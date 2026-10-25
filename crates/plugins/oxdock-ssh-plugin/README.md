@@ -583,18 +583,14 @@ CANCEL $c
 LET $pin: PIPE
 LET $pout: PIPE
 LET $perr: PIPE
-[family:unix] {
-    LET $t: HANDLE = ASYNC { SSH_RUN($sess.session, ["sh", "-c", "echo run-hi"], $pin, $pout, $perr) }
-    LET $code: INT = AWAIT $t
-    ASSERT_EQ $code 0
-    ASSERT_CONTAINS $pout "run-hi"
-}
+LET $argv: LIST<STRING> = ["sh", "-c", "echo run-hi"]
 [family:windows] {
-    LET $t: HANDLE = ASYNC { SSH_RUN($sess.session, ["cmd", "/c", "echo run-hi"], $pin, $pout, $perr) }
-    LET $code: INT = AWAIT $t
-    ASSERT_EQ $code 0
-    ASSERT_CONTAINS $pout "run-hi"
+    $argv = ["cmd", "/c", "echo run-hi"]
 }
+LET $t: HANDLE = ASYNC { SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
+LET $code: INT = AWAIT $t
+ASSERT_EQ $code 0
+ASSERT_CONTAINS $pout "run-hi"
 SSH_CLOSE($m.server)
 ```
 
