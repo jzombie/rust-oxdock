@@ -253,6 +253,38 @@ fn pump_master_out(
     Ok(())
 }
 
+/// Console line-input translation for master-bound bytes: Windows
+/// consoles submit lines on carriage return, so a lone `\n` (what
+/// portable scripts emit) must arrive as `\r\n`. Already-paired
+/// `\r\n` passes through untouched, keeping explicit-`\r` authors
+/// byte-identical, and Unix masters take bytes verbatim either way.
+/// `prev_cr` carries a trailing `\r` across chunk boundaries so a
+/// split pair is never doubled; returns borrowed on the verbatim
+/// path so Unix pays no allocation.
+fn console_input_bytes<'a>(chunk: &'a [u8], prev_cr: &mut bool) -> std::borrow::Cow<'a, [u8]> {
+    #[cfg(windows)]
+    {
+        let mut out = Vec::with_capacity(chunk.len() + 8);
+        for &byte in chunk {
+            if byte == b'\n' {
+                if !*prev_cr {
+                    out.push(b'\r');
+                }
+                out.push(b'\n');
+            } else {
+                out.push(byte);
+            }
+            *prev_cr = byte == b'\r';
+        }
+        std::borrow::Cow::Owned(out)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = prev_cr;
+        std::borrow::Cow::Borrowed(chunk)
+    }
+}
+
 /// Pump caller stdin bytes into the master writer until EOF,
 /// cancellation, or `peer_done` (child gone: bytes would have nowhere
 /// to go). Reports whether the fed bytes end mid-line: the release
@@ -270,6 +302,9 @@ fn pump_stdin_to_master(
     let mut buffer = [0u8; PUMP_CHUNK];
     let mut fed = false;
     let mut ends_newline = true;
+    // Trailing-`\r` carry for the line-input translation: a chunk
+    // split between the pair must not double the carriage return.
+    let mut prev_cr = false;
     loop {
         if cancel.load(Ordering::SeqCst) || peer_done.load(Ordering::SeqCst) {
             break;
@@ -281,7 +316,10 @@ fn pump_stdin_to_master(
                 let mut guard = master
                     .lock()
                     .map_err(|_| anyhow::anyhow!("{func} sink lock poisoned"))?;
-                if guard.write_all(&buffer[..count]).is_err() {
+                if guard
+                    .write_all(&console_input_bytes(&buffer[..count], &mut prev_cr))
+                    .is_err()
+                {
                     break;
                 }
                 if guard.flush().is_err() {
@@ -713,5 +751,51 @@ fn to_portable_size(rows: u16, cols: u16) -> portable_pty::PtySize {
         cols,
         pixel_width: 0,
         pixel_height: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lone_lf_expands_to_crlf() {
+        // Portable `\n`-terminated input is what consoles need as
+        // `\r\n`: the core Windows case, pinned byte-exact.
+        let mut prev_cr = false;
+        let out = console_input_bytes(b"dir\n", &mut prev_cr);
+        #[cfg(windows)]
+        assert_eq!(out.as_ref(), b"dir\r\n".as_slice());
+        #[cfg(not(windows))]
+        assert_eq!(out.as_ref(), b"dir\n".as_slice());
+    }
+
+    #[test]
+    fn paired_crlf_passes_through() {
+        // Explicit-`\r` authors stay byte-identical: pairs never
+        // double, on any platform.
+        let mut prev_cr = false;
+        let out = console_input_bytes(b"proxy-ping\r\n", &mut prev_cr);
+        assert_eq!(out.as_ref(), b"proxy-ping\r\n".as_slice());
+    }
+
+    #[test]
+    fn split_pair_never_doubles() {
+        // A chunk split between the pair must not expand: the carry
+        // joins what the chunking separated.
+        let mut prev_cr = false;
+        let first = console_input_bytes(b"ends\r", &mut prev_cr);
+        assert_eq!(first.as_ref(), b"ends\r".as_slice());
+        let second = console_input_bytes(b"\nrest", &mut prev_cr);
+        // Paired `\n` passes through on every platform: this is the
+        // no-double guarantee, not a platform branch.
+        assert_eq!(second.as_ref(), b"\nrest".as_slice());
+        // And a lone `\n` after a non-`\r` close still expands there.
+        let mut prev_cr = false;
+        let third = console_input_bytes(b"a\rb\n", &mut prev_cr);
+        #[cfg(windows)]
+        assert_eq!(third.as_ref(), b"a\rb\r\n".as_slice());
+        #[cfg(not(windows))]
+        assert_eq!(third.as_ref(), b"a\rb\n".as_slice());
     }
 }

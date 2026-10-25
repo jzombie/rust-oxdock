@@ -302,9 +302,10 @@ exactly `argv`. `cmd /c` is the exception (its tail is a command,
 not `argv`): route command text via `ENV SSH_COMMAND="..."` with
 `["cmd", "/c", "%SSH_COMMAND%"]` instead.
 
-Stdin arrives untranslated. Consoles submit on CR, so a DSL line
-bound for a console child ends with `\r`. Real terminals already
-send CR for Enter.
+Stdin arrives with console line endings handled: the pump expands
+a lone `\n` to `\r\n` on Windows, so portable lines submit as-is
+and an explicit `\r` passes through untouched. Real terminals
+already send CR for Enter.
 
 Environment is exactly the script environment like `RUN`:
 block-scoped `ENV` (such as the session's `SSH_USER` / `SSH_CLIENT` /

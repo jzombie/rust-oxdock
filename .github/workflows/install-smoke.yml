@@ -1164,13 +1164,17 @@ jobs:
           # terminal makes the stub treat stdin as a console, and the
           # answer pipes through the master into the prompt. One
           # portable stanza replaces the old per-OS `script(1)` shim;
-          # Windows rides the same surface through ConPTY.
+          # Windows rides the same surface through ConPTY: the pump
+          # expands portable newlines for console line input, so the
+          # answer needs no per-platform shaping. The TIMEOUT bounds
+          # each prompt run so a stuck console fails loudly instead
+          # of hanging the leg.
           LET $promptdir: STRING = "{{ env:RUNNER_TEMP }}/oxprompt-fresh"
           [family:windows] $promptdir = "{{ env:RUNNER_TEMP }}\\oxprompt-fresh"
           LET $answer: PIPE
           WITH_IO [stdout=$answer] ECHO "{{ $promptdir }}"
-          [family:unix] WITH_IO [tty, stdin=$answer] RUN ["bash", "./install.sh"]
-          [family:windows] WITH_IO [tty, stdin=$answer] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          [family:unix] TIMEOUT 300s WITH_IO [tty, stdin=$answer] RUN ["bash", "./install.sh"]
+          [family:windows] TIMEOUT 300s WITH_IO [tty, stdin=$answer] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
           LET $pkind: STRING = PATH_TYPE("{{ $promptdir }}/oxdock")
           [family:windows] $pkind = PATH_TYPE("{{ $promptdir }}\\oxdock.exe")
           ASSERT_EQ $pkind "file"

@@ -52,14 +52,15 @@ LET $srv: HANDLE = ASYNC {
     AWAIT $pump
 }
 
-# Dial the proxy and prove the child echoed the bytes back. The CR
-# submits the console line (see SSH_PTY_RUN); `cat` echoes it back
-# harmlessly on Unix.
+# Dial the proxy and prove the child echoed the bytes back. The
+# pump expands the newline for console line input on Windows, so one
+# portable line works everywhere; `cat` echoes it back harmlessly on
+# Unix.
 LET $cin: PIPE
 LET $cout: PIPE
 LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
 
-WITH_IO [stdout=$cin] ECHO "proxy-ping\r"
+WITH_IO [stdout=$cin] ECHO "proxy-ping"
 
 LET $cDone: MAP<ANY> = AWAIT $c
 ASSERT_EQ $cDone.closed true
@@ -374,9 +375,10 @@ exactly `argv`. `cmd /c` is the exception (its tail is a command,
 not `argv`): route command text via `ENV SSH_COMMAND="..."` with
 `["cmd", "/c", "%SSH_COMMAND%"]` instead.
 
-Stdin arrives untranslated. Consoles submit on CR, so a DSL line
-bound for a console child ends with `\r`. Real terminals already
-send CR for Enter.
+Stdin arrives with console line endings handled: the pump expands
+a lone `\n` to `\r\n` on Windows, so portable lines submit as-is
+and an explicit `\r` passes through untouched. Real terminals
+already send CR for Enter.
 
 Environment is exactly the script environment like `RUN`:
 block-scoped `ENV` (such as the session's `SSH_USER` / `SSH_CLIENT` /
