@@ -397,6 +397,7 @@ pub(crate) fn new_state<P: ProcessManager>(
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
+        reap_floor: None,
         functions: self::native::FunctionRegistry::with_builtins(),
         types: self::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),

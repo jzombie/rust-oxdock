@@ -79,7 +79,7 @@ pub struct ExecState<P: ProcessManager> {
     /// construction. Cloned (not reset) by `fork()` so tasks spawned
     /// inside a block inherit its scrub.
     pub(super) isolated_stack: Vec<Arc<HashMap<String, String>>>,
-    pub(super) bg_children: Vec<Box<dyn BackgroundHandle>>,
+    pub(super) bg_children: Vec<BgChild>,
     pub(super) scope_stack: Vec<ScopeSnapshot>,
     pub(super) io: ExecIo,
     /// Pre-registered SlidingWindow observers for stream assertion steps.
@@ -161,6 +161,13 @@ pub struct ExecState<P: ProcessManager> {
     /// a blocking foreground process. Unlike `inside_async`, this does not
     /// affect end-of-pipeline named-task reaping.
     pub(super) cancellable: bool,
+    /// Scope floor for the end-of-body reaper: task ids at or above this
+    /// joined at scope end, older ones ignored. Set only by `TIMEOUT`
+    /// (snapshot of the task-id counter at scope entry), so a worker the
+    /// body leaves running gets up to the deadline while pre-existing
+    /// tasks keep running past the scope. `None` joins everything: the
+    /// pipeline top and every other scope.
+    pub(super) reap_floor: Option<u64>,
     /// The single function registry: DSL `FUNC` definitions, builtins, and
     /// host extensions. Script entries scope lexically through the
     /// registry's own frames (managed by `push_scope`/`pop_scope`);
@@ -188,6 +195,16 @@ pub(super) struct ScopeSnapshot {
     pub(super) cwd: GuardedPath,
     pub(super) root: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
+}
+
+/// One anonymous background worker: the thread-join handle plus the
+/// task id drawn for the worker at spawn. Only `ThreadJoinHandle`s are
+/// ever pushed (a worker's own `RUN` steps wait inline); the id lets a
+/// `TIMEOUT` scope-end reaper join only the workers its own body
+/// spawned, leaving pre-existing ones alone.
+pub(super) struct BgChild {
+    pub(super) handle: Box<dyn BackgroundHandle>,
+    pub(super) task_id: u64,
 }
 
 /// Task completion record, written once by the first observer of a
@@ -550,7 +567,7 @@ impl<P: ProcessManager> ExecState<P> {
         // only grows the vec. Failed handles stay for the end-pipeline
         // reaper, which owns their error reporting.
         self.bg_children
-            .retain_mut(|handle| match handle.try_wait() {
+            .retain_mut(|child| match child.handle.try_wait() {
                 Ok(None) => true,
                 Ok(Some(status)) => !status.success(),
                 Err(_) => true,
@@ -633,6 +650,7 @@ impl<P: ProcessManager> ExecState<P> {
             inside_async: true,
             keeper_expiry: None,
             cancellable: self.cancellable,
+            reap_floor: self.reap_floor,
             functions: self.functions.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),

@@ -2433,9 +2433,9 @@ fn extract_call(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &[Expr])> {
 
 pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i64) -> Result<()> {
     for child in cx.state.bg_children.iter_mut() {
-        if let Ok(None) = child.try_wait() {
-            let _ = child.kill();
-            let _ = child.try_wait();
+        if let Ok(None) = child.handle.try_wait() {
+            let _ = child.handle.kill();
+            let _ = child.handle.try_wait();
         }
     }
     cx.state.bg_children.clear();
@@ -3321,15 +3321,16 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
     });
 
     // Store the thread handle as a background handle in the parent's state.
-    cx.state
-        .bg_children
-        .push(Box::new(super::steps::ThreadJoinHandle::new(
+    cx.state.bg_children.push(super::state::BgChild {
+        handle: Box::new(super::steps::ThreadJoinHandle::new(
             join,
             cancel_token,
             cancel_hub,
             active_process,
             worker,
-        )));
+        )),
+        task_id: worker_task_id,
+    });
     Ok(())
 }
 
@@ -4769,15 +4770,16 @@ pub(crate) fn timeout<P: ProcessManager>(
     // reach it. Restored afterwards (nesting-safe: an outer TIMEOUT already
     // sets this, and the restore preserves it).
     //
-    // The scope never joins background work (`wait_at_end` stays false,
-    // like IF/FOR/WHILE/ISOLATED bodies): joining here would wait for tasks
-    // started outside the scope, so a long-lived server task turns every
-    // later TIMEOUT into a wait for its deadline. Tasks the body itself
-    // backgrounds are reaped at the pipeline top as usual; a genuinely
-    // stuck body is still killed through the cancellation token and the
-    // active-process handle above.
+    // Scope-bounded join: snapshot the task-id counter so the scope-end
+    // reaper joins only workers this body spawns. A worker the body leaves
+    // running gets up to the deadline, then the fail-fast teardown stops
+    // it. Pre-existing tasks keep running past the scope instead of
+    // holding it open: without the floor, a long-lived server task turns
+    // every later TIMEOUT into a wait for its deadline.
     let prev_cancellable = cx.state.cancellable;
     cx.state.cancellable = true;
+    let floor = cx.state.next_task_id.load(Ordering::SeqCst);
+    let prev_floor = cx.state.reap_floor.replace(floor);
     let result = super::steps::execute_scoped_steps(
         cx.state,
         cx.process,
@@ -4788,9 +4790,10 @@ pub(crate) fn timeout<P: ProcessManager>(
         cx.err.clone(),
         cx.out_pipe.clone(),
         cx.stdin_pipe.clone(),
-        false,
+        true,
     );
     cx.state.cancellable = prev_cancellable;
+    cx.state.reap_floor = prev_floor;
 
     done.store(true, Ordering::SeqCst);
     let _ = watcher.join();

@@ -866,6 +866,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
+        reap_floor: None,
         functions: super::native::FunctionRegistry::with_builtins(),
         types: super::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),
@@ -3170,6 +3171,34 @@ fn timeout_fires_and_kills_blocking_command() {
         runner.kills.lock().unwrap().as_slice(),
         ["hang"],
         "deadline watcher must kill the blocking command"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "TIMEOUT deadline is wall-clock and the worker blocks on a condvar; untestable under Miri isolation"
+)]
+fn timeout_scope_stops_task_it_spawned() {
+    // A worker the TIMEOUT body leaves running gets up to the deadline,
+    // then the scope stops it: the step reports the deadline instead of
+    // returning, and the blocking command records the kill. The scope
+    // joins only its own workers (see the prior-background-work test):
+    // a 2s deadline bounds the cost of this test exactly like the
+    // foreground variant above.
+    let steps = vec![timeout_step("2s", vec![async_step("hang")])];
+    let fs = MockFs::new();
+    let fs = Box::new(fs) as Box<dyn WorkspaceFs>;
+    let runner = BlockingRunner::default();
+    let err = run_expect_err(fs, &steps, runner.clone());
+    assert!(
+        err.to_string().contains("TIMEOUT"),
+        "expected deadline error, got: {err:#}"
+    );
+    assert_eq!(
+        runner.kills.lock().unwrap().as_slice(),
+        ["hang"],
+        "deadline teardown must kill the scope's own worker command"
     );
 }
 

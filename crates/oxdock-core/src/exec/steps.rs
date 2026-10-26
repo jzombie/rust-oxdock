@@ -703,7 +703,7 @@ fn cleanup_assertion_generation<P: ProcessManager>(
 /// sibling tasks, which may depend on the worker via AWAIT.
 fn teardown_tasks_on_error<P: ProcessManager>(state: &mut ExecState<P>) {
     for survivor in state.bg_children.iter_mut() {
-        let _ = survivor.kill();
+        let _ = survivor.handle.kill();
     }
     state.bg_children.clear();
     if state.inside_async {
@@ -1418,15 +1418,23 @@ fn execute_steps_inner<P: ProcessManager>(
     // AWAIT. Entries are retained as Cancelled/Completed tombstones so
     // later AWAIT/CANCEL report precise errors.
     let reap_named = !state.inside_async;
-    let has_bg = !state.bg_children.is_empty();
+    // Scope floor for `TIMEOUT`: only tasks at or above the floor join
+    // at scope end. Older tasks keep running past the scope instead of
+    // holding it open; `None` (pipeline top, every other scope) joins
+    // everything, exactly as before.
+    let floor = state.reap_floor;
+    let in_scope = |id: u64| floor.map(|f| id >= f).unwrap_or(true);
+    let has_bg = state.bg_children.iter().any(|c| in_scope(c.task_id));
     let named_pending = |state: &ExecState<P>| {
         reap_named
             && state
                 .named_tasks
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .values()
-                .any(|entry| !entry.state.lock().unwrap_or_else(|e| e.into_inner()).reaped)
+                .iter()
+                .any(|(id, entry)| {
+                    in_scope(*id) && !entry.state.lock().unwrap_or_else(|e| e.into_inner()).reaped
+                })
     };
     let has_named = named_pending(state);
     if wait_at_end && (has_bg || has_named) {
@@ -1441,10 +1449,16 @@ fn execute_steps_inner<P: ProcessManager>(
                 failed_status = Some(anyhow::anyhow!("ASYNC task cancelled"));
             }
 
-            // 1. Poll anonymous background handles
+            // 1. Poll anonymous background handles. Handles below the
+            // scope floor belong to outer work: never poll them here, or
+            // the scope would wait out tasks it did not spawn.
             let mut i = 0;
             while i < state.bg_children.len() {
-                match state.bg_children[i].try_wait() {
+                if !in_scope(state.bg_children[i].task_id) {
+                    i += 1;
+                    continue;
+                }
+                match state.bg_children[i].handle.try_wait() {
                     Ok(Some(status)) => {
                         if !status.success() && failed_status.is_none() {
                             failed_status =
@@ -1477,6 +1491,9 @@ fn execute_steps_inner<P: ProcessManager>(
                         .collect()
                 };
                 for (id, entry) in &entries {
+                    if !in_scope(*id) {
+                        continue;
+                    }
                     enum Poll {
                         Pending,
                         CompletedOk,
@@ -1536,15 +1553,23 @@ fn execute_steps_inner<P: ProcessManager>(
             // lock; tombstones are retained.
             if let Some(err) = failed_status {
                 for survivor in state.bg_children.iter_mut() {
-                    let _ = survivor.kill();
+                    if in_scope(survivor.task_id) {
+                        let _ = survivor.handle.kill();
+                    }
                 }
                 if reap_named {
-                    let entries: Vec<Arc<TaskEntry>> = {
+                    let entries: Vec<(u64, Arc<TaskEntry>)> = {
                         let named = state.named_tasks.lock().unwrap_or_else(|e| e.into_inner());
-                        named.values().cloned().collect()
+                        named
+                            .iter()
+                            .map(|(id, entry)| (*id, Arc::clone(entry)))
+                            .collect()
                     };
                     let mut to_kill: Vec<(Arc<TaskEntry>, Box<dyn BackgroundHandle>)> = Vec::new();
-                    for entry in &entries {
+                    for (id, entry) in &entries {
+                        if !in_scope(*id) {
+                            continue;
+                        }
                         let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
                         match guard.phase {
                             TaskPhase::Running | TaskPhase::Awaiting => {
@@ -1561,11 +1586,14 @@ fn execute_steps_inner<P: ProcessManager>(
                         entry.finish_teardown();
                     }
                 }
-                state.bg_children.clear();
+                // Drop only the scope's own handles: outer work keeps
+                // running past a scope teardown, and the pipeline-top
+                // teardown still owns it.
+                state.bg_children.retain(|c| !in_scope(c.task_id));
                 return Err(err);
             }
 
-            let bg_empty = state.bg_children.is_empty();
+            let bg_empty = !state.bg_children.iter().any(|c| in_scope(c.task_id));
             if bg_empty && !named_pending(state) {
                 return Ok(Flow::Done);
             }
@@ -1576,12 +1604,15 @@ fn execute_steps_inner<P: ProcessManager>(
                 let unreaped: Vec<Arc<TaskEntry>> = {
                     let named = state.named_tasks.lock().unwrap_or_else(|e| e.into_inner());
                     named
-                        .values()
-                        .filter(|entry| {
+                        .iter()
+                        .filter(|(id, entry)| {
+                            if !in_scope(**id) {
+                                return false;
+                            }
                             let guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
                             matches!(guard.phase, TaskPhase::Cancelled) && !guard.reaped
                         })
-                        .cloned()
+                        .map(|(_, entry)| Arc::clone(entry))
                         .collect()
                 };
                 for entry in &unreaped {
