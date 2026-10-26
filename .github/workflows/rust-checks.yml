@@ -19,15 +19,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Pinned interpreter for every leg below. TEXT_* string surgery needs
-# 0.28.0-alpha minimum; bump deliberately after a newer tag proves
-# green. An older engine choking on new syntax fails loudly at step
-# start, which is the point.
+# Vocabulary baseline for every leg below is 0.32.0-alpha: legs use
+# PATH_JOIN and fail to parse on anything older, which fails loudly at
+# step start by design. These legs prove branch behavior on branch
+# builds; no leg here installs or verifies a previous release, so no
+# product markers are needed. The pin below is only a version input,
+# never depended upon as a fallback engine.
 env:
   OXDOCK_PINNED_ENGINE: v0.29.0-alpha
-  # Legs run the branch-built engine so unreleased DSL is testable.
-  # Deleting this restores the pinned release with no other edits (empty
-  # selects release).
+  # Legs assume the 0.32.0-alpha vocabulary, so the engine running them
+  # must provide it: local branch builds do; the pin above does not.
+  # Until v0.32.0-alpha ships, this stays set.
   OXDOCK_ENGINE_SOURCE: local
 
 jobs:
@@ -70,8 +72,8 @@ jobs:
           # Nested cargo builds run isolated in a temp target dir
           # unless told otherwise. Pin it to the workspace so the
           # restored cache below actually applies.
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
 
           LET $hp: PIPE
           WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
@@ -104,8 +106,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["rustup", "component", "add", "rustfmt", "clippy"]
 
       # Tool-install rules: rustup and cargo binstall run as direct
@@ -126,8 +128,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["cargo", "binstall", "--no-confirm", "--no-symlinks", "--force", "cargo-deny", "cargo-audit", "cargo-sort"]
 
       - name: Check Cargo manifest sorting
@@ -137,8 +139,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["cargo", "sort", "--workspace", "--check"]
 
       - name: Check formatting
@@ -148,8 +150,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["cargo", "fmt", "--all", "--", "--check"]
 
       - name: Run Clippy
@@ -159,8 +161,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
 
       - name: Check documentation
@@ -170,8 +172,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           ENV RUSTDOCFLAGS="-D warnings"
           RUN ["cargo", "doc", "--workspace", "--no-deps", "--document-private-items"]
 
@@ -182,8 +184,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["cargo", "deny", "check"]
 
       - name: Run cargo-audit
@@ -193,8 +195,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["cargo", "audit"]
 
   lint-nightly:
@@ -227,7 +229,8 @@ jobs:
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           LET $hp: PIPE
           WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
           WITH_IO [stdin=$hp] READ_LINE $lock
@@ -260,7 +263,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           LET $has_udeps: BOOL = IS_EXEC("cargo-udeps")
           IF !$has_udeps {
             RUN ["cargo", "install", "cargo-udeps", "--locked"]
@@ -276,7 +280,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           ENV RUSTFLAGS="--cfg miri"
           RUN ["cargo", "+nightly", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
 
@@ -319,8 +324,8 @@ jobs:
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           LET $hp: PIPE
           WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
           WITH_IO [stdin=$hp] READ_LINE $lock
@@ -354,8 +359,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["cargo", "test", "--workspace", "${{ matrix.flags }}", "--lib", "--bins", "--tests", "--examples", "--", "--include-ignored"]
 
       - name: README doctests
@@ -365,8 +370,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["cargo", "test", "-p", "oxdock-doc-tests", "--doc", "${{ matrix.flags }}"]
 
   coverage:
@@ -407,7 +412,8 @@ jobs:
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           LET $hp: PIPE
           WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
           WITH_IO [stdin=$hp] READ_LINE $lock
@@ -442,7 +448,8 @@ jobs:
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
 
           # Fresh profdata only: stale counters from the restored cache
           # would merge into these numbers.
@@ -469,7 +476,8 @@ jobs:
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_STEP_SUMMARY, GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
-          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           LET $summary: STRING = READ "coverage-summary.txt"
           LET $found: BOOL = TEXT_MATCH($summary, "(?m)^TOTAL")
           LET $pct: STRING = "0"

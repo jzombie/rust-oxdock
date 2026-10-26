@@ -118,6 +118,9 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
         // prompt through a pty master, never a `script(1)` shim, so a
         // revert to shell hacks fails loudly here.
         "WITH_IO [tty",
+        // Native joins: legs build every derived path through PATH_JOIN,
+        // never hand-rolled separators with per-OS overrides.
+        "PATH_JOIN(",
     ] {
         assert!(
             joined.contains(marker),
