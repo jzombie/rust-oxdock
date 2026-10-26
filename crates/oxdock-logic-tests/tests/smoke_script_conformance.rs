@@ -82,8 +82,8 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
     let text = load_workflow()?;
     let blocks = oxdock_blocks(&text)?;
     assert!(
-        blocks.len() >= 9,
-        "expected build plus eight legs, found {} oxdock blocks",
+        blocks.len() >= 11,
+        "expected build plus ten legs, found {} oxdock blocks",
         blocks.len()
     );
     let mut joined = String::new();
@@ -101,6 +101,11 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
         "using cached",
         "install.sh | bash",
         "\"oxdock\", \"--version\"",
+        // Gap closures: prebuilt reuses the override limb, isolated
+        // proves silenced CI, every leg now routes CI files.
+        "OXDOCK_SKIP_DOWNLOAD",
+        "oxdock-prebuilt",
+        "GITHUB_PATH, GITHUB_ENV",
         // Version identity against source truth, not a second binary.
         "LOAD_TOML(\"Cargo.toml\")",
         // Configured shell: Unix legs put the install dir on PATH so
@@ -109,6 +114,13 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
         "installed oxdock",
         "| iex",
         "INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT",
+        // Terminal prompt: the isolated leg answers the destination
+        // prompt through a pty master, never a `script(1)` shim, so a
+        // revert to shell hacks fails loudly here.
+        "WITH_IO [tty",
+        // Native joins: legs build every derived path through PATH_JOIN,
+        // never hand-rolled separators with per-OS overrides.
+        "PATH_JOIN(",
     ] {
         assert!(
             joined.contains(marker),
@@ -232,7 +244,7 @@ fn release_targets_all_have_smoke_legs() -> Result<()> {
         );
     }
 
-    // Smoke side: every `os:` matrix (build plus eight legs) carries the
+    // Smoke side: every `os:` matrix (build plus ten legs) carries the
     // full runner set, in order. A leg dropping an architecture fails
     // here instead of silently untesting it.
     let runners: Vec<&str> = coverage.iter().map(|(_, runner, _, _)| *runner).collect();
@@ -252,8 +264,8 @@ fn release_targets_all_have_smoke_legs() -> Result<()> {
         }
     }
     assert_eq!(
-        matrices, 9,
-        "expected build plus eight leg matrices, found {matrices}"
+        matrices, 11,
+        "expected build plus ten leg matrices, found {matrices}"
     );
 
     // DSL side: each mapping's arch branch and asset name resolve in the

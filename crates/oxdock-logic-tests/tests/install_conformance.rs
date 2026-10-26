@@ -126,6 +126,11 @@ fn install_harness(payload: &[u8], digest: &str, dir: Option<&str>) -> Result<In
         );
     }
     io.insert_inherit_env("OXDOCK_VERSION", "9.9.9-t");
+    io.insert_inherit_env("OXDOCK_BINARY_NAME", "");
+    io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "0");
+    io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
+    io.insert_inherit_env("GITHUB_PATH", "");
+    io.insert_inherit_env("GITHUB_ENV", "");
     Ok(InstallRun {
         _temp: temp,
         root,
@@ -252,6 +257,11 @@ fn missing_asset_fails_naming_the_file() -> Result<()> {
         root.join("dest")?.as_path().display().to_string(),
     );
     io.insert_inherit_env("OXDOCK_VERSION", "9.9.9-t");
+    io.insert_inherit_env("OXDOCK_BINARY_NAME", "");
+    io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "0");
+    io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
+    io.insert_inherit_env("GITHUB_PATH", "");
+    io.insert_inherit_env("GITHUB_ENV", "");
     let fs: Box<dyn oxdock_fs::WorkspaceFs> =
         Box::new(PathResolver::new_guarded(root.clone(), root.clone())?);
     let err = run_steps_with_manager_with_modules(

@@ -28,8 +28,10 @@
 # - `binaries` defaults to true. Exactly one binary (the `binary`
 #   input) builds with all features on five platforms (linux x86_64,
 #   linux arm64, macOS arm64, Windows x86_64, Windows arm64) and
-#   attaches to the release. Downloaders get the most capable binary;
-#   registry installers get default features via `cargo install`.
+#   attaches to the release. Downloads and registry installs carry
+#   the same module surface now that default features enable every
+#   module; `--all-features` stays explicit here so test-only extras
+#   (mocks, harnesses) ride along too.
 #   Multi-binary products are not supported: one input, one binary.
 # - `binaries: false` (library-only products) skips the build matrix
 #   and artifact download entirely; the release ships notes only.
@@ -198,10 +200,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      # All features: downloaders get the most capable binary (every
-      # module, including MARKDOWN). Registry installers still get
-      # default features via `cargo install`; that equivalence is a
-      # property of the registry path, not the download path.
+      # All features: the release binary carries every module, and
+      # default `cargo install` builds now match it. `--all-features`
+      # stays explicit here so test-only extras (mocks, harnesses)
+      # ride along too.
       - name: Build the release binary
         shell: bash
         env:

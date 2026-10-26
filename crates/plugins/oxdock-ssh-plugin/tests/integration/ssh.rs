@@ -2971,8 +2971,8 @@ fn proxy_client_lingers_for_reply_and_status() {
     // returns first and disconnects, killing the server mid-reply.
     // Same shape as the README proxy fence: each child reads a stdin
     // line and exits by itself (`cat` on Unix; a console line read on
-    // Windows, where children never observe stdin EOF), and the client
-    // sends CR with the line because consoles submit on CR only.
+    // Windows, where children never observe stdin EOF). Plain lines
+    // submit everywhere: the pump expands them for console input.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-proxy-linger");
@@ -2997,7 +2997,7 @@ fn proxy_client_lingers_for_reply_and_status() {
         LET $cin: PIPE
         LET $cout: PIPE
         LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-linger", "guest", "pass", $cin, $cout) }
-        WITH_IO [stdout=$cin] ECHO "linger-ping\r"
+        WITH_IO [stdout=$cin] ECHO "linger-ping"
         LET $cDone: MAP<ANY> = AWAIT $c
         ASSERT_EQ $cDone.closed true
         ASSERT_EQ $cDone.exit_status 0
@@ -3281,7 +3281,12 @@ fn run_exec_splits_stderr() {
         !out.windows(4).any(|window| window == b"oops"),
         "stderr must never pollute the stdout stream"
     );
-    client.eof().expect("client half-closes");
+    // Half-close races server teardown for immediately-exiting
+    // children: if the server already closed the channel, the close
+    // wait below observes it at once instead of failing on the lost
+    // race. A genuinely wedged channel still fails loudly there, and
+    // the script join below still catches server-side failures.
+    let _ = client.eof();
     client
         .wait_close(Duration::from_secs(15))
         .expect("server closes");

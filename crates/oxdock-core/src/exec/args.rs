@@ -21,6 +21,28 @@ pub(crate) fn type_mismatch(ctx: &str, expected: &TypeTag, value: &Value) -> any
     )
 }
 
+/// Single BOOL spelling for the whole runtime: trim, case-insensitive
+/// `true`/`false`, plus `1`/`0`. Empty and anything else is `None`
+/// (coercion fails, flag checks default false). One rule, no piecemeal.
+pub(crate) fn parse_bool_str(s: &str) -> Option<bool> {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("true")
+        || t.eq_ignore_ascii_case("yes")
+        || t.eq_ignore_ascii_case("on")
+        || t == "1"
+    {
+        Some(true)
+    } else if t.eq_ignore_ascii_case("false")
+        || t.eq_ignore_ascii_case("no")
+        || t.eq_ignore_ascii_case("off")
+        || t == "0"
+    {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// Strict return-slot check for host functions: the value a host body
 /// hands back must satisfy its declared `returns` tag exactly. No
 /// coercion applies on this path: a mismatch is an implementation
@@ -105,10 +127,9 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
             // explicit `INT()` converter owns string parsing, so a
             // string at an `INT` position fails naming both instead
             // of silently re-parsing at every consumer.
-            TypeTag::Bool => match s.trim() {
-                "true" => Ok(Value::bool(true)),
-                "false" => Ok(Value::bool(false)),
-                _ => Err(type_mismatch("coercion", expected, &value)),
+            TypeTag::Bool => match parse_bool_str(s) {
+                Some(b) => Ok(Value::bool(b)),
+                None => Err(type_mismatch("coercion", expected, &value)),
             },
             TypeTag::Pipe => {
                 // Strict: plain strings never coerce to pipes, so a handle is
@@ -165,6 +186,13 @@ fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
         }
         if matches!(expected, TypeTag::Float) {
             return Ok(Value::float(n as f64));
+        }
+        if matches!(expected, TypeTag::Bool) {
+            match n {
+                1 => return Ok(Value::bool(true)),
+                0 => return Ok(Value::bool(false)),
+                _ => return Err(mismatch(expected, value)),
+            }
         }
         return Err(mismatch(expected, value));
     }

@@ -20,6 +20,7 @@ oxdock-net-plugin.workspace = true
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
+oxdock-pty.workspace = true
 portable-pty.workspace = true
 rand.workspace = true
 russh.workspace = true

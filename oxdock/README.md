@@ -418,9 +418,9 @@ standalone processes with the CLI.
 
 This crate is the front door. It re-exports the CLI runner (enabled by
 default) and the build macros (always available), so most users only
-ever depend on `oxdock`. The `cli` feature implies `net`, so the facade
-always carries NET; minimal builds go through `oxdock-cli` with
-`--no-default-features`.
+ever depend on `oxdock`. The default features carry every CLI module
+(`NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting); minimal builds go
+through `oxdock-cli` with `--no-default-features`.
 
 One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps (buffered in memory to 8 MiB, then spilled to a temp file), fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
 

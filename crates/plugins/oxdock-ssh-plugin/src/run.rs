@@ -21,8 +21,7 @@ use oxdock_process::{
 };
 
 use crate::bridge::{
-    ChildDone, ChildExited, DeferredClose, InputSink, close_drained_outputs, note_failure,
-    pump_pipe_to_sink,
+    ChildDone, ChildExited, DeferredClose, close_drained_outputs, note_failure, pump_pipe_to_sink,
 };
 
 /// Copy one child stream into a DSL pipe until EOF. Ends on child EOF;
@@ -267,9 +266,10 @@ pub fn pump_run_session<P: ProcessManager>(
             &in_tx,
             |outcome| RunEvent::Done(ChildDone(0, outcome)),
             || {
+                let mut stdin_holder = child_stdin;
                 pump_pipe_to_sink(
                     &reader_in,
-                    InputSink::Owned(child_stdin),
+                    &mut stdin_holder,
                     &cancel_in,
                     &peer_done_in,
                     "SSH run",

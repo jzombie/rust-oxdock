@@ -31,3 +31,5 @@ mod text_pumps;
 mod unified_values;
 #[path = "integration/unquoted_syntax.rs"]
 mod unquoted_syntax;
+#[path = "integration/with_io_tty.rs"]
+mod with_io_tty;
