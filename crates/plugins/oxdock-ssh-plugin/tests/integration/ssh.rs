@@ -721,13 +721,15 @@ fn outer_window_change_reaches_pty_child_windows() {
     let mut client =
         TestClient::connect_with_pty_dims(addr, "u", "p", 97, 37).expect("client connects");
     client.send(b"\n").expect("client prompts first report");
+    // Same startup grace as the unit resize proof: PowerShell 5.1
+    // cold-starts slowly on shared CI runners.
     client
-        .read_until(b"W=97 H=37", Duration::from_secs(15))
+        .read_until(b"W=97 H=37", Duration::from_secs(60))
         .expect("child reports opener size");
     client.window_change(121, 41).expect("window-change sends");
     client.send(b"\n").expect("client prompts resized report");
     let resized = client
-        .read_until(b"W=121 H=41", Duration::from_secs(15))
+        .read_until(b"W=121 H=41", Duration::from_secs(60))
         .expect("child reports resized window");
     assert!(
         resized.windows(10).any(|window| window == b"W=121 H=41"),
