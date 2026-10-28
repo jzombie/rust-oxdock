@@ -1,9 +1,10 @@
 //! Resize proof: a child reporting its window must observe a
 //! mid-run resize applied through the shared size cell.
 //!
-//! Unix only: discovering the window needs `stty`, and Windows proves
-//! the same path through the ConPTY legs of the smoke matrix instead.
-//! Miri cannot allocate a real pty, so this stays on native runners.
+//! Unix only: discovering the window needs `stty`. Windows proves
+//! the same path in `resize_windows.rs` (PowerShell console-size
+//! loop through ConPTY). Miri cannot allocate a real pty, so this
+//! stays on native runners.
 
 #![cfg(unix)]
 
