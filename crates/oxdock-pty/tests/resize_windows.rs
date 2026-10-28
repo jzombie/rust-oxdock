@@ -50,6 +50,8 @@ fn resize_reaches_child_mid_run() {
     let out_watcher = tee.clone();
     let size_watcher = Arc::clone(&size);
     let cancel_watcher = Arc::clone(&cancel);
+    let resized_flag = Arc::new(AtomicBool::new(false));
+    let resized_watcher = Arc::clone(&resized_flag);
     let watcher = std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let mut resized = false;
@@ -63,6 +65,7 @@ fn resize_reaches_child_mid_run() {
             let rendered = String::from_utf8_lossy(&out_watcher.out.lock().unwrap()).into_owned();
             if !resized && rendered.contains("97 37") {
                 size_watcher.set(41, 121);
+                resized_watcher.store(true, Ordering::SeqCst);
                 resized = true;
             }
             if resized && rendered.contains("121 41") {
@@ -73,7 +76,25 @@ fn resize_reaches_child_mid_run() {
         cancel_watcher.store(true, Ordering::SeqCst);
     });
 
+    // PowerShell cannot start without SystemRoot (ConPTY child
+    // death with 0xFFFF0000 is the symptom): the session seeds a
+    // complete environment, so the test passes through the Windows
+    // system variables its child needs alongside PATH.
     let path = std::env::var("PATH").unwrap_or_else(|_| "C:\\Windows\\System32".to_string());
+    let mut env = vec![("PATH".to_string(), path)];
+    for key in [
+        "SystemRoot",
+        "windir",
+        "COMSPEC",
+        "PATHEXT",
+        "PSModulePath",
+        "TEMP",
+        "TMP",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            env.push((key.to_string(), value));
+        }
+    }
     let outcome = run_pty_session(PtyRequest {
         argv: vec![
             "powershell".to_string(),
@@ -81,7 +102,7 @@ fn resize_reaches_child_mid_run() {
             "-Command".to_string(),
             "while ($true) { Write-Output \"$([Console]::WindowWidth) $([Console]::WindowHeight)\"; Start-Sleep -Milliseconds 200 }".to_string(),
         ],
-        env: vec![("PATH".to_string(), path)],
+        env,
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         initial_size: PtySize {
             rows: 37,
@@ -101,12 +122,17 @@ fn resize_reaches_child_mid_run() {
     });
 
     let _ = watcher.join();
+    let rendered = String::from_utf8_lossy(&tee.out.lock().unwrap()).into_owned();
+    let resize_fired = resized_flag.load(Ordering::SeqCst);
     // Cancellation is the only exit: the child loops forever.
+    // The output and the resize flag ride along so a red run names
+    // the phase it died in: empty output means the child never
+    // printed; output without "121 41" means the resize never
+    // reached ConPTY.
     assert!(
         matches!(outcome, Ok(PtyOutcome::Cancelled)),
-        "session must end via the failsafe cancel, got {outcome:?}"
+        "session must end via the failsafe cancel, got {outcome:?}; resize fired: {resize_fired}; child output: {rendered:?}"
     );
-    let rendered = String::from_utf8_lossy(&tee.out.lock().unwrap()).into_owned();
     assert!(
         rendered.contains("97 37"),
         "child never reported the opener size: {rendered:?}"
