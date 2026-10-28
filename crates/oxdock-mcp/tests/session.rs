@@ -158,6 +158,7 @@ fn redirected_output_never_streams() {
 }
 
 #[test]
+#[cfg(unix)]
 fn bare_run_output_streams_through_the_pump() {
     // Bare RUN (no LET capture) routes child output to the default
     // stdout: the pump path must stream exactly like ECHO does.

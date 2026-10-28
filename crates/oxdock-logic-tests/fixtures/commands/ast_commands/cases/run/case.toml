@@ -1,4 +1,9 @@
 name = "run"
 
-[expect]
+# `RUN` output differs per-OS by design (see write_stdin): Unix `printf`
+# writes bare bytes while `cmd /C echo` appends CRLF.
+[expect.platform.unix]
 files = { "run.txt" = "bar" }
+
+[expect.platform.windows]
+files = { "run.txt" = "bar\r\n" }

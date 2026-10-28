@@ -53,7 +53,11 @@ fn resize_reaches_child_mid_run() {
     let resized_flag = Arc::new(AtomicBool::new(false));
     let resized_watcher = Arc::clone(&resized_flag);
     let watcher = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        // Generous startup grace: PowerShell 5.1 cold-starts slowly
+        // on shared CI runners (tens of seconds before its first
+        // print), while a healthy run exits early on the strings
+        // below. A truly dead child still fails at the deadline.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let mut resized = false;
         loop {
             if std::time::Instant::now() > deadline {

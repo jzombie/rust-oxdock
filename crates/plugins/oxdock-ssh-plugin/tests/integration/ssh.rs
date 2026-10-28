@@ -688,8 +688,12 @@ fn outer_window_change_reaches_pty_child_windows() {
     // one console-size line per newline sent, then a live
     // window-change must move the child's next report to 41x121
     // through ConPTY. Tagged `W=`/`H=` lines keep the assertions
-    // unambiguous under `mode`-style alignment. Unix proves the same
-    // path in `outer_window_change_reaches_pty_child_unix`.
+    // unambiguous under `mode`-style alignment. Console stdin has no
+    // EOF (`ReadLine` blocks until a line arrives even after the
+    // pipes close), so the child exits on an explicit `quit` line
+    // the test sends before closing: disconnect alone can never
+    // reap it. Unix proves the same path in
+    // `outer_window_change_reaches_pty_child_unix`.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-resize-windows");
@@ -703,7 +707,7 @@ fn outer_window_change_reaches_pty_child_windows() {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $c_in: PIPE
             LET $c_out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["powershell", "-NoProfile", "-Command", "while (($l = [Console]::In.ReadLine()) -ne $null) { Write-Output \"W=$([Console]::WindowWidth) H=$([Console]::WindowHeight)\" }"], 0, 0, $c_out, $c_in) }
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["powershell", "-NoProfile", "-Command", "while (($l = [Console]::In.ReadLine()) -ne $null) { if ($l -eq 'quit') { Write-Output 'BYE'; break }; Write-Output \"W=$([Console]::WindowWidth) H=$([Console]::WindowHeight)\" }"], 0, 0, $c_out, $c_in) }
             LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
             AWAIT $t
             AWAIT $p
@@ -729,6 +733,13 @@ fn outer_window_change_reaches_pty_child_windows() {
         resized.windows(10).any(|window| window == b"W=121 H=41"),
         "resized report must arrive, got: {resized:?}"
     );
+    // Console stdin has no EOF: tell the child to exit and wait for
+    // its goodbye before disconnecting, so the quit line cannot race
+    // the teardown. The exit then completes the script join.
+    client.send(b"quit\n").expect("client stops the child");
+    let _goodbye = client
+        .read_until(b"BYE", Duration::from_secs(15))
+        .expect("child confirms exit");
     client.close();
     handle
         .join()
