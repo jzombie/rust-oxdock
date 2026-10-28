@@ -621,6 +621,122 @@ fn pty_explicit_size() {
 }
 
 #[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
+)]
+fn outer_window_change_reaches_pty_child_unix() {
+    // End-to-end resize: the client opens 97x37, reads one `stty size`
+    // line per newline sent, then a live window-change must move the
+    // child's next report to 41x121. The child exits on stdin EOF, so
+    // closing the client drains every task with no cancellation.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-resize-unix");
+    let probe = root.clone();
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-unix", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $c_in: PIPE
+            LET $c_out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "while IFS= read -r line; do stty size; done"], 0, 0, $c_out, $c_in) }
+            LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
+            AWAIT $t
+            AWAIT $p
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let mut client =
+        TestClient::connect_with_pty_dims(addr, "u", "p", 97, 37).expect("client connects");
+    client.send(b"\n").expect("client prompts first report");
+    client
+        .read_until(b"37 97", Duration::from_secs(15))
+        .expect("child reports opener size");
+    client.window_change(121, 41).expect("window-change sends");
+    client.send(b"\n").expect("client prompts resized report");
+    let resized = client
+        .read_until(b"41 121", Duration::from_secs(15))
+        .expect("child reports resized window");
+    assert!(
+        resized.windows(6).any(|window| window == b"41 121"),
+        "resized report must arrive, got: {resized:?}"
+    );
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("resize script completes after disconnect");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
+)]
+fn outer_window_change_reaches_pty_child_windows() {
+    // Windows half of the resize proof: the client opens 97x37, reads
+    // one console-size line per newline sent, then a live
+    // window-change must move the child's next report to 41x121
+    // through ConPTY. Tagged `W=`/`H=` lines keep the assertions
+    // unambiguous under `mode`-style alignment. Unix proves the same
+    // path in `outer_window_change_reaches_pty_child_unix`.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-resize-windows");
+    let probe = root.clone();
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-windows", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $c_in: PIPE
+            LET $c_out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["powershell", "-NoProfile", "-Command", "while (($l = [Console]::In.ReadLine()) -ne $null) { Write-Output \"W=$([Console]::WindowWidth) H=$([Console]::WindowHeight)\" }"], 0, 0, $c_out, $c_in) }
+            LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
+            AWAIT $t
+            AWAIT $p
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let mut client =
+        TestClient::connect_with_pty_dims(addr, "u", "p", 97, 37).expect("client connects");
+    client.send(b"\n").expect("client prompts first report");
+    client
+        .read_until(b"W=97 H=37", Duration::from_secs(15))
+        .expect("child reports opener size");
+    client.window_change(121, 41).expect("window-change sends");
+    client.send(b"\n").expect("client prompts resized report");
+    let resized = client
+        .read_until(b"W=121 H=41", Duration::from_secs(15))
+        .expect("child reports resized window");
+    assert!(
+        resized.windows(10).any(|window| window == b"W=121 H=41"),
+        "resized report must arrive, got: {resized:?}"
+    );
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("resize script completes after disconnect");
+}
+
+#[test]
 #[cfg_attr(
     miri,
     ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
