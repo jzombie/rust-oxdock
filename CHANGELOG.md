@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Dependencies
 
+- Bump `line-ending` 1.5.1 → 1.6.0.
 - Bump `pulldown-cmark` 0.13.4 → 0.13.5 (RUSTSEC-2026-0414).
 - Add `signal-hook` 0.3.18 (Unix `SIGWINCH` tracking for the `oxdock-pty` resize watcher).
 - `windows-sys` gains the `Win32_System_Console` feature (console sizing for `oxdock-pty` on Windows).
