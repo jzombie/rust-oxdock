@@ -16,7 +16,9 @@ fn load_badge_script() -> Result<String> {
     let repo_root = repo_root()?;
     let root = GuardedPath::new_root_from_str(&repo_root)?;
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
-    let script_path = resolver.root().join(".github/scripts/gha-miri-badge.oxfile")?;
+    let script_path = resolver
+        .root()
+        .join(".github/scripts/gha-miri-badge.oxfile")?;
     resolver.read_to_string(&script_path)
 }
 
