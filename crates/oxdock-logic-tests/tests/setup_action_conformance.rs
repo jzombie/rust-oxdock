@@ -128,7 +128,7 @@ fn ci_tail_harness() -> Result<CiTailRun> {
     io.insert_inherit_env("OXDOCK_DIR", engine_dir.as_path().display().to_string());
     io.insert_inherit_env("OXDOCK_VERSION", "0.0.0-test");
     io.insert_inherit_env("OXDOCK_BINARY_NAME", bin);
-    io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "1");
+    io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "true");
     io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "v0.0.0-test");
     io.insert_inherit_env("GITHUB_PATH", gh_path.as_path().display().to_string());
     io.insert_inherit_env("GITHUB_ENV", gh_env.as_path().display().to_string());

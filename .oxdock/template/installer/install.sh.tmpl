@@ -276,7 +276,7 @@ fi
 # the descriptor survives re-entry unchanged, so the answer matches.
 OXDOCK_INTERACTIVE=""
 if [ -t 0 ]; then
-  OXDOCK_INTERACTIVE=1
+  OXDOCK_INTERACTIVE=true
 
 fi
 
@@ -326,7 +326,7 @@ fi
   OXDOCK_VERSION="$VERSION" \
   OXDOCK_BINARY_NAME="${OXDOCK_BINARY_NAME:-}" \
   OXDOCK_EXPECTED_VERSION="$VERSION" \
-  OXDOCK_SKIP_DOWNLOAD=0 \
+  OXDOCK_SKIP_DOWNLOAD=false \
   OXDOCK_INTERPRETER="$ENGINE" \
   OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" \
   OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" \
@@ -364,7 +364,7 @@ if [ -z "${OXDOCK_PIPED_SCRIPT:-}" ] && [ -n "${GITHUB_PATH:-}" ] && [ -f "$GITH
     OXDOCK_VERSION="$VERSION" \
     OXDOCK_BINARY_NAME="$RAW_NAME" \
     OXDOCK_EXPECTED_VERSION="$VERSION" \
-    OXDOCK_SKIP_DOWNLOAD=1 \
+    OXDOCK_SKIP_DOWNLOAD=true \
     "$FRESH" "$tmp/{{ $docs_global.stub_name_oxfile }}") || {
     code=$?
 

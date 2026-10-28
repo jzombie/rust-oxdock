@@ -203,7 +203,7 @@ if (-not $env:OXDOCK_STUB_ACTIVE) {
   # redirection, under pipes the stdin drain above already decided
   # piped vs install, so the answer matches on re-entry.
   if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
-    $env:OXDOCK_INTERACTIVE = '1'
+    $env:OXDOCK_INTERACTIVE = 'true'
   }
 
   $env:OXDOCK_STUB_ACTIVE = '1'
@@ -250,7 +250,7 @@ try {
 
   $env:OXDOCK_EXPECTED_VERSION = $Version
 
-  $env:OXDOCK_SKIP_DOWNLOAD = '0'
+  $env:OXDOCK_SKIP_DOWNLOAD = 'false'
 
   # An explicit OXDOCK_ENGINE runs the installer instead of the
   # unpacked release; it must name an existing file, and fails closed
@@ -296,7 +296,7 @@ try {
       }
 
       $env:OXDOCK_EXPECTED_VERSION = $Version
-      $env:OXDOCK_SKIP_DOWNLOAD = '1'
+      $env:OXDOCK_SKIP_DOWNLOAD = 'true'
 
       try {
         & $Fresh (Join-Path $tmp 'install.oxfile')

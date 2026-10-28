@@ -127,7 +127,7 @@ fn install_harness(payload: &[u8], digest: &str, dir: Option<&str>) -> Result<In
     }
     io.insert_inherit_env("OXDOCK_VERSION", "9.9.9-t");
     io.insert_inherit_env("OXDOCK_BINARY_NAME", "");
-    io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "0");
+    io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "false");
     io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
     io.insert_inherit_env("GITHUB_PATH", "");
     io.insert_inherit_env("GITHUB_ENV", "");
@@ -258,7 +258,7 @@ fn missing_asset_fails_naming_the_file() -> Result<()> {
     );
     io.insert_inherit_env("OXDOCK_VERSION", "9.9.9-t");
     io.insert_inherit_env("OXDOCK_BINARY_NAME", "");
-    io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "0");
+    io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "false");
     io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
     io.insert_inherit_env("GITHUB_PATH", "");
     io.insert_inherit_env("GITHUB_ENV", "");
