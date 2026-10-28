@@ -1719,9 +1719,11 @@ An inline block (`LET $var: TYPE = { <commands> }`) runs its
 steps in a fresh scope and binds the nearest `RETURN` value,
 like a zero-arg function body: fallthrough without `RETURN`
 binds `""`, and `BREAK`/`CONTINUE` escaping the block are
-errors. The block reads outer variables but its own LETs
-never leak out. A `{k: v}` shape still parses as a map
-literal; anything else in braces is a block.
+errors. Think IIFE: the block executes immediately where it
+stands and its value is the result. The block reads outer
+variables but its own LETs never leak out. A `{k: v}` shape
+still parses as a map literal; anything else in braces is
+a block.
 
 The split is deliberate: synchronous commands capture
 stdout because they run inline to completion on the same
