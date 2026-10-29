@@ -1159,19 +1159,30 @@ when it names none (24x80 fallback off-terminal;
 Unnamed sides track the host window while the step runs
 (signal-driven on Unix, polled where no window signal
 exists); explicit sides stay pinned.
+
 The master carries the child's interleaved stdout and stderr
 as one stream, so it routes exclusively to `stdout` (step
 capture or a `stdout = $p` pipe): `stderr` bindings alongside
 `tty` are rejected, and `tty` outside a `RUN` step is
-rejected. `stdin = $p` feeds the master; bare `[tty]`
+rejected. Pty-backed descriptors never promote to OS
+kernel pipes, even inside `ASYNC` single-`RUN` bodies.
+
+`stdin = $p` feeds the master; bare `[tty]`
 with a real terminal stdin feeds host keys the same
-way (raw, transparent) and stays closed headless. Expect pty translation in assertions:
+way (raw, transparent) and stays closed headless. Host
+interrupt keys reach the child instead of cancelling the
+step, so bind a step `TIMEOUT` for a guaranteed exit.
+
+Expect pty translation in assertions:
 newlines arrive as carriage return plus newline, and prompts
-echo input. An input pipe that EOFs contributes a
+echo input. On Windows, lone line feeds in fed input expand
+to carriage-return line feeds for console submission, so
+portable scripts need no per-platform line endings.
+
+An input pipe that EOFs contributes a
 terminal-echoed end-of-transmission marker on some
 platforms: prefer `ASSERT_CONTAINS` over byte-exact
-assertions on fed sessions. Pty-backed descriptors never promote to OS
-kernel pipes, even inside `ASYNC` single-`RUN` bodies.
+assertions on fed sessions.
 
 Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
 producer can finish before the consumer starts.
