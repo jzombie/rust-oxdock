@@ -3,7 +3,7 @@
     {
       "name": "setup-oxdock-action",
       "out": ".github/actions/setup-oxdock/action.yml",
-      "values": ".oxdock/template/readme/values.json",
+      "values": ".oxdock/template/github-actions/values.json",
       "template": ".oxdock/template/github-actions/setup-oxdock-action.yml.tmpl",
       "fragments": {
         "shared": [
