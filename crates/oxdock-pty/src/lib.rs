@@ -16,11 +16,13 @@
 
 mod drain;
 mod filter;
+mod host;
 mod run;
 mod size;
 
 pub use drain::{DRAIN_CAP_MS, DRAIN_QUIESCE_MS, drain_overdue};
 pub use filter::DsrFilter;
+pub use host::acquire_host_stdin;
 pub use run::{PtyInput, PtyOutcome, PtyRequest, ReadChunk, run_pty_session};
 pub use size::{
     DEFAULT_TTY_COLS, DEFAULT_TTY_ROWS, PtySize, SizeSource, WatchSize, host_terminal_size,

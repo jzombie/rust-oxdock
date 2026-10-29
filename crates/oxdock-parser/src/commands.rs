@@ -2138,7 +2138,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 capture or a `stdout = $p` pipe): `stderr` bindings alongside
                 `tty` are rejected, and `tty` outside a `RUN` step is
                 rejected. `stdin = $p` feeds the master; bare `[tty]`
-                leaves stdin closed. Expect pty translation in assertions:
+                with a real terminal stdin feeds host keys the same
+                way (raw, transparent) and stays closed headless. Expect pty translation in assertions:
                 newlines arrive as carriage return plus newline, and prompts
                 echo input. An input pipe that EOFs contributes a
                 terminal-echoed end-of-transmission marker on some

@@ -1,0 +1,5 @@
+IMPORT [STD]
+INHERIT_ENV [PATH, TERM]
+WORKSPACE SYSTEM
+
+WITH_IO [tty] RUN head -c 16 | od -An -tx1

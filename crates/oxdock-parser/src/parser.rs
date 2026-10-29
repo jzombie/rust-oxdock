@@ -413,6 +413,9 @@ pub struct ScriptParser<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> {
     /// Single-file `EXPORT` names in source order. Top-level only;
     /// validated against top-level `FUNC` definitions at end of parse.
     exports: Vec<String>,
+    /// Source line per entry in `steps`, in order. Post-parse
+    /// validations point at real lines instead of end of file.
+    step_lines: Vec<usize>,
 }
 
 impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
@@ -472,6 +475,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             preseed_funcs,
             preseed_imports,
             exports: Vec::new(),
+            step_lines: Vec::new(),
         })
     }
 
@@ -726,12 +730,16 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         // (`[family:windows] INHERIT_ENV [SystemRoot]`); each guarded
         // line runs only when its guard passes, like any other step.
         {
-            let ctx = self.eof_span();
             let mut seen_non_prelude = false;
-            for step in &self.steps {
+            for (index, step) in self.steps.iter().enumerate() {
+                let span = |index: usize| {
+                    let line = self.step_lines.get(index).copied().unwrap_or(1).max(1);
+                    span_for_line(self.input, line)
+                };
                 match &step.kind {
                     StepKind::InheritEnv { .. } => {
                         if seen_non_prelude {
+                            let ctx = span(index);
                             return Err(ParseError::structural(
                                 "inherit_env",
                                 "INHERIT_ENV must appear before any other commands".to_string(),
@@ -741,6 +749,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                     }
                     kind => {
                         if contains_inherit_env(kind) {
+                            let ctx = span(index);
                             return Err(ParseError::structural(
                                 "inherit_env",
                                 "INHERIT_ENV cannot be nested inside other commands".to_string(),
@@ -1110,6 +1119,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             scope_enter,
             scope_exit: 0,
         });
+        self.step_lines.push(line_no);
         Ok(())
     }
 

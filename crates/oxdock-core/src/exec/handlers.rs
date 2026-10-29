@@ -407,9 +407,10 @@ pub(super) fn run_argv<P: ProcessManager>(
 /// The terminal request rides `cx.tty` (populated only by `with_io`
 /// from `[tty]` bindings); every other path keeps hermetic pipes. The
 /// master is one interleaved stream: it lands exclusively in the step
-/// stdout sink, stdin flows only from a `stdin = $p` script pipe (bare
-/// `[tty]` runs closed), and cancellation kills the child through the
-/// pump's own path before reporting like any interrupted `RUN`.
+/// stdout sink, stdin flows from a `stdin = $p` script pipe or from
+/// the host terminal itself when stdin is a real one (bare `[tty]`
+/// headless stays closed), and cancellation kills the child through
+/// the pump's own path before reporting like any interrupted `RUN`.
 /// Environment, anchors, and working directory mirror [`run_argv`]
 /// exactly: closed child env from the script map, the same anchor
 /// pre-flight the native spawn runs (`shell` selects the shell-form
@@ -444,14 +445,22 @@ fn run_pty<P: ProcessManager>(
         PolicyPath::Guarded(p) => command_path(p).to_string_lossy().into_owned(),
         PolicyPath::Unguarded(p) => p.as_path().to_string_lossy().into_owned(),
     };
-    // Stdin feeds the master only from a `stdin = $p` script pipe: the
-    // backend behind it carries the wake hook that releases a worker
-    // parked in a blocking read when the child dies. Anything else
-    // (bare `[tty]`, ambient inheritance, unwakeable descriptors) runs
-    // closed instead of stranding the session on a worker that can
-    // never observe exit.
+    // Stdin feeds the master from a `stdin = $p` script pipe, or from
+    // the host terminal itself when stdin is a real one: the backend
+    // behind a pipe carries the wake hook that releases a worker
+    // parked in a blocking read when the child dies, and the host
+    // reader carries its own teardown flag plus a console unblock,
+    // so neither strands the session. Anything else (bare `[tty]`
+    // headless, ambient inheritance off-terminal, unwakeable
+    // descriptors) runs closed instead of stranding the session on
+    // a worker that can never observe exit.
     let input = match &cx.stdin {
-        CommandStdin::Null | CommandStdin::Inherit => None,
+        CommandStdin::Null | CommandStdin::Inherit
+            if !cx.process.stdin_is_terminal() || cx.stdin.is_redirected() =>
+        {
+            None
+        }
+        CommandStdin::Null | CommandStdin::Inherit => oxdock_pty::acquire_host_stdin(),
         CommandStdin::Stream(reader) => match cx.stdin_pipe.clone() {
             Some(backend) => {
                 let reader = reader.clone();
