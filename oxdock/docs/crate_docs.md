@@ -2651,8 +2651,8 @@ line runs only when its guard passes.
 
 Sandbox defaults need no declaration: loader bindings,
 terminal defaults, the host lookup path, and the user's
-profile locations seed automatically. See Environment
-Variable Contracts for the exact list, which grows with the
+profile locations seed automatically. See OxDock
+Environment Variable Contracts for the exact list, which grows with the
 engine.
 
 Secrets and tool config stay opt-in here: a token or a
