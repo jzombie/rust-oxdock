@@ -1,0 +1,43 @@
+# Number guessing game. Picks 1-10 with STD::RAND, 3 tries via PROMPT.
+# (The random builtin is RAND, not RND.)
+
+IMPORT [STD]
+WORKSPACE SYSTEM
+
+# RAND draws a FLOAT in [0, 1). Scale to [0, 10) and count off whole
+# ones with repeated subtraction to land 1-10.
+LET $draw: FLOAT = RAND()
+LET $rest: FLOAT = $draw * 10.0
+LET $secret: INT = 1
+
+WHILE $rest >= 1.0 {
+    $rest = $rest - 1.0
+    $secret = $secret + 1
+}
+
+LET $won: BOOL = false
+LET $guess: STRING = ""
+LET $n: INT = 0
+
+ECHO "Guess the number (1-10). You have 3 tries."
+
+FOR $attempt: INT IN [1, 2, 3] {
+    ECHO "Try {{ $attempt }} of 3."
+    PROMPT $guess "Guess a number 1-10?"
+
+    $n = INT($guess)
+
+    IF $n == $secret {
+        ECHO "Correct! The number was {{ $secret }}."
+        $won = true
+        BREAK
+    } ELSE IF $n < $secret {
+        ECHO "Too low."
+    } ELSE {
+        ECHO "Too high."
+    }
+}
+
+IF !$won {
+    ECHO "Out of tries. The number was {{ $secret }}."
+}
