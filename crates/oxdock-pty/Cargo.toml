@@ -21,7 +21,7 @@ windows-sys.workspace = true
 anyhow.workspace = true
 portable-pty.workspace = true
 
-[dev-dependencies]
+[target.'cfg(windows)'.dev-dependencies]
 oxdock-process.workspace = true
 
 [lints]
