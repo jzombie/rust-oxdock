@@ -1,4 +1,4 @@
-# Environment Variable Contracts
+# OxDock Environment Variable Contracts
 
 Every variable the engine seeds into script environments.
 
@@ -31,6 +31,8 @@ absent; explicit script values win.
 | [`HOME`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+HOME&type=code) | unix |
 | [`TMPDIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TMPDIR&type=code) | unix |
 | [`TERM`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TERM&type=code) | unix |
+| [`LANG`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+LANG&type=code) | unix |
+| [`LC_ALL`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+LC_ALL&type=code) | unix |
 | [`LOGNAME`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+LOGNAME&type=code) | unix |
 | [`USER`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+USER&type=code) | unix |
 | [`TEMP`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TEMP&type=code) | windows |

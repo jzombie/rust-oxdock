@@ -85,9 +85,10 @@ ASSERT_EQ $sum 5
 
 ## OpenCode setup
 
-To drive a script from OpenCode, build with the feature and register
-the server in `opencode.jsonc`. Any key under `mcp` becomes the tool
-prefix, so name it after the toolset it serves.
+To drive a script from OpenCode, build the binary (MCP hosting
+is on by default) and register the server in `opencode.jsonc`. Any
+key under `mcp` becomes the tool prefix, so name it after the
+toolset it serves.
 
 ```jsonc
 {
@@ -105,7 +106,7 @@ prefix, so name it after the toolset it serves.
 }
 ```
 
-Build once with `cargo build -p oxdock --features mcp`, then restart
+Build once with `cargo build -p oxdock`, then restart
 OpenCode (or resync its MCP servers) so the client connects and lists
 tools. Each `EXPORT`ed function appears as `<name>_<FUNC>` with the
 `#` doc block as its description.

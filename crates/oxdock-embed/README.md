@@ -7,7 +7,8 @@ OxDock binary embedding layer.
 Generates the runtime `EmbeddedFile` module that the `oxdock_embed!` macro emits.
 At build time it hashes, stamps, and serialises every asset; at run time the
 generated struct exposes `get(path) -> Option<EmbeddedFile>` and `iter()` over
-all embedded filenames.
+all embedded filenames. The emitted code is `no_std` clean (`alloc` plus `core`
+only, `Cow::Borrowed`).
 
 ## License
 

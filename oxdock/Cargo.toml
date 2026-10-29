@@ -20,16 +20,17 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [features]
-default = ["cli", "net"]
+default = ["cli", "net", "ssh", "markdown", "mcp"]
 cli = ["dep:oxdock-cli"]
 # Virtual-endpoint toolkit in the CLI runner (oxdock-net-plugin).
 net = ["oxdock-cli/net"]
 # Ephemeral SSH server/client in the CLI runner (oxdock-ssh-plugin).
 ssh = ["cli", "net", "oxdock-cli/ssh"]
-# Markdown helpers in the CLI runner (oxdock-markdown-plugin). Opt-in so
-# default and minimal builds keep their current module surface.
+# Markdown helpers in the CLI runner (oxdock-markdown-plugin). On by
+# default; `--no-default-features` builds drop the module.
 markdown = ["oxdock-cli/markdown"]
-# MCP tool hosting for EXPORTed script functions. Opt-in; on with --all-features.
+# MCP tool hosting for EXPORTed script functions. On by default;
+# `--no-default-features` builds drop it.
 mcp = ["oxdock-cli/mcp"]
 
 [dependencies]

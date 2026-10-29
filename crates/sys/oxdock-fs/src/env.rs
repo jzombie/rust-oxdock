@@ -123,6 +123,10 @@ pub mod os {
             TMPDIR = "TMPDIR",
             /// Terminal identity.
             TERM = "TERM",
+            /// Locale fallback: character encoding and message language.
+            LANG = "LANG",
+            /// Locale override: wins over every other locale variable.
+            LC_ALL = "LC_ALL",
         }
     }
 

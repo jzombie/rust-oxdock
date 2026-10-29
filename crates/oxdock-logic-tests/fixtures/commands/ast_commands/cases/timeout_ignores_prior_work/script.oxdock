@@ -1,0 +1,6 @@
+# A server task started before the scope must not hold a TIMEOUT scope
+# open to its deadline: the instant body completes at once, and CANCEL
+# still tears the server down afterwards.
+LET $srv: HANDLE = ASYNC RUN @SLEEP_LONG_CMD@
+TIMEOUT 10s WRITE done.txt "quick"
+CANCEL $srv

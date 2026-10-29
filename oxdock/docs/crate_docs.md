@@ -1,12 +1,14 @@
 **OxDock is a Dockerfile-inspired DSL for native builds, multi-node pipelines, and sealed remote execution.**
 
+Bash gives you strings and exit codes. OxDock gives you [typed values](https://github.com/jzombie/rust-oxdock#value-types), [guarded paths](https://github.com/jzombie/rust-oxdock#workspaces--filesystem), [managed pipes](https://github.com/jzombie/rust-oxdock#transport-pipes), and identical behavior on Linux/macOS/Windows (the things you'd re-implement badly in every growing bash script). And with hot-loading [MCP tooling](https://github.com/jzombie/rust-oxdock#mcp-hosting), *English-to-OxDock* just skips the boilerplate of getting there. [Workspaces](https://github.com/jzombie/rust-oxdock#workspaces--filesystem) (`SNAPSHOT`, `LOCAL`, `CACHE`, `SYSTEM`) and [scoped blocks](https://github.com/jzombie/rust-oxdock#guards-and-scoped-blocks) with [selective environment inheritance](https://github.com/jzombie/rust-oxdock#selective-environment-inheritance) give every run an isolated root that reverts on scope exit. When plain shell is the right tool, [`RUN`](https://github.com/jzombie/rust-oxdock#run) still reaches it, and [platform guards](https://github.com/jzombie/rust-oxdock#platform-guards) keep the OS-specific bits fenced: the two compose instead of competing.
+
 Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on Linux, macOS, and Windows. Execute scripts on bare metal, inside containers, or dispatched across remote machines simultaneously. No daemons. No hypervisors.
 
 Platform gating selects OS-specific steps, and remote targets bind over any stdio transport. Only RUN touches the host shell.
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.31.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.32.0-alpha/oxdock/)
 
 ## Dynamically embed assets at compile time
 
@@ -100,8 +102,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.31.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.31.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.32.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.32.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -113,7 +115,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.31.0-alpha"
+    "alpha OxDock 0.32.0-alpha"
 );
 ```
 
@@ -318,6 +320,18 @@ Every path resolves inside a guarded workspace root, and escapes are rejected be
 WRITE ../escape.txt "nope"
 ```
 
+OxDock sandboxes by plumbing, not virtualization: scrubbed child
+environments, workspace-scoped paths, and typed verbs instead of raw
+shell let scripts communicate across trust barriers with no hypervisor.
+That same plumbing is what lets an agent talk to other environments in
+a controlled fashion: pipes, guarded paths, scrubbed environments, and
+the `REMOTE` and SSH transports are all declared channels, so every
+crossing goes through the boundary, never around it.
+
+That is a competence boundary, not a security boundary. It keeps a
+clumsy agent from wandering; it does not contain a hostile payload.
+For untrusted code, run OxDock itself inside a container or VM.
+
 ## Extending OxDock from Rust
 
 Scripts call host functions and custom types that Rust code registers
@@ -425,7 +439,9 @@ native ones. `TYPES()` lists every registered name and
 `TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
 host surface exactly like native surface. Script `TYPE` aliases ride the
 same listing: `TYPES()` includes alias names and `TYPE_DESCRIBE("PERSON")`
-reports the canonical target spelling. Host types stay opaque:
+reports the canonical target spelling.
+
+Host types stay opaque:
 literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
 and `MAP` only, so queryable containers expose host accessor functions
 (`MATRIX_GET($m, $row, $col)`) instead of new syntax.
@@ -894,12 +910,10 @@ ASSERT_CONTAINS stdout "semi;colon"
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- Guards are namespaced `key:value` pairs: `os:macos`, `os:linux`, `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases for `any(os:macos, os:linux)` and `os:windows` respectively, lowered at parse so every platform check runs under `os:`. Matching is case-sensitive throughout.
-- A comma-separated list means **AND**: `[env:A, os:linux]`.
-- Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
-- Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
-- Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
-- Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
+- Guard predicates are namespaced `key:value` pairs: `os:macos` / `os:linux` / `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, and comparisons like `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases, lowered at parse to `any(os:macos, os:linux)` and `os:windows`, so every platform check runs under `os:`.
+- Matching is case-sensitive throughout.
+- Combine predicates with calls or commas: `any(expr, expr, ...)` takes at least two branches for disjunction (no infix operator), `all(expr, expr, ...)` spells out conjunction, and a comma-separated list means **AND**: `[env:A, os:linux]`.
+- Negate any predicate with `not(...)`: `[not(env:SKIP)]`. Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
@@ -1117,7 +1131,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
 | [`LIST_APPEND`](#list_append) | `LIST_APPEND $list <item>` |
-| [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
+| [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=$var], ...] <command> \| WITH_IO [bindings] { <commands> } \| WITH_IO [tty[, stdin=$p][, rows=<int>][, cols=<int>]] RUN ...` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
@@ -1139,7 +1153,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 
 Reroute standard streams.
 
-**Syntax:** `WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> }`
+**Syntax:** `WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> } | WITH_IO [tty[, stdin=$p][, rows=<int>][, cols=<int>]] RUN ...`
 
 Reroutes the standard streams of the next command or, in block form,
 of every enclosed command.
@@ -1148,6 +1162,39 @@ Bindings map streams (`stdin`, `stdout`, `stderr`) to a PIPE-typed
 variable (`stdout=$p`, `stdin=$p`), resolved from the variable
 when the step runs. Both stdout and stderr pipes capture output
 the same way. Declare the handle first with `LET $p: PIPE`.
+
+A `RUN` step can opt into a pseudo-terminal with the bare `tty`
+flag instead of a new command: `WITH_IO [tty] RUN [...]`
+spawns the child under a pty sized from the host terminal
+when it names none (24x80 fallback off-terminal;
+`rows = <int>` / `cols = <int>` override each side).
+Unnamed sides track the host window while the step runs
+(signal-driven on Unix, polled where no window signal
+exists); explicit sides stay pinned.
+
+The master carries the child's interleaved stdout and stderr
+as one stream, so it routes exclusively to `stdout` (step
+capture or a `stdout = $p` pipe): `stderr` bindings alongside
+`tty` are rejected, and `tty` outside a `RUN` step is
+rejected. Pty-backed descriptors never promote to OS
+kernel pipes, even inside `ASYNC` single-`RUN` bodies.
+
+`stdin = $p` feeds the master; bare `[tty]`
+with a real terminal stdin feeds host keys the same
+way (raw, transparent) and stays closed headless. Host
+interrupt keys reach the child instead of cancelling the
+step, so bind a step `TIMEOUT` for a guaranteed exit.
+
+Expect pty translation in assertions:
+newlines arrive as carriage return plus newline, and prompts
+echo input. On Windows, lone line feeds in fed input expand
+to carriage-return line feeds for console submission, so
+portable scripts need no per-platform line endings.
+
+An input pipe that EOFs contributes a
+terminal-echoed end-of-transmission marker on some
+platforms: prefer `ASSERT_CONTAINS` over byte-exact
+assertions on fed sessions.
 
 Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
 producer can finish before the consumer starts.
@@ -1199,6 +1246,17 @@ LET $p: PIPE
 WITH_IO [stdout=$p] ECHO hello
 WITH_IO [stdin=$p] READ_LINE $line
 ASSERT_EQ $line "hello"
+```
+
+**Example: pty terminal binding**
+
+```oxdock
+# A RUN step under bare `tty` sees a terminal: newlines
+# arrive translated, so assert with CONTAINS, never EQ.
+LET $p: PIPE
+WITH_IO [tty, stdout=$p] RUN "echo hello-tty"
+WITH_IO [stdin=$p] READ_LINE $line
+ASSERT_CONTAINS $line "hello-tty"
 ```
 
 
@@ -1442,9 +1500,11 @@ An inline block (`LET $var: TYPE = { <commands> }`) runs its
 steps in a fresh scope and binds the nearest `RETURN` value,
 like a zero-arg function body: fallthrough without `RETURN`
 binds `""`, and `BREAK`/`CONTINUE` escaping the block are
-errors. The block reads outer variables but its own LETs
-never leak out. A `{k: v}` shape still parses as a map
-literal; anything else in braces is a block.
+errors. Think IIFE: the block executes immediately where it
+stands and its value is the result. The block reads outer
+variables but its own LETs never leak out. A `{k: v}` shape
+still parses as a map literal; anything else in braces is
+a block.
 
 The split is deliberate: synchronous commands capture
 stdout because they run inline to completion on the same
@@ -2614,8 +2674,8 @@ line runs only when its guard passes.
 
 Sandbox defaults need no declaration: loader bindings,
 terminal defaults, the host lookup path, and the user's
-profile locations seed automatically. See Environment
-Variable Contracts for the exact list, which grows with the
+profile locations seed automatically. See OxDock
+Environment Variable Contracts for the exact list, which grows with the
 engine.
 
 Secrets and tool config stay opt-in here: a token or a
@@ -4466,6 +4526,44 @@ LET $doc: MAP<ANY> = PARSE_TOML("title = \"demo\"")
 ASSERT_EQ $doc.title "demo"
 ```
 
+### STD::PATH_JOIN
+
+Join a directory and a file name with the host-native separator.
+
+Both inputs accept `STRING` or workspace `PATH` words; the result
+is a `STRING` joined with the platform separator, so installers
+never hand-roll separators in templates. No filesystem access:
+missing parents fail later at the consumer. Stays `STRING` (not
+`PATH`) on purpose: the joined value is a not-yet-validated
+destination string like `$dir` itself, and `PATH` words
+re-canonicalize to forward slashes on template expansion, which
+would undo the native join.
+
+**Signature:** `STD::PATH_JOIN($dir: STRING|PATH, $name: STRING|PATH) -> STRING`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$dir` (`STRING|PATH`): Directory half of the destination.
+- `$name` (`STRING|PATH`): File half of the destination.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: join path**
+
+```oxdock
+# Directory and file stem join with the native separator.
+# Source `\` is one backslash at runtime; `/` works on Windows
+# too, native just reads better there.
+IMPORT [STD]
+LET $p: STRING = PATH_JOIN("some-dir", "some-file")
+[family:unix] ASSERT_EQ $p "some-dir/some-file"
+[family:windows] ASSERT_EQ $p "some-dir\some-file"
+```
+
 ### STD::PATH_TYPE
 
 Describe a filesystem entry.
@@ -6012,7 +6110,7 @@ let script = indoc! {"
 let err = oxdock_parser::parse_script(script, oxdock_parser::lower_command)
     .expect_err("must fail");
 let expected = indoc! {"
-    invalid syntax for command WITH_IO: WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); got `[stdout=discard] ECHO hi`.
+    invalid syntax for command WITH_IO: WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); `tty` is a bare flag for RUN steps, with `rows = <int>` / `cols = <int>` geometry (e.g. `[tty, rows=40, cols=100]`); got `[stdout=discard] ECHO hi`.
       --> line 1, col 1-32
       1 | WITH_IO [stdout=discard] ECHO hi
         | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

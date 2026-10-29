@@ -355,8 +355,13 @@ command_inner = { inherit_env_command | timeout_statement | isolated_statement |
 
 with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
-io_binding = { io_stream ~ (ws? ~ "=" ~ ws? ~ pipe_binding)? }
-io_stream = { "stdin" | "stdout" | "stderr" }
+io_binding = { io_size | io_stream ~ (ws? ~ "=" ~ ws? ~ pipe_binding)? }
+io_stream = { "stdin" | "stdout" | "stderr" | "tty" }
+// Terminal geometry: `rows`/`cols` take a positive integer and require
+// `tty` on the same step (validated in lowering, not here).
+io_size = { io_dim_name ~ ws? ~ "=" ~ ws? ~ tty_dim }
+io_dim_name = { "rows" | "cols" }
+tty_dim = @{ ASCII_DIGIT+ }
 // Binding endpoints are `$var` references to PIPE-typed variables.
 pipe_binding = { dollar_ident }
 

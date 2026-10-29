@@ -1,0 +1,14 @@
+# Mostly here to test ncurses layout support.
+
+IMPORT [STD]
+INHERIT_ENV [PATH]
+WORKSPACE SYSTEM
+
+LET $prog: STRING = "htop"
+
+IF IS_EXEC($prog) {
+    WITH_IO [tty] RUN $prog
+} ELSE {
+    ECHO "No {{ $prog }} available."
+    EXIT 1
+}

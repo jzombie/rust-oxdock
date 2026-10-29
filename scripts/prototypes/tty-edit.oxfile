@@ -1,0 +1,24 @@
+IMPORT [STD]
+INHERIT_ENV [PATH]
+WORKSPACE SYSTEM
+
+LET $progs: LIST<STRING> = []
+
+[family:unix] $progs = ["nano", "vi"]
+[family:windows] $progs = ["edit"]
+
+LET $ran_prog: BOOL = false
+
+FOR $prog: STRING IN $progs {
+    IF IS_EXEC($prog) {
+        WITH_IO [tty] RUN $prog
+
+        $ran_prog = true
+        BREAK
+    }
+}
+
+IF !$ran_prog {
+    ECHO "No configured editor available."
+    EXIT 1
+}

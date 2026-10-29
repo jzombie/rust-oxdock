@@ -689,15 +689,28 @@ fn ssh_pump<P: ProcessManager>(
 /// not `argv`): route command text via `ENV SSH_COMMAND="..."` with
 /// `["cmd", "/c", "%SSH_COMMAND%"]` instead.
 ///
-/// Stdin arrives untranslated. Consoles submit on CR, so a DSL line
-/// bound for a console child ends with `\r`. Real terminals already
-/// send CR for Enter.
+/// Stdin arrives with console line endings handled: the pump expands
+/// a lone `\n` to `\r\n` on Windows, so portable lines submit as-is
+/// and an explicit `\r` passes through untouched. Real terminals
+/// already send CR for Enter.
 ///
 /// Environment is exactly the script environment like `RUN`:
 /// block-scoped `ENV` (such as the session's `SSH_USER` / `SSH_CLIENT` /
 /// `SSH_SERVER` / `SSH_COMMAND` relay) reaches the child; host names
 /// arrive only through `INHERIT_ENV`, including `TERM` for terminal
 /// definitions. The working directory comes from the script.
+///
+/// `WITH_IO [tty]` shares the same pump core and covers terminal
+/// runs with host or static sizing and step-local reporting. This
+/// function covers the two session-bound cases a script composition
+/// cannot reproduce: a composed run with static geometry observes
+/// the opener but never an outer resize (no script primitive
+/// subscribes a running pty to the session cell), and a failing DSL
+/// `RUN` aborts its task before any script-level status report could
+/// follow (there is no try/catch; the close race after that would be
+/// the second problem). If a second consumer ever needs
+/// session-driven sizing or reaper-ordered reporting, that is the
+/// point to revisit unifying the two.
 ///
 #[oxdock_func(
     returns = TypeTag::Int,

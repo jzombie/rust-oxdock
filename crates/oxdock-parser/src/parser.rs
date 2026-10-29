@@ -340,6 +340,9 @@ struct IoBindingSet {
     stdin: Option<IoBinding>,
     stdout: Option<IoBinding>,
     stderr: Option<IoBinding>,
+    tty: Option<IoBinding>,
+    rows: Option<IoBinding>,
+    cols: Option<IoBinding>,
 }
 
 impl IoBindingSet {
@@ -348,6 +351,9 @@ impl IoBindingSet {
             IoStream::Stdin => self.stdin = Some(binding),
             IoStream::Stdout => self.stdout = Some(binding),
             IoStream::Stderr => self.stderr = Some(binding),
+            IoStream::Tty => self.tty = Some(binding),
+            IoStream::Rows(_) => self.rows = Some(binding),
+            IoStream::Cols(_) => self.cols = Some(binding),
         }
     }
 
@@ -360,6 +366,15 @@ impl IoBindingSet {
             out.push(binding);
         }
         if let Some(binding) = self.stderr {
+            out.push(binding);
+        }
+        if let Some(binding) = self.tty {
+            out.push(binding);
+        }
+        if let Some(binding) = self.rows {
+            out.push(binding);
+        }
+        if let Some(binding) = self.cols {
             out.push(binding);
         }
         out
@@ -398,6 +413,9 @@ pub struct ScriptParser<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> {
     /// Single-file `EXPORT` names in source order. Top-level only;
     /// validated against top-level `FUNC` definitions at end of parse.
     exports: Vec<String>,
+    /// Source line per entry in `steps`, in order. Post-parse
+    /// validations point at real lines instead of end of file.
+    step_lines: Vec<usize>,
 }
 
 impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
@@ -457,6 +475,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             preseed_funcs,
             preseed_imports,
             exports: Vec::new(),
+            step_lines: Vec::new(),
         })
     }
 
@@ -711,12 +730,16 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         // (`[family:windows] INHERIT_ENV [SystemRoot]`); each guarded
         // line runs only when its guard passes, like any other step.
         {
-            let ctx = self.eof_span();
             let mut seen_non_prelude = false;
-            for step in &self.steps {
+            for (index, step) in self.steps.iter().enumerate() {
+                let span = |index: usize| {
+                    let line = self.step_lines.get(index).copied().unwrap_or(1).max(1);
+                    span_for_line(self.input, line)
+                };
                 match &step.kind {
                     StepKind::InheritEnv { .. } => {
                         if seen_non_prelude {
+                            let ctx = span(index);
                             return Err(ParseError::structural(
                                 "inherit_env",
                                 "INHERIT_ENV must appear before any other commands".to_string(),
@@ -726,6 +749,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                     }
                     kind => {
                         if contains_inherit_env(kind) {
+                            let ctx = span(index);
                             return Err(ParseError::structural(
                                 "inherit_env",
                                 "INHERIT_ENV cannot be nested inside other commands".to_string(),
@@ -1095,6 +1119,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             scope_enter,
             scope_exit: 0,
         });
+        self.step_lines.push(line_no);
         Ok(())
     }
 
@@ -1686,6 +1711,7 @@ fn parse_structural_command_with_lower(
                 }
             }
             if let Some(cmd) = cmd {
+                check_tty_wrapping(&bindings, Some(cmd.as_ref()), &span)?;
                 StepKind::WithIo { bindings, cmd }
             } else {
                 StepKind::WithIoBlock { bindings }
@@ -3809,6 +3835,50 @@ fn parse_guard_line(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExp
     ))
 }
 
+/// Direct-form `WITH_IO [tty]` validity, checked while the wrapped
+/// command is still in hand so misuse fails at parse with a span.
+/// Block-expanded bindings skip this (their steps never re-enter
+/// lowering); the runtime resolver repeats the same checks, so every
+/// construction fails with one story.
+fn check_tty_wrapping(
+    bindings: &[IoBinding],
+    cmd: Option<&StepKind>,
+    span: &SpanContext,
+) -> ParseResult<()> {
+    let has_tty = bindings.iter().any(|b| matches!(b.stream, IoStream::Tty));
+    let has_geometry = bindings
+        .iter()
+        .any(|b| matches!(b.stream, IoStream::Rows(_) | IoStream::Cols(_)));
+    if has_geometry && !has_tty {
+        return Err(ParseError::structural(
+            "with_io",
+            "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size".to_string(),
+            span,
+        ));
+    }
+    if !has_tty {
+        return Ok(());
+    }
+    if bindings
+        .iter()
+        .any(|b| matches!(b.stream, IoStream::Stderr))
+    {
+        return Err(ParseError::structural(
+            "with_io",
+            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex".to_string(),
+            span,
+        ));
+    }
+    match cmd {
+        Some(StepKind::Run(_) | StepKind::RunExec { .. }) | None => Ok(()),
+        Some(_) => Err(ParseError::structural(
+            "with_io",
+            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it".to_string(),
+            span,
+        )),
+    }
+}
+
 fn parse_io_binding(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<IoBinding> {
     let span = refine_span(ctx, &pair);
     let mut stream = None;
@@ -3816,6 +3886,7 @@ fn parse_io_binding(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<IoBindin
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::io_stream => stream = Some(parse_io_stream(inner.as_str())),
+            Rule::io_size => stream = Some(parse_io_size(ctx, inner)?),
             Rule::pipe_binding => pipe = Some(parse_pipe_binding(ctx, inner)?),
             _ => {}
         }
@@ -3823,7 +3894,50 @@ fn parse_io_binding(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<IoBindin
     let stream = stream.ok_or_else(|| {
         ParseError::structural("with_io", "missing IO stream in WITH_IO".to_string(), &span)
     })?;
+    // `tty` is a bare flag: the name stays reserved so a future value
+    // shape cannot silently change what `tty = $x` means today.
+    if stream == IoStream::Tty && pipe.is_some() {
+        return Err(ParseError::structural(
+            "with_io",
+            "WITH_IO [tty] takes no value: use bare `tty`, with `rows = <int>` / `cols = <int>` for geometry (e.g. `[tty, rows=40, cols=100]`)".to_string(),
+            &span,
+        ));
+    }
     Ok(IoBinding { stream, pipe })
+}
+
+fn parse_io_size(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<IoStream> {
+    let span = refine_span(ctx, &pair);
+    let mut name = None;
+    let mut dim = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::io_dim_name => name = Some(inner.as_str()),
+            Rule::tty_dim => dim = Some(inner.as_str()),
+            _ => {}
+        }
+    }
+    let dim = dim
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|value| (1..=u64::from(u16::MAX)).contains(value))
+        .ok_or_else(|| {
+            ParseError::structural(
+                "with_io",
+                "WITH_IO terminal geometry needs a positive integer 1-65535 (e.g. `rows=40`)"
+                    .to_string(),
+                &span,
+            )
+        })?;
+    let dim = dim as u16;
+    match name {
+        Some("rows") => Ok(IoStream::Rows(dim)),
+        Some("cols") => Ok(IoStream::Cols(dim)),
+        _ => Err(ParseError::structural(
+            "with_io",
+            "missing terminal dimension in WITH_IO".to_string(),
+            &span,
+        )),
+    }
 }
 
 fn parse_io_stream(text: &str) -> IoStream {
@@ -3831,6 +3945,7 @@ fn parse_io_stream(text: &str) -> IoStream {
         "stdin" => IoStream::Stdin,
         "stdout" => IoStream::Stdout,
         "stderr" => IoStream::Stderr,
+        "tty" => IoStream::Tty,
         _ => unreachable!("parser produced invalid io_stream token"),
     }
 }

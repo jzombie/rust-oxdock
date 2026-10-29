@@ -2,15 +2,17 @@
 
 **OxDock is a Dockerfile-inspired DSL for native builds, multi-node pipelines, and sealed remote execution.**
 
+Bash gives you strings and exit codes. OxDock gives you [typed values](https://github.com/jzombie/rust-oxdock#value-types), [guarded paths](https://github.com/jzombie/rust-oxdock#workspaces--filesystem), [managed pipes](https://github.com/jzombie/rust-oxdock#transport-pipes), and identical behavior on Linux/macOS/Windows (the things you'd re-implement badly in every growing bash script). And with hot-loading [MCP tooling](https://github.com/jzombie/rust-oxdock#mcp-hosting), *English-to-OxDock* just skips the boilerplate of getting there. [Workspaces](https://github.com/jzombie/rust-oxdock#workspaces--filesystem) (`SNAPSHOT`, `LOCAL`, `CACHE`, `SYSTEM`) and [scoped blocks](https://github.com/jzombie/rust-oxdock#guards-and-scoped-blocks) with [selective environment inheritance](https://github.com/jzombie/rust-oxdock#selective-environment-inheritance) give every run an isolated root that reverts on scope exit. When plain shell is the right tool, [`RUN`](https://github.com/jzombie/rust-oxdock#run) still reaches it, and [platform guards](https://github.com/jzombie/rust-oxdock#platform-guards) keep the OS-specific bits fenced: the two compose instead of competing.
+
 Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on Linux, macOS, and Windows. Execute scripts on bare metal, inside containers, or dispatched across remote machines simultaneously. No daemons. No hypervisors.
 
 Platform gating selects OS-specific steps, and remote targets bind over any stdio transport. Only RUN touches the host shell.
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.31.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.32.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.31.0-alpha`, or install the standalone runner with `cargo install oxdock@0.31.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.32.0-alpha`, or install the standalone runner with `cargo install oxdock@0.32.0-alpha`.
 
 Run a script:
 
@@ -110,8 +112,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.31.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.31.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.32.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.32.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -123,7 +125,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.31.0-alpha"
+    "alpha OxDock 0.32.0-alpha"
 );
 ```
 
@@ -328,6 +330,18 @@ Every path resolves inside a guarded workspace root, and escapes are rejected be
 WRITE ../escape.txt "nope"
 ```
 
+OxDock sandboxes by plumbing, not virtualization: scrubbed child
+environments, workspace-scoped paths, and typed verbs instead of raw
+shell let scripts communicate across trust barriers with no hypervisor.
+That same plumbing is what lets an agent talk to other environments in
+a controlled fashion: pipes, guarded paths, scrubbed environments, and
+the `REMOTE` and SSH transports are all declared channels, so every
+crossing goes through the boundary, never around it.
+
+That is a competence boundary, not a security boundary. It keeps a
+clumsy agent from wandering; it does not contain a hostile payload.
+For untrusted code, run OxDock itself inside a container or VM.
+
 ### Prepare during the build
 
 `oxdock_embed!` ships artifacts inside the binary. `oxdock_prepare!` runs the same script but emits no runtime module. Use it when assets only need to exist during the build, for codegen or `include!` workflows.
@@ -418,9 +432,9 @@ standalone processes with the CLI.
 
 This crate is the front door. It re-exports the CLI runner (enabled by
 default) and the build macros (always available), so most users only
-ever depend on `oxdock`. The `cli` feature implies `net`, so the facade
-always carries NET; minimal builds go through `oxdock-cli` with
-`--no-default-features`.
+ever depend on `oxdock`. The default features carry every CLI module
+(`NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting); minimal builds go
+through `oxdock-cli` with `--no-default-features`.
 
 One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps (buffered in memory to 8 MiB, then spilled to a temp file), fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
 
@@ -577,12 +591,10 @@ ASSERT_CONTAINS stdout "semi;colon"
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- Guards are namespaced `key:value` pairs: `os:macos`, `os:linux`, `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases for `any(os:macos, os:linux)` and `os:windows` respectively, lowered at parse so every platform check runs under `os:`. Matching is case-sensitive throughout.
-- A comma-separated list means **AND**: `[env:A, os:linux]`.
-- Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
-- Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
-- Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
-- Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
+- Guard predicates are namespaced `key:value` pairs: `os:macos` / `os:linux` / `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, and comparisons like `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases, lowered at parse to `any(os:macos, os:linux)` and `os:windows`, so every platform check runs under `os:`.
+- Matching is case-sensitive throughout.
+- Combine predicates with calls or commas: `any(expr, expr, ...)` takes at least two branches for disjunction (no infix operator), `all(expr, expr, ...)` spells out conjunction, and a comma-separated list means **AND**: `[env:A, os:linux]`.
+- Negate any predicate with `not(...)`: `[not(env:SKIP)]`. Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
@@ -808,7 +820,8 @@ Every variable the seed provides to spawned children is specified in [ENV_CONTRA
 
 - **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
 
-- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`. Identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
+- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`.
+- **Cache identity and lifecycle:** identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
 
 - **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
 
@@ -821,7 +834,7 @@ Every variable the seed provides to spawned children is specified in [ENV_CONTRA
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.31.0-alpha
+cargo install oxdock@0.32.0-alpha
 ```
 
 Run a script file:
@@ -944,7 +957,9 @@ native ones. `TYPES()` lists every registered name and
 `TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
 host surface exactly like native surface. Script `TYPE` aliases ride the
 same listing: `TYPES()` includes alias names and `TYPE_DESCRIBE("PERSON")`
-reports the canonical target spelling. Host types stay opaque:
+reports the canonical target spelling.
+
+Host types stay opaque:
 literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
 and `MAP` only, so queryable containers expose host accessor functions
 (`MATRIX_GET($m, $row, $col)`) instead of new syntax.
@@ -1198,7 +1213,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.31.0-alpha", default-features = false }
+oxdock = { version = "0.32.0-alpha", default-features = false }
 ```
 
 ## Glossary

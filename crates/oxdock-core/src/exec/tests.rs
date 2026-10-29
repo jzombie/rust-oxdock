@@ -866,6 +866,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
+        reap_floor: None,
         functions: super::native::FunctionRegistry::with_builtins(),
         types: super::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),
@@ -3151,10 +3152,13 @@ impl BackgroundHandle for BlockingHandle {
     ignore = "TIMEOUT deadline is wall-clock and the test blocks on a condvar; untestable under Miri isolation"
 )]
 fn timeout_fires_and_kills_blocking_command() {
-    let steps = vec![timeout_step(
-        "200ms",
-        vec![step(StepKind::Run("hang".into()))],
-    )];
+    // Generous deadline for a wall-clock race: the failure mode is a
+    // descheduled main thread stalling past the deadline before the
+    // body even registers, and sub-second deadlines sit inside CI
+    // scheduling jitter on loaded runners. The body blocks forever,
+    // so the test always costs exactly the deadline; 2s buys an
+    // order of magnitude of headroom at a fixed two-second cost.
+    let steps = vec![timeout_step("2s", vec![step(StepKind::Run("hang".into()))])];
     let fs = MockFs::new();
     let fs = Box::new(fs) as Box<dyn WorkspaceFs>;
     let runner = BlockingRunner::default();
@@ -3167,6 +3171,34 @@ fn timeout_fires_and_kills_blocking_command() {
         runner.kills.lock().unwrap().as_slice(),
         ["hang"],
         "deadline watcher must kill the blocking command"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "TIMEOUT deadline is wall-clock and the worker blocks on a condvar; untestable under Miri isolation"
+)]
+fn timeout_scope_stops_task_it_spawned() {
+    // A worker the TIMEOUT body leaves running gets up to the deadline,
+    // then the scope stops it: the step reports the deadline instead of
+    // returning, and the blocking command records the kill. The scope
+    // joins only its own workers (see the prior-background-work test):
+    // a 2s deadline bounds the cost of this test exactly like the
+    // foreground variant above.
+    let steps = vec![timeout_step("2s", vec![async_step("hang")])];
+    let fs = MockFs::new();
+    let fs = Box::new(fs) as Box<dyn WorkspaceFs>;
+    let runner = BlockingRunner::default();
+    let err = run_expect_err(fs, &steps, runner.clone());
+    assert!(
+        err.to_string().contains("TIMEOUT"),
+        "expected deadline error, got: {err:#}"
+    );
+    assert_eq!(
+        runner.kills.lock().unwrap().as_slice(),
+        ["hang"],
+        "deadline teardown must kill the scope's own worker command"
     );
 }
 
@@ -3225,6 +3257,7 @@ fn timeout_preserves_preexisting_cancellation() {
         err: None,
         out_pipe: None,
         stdin_pipe: None,
+        tty: None,
     };
     super::handlers::timeout(&mut cx, 0, &std::time::Duration::from_secs(30), &[])
         .expect("empty body must succeed");
@@ -3233,6 +3266,60 @@ fn timeout_preserves_preexisting_cancellation() {
             .cancel_token
             .load(std::sync::atomic::Ordering::SeqCst),
         "pre-existing cancellation must survive a successful TIMEOUT body"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns ASYNC worker threads and asserts a wall-clock promptness bound; untestable under Miri isolation"
+)]
+fn timeout_scope_does_not_join_prior_background_work() {
+    // A TIMEOUT scope bounds only its own body. A long-lived task started
+    // before the scope (the install-smoke server pattern: ASYNC server,
+    // TIMEOUT prompt step, CANCEL server) must not hold the scope open to
+    // its deadline: the instant body means the step returns at once with
+    // no deadline error. Pre-fix this held the scope for the full
+    // deadline, then reported it with the body error
+    // "ASYNC task cancelled". The promptness bound carries headroom on
+    // purpose: fixed code returns in milliseconds, and only scheduler
+    // stalls larger than five seconds could trip it.
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::AssignAsync {
+                var: "srv".into(),
+                decl_type: "HANDLE".to_string(),
+                body: vec![step(StepKind::Run("server".into()))],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        timeout_step("30s", vec![step(StepKind::Run("echo quick".into()))]),
+        step(StepKind::Cancel { var: "srv".into() }),
+    ];
+    let mock = MockProcessManager::default();
+    // Two never-ready plans, not one: the ASYNC worker thread and the
+    // TIMEOUT body's cancellable foreground spawn race for plan order,
+    // and whichever spawn loses must still observe a pending handle.
+    // (`wait()` on the foreground handle returns at once regardless;
+    // only `try_wait` polls the countdown, so the instant body is
+    // unaffected either way.)
+    mock.push_bg_plan(usize::MAX, success_status());
+    mock.push_bg_plan(usize::MAX, success_status());
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let start = std::time::Instant::now();
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new())
+        .expect("instant body under TIMEOUT must not wait out a prior server task");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "TIMEOUT scope must return without joining prior background work"
+    );
+    assert!(
+        mock.killed().contains(&"server".to_string()),
+        "CANCEL must still tear down the server task afterwards, got: {:?}",
+        mock.killed()
     );
 }
 
@@ -5915,7 +6002,7 @@ fn inherit_env_description_names_no_seed_rows() {
     // Normalized: source line-breaks must never break the pointer check.
     let flat = description.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        flat.contains("Environment Variable Contracts"),
+        flat.contains("OxDock Environment Variable Contracts"),
         "INHERIT_ENV description must point at the contract"
     );
     for entry in oxdock_process::env_policy::describe_baseline_defaults() {

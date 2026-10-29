@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.32.0-alpha] - 2026-10-29
+
+### Added
+
+- `WITH_IO [tty]` terminal binding for `RUN` steps: the bare `tty` flag spawns the child under a pseudo-terminal on the shared `oxdock-pty` pump (no new top-level keyword), sized from the host terminal when it names none (24x80 fallback off-terminal) with `rows = <int>` / `cols = <int>` per-side overrides. Unnamed sides track the host window live while the step runs (SIGWINCH on Unix, polled on Windows); explicit sides stay pinned. The master carries interleaved stdout and stderr as one stream routed exclusively to `stdout` (step capture or `stdout = $p`); `stderr` bindings alongside `tty` and `tty` outside `RUN` are lowering errors, `tty = $x` and unknown tty-adjacent keys fail at parse, and geometry without `tty` is rejected. `stdin = $p` feeds the master while bare `[tty]` without a terminal stdin leaves stdin closed; on Windows the pump expands lone-`LF` input to `CRLF` for console line submission, so portable scripts need no per-platform line endings; input EOF ends with a newline-led EOT nudge only when a partial line is still pending, so no phantom empty line ever reaches the output. Expect pty translation in assertions (`\n` arrives as `\r\n`, prompts echo input); pty-backed descriptors never promote to OS kernel pipes.
+- `STD::PATH_JOIN($dir, $name)` function: join a directory and a file name with the host-native separator (`\` on Windows, `/` elsewhere). Both inputs admit `STRING` or `PATH`; the result is a `STRING` with no filesystem access. `install.oxfile` places through it, replacing the hand-rolled `[family:windows]` filename override.
+- New `oxdock-pty` crate: shared pseudo-terminal pump (spawn under a pty, pump pipes through the master, apply resizes, drain to quiescence) with no run-model dependencies. The SSH plugin's terminal bridge is now a thin adapter over it; behavior is unchanged.
+- Bare `WITH_IO [tty]` steps hear host keys when stdin is a real terminal: the pump feeds console bytes into the master under host raw mode (no echo, cooking, signals, or flow control; restored on step end), with a cancellable reader per platform (Unix poll tick, Windows `CancelIoEx`) so teardown never strands on a parked read. Bytes cross unmodified and the child pty owns signal generation, matching Docker/SSH conduit behavior; bind a step `TIMEOUT` for a guaranteed exit since host Ctrl-C now reaches the child instead of cancelling the step. Piped, redirected, and Miri stdin keep the closed behavior; script-pipe input (`stdin = $p`) is unchanged.
+- Single `BOOL` spelling for the whole runtime: case-insensitive `true`/`false`/`yes`/`no`/`on`/`off` plus `1`/`0` (surrounding whitespace trimmed). `STRING` → `BOOL` coercion and the `INHERIT_STDOUT` flag checks share one parser, replacing the piecemeal per-site rules. `INT` `1`/`0` coerce to `BOOL` as well; anything else stays a `TypeMismatch`.
+
+### Changed
+
+- Default features now enable every CLI module (`net`, `ssh`, `markdown`, `mcp`): `cargo install oxdock` and the release downloads carry the same 1:1 module surface, so no `--features` flags are needed for `SSH_*`, `MARKDOWN_*`, or `--mcp`. The feature names are unchanged and still gate the minimal builds: `--no-default-features` drops all four modules (still covered by the CI matrix legs).
+- `setup-oxdock` collapses into the installer stubs (#245): the release path is one piped stub call per OS with inputs crossing on `env:`, no version math, renames, or `GITHUB_ENV` writes in the action (`post-install.oxfile` is deleted). The stubs resolve `latest` themselves (including the literal string) and pass names through untouched; `install.oxfile` owns the install name (`OXDOCK_BINARY_NAME`, `.exe` appended on Windows), the `OXDOCK_SKIP_DOWNLOAD=1` local-build tail, and the nested CI gate (a `v`-tagged bridge trims to the expectation, otherwise derived from the placed binary; assert plus `GITHUB_PATH`/`GITHUB_ENV` appends fire together or not at all). The fresh binary re-runs the same file for smoke before its directory lands on `PATH`. New `isolated` leg (blanked CI routing proves the installer stays silent off-runner, plus a `WITH_IO [tty]` prompt stanza answering the destination prompt on every runner, ConPTY included) and `prebuilt` leg (unpack the staged tarball, install an override binary with a tagged expectation) cover the tail limbs on all five runners; every leg now routes `GITHUB_PATH`/`GITHUB_ENV`.
+- `source: local` is the CI bootstrap until `v0.32.0-alpha` ships the new bundle (currently pinned `v0.29.0-alpha` bundles predate the tail and publish no `PATH`).
+- `install.ps1` exports `OXDOCK_INTERACTIVE=1` on interactive consoles (`UserInteractive` without input redirection), matching the shell stub's `[ -t 0 ]` probe: Windows installs under ConPTY now confirm the destination through the `PROMPT` branch instead of silently taking the default.
+- Session seed mirrors host `LANG`/`LC_ALL` (unix): terminal children inherit the host locale with no declaration, so full-screen apps measure glyphs correctly.
+
+### Fixed
+
+- `TIMEOUT` scopes join only the background tasks their own body spawns: a worker the body leaves running gets up to the deadline, then the scope stops it; pre-existing tasks keep running past the scope instead of holding it open to its deadline (which hung the install-smoke prompt stanza for the full 300s after the install had already succeeded).
+- Concurrent `ECHO` lines no longer interleave mid-line: the message and its newline emit in one write instead of two formatting writes that re-locked the shared parent separately, so parallel tasks keep atomic lines.
+- Misplaced `INHERIT_ENV` now fails at the offending line instead of end of file.
+- Guard blocks cover nested bodies: a variable declared under a guard reads cleanly inside loop, branch, and inline-block bodies instead of failing with `not guaranteed to be defined`.
+
+### Dependencies
+
+- Bump `line-ending` 1.5.1 → 1.6.0.
+- Bump `pulldown-cmark` 0.13.4 → 0.13.5 (RUSTSEC-2026-0414).
+- Add `signal-hook` 0.3.18 (Unix `SIGWINCH` tracking for the `oxdock-pty` resize watcher; pulls transitive `signal-hook-registry` 1.4.8).
+- `windows-sys` gains the `Win32_System_Console` feature (console sizing for `oxdock-pty` on Windows).
+- Bump `russh` 0.64.1 → 0.65.0 (#257).
+- Bump `rmcp` / `rmcp-macros` 3.6.0 → 3.8.0 (lockfile only; supersedes the 3.7.0 bump in #259).
+- Bump `pest` / `pest_meta` 2.9.4 → 2.9.5 (#258; new transitive `pest_stack_guard` 1.0.0; `pest_derive` / `pest_generator` stay 2.9.4).
+- Bump `ureq` 3.4.2 → 3.5.0 (`ureq-proto` 0.6.4 → 0.6.5) (#256).
+- Bump `sha2` 0.11.0 → 0.11.1 (#260).
+- Migrate remaining dependents to transitive `windows-sys` 0.61.2 (via the `pest`, `russh`, and `ureq` updates; `ring` still pins 0.52.0).
+
 ## [0.31.0-alpha] - 2026-10-25
 
 ### Added
@@ -618,7 +656,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Sparse `target.json` files (just `name`/`out`) synthesize stages from the target directory layout (`header.tmpl`, verbatim `fragments/*.md`, expanded `fragments/*.tmpl`, `footer.tmpl`); bespoke targets declare full stages.
 - Generated command reference shared three ways from one provider: root README, `oxdock` README, and rustdoc includes (`oxdock/docs/command_reference.md`, `crates/oxdock-parser/docs/command_reference.md`).
 - Shared embed example consumed by both the root and `oxdock` READMEs from a single canonical file.
-- Master-template targets: order comes from `{{> path }}` positions in an `output.tmpl` document instead of a managed JSON stage list (verbatim unless `.tmpl`, which expands); literal document prose expands with the values context.
+- Master-template targets: order comes from `{{ $files.group.stem }}` include positions in an `output.tmpl` document instead of a managed JSON stage list (verbatim unless `.tmpl`, which expands); literal document prose expands with the values context.
 
 ### Fixed
 

@@ -25,6 +25,11 @@ fn inherit_env_must_appear_before_other_commands() {
         INHERIT_ENV [BAR]"#};
     let err = parse_script(script, mock_lower).expect_err("INHERIT_ENV after commands must fail");
     assert!(err.to_string().contains("before any other commands"));
+    // The span names the offending directive, not the end of the file.
+    assert!(
+        err.to_string().contains("line 2"),
+        "error must point at the late INHERIT_ENV, got: {err}"
+    );
 }
 
 #[test]
