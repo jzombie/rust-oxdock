@@ -151,12 +151,10 @@ ASSERT_CONTAINS stdout "semi;colon"
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- Guards are namespaced `key:value` pairs: `os:macos`, `os:linux`, `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases for `any(os:macos, os:linux)` and `os:windows` respectively, lowered at parse so every platform check runs under `os:`. Matching is case-sensitive throughout.
-- A comma-separated list means **AND**: `[env:A, os:linux]`.
-- Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
-- Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
-- Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
-- Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
+- Guard predicates are namespaced `key:value` pairs: `os:macos` / `os:linux` / `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, and comparisons like `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases, lowered at parse to `any(os:macos, os:linux)` and `os:windows`, so every platform check runs under `os:`.
+- Matching is case-sensitive throughout.
+- Combine predicates with calls or commas: `any(expr, expr, ...)` takes at least two branches for disjunction (no infix operator), `all(expr, expr, ...)` spells out conjunction, and a comma-separated list means **AND**: `[env:A, os:linux]`.
+- Negate any predicate with `not(...)`: `[not(env:SKIP)]`. Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 

@@ -653,7 +653,9 @@ native ones. `TYPES()` lists every registered name and
 `TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
 host surface exactly like native surface. Script `TYPE` aliases ride the
 same listing: `TYPES()` includes alias names and `TYPE_DESCRIBE("PERSON")`
-reports the canonical target spelling. Host types stay opaque:
+reports the canonical target spelling.
+
+Host types stay opaque:
 literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
 and `MAP` only, so queryable containers expose host accessor functions
 (`MATRIX_GET($m, $row, $col)`) instead of new syntax.
@@ -1139,12 +1141,10 @@ ASSERT_CONTAINS stdout "semi;colon"
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- Guards are namespaced `key:value` pairs: `os:macos`, `os:linux`, `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases for `any(os:macos, os:linux)` and `os:windows` respectively, lowered at parse so every platform check runs under `os:`. Matching is case-sensitive throughout.
-- A comma-separated list means **AND**: `[env:A, os:linux]`.
-- Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
-- Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
-- Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
-- Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
+- Guard predicates are namespaced `key:value` pairs: `os:macos` / `os:linux` / `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, and comparisons like `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases, lowered at parse to `any(os:macos, os:linux)` and `os:windows`, so every platform check runs under `os:`.
+- Matching is case-sensitive throughout.
+- Combine predicates with calls or commas: `any(expr, expr, ...)` takes at least two branches for disjunction (no infix operator), `all(expr, expr, ...)` spells out conjunction, and a comma-separated list means **AND**: `[env:A, os:linux]`.
+- Negate any predicate with `not(...)`: `[not(env:SKIP)]`. Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
@@ -6420,7 +6420,8 @@ Every variable the seed provides to spawned children is specified in [ENV_CONTRA
 
 - **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
 
-- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`. Identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
+- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`.
+- **Cache identity and lifecycle:** identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
 
 - **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
 
