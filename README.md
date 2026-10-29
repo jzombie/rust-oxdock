@@ -33,7 +33,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.32.1-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.32.2-alpha/oxdock/)
 
 Jump to the [Command Reference](#command-reference) below for the full
 command list with runnable examples, or view the growing list of standard
@@ -57,13 +57,13 @@ library [Functions](#functions).
 release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 
 ```sh
-cargo install oxdock@0.32.1-alpha
+cargo install oxdock@0.32.2-alpha
 ```
 
 ### Add to Rust project
 
 ```sh
-cargo add oxdock@0.32.1-alpha
+cargo add oxdock@0.32.2-alpha
 ```
 
 Run a script:
@@ -164,8 +164,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.32.1-alpha"
-    ASSERT_EQ $b "beta OxDock 0.32.1-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.32.2-alpha"
+    ASSERT_EQ $b "beta OxDock 0.32.2-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -177,7 +177,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.32.1-alpha"
+    "alpha OxDock 0.32.2-alpha"
 );
 ```
 
@@ -3637,10 +3637,13 @@ A missing key is an error, never a silent empty.
 
 Calls: `{{ MODULE::FUNC(args) }}` invokes a pure registry function
 with `$var.path` references and `STRING`, `INT`, `FLOAT`, and `BOOL`
-literals as arguments. Only pure functions resolve here: stateful,
-script-defined, and pipe-backed entries fail naming themselves,
-since placeholder evaluation carries no step context. The same
-calls resolve in ordinary strings, so both paths agree.
+literals as arguments. Arguments check against the registered
+signature, so wrong arity or mistyped values fail at the call;
+unknown names fail listing the known functions. Only pure
+functions resolve here: stateful, script-defined, and pipe-backed
+entries fail naming themselves, since placeholder evaluation
+carries no step context. The same calls resolve in ordinary
+strings, so both paths agree.
 
 Substitution runs in a single pass. `EXPAND` is not recursive and does not
 expand nested placeholders: a value that itself contains `{{ ... }}` is
@@ -6556,13 +6559,13 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 
 ## Citation
 
-If you use OxDock in published work, cite version `0.32.1-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+If you use OxDock in published work, cite version `0.32.2-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
 
 ```bibtex
 @software{oxdock,
   author = "Jeremy Harris",
   title = "OxDock",
-  version = "0.32.1-alpha",
+  version = "0.32.2-alpha",
   url = "https://github.com/jzombie/rust-oxdock",
   license = "Apache-2.0"
 }

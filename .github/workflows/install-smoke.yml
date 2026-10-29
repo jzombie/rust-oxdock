@@ -501,6 +501,18 @@ jobs:
           [family:windows] ASSERT_CONTAINS $o2 "to {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps"
           [family:windows] ASSERT_CONTAINS $o2 "ensure {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps is on PATH"
 
+          # Restricted policy (vanilla Windows): narrowing this process
+          # to Restricted before the one-liner proves the installer runs
+          # with no execution-policy bypass anywhere in this leg. The
+          # handoff is in-memory now, so the cached stub installs where
+          # the old file-based handoff died with PSSecurityException.
+          # product: always-local: installs the staged branch build.
+          [family:windows] LET $e3: PIPE
+          [family:windows] LET $o3: PIPE
+          [family:windows] WITH_IO [stdout=$o3, stderr=$e3] RUN ["pwsh", "-NoProfile", "-Command", "Set-ExecutionPolicy -Scope Process -ExecutionPolicy Restricted -Force; (irm http://127.0.0.1:{{ env:SMOKE_PORT }}/install.ps1) | iex"]
+          [family:windows] ASSERT_CONTAINS $e3 "using cached"
+          [family:windows] ASSERT_CONTAINS $o3 "installed oxdock local-test to "
+
           CANCEL $srv
 
 

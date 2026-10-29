@@ -16,7 +16,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v0.32.1-alpha'; irm ... | iex
+#   $env:VERSION = 'v0.32.2-alpha'; irm ... | iex
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
@@ -208,7 +208,15 @@ if (-not $env:OXDOCK_STUB_ACTIVE) {
 
   $env:OXDOCK_STUB_ACTIVE = '1'
 
-  & (Join-Path $VDir 'install.ps1')
+  # In-memory handoff: the outer stub arrived via iex, and invoking the
+  # cached file as a path would trip Restricted execution policy on
+  # vanilla Windows (plus any GPO-enforced policy a process-scope
+  # bypass cannot relax). Compiling the verified content to a
+  # scriptblock keeps every stage in memory, so no session mutation is
+  # needed. Stdin was already bridged to a file above and travels via
+  # env, so no pipeline state crosses this call. Native binaries below
+  # are unaffected by script policy either way.
+  & ([scriptblock]::Create((Get-Content -Raw -LiteralPath (Join-Path $VDir 'install.ps1'))))
   if ($LASTEXITCODE -ne 0) { throw "installer failed with exit code $LASTEXITCODE" }
   return
 
