@@ -248,6 +248,8 @@ define_env_contract! {
         oxdock_env::os::unix::HOME, [unix];
         oxdock_env::os::unix::TMPDIR, [unix];
         oxdock_env::os::unix::TERM, [unix];
+        oxdock_env::os::unix::LANG, [unix];
+        oxdock_env::os::unix::LC_ALL, [unix];
         oxdock_env::os::unix::LOGNAME, [unix];
         oxdock_env::os::unix::USER, [unix];
         oxdock_env::os::windows::TEMP, [windows];
