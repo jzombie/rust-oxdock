@@ -32,33 +32,14 @@ const POLL_TICK_MS: i32 = 50;
 /// fails. Never blocks the caller: the reader runs on the pump's
 /// input worker.
 pub fn acquire_host_stdin() -> Option<PtyInput> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_reader = Arc::clone(&stop);
     #[cfg(unix)]
     {
-        let guard = match RawGuard::acquire() {
-            Some(guard) => {
-                eprintln!("oxdock-tty: host stdin engaged, raw mode set");
-                guard
-            }
-            None => {
-                eprintln!("oxdock-tty: host stdin closed (not a terminal or raw mode failed)");
-                return None;
-            }
-        };
-        let keep = Arc::new(guard);
-        Some(PtyInput {
-            read_chunk: Box::new(move |buf| {
-                let _hold = Arc::clone(&keep);
-                read_chunk_unix(buf, &stop_reader)
-            }),
-            cancel: Box::new(move || {
-                stop.store(true, Ordering::SeqCst);
-            }),
-        })
+        acquire_fd(0)
     }
     #[cfg(windows)]
     {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_reader = Arc::clone(&stop);
         let (handle, guard) = open_console_input()?;
         let keep = Arc::new(guard);
         Some(PtyInput {
@@ -79,13 +60,43 @@ pub fn acquire_host_stdin() -> Option<PtyInput> {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = stop;
         None
     }
 }
 
+/// Offer an arbitrary terminal fd as the session input. Test seam
+/// for the live path: production passes fd 0, tests pass a pty
+/// slave. Same fail-closed contract as `acquire_host_stdin`.
+#[cfg(unix)]
+fn acquire_fd(fd: libc::c_int) -> Option<PtyInput> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_reader = Arc::clone(&stop);
+    let guard = match RawGuard::acquire_fd(fd) {
+        Some(guard) => {
+            eprintln!("oxdock-tty: host stdin engaged, raw mode set");
+            guard
+        }
+        None => {
+            eprintln!("oxdock-tty: host stdin closed (not a terminal or raw mode failed)");
+            return None;
+        }
+    };
+    let keep = Arc::new(guard);
+    Some(PtyInput {
+        read_chunk: Box::new(move |buf| {
+            let _hold = Arc::clone(&keep);
+            read_chunk_fd(fd, buf, &stop_reader)
+        }),
+        cancel: Box::new(move || {
+            stop.store(true, Ordering::SeqCst);
+        }),
+    })
+}
+
 /// Restores the host terminal mode when the reader goes away.
 struct RawGuard {
+    #[cfg(unix)]
+    fd: libc::c_int,
     #[cfg(unix)]
     original: libc::termios,
     /// Console input handle as an integer: `HANDLE` is a raw pointer
@@ -99,14 +110,8 @@ struct RawGuard {
 
 #[cfg(unix)]
 impl RawGuard {
-    /// Put fd 0 in raw mode: no echo, no cooking, no signals, no
-    /// flow control. The child pty owns signal generation from here:
-    /// bytes cross unmodified and the slave line discipline decides
-    /// what they mean. Fails closed when stdin is not a terminal.
-    fn acquire() -> Option<Self> {
-        Self::acquire_fd(0)
-    }
-
+    /// Put `fd` in raw mode: no echo, no cooking, no signals, no
+    /// flow control. Fails closed when the fd is not a terminal.
     fn acquire_fd(fd: libc::c_int) -> Option<Self> {
         if unsafe { libc::isatty(fd) } != 1 {
             return None;
@@ -121,7 +126,7 @@ impl RawGuard {
         if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
             return None;
         }
-        Some(Self { original })
+        Some(Self { fd, original })
     }
 }
 
@@ -129,18 +134,18 @@ impl RawGuard {
 impl Drop for RawGuard {
     fn drop(&mut self) {
         unsafe {
-            libc::tcsetattr(0, libc::TCSANOW, &self.original);
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
         }
     }
 }
 
-/// Read one chunk from fd 0 without ever blocking past the tick.
+/// Read one chunk from `fd` without ever blocking past the tick.
 /// Cancellation and real EOF both report `Ok(0)`: the pump ends
 /// input cleanly either way instead of failing the step.
 #[cfg(unix)]
-fn read_chunk_unix(buf: &mut [u8], stop: &AtomicBool) -> io::Result<usize> {
-    let mut fd = libc::pollfd {
-        fd: 0,
+fn read_chunk_fd(fd: libc::c_int, buf: &mut [u8], stop: &AtomicBool) -> io::Result<usize> {
+    let mut pfd = libc::pollfd {
+        fd,
         events: libc::POLLIN,
         revents: 0,
     };
@@ -148,7 +153,7 @@ fn read_chunk_unix(buf: &mut [u8], stop: &AtomicBool) -> io::Result<usize> {
         if stop.load(Ordering::SeqCst) {
             return Ok(0);
         }
-        let ready = unsafe { libc::poll(&mut fd, 1, POLL_TICK_MS) };
+        let ready = unsafe { libc::poll(&mut pfd, 1, POLL_TICK_MS) };
         if ready < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {
@@ -159,13 +164,13 @@ fn read_chunk_unix(buf: &mut [u8], stop: &AtomicBool) -> io::Result<usize> {
         if ready == 0 {
             continue;
         }
-        if fd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+        if pfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
             return Ok(0);
         }
-        if fd.revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+        if pfd.revents & (libc::POLLIN | libc::POLLHUP) == 0 {
             continue;
         }
-        let count = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        let count = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
         if count < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {
@@ -269,6 +274,44 @@ mod tests {
         assert!(super::RawGuard::acquire_fd(fd).is_none());
         unsafe {
             libc::close(fd);
+        }
+    }
+
+    /// Live path without a human: bytes written to a pty master
+    /// arrive through the acquired reader with raw mode applied,
+    /// and dropping the reader restores the slave's mode.
+    #[cfg(unix)]
+    #[test]
+    fn pty_slave_feeds_acquired_reader() {
+        let mut master = 0;
+        let mut slave = 0;
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
+        let mut input = super::acquire_fd(slave).expect("pty slave is a terminal");
+        let mut before: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(slave, &mut before) }, 0);
+        assert_eq!(before.c_lflag & libc::ECHO, 0, "reader applies raw mode");
+        let sent = b"hi";
+        let written = unsafe { libc::write(master, sent.as_ptr() as *const _, sent.len()) };
+        assert_eq!(written as usize, sent.len());
+        let mut buf = [0u8; 16];
+        let count = (input.read_chunk)(&mut buf).expect("pump read succeeds");
+        assert_eq!(&buf[..count], sent, "bytes cross unmodified");
+        drop(input);
+        let mut after: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(slave, &mut after) }, 0);
+        assert_ne!(after.c_lflag & libc::ECHO, 0, "drop restores slave mode");
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
         }
     }
 
