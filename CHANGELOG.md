@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- CI engine pins unify on `v0.32.0-alpha` (`rust-checks`, `install-smoke`, `miri-nightly`, `settings`): pinned engines now provide the 0.32.0-alpha vocabulary, so no leg depends on a predating fallback. `source: local` stays where legs prove branch behavior.
+
 ## [0.32.0-alpha] - 2026-10-29
 
 ### Added

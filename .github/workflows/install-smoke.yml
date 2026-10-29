@@ -27,11 +27,11 @@ env:
   # (proves a published release installs and runs).
   # TODO (future): enforce marker coverage in smoke_script_conformance,
   # so a leg selecting its product some new way cannot land unmarked.
-  OXDOCK_PINNED_ENGINE: v0.29.0-alpha
+  OXDOCK_PINNED_ENGINE: v0.32.0-alpha
   # Leg scripts assume the 0.32.0-alpha vocabulary (PATH_JOIN,
   # WITH_IO [tty]), so the engine running them must provide it: local
-  # branch builds do; the pin above does not. Until v0.32.0-alpha ships,
-  # this stays set.
+  # branch builds do, and the pin above now does too. Source stays local
+  # so legs keep proving branch behavior, not the release.
   OXDOCK_ENGINE_SOURCE: local
 
 jobs:
