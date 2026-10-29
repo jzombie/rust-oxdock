@@ -17,12 +17,12 @@ signal-hook.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 
+[target.'cfg(windows)'.dev-dependencies]
+oxdock-process.workspace = true
+
 [dependencies]
 anyhow.workspace = true
 portable-pty.workspace = true
-
-[target.'cfg(windows)'.dev-dependencies]
-oxdock-process.workspace = true
 
 [lints]
 workspace = true
