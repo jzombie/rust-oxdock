@@ -34,8 +34,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - Bump `line-ending` 1.5.1 → 1.6.0.
 - Bump `pulldown-cmark` 0.13.4 → 0.13.5 (RUSTSEC-2026-0414).
-- Add `signal-hook` 0.3.18 (Unix `SIGWINCH` tracking for the `oxdock-pty` resize watcher).
+- Add `signal-hook` 0.3.18 (Unix `SIGWINCH` tracking for the `oxdock-pty` resize watcher; pulls transitive `signal-hook-registry` 1.4.8).
 - `windows-sys` gains the `Win32_System_Console` feature (console sizing for `oxdock-pty` on Windows).
+- Bump `russh` 0.64.1 → 0.65.0 (#257).
+- Bump `rmcp` / `rmcp-macros` 3.6.0 → 3.8.0 (lockfile only; supersedes the 3.7.0 bump in #259).
+- Bump `pest` / `pest_meta` 2.9.4 → 2.9.5 (#258; new transitive `pest_stack_guard` 1.0.0; `pest_derive` / `pest_generator` stay 2.9.4).
+- Bump `ureq` 3.4.2 → 3.5.0 (`ureq-proto` 0.6.4 → 0.6.5) (#256).
+- Bump `sha2` 0.11.0 → 0.11.1 (#260).
+- Migrate remaining dependents to transitive `windows-sys` 0.61.2 (via the `pest`, `russh`, and `ureq` updates; `ring` still pins 0.52.0).
 
 ## [0.31.0-alpha] - 2026-10-25
 
