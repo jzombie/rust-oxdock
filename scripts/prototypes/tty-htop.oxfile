@@ -1,9 +1,0 @@
-IMPORT [STD]
-WORKSPACE SYSTEM
-
-IF IS_EXEC("htop") {
-    WITH_IO [tty] RUN htop
-} ELSE {
-    ECHO "No htop available."
-    EXIT 1
-}

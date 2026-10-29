@@ -1,0 +1,20 @@
+IMPORT [STD]
+INHERIT_ENV [PATH, TERM]
+WORKSPACE SYSTEM
+
+[family:unix] {
+    IF IS_EXEC("nano") {
+        WITH_IO [tty] RUN nano
+    } ELSE {
+        ECHO "No nano available."
+        EXIT 1
+    }
+}
+[family:windows] {
+    IF IS_EXEC("edit") {
+        WITH_IO [tty] RUN edit
+    } ELSE {
+        ECHO "No edit available."
+        EXIT 1
+    }
+}
