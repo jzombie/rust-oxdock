@@ -189,6 +189,7 @@ fn invoke_sample<P: ProcessManager + Send + 'static>(
                     err: None,
                     out_pipe: None,
                     stdin_pipe: None,
+                    tty: None,
                 };
                 let _ = done_tx.send(match func(&mut cx, args) {
                     Ok(value) => SampleOutcome::Ok(value),
@@ -348,6 +349,7 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
+        reap_floor: None,
         functions: super::native::FunctionRegistry::with_builtins(),
         types: super::typing::startup_type_map(),
         record_schemas: HashMap::new(),

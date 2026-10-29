@@ -542,6 +542,14 @@ pub enum IoStream {
     Stdin,
     Stdout,
     Stderr,
+    /// Bare `tty` flag: run the wrapped `RUN` step under a pseudo-terminal.
+    /// Takes no pipe (`tty = $x` is a parse error); the master carries one
+    /// interleaved stream, so `stderr` bindings alongside it are rejected.
+    Tty,
+    /// `rows = <int>` terminal height. Requires `tty`; rejected without it.
+    Rows(u16),
+    /// `cols = <int>` terminal width. Requires `tty`; rejected without it.
+    Cols(u16),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

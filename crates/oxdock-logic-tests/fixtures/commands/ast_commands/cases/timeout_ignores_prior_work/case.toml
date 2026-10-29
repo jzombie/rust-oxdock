@@ -1,0 +1,4 @@
+name = "timeout_ignores_prior_work"
+
+[expect]
+files = { "done.txt" = "quick" }

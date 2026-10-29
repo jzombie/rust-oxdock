@@ -407,21 +407,12 @@ pub(crate) struct DeferredClose<'a> {
     pub closed: bool,
 }
 
-/// Input sink ownership: a terminal master writer is shared with the
-/// output worker (setup answers flow through it) and outlives the
-/// input worker; a piped child stdin is owned by the input worker, so
-/// thread end drops it and the child observes EOF.
-pub(crate) enum InputSink {
-    Owned(Box<dyn Write + Send>),
-    Shared(Arc<std::sync::Mutex<Box<dyn Write + Send>>>),
-}
-
 /// Pump DSL-pipe bytes into a child stdin sink until pipe EOF,
 /// cancellation, or `peer_done` (child gone: bytes would have nowhere
 /// to go). Cancellation arrives as EOF through [`oxdock_pipe::PipeInner::cancel`].
 pub(crate) fn pump_pipe_to_sink(
     reader: &SharedInput,
-    mut sink: InputSink,
+    sink: &mut Box<dyn Write + Send>,
     cancel: &AtomicBool,
     peer_done: &AtomicBool,
     func: &str,
@@ -434,27 +425,14 @@ pub(crate) fn pump_pipe_to_sink(
         match read_pump_chunk(reader, &mut buffer) {
             Err(err) => bail!("{func} input pipe read failed: {err}"),
             Ok(0) => break,
-            Ok(count) => match &mut sink {
-                InputSink::Owned(handle) => {
-                    if handle.write_all(&buffer[..count]).is_err() {
-                        break;
-                    }
-                    if handle.flush().is_err() {
-                        break;
-                    }
+            Ok(count) => {
+                if sink.write_all(&buffer[..count]).is_err() {
+                    break;
                 }
-                InputSink::Shared(shared) => {
-                    let mut guard = shared
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("{func} sink lock poisoned"))?;
-                    if guard.write_all(&buffer[..count]).is_err() {
-                        break;
-                    }
-                    if guard.flush().is_err() {
-                        break;
-                    }
+                if sink.flush().is_err() {
+                    break;
                 }
-            },
+            }
         }
     }
     Ok(())

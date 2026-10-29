@@ -1,0 +1,88 @@
+# Number guessing game. Picks 1-10 with STD::RAND, 3 tries via PROMPT.
+# (The random builtin is RAND, not RND.) Replay until declined, tally kept.
+
+IMPORT [STD]
+WORKSPACE SYSTEM
+
+# Draw 1..$high: RAND gives [0, 1), so scale up and count off whole
+# ones with repeated subtraction.
+FUNC PICK($high: INT) {
+    LET $draw: FLOAT = RAND()
+    LET $rest: FLOAT = $draw * $high
+    LET $n: INT = 1
+
+    WHILE $rest >= 1.0 {
+        $rest = $rest - 1.0
+        $n = $n + 1
+    }
+
+    RETURN $n
+}
+
+# One validated guess: reprompts on junk without burning a try.
+FUNC ASK($attempt: INT, $tries: INT, $high: INT) {
+    LET $raw: STRING = ""
+
+    WHILE true {
+        ECHO "Try {{ $attempt }} of {{ $tries }} (1-{{ $high }})."
+        PROMPT $raw "Your guess?"
+
+        LET $valid: BOOL = TEXT_MATCH($raw, "^[0-9]+$")
+
+        IF !$valid {
+            ECHO "Numbers only."
+            CONTINUE
+        }
+
+        LET $n: INT = INT($raw)
+
+        IF $n < 1 || $n > $high {
+            ECHO "Between 1 and {{ $high }}."
+            CONTINUE
+        }
+
+        RETURN $n
+    }
+
+    RETURN 1
+}
+
+LET $high: INT = 10
+LET $tries: INT = 3
+LET $rounds: INT = 0
+LET $wins: INT = 0
+LET $again: STRING = "y"
+
+WHILE $again == "y" {
+    $rounds = $rounds + 1
+    LET $secret: INT = PICK($high)
+    LET $won: BOOL = false
+    LET $attempt: INT = 1
+
+    WHILE $attempt <= $tries {
+        LET $n: INT = ASK($attempt, $tries, $high)
+
+        IF $n == $secret {
+            ECHO "Correct! The number was {{ $secret }}."
+            $won = true
+            BREAK
+        } ELSE IF $n < $secret {
+            ECHO "Too low."
+        } ELSE {
+            ECHO "Too high."
+        }
+
+        $attempt = $attempt + 1
+    }
+
+    IF !$won {
+        ECHO "Out of tries. The number was {{ $secret }}."
+    } ELSE {
+        $wins = $wins + 1
+    }
+
+    PROMPT $again "Play again? (y/n)" "n"
+    $again = TEXT_TO_LOWER($again)
+}
+
+ECHO "Won {{ $wins }} of {{ $rounds }}."

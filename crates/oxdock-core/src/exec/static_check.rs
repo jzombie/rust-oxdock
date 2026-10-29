@@ -732,11 +732,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         };
         for (idx, step) in steps.iter().enumerate() {
             self.visits += 1;
+            // The read site carries the conjunction of every enclosing
+            // guard, not just the step's own: a loop variable declared
+            // under a block guard reads cleanly anywhere beneath it.
+            // A bare step under no guard keeps a bare site, so
+            // top-level coverage is unchanged.
+            let site = match (&scope.site, &step.guard) {
+                (None, None) => None,
+                (Some(rule), None) | (None, Some(rule)) => Some(rule.clone()),
+                (Some(outer), Some(own)) => Some(GuardExpr::all(vec![outer.clone(), own.clone()])),
+            };
             let scoped = Scope {
                 label: scope.label,
                 ret: scope.ret.clone(),
                 loops: scope.loops,
-                site: step.guard.clone(),
+                site,
             };
             let scope = &scoped;
             // Positional scopes mirror execution exactly: pushed

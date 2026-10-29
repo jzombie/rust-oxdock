@@ -621,6 +621,135 @@ fn pty_explicit_size() {
 }
 
 #[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
+)]
+fn outer_window_change_reaches_pty_child_unix() {
+    // End-to-end resize: the client opens 97x37, reads one `stty size`
+    // line per newline sent, then a live window-change must move the
+    // child's next report to 41x121. The child exits on stdin EOF, so
+    // closing the client drains every task with no cancellation.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-resize-unix");
+    let probe = root.clone();
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-unix", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $c_in: PIPE
+            LET $c_out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "while IFS= read -r line; do stty size; done"], 0, 0, $c_out, $c_in) }
+            LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
+            AWAIT $t
+            AWAIT $p
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let mut client =
+        TestClient::connect_with_pty_dims(addr, "u", "p", 97, 37).expect("client connects");
+    client.send(b"\n").expect("client prompts first report");
+    client
+        .read_until(b"37 97", Duration::from_secs(15))
+        .expect("child reports opener size");
+    client.window_change(121, 41).expect("window-change sends");
+    client.send(b"\n").expect("client prompts resized report");
+    let resized = client
+        .read_until(b"41 121", Duration::from_secs(15))
+        .expect("child reports resized window");
+    assert!(
+        resized.windows(6).any(|window| window == b"41 121"),
+        "resized report must arrive, got: {resized:?}"
+    );
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("resize script completes after disconnect");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
+)]
+fn outer_window_change_reaches_pty_child_windows() {
+    // Windows half of the resize proof: the client opens 97x37, reads
+    // one console-size line per newline sent, then a live
+    // window-change must move the child's next report to 41x121
+    // through ConPTY. Tagged `W=`/`H=` lines keep the assertions
+    // unambiguous under `mode`-style alignment. Console stdin has no
+    // EOF (`ReadLine` blocks until a line arrives even after the
+    // pipes close), so the child exits on an explicit `quit` line
+    // the test sends before closing: disconnect alone can never
+    // reap it. Unix proves the same path in
+    // `outer_window_change_reaches_pty_child_unix`.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-resize-windows");
+    let probe = root.clone();
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-windows", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $c_in: PIPE
+            LET $c_out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["powershell", "-NoProfile", "-Command", "while (($l = [Console]::In.ReadLine()) -ne $null) { if ($l -eq 'quit') { Write-Output 'BYE'; break }; Write-Output \"W=$([Console]::WindowWidth) H=$([Console]::WindowHeight)\" }"], 0, 0, $c_out, $c_in) }
+            LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
+            AWAIT $t
+            AWAIT $p
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let mut client =
+        TestClient::connect_with_pty_dims(addr, "u", "p", 97, 37).expect("client connects");
+    client.send(b"\n").expect("client prompts first report");
+    // Same startup grace as the unit resize proof: PowerShell 5.1
+    // cold-starts slowly on shared CI runners.
+    client
+        .read_until(b"W=97 H=37", Duration::from_secs(60))
+        .expect("child reports opener size");
+    client.window_change(121, 41).expect("window-change sends");
+    client.send(b"\n").expect("client prompts resized report");
+    let resized = client
+        .read_until(b"W=121 H=41", Duration::from_secs(60))
+        .expect("child reports resized window");
+    assert!(
+        resized.windows(10).any(|window| window == b"W=121 H=41"),
+        "resized report must arrive, got: {resized:?}"
+    );
+    // Console stdin has no EOF: tell the child to exit and wait for
+    // its goodbye before disconnecting, so the quit line cannot race
+    // the teardown. The exit then completes the script join.
+    client.send(b"quit\n").expect("client stops the child");
+    let _goodbye = client
+        .read_until(b"BYE", Duration::from_secs(15))
+        .expect("child confirms exit");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("resize script completes after disconnect");
+}
+
+#[test]
 #[cfg_attr(
     miri,
     ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
@@ -2971,8 +3100,8 @@ fn proxy_client_lingers_for_reply_and_status() {
     // returns first and disconnects, killing the server mid-reply.
     // Same shape as the README proxy fence: each child reads a stdin
     // line and exits by itself (`cat` on Unix; a console line read on
-    // Windows, where children never observe stdin EOF), and the client
-    // sends CR with the line because consoles submit on CR only.
+    // Windows, where children never observe stdin EOF). Plain lines
+    // submit everywhere: the pump expands them for console input.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-proxy-linger");
@@ -2997,7 +3126,7 @@ fn proxy_client_lingers_for_reply_and_status() {
         LET $cin: PIPE
         LET $cout: PIPE
         LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-linger", "guest", "pass", $cin, $cout) }
-        WITH_IO [stdout=$cin] ECHO "linger-ping\r"
+        WITH_IO [stdout=$cin] ECHO "linger-ping"
         LET $cDone: MAP<ANY> = AWAIT $c
         ASSERT_EQ $cDone.closed true
         ASSERT_EQ $cDone.exit_status 0
@@ -3281,7 +3410,12 @@ fn run_exec_splits_stderr() {
         !out.windows(4).any(|window| window == b"oops"),
         "stderr must never pollute the stdout stream"
     );
-    client.eof().expect("client half-closes");
+    // Half-close races server teardown for immediately-exiting
+    // children: if the server already closed the channel, the close
+    // wait below observes it at once instead of failing on the lost
+    // race. A genuinely wedged channel still fails loudly there, and
+    // the script join below still catches server-side failures.
+    let _ = client.eof();
     client
         .wait_close(Duration::from_secs(15))
         .expect("server closes");

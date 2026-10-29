@@ -1452,6 +1452,9 @@ fn emit_io_bindings(bindings: &[oxdock_parser::IoBinding]) -> proc_macro2::Token
                 oxdock_parser::IoStream::Stdin => quote! { Stdin },
                 oxdock_parser::IoStream::Stdout => quote! { Stdout },
                 oxdock_parser::IoStream::Stderr => quote! { Stderr },
+                oxdock_parser::IoStream::Tty => quote! { Tty },
+                oxdock_parser::IoStream::Rows(rows) => quote! { Rows(#rows) },
+                oxdock_parser::IoStream::Cols(cols) => quote! { Cols(#cols) },
             };
             let pipe = match &b.pipe {
                 None => quote! { None },

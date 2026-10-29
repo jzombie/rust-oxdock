@@ -18,7 +18,7 @@ fn load_settings_script() -> Result<String> {
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
     let script_path = resolver
         .root()
-        .join("scripts/gha/gha-apply-settings.oxfile")?;
+        .join(".github/scripts/gha-apply-settings.oxfile")?;
     resolver.read_to_string(&script_path)
 }
 
@@ -28,12 +28,12 @@ fn load_settings_script() -> Result<String> {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "reads scripts/gha/gha-apply-settings.oxfile from the repository checkout layout"
+    ignore = "reads .github/scripts/gha-apply-settings.oxfile from the repository checkout layout"
 )]
 fn settings_script_parses_and_covers_all_surfaces() -> Result<()> {
     let text = load_settings_script()?;
     oxdock_core::parse_script(&text).map_err(|err| {
-        anyhow::anyhow!("scripts/gha/gha-apply-settings.oxfile failed to parse: {err}")
+        anyhow::anyhow!(".github/scripts/gha-apply-settings.oxfile failed to parse: {err}")
     })?;
     assert!(
         text.contains("environments"),

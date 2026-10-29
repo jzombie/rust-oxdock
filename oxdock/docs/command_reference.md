@@ -33,7 +33,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
 | [`LIST_APPEND`](#list_append) | `LIST_APPEND $list <item>` |
-| [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
+| [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=$var], ...] <command> \| WITH_IO [bindings] { <commands> } \| WITH_IO [tty[, stdin=$p][, rows=<int>][, cols=<int>]] RUN ...` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
@@ -55,7 +55,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 
 Reroute standard streams.
 
-**Syntax:** `WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> }`
+**Syntax:** `WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> } | WITH_IO [tty[, stdin=$p][, rows=<int>][, cols=<int>]] RUN ...`
 
 Reroutes the standard streams of the next command or, in block form,
 of every enclosed command.
@@ -64,6 +64,28 @@ Bindings map streams (`stdin`, `stdout`, `stderr`) to a PIPE-typed
 variable (`stdout=$p`, `stdin=$p`), resolved from the variable
 when the step runs. Both stdout and stderr pipes capture output
 the same way. Declare the handle first with `LET $p: PIPE`.
+
+A `RUN` step can opt into a pseudo-terminal with the bare `tty`
+flag instead of a new command: `WITH_IO [tty] RUN [...]`
+spawns the child under a pty sized from the host terminal
+when it names none (24x80 fallback off-terminal;
+`rows = <int>` / `cols = <int>` override each side).
+Unnamed sides track the host window while the step runs
+(signal-driven on Unix, polled where no window signal
+exists); explicit sides stay pinned.
+The master carries the child's interleaved stdout and stderr
+as one stream, so it routes exclusively to `stdout` (step
+capture or a `stdout = $p` pipe): `stderr` bindings alongside
+`tty` are rejected, and `tty` outside a `RUN` step is
+rejected. `stdin = $p` feeds the master; bare `[tty]`
+with a real terminal stdin feeds host keys the same
+way (raw, transparent) and stays closed headless. Expect pty translation in assertions:
+newlines arrive as carriage return plus newline, and prompts
+echo input. An input pipe that EOFs contributes a
+terminal-echoed end-of-transmission marker on some
+platforms: prefer `ASSERT_CONTAINS` over byte-exact
+assertions on fed sessions. Pty-backed descriptors never promote to OS
+kernel pipes, even inside `ASYNC` single-`RUN` bodies.
 
 Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
 producer can finish before the consumer starts.
@@ -115,6 +137,17 @@ LET $p: PIPE
 WITH_IO [stdout=$p] ECHO hello
 WITH_IO [stdin=$p] READ_LINE $line
 ASSERT_EQ $line "hello"
+```
+
+**Example: pty terminal binding**
+
+```oxdock
+# A RUN step under bare `tty` sees a terminal: newlines
+# arrive translated, so assert with CONTAINS, never EQ.
+LET $p: PIPE
+WITH_IO [tty, stdout=$p] RUN "echo hello-tty"
+WITH_IO [stdin=$p] READ_LINE $line
+ASSERT_CONTAINS $line "hello-tty"
 ```
 
 
@@ -358,9 +391,11 @@ An inline block (`LET $var: TYPE = { <commands> }`) runs its
 steps in a fresh scope and binds the nearest `RETURN` value,
 like a zero-arg function body: fallthrough without `RETURN`
 binds `""`, and `BREAK`/`CONTINUE` escaping the block are
-errors. The block reads outer variables but its own LETs
-never leak out. A `{k: v}` shape still parses as a map
-literal; anything else in braces is a block.
+errors. Think IIFE: the block executes immediately where it
+stands and its value is the result. The block reads outer
+variables but its own LETs never leak out. A `{k: v}` shape
+still parses as a map literal; anything else in braces is
+a block.
 
 The split is deliberate: synchronous commands capture
 stdout because they run inline to completion on the same
@@ -1530,8 +1565,8 @@ line runs only when its guard passes.
 
 Sandbox defaults need no declaration: loader bindings,
 terminal defaults, the host lookup path, and the user's
-profile locations seed automatically. See Environment
-Variable Contracts for the exact list, which grows with the
+profile locations seed automatically. See OxDock
+Environment Variable Contracts for the exact list, which grows with the
 engine.
 
 Secrets and tool config stay opt-in here: a token or a
@@ -3380,6 +3415,44 @@ contents, and captured text share one JSON/TOML shape.
 IMPORT [STD]
 LET $doc: MAP<ANY> = PARSE_TOML("title = \"demo\"")
 ASSERT_EQ $doc.title "demo"
+```
+
+### STD::PATH_JOIN
+
+Join a directory and a file name with the host-native separator.
+
+Both inputs accept `STRING` or workspace `PATH` words; the result
+is a `STRING` joined with the platform separator, so installers
+never hand-roll separators in templates. No filesystem access:
+missing parents fail later at the consumer. Stays `STRING` (not
+`PATH`) on purpose: the joined value is a not-yet-validated
+destination string like `$dir` itself, and `PATH` words
+re-canonicalize to forward slashes on template expansion, which
+would undo the native join.
+
+**Signature:** `STD::PATH_JOIN($dir: STRING|PATH, $name: STRING|PATH) -> STRING`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$dir` (`STRING|PATH`): Directory half of the destination.
+- `$name` (`STRING|PATH`): File half of the destination.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: join path**
+
+```oxdock
+# Directory and file stem join with the native separator.
+# Source `\` is one backslash at runtime; `/` works on Windows
+# too, native just reads better there.
+IMPORT [STD]
+LET $p: STRING = PATH_JOIN("some-dir", "some-file")
+[family:unix] ASSERT_EQ $p "some-dir/some-file"
+[family:windows] ASSERT_EQ $p "some-dir\some-file"
 ```
 
 ### STD::PATH_TYPE

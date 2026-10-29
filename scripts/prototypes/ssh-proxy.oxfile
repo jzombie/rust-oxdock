@@ -3,10 +3,10 @@
 # an interactive onward hop to `orb`. Per-session PTY children with
 # semaphore admission. Mirrors the proof shape behind issue #223.
 #
-# Run it (build once first: a feature-gated rebuild under `-q` prints
+# Run it (build once first: a quiet rebuild under `-q` prints
 # nothing and looks hung):
-#   cargo build -p oxdock --features ssh
-#   ./target/debug/oxdock -p 2222:ssh-server --script scripts/proto.ssh-proxy.oxdock
+#   cargo build -p oxdock
+#   ./target/debug/oxdock -p 2222:ssh-server --script scripts/prototypes/ssh-proxy.oxfile
 # Then connect (password `test123`):
 #   ssh -p 2222 test@127.0.0.1
 # Needs an `orb` SSH host with key auth (`BatchMode=yes`): exec runs
@@ -74,44 +74,35 @@ WHILE $run {
             LET $c_out: PIPE  # Bytes from Wire -> PTY
 
             # Exec sessions carry the requested command text; shells
-            # carry an empty command. One branch per shape: block scope
-            # reverts variable writes on exit, so each branch owns its
-            # spawn and pump instead of sharing them below.
-            IF $sess.command != "" {
-                # The command rides as one argv element, never re-joined:
-                # `ssh` forwards a single element untouched, while joining
-                # segments with spaces mangles quoting (issue 223).
-                LET $pty: HANDLE = ASYNC {
-                    SSH_PTY_RUN($sess.session, ["ssh", "-o", "BatchMode=yes", "orb", "{{ $sess.command }}"], 0, 0, $c_out, $c_in)
+            # carry an empty command. Only the argv differs, so build it
+            # once in an inline block (IF-branch writes would revert on
+            # exit, but the block yields its RETURN value outward) and
+            # share one spawn and pump below.
+            # The command rides as one argv element, never re-joined:
+            # `ssh` forwards a single element untouched, while joining
+            # segments with spaces mangles quoting (issue 223).
+            LET $hop: LIST<STRING> = {
+                IF $sess.command != "" {
+                    RETURN ["ssh", "-o", "BatchMode=yes", "orb", "{{ $sess.command }}"]
+                } ELSE {
+                    RETURN ["ssh", "-o", "BatchMode=yes", "orb"]
                 }
-
-                LET $pump: HANDLE = ASYNC {
-                    # Enforces a 30-minute max session limit to reap idle or abandoned connections
-                    # [INTENTIONALLY-COMMENTED-OUT] TIMEOUT 1800s {
-                        SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out)
-                    # }
-                }
-
-                # Wait for session teardown or timeout
-                AWAIT $pty
-                AWAIT $pump
-            } ELSE {
-                # Interactive shell proxies onward, as before.
-                LET $pty: HANDLE = ASYNC {
-                    SSH_PTY_RUN($sess.session, ["ssh", "-o", "BatchMode=yes", "orb"], 0, 0, $c_out, $c_in)
-                }
-
-                LET $pump: HANDLE = ASYNC {
-                    # Enforces a 30-minute max session limit to reap idle or abandoned connections
-                    # [INTENTIONALLY-COMMENTED-OUT] TIMEOUT 1800s {
-                        SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out)
-                    # }
-                }
-
-                # Wait for session teardown or timeout
-                AWAIT $pty
-                AWAIT $pump
             }
+
+            LET $pty: HANDLE = ASYNC {
+                SSH_PTY_RUN($sess.session, $hop, 0, 0, $c_out, $c_in)
+            }
+
+            LET $pump: HANDLE = ASYNC {
+                # Enforces a 30-minute max session limit to reap idle or abandoned connections
+                # [INTENTIONALLY-COMMENTED-OUT] TIMEOUT 1800s {
+                    SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out)
+                # }
+            }
+
+            # Wait for session teardown or timeout
+            AWAIT $pty
+            AWAIT $pump
 
             LET $avail_end: INT = SEMAPHORE_AVAILABLE($sem)
             LET $active_end: INT = ($max_conns - $avail_end) - 1

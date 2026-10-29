@@ -20,7 +20,7 @@
 # Conventions a calling repo follows (all OxDock defaults here): a
 # Cargo workspace whose binary package matches `binary`, a CHANGELOG.md
 # with `## [<version>]` sections, and a `release` environment with
-# required reviewers (converge it with scripts/gha/gha-apply-settings.oxfile).
+# required reviewers (converge it with .github/scripts/gha-apply-settings.oxfile).
 # Callers hold no OxDock code. Asset names derive from `binary`; the
 # tag carries the product version.
 #
@@ -28,8 +28,10 @@
 # - `binaries` defaults to true. Exactly one binary (the `binary`
 #   input) builds with all features on five platforms (linux x86_64,
 #   linux arm64, macOS arm64, Windows x86_64, Windows arm64) and
-#   attaches to the release. Downloaders get the most capable binary;
-#   registry installers get default features via `cargo install`.
+#   attaches to the release. Downloads and registry installs carry
+#   the same module surface now that default features enable every
+#   module; `--all-features` stays explicit here so test-only extras
+#   (mocks, harnesses) ride along too.
 #   Multi-binary products are not supported: one input, one binary.
 # - `binaries: false` (library-only products) skips the build matrix
 #   and artifact download entirely; the release ships notes only.
@@ -144,9 +146,9 @@ jobs:
             mkdir -p /tmp/pipeline-bin
             tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-musl.tar.gz -C /tmp/pipeline-bin
             chmod +x /tmp/pipeline-bin/oxdock
-            /tmp/pipeline-bin/oxdock rust-release/scripts/gha/gha-rust-validate.oxfile
+            /tmp/pipeline-bin/oxdock rust-release/.github/scripts/gha-rust-validate.oxfile
           else
-            cargo run --manifest-path rust-release/Cargo.toml -p oxdock -- rust-release/scripts/gha/gha-rust-validate.oxfile
+            cargo run --manifest-path rust-release/Cargo.toml -p oxdock -- rust-release/.github/scripts/gha-rust-validate.oxfile
           fi
 
   build:
@@ -198,10 +200,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      # All features: downloaders get the most capable binary (every
-      # module, including MARKDOWN). Registry installers still get
-      # default features via `cargo install`; that equivalence is a
-      # property of the registry path, not the download path.
+      # All features: the release binary carries every module, and
+      # default `cargo install` builds now match it. `--all-features`
+      # stays explicit here so test-only extras (mocks, harnesses)
+      # ride along too.
       - name: Build the release binary
         shell: bash
         env:
@@ -355,7 +357,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          ./target/runner/${{ inputs.binary }} ./scripts/gha/gha-rust-release.oxfile
+          ./target/runner/${{ inputs.binary }} ./.github/scripts/gha-rust-release.oxfile
 
       # Everything else runs the central script with the central runner:
       # published binary at the derived pin if the ref has a release,
@@ -379,7 +381,7 @@ jobs:
             mkdir -p /tmp/pipeline-bin
             tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-musl.tar.gz -C /tmp/pipeline-bin
             chmod +x /tmp/pipeline-bin/oxdock
-            /tmp/pipeline-bin/oxdock rust-release/scripts/gha/gha-rust-release.oxfile
+            /tmp/pipeline-bin/oxdock rust-release/.github/scripts/gha-rust-release.oxfile
           else
-            cargo run --manifest-path rust-release/Cargo.toml -p oxdock --features markdown -- rust-release/scripts/gha/gha-rust-release.oxfile
+            cargo run --manifest-path rust-release/Cargo.toml -p oxdock --features markdown -- rust-release/.github/scripts/gha-rust-release.oxfile
           fi

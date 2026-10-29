@@ -1,6 +1,10 @@
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
 #
+# Pass OXDOCK_BINARY_NAME to choose the installed stem (default
+# `oxdock`; the installer appends `.exe` on Windows). CI passes
+# `oxdock-engine` to free the bare name for a binary under test.
+#
 # Point OXDOCK_ENGINE at a branch-built binary to run the installer
 # with it instead of the downloaded release (CI smoke proves behavior
 # fixes before any release ships them). The asset still downloads and

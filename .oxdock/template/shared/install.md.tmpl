@@ -6,16 +6,11 @@
      installer-grade trust for unproven bytes. Restore the stanzas
      from git history once the release smoke is green. -->
 
-**Build from source via Cargo** *(default features only)*:
+**Build from source via Cargo** (same full module surface as the
+release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 
 ```sh
 cargo install oxdock@{{ env:CRATE_VERSION }}
-```
-
-For a full-feature build:
-
-```sh
-cargo install oxdock@{{ env:CRATE_VERSION }} --all-features
 ```
 
 ### Add to Rust project

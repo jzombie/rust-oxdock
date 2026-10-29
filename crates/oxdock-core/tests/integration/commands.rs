@@ -4909,6 +4909,31 @@ fn static_split_guarded_declare_with_unguarded_read_fails() {
 }
 
 #[test]
+fn static_for_var_readable_under_enclosing_block_guard() {
+    // A block guard covers the whole subtree, including loop bodies
+    // and inline blocks: a loop variable declared under a guard reads
+    // cleanly anywhere beneath it. Without that coverage the read site
+    // looks unguarded next to the guarded declaration and the check
+    // fails code that runs correctly. An env guard keeps this live on
+    // every platform (open env domains never prove unsatisfiable, so
+    // the body always analyzes); FOO stays unset, so execution skips
+    // the block deterministically everywhere.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        INHERIT_ENV [FOO]
+        [eq(env:FOO, "1")] {
+            LET $progs: LIST<STRING> = ["htop", "vi"]
+            FOR $prog: STRING IN $progs {
+                LET $echoed: STRING = { RETURN $prog }
+                ECHO $echoed
+            }
+        }
+    "#};
+    run_script(&root, script).expect("loop var reads under its own block guard");
+}
+
+#[test]
 fn guarded_target_selection_with_unconditional_capture() {
     // Fixed playground_copy.oxfile producer shape: the branch selects a
     // plain string under guard; the RUN capture runs unconditionally, so

@@ -39,7 +39,9 @@ pub use workspace_fs::{
     CargoScratch, CopySourceRoot, DirEntry, EntryKind, GuardedPath, GuardedTempDir,
     LazyGuardedTempDir, PathResolver, reserve_cargo_scratch,
 };
-pub use workspace_fs::{SpillFile, command_path, embed_path, normalized_path, to_forward_slashes};
+pub use workspace_fs::{
+    SpillFile, command_path, embed_path, join_native, normalized_path, to_forward_slashes,
+};
 
 #[allow(clippy::disallowed_types)]
 pub use workspace_fs::UnguardedPath;

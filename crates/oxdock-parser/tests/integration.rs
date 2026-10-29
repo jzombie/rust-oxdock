@@ -45,3 +45,5 @@ mod type_syntax;
 mod unified_values;
 #[path = "integration/with_io_block.rs"]
 mod with_io_block;
+#[path = "integration/with_io_tty.rs"]
+mod with_io_tty;

@@ -15,10 +15,11 @@ LET $sum: INT = ADD(2, 3)
 ASSERT_EQ $sum 5
 ```
 
-Build with the feature and pass the script to the flag:
+Pass the script to the flag (`--mcp` hosting ships in default
+builds; only `--no-default-features` builds drop it):
 
 ```sh
-cargo build -p oxdock --features mcp
+cargo build -p oxdock
 ./target/debug/oxdock --mcp tools.oxdock
 ```
 

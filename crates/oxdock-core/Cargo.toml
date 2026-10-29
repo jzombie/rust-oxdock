@@ -30,6 +30,7 @@ oxdock-func-macro.workspace = true
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
+oxdock-pty.workspace = true
 oxdock-remote-proto.workspace = true
 rand.workspace = true
 regex.workspace = true

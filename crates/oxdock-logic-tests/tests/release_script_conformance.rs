@@ -23,7 +23,7 @@ fn load_release_script() -> Result<String> {
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
     let script_path = resolver
         .root()
-        .join("scripts/gha/gha-rust-release.oxfile")?;
+        .join(".github/scripts/gha-rust-release.oxfile")?;
     resolver.read_to_string(&script_path)
 }
 
@@ -35,7 +35,7 @@ fn parse_release_script(text: &str) -> Result<Vec<oxdock_parser::Step>> {
     let mut engine = oxdock_core::Engine::new();
     engine.register_module(oxdock_markdown_plugin::module());
     oxdock_core::parse_script_with_modules(text, engine.module_table()).map_err(|err| {
-        anyhow::anyhow!("scripts/gha/gha-rust-release.oxfile failed to parse: {err}")
+        anyhow::anyhow!(".github/scripts/gha-rust-release.oxfile failed to parse: {err}")
     })
 }
 
@@ -47,7 +47,7 @@ fn parse_release_script(text: &str) -> Result<Vec<oxdock_parser::Step>> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(
     miri,
-    ignore = "reads scripts/gha/gha-rust-release.oxfile from the repository checkout layout"
+    ignore = "reads .github/scripts/gha-rust-release.oxfile from the repository checkout layout"
 )]
 fn release_script_parses() -> Result<()> {
     let text = load_release_script()?;
@@ -61,7 +61,7 @@ fn release_script_parses() -> Result<()> {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "reads scripts/gha/gha-rust-validate.oxfile from the repository checkout layout"
+    ignore = "reads .github/scripts/gha-rust-validate.oxfile from the repository checkout layout"
 )]
 fn validate_script_parses_and_gates_on_version() -> Result<()> {
     let repo_root = repo_root()?;
@@ -69,16 +69,16 @@ fn validate_script_parses_and_gates_on_version() -> Result<()> {
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
     let script_path = resolver
         .root()
-        .join("scripts/gha/gha-rust-validate.oxfile")?;
+        .join(".github/scripts/gha-rust-validate.oxfile")?;
     let text = resolver.read_to_string(&script_path)?;
     oxdock_core::parse_script(&text).map_err(|err| {
-        anyhow::anyhow!("scripts/gha/gha-rust-validate.oxfile failed to parse: {err}")
+        anyhow::anyhow!(".github/scripts/gha-rust-validate.oxfile failed to parse: {err}")
     })?;
     Ok(())
 }
 
 /// The version fallback executes for real: the actual
-/// `scripts/gha/gha-rust-validate.oxfile` (side-effect-free: it only reads and
+/// `.github/scripts/gha-rust-validate.oxfile` (side-effect-free: it only reads and
 /// asserts) runs to completion against synthetic roots of every
 /// manifest layout, with the confirmation bridged to match. No
 /// duplicated logic: the harness owns the root, the file owns the
@@ -91,10 +91,10 @@ fn version_fallback_covers_all_manifest_layouts() -> Result<()> {
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
     let script_path = resolver
         .root()
-        .join("scripts/gha/gha-rust-validate.oxfile")?;
+        .join(".github/scripts/gha-rust-validate.oxfile")?;
     let text = resolver.read_to_string(&script_path)?;
     let steps = oxdock_core::parse_script(&text).map_err(|err| {
-        anyhow::anyhow!("scripts/gha/gha-rust-validate.oxfile failed to parse: {err}")
+        anyhow::anyhow!(".github/scripts/gha-rust-validate.oxfile failed to parse: {err}")
     })?;
     for (manifest, expected) in [
         (
