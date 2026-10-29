@@ -341,4 +341,65 @@ mod tests {
             CloseHandle(handle as HANDLE);
         }
     }
+
+    /// Live path without a human or a desktop: a private console
+    /// plus injected key events prove bytes flow on Windows too.
+    /// Skips (loudly) when the harness already owns a console, which
+    /// only happens on interactive dev machines.
+    #[cfg(windows)]
+    #[test]
+    fn console_input_feeds_acquired_reader() {
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::System::Console::{
+            AllocConsole, FreeConsole, GetConsoleWindow, GetStdHandle, INPUT_RECORD,
+            INPUT_RECORD_0, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, STD_INPUT_HANDLE,
+            WriteConsoleInputW,
+        };
+        if unsafe { GetConsoleWindow() }.is_null() {
+            assert_ne!(
+                unsafe { AllocConsole() },
+                0,
+                "headless harness gets a console"
+            );
+        } else {
+            eprintln!("SKIP: harness already owns a console; live path proven manually");
+            return;
+        }
+        struct ConsoleGuard;
+        impl Drop for ConsoleGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    FreeConsole();
+                }
+            }
+        }
+        let _console = ConsoleGuard;
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        assert!(!handle.is_null());
+        let record = INPUT_RECORD {
+            EventType: KEY_EVENT as u16,
+            Event: INPUT_RECORD_0 {
+                KeyEvent: KEY_EVENT_RECORD {
+                    bKeyDown: 1,
+                    wRepeatCount: 1,
+                    wVirtualKeyCode: 0x41,
+                    wVirtualScanCode: 0,
+                    uChar: KEY_EVENT_RECORD_0 {
+                        UnicodeChar: b'A' as u16,
+                    },
+                    dwControlKeyState: 0,
+                },
+            },
+        };
+        let mut written: u32 = 0;
+        let fed = unsafe { WriteConsoleInputW(handle, &record, 1, &mut written) };
+        assert_ne!(fed, 0, "key event lands in the console buffer");
+        assert_eq!(written, 1);
+        let mut input = super::acquire_host_stdin().expect("fresh console is usable");
+        let mut buf = [0u8; 16];
+        let count = (input.read_chunk)(&mut buf).expect("pump read succeeds");
+        assert_eq!(&buf[..count], b"A", "keystroke crosses unmodified");
+        drop(input);
+        let _ = handle as HANDLE;
+    }
 }
