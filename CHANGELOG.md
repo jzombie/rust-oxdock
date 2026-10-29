@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.32.2-alpha] - 2026-10-29
+
+### Fixed
+
+- `install.ps1` handoff runs fully in memory: the verified cached stub compiles to a scriptblock instead of executing as a script file, so the stock one-liner installs on vanilla Windows (Restricted execution policy) with no bypass step and no session mutation. Native binary and `tar.exe` invocations were never subject to script policy.
+- Install smoke proves the no-bypass path: the Windows pipe leg narrows its own process to Restricted before running the loopback `irm|iex` stub, so the vanilla-client failure class runs green in CI before any release ships it.
+
 ## [0.32.1-alpha] - 2026-10-29
 
 ### Changed
