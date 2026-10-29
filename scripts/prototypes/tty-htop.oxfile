@@ -4,9 +4,11 @@ IMPORT [STD]
 INHERIT_ENV [PATH]
 WORKSPACE SYSTEM
 
-IF IS_EXEC("htop") {
-    WITH_IO [tty] RUN htop
+LET $prog: STRING = "htop"
+
+IF IS_EXEC($prog) {
+    WITH_IO [tty] RUN $prog
 } ELSE {
-    ECHO "No htop available."
+    ECHO "No {{ $prog }} available."
     EXIT 1
 }

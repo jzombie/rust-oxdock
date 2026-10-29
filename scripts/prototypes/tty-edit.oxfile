@@ -2,19 +2,23 @@ IMPORT [STD]
 INHERIT_ENV [PATH]
 WORKSPACE SYSTEM
 
-[family:unix] {
-    IF IS_EXEC("nano") {
-        WITH_IO [tty] RUN nano
-    } ELSE {
-        ECHO "No nano available."
-        EXIT 1
+LET $progs: LIST<STRING> = []
+
+[family:unix] $progs = ["nano", "vi"]
+[family:windows] $progs = ["edit"]
+
+LET $ran_prog: BOOL = false
+
+FOR $prog: STRING IN $progs {
+    IF IS_EXEC($prog) {
+        WITH_IO [tty] RUN $prog
+
+        $ran_prog = true
+        BREAK
     }
 }
-[family:windows] {
-    IF IS_EXEC("edit") {
-        WITH_IO [tty] RUN edit
-    } ELSE {
-        ECHO "No edit available."
-        EXIT 1
-    }
+
+IF !$ran_prog {
+    ECHO "No configured editor available."
+    EXIT 1
 }
