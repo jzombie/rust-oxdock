@@ -1907,6 +1907,7 @@ version = "0.32.0-alpha"
 dependencies = [
  "anyhow",
  "libc",
+ "oxdock-process",
  "portable-pty",
  "signal-hook",
  "windows-sys 0.61.2",
