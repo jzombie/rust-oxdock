@@ -20,7 +20,7 @@ concurrency:
 # needs 0.28.0-alpha minimum. Bump only after a newer tag proves green;
 # an older engine choking on new syntax fails loudly at step start.
 env:
-  OXDOCK_PINNED_ENGINE: v0.28.0-alpha
+  OXDOCK_PINNED_ENGINE: v0.32.0-alpha
 
 jobs:
   miri:

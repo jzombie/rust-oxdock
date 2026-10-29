@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.32.1-alpha] - 2026-10-29
+
+### Changed
+
+- CI engine pins unify on `v0.32.0-alpha` (`rust-checks`, `install-smoke`, `miri-nightly`, `settings`): pinned engines now provide the 0.32.0-alpha vocabulary, so no leg depends on a predating fallback. `source: local` stays where legs prove branch behavior.
+
+### Dependencies
+
+- Bump transitive `crypto-bigint` 0.7.8 → 0.7.10 (0.7.8 yanked; pulls `ctutils` 0.4.5 → 0.4.7).
+
 ## [0.32.0-alpha] - 2026-10-29
 
 ### Added

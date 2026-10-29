@@ -26,10 +26,10 @@ concurrency:
 # product markers are needed. The pin below is only a version input,
 # never depended upon as a fallback engine.
 env:
-  OXDOCK_PINNED_ENGINE: v0.29.0-alpha
+  OXDOCK_PINNED_ENGINE: v0.32.0-alpha
   # Legs assume the 0.32.0-alpha vocabulary, so the engine running them
-  # must provide it: local branch builds do; the pin above does not.
-  # Until v0.32.0-alpha ships, this stays set.
+  # must provide it: local branch builds do, and the pin above now does
+  # too. Source stays local so legs keep proving branch behavior.
   OXDOCK_ENGINE_SOURCE: local
 
 jobs:

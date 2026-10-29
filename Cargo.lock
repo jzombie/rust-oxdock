@@ -573,9 +573,9 @@ dependencies = [
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.8"
+version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d726facc8b27e604391b232b970cdc19b5468c69f08b466b9734c759216c7415"
+checksum = "9c035cb64cba03dad2fb921f3e218785e8cf9a41790da5eb3a1400f62fa2be11"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -610,9 +610,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
+checksum = "a2376ffd6f96d8a9db59875b4b6b0237d6900b5baf64279714e05493ce64828a"
 dependencies = [
  "cmov",
  "subtle",
@@ -1610,7 +1610,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxdock"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-cli"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-doc-tests"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-embed"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1723,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "cache-manager",
@@ -1749,7 +1749,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-func-macro"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-logic-tests"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-markdown-plugin"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-mcp"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1836,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-net-plugin"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1863,7 +1863,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1881,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pipe"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1889,7 +1889,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-process"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1903,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pty"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "libc",
@@ -1915,7 +1915,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-remote-proto"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-ssh-plugin"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1951,7 +1951,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.32.0-alpha"
+version = "0.32.1-alpha"
 
 [[package]]
 name = "p256"
