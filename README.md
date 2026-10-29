@@ -3637,10 +3637,13 @@ A missing key is an error, never a silent empty.
 
 Calls: `{{ MODULE::FUNC(args) }}` invokes a pure registry function
 with `$var.path` references and `STRING`, `INT`, `FLOAT`, and `BOOL`
-literals as arguments. Only pure functions resolve here: stateful,
-script-defined, and pipe-backed entries fail naming themselves,
-since placeholder evaluation carries no step context. The same
-calls resolve in ordinary strings, so both paths agree.
+literals as arguments. Arguments check against the registered
+signature, so wrong arity or mistyped values fail at the call;
+unknown names fail listing the known functions. Only pure
+functions resolve here: stateful, script-defined, and pipe-backed
+entries fail naming themselves, since placeholder evaluation
+carries no step context. The same calls resolve in ordinary
+strings, so both paths agree.
 
 Substitution runs in a single pass. `EXPAND` is not recursive and does not
 expand nested placeholders: a value that itself contains `{{ ... }}` is
