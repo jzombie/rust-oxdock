@@ -1,88 +1,111 @@
 # Hangman. Secret word picked with STD::RAND, guesses via PROMPT.
-# 6 misses allowed, then the word is revealed.
+# 6 misses allowed per round, then the word is revealed.
+# Replay until declined, tally kept.
 
 IMPORT [STD]
 WORKSPACE SYSTEM
 
-# Pick a word. RAND draws [0, 1): scale to [0, count) and count off
+# Pick a word: RAND gives [0, 1), so scale to the list size, count off
 # whole ones, then take the word at that index.
-LET $words: LIST<STRING> = ["oxdock", "shell", "script", "prompt", "terminal"]
-LET $draw: FLOAT = RAND()
-LET $rest: FLOAT = $draw * 5.0
-LET $pick: INT = 0
+FUNC PICK_WORD() {
+    LET $words: LIST<STRING> = ["oxdock", "shell", "script", "prompt", "terminal"]
+    LET $draw: FLOAT = RAND()
+    LET $rest: FLOAT = $draw * 5.0
+    LET $pick: INT = 0
 
-WHILE $rest >= 1.0 {
-    $rest = $rest - 1.0
-    $pick = $pick + 1
-}
-
-LET $secret: STRING = "oxdock"
-
-FOR $i: INT, $w: STRING IN $words {
-    IF $i == $pick {
-        $secret = $w
+    WHILE $rest >= 1.0 {
+        $rest = $rest - 1.0
+        $pick = $pick + 1
     }
-}
 
-LET $len: INT = TEXT_LENGTH($secret)
-LET $guessed: LIST<STRING> = []
-LET $misses: INT = 0
-LET $max: INT = 6
-LET $won: BOOL = false
-LET $raw: STRING = ""
+    LET $secret: STRING = "oxdock"
 
-ECHO "Hangman: {{ $len }} letters, {{ $max }} misses allowed."
-
-WHILE $misses < $max {
-    LET $chars: LIST<STRING> = TEXT_SPLIT($secret, "")
-    LET $known: STRING = TEXT_JOIN($guessed, "")
-    LET $shown: STRING = ""
-    LET $hidden: INT = 0
-
-    FOR $j: INT, $ch: STRING IN $chars {
-        IF TEXT_CONTAINS($known, $ch) {
-            $shown = "{{ $shown }}{{ $ch }} "
-        } ELSE {
-            $shown = "{{ $shown }}_ "
-            $hidden = $hidden + 1
+    FOR $i: INT, $w: STRING IN $words {
+        IF $i == $pick {
+            $secret = $w
         }
     }
 
-    ECHO "Word: {{ $shown }} misses {{ $misses }}/{{ $max }}."
-
-    IF $hidden == 0 {
-        $won = true
-        BREAK
-    }
-
-    PROMPT $raw "Guess a letter?"
-    LET $letter: STRING = TEXT_TO_LOWER($raw)
-    LET $valid: BOOL = TEXT_MATCH($letter, "^[a-z]$")
-
-    IF !$valid {
-        ECHO "One letter a-z at a time."
-        CONTINUE
-    }
-
-    LET $seen: STRING = TEXT_JOIN($guessed, "")
-
-    IF TEXT_CONTAINS($seen, $letter) {
-        ECHO "Already guessed {{ $letter }}."
-        CONTINUE
-    }
-
-    LIST_APPEND $guessed $letter
-
-    IF TEXT_CONTAINS($secret, $letter) {
-        ECHO "Hit!"
-    } ELSE {
-        $misses = $misses + 1
-        ECHO "Miss."
-    }
+    RETURN $secret
 }
 
-IF $won {
-    ECHO "You win! The word was {{ $secret }}."
-} ELSE {
+# One full round. Returns true on a win.
+FUNC PLAY() {
+    LET $secret: STRING = PICK_WORD()
+    LET $len: INT = TEXT_LENGTH($secret)
+    LET $guessed: LIST<STRING> = []
+    LET $misses: INT = 0
+    LET $max: INT = 6
+    LET $raw: STRING = ""
+
+    ECHO "Hangman: {{ $len }} letters, {{ $max }} misses allowed."
+
+    WHILE $misses < $max {
+        LET $chars: LIST<STRING> = TEXT_SPLIT($secret, "")
+        LET $known: STRING = TEXT_JOIN($guessed, "")
+        LET $shown: STRING = ""
+
+        FOR $j: INT, $ch: STRING IN $chars {
+            IF TEXT_CONTAINS($known, $ch) {
+                $shown = "{{ $shown }}{{ $ch }} "
+            } ELSE {
+                $shown = "{{ $shown }}_ "
+            }
+        }
+
+        ECHO "Word: {{ $shown }} misses {{ $misses }}/{{ $max }}."
+
+        LET $flat: STRING = TEXT_REPLACE($shown, " ", "")
+
+        IF $flat == $secret {
+            ECHO "You win! The word was {{ $secret }}."
+            RETURN true
+        }
+
+        PROMPT $raw "Guess a letter?"
+        LET $letter: STRING = TEXT_TO_LOWER($raw)
+        LET $valid: BOOL = TEXT_MATCH($letter, "^[a-z]$")
+
+        IF !$valid {
+            ECHO "One letter a-z at a time."
+            CONTINUE
+        }
+
+        LET $seen: STRING = TEXT_JOIN($guessed, "")
+
+        IF TEXT_CONTAINS($seen, $letter) {
+            ECHO "Already guessed {{ $letter }}."
+            CONTINUE
+        }
+
+        LIST_APPEND $guessed $letter
+
+        IF TEXT_CONTAINS($secret, $letter) {
+            ECHO "Hit!"
+        } ELSE {
+            $misses = $misses + 1
+            ECHO "Miss."
+        }
+    }
+
     ECHO "Out of misses. The word was {{ $secret }}."
+    RETURN false
 }
+
+LET $rounds: INT = 0
+LET $wins: INT = 0
+LET $again: STRING = "y"
+
+WHILE $again == "y" {
+    $rounds = $rounds + 1
+    LET $w: BOOL = PLAY()
+
+    IF $w {
+        $wins = $wins + 1
+    }
+
+    PROMPT $again "Play again? (y/n)" "n"
+    $again = TEXT_TO_LOWER($again)
+}
+
+ECHO "Won {{ $wins }} of {{ $rounds }}."
