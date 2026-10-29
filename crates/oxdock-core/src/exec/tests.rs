@@ -6002,7 +6002,7 @@ fn inherit_env_description_names_no_seed_rows() {
     // Normalized: source line-breaks must never break the pointer check.
     let flat = description.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        flat.contains("Environment Variable Contracts"),
+        flat.contains("OxDock Environment Variable Contracts"),
         "INHERIT_ENV description must point at the contract"
     );
     for entry in oxdock_process::env_policy::describe_baseline_defaults() {
