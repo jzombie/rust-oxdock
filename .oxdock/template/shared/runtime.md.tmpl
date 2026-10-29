@@ -72,3 +72,15 @@ Every path resolves inside a guarded workspace root, and escapes are rejected be
 ```oxdock expect_error:"escapes allowed root"
 WRITE ../escape.txt "nope"
 ```
+
+OxDock sandboxes by plumbing, not virtualization: scrubbed child
+environments, workspace-scoped paths, and typed verbs instead of raw
+shell let scripts communicate across trust barriers with no hypervisor.
+That same plumbing is what lets an agent talk to other environments in
+a controlled fashion: pipes, guarded paths, scrubbed environments, and
+the `REMOTE` and SSH transports are all declared channels, so every
+crossing goes through the boundary, never around it.
+
+That is a competence boundary, not a security boundary. It keeps a
+clumsy agent from wandering; it does not contain a hostile payload.
+For untrusted code, run OxDock itself inside a container or VM.
