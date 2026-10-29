@@ -650,7 +650,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Sparse `target.json` files (just `name`/`out`) synthesize stages from the target directory layout (`header.tmpl`, verbatim `fragments/*.md`, expanded `fragments/*.tmpl`, `footer.tmpl`); bespoke targets declare full stages.
 - Generated command reference shared three ways from one provider: root README, `oxdock` README, and rustdoc includes (`oxdock/docs/command_reference.md`, `crates/oxdock-parser/docs/command_reference.md`).
 - Shared embed example consumed by both the root and `oxdock` READMEs from a single canonical file.
-- Master-template targets: order comes from `{{> path }}` positions in an `output.tmpl` document instead of a managed JSON stage list (verbatim unless `.tmpl`, which expands); literal document prose expands with the values context.
+- Master-template targets: order comes from `{{ $files.group.stem }}` include positions in an `output.tmpl` document instead of a managed JSON stage list (verbatim unless `.tmpl`, which expands); literal document prose expands with the values context.
 
 ### Fixed
 
