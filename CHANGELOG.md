@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `TIMEOUT` scopes join only the background tasks their own body spawns: a worker the body leaves running gets up to the deadline, then the scope stops it; pre-existing tasks keep running past the scope instead of holding it open to its deadline (which hung the install-smoke prompt stanza for the full 300s after the install had already succeeded).
 - Concurrent `ECHO` lines no longer interleave mid-line: the message and its newline emit in one write instead of two formatting writes that re-locked the shared parent separately, so parallel tasks keep atomic lines.
 - Misplaced `INHERIT_ENV` now fails at the offending line instead of end of file.
+- Guard blocks cover nested bodies: a variable declared under a guard reads cleanly inside loop, branch, and inline-block bodies instead of failing with `not guaranteed to be defined`.
 
 ### Dependencies
 
