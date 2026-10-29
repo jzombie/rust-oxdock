@@ -26,12 +26,10 @@ set LLVM_VER=23.1.4
 :: Auto-detect architecture.
 set RUST_ARCH=x86_64
 set MINGIT_ARCH=64-bit
-set VSARCH=x64
 set LLVM_ARCH=x86_64
 if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set RUST_ARCH=aarch64
 if /i "%PROCESSOR_ARCHITEW6432%"=="ARM64" set RUST_ARCH=aarch64
 if /i "%RUST_ARCH%"=="aarch64" set MINGIT_ARCH=arm64
-if /i "%RUST_ARCH%"=="aarch64" set VSARCH=arm64
 if /i "%RUST_ARCH%"=="aarch64" set LLVM_ARCH=aarch64
 echo Architecture: %RUST_ARCH%
 
@@ -97,13 +95,14 @@ echo [7/7] Probe the full toolchain...
 set "PATH=C:\llvm\bin;%USERPROFILE%\.cargo\bin;%PATH%"
 cargo --version || exit /b 1
 git --version || exit /b 1
-call "%VSBASE%\Common7\Tools\VsDevCmd.bat" -arch=%VSARCH% || exit /b 1
-where cl || exit /b 1
-where clang || (echo NO clang on PATH after VsDevCmd & exit /b 1)
+:: No VsDevCmd needed: rustc locates MSVC link on its own and clang
+:: rides PATH. Verified with a full `cargo build -p oxdock`, plain
+:: session, 2026-10-28.
+where clang || (echo NO clang on PATH & exit /b 1)
 clang --version || exit /b 1
 echo [7/7] OK
 
 echo.
 echo SUCCESS: base Windows to full OxDock toolchain.
 echo Open a NEW terminal for the persistent PATH, then build with:
-echo   VsDevCmd.bat -arch=%VSARCH% ^&^& cargo build -p oxdock
+echo   cd %USERPROFILE%\Projects\rust-oxdock ^&^& cargo build -p oxdock
