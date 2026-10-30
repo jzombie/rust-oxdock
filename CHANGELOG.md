@@ -10,6 +10,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Added
 
 - Multi-line `"""` string literals (#155): triple-quoted blocks span source lines for prompts, configs, and templates. A newline after the opening delimiter strips once, shared indentation dedents to the closing delimiter baseline, and the newline before a lone closing delimiter strips once. Single and double quotes need no escaping, `\"\"\"` embeds a delimiter, and escapes plus `{{ }}` resolve at runtime like double-quoted strings. CRLF normalizes to LF during lowering, unterminated blocks fail at the opening line, and multi-line values render back as blocks so `Display` reparses exactly. Usable everywhere single-line strings are: arguments, `LET` expressions, list/map literals, comparisons, `RUN` exec args, assignments, and guard values.
+- Braced macro scripts (`oxdock!`, `oxdock_embed!`) support blocks: contiguous string literals fuse back to their source spelling (span-proven, so the string grammar reads one block), wrapper continuations (`ASYNC`, `TIMEOUT` durations) stay glued, and guard brackets rebuild without invented spacing (the atomic grammar context skips none). Real-macro corpus suite (`oxdock_macro_corpus`) covers the language through actual `oxdock!` expansion with macro→string round-trip assertions on every case.
+- String/macro parity enforcement: the fuzz generator now emits quoting, blocks, scalar/list expressions, and one-level bodies across both pathways, with an exhaustive `StepKind` inventory gate (new variants fail compilation until classified) and deterministic per-variant samples. Blocks holding raw `"` stay string-pathway-only (no token stream can carry them) with the divergence pinned by test.
+
+### Fixed
+
+- Macro emitter preserves argument quoting flags (dropping them changed runtime typing: unquoted `200` in `ASSERT_EQ` position converts to `INT`).
+- Display rendering adds no escape layers: recognized escapes pass through verbatim, so render cycles stay parse-stable on both pathways.
+- Single-command `TIMEOUT`/`ISOLATED` Display uses block form for guarded bodies instead of silently dropping inner guards (the single form has no guard slot).
+- Assignment keys admit `:` (`ENV a:b=c` round-trips).
 
 ### Changed
 
