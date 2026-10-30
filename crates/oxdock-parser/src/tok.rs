@@ -54,6 +54,15 @@ pub enum TokKind {
     Newline,
     /// Explicit `;` statement terminator.
     Semicolon,
+    /// A skipped comment's raw spelling (`//...`, `#...`, `/*...*/`),
+    /// emitted only where the lexer skips comments (line starts, top
+    /// level and inside groups). Statement splitting ignores them but
+    /// releases pending `ELSE` continuations (a comment line breaks
+    /// the `}`/`ELSE` chain like the grammar); raw-text renders
+    /// reproduce them byte-identically (templates keep comment text
+    /// like the atomic grammar span). The token frontend never emits
+    /// these (`rustc` strips comments before us).
+    Comment(String),
 }
 
 /// One token plus the gap signal: `joint` is true when no gap (no
@@ -346,6 +355,54 @@ impl<'a> StrLexer<'a> {
             }
             if c == '[' || c == '(' || c == '{' {
                 stack.push(c);
+            } else if c == '/' && (rest.starts_with("//") || rest.starts_with("/*")) {
+                // Comments never nest groups (`// {` stays text like
+                // the grammar): copy through the comment terminator
+                // verbatim for the recursive re-lex.
+                if rest.starts_with("//") {
+                    inner_src.push_str("//");
+                    let mut k = 2;
+                    while k < rest.len() {
+                        let ch = rest[k..].chars().next().unwrap();
+                        if ch == '\n' || ch == '\r' {
+                            break;
+                        }
+                        inner_src.push(ch);
+                        k += ch.len_utf8();
+                    }
+                    self.bump(k, 0);
+                    continue;
+                }
+                inner_src.push_str("/*");
+                self.bump(2, 0);
+                let mut k = 2;
+                let mut depth = 1usize;
+                while k < rest.len() && depth > 0 {
+                    if rest[k..].starts_with("/*") {
+                        depth += 1;
+                        inner_src.push_str("/*");
+                        self.bump(2, 0);
+                        k += 2;
+                    } else if rest[k..].starts_with("*/") {
+                        depth -= 1;
+                        inner_src.push_str("*/");
+                        self.bump(2, 0);
+                        k += 2;
+                    } else {
+                        let ch = rest[k..].chars().next().unwrap();
+                        if ch == '\r' && rest[k..].starts_with("\r\n") {
+                            inner_src.push('\n');
+                            self.bump(2, 1);
+                            k += 2;
+                        } else {
+                            inner_src.push(ch);
+                            let nl = usize::from(ch == '\n');
+                            self.bump(ch.len_utf8(), nl);
+                            k += ch.len_utf8();
+                        }
+                    }
+                }
+                continue;
             } else if c == ']' || c == ')' || c == '}' {
                 if c == close && stack.is_empty() {
                     let close_joint = !matches!(
@@ -360,7 +417,10 @@ impl<'a> StrLexer<'a> {
                     })?;
                     if open_joint
                         && let Some(first) = inner.first()
-                        && !matches!(first.kind, TokKind::Newline | TokKind::Semicolon)
+                        && !matches!(
+                            first.kind,
+                            TokKind::Newline | TokKind::Semicolon | TokKind::Comment(_)
+                        )
                     {
                         inner[0].joint = true;
                     }
@@ -396,7 +456,8 @@ impl<'a> StrLexer<'a> {
         })
     }
 
-    fn skip_line_comment(&mut self) {
+    fn skip_line_comment(&mut self) -> String {
+        let start = self.pos;
         while self.pos < self.src.len() {
             let c = self.rest().chars().next().unwrap();
             if c == '\n' || c == '\r' {
@@ -404,9 +465,11 @@ impl<'a> StrLexer<'a> {
             }
             self.bump(c.len_utf8(), 0);
         }
+        self.src[start..self.pos].to_string()
     }
 
-    fn skip_block_comment(&mut self) -> Result<(), LexError> {
+    fn skip_block_comment(&mut self) -> Result<String, LexError> {
+        let start = self.pos;
         self.bump(2, 0);
         let mut depth = 1usize;
         while self.pos < self.src.len() {
@@ -419,7 +482,7 @@ impl<'a> StrLexer<'a> {
                 self.bump(2, 0);
                 if depth == 0 {
                     self.gapped = true;
-                    return Ok(());
+                    return Ok(self.src[start..self.pos].to_string());
                 }
             } else {
                 let c = rest.chars().next().unwrap();
@@ -459,17 +522,31 @@ impl<'a> StrLexer<'a> {
                     self.out.push(Tok::fresh(TokKind::Semicolon, false));
                     self.gapped = true;
                 }
-                // Comments only count at line start (statement level):
-                // inside payloads `//` and `#` stay ordinary text.
+                // `//` opens a comment anywhere (line comment to end
+                // of line, like the grammar): line starts emit the
+                // marker for the splitter; mid-line markers let raw
+                // runs type them as literals and gap positions skip
+                // them, exactly like the grammar's dual reading.
+                // (`#` and `/*` stay payload mid-line: `#` is arg text
+                // there, `/*` reads as math operators.)
                 '/' if rest.starts_with("//") && self.at_line_start() => {
-                    self.skip_line_comment();
+                    let text = self.skip_line_comment();
+                    self.out.push(Tok::fresh(TokKind::Comment(text), false));
                     self.gapped = true;
                 }
+                '/' if rest.starts_with("//") => {
+                    let text = self.skip_line_comment();
+                    let joint = !self.gapped;
+                    self.out.push(Tok::fresh(TokKind::Comment(text), joint));
+                    self.gapped = false;
+                }
                 '/' if rest.starts_with("/*") && self.at_line_start() => {
-                    self.skip_block_comment()?;
+                    let text = self.skip_block_comment()?;
+                    self.out.push(Tok::fresh(TokKind::Comment(text), false));
                 }
                 '#' if self.at_line_start() => {
-                    self.skip_line_comment();
+                    let text = self.skip_line_comment();
+                    self.out.push(Tok::fresh(TokKind::Comment(text), false));
                     self.gapped = true;
                 }
                 '"' => {
@@ -522,8 +599,8 @@ fn lex_str_inner(s: &str) -> Result<Vec<Tok>, LexError> {
 
 /// Lex a string source into context-free tokens. Newlines normalize to
 /// [`TokKind::Newline`] (one per line break); statement-level `//`,
-/// `/* */`, and whole-line `#` comments vanish (the newline itself
-/// still emits).
+/// `/* */`, and whole-line `#` comments emit [`TokKind::Comment`]
+/// markers (the newline itself still emits).
 pub fn lex_str(s: &str) -> Result<Vec<Tok>, LexError> {
     lex_str_inner(s)
 }
@@ -769,6 +846,10 @@ mod tests {
         Tok::fresh(TokKind::Newline, false)
     }
 
+    fn comment(s: &str) -> Tok {
+        Tok::fresh(TokKind::Comment(s.to_string()), false)
+    }
+
     fn semi() -> Tok {
         Tok::fresh(TokKind::Semicolon, false)
     }
@@ -859,11 +940,24 @@ mod tests {
     }
 
     #[test]
-    fn lex_comments_vanish_but_newline_stays() {
+    fn lex_comments_emit_markers_but_newline_stays() {
         let toks = lex_str("// hello\nECHO hi").unwrap();
-        assert_eq!(toks, vec![nl(), w("ECHO"), w("hi")]);
-        // Mid-line `/* */` is payload text, not a comment: comments are
-        // statement-level (line start) only, matching the grammar.
+        assert_eq!(toks, vec![comment("// hello"), nl(), w("ECHO"), w("hi")]);
+        // Mid-line `//` marks too (jointness preserved for run
+        // gluing); mid-line `/* */` is payload text, not a comment:
+        // comments are statement-level (line start) only, matching
+        // the grammar's dual reading.
+        let toks = lex_str("ECHO hi //c").unwrap();
+        assert_eq!(toks, vec![w("ECHO"), w("hi"), comment("//c")]);
+        let toks = lex_str("ECHO a//b").unwrap();
+        assert_eq!(
+            toks,
+            vec![
+                w("ECHO"),
+                w("a"),
+                Tok::fresh(TokKind::Comment("//b".to_string()), true),
+            ]
+        );
         let toks = lex_str("ECHO hi /* mid */").unwrap();
         assert_eq!(
             toks,

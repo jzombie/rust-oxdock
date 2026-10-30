@@ -12,10 +12,12 @@
 //! `all_structural_metadata()`, and the `structural_metadata_covers_all_structural_kinds`
 //! tripwire below.
 
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::ast::{
-    Arg, ArgPart, Expr, GuardExpr, IoBinding, IoStream, PipeTarget, Step, Value, WorkspaceTarget,
+    Arg, ArgPart, Expr, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable, PipeTarget, Step,
+    Value, WorkspaceTarget,
 };
 use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
@@ -4285,6 +4287,135 @@ pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> Parse
         }
     }
     Ok(())
+}
+
+/// Validate `EXPORT` names at end of parse. Forward references are
+/// allowed (EXPORT may precede its FUNCs), so this runs against the
+/// completed top-level scope. Bare names must match a top-level
+/// `FUNC`; qualified `MOD::NAME` names must match a known module
+/// member (opaque modules skip the member check; the runtime registry
+/// resolves them or fails serving). Duplicates are rejected at the
+/// EXPORT site. Promoted verbatim (the pest finish pass delegates).
+pub(crate) fn validate_exports(
+    ctx: &SpanContext,
+    exports: &[String],
+    top: &HashSet<String>,
+    modules: &ModuleTable,
+) -> ParseResult<()> {
+    for name in exports {
+        let valid = match name.split_once("::") {
+            None => top.contains(name),
+            Some((module, base)) if module == crate::constants::SCRIPT_MODULE_NAME => {
+                top.contains(base)
+            }
+            Some((module, base)) => match modules.modules.get(module) {
+                None => false,
+                Some(None) => true,
+                Some(Some(funcs)) => funcs.functions.contains(base),
+            },
+        };
+        if !valid {
+            return Err(ParseError::validation(
+                crate::constants::KEYWORD_EXPORT,
+                format!("EXPORT `{name}` does not match any top-level FUNC or known module member"),
+                ctx,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// REMOTE whole-script validators and body-symbol collectors,
+/// promoted verbatim from the pest backend (which delegates) so both
+/// parse pathways enforce identical blocks.
+/// Reject `COPY --from-host` / `--to-host` outside `REMOTE` bodies.
+/// Transfer declarations only mean something where a session hoists them;
+/// anywhere else they would silently behave as local copies.
+pub(crate) fn validate_remote_copy_placement(steps: &[Step], ctx: &SpanContext) -> ParseResult<()> {
+    fn visit_kind(kind: &StepKind, in_remote: bool, ctx: &SpanContext) -> ParseResult<()> {
+        if let StepKind::Copy {
+            from_host, to_host, ..
+        } = kind
+            && (*from_host || *to_host)
+            && !in_remote
+        {
+            return Err(ParseError::structural(
+                "copy",
+                "COPY --from-host and --to-host are only valid inside a REMOTE block".to_string(),
+                ctx,
+            ));
+        }
+        let child_remote = in_remote || matches!(kind, StepKind::RemoteBlock { .. });
+        let mut result = Ok(());
+        kind.walk_child_kinds(&mut |child| {
+            if result.is_ok() {
+                result = visit_kind(child, child_remote, ctx);
+            }
+        });
+        result
+    }
+    for step in steps {
+        visit_kind(&step.kind, false, ctx)?;
+    }
+    Ok(())
+}
+
+/// True when any step in the slice (transitively, through nested bodies)
+/// is a `REMOTE` block. `REMOTE` blocks never nest: the inner block would
+/// have no session, no inventory, and no defined sync boundary.
+pub(crate) fn contains_remote_block(steps: &[Step]) -> bool {
+    steps.iter().any(|step| contains_remote_kind(&step.kind))
+}
+
+pub(crate) fn contains_remote_kind(kind: &StepKind) -> bool {
+    if matches!(kind, StepKind::RemoteBlock { .. }) {
+        return true;
+    }
+    let mut found = false;
+    kind.walk_child_kinds(&mut |child| {
+        found = found || contains_remote_kind(child);
+    });
+    found
+}
+
+/// Collect transitively defined `FUNC` names and invoked call names from a
+/// `REMOTE` body. Statement calls, expression calls (including compiled
+/// math ops and inline blocks), and calls nested in any sub-body are all
+/// covered through the uniform [`StepKind`] walkers. Only user-defined
+/// `SCRIPT` symbols matter downstream: qualified module calls pass through.
+pub(crate) fn collect_remote_body_symbols(
+    steps: &[Step],
+    defs: &mut HashSet<String>,
+    calls: &mut Vec<String>,
+) {
+    for step in steps {
+        collect_remote_kind_symbols(&step.kind, defs, calls);
+    }
+}
+
+pub(crate) fn collect_remote_kind_symbols(
+    kind: &StepKind,
+    defs: &mut HashSet<String>,
+    calls: &mut Vec<String>,
+) {
+    if let StepKind::FuncDef { name, .. } = kind {
+        defs.insert(name.clone());
+    }
+    if let StepKind::Call { name, .. } = kind {
+        calls.push(name.clone());
+    }
+    kind.walk_step_exprs(&mut |expr| match expr {
+        Expr::Call { name, .. } => calls.push(name.clone()),
+        Expr::CompiledMath(ops) => {
+            for op in ops {
+                if let MathOp::Call { name, .. } = op {
+                    calls.push(name.clone());
+                }
+            }
+        }
+        Expr::Block(steps) => collect_remote_body_symbols(steps, defs, calls),
+        _ => {}
+    });
 }
 
 #[cfg(test)]

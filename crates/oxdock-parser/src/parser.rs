@@ -5,7 +5,6 @@ use crate::ast::{
 use crate::command::ArgType;
 use crate::constants::{
     KEYWORD_EXPORT, KEYWORD_IMPORT, KEYWORD_INSPECT, KEYWORD_TYPE, MODULE_SEPARATOR,
-    SCRIPT_MODULE_NAME,
 };
 use crate::error::{ParseError, ParseResult, SpanContext};
 use crate::lexer::{
@@ -597,39 +596,16 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         // would silently behave as local copies, so they fail fast.
         {
             let ctx = self.eof_span();
-            validate_remote_copy_placement(&self.steps, &ctx)?;
+            crate::commands::validate_remote_copy_placement(&self.steps, &ctx)?;
         }
 
         // Validate `EXPORT` names at end of parse. Forward references
         // are allowed (EXPORT may precede its FUNCs), so this runs
-        // against the completed top-level scope. Bare names must match
-        // a top-level `FUNC`; qualified `MOD::NAME` names must match a
-        // known module member (opaque modules skip the member check;
-        // the runtime registry resolves them or fails serving).
-        // Duplicates are rejected at the EXPORT site.
+        // against the completed top-level scope (shared validator).
         {
             let top: HashSet<String> = func_scopes.borrow()[0].clone();
-            for name in &self.exports {
-                let valid = match name.split_once("::") {
-                    None => top.contains(name),
-                    Some((module, base)) if module == SCRIPT_MODULE_NAME => top.contains(base),
-                    Some((module, base)) => match self.modules.modules.get(module) {
-                        None => false,
-                        Some(None) => true,
-                        Some(Some(funcs)) => funcs.functions.contains(base),
-                    },
-                };
-                if !valid {
-                    let ctx = self.eof_span();
-                    return Err(ParseError::validation(
-                        KEYWORD_EXPORT,
-                        format!(
-                            "EXPORT `{name}` does not match any top-level FUNC or known module member"
-                        ),
-                        &ctx,
-                    ));
-                }
-            }
+            let ctx = self.eof_span();
+            crate::commands::validate_exports(&ctx, &self.exports, &top, &self.modules)?;
         }
 
         let func_docs = collect_func_docs(self.input, &self.steps);
@@ -1312,38 +1288,6 @@ fn refine_fragmented_block_error(
     };
     crate::lexer::pest_error_at(&header, expected, abs_line, abs_start, abs_end, eff_text)
         .with_step(step_index.unwrap_or(0))
-}
-
-/// Reject `COPY --from-host` / `--to-host` outside `REMOTE` bodies.
-/// Transfer declarations only mean something where a session hoists them;
-/// anywhere else they would silently behave as local copies.
-fn validate_remote_copy_placement(steps: &[Step], ctx: &SpanContext) -> ParseResult<()> {
-    fn visit_kind(kind: &StepKind, in_remote: bool, ctx: &SpanContext) -> ParseResult<()> {
-        if let StepKind::Copy {
-            from_host, to_host, ..
-        } = kind
-            && (*from_host || *to_host)
-            && !in_remote
-        {
-            return Err(ParseError::structural(
-                "copy",
-                "COPY --from-host and --to-host are only valid inside a REMOTE block".to_string(),
-                ctx,
-            ));
-        }
-        let child_remote = in_remote || matches!(kind, StepKind::RemoteBlock { .. });
-        let mut result = Ok(());
-        kind.walk_child_kinds(&mut |child| {
-            if result.is_ok() {
-                result = visit_kind(child, child_remote, ctx);
-            }
-        });
-        result
-    }
-    for step in steps {
-        visit_kind(&step.kind, false, ctx)?;
-    }
-    Ok(())
 }
 
 /// Re-parse raw RHS text as an expression (fallback when the `LET` RHS lead
@@ -2705,64 +2649,6 @@ fn parse_timeout_statement_from_pair(
     })
 }
 
-/// True when any step in the slice (transitively, through nested bodies)
-/// is a `REMOTE` block. `REMOTE` blocks never nest: the inner block would
-/// have no session, no inventory, and no defined sync boundary.
-fn contains_remote_block(steps: &[Step]) -> bool {
-    steps.iter().any(|step| contains_remote_kind(&step.kind))
-}
-
-fn contains_remote_kind(kind: &StepKind) -> bool {
-    if matches!(kind, StepKind::RemoteBlock { .. }) {
-        return true;
-    }
-    let mut found = false;
-    kind.walk_child_kinds(&mut |child| {
-        found = found || contains_remote_kind(child);
-    });
-    found
-}
-
-/// Collect transitively defined `FUNC` names and invoked call names from a
-/// `REMOTE` body. Statement calls, expression calls (including compiled
-/// math ops and inline blocks), and calls nested in any sub-body are all
-/// covered through the uniform [`StepKind`] walkers. Only user-defined
-/// `SCRIPT` symbols matter downstream: qualified module calls pass through.
-fn collect_remote_body_symbols(
-    steps: &[Step],
-    defs: &mut HashSet<String>,
-    calls: &mut Vec<String>,
-) {
-    for step in steps {
-        collect_remote_kind_symbols(&step.kind, defs, calls);
-    }
-}
-
-fn collect_remote_kind_symbols(
-    kind: &StepKind,
-    defs: &mut HashSet<String>,
-    calls: &mut Vec<String>,
-) {
-    if let StepKind::FuncDef { name, .. } = kind {
-        defs.insert(name.clone());
-    }
-    if let StepKind::Call { name, .. } = kind {
-        calls.push(name.clone());
-    }
-    kind.walk_step_exprs(&mut |expr| match expr {
-        Expr::Call { name, .. } => calls.push(name.clone()),
-        Expr::CompiledMath(ops) => {
-            for op in ops {
-                if let MathOp::Call { name, .. } = op {
-                    calls.push(name.clone());
-                }
-            }
-        }
-        Expr::Block(steps) => collect_remote_body_symbols(steps, defs, calls),
-        _ => {}
-    });
-}
-
 fn parse_remote_statement_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
@@ -2859,7 +2745,7 @@ fn parse_remote_statement_from_pair(
             &span,
         ));
     }
-    if contains_remote_block(&body) {
+    if crate::commands::contains_remote_block(&body) {
         return Err(ParseError::validation(
             "REMOTE",
             format!("REMOTE blocks cannot nest (target `{target}` contains another REMOTE block)"),
@@ -2878,7 +2764,7 @@ fn parse_remote_statement_from_pair(
     }
     let mut inner_defs = HashSet::new();
     let mut calls = Vec::new();
-    collect_remote_body_symbols(&body, &mut inner_defs, &mut calls);
+    crate::commands::collect_remote_body_symbols(&body, &mut inner_defs, &mut calls);
     let outer_defs = lctx.visible_func_names();
     for call in &calls {
         let bare = crate::base_name(call);
