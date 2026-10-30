@@ -14,7 +14,7 @@ The syntax is line-oriented with optional semicolon terminators and a static typ
 
 Add it to your Rust build with `cargo add oxdock@0.32.2-alpha`, or install the standalone runner with `cargo install oxdock@0.32.2-alpha`.
 
-### Run a script
+### Run a script with the CLI
 
 ```sh
 oxdock <PATH>

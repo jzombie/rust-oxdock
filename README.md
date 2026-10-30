@@ -92,7 +92,7 @@ cargo install oxdock@0.32.2-alpha
 cargo add oxdock@0.32.2-alpha
 ```
 
-### Run a script
+### Run a script with the CLI
 
 ```sh
 oxdock <PATH>
