@@ -28,6 +28,7 @@ pub mod markdown;
 pub mod parser;
 pub mod strip_flags;
 pub mod tag;
+pub mod tok;
 pub mod value;
 
 pub use ast::*;
@@ -57,6 +58,9 @@ pub use tag::{
     canonicalize_spelling, check_value, check_value_at, intern_composed, lookup_composed,
     parse_spelling, render_structural,
 };
+#[cfg(feature = "proc-macro-api")]
+pub use tok::lex_tokens;
+pub use tok::{GroupDelim, LexError, Tok, TokKind, lex_str};
 
 /// Shared mock lowering for parser tests.
 /// Centralizes AST lowering so unit tests, integration tests, and macro_input tests
