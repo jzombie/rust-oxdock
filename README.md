@@ -48,7 +48,7 @@ library [Functions](#functions).
 ### Standalone CLI installation
 
 <details>
-<summary>Prebuilt installers (all features, no Cargo needed)</summary>
+<summary>Install options (prebuilt or Cargo)</summary>
 
 **Linux / macOS:**
 ```sh
@@ -72,8 +72,6 @@ For a reproducible install, pin an explicit release:
 $env:VERSION = 'v0.32.2-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 ```
 
-</details>
-
 **Build from source via Cargo** (same full module surface as the
 release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 
@@ -86,6 +84,8 @@ cargo install oxdock@0.32.2-alpha
 ```sh
 cargo add oxdock@0.32.2-alpha
 ```
+
+</details>
 
 Run a script:
 

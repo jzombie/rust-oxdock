@@ -1,7 +1,7 @@
 ### Standalone CLI installation
 
 <details>
-<summary>Prebuilt installers (all features, no Cargo needed)</summary>
+<summary>Install options (prebuilt or Cargo)</summary>
 
 **Linux / macOS:**
 ```sh
@@ -25,8 +25,6 @@ For a reproducible install, pin an explicit release:
 $env:VERSION = 'v{{ env:CRATE_VERSION }}'; {{ $docs_global.installer_cmd_ps1 }}
 ```
 
-</details>
-
 **Build from source via Cargo** (same full module surface as the
 release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 
@@ -39,3 +37,5 @@ cargo install oxdock@{{ env:CRATE_VERSION }}
 ```sh
 cargo add oxdock@{{ env:CRATE_VERSION }}
 ```
+
+</details>
