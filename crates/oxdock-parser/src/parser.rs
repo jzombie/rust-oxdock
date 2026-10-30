@@ -4563,7 +4563,8 @@ fn parse_expr_unary(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> Par
 
 /// Reject a staged `UnsignedIntBoundary` in any position where unary `-`
 /// cannot consume it (every composite constructor calls this on children).
-fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {
+/// Shared with the v2 backend (operates on `Expr`, never on pairs).
+pub(crate) fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {
     if matches!(expr, Expr::UnsignedIntBoundary(_)) {
         return Err(ParseError::structural(
             "expr",
@@ -4576,7 +4577,8 @@ fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {
 
 /// Apply unary `-`: fold literals, consume the `i64::MIN` boundary, else
 /// compile to RPN `Neg` (or AST `0 - x` fallback for non-math operands).
-fn apply_unary_neg(ctx: &SpanContext, expr: Expr) -> ParseResult<Expr> {
+/// Shared with the v2 backend.
+pub(crate) fn apply_unary_neg(ctx: &SpanContext, expr: Expr) -> ParseResult<Expr> {
     match expr {
         Expr::Literal(v) => match (v.as_i64(), v.as_f64()) {
             (Some(n), _) => match n.checked_neg() {
@@ -4727,7 +4729,13 @@ fn as_f64(v: &Value) -> Option<f64> {
     }
 }
 
-fn make_arith(ctx: &SpanContext, op: ArithOp, left: Expr, right: Expr) -> ParseResult<Expr> {
+/// Shared with the v2 backend: fold, compile to RPN, or keep the AST node.
+pub(crate) fn make_arith(
+    ctx: &SpanContext,
+    op: ArithOp,
+    left: Expr,
+    right: Expr,
+) -> ParseResult<Expr> {
     reject_boundary(ctx, &left)?;
     reject_boundary(ctx, &right)?;
     if let Some(folded) = try_fold_arith(op, &left, &right) {
@@ -4750,7 +4758,13 @@ fn make_arith(ctx: &SpanContext, op: ArithOp, left: Expr, right: Expr) -> ParseR
     })
 }
 
-fn make_compare(ctx: &SpanContext, op: CompareOp, left: Expr, right: Expr) -> ParseResult<Expr> {
+/// Shared with the v2 backend: fold, compile to RPN, or keep the AST node.
+pub(crate) fn make_compare(
+    ctx: &SpanContext,
+    op: CompareOp,
+    left: Expr,
+    right: Expr,
+) -> ParseResult<Expr> {
     reject_boundary(ctx, &left)?;
     reject_boundary(ctx, &right)?;
     if let Some(folded) = try_fold_compare(op, &left, &right) {
@@ -4778,7 +4792,9 @@ fn make_compare(ctx: &SpanContext, op: CompareOp, left: Expr, right: Expr) -> Pa
 /// Convert an operand subtree to flat RPN. Returns `None` for shapes with
 /// no RPN encoding (`Not`/`Logical`/`List`/`Map`/`FreshPipe`/stray boundary): callers
 /// fall back to AST nodes evaluated recursively.
-fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
+/// Shared with the v2 backend.
+///
+pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
     match expr {
         Expr::Literal(v) => Some(vec![MathOp::PushConst(v.clone())]),
         Expr::Var(name) => Some(vec![MathOp::LoadVar(name.clone())]),
@@ -4878,37 +4894,33 @@ fn parse_expr_atom(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> Pars
 fn parse_numeric_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let text = pair.as_str();
+    classify_numeric_text(text).map_err(|msg| ParseError::structural("expr", msg, &span))
+}
+
+/// Pure numeric classification shared with the v2 backend (which gates
+/// `_`-separator shape before calling: the classifier strips them, so
+/// `1__0` must never reach it as numeric). Returns the literal,
+/// `UnsignedIntBoundary` staging, or the exact pest error text.
+pub(crate) fn classify_numeric_text(text: &str) -> Result<Expr, String> {
     let clean = text.replace('_', "");
     if clean.contains('.') {
-        let parsed: f64 = clean.parse().map_err(|_| {
-            ParseError::structural("expr", format!("invalid float literal {text:?}"), &span)
-        })?;
+        let parsed: f64 = clean
+            .parse()
+            .map_err(|_| format!("invalid float literal {text:?}"))?;
         if !parsed.is_finite() {
-            return Err(ParseError::structural(
-                "expr",
-                format!("invalid float literal {text:?}"),
-                &span,
-            ));
+            return Err(format!("invalid float literal {text:?}"));
         }
         return Ok(Expr::Literal(Value::float(parsed)));
     }
-    let digits: u64 = clean.parse().map_err(|_| {
-        ParseError::structural(
-            "expr",
-            format!("integer overflow: {text:?} exceeds i64::MAX"),
-            &span,
-        )
-    })?;
+    let digits: u64 = clean
+        .parse()
+        .map_err(|_| format!("integer overflow: {text:?} exceeds i64::MAX"))?;
     if digits <= i64::MAX as u64 {
         Ok(Expr::Literal(Value::int(digits as i64)))
     } else if digits == i64::MAX as u64 + 1 {
         Ok(Expr::UnsignedIntBoundary(digits))
     } else {
-        Err(ParseError::structural(
-            "expr",
-            format!("integer overflow: {text:?} exceeds i64::MAX"),
-            &span,
-        ))
+        Err(format!("integer overflow: {text:?} exceeds i64::MAX"))
     }
 }
 

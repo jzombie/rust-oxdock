@@ -21,10 +21,17 @@
 //!
 //! Slice 2 implements guards: leading `[..]` groups parse to
 //! [`GuardExpr`] (predicates, `not`/`any`/`all`, groups, comma seqs,
-//! stacked brackets combining with `All`), and bracket/paren groups in
-//! arg position render back to text. In-body brackets are args (probed:
-//! `ECHO [env:X]` keeps it as an argument); a leading bracket that is
-//! not a guard (`[a] ECHO hi`) errors exactly like pest.
+//! stacked brackets combining with `All`), and in-body bracket/paren
+//! groups splice to raw text for generic args. In-body brackets are
+//! args (probed: `ECHO [env:X]` keeps it as an argument); a leading
+//! bracket that is not a guard (`[a] ECHO hi`) errors exactly like
+//! pest.
+//!
+//! Slice 3 implements `LET`/`SET`/`RETURN` plus the expression tiers
+//! (or/and/compare/ordering/add/mul/unary/atom with lists and maps).
+//! Lowering runs through the shared pest constructors, so folding,
+//! RPN, and overflow outcomes are identical; only the tier walkers are
+//! mirrored. Deferred: calls (slice 4), inline blocks (slice 5).
 //!
 //! TODO(cutover): duplication inventory to unify when pest retires.
 //! Each item below mirrors a pest-side rule with identical outcomes
@@ -39,9 +46,21 @@
 //!   mirror their pest counterparts.
 //! - `parse_guard_groups` folds stacked brackets with `All` exactly
 //!   like the pest path's pending-guard stash.
+//! - The expression tiers mirror the pest precedence chain; only the
+//!   lowering half is truly shared (`make_arith`, `make_compare`,
+//!   `apply_unary_neg`, `reject_boundary`, `classify_numeric_text`,
+//!   `canonicalize_spelling`, `lower_block_string`).
+//! - Numeric `_`-separator shape gating mirrors the `numeric_literal`
+//!   trailing guard; bare-word charsets mirror `bare_word`;
+//!   `neg_op`/`bare` `-` dispatch mirrors the unary rule.
 
-use crate::ast::{Arg, Guard, GuardExpr, Ns, Step, StepKind};
-use crate::error::ParseResult;
+use crate::ast::{
+    Arg, ArithOp, CompareOp, Expr, Guard, GuardExpr, LogicalOp, Ns, Step, StepKind, Value,
+};
+use crate::error::{ParseResult, SpanContext};
+use crate::parser::{
+    apply_unary_neg, classify_numeric_text, make_arith, make_compare, reject_boundary,
+};
 use crate::tok::{GroupDelim, Tok, TokKind};
 use std::fmt;
 
@@ -87,19 +106,24 @@ fn boundary_ends_statement(body: &[Tok]) -> Result<bool, String> {
         None => return Ok(true),
         Some(t) => t,
     };
-    let name = match &head.kind {
-        TokKind::Word(n) => n.clone(),
-        _ => return Err("statement must open with a command word".to_string()),
-    };
-    if crate::STRUCTURAL_KEYWORDS.contains(&name.as_str()) {
-        return Err(format!("unsupported in parse_v2 slice 1: `{name}`"));
-    }
-    match crate::Command::parse(&name) {
-        None => Ok(true),
-        Some(cmd) if cmd.expects_inner_command() => {
-            Err(format!("unsupported in parse_v2 slice 1: wrapper `{name}`"))
+    // Slice 3 owns `LET`/`RETURN`/`$var =` heads; anything else
+    // structural or wrapping stays deferred, never guessed.
+    match &head.kind {
+        TokKind::Word(name) if name == "LET" || name == "RETURN" => Ok(true),
+        TokKind::Punct('$') => Ok(true),
+        TokKind::Word(name) => {
+            if crate::STRUCTURAL_KEYWORDS.contains(&name.as_str()) {
+                return Err(format!("unsupported in parse_v2: `{name}` (later slice)"));
+            }
+            match crate::Command::parse(name) {
+                None => Ok(true),
+                Some(cmd) if cmd.expects_inner_command() => Err(format!(
+                    "unsupported in parse_v2: wrapper `{name}` (later slice)"
+                )),
+                Some(_) => Ok(true),
+            }
         }
-        Some(_) => Ok(true),
+        _ => Err("statement must open with a command word".to_string()),
     }
 }
 
@@ -157,6 +181,13 @@ fn split_statements(toks: &[Tok]) -> Result<Vec<Stmt>, V2Error> {
                 });
             }
         }
+    } else if !guard.is_empty() {
+        // Trailing guards with no following command error (probed:
+        // pest rejects a lone `[env:X]`), never drop silently.
+        return Err(V2Error {
+            stmt: stmt_idx,
+            msg: "guard declared without a following command".to_string(),
+        });
     }
     Ok(stmts)
 }
@@ -347,15 +378,37 @@ fn render_group(open: char, close: char, inner: &[Tok], stmt: usize) -> Result<S
 /// freely between tokens (`ws` admits linebreaks in the grammar);
 /// bare key/value runs never cross them (the grammar excludes
 /// linebreaks there), so runs read raw.
+///
+/// Expression parsing reuses this cursor with `nl_skip = false`:
+/// expressions are single-line (`gap`, never `gap_nl`, between
+/// operands), so a newline terminates instead of vanishing. Newlines
+/// inside group inners (call args, lists, maps) skip via explicit
+/// `skip_newlines` calls at the grammar's `gap_nl` junctures.
 struct Cursor<'t> {
     toks: &'t [Tok],
     pos: usize,
     stmt: usize,
+    nl_skip: bool,
 }
 
 impl<'t> Cursor<'t> {
     fn new(toks: &'t [Tok], stmt: usize) -> Self {
-        Self { toks, pos: 0, stmt }
+        Self {
+            toks,
+            pos: 0,
+            stmt,
+            nl_skip: true,
+        }
+    }
+
+    /// Expression-mode cursor: newlines stop, never skip.
+    fn expr(toks: &'t [Tok], stmt: usize) -> Self {
+        Self {
+            toks,
+            pos: 0,
+            stmt,
+            nl_skip: false,
+        }
     }
 
     fn err(&self, msg: impl Into<String>) -> V2Error {
@@ -375,23 +428,32 @@ impl<'t> Cursor<'t> {
     }
 
     fn peek(&mut self) -> Option<&'t Tok> {
-        self.skip_newlines();
+        if self.nl_skip {
+            self.skip_newlines();
+        }
         self.toks.get(self.pos)
     }
 
     fn next(&mut self) -> Option<&'t Tok> {
-        self.skip_newlines();
+        if self.nl_skip {
+            self.skip_newlines();
+        }
         let t = self.toks.get(self.pos)?;
         self.pos += 1;
         Some(t)
     }
 
     fn done(&mut self) -> bool {
-        self.skip_newlines();
+        if self.nl_skip {
+            self.skip_newlines();
+        }
         self.pos >= self.toks.len()
     }
 
     fn eat_punct(&mut self, c: char) -> bool {
+        if self.nl_skip {
+            self.skip_newlines();
+        }
         match self.peek() {
             Some(t) if matches!(&t.kind, TokKind::Punct(p) if *p == c) => {
                 self.pos += 1;
@@ -861,6 +923,801 @@ fn parse_guard_groups(guard: &[Tok], stmt: usize) -> Result<Option<GuardExpr>, V
     Ok(acc)
 }
 
+// ---- Slice 3: LET/SET/RETURN + expressions ----
+// Expression tiers over [`Tok`] mirror the pest precedence chain
+// (or > and > comparison > ordering > add > mul > unary > atom);
+// arithmetic/comparison lowering runs through the shared constructors
+// (`make_arith`, `make_compare`, `apply_unary_neg`), so folding, RPN
+// compilation, and overflow behavior are identical by construction,
+// never re-derived.
+
+/// Eat a one- or two-char operator: single puncts match directly;
+/// pairs (`==`, `!=`, `<=`, `>=`, `&&`, `||`, `::`) require a joint
+/// second punct. Newlines never skip here (expression mode).
+fn eat_op(cur: &mut Cursor, first: char, second: Option<char>) -> bool {
+    let (a, b) = match (cur.toks.get(cur.pos), cur.toks.get(cur.pos + 1)) {
+        (Some(a), b) => (a, b),
+        _ => return false,
+    };
+    if !matches!(&a.kind, TokKind::Punct(c) if *c == first) {
+        return false;
+    }
+    match second {
+        None => {
+            cur.pos += 1;
+            true
+        }
+        Some(c2) => match b {
+            Some(t) if t.joint && matches!(&t.kind, TokKind::Punct(c) if *c == c2) => {
+                cur.pos += 2;
+                true
+            }
+            _ => false,
+        },
+    }
+}
+
+/// Dummy span for the shared lowering constructors: v2 owns no source
+/// positions yet, so only success values (span-free) participate in
+/// parity; failures surface through [`V2Error`] text.
+fn lowering_ctx(stmt: usize) -> SpanContext<'static> {
+    let _ = stmt;
+    SpanContext::line_only(0)
+}
+
+fn parse_expr_or(cur: &mut Cursor) -> Result<Expr, V2Error> {
+    let mut left = parse_expr_and(cur)?;
+    while eat_op(cur, '|', Some('|')) {
+        let right = parse_expr_and(cur)?;
+        // No folding, no boundary checks: mirrors the pest tier quirk.
+        left = Expr::Logical {
+            op: LogicalOp::Or,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+    }
+    Ok(left)
+}
+
+fn parse_expr_and(cur: &mut Cursor) -> Result<Expr, V2Error> {
+    let mut left = parse_expr_cmp(cur)?;
+    while eat_op(cur, '&', Some('&')) {
+        let right = parse_expr_cmp(cur)?;
+        reject_boundary(&lowering_ctx(cur.stmt), &left).map_err(|e| cur.err(e.to_string()))?;
+        reject_boundary(&lowering_ctx(cur.stmt), &right).map_err(|e| cur.err(e.to_string()))?;
+        left = Expr::Logical {
+            op: LogicalOp::And,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+    }
+    Ok(left)
+}
+
+fn parse_expr_cmp(cur: &mut Cursor) -> Result<Expr, V2Error> {
+    let left = parse_expr_ord(cur)?;
+    let op = if eat_op(cur, '=', Some('=')) {
+        CompareOp::Eq
+    } else if eat_op(cur, '!', Some('=')) {
+        CompareOp::Ne
+    } else {
+        return Ok(left);
+    };
+    let right = parse_expr_ord(cur)?;
+    make_compare(&lowering_ctx(cur.stmt), op, left, right).map_err(|e| cur.err(e.to_string()))
+}
+
+fn parse_expr_ord(cur: &mut Cursor) -> Result<Expr, V2Error> {
+    let left = parse_expr_add(cur)?;
+    let op = if eat_op(cur, '<', Some('=')) {
+        CompareOp::Le
+    } else if eat_op(cur, '>', Some('=')) {
+        CompareOp::Ge
+    } else if eat_op(cur, '<', None) {
+        CompareOp::Lt
+    } else if eat_op(cur, '>', None) {
+        CompareOp::Gt
+    } else {
+        return Ok(left);
+    };
+    let right = parse_expr_add(cur)?;
+    make_compare(&lowering_ctx(cur.stmt), op, left, right).map_err(|e| cur.err(e.to_string()))
+}
+
+fn parse_expr_add(cur: &mut Cursor) -> Result<Expr, V2Error> {
+    let mut left = parse_expr_mul(cur)?;
+    loop {
+        let op = if eat_op(cur, '+', None) {
+            ArithOp::Add
+        } else if eat_op(cur, '-', None) {
+            ArithOp::Sub
+        } else {
+            break;
+        };
+        let right = parse_expr_mul(cur)?;
+        left = make_arith(&lowering_ctx(cur.stmt), op, left, right)
+            .map_err(|e| cur.err(e.to_string()))?;
+    }
+    Ok(left)
+}
+
+fn parse_expr_mul(cur: &mut Cursor) -> Result<Expr, V2Error> {
+    let mut left = parse_expr_unary(cur)?;
+    loop {
+        let op = if eat_op(cur, '*', None) {
+            ArithOp::Mul
+        } else if eat_op(cur, '/', None) {
+            ArithOp::Div
+        } else {
+            break;
+        };
+        let right = parse_expr_unary(cur)?;
+        left = make_arith(&lowering_ctx(cur.stmt), op, left, right)
+            .map_err(|e| cur.err(e.to_string()))?;
+    }
+    Ok(left)
+}
+
+/// A `-` opens a bare word (never negation) when gaplessly followed by
+/// a letter, `_`, or `/` — the `neg_op` lookahead, read off `joint`.
+fn dash_is_bare(cur: &Cursor) -> bool {
+    let next = cur.toks.get(cur.pos + 1);
+    match next {
+        Some(t) if t.joint => match &t.kind {
+            TokKind::Word(w) => w
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_'),
+            TokKind::Punct('/') => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn parse_expr_unary(cur: &mut Cursor) -> Result<Expr, V2Error> {
+    let mut prefixes = Vec::new();
+    loop {
+        match cur.toks.get(cur.pos).map(|t| &t.kind) {
+            Some(TokKind::Punct('!')) => {
+                cur.pos += 1;
+                prefixes.push(false);
+            }
+            Some(TokKind::Punct('-')) if !dash_is_bare(cur) => {
+                cur.pos += 1;
+                prefixes.push(true);
+            }
+            _ => break,
+        }
+    }
+    let mut expr = parse_expr_atom(cur)?;
+    // Innermost prefix is closest to the atom: apply in reverse order.
+    for is_neg in prefixes.into_iter().rev() {
+        if is_neg {
+            expr = apply_unary_neg(&lowering_ctx(cur.stmt), expr)
+                .map_err(|e| cur.err(e.to_string()))?;
+        } else {
+            reject_boundary(&lowering_ctx(cur.stmt), &expr).map_err(|e| cur.err(e.to_string()))?;
+            expr = Expr::Not(Box::new(expr));
+        }
+    }
+    Ok(expr)
+}
+
+/// `a::b` qualification detector for the deferred call slice: an
+/// uppercase head word plus joint `::` segments and a joint paren.
+/// Peek-only; anything else falls through to bare/error paths exactly
+/// like the grammar's `func_call` mismatch.
+fn at_call_shape(cur: &Cursor) -> bool {
+    let mut pos = cur.pos;
+    let head_ok = match cur.toks.get(pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) => {
+            let mut chars = w.chars();
+            chars.next().is_some_and(|c| c.is_ascii_uppercase())
+                && w.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        }
+        _ => false,
+    };
+    if !head_ok {
+        return false;
+    }
+    pos += 1;
+    loop {
+        let colons = matches!(
+            cur.toks.get(pos).map(|t| &t.kind),
+            Some(TokKind::Punct(':'))
+        ) && cur.toks.get(pos).is_some_and(|t| t.joint)
+            && matches!(
+                cur.toks.get(pos + 1).map(|t| &t.kind),
+                Some(TokKind::Punct(':'))
+            )
+            && cur.toks.get(pos + 1).is_some_and(|t| t.joint)
+            && matches!(
+                cur.toks.get(pos + 2).map(|t| &t.kind),
+                Some(TokKind::Word(_))
+            )
+            && cur.toks.get(pos + 2).is_some_and(|t| t.joint);
+        if !colons {
+            break;
+        }
+        pos += 3;
+    }
+    matches!(
+        cur.toks.get(pos).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Paren,
+            ..
+        })
+    ) && cur.toks.get(pos).is_some_and(|t| t.joint)
+}
+
+/// Identifier charset for `$var` and `.segment` parts. Segments admit
+/// digits-only too (`$a.0`); anything else ends the key path and errors
+/// downstream, like the grammar's backtrack to `variable`.
+fn is_ident_word(w: &str) -> bool {
+    !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_key_segment(w: &str) -> bool {
+    !w.is_empty()
+        && (w.chars().all(|c| c.is_ascii_digit())
+            || (w
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')))
+}
+
+fn is_env_key(w: &str) -> bool {
+    !w.is_empty()
+        && w.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && w.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Maximal joint run of words and `-/.'/'` puncts: pest `bare_word`
+/// shape. Callers classify (`true`/`false`/string); the numeric path
+/// runs first and falls back here on shape/follower mismatch.
+/// Backslash escapes are arg-position syntax: pest `bare_word` admits
+/// no `\`, so expression runs containing one fail here (never drift
+/// into a string the grammar rejects).
+fn expr_bare_run(cur: &mut Cursor, leading_dash: bool) -> Result<String, V2Error> {
+    let mut out = String::new();
+    if leading_dash {
+        match cur.next() {
+            Some(t) if matches!(&t.kind, TokKind::Punct('-')) => out.push('-'),
+            _ => return Err(cur.err("missing expression operand")),
+        }
+    }
+    match cur.next() {
+        Some(t) => match &t.kind {
+            TokKind::Word(w) => out.push_str(w),
+            _ => return Err(cur.err("missing expression operand")),
+        },
+        None => return Err(cur.err("missing expression operand")),
+    }
+    loop {
+        let next = match cur.toks.get(cur.pos) {
+            Some(t) if t.joint => t,
+            _ => break,
+        };
+        match &next.kind {
+            TokKind::Word(w) => {
+                // Abutting words only continue through an operator gap
+                // the tiers own (`a -b` never fuses); without a joint
+                // punct between, stop. Since this token IS joint, the
+                // previous token must have been a bare punct.
+                out.push_str(w);
+                cur.pos += 1;
+            }
+            TokKind::Punct(c) if matches!(c, '-' | '.' | '/') => {
+                out.push(*c);
+                cur.pos += 1;
+            }
+            _ => break,
+        }
+    }
+    if out.contains('\\') {
+        return Err(cur.err("unexpected escape in expression"));
+    }
+    Ok(out)
+}
+/// Numeric literal head: digit-led word plus joint `.digits` tails.
+/// Callers apply the separator-shape gate and the follower rule, then
+/// the shared classifier.
+fn number_head(cur: &mut Cursor) -> Option<String> {
+    let first = match cur.toks.get(cur.pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) if w.chars().next().is_some_and(|c| c.is_ascii_digit()) => w.clone(),
+        _ => return None,
+    };
+    let mut text = first;
+    let mut pos = cur.pos + 1;
+    loop {
+        let dot = matches!(
+            cur.toks.get(pos).map(|t| &t.kind),
+            Some(TokKind::Punct('.'))
+        ) && cur.toks.get(pos).is_some_and(|t| t.joint);
+        let digits = cur.toks.get(pos + 1);
+        let digits_ok = dot
+            && matches!(digits.map(|t| &t.kind), Some(TokKind::Word(w)) if w.chars().all(|c| c.is_ascii_digit() || c == '_'))
+            && digits.is_some_and(|t| t.joint);
+        if !digits_ok {
+            break;
+        }
+        text.push('.');
+        if let Some(TokKind::Word(w)) = digits.map(|t| &t.kind) {
+            text.push_str(w);
+        }
+        pos += 2;
+    }
+    Some(text)
+}
+
+/// `_`-separator shape gate mirroring the `numeric_literal` rule:
+/// digits with single-underscore separators, at most one fraction.
+fn numeric_shape_ok(text: &str) -> bool {
+    let mut parts = text.split('.');
+    let int_part = parts.next().unwrap_or("");
+    let frac_part = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    fn run_ok(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_digit() || c == '_')
+            && !s.starts_with('_')
+            && !s.ends_with('_')
+            && !s.contains("__")
+    }
+    run_ok(int_part) && frac_part.is_none_or(run_ok)
+}
+
+/// Follower rule mirroring the `numeric_literal` trailing guard
+/// (`!(ALNUM | "_" | "." | "/")`): a joint word, `.`, or `/` continues
+/// into a bare word (`30s`, `1.`, `4/2`); `-`/`+`/operators let the
+/// number stand for the tiers (`1-2` is `Sub`, like the grammar).
+fn number_falls_to_bare(cur: &Cursor, consumed: usize) -> bool {
+    match cur.toks.get(cur.pos + consumed) {
+        Some(t) if t.joint => matches!(
+            &t.kind,
+            TokKind::Word(_) | TokKind::Punct('.') | TokKind::Punct('/')
+        ),
+        _ => false,
+    }
+}
+
+fn parse_expr_atom(cur: &mut Cursor) -> Result<Expr, V2Error> {
+    match cur.toks.get(cur.pos).map(|t| &t.kind) {
+        Some(TokKind::Group {
+            delim: GroupDelim::Paren,
+            inner,
+            ..
+        }) => {
+            let inner = inner.clone();
+            cur.pos += 1;
+            let mut sub = Cursor::expr(&inner, cur.stmt);
+            sub.skip_newlines();
+            let expr = parse_expr_or(&mut sub)?;
+            sub.skip_newlines();
+            if !sub.done() {
+                return Err(sub.err("unexpected text in parentheses"));
+            }
+            Ok(expr)
+        }
+        Some(TokKind::Word(_)) if at_call_shape(cur) => {
+            Err(cur.err("unsupported in parse_v2: function calls (later slice)"))
+        }
+        Some(TokKind::Punct('$')) => {
+            cur.pos += 1;
+            let base = match cur.next() {
+                Some(t) => match &t.kind {
+                    TokKind::Word(w) if is_ident_word(w) => w.clone(),
+                    _ => return Err(cur.err("`$` requires a variable name")),
+                },
+                None => return Err(cur.err("`$` requires a variable name")),
+            };
+            let mut keys = Vec::new();
+            loop {
+                let dot = matches!(
+                    cur.toks.get(cur.pos).map(|t| &t.kind),
+                    Some(TokKind::Punct('.'))
+                );
+                let seg = cur.toks.get(cur.pos + 1);
+                let seg_ok = dot
+                    && matches!(seg.map(|t| &t.kind), Some(TokKind::Word(w)) if is_key_segment(w));
+                if !seg_ok {
+                    break;
+                }
+                if let Some(TokKind::Word(w)) = seg.map(|t| &t.kind) {
+                    keys.push(w.clone());
+                }
+                cur.pos += 2;
+            }
+            if keys.is_empty() {
+                Ok(Expr::Var(base))
+            } else {
+                Ok(Expr::KeyPath { base, keys })
+            }
+        }
+        Some(TokKind::Word(w)) if w == "env" => {
+            // `env:KEY` read when the full shape matches; otherwise a
+            // bare word (`env` alone, `env:k` lowercase) for the error
+            // path, exactly like the grammar's `env_read` mismatch.
+            let key_ok = matches!(
+                cur.toks.get(cur.pos + 1).map(|t| &t.kind),
+                Some(TokKind::Punct(':'))
+            ) && matches!(
+                cur.toks.get(cur.pos + 2).map(|t| &t.kind),
+                Some(TokKind::Word(k)) if is_env_key(k)
+            );
+            if !key_ok {
+                return parse_bare_atom(cur, false);
+            }
+            cur.pos += 1;
+            cur.pos += 1;
+            match cur.next() {
+                Some(t) => match &t.kind {
+                    TokKind::Word(k) => Ok(Expr::Env(k.clone())),
+                    _ => Err(cur.err("unreachable")),
+                },
+                None => Err(cur.err("unreachable")),
+            }
+        }
+        Some(TokKind::Group {
+            delim: GroupDelim::Bracket,
+            inner,
+            ..
+        }) => {
+            let inner = inner.clone();
+            cur.pos += 1;
+            parse_list_literal(&inner, cur.stmt)
+        }
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            inner,
+            ..
+        }) => {
+            let inner = inner.clone();
+            cur.pos += 1;
+            parse_map_or_block(&inner, cur.stmt)
+        }
+        Some(TokKind::Str { text, .. }) => {
+            let text = text.clone();
+            cur.pos += 1;
+            Ok(Expr::Literal(Value::string(text)))
+        }
+        Some(TokKind::BlockStr(full)) => {
+            let full = full.clone();
+            cur.pos += 1;
+            Ok(Expr::Literal(Value::string(
+                crate::command::lower_block_string(&full),
+            )))
+        }
+        Some(TokKind::Word(w)) if w.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
+            parse_numeric_atom(cur)
+        }
+        Some(TokKind::Word(_)) => parse_bare_atom(cur, false),
+        Some(TokKind::Punct('-')) => parse_bare_atom(cur, true),
+        _ => Err(cur.err("missing expression operand")),
+    }
+}
+
+/// Bare-word atom with a `-` lead (the caller proved it is not
+/// negation): consumes the joint `-/.'/'` run for the `bare_word`
+/// shape.
+fn parse_bare_atom(cur: &mut Cursor, leading_dash: bool) -> Result<Expr, V2Error> {
+    let text = expr_bare_run(cur, leading_dash)?;
+    match text.as_str() {
+        "true" => Ok(Expr::Literal(Value::bool(true))),
+        "false" => Ok(Expr::Literal(Value::bool(false))),
+        _ => Ok(Expr::Literal(Value::string(text))),
+    }
+}
+
+/// Numeric atom: rejoin dotted tails, apply the shape gate and the
+/// follower rule, then the shared classifier. Anything failing the
+/// gate or follower reparses as a bare word (durations, versions,
+/// paths), exactly like the grammar's `numeric_literal`-or-`bare_word`
+/// order.
+fn parse_numeric_atom(cur: &mut Cursor) -> Result<Expr, V2Error> {
+    let start = cur.pos;
+    let text = number_head(cur).ok_or_else(|| cur.err("missing expression operand"))?;
+    let consumed = {
+        let mut n = 1;
+        let mut p = start + 1;
+        while matches!(cur.toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('.')))
+            && cur.toks.get(p).is_some_and(|t| t.joint)
+            && matches!(
+                cur.toks.get(p + 1).map(|t| &t.kind),
+                Some(TokKind::Word(w)) if w.chars().all(|c| c.is_ascii_digit() || c == '_')
+            )
+            && cur.toks.get(p + 1).is_some_and(|t| t.joint)
+        {
+            n += 2;
+            p += 2;
+        }
+        n
+    };
+    if !numeric_shape_ok(&text) || number_falls_to_bare(cur, consumed) {
+        return parse_bare_atom(cur, false);
+    }
+    cur.pos += consumed;
+    classify_numeric_text(&text).map_err(|msg| cur.err(msg))
+}
+
+/// Full expression with the top-level boundary rejection (mirrors
+/// `parse_expr`): a stray `UnsignedIntBoundary` that no unary `-`
+/// consumed is an overflow error.
+fn parse_expr_checked(cur: &mut Cursor) -> Result<Expr, V2Error> {
+    let expr = parse_expr_or(cur)?;
+    if matches!(expr, Expr::UnsignedIntBoundary(_)) {
+        return Err(cur.err("integer overflow: 9223372036854775808 exceeds i64::MAX"));
+    }
+    Ok(expr)
+}
+
+/// List literal over a bracket group's contents: `gap_nl` newlines
+/// skip at the edges and after commas only, mirroring the grammar.
+fn parse_list_literal(inner: &[Tok], stmt: usize) -> Result<Expr, V2Error> {
+    let mut cur = Cursor::expr(inner, stmt);
+    cur.skip_newlines();
+    if cur.done() {
+        return Ok(Expr::List(vec![]));
+    }
+    let mut items = Vec::new();
+    loop {
+        let item = parse_expr_checked(&mut cur)?;
+        reject_boundary(&lowering_ctx(stmt), &item).map_err(|e| cur.err(e.to_string()))?;
+        items.push(item);
+        cur.skip_newlines();
+        if cur.eat_punct(',') {
+            cur.skip_newlines();
+            continue;
+        }
+        break;
+    }
+    if !cur.done() {
+        return Err(cur.err("unexpected text in list"));
+    }
+    Ok(Expr::List(items))
+}
+
+/// Map literal attempt over a brace group's contents: comma-separated
+/// `key: value` entries with `gap` (never newline) around the colon.
+/// Any entry failing the shape is not a map: the caller reports the
+/// deferred block slice (the grammar tries `block` next, which fails
+/// the same inputs at this stage).
+fn parse_map_literal(inner: &[Tok], stmt: usize) -> Result<Expr, V2Error> {
+    let mut entries = Vec::new();
+    // Empty (or newline-only) braces are an empty map.
+    if inner.iter().all(|t| matches!(&t.kind, TokKind::Newline)) {
+        return Ok(Expr::Map(vec![]));
+    }
+    for part in split_top_commas(inner) {
+        let mut sub = Cursor::expr(part, stmt);
+        sub.skip_newlines();
+        let key = match sub.toks.get(sub.pos).map(|t| &t.kind) {
+            Some(TokKind::Str { text, .. }) => {
+                let key = text.clone();
+                sub.pos += 1;
+                key
+            }
+            Some(TokKind::BlockStr(full)) => {
+                let key = crate::command::lower_block_string(full);
+                sub.pos += 1;
+                key
+            }
+            Some(TokKind::Word(_)) | Some(TokKind::Punct('-')) => map_bare_key(&mut sub)?,
+            _ => return Err(sub.err("not a map literal")),
+        };
+        if !sub.eat_punct(':') {
+            return Err(sub.err("not a map literal"));
+        }
+        let val = parse_expr_checked(&mut sub)?;
+        reject_boundary(&lowering_ctx(stmt), &val).map_err(|e| sub.err(e.to_string()))?;
+        sub.skip_newlines();
+        if !sub.done() {
+            return Err(sub.err("not a map literal"));
+        }
+        entries.push((key, val));
+    }
+    Ok(Expr::Map(entries))
+}
+
+/// Bare map key: joint `-/.'/'`-run, mirroring `bare_word` charset
+/// (no bool/numeric classification: keys are always strings).
+fn map_bare_key(sub: &mut Cursor) -> Result<String, V2Error> {
+    let mut out = String::new();
+    if matches!(
+        sub.toks.get(sub.pos).map(|t| &t.kind),
+        Some(TokKind::Punct('-'))
+    ) {
+        out.push('-');
+        sub.pos += 1;
+    }
+    match sub.toks.get(sub.pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) => {
+            out.push_str(w);
+            sub.pos += 1;
+        }
+        _ => return Err(sub.err("not a map literal")),
+    }
+    while let Some(t) = sub.toks.get(sub.pos) {
+        if !t.joint {
+            break;
+        }
+        match &t.kind {
+            TokKind::Word(w) => {
+                out.push_str(w);
+                sub.pos += 1;
+            }
+            TokKind::Punct(c) if matches!(c, '-' | '.' | '/') => {
+                out.push(*c);
+                sub.pos += 1;
+            }
+            _ => break,
+        }
+    }
+    if out.contains('\\') {
+        return Err(sub.err("unexpected escape in map key"));
+    }
+    Ok(out)
+}
+
+fn parse_map_or_block(inner: &[Tok], stmt: usize) -> Result<Expr, V2Error> {
+    match parse_map_literal(inner, stmt) {
+        Ok(map) => Ok(map),
+        Err(_) => Err(V2Error {
+            stmt,
+            msg: "unsupported in parse_v2: inline blocks (later slice)".to_string(),
+        }),
+    }
+}
+
+/// Assignment `=`: the first `=` neither glued to a following `=`
+/// (`==`) nor glued after `!`/`<`/`>`/`=` (`!=`, `<=`, `>=`, second of
+/// `==`). Glued-ness reads off the `=`'s own `joint` (gap before it)
+/// and the follower's (gap after it). Anything else leaves the
+/// statement bare (`LET $p: PIPE`), exactly where the grammar's `"="`
+/// match fails.
+fn find_assign_eq(body: &[Tok]) -> Option<usize> {
+    for (i, tok) in body.iter().enumerate() {
+        if !matches!(&tok.kind, TokKind::Punct('=')) {
+            continue;
+        }
+        let next_eq = body
+            .get(i + 1)
+            .is_some_and(|t| t.joint && matches!(&t.kind, TokKind::Punct('=')));
+        let prev_op = tok.joint
+            && i > 0
+            && matches!(&body[i - 1].kind, TokKind::Punct('!' | '<' | '>' | '='));
+        if !next_eq && !prev_op {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Render a type region joint-aware (`LIST< MAP >` keeps its gaps for
+/// the shared canonicalizer, exactly like `type_tag.as_str()`).
+fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
+    let mut out = String::new();
+    for tok in toks {
+        if !tok.joint && !out.is_empty() {
+            out.push(' ');
+        }
+        match &tok.kind {
+            TokKind::Word(w) => out.push_str(w),
+            TokKind::Punct(c) => out.push(*c),
+            _ => {
+                return Err(V2Error {
+                    stmt,
+                    msg: "malformed type in LET".to_string(),
+                });
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err(V2Error {
+            stmt,
+            msg: "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
+        });
+    }
+    Ok(crate::canonicalize_spelling(&out))
+}
+
+fn expect_dollar_var(cur: &mut Cursor, msg: &str) -> Result<String, V2Error> {
+    match cur.next() {
+        Some(t) if matches!(&t.kind, TokKind::Punct('$')) => {}
+        _ => return Err(cur.err(msg)),
+    }
+    match cur.next() {
+        Some(t) => match &t.kind {
+            TokKind::Word(w) if is_ident_word(w) => Ok(w.clone()),
+            _ => Err(cur.err(msg)),
+        },
+        None => Err(cur.err(msg)),
+    }
+}
+
+fn parse_let_body(body: &[Tok], stmt: usize) -> Result<StepKind, V2Error> {
+    let mut cur = Cursor::expr(body, stmt);
+    match cur.next() {
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == "LET") => {}
+        _ => return Err(cur.err("unreachable")),
+    }
+    let var = expect_dollar_var(&mut cur, "LET requires a variable")?;
+    if !cur.eat_punct(':') {
+        return Err(cur.err("LET requires explicit type: LET $var: TYPE = <expr>"));
+    }
+    // Type region runs to the assignment `=`; it cannot contain one.
+    let type_start = cur.pos;
+    let assign = find_assign_eq(&body[type_start..]).map(|i| i + type_start);
+    let decl_type = render_type_region(&body[type_start..assign.unwrap_or(body.len())], stmt)?;
+    let expr = match assign {
+        Some(eq) => {
+            cur.pos = eq + 1;
+            let expr = parse_expr_checked(&mut cur)?;
+            if !cur.done() {
+                return Err(cur.err("unexpected text after LET expression"));
+            }
+            expr
+        }
+        // Bare `LET $p: PIPE` mints a fresh pipe; every other bare
+        // type is a validation error, mirroring the grammar.
+        None if decl_type == "PIPE" => Expr::FreshPipe,
+        None => {
+            return Err(cur.err(
+                "LET requires an expression: LET $var: TYPE = <expr> (only LET $p: PIPE omits the initializer)",
+            ));
+        }
+    };
+    Ok(StepKind::Assign {
+        var,
+        decl_type,
+        expr,
+    })
+}
+
+fn parse_set_body(body: &[Tok], stmt: usize) -> Result<StepKind, V2Error> {
+    let mut cur = Cursor::expr(body, stmt);
+    let var = expect_dollar_var(&mut cur, "mutation requires a variable: $var = <expr>")?;
+    let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);
+    let eq = match assign {
+        Some(eq) => eq,
+        None => {
+            return Err(cur.err("mutation requires a variable: $var = <expr>"));
+        }
+    };
+    cur.pos = eq + 1;
+    let expr = parse_expr_checked(&mut cur)?;
+    if !cur.done() {
+        return Err(cur.err("unexpected text after expression"));
+    }
+    Ok(StepKind::Set { var, expr })
+}
+
+fn parse_return_body(body: &[Tok], stmt: usize) -> Result<StepKind, V2Error> {
+    let mut cur = Cursor::expr(body, stmt);
+    match cur.next() {
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == "RETURN") => {}
+        _ => return Err(cur.err("unreachable")),
+    }
+    if cur.done() {
+        return Ok(StepKind::Return {
+            expr: Box::new(Expr::Literal(Value::string(String::new()))),
+        });
+    }
+    let expr = parse_expr_checked(&mut cur)?;
+    if !cur.done() {
+        return Err(cur.err("unexpected text after RETURN expression"));
+    }
+    Ok(StepKind::Return {
+        expr: Box::new(expr),
+    })
+}
+
 /// Lower one statement through the shared command dispatcher.
 fn lower_stmt(
     stmt: &Stmt,
@@ -868,6 +1725,35 @@ fn lower_stmt(
     lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
 ) -> Result<Step, V2Error> {
     let guard = parse_guard_groups(&stmt.guard, idx)?;
+    // Structural heads parse with groups intact (expression lists,
+    // maps, parens); only generic commands splice groups to raw text.
+    match stmt.body.first().map(|t| &t.kind) {
+        Some(TokKind::Word(name)) if name == "LET" => {
+            return Ok(Step {
+                guard,
+                kind: parse_let_body(&stmt.body, idx)?,
+                scope_enter: 0,
+                scope_exit: 0,
+            });
+        }
+        Some(TokKind::Word(name)) if name == "RETURN" => {
+            return Ok(Step {
+                guard,
+                kind: parse_return_body(&stmt.body, idx)?,
+                scope_enter: 0,
+                scope_exit: 0,
+            });
+        }
+        Some(TokKind::Punct('$')) => {
+            return Ok(Step {
+                guard,
+                kind: parse_set_body(&stmt.body, idx)?,
+                scope_enter: 0,
+                scope_exit: 0,
+            });
+        }
+        _ => {}
+    }
     let name = match stmt.body.first().map(|t| &t.kind) {
         Some(TokKind::Word(n)) => n.clone(),
         _ => {
@@ -880,14 +1766,14 @@ fn lower_stmt(
     if crate::STRUCTURAL_KEYWORDS.contains(&name.as_str()) {
         return Err(V2Error {
             stmt: idx,
-            msg: format!("unsupported in parse_v2 slice 1: `{name}`"),
+            msg: format!("unsupported in parse_v2: `{name}` (later slice)"),
         });
     }
     match crate::Command::parse(&name) {
         Some(cmd) if cmd.expects_inner_command() => {
             return Err(V2Error {
                 stmt: idx,
-                msg: format!("unsupported in parse_v2 slice 1: wrapper `{name}`"),
+                msg: format!("unsupported in parse_v2: wrapper `{name}` (later slice)"),
             });
         }
         _ => {}
@@ -945,9 +1831,10 @@ mod tests {
     /// Differential oracle: v2 must equal pest on slice-2 scripts,
     /// through both lexers.
     fn assert_parity(text: &str) {
-        let old = crate::parse_script(text, lower).expect("pest must parse parity script");
+        let old = crate::parse_script(text, lower)
+            .unwrap_or_else(|e| panic!("pest must parse parity script {text:?}: {e}"));
         let toks = crate::tok::lex_str(text).expect("string lex must succeed");
-        let new = parse_v2(&toks, lower).expect("v2 must parse parity script");
+        let new = parse_v2(&toks, lower).unwrap_or_else(|e| panic!("v2 must parse {text:?}: {e}"));
         assert_eq!(new, old, "v2/string-lex mismatch for {text:?}");
         #[cfg(feature = "proc-macro-api")]
         {
@@ -961,9 +1848,10 @@ mod tests {
     /// String-path-only oracle for shapes `rustc` cannot carry at all
     /// (lifetime-like quotes). v2 must still equal pest there.
     fn assert_parity_string_only(text: &str) {
-        let old = crate::parse_script(text, lower).expect("pest must parse parity script");
+        let old = crate::parse_script(text, lower)
+            .unwrap_or_else(|e| panic!("pest must parse parity script {text:?}: {e}"));
         let toks = crate::tok::lex_str(text).expect("string lex must succeed");
-        let new = parse_v2(&toks, lower).expect("v2 must parse parity script");
+        let new = parse_v2(&toks, lower).unwrap_or_else(|e| panic!("v2 must parse {text:?}: {e}"));
         assert_eq!(new, old, "v2/string-lex mismatch for {text:?}");
     }
 
@@ -1038,13 +1926,66 @@ mod tests {
     }
 
     #[test]
+    fn v2_matches_pest_on_let_set_return() {
+        for text in [
+            "LET $x: INT = 1",
+            "LET $s: STRING = \"hi\"",
+            "LET $b: BOOL = true",
+            "LET $f: FLOAT = 1.5",
+            "LET $p: PIPE",
+            "LET $l: LIST<STRING> = [\"a\", \"b\"]",
+            "LET $e: LIST<STRING> = []",
+            "LET $m: MAP = {k: 1}",
+            "LET $m2: MAP = {\"a b\": 2, k: [1, 2]}",
+            "LET $n: INT = $a + $b",
+            "LET $c: BOOL = ($a == 3) && ($b == 4)",
+            "LET $g: BOOL = !$ok",
+            "LET $nn: BOOL = true && false",
+            "LET $e2: STRING = env:HOME",
+            "LET $k: STRING = $a.b.c",
+            "LET $u: INT = -5",
+            "LET $v: INT = 9223372036854775807",
+            "LET $min: INT = -9223372036854775808",
+            "LET $w: INT = 1_000",
+            "LET $z: STRING = a/b",
+            "LET $d: STRING = -f",
+            "LET $t: STRING = 30s",
+            "LET $q: STRING = \"\"\"hi\"\"\"",
+            "LET $f2: FLOAT = 2 * -3",
+            "LET $o: BOOL = 2 + 3 > 4",
+            "LET $l2: LIST< MAP > = []",
+            "LET $a1: INT = 1 + 2",
+            "LET $s1: INT = 10 - 4 - 3",
+            "LET $m1: INT = 2 * 3 + 4",
+            "LET $x1: BOOL = 1 < 2 == true",
+            "LET $or: BOOL = $a || $b",
+            "LET $dbl: BOOL = !!$x",
+            "LET $ver: STRING = 1.0.0",
+            "LET $dash: STRING = a-b",
+            "LET $div: INT = 4 / 2",
+            "LET $bad: INT = 1__0 + 0",
+            "LET $strdiv: STRING = 4/2",
+            "LET $sp: INT = $a - $b",
+            "$x = 1",
+            "$x = $a + 1",
+            "RETURN 1",
+            "RETURN",
+            "RETURN $x",
+            "[env:X] LET $x: INT = 1",
+            "[os:linux] $x = 2",
+        ] {
+            assert_parity(text);
+        }
+    }
+
+    #[test]
     fn v2_rejects_slices_not_yet_built() {
         // Structural shapes v2 does not build yet (pest accepts; v2
         // must fail explicitly, never drift).
         for text in [
-            "LET $x: INT = 1",
             "WITH_IO [stdout=$p] ECHO hi",
             "IF true { ECHO hi }",
+            "FOR $x IN [1] { ECHO hi }",
         ] {
             let toks = crate::tok::lex_str(text).expect("lex must succeed");
             assert!(
@@ -1053,7 +1994,10 @@ mod tests {
             );
         }
         // Malformed shapes fail on both pathways (messages may differ
-        // until cutover; success/failure must agree).
+        // until cutover; success/failure must agree). Unbalanced groups
+        // fail even earlier, at lex time (the pest grammar rejects the
+        // same inputs at parse): both layers reject, which is what the
+        // oracle pins.
         for text in [
             "[a] ECHO hi",
             "[os:atari] ECHO hi",
@@ -1066,15 +2010,53 @@ mod tests {
             "ECHO [a;b]",
             "ECHO (a;b)",
             "ECHO a;b",
+            "LET $x = 1",
+            "LET $s: STRING",
+            "LET $x: INT = 1 2",
+            "LET $x: INT = (1",
+            "LET $x: INT = 9223372036854775808",
+            "$x =",
+            "RETURN (",
+            "[env:X]",
+            "LET $x: INT = $a == $b == $c",
+            "LET $bs: STRING = a\\nb",
         ] {
-            let toks = crate::tok::lex_str(text).expect("lex must succeed");
-            assert!(
-                parse_v2(&toks, lower).is_err(),
-                "v2 must explicitly reject (not silently drift): {text:?}"
-            );
+            match crate::tok::lex_str(text) {
+                Err(_) => {
+                    assert!(
+                        crate::parse_script(text, lower).is_err(),
+                        "pest must also reject lex-broken input: {text:?}"
+                    );
+                    continue;
+                }
+                Ok(toks) => {
+                    assert!(
+                        parse_v2(&toks, lower).is_err(),
+                        "v2 must explicitly reject (not silently drift): {text:?}"
+                    );
+                }
+            }
             assert!(
                 crate::parse_script(text, lower).is_err(),
                 "pest must also reject (oracle agreement): {text:?}"
+            );
+        }
+        // Deferred shapes pest accepts: v2 must fail with an explicit
+        // unsupported marker (matched by prefix, so the oracle also
+        // pins the deferral taxonomy).
+        for text in [
+            "LET $s: STRING = INSPECT($x)",
+            "LET $b: STRING = { RETURN \"hi\" }",
+        ] {
+            let toks = crate::tok::lex_str(text).expect("lex must succeed");
+            let err = parse_v2(&toks, lower).expect_err("v2 must defer, not drift");
+            assert!(
+                err.msg.starts_with("unsupported in parse_v2"),
+                "deferral must be explicit: {text:?} -> {err}"
+            );
+            assert!(
+                crate::parse_script(text, lower).is_ok(),
+                "pest must accept deferred shape (proves the deferral): {text:?}"
             );
         }
     }
