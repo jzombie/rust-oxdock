@@ -2,6 +2,9 @@ use oxdock_parser::ast::*;
 use oxdock_parser::parse_braced_tokens_with_modules;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use proptest::strategy::ValueTree;
+use proptest::test_runner::TestRunner;
+use std::collections::HashSet;
 use std::str::FromStr;
 
 // Strategies
@@ -1686,5 +1689,131 @@ fn fuzz_inventory_covers_claimed_kinds() {
         zero_markers(&mut tokenized);
         assert_steps_eq(&parsed[0], &step, &format!("String mismatch: {s}"));
         assert_steps_eq(&tokenized[0], &step, &format!("Token mismatch: {s}"));
+    }
+    // No exact-duplicate samples: a copy-pasted entry would let a
+    // missing variant hide behind sample count. (Same-discriminant
+    // samples with different bodies are legitimate: e.g. plain
+    // `Isolated` and `Isolated` holding `IsolatedInheritEnv`.)
+    let mut seen = HashSet::new();
+    for step_kind in &samples {
+        assert!(
+            seen.insert(format!("{step_kind:?}")),
+            "duplicate sample entry: {step_kind:?}"
+        );
+    }
+}
+
+/// The excluded set, beside the covered samples: every `false` arm in
+/// `fuzz_covers_kind` needs a witness here so the exclusion tests below
+/// can prove it honest instead of asserting it.
+fn sample_excluded_kinds() -> Vec<StepKind> {
+    vec![StepKind::WithIoBlock {
+        bindings: vec![IoBinding {
+            stream: IoStream::Stdout,
+            pipe: Some(PipeTarget::Var("coverage".to_string())),
+        }],
+    }]
+}
+
+// Forward direction: the generator never emits a kind the inventory
+// disclaims. Flipping a `true` arm to `false` while its generator arm
+// remains fails here, so dodging coverage means deleting the generator
+// too, which is review-visible, not silent.
+proptest! {
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "requires real TokenStream/proc-macro parsing to validate API parity"
+    )]
+    fn fuzz_generator_only_emits_claimed_kinds(kind in arb_step_kind()) {
+        assert!(
+            fuzz_covers_kind(&kind),
+            "generator emitted disclaimed kind: {kind:?}"
+        );
+    }
+}
+
+/// Reverse direction: every claimed kind is actually hit by the
+/// generator. Flipping a `false` arm to `true` without generator support
+/// fails here. Deterministic RNG with 20k draws over ~50 arms: missing a
+/// live arm is e^-400 unlikely, so a failure means the claim is fake.
+/// (If this ever flakes, the arm is too rare to matter and should move
+/// to deterministic samples, not get a retry loop.)
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires real TokenStream/proc-macro parsing to validate API parity"
+)]
+fn fuzz_generator_hits_every_claimed_kind() {
+    let mut runner = TestRunner::deterministic();
+    let mut hit = HashSet::new();
+    for _ in 0..20_000 {
+        let kind = arb_step_kind()
+            .new_tree(&mut runner)
+            .expect("strategy must generate")
+            .current();
+        hit.insert(std::mem::discriminant(&kind));
+    }
+    for step_kind in sample_covered_kinds() {
+        assert!(
+            hit.contains(&std::mem::discriminant(&step_kind)),
+            "claimed-covered kind never generated (fake true?): {step_kind:?}"
+        );
+    }
+}
+
+/// Exclusions must be honest: every disclaimed kind fails to round-trip
+/// through at least one pathway (proving no source text can carry it)
+/// and never appears in generator output. A generatable kind marked
+/// `false` fails here or in the forward test above.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires real TokenStream/proc-macro parsing to validate API parity"
+)]
+fn fuzz_excluded_kinds_are_genuinely_unroundtrippable() {
+    let excluded = sample_excluded_kinds();
+    assert!(
+        !excluded.is_empty(),
+        "exclusion list must witness every false arm"
+    );
+    for step_kind in &excluded {
+        assert!(
+            !fuzz_covers_kind(step_kind),
+            "exclusion witness claims coverage: {step_kind:?}"
+        );
+        let step = Step {
+            guard: None,
+            kind: step_kind.clone(),
+            scope_enter: 0,
+            scope_exit: 0,
+        };
+        let s = step.to_string();
+        // The honest property is discriminant-level: no parsed script
+        // may ever hold this node (content equality would need PartialEq
+        // plumbing; survival is the claim being tested).
+        let survives = oxdock_core::parse_script(&s).is_ok_and(|steps| {
+            steps.len() == 1
+                && steps
+                    .iter()
+                    .any(|st| std::mem::discriminant(&st.kind) == std::mem::discriminant(step_kind))
+        });
+        assert!(
+            !survives,
+            "excluded kind survives string parsing, so `false` is a lie: {s:?}"
+        );
+    }
+    let mut runner = TestRunner::deterministic();
+    for _ in 0..20_000 {
+        let kind = arb_step_kind()
+            .new_tree(&mut runner)
+            .expect("strategy must generate")
+            .current();
+        assert!(
+            !excluded
+                .iter()
+                .any(|e| std::mem::discriminant(e) == std::mem::discriminant(&kind)),
+            "generator emitted excluded kind: {kind:?}"
+        );
     }
 }
