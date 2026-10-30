@@ -210,51 +210,6 @@ enum BlockKind {
 }
 
 #[derive(Default)]
-struct IoBindingSet {
-    stdin: Option<IoBinding>,
-    stdout: Option<IoBinding>,
-    stderr: Option<IoBinding>,
-    tty: Option<IoBinding>,
-    rows: Option<IoBinding>,
-    cols: Option<IoBinding>,
-}
-
-impl IoBindingSet {
-    fn insert(&mut self, binding: IoBinding) {
-        match binding.stream {
-            IoStream::Stdin => self.stdin = Some(binding),
-            IoStream::Stdout => self.stdout = Some(binding),
-            IoStream::Stderr => self.stderr = Some(binding),
-            IoStream::Tty => self.tty = Some(binding),
-            IoStream::Rows(_) => self.rows = Some(binding),
-            IoStream::Cols(_) => self.cols = Some(binding),
-        }
-    }
-
-    fn into_vec(self) -> Vec<IoBinding> {
-        let mut out = Vec::new();
-        if let Some(binding) = self.stdin {
-            out.push(binding);
-        }
-        if let Some(binding) = self.stdout {
-            out.push(binding);
-        }
-        if let Some(binding) = self.stderr {
-            out.push(binding);
-        }
-        if let Some(binding) = self.tty {
-            out.push(binding);
-        }
-        if let Some(binding) = self.rows {
-            out.push(binding);
-        }
-        if let Some(binding) = self.cols {
-            out.push(binding);
-        }
-        out
-    }
-}
-
 pub struct ScriptParser<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> {
     input: &'a str,
     tokens: VecDeque<RawToken<'a>>,
@@ -622,7 +577,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                         }
                     }
                     kind => {
-                        if contains_inherit_env(kind) {
+                        if crate::commands::contains_inherit_env(kind) {
                             let ctx = span(index);
                             return Err(ParseError::structural(
                                 "inherit_env",
@@ -813,7 +768,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             guard
         };
         let parent = self.guard_stack.last().cloned().unwrap_or(None);
-        let next = and_guard_exprs(parent, Some(composed));
+        let next = crate::commands::and_guard_exprs(parent, Some(composed));
         self.guard_stack.push(next);
         self.scope_stack.push(ScopeFrame {
             line_no,
@@ -954,11 +909,11 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
     fn guard_context(&mut self, inline: Option<GuardExpr>) -> Option<GuardExpr> {
         let mut context = self.guard_stack.last().cloned().unwrap_or(None);
         if let Some(pending) = self.pending_guards.take() {
-            context = and_guard_exprs(context, Some(pending));
+            context = crate::commands::and_guard_exprs(context, Some(pending));
             self.pending_can_open_block = false;
         }
         if let Some(inline_guard) = inline {
-            context = and_guard_exprs(context, Some(inline_guard));
+            context = crate::commands::and_guard_exprs(context, Some(inline_guard));
         }
         context
     }
@@ -1004,7 +959,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         }
         match kind {
             StepKind::WithIo { bindings, cmd } => StepKind::WithIo {
-                bindings: merge_bindings(&defaults, &bindings),
+                bindings: crate::commands::merge_bindings(&defaults, &bindings),
                 cmd,
             },
             other => StepKind::WithIo {
@@ -1018,7 +973,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         if self.io_scope_stack.is_empty() {
             return Vec::new();
         }
-        let mut set = IoBindingSet::default();
+        let mut set = crate::commands::IoBindingSet::default();
         for frame in &self.io_scope_stack {
             for binding in &frame.bindings {
                 set.insert(binding.clone());
@@ -1029,7 +984,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
 
     fn apply_io_guards(&self, guard: Option<GuardExpr>) -> Option<GuardExpr> {
         self.io_scope_stack.iter().fold(guard, |acc, frame| {
-            and_guard_exprs(acc, frame.guards.clone())
+            crate::commands::and_guard_exprs(acc, frame.guards.clone())
         })
     }
 }
@@ -1257,14 +1212,6 @@ pub fn parse_guard_expr_str(input: &str) -> ParseResult<GuardExpr> {
     parse_guard_expr(&ctx, pair)
 }
 
-fn and_guard_exprs(left: Option<GuardExpr>, right: Option<GuardExpr>) -> Option<GuardExpr> {
-    match (left, right) {
-        (None, None) => None,
-        (Some(expr), None) | (None, Some(expr)) => Some(expr),
-        (Some(lhs), Some(rhs)) => Some(GuardExpr::all(vec![lhs, rhs])),
-    }
-}
-
 /// Candidate structural rules for a fragmented keyword head (issue #215).
 /// Each rule opens its `block` on the head line and may nest further
 /// blocks, so re-parsing the tail with it surfaces pest's deepest inner
@@ -1367,17 +1314,6 @@ fn refine_fragmented_block_error(
         .with_step(step_index.unwrap_or(0))
 }
 
-fn merge_bindings(defaults: &[IoBinding], overrides: &[IoBinding]) -> Vec<IoBinding> {
-    let mut set = IoBindingSet::default();
-    for binding in defaults {
-        set.insert(binding.clone());
-    }
-    for binding in overrides {
-        set.insert(binding.clone());
-    }
-    set.into_vec()
-}
-
 /// Reject `COPY --from-host` / `--to-host` outside `REMOTE` bodies.
 /// Transfer declarations only mean something where a session hoists them;
 /// anywhere else they would silently behave as local copies.
@@ -1408,70 +1344,6 @@ fn validate_remote_copy_placement(steps: &[Step], ctx: &SpanContext) -> ParseRes
         visit_kind(&step.kind, false, ctx)?;
     }
     Ok(())
-}
-
-fn contains_inherit_env(kind: &StepKind) -> bool {
-    if matches!(kind, StepKind::InheritEnv { .. }) {
-        return true;
-    }
-    let mut found = false;
-    kind.walk_child_kinds(&mut |child| {
-        found = found || contains_inherit_env(child);
-    });
-    found
-}
-
-/// True when bindings reroute stdout into a named pipe. A `LET`-capture owns
-/// the step's stdout, so combining the two is a parse error.
-fn has_stdout_pipe(bindings: &[IoBinding]) -> bool {
-    bindings
-        .iter()
-        .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
-}
-
-/// Reject async machinery inside a capture body: background tasks are
-/// captured via `LET $o: STRING = AWAIT $t`, never inline.
-fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
-    let bad = match kind {
-        StepKind::AsyncBlock { .. }
-        | StepKind::AssignAsync { .. }
-        | StepKind::Await { .. }
-        | StepKind::AwaitCapture { .. }
-        | StepKind::Cancel { .. } => true,
-        _ => {
-            let mut bad = false;
-            kind.walk_child_kinds(&mut |child| {
-                bad = bad || reject_async_in_capture(ctx, child).is_err();
-            });
-            bad
-        }
-    };
-    if bad {
-        return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
-    }
-    Ok(())
-}
-
-/// Reject `WITH_IO [stdout=$var]` anywhere inside a capture body: the
-/// capture sink owns stdout.
-fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
-    if let StepKind::WithIo { bindings, .. } = kind
-        && has_stdout_pipe(bindings)
-    {
-        return Err(ParseError::structural(
-            "let",
-            "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
-                .to_string(),
-            ctx,
-        ));
-    }
-    let mut result = Ok(());
-    kind.walk_child_kinds(&mut |child| {
-        if result.is_ok() {
-            result = reject_pipe_stdout_in_capture(ctx, child);
-        }
-    });
-    result
 }
 
 /// Re-parse raw RHS text as an expression (fallback when the `LET` RHS lead
@@ -1585,7 +1457,7 @@ fn parse_structural_command_with_lower(
                 }
             }
             if let Some(cmd) = cmd {
-                check_tty_wrapping(&bindings, Some(cmd.as_ref()), &span)?;
+                crate::commands::check_tty_wrapping(&bindings, Some(cmd.as_ref()), &span)?;
                 StepKind::WithIo { bindings, cmd }
             } else {
                 StepKind::WithIoBlock { bindings }
@@ -2405,10 +2277,10 @@ fn parse_let_async_statement_from_pair(
                         }]);
                     }
                     sync_cmd => {
-                        if has_stdout_pipe(&bindings) {
+                        if crate::commands::has_stdout_pipe(&bindings) {
                             return Err(ParseError::structural("let", "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout".to_string(), &span));
                         }
-                        reject_async_in_capture(ctx, &sync_cmd)?;
+                        crate::commands::reject_async_in_capture(ctx, &sync_cmd)?;
                         let name = var.clone().ok_or_else(|| {
                             ParseError::validation(
                                 "LET",
@@ -2535,8 +2407,8 @@ fn parse_let_capture_statement_from_pair(
     }
     if let Some(timeouted) = timeout_pair {
         let kind = parse_structural_command_with_lower(ctx, timeouted, lctx)?;
-        reject_async_in_capture(ctx, &kind)?;
-        reject_pipe_stdout_in_capture(ctx, &kind)?;
+        crate::commands::reject_async_in_capture(ctx, &kind)?;
+        crate::commands::reject_pipe_stdout_in_capture(ctx, &kind)?;
         return Ok(StepKind::AssignCapture {
             var,
             decl_type: dtype,
@@ -2545,8 +2417,8 @@ fn parse_let_capture_statement_from_pair(
     }
     if let Some(exec) = run_exec_pair {
         let kind = lower_run_exec_pair(ctx, exec, lctx)?;
-        reject_async_in_capture(ctx, &kind)?;
-        reject_pipe_stdout_in_capture(ctx, &kind)?;
+        crate::commands::reject_async_in_capture(ctx, &kind)?;
+        crate::commands::reject_pipe_stdout_in_capture(ctx, &kind)?;
         return Ok(StepKind::AssignCapture {
             var,
             decl_type: dtype,
@@ -2571,8 +2443,8 @@ fn parse_let_capture_statement_from_pair(
             // exhaust small stacks (musl release runner); spans also
             // keep their real line numbers this way.
             let kind = lower_instruction_pair(ctx, ins, lctx)?;
-            reject_async_in_capture(ctx, &kind)?;
-            reject_pipe_stdout_in_capture(ctx, &kind)?;
+            crate::commands::reject_async_in_capture(ctx, &kind)?;
+            crate::commands::reject_pipe_stdout_in_capture(ctx, &kind)?;
             return Ok(StepKind::AssignCapture {
                 var,
                 decl_type: dtype,
@@ -2739,7 +2611,7 @@ fn parse_isolated_statement_from_pair(
             &span,
         )
     })?;
-    rewrite_isolated_inherit(&mut body);
+    crate::commands::rewrite_isolated_inherit(&mut body);
     Ok(StepKind::Isolated { body })
 }
 
@@ -2838,58 +2710,6 @@ fn parse_timeout_statement_from_pair(
 /// have no session, no inventory, and no defined sync boundary.
 fn contains_remote_block(steps: &[Step]) -> bool {
     steps.iter().any(|step| contains_remote_kind(&step.kind))
-}
-
-/// Rewrite prelude-shaped `INHERIT_ENV` nodes anywhere inside an `ISOLATED`
-/// body into `IsolatedInheritEnv`: the nested allowlist reads the isolated
-/// snapshot, never the host. Distinct node, distinct read rule, so the
-/// prelude validator (which only knows `InheritEnv`) never fires here and
-/// diagnostics stay unambiguous.
-fn rewrite_isolated_inherit(body: &mut [Step]) {
-    for step in body {
-        rewrite_isolated_inherit_kind(&mut step.kind);
-    }
-}
-
-/// Single-kind half of [`rewrite_isolated_inherit`]: rewrite the node
-/// itself, then recurse through whatever it contains (`WITH_IO` wraps and
-/// `LET`-capture nest one boxed command; every other body is a step
-/// slice with the same treatment). `FUNC` and `REMOTE` bodies are
-/// deliberately skipped: function bodies execute at call time (possibly
-/// after the block exits and its snapshot is gone) and remote bodies ship
-/// to guests under their own bridging, so a nested `INHERIT_ENV` there
-/// keeps the standard prelude-nesting rejection instead of silently
-/// changing read rules.
-fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
-    if let StepKind::InheritEnv { keys } = kind {
-        *kind = StepKind::IsolatedInheritEnv { keys: keys.clone() };
-    }
-    match kind {
-        StepKind::For { body, .. }
-        | StepKind::While { body, .. }
-        | StepKind::Timeout { body, .. }
-        | StepKind::Isolated { body }
-        | StepKind::AssignAsync { body, .. }
-        | StepKind::AsyncBlock { body } => rewrite_isolated_inherit(body),
-        StepKind::If {
-            then_body,
-            else_ifs,
-            else_body,
-            ..
-        } => {
-            rewrite_isolated_inherit(then_body);
-            for (_, branch) in else_ifs {
-                rewrite_isolated_inherit(branch);
-            }
-            if let Some(else_body) = else_body {
-                rewrite_isolated_inherit(else_body);
-            }
-        }
-        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
-            rewrite_isolated_inherit_kind(cmd);
-        }
-        _ => {}
-    }
 }
 
 fn contains_remote_kind(kind: &StepKind) -> bool {
@@ -3046,7 +2866,10 @@ fn parse_remote_statement_from_pair(
             &span,
         ));
     }
-    if body.iter().any(|s| contains_inherit_env(&s.kind)) {
+    if body
+        .iter()
+        .any(|s| crate::commands::contains_inherit_env(&s.kind))
+    {
         return Err(ParseError::validation(
             "REMOTE",
             "INHERIT_ENV cannot appear inside a REMOTE block: the guest inherits its own process environment".to_string(),
@@ -3260,11 +3083,7 @@ fn parse_async_statement_from_pair(
         }
     }
     if let Some(body) = block_body {
-        for step in &body {
-            if matches!(&step.kind, StepKind::WithIo { .. }) {
-                return Err(ParseError::structural("async", "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(), &span));
-            }
-        }
+        crate::commands::reject_with_io_in_async(&span, &body)?;
         Ok(StepKind::AsyncBlock { body })
     } else if let Some(cmd) = inner_cmd {
         if matches!(&cmd, StepKind::WithIo { .. }) {
@@ -3306,11 +3125,7 @@ fn parse_async_statement_block_from_pair(
             &span,
         )
     })?;
-    for step in &body {
-        if matches!(&step.kind, StepKind::WithIo { .. }) {
-            return Err(ParseError::structural("async", "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(), &span));
-        }
-    }
+    crate::commands::reject_with_io_in_async(&span, &body)?;
     Ok(StepKind::AsyncBlock { body })
 }
 
@@ -3596,50 +3411,6 @@ fn parse_guard_line(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExp
         "guard line missing expression".to_string(),
         &span,
     ))
-}
-
-/// Direct-form `WITH_IO [tty]` validity, checked while the wrapped
-/// command is still in hand so misuse fails at parse with a span.
-/// Block-expanded bindings skip this (their steps never re-enter
-/// lowering); the runtime resolver repeats the same checks, so every
-/// construction fails with one story.
-fn check_tty_wrapping(
-    bindings: &[IoBinding],
-    cmd: Option<&StepKind>,
-    span: &SpanContext,
-) -> ParseResult<()> {
-    let has_tty = bindings.iter().any(|b| matches!(b.stream, IoStream::Tty));
-    let has_geometry = bindings
-        .iter()
-        .any(|b| matches!(b.stream, IoStream::Rows(_) | IoStream::Cols(_)));
-    if has_geometry && !has_tty {
-        return Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size".to_string(),
-            span,
-        ));
-    }
-    if !has_tty {
-        return Ok(());
-    }
-    if bindings
-        .iter()
-        .any(|b| matches!(b.stream, IoStream::Stderr))
-    {
-        return Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex".to_string(),
-            span,
-        ));
-    }
-    match cmd {
-        Some(StepKind::Run(_) | StepKind::RunExec { .. }) | None => Ok(()),
-        Some(_) => Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it".to_string(),
-            span,
-        )),
-    }
 }
 
 fn parse_io_binding(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<IoBinding> {

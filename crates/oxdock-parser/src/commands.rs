@@ -15,7 +15,7 @@
 use std::fmt;
 
 use crate::ast::{
-    Arg, ArgPart, Expr, IoBinding, IoStream, PipeTarget, Step, Value, WorkspaceTarget,
+    Arg, ArgPart, Expr, GuardExpr, IoBinding, IoStream, PipeTarget, Step, Value, WorkspaceTarget,
 };
 use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
@@ -4043,6 +4043,248 @@ pub(crate) fn lower_expand_tokens(
         }
     }
     Ok(StepKind::Expand { path, overrides })
+}
+
+/// Wrapper-shared validators, promoted verbatim from the pest backend
+/// (`LowerCtx`/`ScriptParser` delegate) so both parse pathways enforce
+/// identical bodies. Pure outcome logic over [`StepKind`]: contexts only
+/// feed error spans.
+#[derive(Default)]
+pub(crate) struct IoBindingSet {
+    stdin: Option<IoBinding>,
+    stdout: Option<IoBinding>,
+    stderr: Option<IoBinding>,
+    tty: Option<IoBinding>,
+    rows: Option<IoBinding>,
+    cols: Option<IoBinding>,
+}
+
+impl IoBindingSet {
+    pub(crate) fn insert(&mut self, binding: IoBinding) {
+        match binding.stream {
+            IoStream::Stdin => self.stdin = Some(binding),
+            IoStream::Stdout => self.stdout = Some(binding),
+            IoStream::Stderr => self.stderr = Some(binding),
+            IoStream::Tty => self.tty = Some(binding),
+            IoStream::Rows(_) => self.rows = Some(binding),
+            IoStream::Cols(_) => self.cols = Some(binding),
+        }
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<IoBinding> {
+        let mut out = Vec::new();
+        if let Some(binding) = self.stdin {
+            out.push(binding);
+        }
+        if let Some(binding) = self.stdout {
+            out.push(binding);
+        }
+        if let Some(binding) = self.stderr {
+            out.push(binding);
+        }
+        if let Some(binding) = self.tty {
+            out.push(binding);
+        }
+        if let Some(binding) = self.rows {
+            out.push(binding);
+        }
+        if let Some(binding) = self.cols {
+            out.push(binding);
+        }
+        out
+    }
+}
+
+pub(crate) fn merge_bindings(defaults: &[IoBinding], overrides: &[IoBinding]) -> Vec<IoBinding> {
+    let mut set = IoBindingSet::default();
+    for binding in defaults {
+        set.insert(binding.clone());
+    }
+    for binding in overrides {
+        set.insert(binding.clone());
+    }
+    set.into_vec()
+}
+
+pub(crate) fn and_guard_exprs(
+    left: Option<GuardExpr>,
+    right: Option<GuardExpr>,
+) -> Option<GuardExpr> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(expr), None) | (None, Some(expr)) => Some(expr),
+        (Some(lhs), Some(rhs)) => Some(GuardExpr::all(vec![lhs, rhs])),
+    }
+}
+
+pub(crate) fn has_stdout_pipe(bindings: &[IoBinding]) -> bool {
+    bindings
+        .iter()
+        .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
+}
+
+/// Reject async machinery inside a capture body: background tasks are
+/// captured via `LET $o: STRING = AWAIT $t`, never inline.
+pub(crate) fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
+    let bad = match kind {
+        StepKind::AsyncBlock { .. }
+        | StepKind::AssignAsync { .. }
+        | StepKind::Await { .. }
+        | StepKind::AwaitCapture { .. }
+        | StepKind::Cancel { .. } => true,
+        _ => {
+            let mut bad = false;
+            kind.walk_child_kinds(&mut |child| {
+                bad = bad || reject_async_in_capture(ctx, child).is_err();
+            });
+            bad
+        }
+    };
+    if bad {
+        return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
+    }
+    Ok(())
+}
+
+/// Reject `WITH_IO [stdout=$var]` anywhere inside a capture body: the
+/// capture sink owns stdout.
+pub(crate) fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
+    if let StepKind::WithIo { bindings, .. } = kind
+        && has_stdout_pipe(bindings)
+    {
+        return Err(ParseError::structural(
+            "let",
+            "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
+                .to_string(),
+            ctx,
+        ));
+    }
+    let mut result = Ok(());
+    kind.walk_child_kinds(&mut |child| {
+        if result.is_ok() {
+            result = reject_pipe_stdout_in_capture(ctx, child);
+        }
+    });
+    result
+}
+
+/// Rewrite prelude-shaped `INHERIT_ENV` nodes anywhere inside an `ISOLATED`
+/// body into `IsolatedInheritEnv`: the nested allowlist reads the isolated
+/// snapshot, never the host.
+pub(crate) fn rewrite_isolated_inherit(body: &mut [Step]) {
+    for step in body {
+        rewrite_isolated_inherit_kind(&mut step.kind);
+    }
+}
+
+/// Single-kind half of [`rewrite_isolated_inherit`]: rewrite the node
+/// itself, then recurse through whatever it contains (`WITH_IO` wraps and
+/// captures hold one kind; loop/if bodies hold steps).
+pub(crate) fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
+    if let StepKind::InheritEnv { keys } = kind {
+        *kind = StepKind::IsolatedInheritEnv { keys: keys.clone() };
+    }
+    match kind {
+        StepKind::For { body, .. }
+        | StepKind::While { body, .. }
+        | StepKind::Timeout { body, .. }
+        | StepKind::Isolated { body }
+        | StepKind::AssignAsync { body, .. }
+        | StepKind::AsyncBlock { body } => rewrite_isolated_inherit(body),
+        StepKind::If {
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            rewrite_isolated_inherit(then_body);
+            for (_, branch) in else_ifs {
+                rewrite_isolated_inherit(branch);
+            }
+            if let Some(else_body) = else_body {
+                rewrite_isolated_inherit(else_body);
+            }
+        }
+        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
+            rewrite_isolated_inherit_kind(cmd);
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn contains_inherit_env(kind: &StepKind) -> bool {
+    if matches!(kind, StepKind::InheritEnv { .. }) {
+        return true;
+    }
+    let mut found = false;
+    kind.walk_child_kinds(&mut |child| {
+        found = found || contains_inherit_env(child);
+    });
+    found
+}
+
+/// Reject an `INHERIT_ENV` nested anywhere inside another command: the
+/// prelude directive only reads at statement level (and, rewritten,
+/// inside `ISOLATED` bodies, which never reach here).
+pub(crate) fn reject_nested_inherit_env(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
+    if contains_inherit_env(kind) {
+        return Err(ParseError::structural(
+            "inherit_env",
+            "INHERIT_ENV cannot be nested inside other commands".to_string(),
+            ctx,
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_tty_wrapping(
+    bindings: &[IoBinding],
+    cmd: Option<&StepKind>,
+    span: &SpanContext,
+) -> ParseResult<()> {
+    let has_tty = bindings.iter().any(|b| matches!(b.stream, IoStream::Tty));
+    let has_geometry = bindings
+        .iter()
+        .any(|b| matches!(b.stream, IoStream::Rows(_) | IoStream::Cols(_)));
+    if has_geometry && !has_tty {
+        return Err(ParseError::structural(
+            "with_io",
+            "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size".to_string(),
+            span,
+        ));
+    }
+    if !has_tty {
+        return Ok(());
+    }
+    if bindings
+        .iter()
+        .any(|b| matches!(b.stream, IoStream::Stderr))
+    {
+        return Err(ParseError::structural(
+            "with_io",
+            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex".to_string(),
+            span,
+        ));
+    }
+    match cmd {
+        Some(StepKind::Run(_) | StepKind::RunExec { .. }) | None => Ok(()),
+        Some(_) => Err(ParseError::structural(
+            "with_io",
+            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it".to_string(),
+            span,
+        )),
+    }
+}
+
+/// Reject `WITH_IO` steps directly inside an `ASYNC` body: pipe wiring
+/// belongs outside the task (`WITH_IO [...] ASYNC ...`), never inside.
+pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> ParseResult<()> {
+    for step in body {
+        if matches!(&step.kind, StepKind::WithIo { .. }) {
+            return Err(ParseError::structural("async", "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(), ctx));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
