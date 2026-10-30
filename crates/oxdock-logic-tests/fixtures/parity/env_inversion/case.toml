@@ -1,3 +1,3 @@
 [expect]
   [expect.error]
-  contains = "expected"
+  contains = "unexpected `!` in guard; negation uses `not(...)`"

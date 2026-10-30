@@ -15,6 +15,7 @@
 //! `expand_string`, matching `parse_quoted_string`); `"""` bodies lower
 //! later through the shared `lower_block_string`.
 
+use crate::error::ParseErrorKind;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +87,10 @@ pub struct LexError {
     pub line: usize,
     pub col: usize,
     pub msg: String,
+    /// Machine-readable kind when the lexer knows it (an unclosed
+    /// `WITH_IO` bracket is that command's syntax error, never a bare
+    /// grammar failure); `None` means a plain syntax failure.
+    pub kind: Option<ParseErrorKind>,
 }
 
 impl fmt::Display for LexError {
@@ -95,6 +100,45 @@ impl fmt::Display for LexError {
 }
 
 impl std::error::Error for LexError {}
+
+/// Keywords that open a `{...}` block head (`IF`, `WHILE`, ...).
+/// The unclosed-group diagnostic names the first unsatisfied one so
+/// fragmented blocks blame their opener, never the enclosing head.
+fn is_block_head(w: &str) -> bool {
+    matches!(
+        w,
+        "IF" | "ELSE"
+            | "FOR"
+            | "WHILE"
+            | "FUNC"
+            | "TIMEOUT"
+            | "ISOLATED"
+            | "ASYNC"
+            | "REMOTE"
+            | "WITH_IO"
+    )
+}
+
+/// True for template placeholders (`{{ .. }}` lex as a brace group
+/// holding a brace group).
+fn is_template_group(t: &Tok) -> bool {
+    if let TokKind::Group {
+        delim: GroupDelim::Brace,
+        inner,
+        ..
+    } = &t.kind
+    {
+        matches!(
+            inner.first().map(|f| &f.kind),
+            Some(TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            })
+        )
+    } else {
+        false
+    }
+}
 
 /// Chars that always delimit words in string sources. The set mirrors
 /// `rustc` tokenization so both frontends emit identical streams:
@@ -241,6 +285,11 @@ struct StrLexer<'a> {
     line: usize,
     col: usize,
     out: Vec<Tok>,
+    /// Top-level words with their source lines, plus the output length
+    /// when pushed. Unclosed-group errors scan this for the block head
+    /// whose opener never closed (issue #215's "unclosed `IF` block
+    /// opened on line N" naming, without grammar internals).
+    heads: Vec<(String, usize, usize)>,
     /// True when a gap (space, tab, comment, newline, `;`) precedes the
     /// next token. Reset after each emitted token.
     gapped: bool,
@@ -254,6 +303,7 @@ impl<'a> StrLexer<'a> {
             line: 1,
             col: 1,
             out: Vec::new(),
+            heads: Vec::new(),
             gapped: true,
         }
     }
@@ -263,6 +313,7 @@ impl<'a> StrLexer<'a> {
             line: self.line,
             col: self.col,
             msg: msg.into(),
+            kind: None,
         }
     }
 
@@ -283,7 +334,38 @@ impl<'a> StrLexer<'a> {
     fn push(&mut self, kind: TokKind) {
         let joint = !self.gapped;
         self.gapped = false;
+        if let TokKind::Word(w) = &kind {
+            self.heads.push((w.clone(), self.line, self.out.len()));
+        }
         self.out.push(Tok::fresh(kind, joint));
+    }
+
+    /// Block-head keyword whose `{...}` never closed: the first head
+    /// word with no balanced brace group after it (a head whose block
+    /// closed is satisfied, like `IF` in `IF {..} ELSE {..}`; other
+    /// groups such as `[...]` lists never satisfy). Returns the head
+    /// and its opener line for the unclosed-block diagnostic.
+    fn unclosed_head(&self) -> Option<(String, usize)> {
+        for (word, line, idx) in &self.heads {
+            if !is_block_head(word) {
+                continue;
+            }
+            // Templates (`{{ .. }}`, a brace group holding a brace
+            // group) never satisfy: only real blocks close a head.
+            let satisfied = self.out[*idx..].iter().any(|t| {
+                matches!(
+                    &t.kind,
+                    TokKind::Group {
+                        delim: GroupDelim::Brace,
+                        ..
+                    }
+                ) && !is_template_group(t)
+            });
+            if !satisfied {
+                return Some((word.clone(), *line));
+            }
+        }
+        None
     }
 
     /// True when only whitespace precedes on this line (comment position).
@@ -330,7 +412,7 @@ impl<'a> StrLexer<'a> {
     /// positional: `open_joint` is false when whitespace follows the
     /// opener, `close_joint` is false when it precedes the closer.
     fn lex_group(&mut self, close: char, delim: GroupDelim) -> Result<(), LexError> {
-        let (start_line, start_col) = (self.line, self.col);
+        let start_line = self.line;
         self.bump(1, 0);
         let open_joint = !self.rest().starts_with([' ', '\t', '\r', '\n']);
         let mut stack: Vec<char> = Vec::new();
@@ -410,10 +492,14 @@ impl<'a> StrLexer<'a> {
                         Some(' ' | '\t' | '\r' | '\n')
                     );
                     self.bump(c.len_utf8(), 0);
+                    // Inner lines offset by the opener's line (the
+                    // inner text starts on it), so nested failures
+                    // report absolute positions.
                     let mut inner = lex_str_inner(&inner_src).map_err(|e| LexError {
-                        line: start_line,
-                        col: start_col,
+                        line: start_line + e.line - 1,
+                        col: e.col,
                         msg: e.msg,
+                        kind: e.kind,
                     })?;
                     if open_joint
                         && let Some(first) = inner.first()
@@ -449,10 +535,31 @@ impl<'a> StrLexer<'a> {
             inner_src.push(c);
             self.bump(c.len_utf8(), 0);
         }
+        // Fragmented blocks blame their opener past the head (never
+        // the enclosing head, never a grammar dump): the first
+        // unsatisfied block head names the message; anything else
+        // reports the opener position. The EOF position lands the
+        // span past every head line.
+        let (msg, kind) = match (delim, self.unclosed_head()) {
+            (GroupDelim::Brace, Some((head, opened))) => (
+                format!("unclosed `{head}` block opened on line {opened}"),
+                None,
+            ),
+            // An unclosed `WITH_IO` bracket is that command's syntax
+            // error (never unknown): it names the missing closer.
+            (GroupDelim::Bracket, Some((head, opened))) if head == "WITH_IO" => (
+                format!("WITH_IO bindings missing closing `]` (opened on line {opened})"),
+                Some(ParseErrorKind::InvalidSyntax {
+                    command: "WITH_IO".to_string(),
+                }),
+            ),
+            _ => (format!("unclosed group, expected `{close}`"), None),
+        };
         Err(LexError {
-            line: start_line,
-            col: start_col,
-            msg: format!("unclosed group, expected `{close}`"),
+            line: self.line,
+            col: self.col,
+            msg,
+            kind,
         })
     }
 
@@ -667,6 +774,7 @@ pub fn lex_tokens(ts: &proc_macro2::TokenStream) -> Result<Vec<Tok>, LexError> {
                     line: 0,
                     col: 0,
                     msg: m,
+                    kind: None,
                 })?;
                 self.out.extend(toks);
             }

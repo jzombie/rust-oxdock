@@ -1034,6 +1034,21 @@ fn parse_string_with_std_modules(s: &str) -> anyhow::Result<Vec<Step>> {
     oxdock_core::parse_script_with_modules(s, oxdock_core::std_module_table())
 }
 
+/// Unified-backend (`parser_v2`) oracle: the same string through
+/// `lex_str` + `parse_v2_with_ctx` under the identical table and
+/// reserved set. Every generated script must agree three ways
+/// (string/token/v2); divergences fail here before cutover instead
+/// of after.
+fn parse_v2_with_std_modules(s: &str) -> anyhow::Result<Vec<Step>> {
+    let table = oxdock_core::std_module_table();
+    let mut reserved = oxdock_core::builtin_function_names();
+    reserved.extend(table.reserved_base_names());
+    let toks = oxdock_parser::lex_str(s).map_err(|e| anyhow::anyhow!("v2 lex failed: {e:?}"))?;
+    let ctx = oxdock_parser::V2Ctx::empty(&oxdock_core::lower_command, &table, &reserved);
+    oxdock_parser::parse_v2_with_ctx(&toks, &ctx)
+        .map_err(|e| anyhow::anyhow!("v2 parse failed: {e}"))
+}
+
 fn arb_step() -> impl Strategy<Value = Step> {
     (prop::option::of(arb_guard_expr()), arb_step_kind())
         .prop_map(|(guard, kind)| Step {
@@ -1620,6 +1635,16 @@ proptest! {
         assert_steps_eq(parsed_step, &step, &format!("String parse mismatch: {}", s));
         assert_steps_eq(token_step, &step, &format!("Token parse mismatch: {}", s));
         assert_steps_eq(parsed_step, token_step, &format!("Pathway mismatch: {}", s));
+
+        // 3. Unified-backend oracle (migration gate for cutover).
+        let v2_steps =
+            parse_v2_with_std_modules(&s).expect("failed to parse generated string via v2");
+        assert_eq!(v2_steps.len(), 1);
+        let mut v2d = v2_steps;
+        zero_markers(&mut v2d);
+        let v2_step = &v2d[0];
+        assert_steps_eq(v2_step, &step, &format!("v2 parse mismatch: {}", s));
+        assert_steps_eq(v2_step, parsed_step, &format!("v2/string mismatch: {}", s));
     }
 
     /// Multi-step scripts: whole-script round-trip through both pathways.
@@ -1661,10 +1686,21 @@ proptest! {
         zero_markers(&mut parsed);
         let mut tokenized = token_steps;
         zero_markers(&mut tokenized);
-        for ((p, t), g) in parsed.iter().zip(tokenized.iter()).zip(steps.iter()) {
+        let v2_steps =
+            parse_v2_with_std_modules(&s).expect("failed to parse generated script via v2");
+        assert_eq!(v2_steps.len(), steps.len(), "v2 split lines: {s}");
+        let mut v2d = v2_steps;
+        zero_markers(&mut v2d);
+        for (((p, t), v), g) in parsed
+            .iter()
+            .zip(tokenized.iter())
+            .zip(v2d.iter())
+            .zip(steps.iter())
+        {
             assert_steps_eq(p, g, &format!("String parse mismatch: {s}"));
             assert_steps_eq(t, g, &format!("Token parse mismatch: {s}"));
             assert_steps_eq(p, t, &format!("Pathway mismatch: {s}"));
+            assert_steps_eq(v, g, &format!("v2 parse mismatch: {s}"));
         }
     }
 }

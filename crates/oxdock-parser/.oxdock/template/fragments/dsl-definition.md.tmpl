@@ -1,16 +1,21 @@
-The grammar lives in [`src/dsl.pest`](src/dsl.pest) and is consumed directly by
-the lexer. A copy of the grammar is also exposed at runtime via the
-`oxdock_parser::LANGUAGE_SPEC` constant so that downstream tools can embed or
-inspect the canonical definition without reaching into the crate filesystem.
+The language is defined by two context-free lexers plus one unified
+backend, all in this crate. `tok` turns string sources (`lex_str`) and
+braced-macro token streams (`lex_tokens`) into a single `Tok` stream:
+words, strings, groups, punctuation, newlines, and comment markers with
+gap-adjacency flags, never statement decisions. `parser_v2` resolves
+statement boundaries from grammar state and lowers to `Step`s; shared
+lowering cores (expression folding, call resolution, instruction
+tokens, wrapper and REMOTE validators) live in `commands` and
+`resolve`, so both frontends behave identically by construction.
 
 ```
-use oxdock_parser::LANGUAGE_SPEC;
+use oxdock_parser::{lex_str, parse_script, test_lower_mock};
 
-fn dump_grammar() {
-    println!("OxDock DSL grammar:\\n{}", LANGUAGE_SPEC);
-}
+let toks = lex_str("ECHO hi").expect("lexes");
+let steps = parse_script("ECHO hi", test_lower_mock::lower).expect("parses");
+assert_eq!(steps.len(), 1);
 ```
 
-Because the parser is generated from this same file, the “spec” and the
-implementation stay in lockstep—the DSL is exactly what the grammar
-describes.
+Because both pathways share the backend, the “spec” and the
+implementation stay in lockstep—the DSL is exactly what the backend
+parses.

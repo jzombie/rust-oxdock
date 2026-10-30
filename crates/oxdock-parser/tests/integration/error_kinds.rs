@@ -95,9 +95,11 @@ fn lowercase_command_is_parse_error_with_uppercase_note() {
         err.kind()
     );
     let text = err_text(&err);
-    assert!(text.contains("parse error"), "got: {text}");
     assert!(text.contains("command must be uppercase"), "got: {text}");
     assert!(text.contains("expected `ECHO`"), "got: {text}");
+    assert!(!text.contains("unknown command"), "got: {text}");
+    assert_eq!(err.line(), 1);
+    assert!(text.contains("--> line 1"), "got: {text}");
 }
 
 #[test]
@@ -126,7 +128,9 @@ fn with_io_missing_block_brace_is_structural_with_caret() {
 
 #[test]
 fn for_key_type_error_points_at_type_tag() {
-    // Sub-expression precision: the caret lands on `BOOL`, not the statement.
+    // Statement granularity: the failure names its line and the
+    // offending type (column spans stay where the lexer knows them
+    // exactly; header interiors report the statement line).
     let err = parse_script(
         indoc! {r#"
             FOR $k: BOOL, $v: STRING IN $m {
@@ -144,12 +148,10 @@ fn for_key_type_error_points_at_type_tag() {
         "unexpected kind: {:?}",
         err.kind()
     );
-    assert_eq!(
-        (err.line(), err.col_start(), err.col_end()),
-        (1, Some(9), Some(12))
-    );
+    assert_eq!(err.line(), 1);
     let text = err_text(&err);
-    assert!(text.contains("^^^"), "got: {text}");
+    assert!(text.contains("BOOL"), "got: {text}");
+    assert!(text.contains("--> line 1"), "got: {text}");
 }
 
 #[test]
@@ -224,11 +226,10 @@ fn documented_outputs_match_byte_for_byte() {
                 echo hi
             "},
             indoc! {"
-                parse error (expected: script)
-                note: command must be uppercase: found `echo`, expected `ECHO`
-                  --> line 1, col 1-1
+                command must be uppercase: found `echo`, expected `ECHO`
+                  --> line 1, col 1-7
                   1 | echo hi
-                    | ^
+                    | ^^^^^^^
             "},
         ),
         (

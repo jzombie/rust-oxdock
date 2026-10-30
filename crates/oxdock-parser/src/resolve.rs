@@ -1,8 +1,7 @@
-//! Static call resolution shared by the pest backend and v2.
+//! Static call resolution shared by every parse entry point.
 //!
 //! Pure outcome logic: qualified names out, validation errors otherwise.
-//! `LowerCtx` delegates with its live scopes; v2 passes its own (empty
-//! until `FUNC`/`IMPORT` land in slice 5). Messages live here once, so
+//! Callers pass their live scopes; messages live here once, so
 //! resolution can never disagree across pathways.
 
 use crate::ast::ModuleTable;

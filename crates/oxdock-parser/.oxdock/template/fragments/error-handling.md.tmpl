@@ -10,26 +10,28 @@ Only a name that matches nothing in any case fails as `unknown command`.
 
 The kinds:
 
-- `PestParse`: the grammar could not tokenize the line at all. Always
-  carries line, column span, source line, and caret, plus the expected
-  rule set. Lowercase commands land here with an uppercase note.
+- `PestParse`: low-level syntax the backend never reaches lowering
+  for (unbalanced groups, literal scans, lowercase heads). Always
+  carries line plus the source line and caret; lowercase commands land
+  here with an uppercase note.
 - `InvalidSyntax { command }`: a known command or keyword with malformed
   arguments, flags, arity, or block shape. Carries the received text, the
   canonical syntax, and a hint.
 - `UnknownCommand { name }`: a truly unknown name, with a
   `did you mean` hint when only the case is wrong.
 - `Structural { rule }`: guard, block, scope, and structural keyword
-  failures. Spans are refined to the exact offending pair, so the caret
-  lands on the token (for example the `BOOL` in a bad `FOR` key type),
-  never just the statement start.
+  failures. Spans cover the statement's first line, so the caret marks
+  the statement (header interiors such as a bad `FOR` key type name
+  their offender in the message); lexer-exact positions such as
+  unbalanced groups keep column precision.
 - `Validation { command }`: arity, flag, and static argument type
   failures for a known command.
 
-String and file parsers always populate line, column span, and source
-line. Token stream parsers (`macro_input`) leave the source line empty
-and keep integer coordinates instead, since `proc_macro2::Span` carries
-positions but not source text. Callers keep their own compiler span for
-`syn::Error` conversion. Downstream crates receive `ParseError` by value
-(`ParseResult<T>`) and convert to their own error type only at the outer
-boundary, so matching on `kind`, `line`, and columns never depends on
-message text.
+String parsers always populate line and source line with a statement
+granularity column span. Token stream parsers (`macro_input`) leave
+the source line empty and keep integer coordinates instead, since
+`proc_macro2::Span` carries positions but not source text. Callers keep
+their own compiler span for `syn::Error` conversion. Downstream crates
+receive `ParseError` by value (`ParseResult<T>`) and convert to their
+own error type only at the outer boundary, so matching on `kind` and
+`line` never depends on message text.

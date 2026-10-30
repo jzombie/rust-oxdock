@@ -20,7 +20,6 @@ pub mod command;
 pub mod commands;
 pub mod constants;
 pub mod error;
-mod lexer;
 pub mod literal;
 #[cfg(feature = "proc-macro-api")]
 mod macro_input;
@@ -41,7 +40,6 @@ pub use command::{
 pub use commands::{all_metadata, all_structural_metadata, lower_command};
 pub use constants::*;
 pub use error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
-pub use lexer::LANGUAGE_SPEC;
 pub use literal::{escape_dsl_string, render_dsl_literal, render_quoted};
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
@@ -612,10 +610,7 @@ mod tests {
 
     #[test]
     fn guard_or_guard_line_parses() {
-        use crate::lexer::{LanguageParser, Rule};
-        use pest::Parser;
-        LanguageParser::parse(Rule::guard_line, "[any(os:linux, env:FOO)]")
-            .expect("guard guard line should parse");
+        parse_guard_expr_str("any(os:linux, env:FOO)").expect("guard line should parse");
     }
 
     #[test]
@@ -1486,26 +1481,13 @@ mod tests {
     }
 
     #[test]
-    fn if_keyword_matches_directly() {
-        use crate::lexer::{LanguageParser, Rule};
-        use pest::Parser;
-        let result = LanguageParser::parse(Rule::if_keyword, "IF ");
+    fn if_head_parses_through_backend() {
+        let steps = parse_script("IF true {\n    WRITE yes\n}", test_lower).expect("IF parses");
+        assert_eq!(steps.len(), 1);
         assert!(
-            result.is_ok(),
-            "if_keyword should match 'IF ': {:?}",
-            result.err()
-        );
-    }
-
-    #[test]
-    fn if_statement_pest_matches() {
-        use crate::lexer::{LanguageParser, Rule};
-        use pest::Parser;
-        let result = LanguageParser::parse(Rule::if_statement, "IF true {\n    WRITE yes\n}");
-        assert!(
-            result.is_ok(),
-            "if_statement should match: {:?}",
-            result.err()
+            matches!(steps[0].kind, StepKind::If { .. }),
+            "expected If, got {:?}",
+            steps[0].kind
         );
     }
 

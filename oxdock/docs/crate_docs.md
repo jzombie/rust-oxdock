@@ -761,7 +761,7 @@ time.
 
 > **Prototype status**: OxDock is still being prototyped. DSL syntax and Rust APIs may change without deprecation warnings until the first stable release.
 
-Scripts are sequences of instructions, one per line (`;` separates two; quoted separators stay literal). Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The authoritative grammar is [`crates/oxdock-parser/src/dsl.pest`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/dsl.pest), which is also embedded in the parser crate as the `LANGUAGE_SPEC` constant for tooling.
+Scripts are sequences of instructions, one per line (`;` separates two; quoted separators stay literal). Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The language is defined by the token backend in [`crates/oxdock-parser/src/parser_v2.rs`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/parser_v2.rs), fed by the two context-free lexers in [`crates/oxdock-parser/src/tok.rs`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/tok.rs): one parser serves string scripts and braced-macro token streams alike.
 
 ## Lexical structure
 
@@ -6144,7 +6144,7 @@ let expected = indoc! {"
 assert_eq!(err.to_string(), expected.trim_end());
 ```
 
-Lowercase commands are caught by the grammar with a correction note:
+Lowercase commands are caught at parse time with a correction note:
 ```rust
 use indoc::indoc;
 use oxdock::oxdock_parser;
@@ -6155,21 +6155,18 @@ let script = indoc! {"
 let err = oxdock_parser::parse_script(script, oxdock_parser::lower_command)
     .expect_err("must fail");
 let expected = indoc! {"
-    parse error (expected: script)
-    note: command must be uppercase: found `echo`, expected `ECHO`
-      --> line 1, col 1-1
+    command must be uppercase: found `echo`, expected `ECHO`
+      --> line 1, col 1-7
       1 | echo hi
-        | ^
+        | ^^^^^^^
 "};
 assert_eq!(err.to_string(), expected.trim_end());
 ```
 
 Reading an error, top to bottom: the first line states the kind and the
 fix (expected syntax or a `did you mean` hint), the `-->` line gives the
-exact position, and the caret marks the token to change. For block and
-guard mistakes the caret covers the statement; for argument mistakes such
-as a bad `WITH_IO` binding or a wrong `FOR` key type it points at the
-specific token.
+statement's line, and the caret marks the statement to change (lexer-level
+mistakes such as unbalanced groups point at their exact position).
 
 ## Selective environment inheritance
 

@@ -165,4 +165,31 @@ mod tests {
         let script = script_from_braced_tokens(&ts).expect("failed to render ASYNC script");
         assert_eq!(script, "ASYNC LS a");
     }
+
+    #[test]
+    fn guard_value_named_like_command_and_env_key_stay_glued() {
+        // Regression: guard idents that match command names (`LS`) or
+        // follow `env:` must glue inside guard brackets. Splitting them
+        // across lines strands `]` and fails the reparse (found by
+        // multistep fuzz through `ASYNC { [..] WHILE .. }`).
+        let guard: TokenStream = "[(env:LS)] WHILE false { ECHO hi }".parse().unwrap();
+        let script = script_from_braced_tokens(&guard).expect("failed to render guard script");
+        assert!(
+            !script.contains("env:\n"),
+            "guard key must stay glued to `env:`, got: {script:?}"
+        );
+        let steps = oxdock_parser::parse_script(&script, crate::common::mock_lower)
+            .expect("rebuilt guard must parse");
+        assert_eq!(steps.len(), 1, "got: {steps:?}");
+    }
+
+    #[test]
+    fn glued_dash_in_run_shell_stays_glued() {
+        // Regression: a dash glued to a word in RUN shell text (`W-XYZ`)
+        // must rebuild glued. The flag-spacing heuristic only applies
+        // when spans carry no adjacency signal (found by multistep fuzz).
+        let run: TokenStream = "RUN W-XYZ".parse().unwrap();
+        let script = script_from_braced_tokens(&run).expect("failed to render RUN script");
+        assert_eq!(script, "RUN W-XYZ", "got: {script:?}");
+    }
 }

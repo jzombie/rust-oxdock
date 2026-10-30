@@ -64,7 +64,7 @@ pub struct SpanContext<'a> {
     /// Never transferred into `ParseError`.
     #[cfg(feature = "proc-macro-api")]
     pub compiler_span: Option<proc_macro2::Span>,
-    /// Zero-based step index in `ScriptParser::parse`, when known.
+    /// Zero-based step index in the parsed script, when known.
     pub step_index: Option<usize>,
 }
 

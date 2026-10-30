@@ -442,7 +442,7 @@ One language for the whole build: farm steps out to npm, bundlers, or code gener
 
 > **Prototype status**: OxDock is still being prototyped. DSL syntax and Rust APIs may change without deprecation warnings until the first stable release.
 
-Scripts are sequences of instructions, one per line (`;` separates two; quoted separators stay literal). Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The authoritative grammar is [`crates/oxdock-parser/src/dsl.pest`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/dsl.pest), which is also embedded in the parser crate as the `LANGUAGE_SPEC` constant for tooling.
+Scripts are sequences of instructions, one per line (`;` separates two; quoted separators stay literal). Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The language is defined by the token backend in [`crates/oxdock-parser/src/parser_v2.rs`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/parser_v2.rs), fed by the two context-free lexers in [`crates/oxdock-parser/src/tok.rs`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/tok.rs): one parser serves string scripts and braced-macro token streams alike.
 
 ## Lexical structure
 

@@ -374,7 +374,8 @@ fn walk(
         // would glue into a single shell command. Punctuation must participate
         // too: `$`/`#` would otherwise advance `last_span_end` and blind the
         // check for the tokens that follow them on the same line.
-        if last_span_end.is_some_and(|prev| span.start().line > prev.line)
+        if !in_guard
+            && last_span_end.is_some_and(|prev| span.start().line > prev.line)
             && !line.trim().is_empty()
             && line_is_run_context(line.trim())
         {
@@ -632,8 +633,17 @@ fn walk(
             TokenTree::Punct(p) => {
                 let ch = p.as_char();
                 let mut force_space = gap_space || (*last_was_command && ch != ';');
+                // Glued dashes in RUN shell text stay glued (`W-XYZ`):
+                // `Spacing::Alone` only means "followed by a non-punct",
+                // not "gapped", so an adjacent non-degenerate `-` must
+                // not invent a space. Degenerate spans (`quote!`, all
+                // zero-width) carry no adjacency signal and keep the
+                // spaced reading, which shell flags need.
+                let dash_glued = last_span_end.is_some_and(|prev| prev == span.start())
+                    && span.start() != span.end();
                 if ch == '-'
                     && p.spacing() == Spacing::Alone
+                    && !dash_glued
                     && line_is_run_context(line)
                     && matches!(next, Some(TokenTree::Ident(_) | TokenTree::Literal(_)))
                     && let Some(prev) = line.chars().rev().find(|c| !c.is_whitespace())
@@ -668,7 +678,9 @@ fn walk(
                 }
                 *last_was_command = false;
                 *last_span_end = Some(span.end());
-                if ch == ';' {
+                // `;` ends statements everywhere except inside guards,
+                // where the key charset admits it literally.
+                if ch == ';' && !in_guard {
                     finalize_line(lines, line, capture_has_inner);
                 }
             }
@@ -699,7 +711,7 @@ fn walk(
                 // lines: `GREET("ada")` after `WRITE a.txt hi` must split,
                 // while `ECHO GREET("ada")` (same line, argument position)
                 // and `LET $r: STRING = GREET("ada")` (after `=`) stay glued.
-                // `FOO (` with a space is not a call (see `dsl.pest`), so a
+                // `FOO (` with a space is not a call (calls need a joint paren), so a
                 // gap between the head and the paren group opts out.
                 let is_call_statement_start = !is_command
                     && is_upper_func_head(&ident_text)
@@ -757,7 +769,10 @@ fn walk(
                 // IF after ELSE stays on same line (ELSE IF clause)
                 if ident_text == "ELSE" || (ident_text == "IF" && trimmed.ends_with("ELSE")) {
                     should_finalize = false;
-                } else if is_new_statement && !trimmed_empty && !expects_expr {
+                // Guard idents are values, never statements: even a
+                // command-named value (`LS`) or a guard call (`not(`)
+                // must glue, so the split rules below stay quiet here.
+                } else if is_new_statement && !in_guard && !trimmed_empty && !expects_expr {
                     // A statement keyword opening on a later source line
                     // starts a new statement unless the line still awaits
                     // its inner command (bare wrapper head, bindings
@@ -785,6 +800,7 @@ fn walk(
                 // never splits: `MOCK::` plus `READ_CSV(` is one call head
                 // (the split, if any, already happened at the module ident).
                 if (is_call_statement_start || is_qualified_call_start)
+                    && !in_guard
                     && !trimmed_empty
                     && !expects_expr
                     && !line_is_run_context(trimmed)

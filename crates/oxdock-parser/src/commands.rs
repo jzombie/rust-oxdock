@@ -16,8 +16,8 @@ use std::collections::HashSet;
 use std::fmt;
 
 use crate::ast::{
-    Arg, ArgPart, Expr, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable, PipeTarget, Step,
-    Value, WorkspaceTarget,
+    Arg, ArgPart, ArithOp, CompareOp, Expr, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable,
+    PipeTarget, Step, Value, WorkspaceTarget,
 };
 use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
@@ -4047,10 +4047,9 @@ pub(crate) fn lower_expand_tokens(
     Ok(StepKind::Expand { path, overrides })
 }
 
-/// Wrapper-shared validators, promoted verbatim from the pest backend
-/// (`LowerCtx`/`ScriptParser` delegate) so both parse pathways enforce
-/// identical bodies. Pure outcome logic over [`StepKind`]: contexts only
-/// feed error spans.
+/// Wrapper-shared validators, promoted verbatim from the retired pest
+/// backend, so every parse entry point enforces identical bodies.
+/// Pure outcome logic over [`StepKind`]: contexts only feed error spans.
 #[derive(Default)]
 pub(crate) struct IoBindingSet {
     stdin: Option<IoBinding>,
@@ -4416,6 +4415,323 @@ pub(crate) fn collect_remote_kind_symbols(
         Expr::Block(steps) => collect_remote_body_symbols(steps, defs, calls),
         _ => {}
     });
+}
+
+/// Expression lowering core, promoted verbatim from the retired pest
+/// backend: folding constructors, RPN compilation, boundary rejection,
+/// and numeric classification. The token backend (`parser_v2`) calls
+/// these directly, so folding and overflow behavior are single-sourced.
+/// Reject a staged `UnsignedIntBoundary` in any position where unary `-`
+/// cannot consume it (every composite constructor calls this on children).
+/// Expression lowering core (promoted verbatim from the retired pest
+/// backend): operates on `Expr`, never on token pairs.
+pub(crate) fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {
+    if matches!(expr, Expr::UnsignedIntBoundary(_)) {
+        return Err(ParseError::structural(
+            "expr",
+            "integer overflow: 9223372036854775808 exceeds i64::MAX".to_string(),
+            ctx,
+        ));
+    }
+    Ok(())
+}
+
+/// Apply unary `-`: fold literals, consume the `i64::MIN` boundary, else
+/// compile to RPN `Neg` (or AST `0 - x` fallback for non-math operands).
+/// Shared with the v2 backend.
+pub(crate) fn apply_unary_neg(ctx: &SpanContext, expr: Expr) -> ParseResult<Expr> {
+    match expr {
+        Expr::Literal(v) => match (v.as_i64(), v.as_f64()) {
+            (Some(n), _) => match n.checked_neg() {
+                Some(neg) => Ok(Expr::Literal(Value::int(neg))),
+                None => Ok(Expr::CompiledMath(vec![MathOp::PushConst(v), MathOp::Neg])),
+            },
+            (None, Some(f)) => Ok(Expr::Literal(Value::float(-f))),
+            (None, None) => {
+                let other = Expr::Literal(v);
+                if let Some(mut ops) = expr_to_rpn(&other) {
+                    ops.push(MathOp::Neg);
+                    Ok(Expr::CompiledMath(ops))
+                } else {
+                    // Non-math operand (list/map/logical): `0 - x` evaluates via
+                    // the shared arithmetic helper to a runtime Type Error.
+                    Ok(Expr::Arithmetic {
+                        op: ArithOp::Sub,
+                        left: Box::new(Expr::Literal(Value::int(0))),
+                        right: Box::new(other),
+                    })
+                }
+            }
+        },
+        Expr::UnsignedIntBoundary(n) => {
+            if n == i64::MAX as u64 + 1 {
+                Ok(Expr::Literal(Value::int(i64::MIN)))
+            } else {
+                Err(ParseError::structural(
+                    "expr",
+                    format!("integer overflow: {} exceeds i64::MAX", n),
+                    ctx,
+                ))
+            }
+        }
+        other => {
+            if let Some(mut ops) = expr_to_rpn(&other) {
+                ops.push(MathOp::Neg);
+                Ok(Expr::CompiledMath(ops))
+            } else {
+                // Non-math operand (list/map/logical): `0 - x` evaluates via
+                // the shared arithmetic helper to a runtime Type Error.
+                Ok(Expr::Arithmetic {
+                    op: ArithOp::Sub,
+                    left: Box::new(Expr::Literal(Value::int(0))),
+                    right: Box::new(other),
+                })
+            }
+        }
+    }
+}
+
+/// Try parse-time constant folding for binary arithmetic/comparison.
+/// Returns `Some(literal)` on success, `None` when not both literals or
+/// when the op would error at runtime (div-zero/overflow/non-finite:
+/// leave for the RPN evaluator so the error surfaces at runtime).
+fn try_fold_arith(op: ArithOp, left: &Expr, right: &Expr) -> Option<Expr> {
+    let (Expr::Literal(lv), Expr::Literal(rv)) = (left, right) else {
+        return None;
+    };
+    fold_arith_values(op, lv, rv).map(Expr::Literal)
+}
+
+fn fold_arith_values(op: ArithOp, left: &Value, right: &Value) -> Option<Value> {
+    match (left.as_i64(), right.as_i64()) {
+        (Some(a), Some(b)) => {
+            let v = match op {
+                ArithOp::Add => a.checked_add(b)?,
+                ArithOp::Sub => a.checked_sub(b)?,
+                ArithOp::Mul => a.checked_mul(b)?,
+                ArithOp::Div => a.checked_div(b)?,
+            };
+            Some(Value::int(v))
+        }
+        _ => {
+            let (af, bf) = (as_f64(left)?, as_f64(right)?);
+            fold_float(op, af, bf)
+        }
+    }
+}
+
+fn fold_float(op: ArithOp, a: f64, b: f64) -> Option<Value> {
+    if !a.is_finite() || !b.is_finite() {
+        return None;
+    }
+    let v = match op {
+        ArithOp::Add => a + b,
+        ArithOp::Sub => a - b,
+        ArithOp::Mul => a * b,
+        ArithOp::Div => {
+            if b == 0.0 {
+                return None;
+            }
+            a / b
+        }
+    };
+    if v.is_finite() {
+        Some(Value::float(v))
+    } else {
+        None
+    }
+}
+
+fn try_fold_compare(op: CompareOp, left: &Expr, right: &Expr) -> Option<Expr> {
+    let (Expr::Literal(lv), Expr::Literal(rv)) = (left, right) else {
+        return None;
+    };
+    match (lv.as_i64(), rv.as_i64()) {
+        (Some(a), Some(b)) => {
+            let r = match op {
+                CompareOp::Eq => a == b,
+                CompareOp::Ne => a != b,
+                CompareOp::Lt => a < b,
+                CompareOp::Le => a <= b,
+                CompareOp::Gt => a > b,
+                CompareOp::Ge => a >= b,
+            };
+            Some(Expr::Literal(Value::bool(r)))
+        }
+        _ => {
+            if let (Some(a), Some(b)) = (lv.as_bool(), rv.as_bool()) {
+                return match op {
+                    CompareOp::Eq => Some(Expr::Literal(Value::bool(a == b))),
+                    CompareOp::Ne => Some(Expr::Literal(Value::bool(a != b))),
+                    _ => None,
+                };
+            }
+            let (af, bf) = (as_f64(lv)?, as_f64(rv)?);
+            let r = match op {
+                CompareOp::Eq => af == bf,
+                CompareOp::Ne => af != bf,
+                CompareOp::Lt => af < bf,
+                CompareOp::Le => af <= bf,
+                CompareOp::Gt => af > bf,
+                CompareOp::Ge => af >= bf,
+            };
+            Some(Expr::Literal(Value::bool(r)))
+        }
+    }
+}
+
+fn as_f64(v: &Value) -> Option<f64> {
+    if let Some(n) = v.as_i64() {
+        return Some(n as f64);
+    }
+    match v.as_f64() {
+        Some(f) if f.is_finite() => Some(f),
+        _ => None,
+    }
+}
+
+/// Shared with the v2 backend: fold, compile to RPN, or keep the AST node.
+pub(crate) fn make_arith(
+    ctx: &SpanContext,
+    op: ArithOp,
+    left: Expr,
+    right: Expr,
+) -> ParseResult<Expr> {
+    reject_boundary(ctx, &left)?;
+    reject_boundary(ctx, &right)?;
+    if let Some(folded) = try_fold_arith(op, &left, &right) {
+        return Ok(folded);
+    }
+    if let (Some(mut lops), Some(mut rops)) = (expr_to_rpn(&left), expr_to_rpn(&right)) {
+        lops.append(&mut rops);
+        lops.push(match op {
+            ArithOp::Add => MathOp::Add,
+            ArithOp::Sub => MathOp::Sub,
+            ArithOp::Mul => MathOp::Mul,
+            ArithOp::Div => MathOp::Div,
+        });
+        return Ok(Expr::CompiledMath(lops));
+    }
+    Ok(Expr::Arithmetic {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+    })
+}
+
+/// Shared with the v2 backend: fold, compile to RPN, or keep the AST node.
+pub(crate) fn make_compare(
+    ctx: &SpanContext,
+    op: CompareOp,
+    left: Expr,
+    right: Expr,
+) -> ParseResult<Expr> {
+    reject_boundary(ctx, &left)?;
+    reject_boundary(ctx, &right)?;
+    if let Some(folded) = try_fold_compare(op, &left, &right) {
+        return Ok(folded);
+    }
+    if let (Some(mut lops), Some(mut rops)) = (expr_to_rpn(&left), expr_to_rpn(&right)) {
+        lops.append(&mut rops);
+        lops.push(match op {
+            CompareOp::Eq => MathOp::Eq,
+            CompareOp::Ne => MathOp::Ne,
+            CompareOp::Lt => MathOp::Lt,
+            CompareOp::Le => MathOp::Le,
+            CompareOp::Gt => MathOp::Gt,
+            CompareOp::Ge => MathOp::Ge,
+        });
+        return Ok(Expr::CompiledMath(lops));
+    }
+    Ok(Expr::Compare {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+    })
+}
+
+/// Convert an operand subtree to flat RPN. Returns `None` for shapes with
+/// no RPN encoding (`Not`/`Logical`/`List`/`Map`/`FreshPipe`/stray boundary): callers
+/// fall back to AST nodes evaluated recursively.
+/// Shared with the v2 backend.
+///
+pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
+    match expr {
+        Expr::Literal(v) => Some(vec![MathOp::PushConst(v.clone())]),
+        Expr::Var(name) => Some(vec![MathOp::LoadVar(name.clone())]),
+        Expr::Env(key) => Some(vec![MathOp::LoadEnv(key.clone())]),
+        Expr::KeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
+            base: base.clone(),
+            keys: keys.clone(),
+        }]),
+        Expr::Call { name, args } => {
+            let mut ops = Vec::new();
+            for arg in args {
+                ops.extend(expr_to_rpn(arg)?);
+            }
+            ops.push(MathOp::Call {
+                name: name.clone(),
+                arity: args.len(),
+            });
+            Some(ops)
+        }
+        Expr::Inspect(var) => Some(vec![MathOp::Inspect(var.clone())]),
+        Expr::Arithmetic { op, left, right } => {
+            let mut ops = expr_to_rpn(left)?;
+            ops.extend(expr_to_rpn(right)?);
+            ops.push(match op {
+                ArithOp::Add => MathOp::Add,
+                ArithOp::Sub => MathOp::Sub,
+                ArithOp::Mul => MathOp::Mul,
+                ArithOp::Div => MathOp::Div,
+            });
+            Some(ops)
+        }
+        Expr::Compare { op, left, right } => {
+            let mut ops = expr_to_rpn(left)?;
+            ops.extend(expr_to_rpn(right)?);
+            ops.push(match op {
+                CompareOp::Eq => MathOp::Eq,
+                CompareOp::Ne => MathOp::Ne,
+                CompareOp::Lt => MathOp::Lt,
+                CompareOp::Le => MathOp::Le,
+                CompareOp::Gt => MathOp::Gt,
+                CompareOp::Ge => MathOp::Ge,
+            });
+            Some(ops)
+        }
+        Expr::CompiledMath(ops) => Some(ops.clone()),
+        Expr::FreshPipe => None,
+        Expr::Not(_) | Expr::Logical { .. } | Expr::List(_) | Expr::Map(_) | Expr::Block(_) => None,
+        Expr::UnsignedIntBoundary(_) => None,
+    }
+}
+
+/// Pure numeric classification (the token backend gates
+/// `_`-separator shape before calling: the classifier strips them, so
+/// `1__0` must never reach it as numeric). Returns the literal,
+/// `UnsignedIntBoundary` staging, or the exact pest error text.
+pub(crate) fn classify_numeric_text(text: &str) -> Result<Expr, String> {
+    let clean = text.replace('_', "");
+    if clean.contains('.') {
+        let parsed: f64 = clean
+            .parse()
+            .map_err(|_| format!("invalid float literal {text:?}"))?;
+        if !parsed.is_finite() {
+            return Err(format!("invalid float literal {text:?}"));
+        }
+        return Ok(Expr::Literal(Value::float(parsed)));
+    }
+    let digits: u64 = clean
+        .parse()
+        .map_err(|_| format!("integer overflow: {text:?} exceeds i64::MAX"))?;
+    if digits <= i64::MAX as u64 {
+        Ok(Expr::Literal(Value::int(digits as i64)))
+    } else if digits == i64::MAX as u64 + 1 {
+        Ok(Expr::UnsignedIntBoundary(digits))
+    } else {
+        Err(format!("integer overflow: {text:?} exceeds i64::MAX"))
+    }
 }
 
 #[cfg(test)]

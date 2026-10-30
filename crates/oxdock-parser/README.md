@@ -4,33 +4,38 @@ Parser and AST definitions for the OxDock DSL.
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
 
-1. The lexer (powered by [`pest`](https://pest.rs/)) tokenizes scripts
-   according to `dsl.pest`, handling comments and semicolons along the way.
-2. Tokens are fed into the existing `ScriptParser`, which performs guard stack
-   combination, scope tracking, and `StepKind` construction (no DSL
-   behaviour changed from the previous hand-written line parser).
+1. The lexers (`tok`) turn each source into a context-free `Tok`
+   stream, recording gap adjacency and literal newlines along the way.
+2. The unified backend (`parser_v2`) splits statements from grammar
+   state, folds guards, resolves calls, and constructs `StepKind`
+   values through the shared lowering cores.
 3. The resulting `Vec<Step>` is consumed by runtimes (CLI, macros, tests, etc.).
 
 All existing semantics—including guard combinations, case sensitivity,
 semicolon behaviour, and error messages—remain the same, but they are now
-enforced through the shared grammar file.
+enforced through the single backend both frontends share.
 
-The grammar lives in [`src/dsl.pest`](src/dsl.pest) and is consumed directly by
-the lexer. A copy of the grammar is also exposed at runtime via the
-`oxdock_parser::LANGUAGE_SPEC` constant so that downstream tools can embed or
-inspect the canonical definition without reaching into the crate filesystem.
+The language is defined by two context-free lexers plus one unified
+backend, all in this crate. `tok` turns string sources (`lex_str`) and
+braced-macro token streams (`lex_tokens`) into a single `Tok` stream:
+words, strings, groups, punctuation, newlines, and comment markers with
+gap-adjacency flags, never statement decisions. `parser_v2` resolves
+statement boundaries from grammar state and lowers to `Step`s; shared
+lowering cores (expression folding, call resolution, instruction
+tokens, wrapper and REMOTE validators) live in `commands` and
+`resolve`, so both frontends behave identically by construction.
 
 ```
-use oxdock_parser::LANGUAGE_SPEC;
+use oxdock_parser::{lex_str, parse_script, test_lower_mock};
 
-fn dump_grammar() {
-    println!("OxDock DSL grammar:\n{}", LANGUAGE_SPEC);
-}
+let toks = lex_str("ECHO hi").expect("lexes");
+let steps = parse_script("ECHO hi", test_lower_mock::lower).expect("parses");
+assert_eq!(steps.len(), 1);
 ```
 
-Because the parser is generated from this same file, the “spec” and the
-implementation stay in lockstep—the DSL is exactly what the grammar
-describes.
+Because both pathways share the backend, the “spec” and the
+implementation stay in lockstep—the DSL is exactly what the backend
+parses.
 
 Every parse failure is a typed [`ParseError`](src/error.rs) with a machine
 readable [`ParseErrorKind`](src/error.rs), a 1-based line number, an optional
@@ -44,29 +49,31 @@ Only a name that matches nothing in any case fails as `unknown command`.
 
 The kinds:
 
-- `PestParse`: the grammar could not tokenize the line at all. Always
-  carries line, column span, source line, and caret, plus the expected
-  rule set. Lowercase commands land here with an uppercase note.
+- `PestParse`: low-level syntax the backend never reaches lowering
+  for (unbalanced groups, literal scans, lowercase heads). Always
+  carries line plus the source line and caret; lowercase commands land
+  here with an uppercase note.
 - `InvalidSyntax { command }`: a known command or keyword with malformed
   arguments, flags, arity, or block shape. Carries the received text, the
   canonical syntax, and a hint.
 - `UnknownCommand { name }`: a truly unknown name, with a
   `did you mean` hint when only the case is wrong.
 - `Structural { rule }`: guard, block, scope, and structural keyword
-  failures. Spans are refined to the exact offending pair, so the caret
-  lands on the token (for example the `BOOL` in a bad `FOR` key type),
-  never just the statement start.
+  failures. Spans cover the statement's first line, so the caret marks
+  the statement (header interiors such as a bad `FOR` key type name
+  their offender in the message); lexer-exact positions such as
+  unbalanced groups keep column precision.
 - `Validation { command }`: arity, flag, and static argument type
   failures for a known command.
 
-String and file parsers always populate line, column span, and source
-line. Token stream parsers (`macro_input`) leave the source line empty
-and keep integer coordinates instead, since `proc_macro2::Span` carries
-positions but not source text. Callers keep their own compiler span for
-`syn::Error` conversion. Downstream crates receive `ParseError` by value
-(`ParseResult<T>`) and convert to their own error type only at the outer
-boundary, so matching on `kind`, `line`, and columns never depends on
-message text.
+String parsers always populate line and source line with a statement
+granularity column span. Token stream parsers (`macro_input`) leave
+the source line empty and keep integer coordinates instead, since
+`proc_macro2::Span` carries positions but not source text. Callers keep
+their own compiler span for `syn::Error` conversion. Downstream crates
+receive `ParseError` by value (`ParseResult<T>`) and convert to their
+own error type only at the outer boundary, so matching on `kind` and
+`line` never depends on message text.
 
 `oxdock-parser` builds the executable steps for the OxDock DSL that powers the
 CLI and the embedding macros. The DSL is intentionally compact, but it now has
