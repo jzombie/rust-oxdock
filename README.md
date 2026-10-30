@@ -6447,6 +6447,9 @@ Reading an error, top to bottom: the first line states the kind and the
 fix (expected syntax or a `did you mean` hint), the `-->` line gives the
 statement's line, and the caret marks the statement to change (lexer-level
 mistakes such as unbalanced groups point at their exact position).
+Runtime failures name their position the same way: `step N, line L, col C`
+(the step index, then the statement's source coordinates), so a failing
+run points at the exact script line instead of an index alone.
 
 ## Selective environment inheritance
 

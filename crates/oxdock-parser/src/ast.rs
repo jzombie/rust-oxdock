@@ -686,13 +686,35 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Step {
     pub guard: Option<GuardExpr>,
     pub kind: StepKind,
     pub scope_enter: usize,
     pub scope_exit: usize,
+    /// 1-based source line of the statement that produced this step
+    /// (`0` when unknown: hand-built steps, synthetic streams). Stamped
+    /// at lower time from the split statement, so runtime errors can
+    /// name the failing line. Never rendered by `Display` (output must
+    /// stay reparse-stable) and never compared by content equality
+    /// (provenance, like quoting flags and scope markers).
+    pub line: usize,
+    /// 1-based column where the statement starts (`0` when unknown).
+    /// Same stamping, same provenance rules as `line`; runtime errors
+    /// render both.
+    pub col: usize,
 }
+
+impl PartialEq for Step {
+    fn eq(&self, other: &Self) -> bool {
+        self.guard == other.guard
+            && self.kind == other.kind
+            && self.scope_enter == other.scope_enter
+            && self.scope_exit == other.scope_exit
+    }
+}
+
+impl Eq for Step {}
 
 impl Expr {
     /// Visit this expression and every descendant, depth first. `Block`
@@ -1441,6 +1463,8 @@ mod tests {
                     kind,
                     scope_enter: 0,
                     scope_exit: 0,
+                    line: 0,
+                    col: 0,
                 });
             match (via_backend, via_lowering) {
                 (Ok(_), _) => {}

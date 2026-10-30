@@ -70,15 +70,45 @@ pub enum TokKind {
 /// whitespace, comment, or newline) precedes it. The parser uses this
 /// where the grammar requires adjacency (`::`, `$var`, `==`, `"a""b"`
 /// fragment joins, `FOO (` not-a-call); it never affects token identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `line`/`col` are the 1-based start coordinates (`0` when unknown:
+/// synthetic streams, fused fragments, group interiors lexed without
+/// position context). Only statement-head positions are consumed
+/// (statement starts for errors and step coordinates); everything else
+/// rides along for future tooling. Equality ignores coordinates so
+/// token streams compare by content across frontends.
+#[derive(Debug, Clone)]
 pub struct Tok {
     pub kind: TokKind,
     pub joint: bool,
+    pub line: usize,
+    pub col: usize,
 }
+
+impl PartialEq for Tok {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.joint == other.joint
+    }
+}
+
+impl Eq for Tok {}
 
 impl Tok {
     pub(crate) fn fresh(kind: TokKind, joint: bool) -> Self {
-        Self { kind, joint }
+        Self {
+            kind,
+            joint,
+            line: 0,
+            col: 0,
+        }
+    }
+
+    pub(crate) fn at(kind: TokKind, joint: bool, line: usize, col: usize) -> Self {
+        Self {
+            kind,
+            joint,
+            line,
+            col,
+        }
     }
 }
 
@@ -290,6 +320,12 @@ struct StrLexer<'a> {
     /// whose opener never closed (issue #215's "unclosed `IF` block
     /// opened on line N" naming, without grammar internals).
     heads: Vec<(String, usize, usize)>,
+    /// Start coordinates of the token currently being scanned, captured
+    /// at token begin and stamped by `push`. The main loop marks every
+    /// iteration (each scans exactly one token); group interiors inherit
+    /// absolute positions from a seeded child lexer instead.
+    mark_line: usize,
+    mark_col: usize,
     /// True when a gap (space, tab, comment, newline, `;`) precedes the
     /// next token. Reset after each emitted token.
     gapped: bool,
@@ -297,13 +333,22 @@ struct StrLexer<'a> {
 
 impl<'a> StrLexer<'a> {
     fn new(src: &'a str) -> Self {
+        Self::with_start(src, 1, 1)
+    }
+
+    /// Child lexer over group-interior text starting at an absolute
+    /// position (just past the opener): interior tokens and errors
+    /// come out absolute, so no remapping is needed downstream.
+    fn with_start(src: &'a str, line: usize, col: usize) -> Self {
         Self {
             src,
             pos: 0,
-            line: 1,
-            col: 1,
+            line,
+            col,
             out: Vec::new(),
             heads: Vec::new(),
+            mark_line: 0,
+            mark_col: 0,
             gapped: true,
         }
     }
@@ -337,7 +382,8 @@ impl<'a> StrLexer<'a> {
         if let TokKind::Word(w) = &kind {
             self.heads.push((w.clone(), self.line, self.out.len()));
         }
-        self.out.push(Tok::fresh(kind, joint));
+        let (line, col) = (self.mark_line, self.mark_col);
+        self.out.push(Tok::at(kind, joint, line, col));
     }
 
     /// Block-head keyword whose `{...}` never closed: the first head
@@ -412,7 +458,7 @@ impl<'a> StrLexer<'a> {
     /// positional: `open_joint` is false when whitespace follows the
     /// opener, `close_joint` is false when it precedes the closer.
     fn lex_group(&mut self, close: char, delim: GroupDelim) -> Result<(), LexError> {
-        let start_line = self.line;
+        let (start_line, start_col) = (self.line, self.col);
         self.bump(1, 0);
         let open_joint = !self.rest().starts_with([' ', '\t', '\r', '\n']);
         let mut stack: Vec<char> = Vec::new();
@@ -492,15 +538,13 @@ impl<'a> StrLexer<'a> {
                         Some(' ' | '\t' | '\r' | '\n')
                     );
                     self.bump(c.len_utf8(), 0);
-                    // Inner lines offset by the opener's line (the
-                    // inner text starts on it), so nested failures
-                    // report absolute positions.
-                    let mut inner = lex_str_inner(&inner_src).map_err(|e| LexError {
-                        line: start_line + e.line - 1,
-                        col: e.col,
-                        msg: e.msg,
-                        kind: e.kind,
-                    })?;
+                    // Interior text starts just past the opener, so a
+                    // child lexer seeded there yields absolute
+                    // coordinates for interior tokens and errors alike
+                    // (no remapping downstream).
+                    let mut child = StrLexer::with_start(&inner_src, start_line, start_col + 1);
+                    child.run()?;
+                    let mut inner = child.out;
                     if open_joint
                         && let Some(first) = inner.first()
                         && !matches!(
@@ -609,6 +653,11 @@ impl<'a> StrLexer<'a> {
         while self.pos < self.src.len() {
             let rest = self.rest();
             let c = rest.chars().next().unwrap();
+            // Every iteration scans exactly one token: record its start
+            // coordinates for the positioned emits below (`push` reads
+            // the same marks; group interiors are seeded absolute).
+            self.mark_line = self.line;
+            self.mark_col = self.col;
             match c {
                 ' ' | '\t' => {
                     self.bump(c.len_utf8(), 0);
@@ -616,17 +665,32 @@ impl<'a> StrLexer<'a> {
                 }
                 '\r' if rest.starts_with("\r\n") => {
                     self.bump(2, 1);
-                    self.out.push(Tok::fresh(TokKind::Newline, false));
+                    self.out.push(Tok::at(
+                        TokKind::Newline,
+                        false,
+                        self.mark_line,
+                        self.mark_col,
+                    ));
                     self.gapped = true;
                 }
                 '\n' | '\r' => {
                     self.bump(c.len_utf8(), 1);
-                    self.out.push(Tok::fresh(TokKind::Newline, false));
+                    self.out.push(Tok::at(
+                        TokKind::Newline,
+                        false,
+                        self.mark_line,
+                        self.mark_col,
+                    ));
                     self.gapped = true;
                 }
                 ';' => {
                     self.bump(1, 0);
-                    self.out.push(Tok::fresh(TokKind::Semicolon, false));
+                    self.out.push(Tok::at(
+                        TokKind::Semicolon,
+                        false,
+                        self.mark_line,
+                        self.mark_col,
+                    ));
                     self.gapped = true;
                 }
                 // `//` opens a comment anywhere (line comment to end
@@ -638,22 +702,42 @@ impl<'a> StrLexer<'a> {
                 // there, `/*` reads as math operators.)
                 '/' if rest.starts_with("//") && self.at_line_start() => {
                     let text = self.skip_line_comment();
-                    self.out.push(Tok::fresh(TokKind::Comment(text), false));
+                    self.out.push(Tok::at(
+                        TokKind::Comment(text),
+                        false,
+                        self.mark_line,
+                        self.mark_col,
+                    ));
                     self.gapped = true;
                 }
                 '/' if rest.starts_with("//") => {
                     let text = self.skip_line_comment();
                     let joint = !self.gapped;
-                    self.out.push(Tok::fresh(TokKind::Comment(text), joint));
+                    self.out.push(Tok::at(
+                        TokKind::Comment(text),
+                        joint,
+                        self.mark_line,
+                        self.mark_col,
+                    ));
                     self.gapped = false;
                 }
                 '/' if rest.starts_with("/*") && self.at_line_start() => {
                     let text = self.skip_block_comment()?;
-                    self.out.push(Tok::fresh(TokKind::Comment(text), false));
+                    self.out.push(Tok::at(
+                        TokKind::Comment(text),
+                        false,
+                        self.mark_line,
+                        self.mark_col,
+                    ));
                 }
                 '#' if self.at_line_start() => {
                     let text = self.skip_line_comment();
-                    self.out.push(Tok::fresh(TokKind::Comment(text), false));
+                    self.out.push(Tok::at(
+                        TokKind::Comment(text),
+                        false,
+                        self.mark_line,
+                        self.mark_col,
+                    ));
                     self.gapped = true;
                 }
                 '"' => {
@@ -662,7 +746,8 @@ impl<'a> StrLexer<'a> {
                     let newlines = rest[..used].matches('\n').count();
                     self.bump(used, newlines);
                     self.gapped = false;
-                    self.out.push(Tok::fresh(kind, joint));
+                    self.out
+                        .push(Tok::at(kind, joint, self.mark_line, self.mark_col));
                 }
                 '\'' if self.gapped => {
                     let joint = !self.gapped;
@@ -670,7 +755,8 @@ impl<'a> StrLexer<'a> {
                         Ok((kind, used)) => {
                             self.bump(used, 0);
                             self.gapped = false;
-                            self.out.push(Tok::fresh(kind, joint));
+                            self.out
+                                .push(Tok::at(kind, joint, self.mark_line, self.mark_col));
                         }
                         // Lone `'` (lifetimes, apostrophes): matches the
                         // `TokenStream` shape (`'` punct + word) instead
@@ -730,6 +816,11 @@ pub fn lex_tokens(ts: &proc_macro2::TokenStream) -> Result<Vec<Tok>, LexError> {
         /// Fused raw spellings of an adjacent string-literal run plus
         /// the joint flag of its first piece.
         pending_str: Option<(String, bool)>,
+        /// Start coordinates of the token currently being scanned
+        /// (1-based; `0` means unknown). Set by `note_position` from
+        /// each token's own span; degenerate spans record `(0, 0)`.
+        mark_line: usize,
+        mark_col: usize,
     }
 
     impl Walker {
@@ -740,6 +831,8 @@ pub fn lex_tokens(ts: &proc_macro2::TokenStream) -> Result<Vec<Tok>, LexError> {
                 prev_end: None,
                 prev_joint: false,
                 pending_str: None,
+                mark_line: 0,
+                mark_col: 0,
             }
         }
 
@@ -749,13 +842,19 @@ pub fn lex_tokens(ts: &proc_macro2::TokenStream) -> Result<Vec<Tok>, LexError> {
         fn note_position(&mut self, start: proc_macro2::LineColumn, end: proc_macro2::LineColumn) {
             if start == end {
                 self.gapped = true;
+                self.mark_line = 0;
+                self.mark_col = 0;
             } else {
                 match self.prev_end {
                     None => self.gapped = true,
                     Some(prev) => {
                         if start.line > prev.line {
-                            for _ in 0..(start.line - prev.line) {
-                                self.out.push(Tok::fresh(TokKind::Newline, false));
+                            for i in 0..(start.line - prev.line) {
+                                // Newlines terminate the lines being left;
+                                // columns are unknowable here, so only the
+                                // line is recorded (`0` col = unknown).
+                                self.out
+                                    .push(Tok::at(TokKind::Newline, false, prev.line + i, 0));
                             }
                             self.gapped = true;
                         } else {
@@ -763,6 +862,10 @@ pub fn lex_tokens(ts: &proc_macro2::TokenStream) -> Result<Vec<Tok>, LexError> {
                         }
                     }
                 }
+                // proc_macro2 columns are 0-based byte offsets; toks are
+                // 1-based.
+                self.mark_line = start.line;
+                self.mark_col = start.column + 1;
             }
             self.prev_end = Some(end);
             self.prev_joint = false;
@@ -784,7 +887,8 @@ pub fn lex_tokens(ts: &proc_macro2::TokenStream) -> Result<Vec<Tok>, LexError> {
         fn push(&mut self, kind: TokKind) {
             let joint = !self.gapped;
             self.gapped = false;
-            self.out.push(Tok::fresh(kind, joint));
+            self.out
+                .push(Tok::at(kind, joint, self.mark_line, self.mark_col));
         }
 
         fn walk_stream(&mut self, ts: &proc_macro2::TokenStream) -> Result<(), LexError> {
@@ -890,7 +994,12 @@ pub fn lex_tokens(ts: &proc_macro2::TokenStream) -> Result<Vec<Tok>, LexError> {
                         self.flush_str()?;
                         self.note_position(start, end);
                         if ch == ';' {
-                            self.out.push(Tok::fresh(TokKind::Semicolon, false));
+                            self.out.push(Tok::at(
+                                TokKind::Semicolon,
+                                false,
+                                self.mark_line,
+                                self.mark_col,
+                            ));
                             self.gapped = true;
                         } else {
                             self.push(TokKind::Punct(ch));

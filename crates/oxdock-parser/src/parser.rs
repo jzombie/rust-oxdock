@@ -70,19 +70,20 @@ fn lex_error(input: &str, e: LexError) -> ParseError {
 
 /// Convert a backend failure, preserving the dispatcher's error kind
 /// and completing line/source context the token stream knows. Spans
-/// cover the statement's whole first line (multi-line spans clamp to
-/// the start line, like the old backend), so caret blocks render for
-/// every string-path error.
+/// open at the statement's start column and cover its whole first line
+/// (multi-line spans clamp to the start line, like the old backend),
+/// so caret blocks render for every string-path error.
 fn v2_error(input: &str, e: V2Error) -> ParseError {
     let line = if e.line == 0 {
         last_line(input)
     } else {
         e.line
     };
+    let start_col = e.col.max(1);
     let ctx = match source_line_of(input, line) {
         Some(source_line) => {
-            let end = source_line.len().max(1);
-            SpanContext::full(line, 1, end, source_line)
+            let end = source_line.len().max(start_col);
+            SpanContext::full(line, start_col, end, source_line)
         }
         None => SpanContext::line_only(line),
     };

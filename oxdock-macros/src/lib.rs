@@ -1594,12 +1594,16 @@ fn emit_step(step: &Step, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
     let kind = emit_stepkind(&step.kind, interp);
     let scope_enter = step.scope_enter;
     let scope_exit = step.scope_exit;
+    let line = step.line;
+    let col = step.col;
     quote! {
         oxdock_parser::Step {
             guard: #guard,
             kind: #kind,
             scope_enter: #scope_enter,
             scope_exit: #scope_exit,
+            line: #line,
+            col: #col,
         }
     }
 }
@@ -1953,6 +1957,8 @@ mod tests {
                 kind: StepKind::Run(Arg::String("echo hi".to_string(), false)),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         }
     }
@@ -1998,6 +2004,8 @@ mod tests {
                 kind: StepKind::Echo(Arg::String("hi".to_string(), false)),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         };
         let rendered = emit_stepkind(&task, &[]).to_string();
@@ -2018,6 +2026,8 @@ mod tests {
             kind: timeout_kind("2s"),
             scope_enter: 1,
             scope_exit: 1,
+            line: 0,
+            col: 0,
         };
         let rendered = emit_step(&step, &[]).to_string();
         assert!(rendered.contains("Timeout"), "shape: {rendered}");

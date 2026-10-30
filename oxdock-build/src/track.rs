@@ -470,6 +470,8 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             kind: kind.clone(),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         };
         for k in collect_env_references(std::slice::from_ref(&step_like)) {
             out.insert(k);
@@ -647,6 +649,8 @@ mod tests {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         };
         let refs = collect_env_references(std::slice::from_ref(&env_step));
         assert!(refs.contains("SEED"), "{refs:?}");

@@ -1071,5 +1071,7 @@ fn step_shell(kind: &oxdock_parser::StepKind) -> oxdock_parser::Step {
         kind: kind.clone(),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }
 }

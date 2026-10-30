@@ -163,6 +163,9 @@ pub struct V2Error {
     /// enclosing statement's line on the way out, so only genuinely
     /// position-less errors stay `0`).
     pub line: usize,
+    /// 1-based start column of the enclosing statement, `0` when
+    /// unknown (stamped alongside `line`).
+    pub col: usize,
     pub msg: String,
     /// Lowering failures preserve the dispatcher's classification
     /// (`UnknownCommand`, `InvalidSyntax`, `Validation`); `None` means
@@ -192,6 +195,7 @@ fn lower_err(stmt: usize, e: ParseError) -> V2Error {
     V2Error {
         stmt,
         line: 0,
+        col: 0,
         msg: e.to_string(),
         kind: Some(e.kind().clone()),
     }
@@ -211,6 +215,10 @@ struct Stmt {
     /// 1-based source line where the body starts (guards ride on
     /// earlier lines; errors report this).
     line: usize,
+    /// 1-based column where the body starts (`0` when the head token
+    /// carries no coordinates: synthetic streams). Read off the first
+    /// body token, which always has the statement's own start.
+    col: usize,
 }
 
 /// Grammar-state boundary decision: does this `Newline`/`Semicolon`
@@ -347,14 +355,14 @@ fn tok_newlines(tok: &Tok) -> usize {
     }
 }
 
-/// Stamp an error with the innermost statement's line when it has
-/// none yet (deeper frames stamp first, so outer frames never
-/// overwrite real positions).
-fn stamp_line(err: V2Error, line: usize) -> V2Error {
-    if err.line == 0 {
-        V2Error { line, ..err }
-    } else {
-        err
+/// Stamp an error with the innermost statement's position when it
+/// has none yet (deeper frames stamp first, so outer frames never
+/// overwrite real positions). Each component fills independently.
+fn stamp_pos(err: V2Error, line: usize, col: usize) -> V2Error {
+    V2Error {
+        line: if err.line == 0 { line } else { err.line },
+        col: if err.col == 0 { col } else { err.col },
+        ..err
     }
 }
 
@@ -379,14 +387,15 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
     // every pushed statement records its body's start line for errors.
     let mut line = base;
     let mut start_line = base;
+    let mut start_col = 0;
     // Bare `WITH_IO [..]` awaiting its `{...}` block (see
     // `is_bare_with_io`): the guard and body hold across any
     // separator until the brace arrives or the wait fails.
     // Pending holds carry their body's start line with them.
-    let mut pending_io: Option<(Vec<Tok>, Vec<Tok>, usize)> = None;
+    let mut pending_io: Option<(Vec<Tok>, Vec<Tok>, usize, usize)> = None;
     // If-tailed statement awaiting an `ELSE` continuation across
     // newlines only (a `;` breaks the chain like the grammar).
-    let mut pending_if: Option<(Vec<Tok>, Vec<Tok>, usize)> = None;
+    let mut pending_if: Option<(Vec<Tok>, Vec<Tok>, usize, usize)> = None;
     // Separator crossed between the guard region and the body start:
     // only observed for brace-headed bodies (`brace_detached`).
     let mut detached = false;
@@ -399,10 +408,11 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                          body: &mut Vec<Tok>,
                          detached: &mut bool,
                          stmt_idx: &mut usize,
-                         pending_io: &mut Option<(Vec<Tok>, Vec<Tok>, usize)>,
-                         pending_if: &mut Option<(Vec<Tok>, Vec<Tok>, usize)>,
+                         pending_io: &mut Option<(Vec<Tok>, Vec<Tok>, usize, usize)>,
+                         pending_if: &mut Option<(Vec<Tok>, Vec<Tok>, usize, usize)>,
                          via_newline: bool,
                          start_line: usize,
+                         start_col: usize,
                          line: usize|
      -> Result<(), V2Error> {
         if body.is_empty() {
@@ -412,7 +422,9 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
         }
         // Pending `WITH_IO` wait takes precedence (the holds are
         // mutually exclusive: setting either returns first).
-        if let Some((pending_guard, mut pending_body, pending_line)) = pending_io.take() {
+        if let Some((pending_guard, mut pending_body, pending_line, pending_col)) =
+            pending_io.take()
+        {
             // Only a lone guard-less `{...}` group satisfies the wait;
             // anything else (commands, guarded braces) fails like the
             // grammar's `must be followed by '{'`.
@@ -430,6 +442,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                     stmt: *stmt_idx,
                     msg: "WITH_IO block must be followed by '{'".to_string(),
                     line: pending_line,
+                    col: pending_col,
                     kind: None,
                 });
             }
@@ -441,6 +454,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                 body: pending_body,
                 brace_detached: false,
                 line: pending_line,
+                col: pending_col,
             });
             *stmt_idx += 1;
             return Ok(());
@@ -449,7 +463,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
         // The wait was set across a newline (only newlines hold), so
         // the separator kind of *this* flush is irrelevant — `;` and
         // EOF merge too; anything else releases the held IF.
-        if let Some((held_guard, mut held_body, held_line)) = pending_if.take() {
+        if let Some((held_guard, mut held_body, held_line, held_col)) = pending_if.take() {
             let else_start = guard.is_empty()
                 && matches!(
                     body.first().map(|t| &t.kind),
@@ -461,6 +475,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                     body: held_body,
                     brace_detached: false,
                     line: held_line,
+                    col: held_col,
                 });
                 *stmt_idx += 1;
             } else {
@@ -474,7 +489,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                 guard.clear();
                 *detached = false;
                 if via_newline && is_if_tail(&held_body) {
-                    *pending_if = Some((held_guard, held_body, held_line));
+                    *pending_if = Some((held_guard, held_body, held_line, held_col));
                     return Ok(());
                 }
                 stmts.push(Stmt {
@@ -482,6 +497,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                     body: held_body,
                     brace_detached: false,
                     line: held_line,
+                    col: held_col,
                 });
                 *stmt_idx += 1;
                 return Ok(());
@@ -493,17 +509,28 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                     stmt: *stmt_idx,
                     msg: "previous WITH_IO block is still waiting for '{'".to_string(),
                     line,
+                    col: start_col,
                     kind: None,
                 });
             }
-            *pending_io = Some((std::mem::take(guard), std::mem::take(body), start_line));
+            *pending_io = Some((
+                std::mem::take(guard),
+                std::mem::take(body),
+                start_line,
+                start_col,
+            ));
             *detached = false;
             return Ok(());
         }
         // Ordinary statement: emit it, holding if-tailed bodies for
         // an `ELSE` continuation across newlines only.
         if via_newline && is_if_tail(body) {
-            *pending_if = Some((std::mem::take(guard), std::mem::take(body), start_line));
+            *pending_if = Some((
+                std::mem::take(guard),
+                std::mem::take(body),
+                start_line,
+                start_col,
+            ));
             *detached = false;
             return Ok(());
         }
@@ -513,6 +540,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
             body: std::mem::take(body),
             brace_detached,
             line: start_line,
+            col: start_col,
         });
         *detached = false;
         *stmt_idx += 1;
@@ -563,6 +591,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                         stmt: stmt_idx,
                         msg: "unclosed block comment".to_string(),
                         line,
+                        col: tok.col,
                         kind: None,
                     });
                 }
@@ -581,7 +610,18 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
         // positions fail or math over it, exactly like the grammar.
         if comment_depth > 0 {
             if body.is_empty() {
-                start_line = line;
+                // Head-token coordinates are authoritative: the line
+                // tracker lags content stripped before lexing (comments
+                // vanish on the token path, leaving no newline behind).
+                // Zero coordinates (synthetic streams) keep the tracker.
+                if tok.line > 0 {
+                    start_line = tok.line;
+                } else {
+                    start_line = line;
+                }
+                if tok.col > 0 {
+                    start_col = tok.col;
+                }
             }
             line += tok_newlines(tok);
             body.push(tok.clone());
@@ -610,6 +650,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                         &mut pending_if,
                         true,
                         start_line,
+                        start_col,
                         line,
                     )?,
                     Ok(false) => {}
@@ -617,7 +658,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                         return Err(V2Error {
                             stmt: stmt_idx,
                             msg,
-                            line,
+                            line: start_line,
+                            col: start_col,
                             kind: None,
                         });
                     }
@@ -629,12 +671,13 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                 if body.is_empty() {
                     // A `;` breaks `ELSE` chains (release the hold)
                     // but not `WITH_IO` waits (probed `;` merge).
-                    if let Some((held_guard, held_body, held_line)) = pending_if.take() {
+                    if let Some((held_guard, held_body, held_line, held_col)) = pending_if.take() {
                         stmts.push(Stmt {
                             guard: held_guard,
                             body: held_body,
                             brace_detached: false,
                             line: held_line,
+                            col: held_col,
                         });
                         stmt_idx += 1;
                     }
@@ -653,6 +696,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                         &mut pending_if,
                         false,
                         start_line,
+                        start_col,
                         line,
                     )?,
                     Ok(false) => {}
@@ -660,7 +704,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                         return Err(V2Error {
                             stmt: stmt_idx,
                             msg,
-                            line,
+                            line: start_line,
+                            col: start_col,
                             kind: None,
                         });
                     }
@@ -671,12 +716,13 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
             // pending `ELSE` wait (a comment line breaks the chain
             // like the grammar); `WITH_IO` waits survive comments.
             TokKind::Comment(text) => {
-                if let Some((held_guard, held_body, held_line)) = pending_if.take() {
+                if let Some((held_guard, held_body, held_line, held_col)) = pending_if.take() {
                     stmts.push(Stmt {
                         guard: held_guard,
                         body: held_body,
                         brace_detached: false,
                         line: held_line,
+                        col: held_col,
                     });
                     stmt_idx += 1;
                 }
@@ -700,6 +746,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                                 stmt: stmt_idx,
                                 msg: "unclosed block comment".to_string(),
                                 line,
+                                col: tok.col,
                                 kind: None,
                             });
                         }
@@ -722,7 +769,16 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
             }
             _ => {
                 if body.is_empty() {
-                    start_line = line;
+                    // Head-token coordinates are authoritative (see
+                    // above); the tracker is the fallback.
+                    if tok.line > 0 {
+                        start_line = tok.line;
+                    } else {
+                        start_line = line;
+                    }
+                    if tok.col > 0 {
+                        start_col = tok.col;
+                    }
                 }
                 line += tok_newlines(tok);
                 body.push(tok.clone());
@@ -742,13 +798,15 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                 &mut pending_if,
                 false,
                 start_line,
+                start_col,
                 line,
             )?,
             Err(msg) => {
                 return Err(V2Error {
                     stmt: stmt_idx,
                     msg,
-                    line,
+                    line: start_line,
+                    col: start_col,
                     kind: None,
                 });
             }
@@ -760,23 +818,26 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
             stmt: stmt_idx,
             msg: "guard declared without a following command".to_string(),
             line,
+            col: 0,
             kind: None,
         });
     }
     // Release a trailing `ELSE` wait; a trailing `WITH_IO` wait fails.
-    if let Some((held_guard, held_body, held_line)) = pending_if.take() {
+    if let Some((held_guard, held_body, held_line, held_col)) = pending_if.take() {
         stmts.push(Stmt {
             guard: held_guard,
             body: held_body,
             brace_detached: false,
             line: held_line,
+            col: held_col,
         });
     }
-    if pending_io.is_some() {
+    if let Some((_, _, pending_line, pending_col)) = pending_io.take() {
         return Err(V2Error {
             stmt: stmt_idx,
             msg: "WITH_IO block must be followed by '{'".to_string(),
-            line,
+            line: pending_line,
+            col: pending_col,
             kind: None,
         });
     }
@@ -940,6 +1001,7 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
                             stmt,
                             msg: "unexpected `$` in argument".to_string(),
                             line: 0,
+                            col: 0,
                             kind: None,
                         });
                     }
@@ -1001,6 +1063,7 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
                     stmt,
                     msg: "unexpected line break in argument".to_string(),
                     line: 0,
+                    col: 0,
                     kind: None,
                 });
             }
@@ -1042,6 +1105,7 @@ fn build_value_arg(
             stmt,
             msg: "unexpected text after quoted value".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -1183,6 +1247,7 @@ fn try_lone_value_expr(region: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Optio
                     stmt,
                     msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
                     line: 0,
+                    col: 0,
                     kind: None,
                 });
             };
@@ -1193,6 +1258,7 @@ fn try_lone_value_expr(region: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Optio
                 stmt,
                 msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -1358,6 +1424,7 @@ fn build_arg_tokens(toks: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Vec<InsTok
                     stmt,
                     msg,
                     line: 0,
+                    col: 0,
                     kind: None,
                 });
             }
@@ -1527,6 +1594,7 @@ fn lower_generic_args(
             stmt,
             msg: e.to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -1535,6 +1603,7 @@ fn lower_generic_args(
             stmt,
             msg: e.to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -1665,6 +1734,7 @@ impl<'t> Cursor<'t> {
         V2Error {
             stmt: self.stmt,
             line: 0,
+            col: 0,
             msg: msg.into(),
             kind: None,
         }
@@ -2217,6 +2287,7 @@ fn parse_guard_groups(guard: &[Tok], stmt: usize) -> Result<Option<GuardExpr>, V
                     stmt,
                     msg: "unsupported in parse_v2 slice 2: non-bracket guard".to_string(),
                     line: 0,
+                    col: 0,
                     kind: None,
                 });
             }
@@ -2422,6 +2493,7 @@ fn parse_expr_call(name: String, inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Res
                 stmt,
                 msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         };
@@ -2432,6 +2504,7 @@ fn parse_expr_call(name: String, inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Res
             stmt,
             msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -2604,6 +2677,7 @@ fn parse_timeout_duration_at(
         stmt,
         msg: e.to_string(),
         line: 0,
+        col: 0,
         kind: None,
     })?;
     Ok(Some((arg, used)))
@@ -2660,6 +2734,7 @@ fn parse_io_binding_part(part: &[&Tok], stmt: usize) -> Result<Option<IoBinding>
         stmt,
         msg,
         line: 0,
+        col: 0,
         kind: None,
     };
     let Some(first) = part.first() else {
@@ -2795,6 +2870,7 @@ fn parse_await_cancel_at(
                 stmt,
                 msg: format!("{head} requires a variable"),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -2903,6 +2979,7 @@ fn parse_single_inner(
                 stmt,
                 msg: "RUN [...] requires a gap after RUN".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -3152,6 +3229,7 @@ fn render_inherit_key(part: &[Tok], stmt: usize) -> Result<Option<String>, V2Err
                     stmt,
                     msg: "unclosed block comment".to_string(),
                     line: 0,
+                    col: 0,
                     kind: None,
                 })?;
             }
@@ -3250,7 +3328,9 @@ fn parse_body_steps(
         // nested splits and stamp failures that have none yet (deeper
         // frames stamp first, so this never overwrites real positions).
         *ctx.current_line.borrow_mut() = s.line;
-        out.extend(lower_stmt_steps(&s, stmt, ctx, true, mark).map_err(|e| stamp_line(e, s.line))?);
+        out.extend(
+            lower_stmt_steps(&s, stmt, ctx, true, mark).map_err(|e| stamp_pos(e, s.line, s.col))?,
+        );
     }
     *ctx.current_line.borrow_mut() = saved;
     ctx.funcs.borrow_mut().pop();
@@ -3312,6 +3392,7 @@ fn parse_with_io_single(
             stmt,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -3342,6 +3423,7 @@ fn parse_with_io_single(
         stmt,
         msg: e.to_string(),
         line: 0,
+        col: 0,
         kind: None,
     })?;
     let kind = StepKind::WithIo {
@@ -3352,6 +3434,7 @@ fn parse_with_io_single(
         stmt,
         msg: e.to_string(),
         line: 0,
+        col: 0,
         kind: None,
     })?;
     Ok(Some((kind, 2 + used)))
@@ -3410,6 +3493,8 @@ fn parse_timeout_single(
                 kind: cmd,
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
             used,
         )
@@ -3423,6 +3508,7 @@ fn parse_timeout_single(
         stmt,
         msg: e.to_string(),
         line: 0,
+        col: 0,
         kind: None,
     })?;
     Ok(Some((kind, 1 + dused + body.1)))
@@ -3474,6 +3560,8 @@ fn parse_isolated_single(
                 kind: cmd,
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
             used,
         )
@@ -3516,6 +3604,7 @@ fn parse_async_single(
             stmt,
             msg: e.to_string(),
             line: 0,
+            col: 0,
             kind: None,
         })?;
         let kind = StepKind::AsyncBlock { body };
@@ -3523,6 +3612,7 @@ fn parse_async_single(
             stmt,
             msg: e.to_string(),
             line: 0,
+            col: 0,
             kind: None,
         })?;
         return Ok(Some((kind, 2)));
@@ -3545,12 +3635,15 @@ fn parse_async_single(
         kind: cmd,
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
     let span = lowering_ctx(stmt);
     crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| V2Error {
         stmt,
         msg: e.to_string(),
         line: 0,
+        col: 0,
         kind: None,
     })?;
     let kind = StepKind::AsyncBlock { body };
@@ -3558,6 +3651,7 @@ fn parse_async_single(
         stmt,
         msg: e.to_string(),
         line: 0,
+        col: 0,
         kind: None,
     })?;
     Ok(Some((kind, 1 + used)))
@@ -3910,6 +4004,7 @@ fn parse_for_at(
                 types.len()
             ),
             line: 0,
+            col: 0,
             kind: Some(ParseErrorKind::Validation {
                 command: "FOR".to_string(),
             }),
@@ -3937,6 +4032,7 @@ fn parse_for_at(
                 stmt,
                 msg: "FOR requires one or two variables".to_string(),
                 line: 0,
+                col: 0,
                 kind: Some(ParseErrorKind::Validation {
                     command: "FOR".to_string(),
                 }),
@@ -3951,6 +4047,7 @@ fn parse_for_at(
             stmt,
             msg: format!("FOR key variable must be INT or STRING, got {kt}"),
             line: 0,
+            col: 0,
             kind: Some(ParseErrorKind::Validation {
                 command: "FOR".to_string(),
             }),
@@ -4025,6 +4122,7 @@ fn parse_func_at(
         stmt,
         msg,
         line: 0,
+        col: 0,
         kind: Some(ParseErrorKind::Validation {
             command: "FUNC".to_string(),
         }),
@@ -4234,6 +4332,7 @@ fn parse_import_at(
         stmt,
         msg,
         line: 0,
+        col: 0,
         kind: Some(ParseErrorKind::Validation {
             command: "IMPORT".to_string(),
         }),
@@ -4452,6 +4551,7 @@ fn parse_remote_single(
         stmt,
         msg,
         line: 0,
+        col: 0,
         kind: Some(ParseErrorKind::Validation {
             command: "REMOTE".to_string(),
         }),
@@ -5326,6 +5426,7 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
                     stmt,
                     msg: "malformed type in LET".to_string(),
                     line: 0,
+                    col: 0,
                     kind: None,
                 });
             }
@@ -5336,6 +5437,7 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
             stmt,
             msg: "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -5471,12 +5573,14 @@ fn parse_let_rhs(
             stmt,
             msg: e.to_string(),
             line: 0,
+            col: 0,
             kind: None,
         })?;
         crate::commands::reject_pipe_stdout_in_capture(&span, &kind).map_err(|e| V2Error {
             stmt,
             msg: e.to_string(),
             line: 0,
+            col: 0,
             kind: None,
         })?;
         return Ok((
@@ -5555,12 +5659,14 @@ fn parse_let_rhs(
                 stmt,
                 msg: e.to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             })?;
             crate::commands::reject_pipe_stdout_in_capture(&span, &cmd).map_err(|e| V2Error {
                 stmt,
                 msg: e.to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             })?;
             // `INHERIT_ENV`-led lines land here (generic): the
@@ -5570,6 +5676,7 @@ fn parse_let_rhs(
                 stmt,
                 msg: e.to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             })?;
             return Ok((
@@ -5637,6 +5744,7 @@ fn try_let_with_io_rhs(
         stmt,
         msg,
         line: 0,
+        col: 0,
         kind: None,
     };
     let rest = &rhs[2..];
@@ -5710,6 +5818,8 @@ fn try_let_with_io_rhs(
                 },
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             };
             return Ok(Some((
                 StepKind::AssignAsync {
@@ -5746,6 +5856,8 @@ fn try_let_with_io_rhs(
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         };
         let kind = StepKind::AssignAsync {
             var,
@@ -5757,6 +5869,7 @@ fn try_let_with_io_rhs(
             stmt,
             msg: e.to_string(),
             line: 0,
+            col: 0,
             kind: None,
         })?;
         return Ok(Some((kind, 2 + 1 + used)));
@@ -5797,6 +5910,7 @@ fn try_let_with_io_rhs(
         stmt,
         msg: e.to_string(),
         line: 0,
+        col: 0,
         kind: None,
     })?;
     Ok(Some((
@@ -5828,6 +5942,7 @@ fn parse_let_async_rhs(
             stmt,
             msg: "LET $var: HANDLE = ASYNC requires a body".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     };
@@ -5854,6 +5969,7 @@ fn parse_let_async_rhs(
             stmt,
             msg: e.to_string(),
             line: 0,
+            col: 0,
             kind: None,
         })?;
         return Ok((kind, 1));
@@ -5863,6 +5979,7 @@ fn parse_let_async_rhs(
             stmt,
             msg: "LET $var: HANDLE = ASYNC requires a body".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -5884,6 +6001,8 @@ fn parse_let_async_rhs(
             kind: cmd,
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         }],
     };
     let span = lowering_ctx(stmt);
@@ -5891,6 +6010,7 @@ fn parse_let_async_rhs(
         stmt,
         msg: e.to_string(),
         line: 0,
+        col: 0,
         kind: None,
     })?;
     Ok((kind, used))
@@ -5952,10 +6072,25 @@ fn lower_stmt_steps(
     // the element loop): templates and guardless/bare blocks fail
     // loudly; guarded braces open guard blocks (top level) or the
     // nested quirk (in bodies).
-    if starts_brace(&stmt.body) {
-        return parse_brace_head(stmt, guard, idx, ctx, in_block, mark);
+    let mut steps = if starts_brace(&stmt.body) {
+        parse_brace_head(stmt, guard, idx, ctx, in_block, mark)?
+    } else {
+        parse_elements(&stmt.body, idx, ctx, guard, in_block)?
+    };
+    // Stamp the statement's source position on every directly
+    // produced step still missing one. Nested body steps were stamped
+    // by their own statements during recursion, so only direct
+    // products are claimed here; inner statements keep their own
+    // lines and columns.
+    for step in &mut steps {
+        if step.line == 0 {
+            step.line = stmt.line;
+        }
+        if step.col == 0 {
+            step.col = stmt.col;
+        }
     }
-    parse_elements(&stmt.body, idx, ctx, guard, in_block)
+    Ok(steps)
 }
 
 /// Statement-head `{...}` dispatcher. Template braces fail (the
@@ -5978,6 +6113,7 @@ fn parse_brace_head(
             stmt: idx,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -5993,6 +6129,7 @@ fn parse_brace_head(
                 stmt: idx,
                 msg: "unexpected '{' in block body".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -6005,6 +6142,7 @@ fn parse_brace_head(
             stmt: idx,
             msg: "unexpected '{' in block body".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         })?;
         let mut steps = parse_body_steps(&inner, idx, ctx, mark)?;
@@ -6047,6 +6185,7 @@ fn parse_brace_head(
             stmt: idx,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     };
@@ -6056,6 +6195,7 @@ fn parse_brace_head(
             stmt: idx,
             msg: "guard block must contain at least one command".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -6127,6 +6267,7 @@ fn parse_elements(
                         stmt,
                         msg: "unclosed block comment".to_string(),
                         line: 0,
+                        col: 0,
                         kind: None,
                     });
                 }
@@ -6146,6 +6287,7 @@ fn parse_elements(
                     stmt,
                     msg: "IMPORT cannot be guarded".to_string(),
                     line: 0,
+                    col: 0,
                     kind: None,
                 });
             }
@@ -6159,6 +6301,7 @@ fn parse_elements(
                 stmt,
                 msg: "element consumed no input".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -6184,6 +6327,8 @@ fn parse_element_at(
         kind,
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     };
     let head_word = match toks.get(pos).map(|t| &t.kind) {
         Some(TokKind::Word(w)) => Some(w.clone()),
@@ -6198,6 +6343,7 @@ fn parse_element_at(
             stmt,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -6311,6 +6457,7 @@ fn parse_element_at(
                 stmt,
                 msg: "EXPORT is only allowed at the top level".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -6319,6 +6466,7 @@ fn parse_element_at(
                 stmt,
                 msg: "EXPORT cannot be guarded".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -6333,6 +6481,7 @@ fn parse_element_at(
                         stmt,
                         msg: format!("duplicate EXPORT `{name}`"),
                         line: 0,
+                        col: 0,
                         kind: Some(ParseErrorKind::Validation {
                             command: "EXPORT".to_string(),
                         }),
@@ -6351,6 +6500,7 @@ fn parse_element_at(
                 stmt,
                 msg: "TYPE must appear at top level".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -6359,6 +6509,7 @@ fn parse_element_at(
                 stmt,
                 msg: "TYPE cannot be guarded".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -6377,6 +6528,7 @@ fn parse_element_at(
             stmt,
             msg: format!("command must be uppercase: found `{head}`, expected `{upper}`"),
             line: 0,
+            col: 0,
             kind: Some(ParseErrorKind::PestParse),
         });
     }
@@ -6424,6 +6576,8 @@ fn parse_with_io_element(
                 kind,
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
             used,
         ));
@@ -6443,6 +6597,8 @@ fn parse_with_io_element(
                     kind,
                     scope_enter: 0,
                     scope_exit: 0,
+                    line: 0,
+                    col: 0,
                 }],
                 used,
             ));
@@ -6471,6 +6627,7 @@ fn parse_with_io_element(
                 stmt,
                 msg: "WITH_IO block must contain at least one command".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -6500,6 +6657,7 @@ fn parse_with_io_element(
                 stmt,
                 msg: e.to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             })?;
         }
@@ -6520,6 +6678,8 @@ fn parse_with_io_element(
                 kind: StepKind::WithIoBlock { bindings },
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
             2,
         ));
@@ -6531,6 +6691,7 @@ fn parse_with_io_element(
             stmt,
             msg: "WITH_IO block must be followed by '{'".to_string(),
             line: 0,
+            col: 0,
             kind: None,
         });
     }
@@ -6550,6 +6711,7 @@ fn parse_with_io_element(
         stmt,
         msg: e.to_string(),
         line: 0,
+        col: 0,
         kind: None,
     })?;
     let kind = StepKind::WithIo {
@@ -6560,6 +6722,7 @@ fn parse_with_io_element(
         stmt,
         msg: e.to_string(),
         line: 0,
+        col: 0,
         kind: None,
     })?;
     Ok((
@@ -6568,6 +6731,8 @@ fn parse_with_io_element(
             kind,
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         }],
         2 + used,
     ))
@@ -6618,6 +6783,7 @@ fn parse_inner_command(
                 stmt,
                 msg: "statement must open with a command word".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -6641,6 +6807,7 @@ fn parse_inner_command(
                 stmt,
                 msg: "RUN [...] requires a gap after RUN".to_string(),
                 line: 0,
+                col: 0,
                 kind: None,
             });
         }
@@ -6680,7 +6847,9 @@ pub fn parse_v2_with_ctx(toks: &[Tok], ctx: &V2Ctx) -> Result<Vec<Step>, V2Error
     *ctx.current_line.borrow_mut() = 1;
     for (i, s) in split_statements(toks, 1)?.iter().enumerate() {
         *ctx.current_line.borrow_mut() = s.line;
-        out.extend(lower_stmt_steps(s, i, ctx, false, true).map_err(|e| stamp_line(e, s.line))?);
+        out.extend(
+            lower_stmt_steps(s, i, ctx, false, true).map_err(|e| stamp_pos(e, s.line, s.col))?,
+        );
     }
     // Whole-script validations mirroring the pest finish pass (which
     // delegates to the same shared validators where promoted).
@@ -6695,6 +6864,7 @@ pub fn parse_v2_with_ctx(toks: &[Tok], ctx: &V2Ctx) -> Result<Vec<Step>, V2Error
                             stmt: out.len(),
                             msg: "INHERIT_ENV must appear before any other commands".to_string(),
                             line: 0,
+                            col: 0,
                             kind: None,
                         });
                     }
@@ -6705,6 +6875,7 @@ pub fn parse_v2_with_ctx(toks: &[Tok], ctx: &V2Ctx) -> Result<Vec<Step>, V2Error
                             stmt: out.len(),
                             msg: "INHERIT_ENV cannot be nested inside other commands".to_string(),
                             line: 0,
+                            col: 0,
                             kind: None,
                         });
                     }
@@ -6718,6 +6889,7 @@ pub fn parse_v2_with_ctx(toks: &[Tok], ctx: &V2Ctx) -> Result<Vec<Step>, V2Error
             stmt: out.len(),
             msg: e.to_string(),
             line: 0,
+            col: 0,
             kind: None,
         },
     )?;
@@ -6733,6 +6905,7 @@ pub fn parse_v2_with_ctx(toks: &[Tok], ctx: &V2Ctx) -> Result<Vec<Step>, V2Error
             stmt: out.len(),
             msg: e.to_string(),
             line: 0,
+            col: 0,
             kind: None,
         })?;
     }

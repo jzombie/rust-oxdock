@@ -38,12 +38,16 @@ fn run_records_env_and_cwd() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Run("echo hi".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let mock = MockProcessManager::default();
@@ -80,12 +84,16 @@ fn run_expands_env_values() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Run("echo {{ env:FOO }}".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let mock = MockProcessManager::default();
@@ -123,6 +131,8 @@ fn run_shell_routes_dollar_forms_to_dsl_or_shell() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -133,6 +143,8 @@ fn run_shell_routes_dollar_forms_to_dsl_or_shell() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     for script in scripts {
@@ -171,6 +183,8 @@ fn run_exec_resolves_and_flattens_argv() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -184,6 +198,8 @@ fn run_exec_resolves_and_flattens_argv() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -201,6 +217,8 @@ fn run_exec_resolves_and_flattens_argv() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let mock = MockProcessManager::default();
@@ -239,6 +257,8 @@ fn run_exec_rejects_map_elements_with_type_error() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
     let mock = MockProcessManager::default();
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
@@ -267,6 +287,8 @@ fn run_exec_resolves_every_variable_type() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -277,6 +299,8 @@ fn run_exec_resolves_every_variable_type() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -290,6 +314,8 @@ fn run_exec_resolves_every_variable_type() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -311,6 +337,8 @@ fn run_exec_resolves_every_variable_type() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let mock = MockProcessManager::default();
@@ -338,6 +366,8 @@ fn run_exec_expands_templates_in_literal_elements_once() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -356,6 +386,8 @@ fn run_exec_expands_templates_in_literal_elements_once() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let mock = MockProcessManager::default();
@@ -387,6 +419,8 @@ fn run_exec_processes_escapes_and_keeps_metachars_literal() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
     let mock = MockProcessManager::default();
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
@@ -416,6 +450,8 @@ fn run_exec_treats_variable_values_as_opaque() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -426,6 +462,8 @@ fn run_exec_treats_variable_values_as_opaque() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -437,6 +475,8 @@ fn run_exec_treats_variable_values_as_opaque() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let mock = MockProcessManager::default();
@@ -457,6 +497,8 @@ fn async_completion_short_circuits_pipeline() {
             kind: StepKind::Run("echo after".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let mock = MockProcessManager::default();
@@ -483,6 +525,8 @@ fn exit_kills_background_processes() {
             kind: StepKind::Exit(oxdock_parser::Arg::String("5".to_string(), false)),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let mock = MockProcessManager::default();
@@ -490,7 +534,7 @@ fn exit_kills_background_processes() {
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     let err = run_expect_err(fs, &steps, mock.clone());
     assert!(
-        err.to_string().contains("EXIT requested with code 5"),
+        format!("{err:#}").contains("EXIT requested with code 5"),
         "unexpected error: {err}"
     );
 }
@@ -508,6 +552,8 @@ fn symlink_errors_report_underlying_cause() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -518,6 +564,8 @@ fn symlink_errors_report_underlying_cause() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let err = run_steps(&root, &steps).unwrap_err();
@@ -546,6 +594,8 @@ fn guarded_run_waits_for_env_to_be_set() {
             kind: StepKind::Run("echo first".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -555,12 +605,16 @@ fn guarded_run_waits_for_env_to_be_set() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: Some(guard.into()),
             kind: StepKind::Run("echo second".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let mock = MockProcessManager::default();
@@ -593,12 +647,16 @@ fn guard_groups_allow_any_matching_branch() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: Some(GuardExpr::or(vec![guard_alpha.into(), guard_beta.into()])),
             kind: StepKind::Run("echo guarded".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let mock = MockProcessManager::default();
@@ -628,6 +686,8 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -640,6 +700,8 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
 
@@ -693,6 +755,8 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -708,6 +772,8 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let (_cwd, files) = run_with_mock_fs(&steps);
@@ -752,10 +818,14 @@ fn async_stdin_pipe_unblocks_background_write() {
                     },
                     scope_enter: 0,
                     scope_exit: 0,
+                    line: 0,
+                    col: 0,
                 }],
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -768,6 +838,8 @@ fn async_stdin_pipe_unblocks_background_write() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         step(StepKind::Await {
             var: "writer".into(),
@@ -911,12 +983,16 @@ fn mock_fs_handles_workdir_and_write() {
             kind: StepKind::Mkdir("app".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("app".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -926,12 +1002,16 @@ fn mock_fs_handles_workdir_and_write() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Read(Some("out.txt".into())),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let (_cwd, files) = run_with_mock_fs(&steps);
@@ -953,6 +1033,8 @@ fn write_interpolates_env_values() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -962,6 +1044,8 @@ fn write_interpolates_env_values() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -971,6 +1055,8 @@ fn write_interpolates_env_values() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let (_cwd, files) = run_with_mock_fs(&steps);
@@ -1110,6 +1196,8 @@ fn cat_and_capture_expand_env_paths() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -1119,6 +1207,8 @@ fn cat_and_capture_expand_env_paths() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -1128,6 +1218,8 @@ fn cat_and_capture_expand_env_paths() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -1140,6 +1232,8 @@ fn cat_and_capture_expand_env_paths() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -1155,6 +1249,8 @@ fn cat_and_capture_expand_env_paths() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     run_steps(&root, &steps).expect("capture with env paths succeeds");
@@ -1177,12 +1273,16 @@ fn final_cwd_tracks_last_workdir() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("sub".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let (cwd, snapshot) = run_with_mock_fs(&steps);
@@ -1207,12 +1307,16 @@ fn mock_fs_normalizes_backslash_workdir() {
             kind: StepKind::Mkdir("win_nest".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("win_nest".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -1222,6 +1326,8 @@ fn mock_fs_normalizes_backslash_workdir() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let (cwd, snapshot) = run_with_mock_fs(&steps);
@@ -1247,6 +1353,8 @@ fn mock_fs_rejects_absolute_windows_paths() {
         kind: StepKind::Workdir("C:\\outside".into()),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
     let fs = MockFs::new();
     let mut state = create_exec_state(fs);
@@ -1368,6 +1476,8 @@ fn with_stdin_passes_content_to_run() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let mock = MockProcessManager::default();
@@ -1401,6 +1511,8 @@ where
         kind: kind.into(),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }
 }
 
@@ -1413,10 +1525,14 @@ fn async_step(cmd: &str) -> Step {
                 kind: StepKind::Run(cmd.into()),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }
 }
 
@@ -1511,7 +1627,7 @@ fn exit_kills_all_background_children() {
     mock.push_bg_plan(100, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     let err = run_expect_err(fs, &steps, mock.clone());
-    assert!(err.to_string().contains("EXIT requested with code 3"));
+    assert!(format!("{err:#}").contains("EXIT requested with code 3"));
 }
 
 /// Minimal stub whose foreground commands fail by script name, letting us
@@ -1600,6 +1716,8 @@ fn with_io_rejects_duplicate_stdout_binding() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let fs = MockFs::new();
@@ -1619,7 +1737,7 @@ fn with_io_rejects_duplicate_stdout_binding() {
     )
     .expect_err("duplicate stdout binding");
     assert!(
-        err.to_string().contains("declared stdout more than once"),
+        format!("{err:#}").contains("declared stdout more than once"),
         "unexpected: {err}"
     );
 }
@@ -1658,6 +1776,8 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
                 },
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             },
         ];
         let fs = MockFs::new();
@@ -1677,7 +1797,7 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
         )
         .expect_err("duplicate binding");
         assert!(
-            err.to_string().contains(fragment),
+            format!("{err:#}").contains(fragment),
             "expected '{fragment}', got: {err}"
         );
     }
@@ -1709,11 +1829,15 @@ fn with_io_async_outer_pipe_stays_script() {
                         kind: StepKind::Run("echo hi".into()),
                         scope_enter: 0,
                         scope_exit: 0,
+                        line: 0,
+                        col: 0,
                     }],
                 }),
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let fs = MockFs::new();
@@ -1824,11 +1948,15 @@ fn with_io_async_dsl_body_stays_script_pipe() {
                         kind: StepKind::Echo("hi".into()),
                         scope_enter: 0,
                         scope_exit: 0,
+                        line: 0,
+                        col: 0,
                     }],
                 }),
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     let fs = MockFs::new();
@@ -1867,6 +1995,8 @@ fn with_io_block_form_bails_unexpanded() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
     let fs = MockFs::new();
     let mut state = create_exec_state(fs);
@@ -1884,7 +2014,7 @@ fn with_io_block_form_bails_unexpanded() {
         true,
     )
     .expect_err("unexpanded WITH_IO block");
-    assert!(err.to_string().contains("expanded during parsing"));
+    assert!(format!("{err:#}").contains("expanded during parsing"));
 }
 
 #[test]
@@ -1910,7 +2040,7 @@ fn write_without_contents_or_stdin_bails() {
     )
     .expect_err("write without source");
     assert!(
-        err.to_string().contains("requires stdin"),
+        format!("{err:#}").contains("requires stdin"),
         "unexpected: {err}"
     );
 }
@@ -2141,6 +2271,8 @@ fn copy_directory_branch_recurses_into_nested_target() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
 
@@ -3023,6 +3155,8 @@ fn timeout_step(duration: &str, body: Vec<Step>) -> Step {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }
 }
 
@@ -3038,6 +3172,8 @@ fn timeout_body_completes_within_deadline() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         }],
     )];
     let (_cwd, files) = run_with_mock_fs(&steps);
@@ -3063,11 +3199,11 @@ fn timeout_body_error_passes_through_without_firing() {
     let fs = Box::new(fs) as Box<dyn WorkspaceFs>;
     let err = run_expect_err(fs, &steps, MockProcessManager::default());
     assert!(
-        err.to_string().contains("EXIT requested with code 3"),
+        format!("{err:#}").contains("EXIT requested with code 3"),
         "unexpected error: {err:#}"
     );
     assert!(
-        !err.to_string().contains("TIMEOUT"),
+        !format!("{err:#}").contains("TIMEOUT"),
         "fast failure must not be wrapped as a timeout: {err:#}"
     );
 }
@@ -3164,7 +3300,7 @@ fn timeout_fires_and_kills_blocking_command() {
     let runner = BlockingRunner::default();
     let err = run_expect_err(fs, &steps, runner.clone());
     assert!(
-        err.to_string().contains("TIMEOUT"),
+        format!("{err:#}").contains("TIMEOUT"),
         "expected deadline error, got: {err:#}"
     );
     assert_eq!(
@@ -3192,7 +3328,7 @@ fn timeout_scope_stops_task_it_spawned() {
     let runner = BlockingRunner::default();
     let err = run_expect_err(fs, &steps, runner.clone());
     assert!(
-        err.to_string().contains("TIMEOUT"),
+        format!("{err:#}").contains("TIMEOUT"),
         "expected deadline error, got: {err:#}"
     );
     assert_eq!(
@@ -3295,6 +3431,8 @@ fn timeout_scope_does_not_join_prior_background_work() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         timeout_step("30s", vec![step(StepKind::Run("echo quick".into()))]),
         step(StepKind::Cancel { var: "srv".into() }),

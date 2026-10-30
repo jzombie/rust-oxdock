@@ -1330,6 +1330,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             kind: cmd.clone(),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         };
         self.walk_step(&step, env, scope, idx, depth)
     }

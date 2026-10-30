@@ -251,6 +251,8 @@ fn arb_flat_block_body() -> impl Strategy<Value = Vec<Step>> {
             kind,
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         }),
         1..=2,
     )
@@ -847,6 +849,8 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                 },
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         }),
     ]
@@ -906,6 +910,8 @@ fn arb_command_body() -> impl Strategy<Value = Vec<Step>> {
                 kind,
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }
         }),
         1..=2,
@@ -984,6 +990,8 @@ fn arb_body_with_depth(depth: u32) -> BoxedStrategy<Vec<Step>> {
             kind,
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         }),
         1..=2,
     )
@@ -1057,6 +1065,8 @@ fn arb_step() -> impl Strategy<Value = Step> {
             kind,
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         })
         .prop_filter("Reject guarded INHERIT_ENV", |step| match &step.kind {
             StepKind::InheritEnv { .. } => step.guard.is_none(),
@@ -1602,6 +1612,8 @@ fn shell_of_kind(kind: &StepKind) -> Step {
         kind: kind.clone(),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }
 }
 
@@ -1743,6 +1755,8 @@ fn keyword_args_round_trip_through_both_pathways() {
                 kind,
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             };
             let s = step.to_string();
 
@@ -1941,6 +1955,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 },
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }]),
         },
         StepKind::If {
@@ -1950,6 +1966,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 kind: StepKind::Echo("coverage echo".into()),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
             else_ifs: vec![],
             else_body: None,
@@ -1961,6 +1979,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 kind: StepKind::Echo("coverage echo".into()),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         },
         StepKind::FuncDef {
@@ -1971,6 +1991,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 kind: StepKind::Echo("coverage echo".into()),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
             docs: None,
         },
@@ -1981,6 +2003,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 kind: StepKind::Echo("coverage echo".into()),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         },
         StepKind::Isolated {
@@ -1989,6 +2013,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 kind: StepKind::Echo("coverage echo".into()),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         },
         StepKind::AsyncBlock {
@@ -1997,6 +2023,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 kind: StepKind::Echo("coverage echo".into()),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         },
         StepKind::AssignAsync {
@@ -2007,6 +2035,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 kind: StepKind::Echo("coverage echo".into()),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         },
         StepKind::RemoteBlock {
@@ -2018,6 +2048,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 kind: StepKind::Echo("coverage echo".into()),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         },
         StepKind::AssignCapture {
@@ -2041,6 +2073,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 kind: StepKind::Echo("coverage echo".into()),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         },
         StepKind::WithIo {
@@ -2062,6 +2096,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 },
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         },
     ]
@@ -2168,6 +2204,8 @@ fn fuzz_inventory_covers_claimed_kinds() {
             kind: step_kind.clone(),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         };
         let s = step.to_string();
         let parsed_steps =
@@ -2257,6 +2295,8 @@ fn sample_covered_exprs() -> Vec<Expr> {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         }]),
         Expr::Call {
             name: "STD::TEXT_LENGTH".to_string(),
@@ -2534,6 +2574,8 @@ fn fuzz_excluded_kinds_are_genuinely_unroundtrippable() {
             kind: step_kind.clone(),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         };
         let s = step.to_string();
         // The honest property is discriminant-level: no parsed script

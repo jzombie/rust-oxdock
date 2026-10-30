@@ -29,6 +29,8 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -41,6 +43,8 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -56,6 +60,8 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ]
 }
@@ -250,18 +256,24 @@ fn commands_behave_cross_platform() {
             kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Mkdir("client".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Mkdir("client/dist".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -271,6 +283,8 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -280,12 +294,16 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Run(run_cmd.into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -295,10 +313,14 @@ fn commands_behave_cross_platform() {
                     kind: StepKind::Run(bg_cmd.into()),
                     scope_enter: 0,
                     scope_exit: 0,
+                    line: 0,
+                    col: 0,
                 }],
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -311,6 +333,8 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -321,24 +345,32 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Ls(Some("client".into())),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("client/dist".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Echo("echo from workdir".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -348,18 +380,24 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workspace(WorkspaceTarget::Local),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -369,18 +407,24 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workspace(WorkspaceTarget::Snapshot),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -390,6 +434,8 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
 
@@ -538,12 +584,16 @@ fn exit_stops_pipeline_and_reports_code() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Exit(oxdock_parser::Arg::String("9".to_string(), false)),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -553,6 +603,8 @@ fn exit_stops_pipeline_and_reports_code() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
 
@@ -605,6 +657,8 @@ fn capture_echo_interpolates_env() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
     let mut steps = steps;
     steps.extend(capture_pipeline(
@@ -631,6 +685,8 @@ fn capture_ls_lists_entries_with_header() {
         kind: StepKind::Workdir("items".into()),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
     let mut steps = steps;
     steps.extend(capture_pipeline("cap-ls", "ls.txt", *parse_one("LS")));
@@ -672,6 +728,8 @@ fn capture_cwd_canonicalizes_and_writes() {
         kind: StepKind::Workdir("a/b".into()),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
     let mut steps = steps;
     steps.extend(capture_pipeline("cap-cwd", "pwd.txt", *parse_one("CWD")));
@@ -913,6 +971,8 @@ fn workdir_cannot_escape_root() {
         kind: StepKind::Workdir("../".into()),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let err = run_steps(&root, &steps).unwrap_err();
@@ -935,6 +995,8 @@ fn write_cannot_escape_root() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let err = run_steps(&root, &steps).unwrap_err();
@@ -971,6 +1033,8 @@ fn read_cannot_escape_root() {
         kind: StepKind::Read(Some("../secret.txt".into())),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let err = run_steps(&root, &steps).unwrap_err();
@@ -1025,6 +1089,8 @@ fn read_symlink_escape_is_blocked() {
         kind: StepKind::Read(Some("leak.txt".into())),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let err = run_steps(&root, &steps).unwrap_err();
@@ -1062,6 +1128,8 @@ fn workdir_accepts_symlink_into_workspace_root() {
             kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -1072,12 +1140,16 @@ fn workdir_accepts_symlink_into_workspace_root() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("client".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
 
@@ -1134,6 +1206,8 @@ fn write_missing_path_cannot_escape_root() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let err = run_steps(&root, &steps).unwrap_err();
@@ -1153,6 +1227,8 @@ fn workdir_creates_missing_dirs_within_root() {
         kind: StepKind::Workdir("a/b/c".into()),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     run_steps(&root, &steps).unwrap();
@@ -1170,6 +1246,8 @@ fn cat_reads_file_contents_without_error() {
         kind: StepKind::Read(Some("file.txt".into())),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     // This should succeed and emit contents to stdout; we only verify it does not error.
@@ -1186,12 +1264,16 @@ fn cwd_prints_to_stdout() {
             kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Cwd,
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     // Should succeed and print the canonical cwd; we only assert it doesn't error.
@@ -1218,6 +1300,8 @@ fn cat_reads_stdin_with_io() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let mut io_cfg = ExecIo::new();
@@ -2099,7 +2183,7 @@ fn prompt_without_default_fails_closed_on_non_tty() {
     let err = run_script_headless(&root, "PROMPT $dir \"Install destination?\"")
         .expect_err("headless prompt without default must fail");
     assert!(
-        err.to_string().contains("non-TTY"),
+        format!("{err:#}").contains("non-TTY"),
         "failure names the non-TTY: {err}"
     );
 }
@@ -2156,7 +2240,7 @@ fn prompt_with_redirected_stdin_ignores_host_tty() {
     )
     .expect_err("redirected stdin without default must fail");
     assert!(
-        err.to_string().contains("non-TTY"),
+        format!("{err:#}").contains("non-TTY"),
         "failure names the non-TTY: {err}"
     );
 }
@@ -2456,6 +2540,32 @@ fn run_exec_nonzero_status_bails_with_step_context() {
             && msg.contains("failed with status"),
         "error must carry the failing command and status, got: {msg}"
     );
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "spawns processes; Miri does not support process execution"
+)]
+#[test]
+fn failing_step_reports_source_line_and_column() {
+    // Coordinates ride on the steps: a runtime failure names the
+    // statement's source line and column, not just its index. The
+    // failing command sits on line 2 (indoc strips the margin).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    let steps = oxdock_core::parse_script(indoc! {r#"
+        ECHO banner
+        RUN ["cargo", "--invalid-oxdock-flag-xyz"]
+    "#})
+    .unwrap();
+    let err = run_steps(&root, &steps).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("step 2, line 2, col 1"),
+        "error must name line+col, got: {msg}"
+    );
+    assert!(msg.contains("failed with status"), "got: {msg}");
 }
 
 // ---------------------------------------------------------------------------
@@ -4076,6 +4186,8 @@ fn read_large_file_streams_without_oom() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -4088,6 +4200,8 @@ fn read_large_file_streams_without_oom() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -4103,6 +4217,8 @@ fn read_large_file_streams_without_oom() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     run_steps_with_context(&root, &root, &io_steps).expect("read pipeline");
@@ -4131,6 +4247,8 @@ fn read_stdin_streaming_via_pipe() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -4141,6 +4259,8 @@ fn read_stdin_streaming_via_pipe() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -4153,6 +4273,8 @@ fn read_stdin_streaming_via_pipe() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -4168,6 +4290,8 @@ fn read_stdin_streaming_via_pipe() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     run_steps_with_context(&root, &root, &steps).expect("pipe read pipeline");

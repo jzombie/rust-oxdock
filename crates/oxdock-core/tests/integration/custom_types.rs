@@ -165,7 +165,7 @@ fn custom_value_rejected_by_builtin_declaration() {
     "#};
     let err =
         run_with_tag_hosts(&root, script).expect_err("custom value must not coerce to STRING");
-    assert!(err.to_string().contains("TypeMismatch"), "{err}");
+    assert!(format!("{err:#}").contains("TypeMismatch"), "{err:#}");
 }
 
 /// A custom process manager flows through the same facade: the manager is
@@ -230,7 +230,7 @@ fn container_accessors_reject_bad_reads() {
         "#},
     )
     .expect_err("out-of-bounds cell must fail");
-    assert!(err.to_string().contains("out of bounds"), "{err}");
+    assert!(format!("{err:#}").contains("out of bounds"), "{err:#}");
     let err = run_with_matrix_hosts(
         &root,
         indoc! {r#"
@@ -240,7 +240,10 @@ fn container_accessors_reject_bad_reads() {
         "#},
     )
     .expect_err("foreign value must fail");
-    assert!(err.to_string().contains("expects a MATRIX value"), "{err}");
+    assert!(
+        format!("{err:#}").contains("expects a MATRIX value"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -257,8 +260,8 @@ fn custom_type_rejects_key_path_traversal() {
     )
     .expect_err("key path into opaque type must fail");
     assert!(
-        err.to_string().contains("Cannot traverse into scalar"),
-        "{err}"
+        format!("{err:#}").contains("Cannot traverse into scalar"),
+        "{err:#}"
     );
 }
 
@@ -276,9 +279,8 @@ fn custom_type_rejects_for_iteration() {
     )
     .expect_err("iteration over opaque type must fail");
     assert!(
-        err.to_string()
-            .contains("FOR loop requires a List or Map iterable"),
-        "{err}"
+        format!("{err:#}").contains("FOR loop requires a List or Map iterable"),
+        "{err:#}"
     );
 }
 

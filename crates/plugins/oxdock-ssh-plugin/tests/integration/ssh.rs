@@ -914,7 +914,7 @@ fn run_cancel_with_orphan_stdout_returns_promptly() {
         .expect_err("cancelling past an orphan-held pipe must fail the TIMEOUT, fast");
     let elapsed = start.elapsed();
     assert!(
-        err.to_string().contains("TIMEOUT"),
+        format!("{err:#}").contains("TIMEOUT"),
         "TIMEOUT owns the failure, not the hang: {err:#}",
     );
     assert!(
@@ -1597,7 +1597,7 @@ fn cancel_mid_pump_terminates() {
     "#};
     let start = Instant::now();
     let err = run_script(&root, script).expect_err("silent pump must time out");
-    assert!(err.to_string().contains("TIMEOUT"), "{err}");
+    assert!(format!("{err:#}").contains("TIMEOUT"), "{err}");
     assert!(
         start.elapsed() < Duration::from_secs(10),
         "pump must not outlive its timeout"
@@ -1812,7 +1812,7 @@ fn unknown_serve_option_bails() {
     )
     .expect_err("unknown option must fail");
     assert!(
-        err.to_string().contains("unknown option 'frobnicate'"),
+        format!("{err:#}").contains("unknown option 'frobnicate'"),
         "{err:#}"
     );
 }
@@ -1858,7 +1858,7 @@ fn missing_username_bails() {
     )
     .expect_err("missing username must fail");
     assert!(
-        err.to_string().contains("option 'username' is required"),
+        format!("{err:#}").contains("option 'username' is required"),
         "{err:#}"
     );
 }
@@ -1883,8 +1883,7 @@ fn empty_password_bails() {
     )
     .expect_err("empty password must fail");
     assert!(
-        err.to_string()
-            .contains("option 'password' must not be empty"),
+        format!("{err:#}").contains("option 'password' must not be empty"),
         "{err:#}"
     );
 }
@@ -1907,7 +1906,7 @@ fn missing_password_bails() {
     )
     .expect_err("missing password must fail");
     assert!(
-        err.to_string().contains("option 'password' is required"),
+        format!("{err:#}").contains("option 'password' is required"),
         "{err:#}"
     );
 }
@@ -1930,8 +1929,7 @@ fn non_string_username_bails() {
     )
     .expect_err("non-string username must fail");
     assert!(
-        err.to_string()
-            .contains("option 'username': expected STRING, got INT"),
+        format!("{err:#}").contains("option 'username': expected STRING, got INT"),
         "{err:#}"
     );
 }
@@ -1954,8 +1952,7 @@ fn unknown_option_names_all_valid_keys() {
     )
     .expect_err("unknown option must fail");
     assert!(
-        err.to_string()
-            .contains("(expected: username, password, key_path, idle_timeout)"),
+        format!("{err:#}").contains("(expected: username, password, key_path, idle_timeout)"),
         "{err:#}"
     );
 }
@@ -1978,7 +1975,7 @@ fn non_string_key_path_bails() {
     )
     .expect_err("non-string key_path must fail");
     assert!(
-        err.to_string().contains("expected STRING, got INT"),
+        format!("{err:#}").contains("expected STRING, got INT"),
         "{err:#}"
     );
 }
@@ -2127,7 +2124,10 @@ fn invalid_host_key_file_bails() {
         "#},
     )
     .expect_err("invalid key must fail");
-    assert!(err.to_string().contains("cannot parse host key"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("cannot parse host key"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -2211,7 +2211,10 @@ fn escaping_key_path_bails() {
         "#},
     )
     .expect_err("escaping key_path must fail");
-    assert!(err.to_string().contains("escapes the workspace"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("escapes the workspace"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -2460,7 +2463,7 @@ fn pump_channel_second_pump_bails() {
         .join()
         .expect("script thread joins")
         .expect_err("second pump must fail");
-    assert!(err.to_string().contains("already pumped"), "{err:#}");
+    assert!(format!("{err:#}").contains("already pumped"), "{err:#}");
 }
 
 #[test]
@@ -2932,7 +2935,7 @@ fn offline_connect_bails_before_sockets() {
         AWAIT $c
     "#};
     let err = run_script_with(registry, &root, script).expect_err("offline dial must fail");
-    assert!(err.to_string().contains("--offline mode"), "{err:#}");
+    assert!(format!("{err:#}").contains("--offline mode"), "{err:#}");
 }
 
 #[test]
@@ -3462,7 +3465,7 @@ fn serve_accepts_idle_timeout_option() {
     "#};
     let err = run_script_with(registry, &root, script).expect_err("bad duration must fail");
     assert!(
-        err.to_string().contains("idle_timeout"),
+        format!("{err:#}").contains("idle_timeout"),
         "failure names the option: {err:#}"
     );
 }
@@ -3634,7 +3637,10 @@ fn send_exit_status_rejects_negative_code() {
         .join()
         .expect("script thread joins")
         .expect_err("negative code must fail");
-    assert!(err.to_string().contains("must not be negative"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("must not be negative"),
+        "{err:#}"
+    );
 }
 
 #[test]
