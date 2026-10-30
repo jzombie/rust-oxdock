@@ -47,7 +47,8 @@ library [Functions](#functions).
 
 ### Standalone CLI installation
 
-Prebuilt installers include all features.
+<details>
+<summary>Prebuilt installers (all features, no Cargo needed)</summary>
 
 **Linux / macOS:**
 ```sh
@@ -70,6 +71,8 @@ For a reproducible install, pin an explicit release:
 ```powershell
 $env:VERSION = 'v0.32.2-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 ```
+
+</details>
 
 **Build from source via Cargo** (same full module surface as the
 release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
