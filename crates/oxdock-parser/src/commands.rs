@@ -3934,6 +3934,117 @@ impl fmt::Display for StepKind {
     }
 }
 
+/// One lowered instruction token: a positional argument, or a pre-split
+/// `KEY=value` assignment from the unified grammar rule. Assignments reach
+/// ENV/EXPAND lowerings intact; every other command sees them collapsed to
+/// canonical `key=value` text (see `lower_instruction_pair`).
+pub(crate) enum InsToken {
+    Pos(Arg),
+    Assign(String, Arg),
+}
+
+pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<StepKind> {
+    if tokens.is_empty() {
+        return Err(ParseError::validation(
+            "ENV",
+            "ENV requires KEY=value".to_string(),
+            ctx,
+        ));
+    }
+    match tokens.as_slice() {
+        [InsToken::Assign(key, value)] => {
+            // Same KEY=value check the ENV lower applies on the
+            // `lower_command` path, over the joined assignment form.
+            if crate::command::split_assignment(&format!("{key}={}", value.render()))
+                .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
+                .is_none()
+            {
+                return Err(ParseError::validation(
+                    "ENV",
+                    "ENV requires KEY=value format".to_string(),
+                    ctx,
+                ));
+            }
+            Ok(StepKind::Env {
+                key: key.clone(),
+                value: value.clone(),
+            })
+        }
+        [InsToken::Pos(Arg::String(text, _))] => match crate::command::split_assignment(text)
+            .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
+        {
+            Some((key, value)) => Ok(StepKind::Env { key, value }),
+            None => Err(ParseError::validation(
+                "ENV",
+                "ENV requires KEY=value format".to_string(),
+                ctx,
+            )),
+        },
+        _ => Err(ParseError::validation(
+            "ENV",
+            "ENV requires KEY=value format".to_string(),
+            ctx,
+        )),
+    }
+}
+
+/// Parser-direct `EXPAND` lowering: positional tokens are the optional path,
+/// assignments are overrides. Split quoted values can never masquerade as
+/// extra paths : tokenize time already proved they are one value.
+pub(crate) fn lower_expand_tokens(
+    ctx: &SpanContext,
+    tokens: Vec<InsToken>,
+) -> ParseResult<StepKind> {
+    let mut path = None;
+    let mut overrides = Vec::new();
+    for token in tokens {
+        match token {
+            InsToken::Assign(key, value) => {
+                if key.is_empty() {
+                    return Err(ParseError::validation(
+                        "EXPAND",
+                        "EXPAND requires KEY=value format for overrides".to_string(),
+                        ctx,
+                    ));
+                }
+                overrides.push((key, value));
+            }
+            InsToken::Pos(arg) => match &arg {
+                Arg::String(text, quoted) if !quoted && text.contains('=') => {
+                    let Some((key, value)) = crate::command::split_assignment(text)
+                        .map_err(|e| ParseError::validation("EXPAND", e.to_string(), ctx))?
+                    else {
+                        return Err(ParseError::validation(
+                            "EXPAND",
+                            "EXPAND requires KEY=value format for overrides".to_string(),
+                            ctx,
+                        ));
+                    };
+                    overrides.push((key, value));
+                }
+                _ => {
+                    if path.is_none() {
+                        // Path-typed positional, checked like every other
+                        // `lower_command` path arg (literals always pass;
+                        // resolution stays runtime).
+                        ArgType::Path
+                            .check_arg(&arg)
+                            .map_err(|e| ParseError::validation("EXPAND", e.to_string(), ctx))?;
+                        path = Some(arg);
+                    } else {
+                        return Err(ParseError::validation(
+                            "EXPAND",
+                            "EXPAND accepts at most one path".to_string(),
+                            ctx,
+                        ));
+                    }
+                }
+            },
+        }
+    }
+    Ok(StepKind::Expand { path, overrides })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

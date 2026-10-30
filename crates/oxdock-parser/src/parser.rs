@@ -5,12 +5,13 @@ use crate::ast::{
 use crate::command::ArgType;
 use crate::constants::{
     KEYWORD_EXPORT, KEYWORD_IMPORT, KEYWORD_INSPECT, KEYWORD_TYPE, MODULE_SEPARATOR,
-    SCRIPT_MODULE_NAME, qualify, split_qualified,
+    SCRIPT_MODULE_NAME,
 };
 use crate::error::{ParseError, ParseResult, SpanContext};
 use crate::lexer::{
     self, LanguageParser, RawToken, Rule, parse_pest_error, refine_span, span_for_line, span_of,
 };
+use crate::resolve::check_func_ident;
 use pest::Parser as _;
 use pest::iterators::Pair;
 use std::cell::RefCell;
@@ -134,135 +135,8 @@ impl<'a> LowerCtx<'a> {
     /// import frames; zero or several matches fail. `INSPECT` passes
     /// through untouched: it is a dedicated AST node, not a registry entry.
     pub(super) fn resolve_call(&self, ctx: &SpanContext, name: &str) -> ParseResult<String> {
-        if let Some((module, base)) = split_qualified(name) {
-            if base == KEYWORD_INSPECT {
-                return Err(ParseError::validation(
-                    "FUNC",
-                    "INSPECT is a builtin keyword and cannot be module-qualified".to_string(),
-                    ctx,
-                ));
-            }
-            check_func_ident(ctx, module)?;
-            check_func_ident(ctx, base)?;
-            match self.modules.modules.get(module) {
-                None => {
-                    let mut known: Vec<String> = self.modules.modules.keys().cloned().collect();
-                    known.sort();
-                    Err(ParseError::validation(
-                        "FUNC",
-                        format!(
-                            "unknown module `{module}`; known modules: {}",
-                            known.join(", ")
-                        ),
-                        ctx,
-                    ))
-                }
-                Some(None) => Ok(name.to_string()),
-                Some(Some(funcs)) => {
-                    if funcs.functions.contains(base) {
-                        Ok(qualify(module, base))
-                    } else {
-                        Err(ParseError::validation(
-                            "FUNC",
-                            format!("unknown function `{module}::{base}`"),
-                            ctx,
-                        ))
-                    }
-                }
-            }
-        } else {
-            if name == KEYWORD_IMPORT || name == KEYWORD_EXPORT {
-                return Err(ParseError::validation(
-                    "FUNC",
-                    format!("`{name}` is a directive, not a function"),
-                    ctx,
-                ));
-            }
-            if name == KEYWORD_INSPECT {
-                return Ok(name.to_string());
-            }
-            let scopes = self.func_scopes.borrow();
-            if scopes.iter().rev().any(|scope| scope.contains(name)) {
-                return Ok(qualify(SCRIPT_MODULE_NAME, name));
-            }
-            drop(scopes);
-            // Distinct exporting modules across all visible import frames.
-            // Several matches fail instead of shadowing silently: qualify it.
-            let frames = self.import_scopes.borrow();
-            let mut known_matches: Vec<String> = Vec::new();
-            let mut opaque_matches: Vec<String> = Vec::new();
-            for frame in frames.iter() {
-                for module in frame {
-                    match self.modules.modules.get(module) {
-                        Some(Some(funcs)) => {
-                            if funcs.functions.contains(name) && !known_matches.contains(module) {
-                                known_matches.push(module.clone());
-                            }
-                        }
-                        Some(None) if !opaque_matches.contains(module) => {
-                            opaque_matches.push(module.clone());
-                        }
-                        Some(None) | None => {}
-                    }
-                }
-            }
-            drop(frames);
-            if known_matches.len() > 1 {
-                known_matches.sort();
-                return Err(ParseError::validation(
-                    "FUNC",
-                    format!(
-                        "ambiguous function `{name}`: exported by {}; qualify it (e.g. `{}::{name}`)",
-                        known_matches.join(", "),
-                        known_matches[0],
-                    ),
-                    ctx,
-                ));
-            }
-            if let Some(module) = known_matches.pop() {
-                return Ok(qualify(&module, name));
-            }
-            if opaque_matches.len() > 1 {
-                opaque_matches.sort();
-                return Err(ParseError::validation(
-                    "FUNC",
-                    format!(
-                        "ambiguous function `{name}`: imported opaque modules {}; qualify it",
-                        opaque_matches.join(", "),
-                    ),
-                    ctx,
-                ));
-            }
-            if let Some(module) = opaque_matches.pop() {
-                return Ok(qualify(&module, name));
-            }
-            // Nothing in scope: point at the fix when a known module
-            // exports the name but was never imported.
-            let mut exporters: Vec<String> = self
-                .modules
-                .modules
-                .iter()
-                .filter_map(|(module, funcs)| match funcs {
-                    Some(funcs) if funcs.functions.contains(name) => Some(module.clone()),
-                    _ => None,
-                })
-                .collect();
-            exporters.sort();
-            if let Some(first) = exporters.first() {
-                return Err(ParseError::validation(
-                    "FUNC",
-                    format!(
-                        "unknown function `{name}`; qualify it (`{first}::{name}`) or add `IMPORT [{first}]`"
-                    ),
-                    ctx,
-                ));
-            }
-            Err(ParseError::validation(
-                "FUNC",
-                format!("unknown function `{name}`"),
-                ctx,
-            ))
-        }
+        let (funcs, imports) = self.visible_snapshot();
+        crate::resolve::resolve_call_name(self.modules, &funcs, &imports, ctx, name)
     }
 
     /// Base names exported by every known module. Backs the `FUNC` shadow
@@ -1762,7 +1636,7 @@ fn extract_instruction(
     ctx: &SpanContext,
     pair: Pair<Rule>,
     lctx: &LowerCtx,
-) -> ParseResult<(String, Vec<InsToken>)> {
+) -> ParseResult<(String, Vec<crate::commands::InsToken>)> {
     let span = refine_span(ctx, &pair);
     let mut name = None;
     let mut args = Vec::new();
@@ -1775,12 +1649,12 @@ fn extract_instruction(
                 args.extend(
                     parse_argument(ctx, lctx, inner)?
                         .into_iter()
-                        .map(InsToken::Pos),
+                        .map(crate::commands::InsToken::Pos),
                 );
             }
             Rule::assignment => {
                 let (key, value) = parse_assignment(ctx, lctx, inner)?;
-                args.push(InsToken::Assign(key, value));
+                args.push(crate::commands::InsToken::Assign(key, value));
             }
             _ => {}
         }
@@ -1795,15 +1669,6 @@ fn extract_instruction(
     Ok((name, args))
 }
 
-/// One lowered instruction token: a positional argument, or a pre-split
-/// `KEY=value` assignment from the unified grammar rule. Assignments reach
-/// ENV/EXPAND lowerings intact; every other command sees them collapsed to
-/// canonical `key=value` text (see `lower_instruction_pair`).
-enum InsToken {
-    Pos(Arg),
-    Assign(String, Arg),
-}
-
 /// Lower one generic instruction pair: ENV/EXPAND build `StepKind` directly
 /// from pre-split assignments (never via the injected `lower`, mirroring how
 /// LET/FOR/IF bypass it); all other commands flow through `lower` with
@@ -1816,16 +1681,18 @@ fn lower_instruction_pair(
     let span = refine_span(ctx, &pair);
     let (name, tokens) = extract_instruction(ctx, pair, lctx)?;
     if name == "ENV" {
-        return lower_env_command(ctx, tokens);
+        return crate::commands::lower_env_tokens(ctx, tokens);
     }
     if name == "EXPAND" {
-        return lower_expand_command(ctx, tokens);
+        return crate::commands::lower_expand_tokens(ctx, tokens);
     }
     let args = tokens
         .into_iter()
         .map(|token| match token {
-            InsToken::Pos(arg) => arg,
-            InsToken::Assign(key, value) => crate::commands::canonical_assignment_arg(&key, &value),
+            crate::commands::InsToken::Pos(arg) => arg,
+            crate::commands::InsToken::Assign(key, value) => {
+                crate::commands::canonical_assignment_arg(&key, &value)
+            }
         })
         .collect();
     (lctx.lower)(&name, args).map_err(|e| e.with_span(&span))
@@ -2038,105 +1905,6 @@ fn collapse_ws(s: &str) -> String {
 /// Parser-direct `ENV` lowering: exactly one assignment. A lone positional
 /// holding `=` is the exotic-key fringe (keys the grammar cannot classify);
 /// anything else is a precise error instead of a silent drop.
-fn lower_env_command(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<StepKind> {
-    if tokens.is_empty() {
-        return Err(ParseError::validation(
-            "ENV",
-            "ENV requires KEY=value".to_string(),
-            ctx,
-        ));
-    }
-    match tokens.as_slice() {
-        [InsToken::Assign(key, value)] => {
-            // Same KEY=value check the ENV lower applies on the
-            // `lower_command` path, over the joined assignment form.
-            if crate::command::split_assignment(&format!("{key}={}", value.render()))
-                .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
-                .is_none()
-            {
-                return Err(ParseError::validation(
-                    "ENV",
-                    "ENV requires KEY=value format".to_string(),
-                    ctx,
-                ));
-            }
-            Ok(StepKind::Env {
-                key: key.clone(),
-                value: value.clone(),
-            })
-        }
-        [InsToken::Pos(Arg::String(text, _))] => match crate::command::split_assignment(text)
-            .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
-        {
-            Some((key, value)) => Ok(StepKind::Env { key, value }),
-            None => Err(ParseError::validation(
-                "ENV",
-                "ENV requires KEY=value format".to_string(),
-                ctx,
-            )),
-        },
-        _ => Err(ParseError::validation(
-            "ENV",
-            "ENV requires KEY=value format".to_string(),
-            ctx,
-        )),
-    }
-}
-
-/// Parser-direct `EXPAND` lowering: positional tokens are the optional path,
-/// assignments are overrides. Split quoted values can never masquerade as
-/// extra paths : tokenize time already proved they are one value.
-fn lower_expand_command(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<StepKind> {
-    let mut path = None;
-    let mut overrides = Vec::new();
-    for token in tokens {
-        match token {
-            InsToken::Assign(key, value) => {
-                if key.is_empty() {
-                    return Err(ParseError::validation(
-                        "EXPAND",
-                        "EXPAND requires KEY=value format for overrides".to_string(),
-                        ctx,
-                    ));
-                }
-                overrides.push((key, value));
-            }
-            InsToken::Pos(arg) => match &arg {
-                Arg::String(text, quoted) if !quoted && text.contains('=') => {
-                    let Some((key, value)) = crate::command::split_assignment(text)
-                        .map_err(|e| ParseError::validation("EXPAND", e.to_string(), ctx))?
-                    else {
-                        return Err(ParseError::validation(
-                            "EXPAND",
-                            "EXPAND requires KEY=value format for overrides".to_string(),
-                            ctx,
-                        ));
-                    };
-                    overrides.push((key, value));
-                }
-                _ => {
-                    if path.is_none() {
-                        // Path-typed positional, checked like every other
-                        // `lower_command` path arg (literals always pass;
-                        // resolution stays runtime).
-                        ArgType::Path
-                            .check_arg(&arg)
-                            .map_err(|e| ParseError::validation("EXPAND", e.to_string(), ctx))?;
-                        path = Some(arg);
-                    } else {
-                        return Err(ParseError::validation(
-                            "EXPAND",
-                            "EXPAND accepts at most one path".to_string(),
-                            ctx,
-                        ));
-                    }
-                }
-            },
-        }
-    }
-    Ok(StepKind::Expand { path, overrides })
-}
-
 fn parse_type_tag(pair: Pair<Rule>) -> String {
     // Canonicalize to the no-space form: `LIST<MAP>` and `LIST< MAP >`
     // (including macro token-stream reconstructions, which space
@@ -2170,27 +1938,6 @@ fn parse_type_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseR
         ));
     };
     Ok(StepKind::TypeAlias { name, target })
-}
-
-fn check_func_ident(ctx: &SpanContext, name: &str) -> ParseResult<()> {
-    let ok = name
-        .chars()
-        .next()
-        .map(|c| c.is_ascii_uppercase())
-        .unwrap_or(false)
-        && name
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-    if !ok {
-        return Err(ParseError::validation(
-            "FUNC",
-            format!(
-                "function names must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{name}`"
-            ),
-            ctx,
-        ));
-    }
-    Ok(())
 }
 
 fn parse_while_statement_from_pair(
