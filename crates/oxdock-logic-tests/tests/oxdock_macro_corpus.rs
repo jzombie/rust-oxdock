@@ -454,6 +454,28 @@ fn macro_remote_block_runs_on_mock_transport() {
 }
 
 #[test]
+fn macro_with_io_block_consumes_node() {
+    let steps = oxdock! {
+        LET $p: PIPE
+        WITH_IO [stdout=$p] {
+            ECHO blockhello
+        }
+        WITH_IO [stdin=$p] READ_LINE $line
+        ASSERT_EQ $line "blockhello"
+    };
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_steps(&root, &steps);
+    assert_macro_string_roundtrip(&steps);
+    assert!(
+        !steps
+            .iter()
+            .any(|s| matches!(s.kind, oxdock_parser::StepKind::WithIoBlock { .. })),
+        "transient node leaked into macro product"
+    );
+}
+
+#[test]
 fn macro_sleep_and_exit_code() {
     let steps = oxdock! {
         SLEEP 1ms

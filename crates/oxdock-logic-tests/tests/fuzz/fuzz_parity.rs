@@ -1632,6 +1632,9 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         // Never survives lowering (`handle_command` consumes it into an
         // io scope without emitting a step), so no source text can round
         // through it: permanently ungeneratable, correctly excluded.
+        // The consumption itself is pinned by
+        // `with_io_block_form_consumes_node` (parser) and
+        // `macro_with_io_block_consumes_node` (real macro).
         StepKind::WithIoBlock { .. } => false,
         StepKind::For { .. } => true,
         StepKind::If { .. } => true,

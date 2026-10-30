@@ -973,6 +973,21 @@ mod tests {
     }
 
     #[test]
+    fn with_io_block_form_consumes_node() {
+        // `WITH_IO [..] { .. }` lowers through a transient WithIoBlock
+        // node that `handle_command` consumes into an io scope without
+        // emitting a step: no parsed script ever holds one.
+        let steps =
+            parse_script("WITH_IO [stdout=$p] {\n    ECHO hi\n}", test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        assert!(
+            !matches!(steps[0].kind, StepKind::WithIoBlock { .. }),
+            "transient node leaked: {:?}",
+            steps[0].kind
+        );
+    }
+
+    #[test]
     fn assignment_key_allows_colons() {
         let steps = parse_script("ENV a:b=c", test_lower).expect("parse ok");
         match &steps[0].kind {
