@@ -500,7 +500,12 @@ fn walk(
                 // with no span gap fuses verbatim instead. Spaced literals
                 // keep their separating space. Synthetic (`quote!`) spans
                 // are zero-width and carry no adjacency signal, so they
-                // always take the spaced reading.
+                // always take the spaced reading. Blocks holding raw `"`
+                // cannot pass here at all: the lexer ends the literal at
+                // every quote, shredding content into idents and puncts
+                // that read as separate arguments. That shape is
+                // indistinguishable from legitimate multi-arg statements,
+                // so it stays string-pathway-only by construction.
                 let fuse = frag.starts_with('"')
                     && line.trim_end().ends_with('"')
                     && span.start() != span.end()

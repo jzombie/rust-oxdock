@@ -912,6 +912,18 @@ mod tests {
     }
 
     #[test]
+    fn assignment_key_allows_colons() {
+        let steps = parse_script("ENV a:b=c", test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Env { key, value } => {
+                assert_eq!(key, "a:b");
+                assert_eq!(value.as_str(), "c");
+            }
+            other => panic!("expected Env, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn block_string_display_round_trips() {
         let script = indoc! {r#"
             ECHO """

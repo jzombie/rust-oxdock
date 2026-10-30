@@ -452,7 +452,7 @@ templated_arg = @{ "{{" ~ (!"}}" ~ ANY)* ~ "}}" }
 // match here (the `!"--"` guard), so `--flag=value` falls through to
 // `argument` as one token and `strip_flags` splits it downstream.
 assignment = ${ !"--" ~ assign_key ~ gap ~ "=" ~ gap ~ assign_value? }
-assign_key = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/")+ }
+assign_key = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/" | ":")+ }
 assign_value = { block_string | quoted_string | assign_expr | raw_fragments }
 // An assignment boundary: whitespace followed by `KEY=` — the start of a
 // sibling assignment (`EXPAND K1=$x K2=$y`). Values never consume across it,

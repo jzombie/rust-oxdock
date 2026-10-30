@@ -166,10 +166,15 @@ fn quote_dsl_string(s: &str) -> String {
     // Multi-line values render as `"""` blocks on their own lines at
     // column zero, so lowering recovers the bytes exactly: the leading
     // newline strips once, the empty closing baseline contributes no
-    // common prefix, and the trailing newline strips once. Blank-only
-    // and carriage-return values keep the legacy raw double-quoted
-    // spelling instead: block lowering would normalize them away.
-    if s.contains('\n') && !s.contains('\r') && !s.trim().is_empty() {
+    // common prefix, and the trailing newline strips once. Quote-holding
+    // values stay double-quoted with `\"` escapes: blocks admit raw
+    // quotes for the string grammar, but no Rust token stream can carry
+    // them (the lexer ends the literal at every raw `"`), so block
+    // rendering would shred on the token pathway while escaping keeps
+    // both pathways agreeing. Blank-only and carriage-return values
+    // keep the legacy raw double-quoted spelling instead: block
+    // lowering would normalize them away.
+    if s.contains('\n') && !s.contains('"') && !s.contains('\r') && !s.trim().is_empty() {
         let escaped = s.replace('\\', "\\\\").replace("\"\"\"", "\\\"\\\"\\\"");
         return format!("\"\"\"\n{escaped}\n\"\"\"");
     }

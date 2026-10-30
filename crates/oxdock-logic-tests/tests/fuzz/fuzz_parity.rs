@@ -126,11 +126,10 @@ fn safe_msg() -> impl Strategy<Value = String> {
 /// templates, and digit leads stay excluded: unrelated edges with
 /// their own coverage.
 fn rich_line() -> impl Strategy<Value = String> {
-    // No double quotes: Display must escape them and the parser keeps
-    // escapes verbatim, so each render cycle adds a layer (runtime
-    // behavior stays stable; parse-level comparison cannot). Single
-    // quotes pass through raw and stay covered here; `"`-in-block is
-    // pinned by parser unit tests at the verbatim level instead.
+    // No double quotes: no Rust token stream can carry a raw `"` (the
+    // lexer ends the literal there), so `"`-holding blocks are
+    // string-pathway-only by construction. `\"`-in-block stays covered
+    // by parser unit tests at the verbatim level instead.
     prop::collection::vec(
         prop_oneof![
             "[a-zA-Z0-9]",
@@ -217,18 +216,10 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             Just(WorkspaceTarget::System)
         ]
         .prop_map(StepKind::Workspace),
-        // `:` is outside the `assign_key` charset, so keys holding it
-        // cannot Display-round-trip (separate grammar-scope issue).
-        (
-            safe_string().prop_filter("Env keys admit the assignment charset", |k| {
-                !k.contains(':')
-            }),
-            any_msg(),
-        )
-            .prop_map(|(key, value)| StepKind::Env {
-                key,
-                value: value.into()
-            }),
+        (safe_string(), any_msg(),).prop_map(|(key, value)| StepKind::Env {
+            key,
+            value: value.into()
+        }),
         safe_msg().prop_map(|s| StepKind::Run(s.into())),
         prop::collection::vec(safe_string(), 1..3).prop_map(|items| StepKind::RunExec {
             argv: items
