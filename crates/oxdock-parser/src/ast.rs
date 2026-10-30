@@ -1226,7 +1226,10 @@ impl fmt::Display for Expr {
                 write!(f, " }}")
             }
             Expr::Compare { op, left, right } => {
-                write!(f, "{} {} {}", left, op, right)
+                // Parenthesized like `Arithmetic`/`Logical` below, so
+                // nested comparisons round-trip (`(a == b) == c` parses;
+                // `a == b == c` does not). Found by expression fuzz.
+                write!(f, "({} {} {})", left, op, right)
             }
             Expr::Arithmetic { op, left, right } => {
                 write!(f, "({} {} {})", left, op, right)

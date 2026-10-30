@@ -137,17 +137,287 @@ fn arb_scalar_literal() -> impl Strategy<Value = Expr> {
     ]
 }
 
-/// Leaf expressions plus one-level lists: everything here Displays
-/// and reparses without registry lookups or scope state.
-/// Deliberately ungenerated: `Arithmetic`/`Compare`/`Logical`/`Not`
-/// (lowering folds constants and compiles dynamic subtrees, so AST
-/// parity is undefined there by design — value behavior is covered by
-/// the arithmetic suites), `Call` (needs a module table the token path
-/// cannot carry; covered through the real macro in the corpus),
-/// `Block` (renders `{{ }}` template shape, not reparseable as a
-/// block), `FreshPipe`/`UnsignedIntBoundary` (lowering intermediates,
-/// except bare `PIPE` declarations, which round-trip as `FreshPipe`
-/// and are generated with `Assign` below).
+/// Variable operand pool for math/logic generation: short names both
+/// pathways spell identically, with no quoting or module involvement.
+fn arb_math_var() -> impl Strategy<Value = Expr> {
+    "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Var)
+}
+
+/// Numeric leaves for arithmetic: vars plus non-negative ints and
+/// fraction-carrying floats (negatives lower through unary negation;
+/// integral floats reparse as INT).
+fn arb_number_leaf() -> impl Strategy<Value = Expr> {
+    prop_oneof![
+        arb_math_var(),
+        (0u32..999_999).prop_map(|i| Expr::Literal(Value::int(i as i64))),
+        (0u32..999_999, 1u32..999).prop_map(|(i, f)| Expr::Literal(Value::float(
+            format!("{i}.{f}").parse::<f64>().unwrap_or(f64::NAN)
+        ))),
+    ]
+}
+
+/// Arithmetic over numeric operands, nesting capped: every shape
+/// Displays parenthesized, so both pathways reparse identically.
+/// Maps/lists/blocks are not operands (semantically nonsense and the
+/// `{}` brace shape is token-ambiguous).
+fn arb_arith_with_depth(depth: u32) -> BoxedStrategy<Expr> {
+    let leaf = arb_number_leaf().boxed();
+    if depth >= 2 {
+        return leaf;
+    }
+    let deeper = arb_arith_with_depth(depth + 1);
+    prop_oneof![
+        leaf,
+        (deeper.clone(), deeper).prop_map(|(l, r)| Expr::Arithmetic {
+            op: ArithOp::Add,
+            left: Box::new(l),
+            right: Box::new(r),
+        }),
+    ]
+    .boxed()
+}
+
+/// Boolean shapes: flags, comparisons over arithmetic operands, and
+/// capped `Not`/`Logical` nesting. `Not` Displays parenthesized around
+/// compound operands; `Logical` always parenthesizes.
+fn arb_bool_with_depth(depth: u32) -> BoxedStrategy<Expr> {
+    let leaf = prop_oneof![
+        any::<bool>().prop_map(|b| Expr::Literal(Value::bool(b))),
+        arb_math_var(),
+    ]
+    .boxed();
+    if depth >= 2 {
+        return leaf;
+    }
+    let deeper = arb_bool_with_depth(depth + 1);
+    let cmp_operand = prop_oneof![
+        arb_arith_with_depth(1),
+        arb_math_var(),
+        arb_scalar_literal(),
+    ]
+    .boxed();
+    prop_oneof![
+        leaf,
+        (cmp_operand.clone(), cmp_operand).prop_map(|(l, r)| Expr::Compare {
+            op: CompareOp::Eq,
+            left: Box::new(l),
+            right: Box::new(r),
+        }),
+        arb_math_var().prop_map(|v| Expr::Not(Box::new(v))),
+        (deeper.clone(), deeper).prop_map(|(l, r)| Expr::Logical {
+            op: LogicalOp::And,
+            left: Box::new(l),
+            right: Box::new(r),
+        }),
+    ]
+    .boxed()
+}
+
+/// Source-shape expressions with a depth budget. Leaves are the old
+/// `arb_leaf_expr` set; nodes are math/logic/call/block shapes whose
+/// lowering image both pathways must agree on (proven by strict
+/// parsed-vs-token equality; generated-vs-parsed uses `expr_image_eq`).
+/// `CompiledMath`/`UnsignedIntBoundary` are never emitted: they are
+/// lowering outputs/privates, classified in `expr_covers_kind`.
+fn arb_expr_with_depth(depth: u32) -> BoxedStrategy<Expr> {
+    let leaf = arb_leaf_expr().boxed();
+    if depth >= 1 {
+        return leaf;
+    }
+    prop_oneof![
+        leaf,
+        arb_arith_with_depth(0).boxed(),
+        arb_bool_with_depth(0).boxed(),
+        safe_string().prop_map(|s| Expr::Call {
+            name: "STD::TEXT_LENGTH".to_string(),
+            args: vec![Expr::Literal(Value::string(s))],
+        }),
+        arb_flat_block_body().prop_map(Expr::Block),
+    ]
+    .boxed()
+}
+
+fn arb_expr() -> BoxedStrategy<Expr> {
+    arb_expr_with_depth(0)
+}
+
+/// Block bodies stay flat and command-safe: the coverage target is the
+/// `Block` shape itself (inline `LET $x = { ... }` round-trip), not
+/// nesting inside evaluation scopes.
+fn arb_flat_block_body() -> impl Strategy<Value = Vec<Step>> {
+    prop::collection::vec(
+        arb_body_step_kind().prop_map(|kind| Step {
+            guard: None,
+            kind,
+            scope_enter: 0,
+            scope_exit: 0,
+        }),
+        1..=2,
+    )
+}
+
+/// Lowering-image equality for expressions: strict equality first; a
+/// math-source shape (`Compare`/`Arithmetic`/`Not`/`Logical`) also
+/// matches its lowering image (`Literal` when folded, `CompiledMath`
+/// when compiled) in either argument order (callers pass
+/// parsed-vs-generated in both directions). Both pathways share
+/// lowering, so the image must additionally agree strictly
+/// pathway-vs-pathway (asserted separately); this rule only bridges
+/// source↔image, never image↔image. Anything else falls back to strict
+/// equality, so a new variant that lowering normalizes fails loudly
+/// here until classified. `Block` bodies compare marker-free (parsed
+/// bodies earn scope markers).
+fn expr_image_eq(a: &Expr, b: &Expr) -> bool {
+    if a == b {
+        return true;
+    }
+    fn is_source(e: &Expr) -> bool {
+        matches!(
+            e,
+            Expr::Compare { .. } | Expr::Arithmetic { .. } | Expr::Not(..) | Expr::Logical { .. }
+        )
+    }
+    fn is_image(e: &Expr) -> bool {
+        matches!(e, Expr::Literal(..) | Expr::CompiledMath(..))
+    }
+    if (is_source(a) && is_image(b)) || (is_source(b) && is_image(a)) {
+        return true;
+    }
+    // Structural recursion for math shapes: images nest inside
+    // passthrough nodes (`Logical(Compare(..))` vs
+    // `Logical(CompiledMath(..))`), so operands compare by image too.
+    match (a, b) {
+        (
+            Expr::Compare {
+                op: o1,
+                left: l1,
+                right: r1,
+            },
+            Expr::Compare {
+                op: o2,
+                left: l2,
+                right: r2,
+            },
+        ) => o1 == o2 && expr_image_eq(l1, l2) && expr_image_eq(r1, r2),
+        (
+            Expr::Arithmetic {
+                op: o1,
+                left: l1,
+                right: r1,
+            },
+            Expr::Arithmetic {
+                op: o2,
+                left: l2,
+                right: r2,
+            },
+        ) => o1 == o2 && expr_image_eq(l1, l2) && expr_image_eq(r1, r2),
+        (
+            Expr::Logical {
+                op: o1,
+                left: l1,
+                right: r1,
+            },
+            Expr::Logical {
+                op: o2,
+                left: l2,
+                right: r2,
+            },
+        ) => o1 == o2 && expr_image_eq(l1, l2) && expr_image_eq(r1, r2),
+        (Expr::Not(x), Expr::Not(y)) => expr_image_eq(x, y),
+        (Expr::List(a), Expr::List(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| expr_image_eq(x, y))
+        }
+        (Expr::Map(a), Expr::Map(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((k1, v1), (k2, v2))| k1 == k2 && expr_image_eq(v1, v2))
+        }
+        (Expr::Call { name: n1, args: a1 }, Expr::Call { name: n2, args: a2 }) => {
+            n1 == n2
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2.iter()).all(|(x, y)| expr_image_eq(x, y))
+        }
+        (Expr::Block(a), Expr::Block(b)) => {
+            let mut a = a.clone();
+            let mut b = b.clone();
+            zero_markers(&mut a);
+            zero_markers(&mut b);
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| flat_body_image_eq(x, y))
+        }
+        _ => false,
+    }
+}
+
+fn flat_body_image_eq(a: &Step, b: &Step) -> bool {
+    if a.guard != b.guard {
+        return false;
+    }
+    match (&a.kind, &b.kind) {
+        (StepKind::Echo(x), StepKind::Echo(y)) => arg_content_eq(x, y),
+        (
+            StepKind::Write {
+                path: px,
+                contents: cx,
+            },
+            StepKind::Write {
+                path: py,
+                contents: cy,
+            },
+        ) => {
+            arg_content_eq(px, py)
+                && match (cx, cy) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => arg_content_eq(x, y),
+                    _ => false,
+                }
+        }
+        (StepKind::Env { key: kx, value: vx }, StepKind::Env { key: ky, value: vy }) => {
+            kx == ky && arg_content_eq(vx, vy)
+        }
+        (
+            StepKind::Assign {
+                var: vx,
+                decl_type: tx,
+                expr: ex,
+            },
+            StepKind::Assign {
+                var: vy,
+                decl_type: ty,
+                expr: ey,
+            },
+        ) => vx == vy && tx == ty && expr_image_eq(ex, ey),
+        (
+            StepKind::AssertEq {
+                hash: hx,
+                actual: ax,
+                expected: ex,
+            },
+            StepKind::AssertEq {
+                hash: hy,
+                actual: ay,
+                expected: ey,
+            },
+        ) => {
+            hx == hy
+                && match (ax, ay) {
+                    (AssertTarget::Value(x), AssertTarget::Value(y)) => arg_content_eq(x, y),
+                    _ => ax == ay,
+                }
+                && match (ex, ey) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => arg_content_eq(x, y),
+                    _ => false,
+                }
+        }
+        // `Block` bodies hold only the flat subset above: anything else
+        // fails loudly instead of comparing strictly (flags would lie).
+        _ => false,
+    }
+}
 fn arb_leaf_expr() -> impl Strategy<Value = Expr> {
     prop_oneof![
         arb_scalar_literal(),
@@ -401,9 +671,13 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             ]
         )
             .prop_map(|(name, target)| StepKind::TypeAlias { name, target }),
-        // Assignment pairs decl tags with matching literal shapes. The
+        // Assignment pairs decl tags with matching expression shapes. The
         // parser does not enforce the pairing, but keeping it preserves
         // the option of tightening validation without churning the fuzz.
+        // Math/logic source shapes lower to images (folded `Literal` or
+        // `CompiledMath`); both pathways share lowering, so generated-vs-
+        // parsed compares via `expr_image_eq` while parsed-vs-token stays
+        // strict.
         prop_oneof![
             ("[a-z][a-zA-Z0-9_]*", safe_string()).prop_map(|(var, s)| {
                 StepKind::Assign {
@@ -446,9 +720,24 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                 decl_type: "PIPE".to_string(),
                 expr: Expr::FreshPipe,
             }),
+            ("[a-z][a-zA-Z0-9_]*", arb_expr()).prop_map(|(var, expr)| {
+                let decl_type = match &expr {
+                    Expr::Compare { .. } | Expr::Logical { .. } | Expr::Not(..) => "BOOL",
+                    Expr::Arithmetic { .. } => "INT",
+                    Expr::Call { .. } => "INT",
+                    Expr::Block(..) => "STRING",
+                    _ => "STRING",
+                }
+                .to_string();
+                StepKind::Assign {
+                    var,
+                    decl_type,
+                    expr,
+                }
+            }),
         ],
-        ("[a-z][a-zA-Z0-9_]*", arb_leaf_expr()).prop_map(|(var, expr)| StepKind::Set { var, expr }),
-        arb_leaf_expr().prop_map(|expr| StepKind::Return {
+        ("[a-z][a-zA-Z0-9_]*", arb_expr()).prop_map(|(var, expr)| StepKind::Set { var, expr }),
+        arb_expr().prop_map(|expr| StepKind::Return {
             expr: Box::new(expr)
         }),
         Just(StepKind::Break),
@@ -481,18 +770,19 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                 path: path.map(Into::into),
                 overrides: overrides.into_iter().map(|(k, v)| (k, v.into())).collect(),
             }),
-        // Bodies nest flat kinds exactly one level deep; scope markers
-        // normalize recursively in comparison.
-        (any::<bool>(), arb_body(), arb_body()).prop_map(|(flag, then_body, else_body)| {
+        // Bodies nest recursively to `MAX_BODY_DEPTH`: flat command-safe
+        // kinds everywhere, `If`/`While` wrappers while budget remains.
+        // Scope markers normalize recursively in comparison.
+        (arb_bool_expr(), arb_body(), arb_body()).prop_map(|(cond, then_body, else_body)| {
             StepKind::If {
-                cond: Box::new(Expr::Literal(Value::bool(flag))),
+                cond: Box::new(cond),
                 then_body,
                 else_ifs: vec![],
                 else_body: Some(else_body),
             }
         }),
-        (any::<bool>(), arb_body()).prop_map(|(flag, body)| StepKind::While {
-            cond: Box::new(Expr::Literal(Value::bool(flag))),
+        (arb_bool_expr(), arb_body()).prop_map(|(cond, body)| StepKind::While {
+            cond: Box::new(cond),
             body,
         }),
         ("FUZZ[A-Z0-9_]*", arb_body()).prop_map(|(name, body)| StepKind::FuncDef {
@@ -639,9 +929,56 @@ fn arb_command_body_kind() -> impl Strategy<Value = StepKind> {
         }),
     ]
 }
+/// Boolean conditions: literal flags plus dynamic shapes (negation,
+/// conjunction, comparison over vars). All Display parenthesized or
+/// prefixed so both pathways reparse identically.
+fn arb_bool_expr() -> impl Strategy<Value = Expr> {
+    prop_oneof![
+        any::<bool>().prop_map(|b| Expr::Literal(Value::bool(b))),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|v| Expr::Not(Box::new(Expr::Var(v)))),
+        ("[a-z][a-zA-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(l, r)| Expr::Logical {
+            op: LogicalOp::And,
+            left: Box::new(Expr::Var(l)),
+            right: Box::new(Expr::Var(r)),
+        }),
+        ("[a-z][a-zA-Z0-9_]*", 0u32..999).prop_map(|(v, i)| Expr::Compare {
+            op: CompareOp::Eq,
+            left: Box::new(Expr::Var(v)),
+            right: Box::new(Expr::Literal(Value::int(i as i64))),
+        }),
+    ]
+}
+
 fn arb_body() -> impl Strategy<Value = Vec<Step>> {
+    arb_body_with_depth(0)
+}
+
+/// Recursion budget for nested bodies: two levels exercise block-in-
+/// block rendering on both pathways without exponential blowup.
+const MAX_BODY_DEPTH: u32 = 2;
+
+fn arb_body_with_depth(depth: u32) -> BoxedStrategy<Vec<Step>> {
+    let step: BoxedStrategy<StepKind> = if depth >= MAX_BODY_DEPTH {
+        arb_body_step_kind().boxed()
+    } else {
+        let deeper = arb_body_with_depth(depth + 1);
+        prop_oneof![
+            arb_body_step_kind(),
+            (arb_bool_expr(), deeper.clone()).prop_map(|(cond, body)| StepKind::While {
+                cond: Box::new(cond),
+                body,
+            }),
+            (arb_bool_expr(), deeper).prop_map(|(cond, body)| StepKind::If {
+                cond: Box::new(cond),
+                then_body: body,
+                else_ifs: vec![],
+                else_body: None,
+            }),
+        ]
+        .boxed()
+    };
     prop::collection::vec(
-        (prop::option::of(arb_guard_expr()), arb_body_step_kind()).prop_map(|(guard, kind)| Step {
+        (prop::option::of(arb_guard_expr()), step).prop_map(|(guard, kind)| Step {
             guard,
             kind,
             scope_enter: 0,
@@ -649,6 +986,7 @@ fn arb_body() -> impl Strategy<Value = Vec<Step>> {
         }),
         1..=2,
     )
+    .boxed()
 }
 
 /// Body-safe flat kinds: prelude directives (`INHERIT_ENV`, `TYPE`)
@@ -687,6 +1025,13 @@ fn parse_tokens_with_std_modules(
     let mut reserved = oxdock_core::builtin_function_names();
     reserved.extend(table.reserved_base_names());
     parse_braced_tokens_with_modules(ts, oxdock_core::lower_command, reserved, table)
+}
+
+/// String-path parse with the standard module table: expression calls
+/// (`STD::*` in `LET`) resolve the same way as the token path. Both
+/// pathways now parse under identical tables; that is the parity.
+fn parse_string_with_std_modules(s: &str) -> anyhow::Result<Vec<Step>> {
+    oxdock_core::parse_script_with_modules(s, oxdock_core::std_module_table())
 }
 
 fn arb_step() -> impl Strategy<Value = Step> {
@@ -1011,14 +1356,14 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
         ) => {
             assert_eq!(lv, rv, "Assign var mismatch: {}", msg);
             assert_eq!(lt, rt, "Assign type mismatch: {}", msg);
-            assert_eq!(le, re, "Assign expr mismatch: {}", msg);
+            assert!(expr_image_eq(le, re), "Assign expr mismatch: {}", msg);
         }
         (StepKind::Set { var: lv, expr: le }, StepKind::Set { var: rv, expr: re }) => {
             assert_eq!(lv, rv, "Set var mismatch: {}", msg);
-            assert_eq!(le, re, "Set expr mismatch: {}", msg);
+            assert!(expr_image_eq(le, re), "Set expr mismatch: {}", msg);
         }
         (StepKind::Return { expr: le }, StepKind::Return { expr: re }) => {
-            assert_eq!(le, re, "Return expr mismatch: {}", msg);
+            assert!(expr_image_eq(le, re), "Return expr mismatch: {}", msg);
         }
         (StepKind::Break, StepKind::Break) => {}
         (StepKind::Continue, StepKind::Continue) => {}
@@ -1052,11 +1397,11 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 else_body: rb,
             },
         ) => {
-            assert_eq!(lc, rc, "If cond mismatch: {}", msg);
+            assert!(expr_image_eq(lc, rc), "If cond mismatch: {}", msg);
             assert_bodies_eq(lt, rt, msg);
             assert_eq!(le.len(), re.len(), "If else-if mismatch: {}", msg);
             for ((c1, b1), (c2, b2)) in le.iter().zip(re.iter()) {
-                assert_eq!(c1, c2, "If else-if cond mismatch: {}", msg);
+                assert!(expr_image_eq(c1, c2), "If else-if cond mismatch: {}", msg);
                 assert_bodies_eq(b1, b2, msg);
             }
             match (lb, rb) {
@@ -1066,7 +1411,7 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             }
         }
         (StepKind::While { cond: lc, body: lb }, StepKind::While { cond: rc, body: rb }) => {
-            assert_eq!(lc, rc, "While cond mismatch: {}", msg);
+            assert!(expr_image_eq(lc, rc), "While cond mismatch: {}", msg);
             assert_bodies_eq(lb, rb, msg);
         }
         (
@@ -1206,7 +1551,7 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_eq!(lkt, rkt, "For key type mismatch: {}", msg);
             assert_eq!(lv, rv, "For var mismatch: {}", msg);
             assert_eq!(lvt, rvt, "For var type mismatch: {}", msg);
-            assert_eq!(li, ri, "For iterable mismatch: {}", msg);
+            assert!(expr_image_eq(li, ri), "For iterable mismatch: {}", msg);
             assert_bodies_eq(lb, rb, msg);
         }
         (StepKind::Call { name: ln, args: la }, StepKind::Call { name: rn, args: ra }) => {
@@ -1250,14 +1595,14 @@ proptest! {
     fn fuzz_parity(step in arb_step()) {
         let s = step.to_string();
 
-        // 1. Parse string
-        let parsed_steps = oxdock_core::parse_script(&s).expect("failed to parse generated string");
+        // 1. Parse string (std module table: expression calls resolve the
+        // same way as the token path from here on).
+        let parsed_steps =
+            parse_string_with_std_modules(&s).expect("failed to parse generated string");
         assert_eq!(parsed_steps.len(), 1);
         let mut parsed = parsed_steps;
         zero_markers(&mut parsed);
         let parsed_step = &parsed[0];
-
-        assert_steps_eq(parsed_step, &step, &format!("String parse mismatch: {}", s));
 
         // 2. Parse tokens (if feature enabled)
         let ts: proc_macro2::TokenStream = s.parse().expect("failed to tokenize string");
@@ -1268,7 +1613,59 @@ proptest! {
         zero_markers(&mut tokenized);
         let token_step = &tokenized[0];
 
+        // Expression arms tolerate lowering images (source math vs
+        // folded `Literal`/`CompiledMath`); images agree strictly
+        // pathway-vs-pathway because the rule only bridges source↔image,
+        // never image↔image.
+        assert_steps_eq(parsed_step, &step, &format!("String parse mismatch: {}", s));
         assert_steps_eq(token_step, &step, &format!("Token parse mismatch: {}", s));
+        assert_steps_eq(parsed_step, token_step, &format!("Pathway mismatch: {}", s));
+    }
+
+    /// Multi-step scripts: whole-script round-trip through both pathways.
+    /// `FuncDef` names index by position (no forward refs, no collisions:
+    /// calls only target `STD`), so generation stays self-contained while
+    /// exercising cross-step parsing (blank-line joins, sequential
+    /// guards, mixed shapes in one text).
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "requires real TokenStream/proc-macro parsing to validate API parity"
+    )]
+    fn fuzz_multistep_parity(steps in prop::collection::vec(arb_step(), 1..=4)) {
+        let mut steps = steps;
+        for (i, step) in steps.iter_mut().enumerate() {
+            if let StepKind::FuncDef { name, .. } = &mut step.kind {
+                *name = format!("MULTIFUNC{i}");
+            }
+        }
+        // Prelude order: `INHERIT_ENV` must precede all other commands,
+        // so stable-partition it front (single-step fuzz never meets
+        // this; scripts do).
+        steps.sort_by_key(|step| {
+            !matches!(step.kind, StepKind::InheritEnv { .. })
+        });
+        let s = steps
+            .iter()
+            .map(|step| step.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed_steps =
+            parse_string_with_std_modules(&s).expect("failed to parse generated script");
+        assert_eq!(parsed_steps.len(), steps.len(), "string split lines: {s}");
+        let ts: proc_macro2::TokenStream = s.parse().expect("failed to tokenize script");
+        let token_steps =
+            parse_tokens_with_std_modules(&ts).expect("failed to parse script tokens");
+        assert_eq!(token_steps.len(), steps.len(), "token walk split lines: {s}");
+        let mut parsed = parsed_steps;
+        zero_markers(&mut parsed);
+        let mut tokenized = token_steps;
+        zero_markers(&mut tokenized);
+        for ((p, t), g) in parsed.iter().zip(tokenized.iter()).zip(steps.iter()) {
+            assert_steps_eq(p, g, &format!("String parse mismatch: {s}"));
+            assert_steps_eq(t, g, &format!("Token parse mismatch: {s}"));
+            assert_steps_eq(p, t, &format!("Pathway mismatch: {s}"));
+        }
     }
 }
 
@@ -1309,7 +1706,8 @@ fn keyword_args_round_trip_through_both_pathways() {
             };
             let s = step.to_string();
 
-            let parsed_steps = oxdock_core::parse_script(&s).expect("string parse must round-trip");
+            let parsed_steps =
+                parse_string_with_std_modules(&s).expect("string parse must round-trip");
             assert_eq!(parsed_steps.len(), 1, "string split lines: {s}");
             assert_steps_eq(&parsed_steps[0], &step, &format!("String mismatch: {s}"));
 
@@ -1450,6 +1848,60 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 "COVERAGE".to_string(),
                 Arg::String("covered".to_string(), false),
             )],
+        },
+        // Expression shapes: dynamic math/logic lower to images both
+        // pathways must agree on; the sample asserts the agreement.
+        StepKind::Assign {
+            var: "coverage".to_string(),
+            decl_type: "INT".to_string(),
+            expr: Expr::Arithmetic {
+                op: ArithOp::Add,
+                left: Box::new(Expr::Var("coverage".to_string())),
+                right: Box::new(Expr::Var("coverage".to_string())),
+            },
+        },
+        StepKind::Assign {
+            var: "coverage".to_string(),
+            decl_type: "BOOL".to_string(),
+            expr: Expr::Compare {
+                op: CompareOp::Eq,
+                left: Box::new(Expr::Var("coverage".to_string())),
+                right: Box::new(Expr::Literal(Value::int(7))),
+            },
+        },
+        StepKind::Assign {
+            var: "coverage".to_string(),
+            decl_type: "BOOL".to_string(),
+            expr: Expr::Not(Box::new(Expr::Var("coverage".to_string()))),
+        },
+        StepKind::Assign {
+            var: "coverage".to_string(),
+            decl_type: "BOOL".to_string(),
+            expr: Expr::Logical {
+                op: LogicalOp::And,
+                left: Box::new(Expr::Var("coverage".to_string())),
+                right: Box::new(Expr::Var("coverage".to_string())),
+            },
+        },
+        StepKind::Assign {
+            var: "coverage".to_string(),
+            decl_type: "INT".to_string(),
+            expr: Expr::Call {
+                name: "STD::TEXT_LENGTH".to_string(),
+                args: vec![Expr::Literal(Value::string("coverage".to_string()))],
+            },
+        },
+        StepKind::Assign {
+            var: "coverage".to_string(),
+            decl_type: "STRING".to_string(),
+            expr: Expr::Block(vec![Step {
+                guard: None,
+                kind: StepKind::Return {
+                    expr: Box::new(Expr::Literal(Value::string("covered".to_string()))),
+                },
+                scope_enter: 0,
+                scope_exit: 0,
+            }]),
         },
         StepKind::If {
             cond: Box::new(Expr::Literal(Value::bool(true))),
@@ -1677,7 +2129,8 @@ fn fuzz_inventory_covers_claimed_kinds() {
             scope_exit: 0,
         };
         let s = step.to_string();
-        let parsed_steps = oxdock_core::parse_script(&s).expect("sample must parse from string");
+        let parsed_steps =
+            parse_string_with_std_modules(&s).expect("sample must parse from string");
         assert_eq!(parsed_steps.len(), 1, "string split lines: {s}");
         let ts: proc_macro2::TokenStream = s.parse().expect("sample must tokenize");
         let token_steps =
@@ -1689,6 +2142,7 @@ fn fuzz_inventory_covers_claimed_kinds() {
         zero_markers(&mut tokenized);
         assert_steps_eq(&parsed[0], &step, &format!("String mismatch: {s}"));
         assert_steps_eq(&tokenized[0], &step, &format!("Token mismatch: {s}"));
+        assert_steps_eq(&parsed[0], &tokenized[0], &format!("Pathway mismatch: {s}"));
     }
     // No exact-duplicate samples: a copy-pasted entry would let a
     // missing variant hide behind sample count. (Same-discriminant
@@ -1703,9 +2157,243 @@ fn fuzz_inventory_covers_claimed_kinds() {
     }
 }
 
-/// The excluded set, beside the covered samples: every `false` arm in
-/// `fuzz_covers_kind` needs a witness here so the exclusion tests below
-/// can prove it honest instead of asserting it.
+/// Expression coverage inventory: every `Expr` variant appears here
+/// explicitly with no wildcard, so adding a variant fails compilation
+/// until classified. Source shapes generated by `arb_expr` claim
+/// `true`; lowering-only nodes are classified beside them with reasons.
+fn expr_covers_kind(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(..)
+        | Expr::Var(..)
+        | Expr::Env(..)
+        | Expr::KeyPath { .. }
+        | Expr::List(..)
+        | Expr::Map(..)
+        | Expr::Block(..)
+        | Expr::Call { .. }
+        | Expr::Inspect(..)
+        | Expr::Compare { .. }
+        | Expr::Arithmetic { .. }
+        | Expr::Not(..)
+        | Expr::Logical { .. }
+        | Expr::FreshPipe => true,
+        // Lowering image of generated math: never emitted by the
+        // generator, but every math sample must produce it identically
+        // on both pathways (asserted in `fuzz_expr_inventory_enforced`).
+        Expr::CompiledMath(..) => true,
+        // Lowering-internal staging for `i64::MIN`: no source spelling
+        // denotes this node (its only spelling lowers past it), so it is
+        // ungeneratable; the witness below proves it.
+        Expr::UnsignedIntBoundary(..) => false,
+    }
+}
+
+/// One canonical instance per generatable expression shape. The fuzzer
+/// proves the alphabet across these; these prove each shape survives
+/// both pathways at least once, deterministically.
+fn sample_covered_exprs() -> Vec<Expr> {
+    vec![
+        Expr::Literal(Value::string("coverage".to_string())),
+        Expr::Literal(Value::int(7)),
+        Expr::Literal(Value::bool(true)),
+        Expr::Var("coverage".to_string()),
+        Expr::Env("COVERAGE".to_string()),
+        Expr::KeyPath {
+            base: "coverage".to_string(),
+            keys: vec!["key".to_string()],
+        },
+        Expr::List(vec![Expr::Literal(Value::string("covered".to_string()))]),
+        Expr::Map(vec![(
+            "coverage".to_string(),
+            Expr::Literal(Value::string("covered".to_string())),
+        )]),
+        Expr::Inspect("coverage".to_string()),
+        Expr::FreshPipe,
+        Expr::Block(vec![Step {
+            guard: None,
+            kind: StepKind::Return {
+                expr: Box::new(Expr::Literal(Value::string("covered".to_string()))),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        }]),
+        Expr::Call {
+            name: "STD::TEXT_LENGTH".to_string(),
+            args: vec![Expr::Literal(Value::string("coverage".to_string()))],
+        },
+        Expr::Compare {
+            op: CompareOp::Eq,
+            left: Box::new(Expr::Var("coverage".to_string())),
+            right: Box::new(Expr::Literal(Value::int(7))),
+        },
+        Expr::Arithmetic {
+            op: ArithOp::Add,
+            left: Box::new(Expr::Var("coverage".to_string())),
+            right: Box::new(Expr::Var("coverage".to_string())),
+        },
+        Expr::Not(Box::new(Expr::Var("coverage".to_string()))),
+        Expr::Logical {
+            op: LogicalOp::And,
+            left: Box::new(Expr::Var("coverage".to_string())),
+            right: Box::new(Expr::Var("coverage".to_string())),
+        },
+    ]
+}
+
+/// Recursive claim check over generated expression trees: every node
+/// must claim coverage, so flipping a `true` arm in `expr_covers_kind`
+/// to `false` while its generator arm remains fails the forward tests
+/// below. Exhaustive with no wildcard: a new `Expr` variant fails
+/// compilation here until classified. `Block` bodies recurse through
+/// `walk_exprs` (flat bodies hold leaves, so one level suffices).
+fn assert_expr_tree_claimed(expr: &Expr) {
+    assert!(
+        expr_covers_kind(expr),
+        "generator emitted disclaimed expr: {expr:?}"
+    );
+    match expr {
+        Expr::Literal(..)
+        | Expr::Var(..)
+        | Expr::Env(..)
+        | Expr::KeyPath { .. }
+        | Expr::Inspect(..)
+        | Expr::FreshPipe
+        | Expr::CompiledMath(..)
+        | Expr::UnsignedIntBoundary(..) => {}
+        Expr::List(items) => {
+            for item in items {
+                assert_expr_tree_claimed(item);
+            }
+        }
+        Expr::Map(entries) => {
+            for (_, value) in entries {
+                assert_expr_tree_claimed(value);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                assert_expr_tree_claimed(arg);
+            }
+        }
+        Expr::Compare { left, right, .. }
+        | Expr::Arithmetic { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            assert_expr_tree_claimed(left);
+            assert_expr_tree_claimed(right);
+        }
+        Expr::Not(inner) => assert_expr_tree_claimed(inner),
+        Expr::Block(steps) => {
+            for step in steps {
+                step.kind.walk_exprs(&mut assert_expr_tree_claimed);
+            }
+        }
+    }
+}
+/// Classification snapshot: every variant's claim in one place, so a
+/// flipped arm in `expr_covers_kind` fails here unless this test is
+/// edited too (review-visible, same standard as the `StepKind` gate).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires real TokenStream/proc-macro parsing to validate API parity"
+)]
+fn fuzz_expr_inventory_enforced() {
+    for expr in sample_covered_exprs() {
+        assert!(
+            expr_covers_kind(&expr),
+            "sample must claim coverage: {expr:?}"
+        );
+    }
+    assert!(expr_covers_kind(&Expr::CompiledMath(vec![])));
+    assert!(!expr_covers_kind(&Expr::UnsignedIntBoundary(0)));
+
+    // Generator hits every sampled discriminant: a `true` without
+    // generator support fails here.
+    let mut runner = TestRunner::deterministic();
+    let mut hit = HashSet::new();
+    for _ in 0..20_000 {
+        let expr = arb_expr()
+            .new_tree(&mut runner)
+            .expect("strategy must generate")
+            .current();
+        hit.insert(std::mem::discriminant(&expr));
+    }
+    for expr in sample_covered_exprs() {
+        // `FreshPipe` is exercised through bare `PIPE` declarations at
+        // step level (the kinds inventory), never as a bare expression.
+        if matches!(expr, Expr::FreshPipe) {
+            continue;
+        }
+        assert!(
+            hit.contains(&std::mem::discriminant(&expr)),
+            "claimed-covered expr never generated (fake true?): {expr:?}"
+        );
+    }
+    // Math samples lower to an image both pathways must share: assert
+    // the image explicitly instead of assuming it.
+    for expr in sample_covered_exprs() {
+        if !matches!(
+            expr,
+            Expr::Compare { .. } | Expr::Arithmetic { .. } | Expr::Not(..) | Expr::Logical { .. }
+        ) {
+            continue;
+        }
+        let src = format!("LET $coverage: STRING = {expr}");
+        let string_out =
+            parse_string_with_std_modules(&src).expect("math sample must parse from string");
+        let ts: proc_macro2::TokenStream = src.parse().expect("math sample must tokenize");
+        let token_out =
+            parse_tokens_with_std_modules(&ts).expect("math sample must parse from tokens");
+        assert_eq!(string_out.len(), 1);
+        assert_eq!(token_out.len(), 1);
+        // Lowering may keep the source shape (`Not` passes through) or
+        // replace it, but only with a folded `Literal` or `CompiledMath`:
+        // any other image is a new lowering behavior to classify.
+        let out_expr = match &string_out[0].kind {
+            StepKind::Assign { expr, .. } => expr,
+            other => panic!("math sample must lower to Assign, got {other:?}"),
+        };
+        if std::mem::discriminant(out_expr) != std::mem::discriminant(&expr) {
+            assert!(
+                matches!(out_expr, Expr::Literal(..) | Expr::CompiledMath(..)),
+                "math lowered past known images: {src:?} -> {out_expr:?}"
+            );
+        }
+        assert_eq!(
+            string_out[0].kind, token_out[0].kind,
+            "math image differs across pathways: {src:?}"
+        );
+    }
+    // Exclusion honesty: the boundary node has no source spelling —
+    // constructing it directly must not survive a text round-trip — and
+    // the generator must never emit it.
+    let witness = Expr::UnsignedIntBoundary(0);
+    let src = format!("LET $coverage: INT = {witness}");
+    let survives = parse_string_with_std_modules(&src).is_ok_and(|steps| {
+        steps.len() == 1
+            && matches!(&steps[0].kind, StepKind::Assign { expr, .. }
+                if std::mem::discriminant(expr) == std::mem::discriminant(&witness))
+    });
+    assert!(
+        !survives,
+        "excluded expr survives parsing, so `false` is a lie: {src:?}"
+    );
+    let mut runner = TestRunner::deterministic();
+    for _ in 0..20_000 {
+        let expr = arb_expr()
+            .new_tree(&mut runner)
+            .expect("strategy must generate")
+            .current();
+        assert!(
+            std::mem::discriminant(&expr) != std::mem::discriminant(&witness),
+            "generator emitted excluded expr: {expr:?}"
+        );
+    }
+}
+
+/// The excluded step set: every `false` arm in `fuzz_covers_kind` needs
+/// a witness here so the exclusion tests below can prove it honest
+/// instead of asserting it.
 fn sample_excluded_kinds() -> Vec<StepKind> {
     vec![StepKind::WithIoBlock {
         bindings: vec![IoBinding {
@@ -1715,11 +2403,29 @@ fn sample_excluded_kinds() -> Vec<StepKind> {
     }]
 }
 
-// Forward direction: the generator never emits a kind the inventory
-// disclaims. Flipping a `true` arm to `false` while its generator arm
-// remains fails here, so dodging coverage means deleting the generator
-// too, which is review-visible, not silent.
+// Forward direction: every generated expression node claims coverage.
 proptest! {
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "requires real TokenStream/proc-macro parsing to validate API parity"
+    )]
+    fn fuzz_expr_generator_only_emits_claimed(expr in arb_expr()) {
+        assert_expr_tree_claimed(&expr);
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "requires real TokenStream/proc-macro parsing to validate API parity"
+    )]
+    fn fuzz_cond_generator_only_emits_claimed(expr in arb_bool_expr()) {
+        assert_expr_tree_claimed(&expr);
+    }
+
+    // StepKind forward direction: the generator never emits a kind the
+    // inventory disclaims. Flipping a `true` arm to `false` while its
+    // generator arm remains fails here.
     #[test]
     #[cfg_attr(
         miri,

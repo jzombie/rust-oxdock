@@ -407,6 +407,25 @@ fn macro_std_call_through_import() {
 }
 
 #[test]
+fn macro_dynamic_math_and_inline_block() {
+    let steps = oxdock! {
+        LET $a: INT = 3
+        LET $b: INT = 4
+        LET $sum: INT = $a + $b
+        ASSERT_EQ $sum 7
+        LET $both: BOOL = ($a == 3) && ($b == 4)
+        ASSERT_EQ $both true
+        LET $neg: BOOL = !$both
+        ASSERT_EQ $neg false
+        LET $greeting: STRING = { RETURN "hi" }
+        ASSERT_EQ $greeting "hi"
+    };
+    let temp = GuardedPath::tempdir().unwrap();
+    run_steps(temp.as_guarded_path(), &steps);
+    assert_macro_string_roundtrip(&steps);
+}
+
+#[test]
 fn macro_inspect_and_fresh_pipe() {
     let steps = oxdock! {
         LET $x: STRING = "hi"

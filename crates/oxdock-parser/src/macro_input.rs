@@ -266,6 +266,35 @@ fn emit_template_placeholder(
     *last_span_end = Some(span.end());
 }
 
+/// True when a rebuilt line still awaits its inner command: a bare
+/// wrapper head (`ISOLATED`, `ASYNC`), a `WITH_IO [...]` bindings line
+/// with no command yet, or the expression continuations (`=`, `IN`,
+/// trailing `ASYNC`, `TIMEOUT` duration). A new statement keyword on a
+/// later line glues only in these cases; a complete wrapper line
+/// (`ISOLATED ENV K=v`) splits. Found by multistep fuzz: the token
+/// rebuild dropped newlines after complete single-form wrappers.
+fn line_awaits_inner_command(trimmed: &str) -> bool {
+    let trimmed_end = trimmed.trim_end();
+    let last_word = trimmed_end.split_whitespace().last();
+    if trimmed_end.ends_with('=')
+        || last_word == Some("IN")
+        || last_word == Some("ASYNC")
+        || line_ends_in_timeout_duration(trimmed_end)
+    {
+        return true;
+    }
+    if matches!(last_word, Some("ISOLATED") | Some("ASYNC")) {
+        return true;
+    }
+    if trimmed_end.ends_with(']') {
+        let head = trimmed.split_whitespace().next();
+        if head == Some("WITH_IO") {
+            return true;
+        }
+    }
+    false
+}
+
 fn line_expects_inner_command(line: &str) -> bool {
     matches!(
         current_line_command(line),
@@ -447,7 +476,18 @@ fn walk(
                                 || trimmed_here.ends_with('[')
                                 || trimmed_here.ends_with(',')
                                 || trimmed_here.split_whitespace().last() == Some("IN");
-                            if *last_was_command || continues_expr {
+                            // A bracket opening on a later line than the
+                            // previous token starts a new statement (a
+                            // leading guard), even right after a bare
+                            // command: without this, `CWD` followed by
+                            // `[env:X] ECHO` glues into `CWD [env:X]`,
+                            // dropping the guard or failing arity.
+                            // Expression continuations (`=`/`IN`/etc.)
+                            // still attach across lines.
+                            let opens_new_line = last_span_end
+                                .map(|prev| span.start().line > prev.line)
+                                .unwrap_or(false);
+                            if (*last_was_command && !opens_new_line) || continues_expr {
                                 // First bracket group after a command: attach to the command
                                 // (e.g., INHERIT_ENV [keys], WITH_IO [bindings]).
                                 // Same-line groups elsewhere attach as expressions.
@@ -601,6 +641,21 @@ fn walk(
                 {
                     force_space = true;
                 }
+                // A `$var` mutate statement opening on a later line starts
+                // a new statement, mirroring the Ident arm: without this,
+                // `$x = 1` after a complete step glues onto its line.
+                // Restricted to `$`+Ident (`${..}` interpolation has a
+                // Group next, `=` continuations await) so same-line args
+                // (`ECHO $x`) and interpolation never split.
+                if ch == '$'
+                    && matches!(next, Some(TokenTree::Ident(_)))
+                    && !line.trim().is_empty()
+                    && !line_is_run_context(line.trim())
+                    && !line_awaits_inner_command(line.trim())
+                    && last_span_end.is_some_and(|prev| span.start().line > prev.line)
+                {
+                    finalize_line(lines, line, capture_has_inner);
+                }
                 // Atomic guard context admits no implicit gaps around
                 // structural punctuation: push directly instead of
                 // letting `push_fragment` invent spacing the grammar
@@ -681,7 +736,6 @@ fn walk(
                     );
                 let trimmed = line.trim();
                 let trimmed_empty = trimmed.is_empty();
-                let guard_prefix = trimmed.starts_with('[');
                 let line_requires_inner = line_expects_inner_command(trimmed);
                 // A line ending in `=` (or the `IN` of a FOR header) expects an
                 // expression next: `LET $o: STRING = ECHO hi`,
@@ -703,9 +757,26 @@ fn walk(
                 // IF after ELSE stays on same line (ELSE IF clause)
                 if ident_text == "ELSE" || (ident_text == "IF" && trimmed.ends_with("ELSE")) {
                     should_finalize = false;
-                } else if is_new_statement && !trimmed_empty && !guard_prefix && !expects_expr {
-                    let current_expects_inner = line_expects_inner_command(trimmed);
-                    should_finalize = !line_is_run_context(trimmed) && !current_expects_inner;
+                } else if is_new_statement && !trimmed_empty && !expects_expr {
+                    // A statement keyword opening on a later source line
+                    // starts a new statement unless the line still awaits
+                    // its inner command (bare wrapper head, bindings
+                    // without command, `=`/`IN`/duration continuations).
+                    // Same-line occurrences keep gluing (wrapper
+                    // continuations like `ISOLATED ECHO hi`).
+                    // Degenerate spans (synthetic `call_site`/`quote!`
+                    // streams where every token reports the same
+                    // position) carry no line signal: fall back to
+                    // splitting, preserving the old behavior there.
+                    let new_line = last_span_end
+                        .map(|prev| span.start().line > prev.line)
+                        .unwrap_or(false);
+                    let spans_degenerate = last_span_end
+                        .map(|prev| prev == span.start())
+                        .unwrap_or(false);
+                    should_finalize = !line_is_run_context(trimmed)
+                        && !line_awaits_inner_command(trimmed)
+                        && (new_line || spans_degenerate);
                 }
                 // Bare and qualified calls split like keywords when they open
                 // a new source line after a complete statement. Same-line
@@ -715,7 +786,6 @@ fn walk(
                 // (the split, if any, already happened at the module ident).
                 if (is_call_statement_start || is_qualified_call_start)
                     && !trimmed_empty
-                    && !guard_prefix
                     && !expects_expr
                     && !line_is_run_context(trimmed)
                     && !trimmed_end.ends_with(MODULE_SEPARATOR)
@@ -725,7 +795,6 @@ fn walk(
                 }
                 if is_command
                     && !trimmed_empty
-                    && !guard_prefix
                     && *capture_has_inner
                     && line_requires_inner
                     && ident_text != "ASYNC"
@@ -891,6 +960,26 @@ mod tests {
     /// Mock lowering for macro_input tests.
     fn mock_lower(name: &str, args: Vec<crate::Arg>) -> crate::ParseResult<StepKind> {
         crate::test_lower_mock::lower(name, args)
+    }
+
+    #[test]
+    fn leading_guard_after_bare_command_starts_new_line() {
+        // A guard opening on a later line than a bare command starts a
+        // new statement: without this, `CWD` followed by `[env:X] ECHO`
+        // glues into `CWD [env:X]` and fails arity. Found by multistep
+        // fuzz (`CWD` + guarded step); real `oxdock!` users hit the same
+        // shape writing guarded steps after bare commands.
+        let text = "CWD\n[env:X] ECHO hi";
+        let ts: proc_macro2::TokenStream = text.parse().expect("tokens");
+        let script = script_from_braced_tokens(&ts).expect("rebuild");
+        let braced = parse_braced_tokens(&ts, mock_lower).expect("braced parse");
+        let string = crate::parse_script(text, mock_lower).expect("string parse");
+        assert_eq!(braced, string, "pathways must agree (rebuilt: {script:?})");
+        assert_eq!(braced.len(), 2, "steps split: {script:?}");
+        assert!(
+            braced[1].guard.is_some(),
+            "guard dropped in rebuild: {script:?}"
+        );
     }
 
     #[test]

@@ -911,8 +911,6 @@ mod tests {
         }
     }
 
-
-
     #[test]
     fn block_map_key_dedents() {
         let steps = parse_script("LET $m: MAP = {\"\"\"\nkey\n\"\"\": \"v\"}", test_lower)
