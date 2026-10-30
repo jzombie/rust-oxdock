@@ -175,10 +175,66 @@ fn quote_dsl_string(s: &str) -> String {
     // keep the legacy raw double-quoted spelling instead: block
     // lowering would normalize them away.
     if s.contains('\n') && !s.contains('"') && !s.contains('\r') && !s.trim().is_empty() {
-        let escaped = s.replace('\\', "\\\\").replace("\"\"\"", "\\\"\\\"\\\"");
+        let escaped = escape_block_text(s);
         return format!("\"\"\"\n{escaped}\n\"\"\"");
     }
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    format!("\"{}\"", escape_inline_text(s))
+}
+
+/// Escape text for double-quoted rendering so a render cycle adds no
+/// layer: recognized escapes pass through verbatim (the parser keeps
+/// them verbatim and both lexers accept them), while the delimiter and
+/// anything neither lexer takes raw gets escaped.
+fn escape_inline_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => {
+                // Recognized pairs emit atomically: reprocessing the
+                // trailing quote through the `"` arm above would grow
+                // the pair a second backslash.
+                if matches!(
+                    chars.peek(),
+                    Some('n' | 't' | 'r' | '\\' | '"' | '\'' | '0')
+                ) {
+                    out.push('\\');
+                    out.push(chars.next().unwrap_or('\\'));
+                } else {
+                    out.push_str("\\\\");
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escape block payloads: the delimiter triple always escapes first,
+/// and a backslash survives raw only where both lexers take it
+/// (recognized escapes, including the ones just introduced; a real
+/// newline or `{` after it would break Rust lexing, so those double
+/// like everything else unrecognized).
+fn escape_block_text(s: &str) -> String {
+    let preescaped = s.replace("\"\"\"", "\\\"\\\"\\\"");
+    let mut out = String::with_capacity(preescaped.len());
+    let mut chars = preescaped.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let keep = matches!(
+            chars.peek(),
+            Some('n' | 't' | 'r' | '\\' | '"' | '\'' | '0')
+        );
+        out.push('\\');
+        if !keep {
+            out.push('\\');
+        }
+    }
+    out
 }
 
 fn quote_arg(s: &str) -> String {
@@ -3800,7 +3856,10 @@ impl fmt::Display for StepKind {
             StepKind::Cancel { var } => write!(f, "CANCEL ${}", var),
             StepKind::Timeout { duration, body } => {
                 let budget = fmt_raw_arg(duration);
-                if body.len() == 1 {
+                // Single-command form cannot carry an inner guard (the
+                // grammar has no guard slot there), so guarded singles
+                // take block form rather than silently dropping it.
+                if body.len() == 1 && body[0].guard.is_none() {
                     write!(f, "TIMEOUT {} {}", budget, body[0].kind)
                 } else {
                     write!(f, "TIMEOUT {} {{", budget)?;
@@ -3811,7 +3870,7 @@ impl fmt::Display for StepKind {
                 }
             }
             StepKind::Isolated { body } => {
-                if body.len() == 1 {
+                if body.len() == 1 && body[0].guard.is_none() {
                     write!(f, "ISOLATED {}", body[0].kind)
                 } else {
                     write!(f, "ISOLATED {{")?;

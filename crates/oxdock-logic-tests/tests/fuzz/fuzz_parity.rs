@@ -119,6 +119,63 @@ fn safe_msg() -> impl Strategy<Value = String> {
         })
 }
 
+/// Scalar literal expressions: non-negative ints, bools, finite
+/// fraction-carrying floats, and safe strings. Negatives would lower
+/// through unary negation instead of folding to a literal; integral
+/// floats reparse as INT. Both would diverge from the generated AST.
+fn arb_scalar_literal() -> impl Strategy<Value = Expr> {
+    prop_oneof![
+        (0u32..999_999).prop_map(|i| Expr::Literal(Value::int(i as i64))),
+        any::<bool>().prop_map(|b| Expr::Literal(Value::bool(b))),
+        (0u32..999_999, 1u32..999).prop_map(|(i, f)| Expr::Literal(Value::float(
+            format!("{i}.{f}").parse::<f64>().unwrap_or(f64::NAN)
+        ))),
+        safe_string().prop_map(|s| Expr::Literal(Value::string(s))),
+    ]
+}
+
+/// Leaf expressions plus one-level lists: everything here Displays
+/// and reparses without registry lookups or scope state.
+/// Deliberately ungenerated: `Arithmetic`/`Compare`/`Logical`/`Not`
+/// (lowering folds constants and compiles dynamic subtrees, so AST
+/// parity is undefined there by design — value behavior is covered by
+/// the arithmetic suites), `Call` (needs a module table the token path
+/// cannot carry; covered through the real macro in the corpus),
+/// `Block` (renders `{{ }}` template shape, not reparseable as a
+/// block), `FreshPipe`/`UnsignedIntBoundary` (lowering intermediates,
+/// except bare `PIPE` declarations, which round-trip as `FreshPipe`
+/// and are generated with `Assign` below).
+fn arb_leaf_expr() -> impl Strategy<Value = Expr> {
+    prop_oneof![
+        arb_scalar_literal(),
+        "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Var),
+        "[A-Z][A-Z0-9_]*".prop_map(Expr::Env),
+        "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Inspect),
+        (
+            "[a-z][a-zA-Z0-9_]*",
+            prop::collection::vec("[a-z][a-zA-Z0-9_]*", 1..=2),
+        )
+            .prop_map(|(base, keys)| Expr::KeyPath { base, keys }),
+        prop::collection::vec(safe_string(), 0..=3).prop_map(|items| {
+            Expr::List(
+                items
+                    .into_iter()
+                    .map(Value::string)
+                    .map(Expr::Literal)
+                    .collect(),
+            )
+        }),
+        prop::collection::vec(("[a-z][a-zA-Z0-9_]*", safe_string()), 0..=2).prop_map(|entries| {
+            Expr::Map(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k, Expr::Literal(Value::string(v))))
+                    .collect(),
+            )
+        },),
+    ]
+}
+
 /// Message alphabet that exercises quoting and `"""` blocks: embedded
 /// newlines render as blocks, quotes escape inline, and leading spaces
 /// probe dedent baselines. Always quoted-or-block on Display (never a
@@ -341,6 +398,266 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             ]
         )
             .prop_map(|(name, target)| StepKind::TypeAlias { name, target }),
+        // Assignment pairs decl tags with matching literal shapes. The
+        // parser does not enforce the pairing, but keeping it preserves
+        // the option of tightening validation without churning the fuzz.
+        prop_oneof![
+            ("[a-z][a-zA-Z0-9_]*", safe_string()).prop_map(|(var, s)| {
+                StepKind::Assign {
+                    var,
+                    decl_type: "STRING".to_string(),
+                    expr: Expr::Literal(Value::string(s)),
+                }
+            }),
+            ("[a-z][a-zA-Z0-9_]*", 0u32..999_999).prop_map(|(var, i)| {
+                StepKind::Assign {
+                    var,
+                    decl_type: "INT".to_string(),
+                    expr: Expr::Literal(Value::int(i as i64)),
+                }
+            }),
+            ("[a-z][a-zA-Z0-9_]*", any::<bool>()).prop_map(|(var, b)| {
+                StepKind::Assign {
+                    var,
+                    decl_type: "BOOL".to_string(),
+                    expr: Expr::Literal(Value::bool(b)),
+                }
+            }),
+            (
+                "[a-z][a-zA-Z0-9_]*",
+                prop::collection::vec(safe_string(), 0..=2)
+            )
+                .prop_map(|(var, items)| StepKind::Assign {
+                    var,
+                    decl_type: "LIST<STRING>".to_string(),
+                    expr: Expr::List(
+                        items
+                            .into_iter()
+                            .map(Value::string)
+                            .map(Expr::Literal)
+                            .collect(),
+                    ),
+                },),
+            "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Assign {
+                var,
+                decl_type: "PIPE".to_string(),
+                expr: Expr::FreshPipe,
+            }),
+        ],
+        ("[a-z][a-zA-Z0-9_]*", arb_leaf_expr()).prop_map(|(var, expr)| StepKind::Set { var, expr }),
+        arb_leaf_expr().prop_map(|expr| StepKind::Return {
+            expr: Box::new(expr)
+        }),
+        Just(StepKind::Break),
+        Just(StepKind::Continue),
+        prop_oneof![
+            Just("10s".to_string()),
+            Just("500ms".to_string()),
+            Just("2m".to_string()),
+        ]
+        .prop_map(|d| StepKind::Sleep {
+            duration: Arg::String(d, false),
+        }),
+        ("[a-z][a-zA-Z0-9_]*", "[a-zA-Z_][a-zA-Z0-9_]*").prop_map(|(list, item)| {
+            StepKind::ListAppend {
+                list,
+                item: Arg::String(item, false),
+            }
+        }),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Await { var: var.clone() }),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Cancel { var: var.clone() }),
+        (safe_string(), any_msg()).prop_map(|(path, contents)| StepKind::Append {
+            path: path.into(),
+            contents: Some(contents.into()),
+        }),
+        (
+            prop::option::of(safe_string()),
+            prop::collection::vec((safe_string(), any_msg()), 0..=2),
+        )
+            .prop_map(|(path, overrides)| StepKind::Expand {
+                path: path.map(Into::into),
+                overrides: overrides.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            }),
+        // Bodies nest flat kinds exactly one level deep; scope markers
+        // normalize recursively in comparison.
+        (any::<bool>(), arb_body(), arb_body()).prop_map(|(flag, then_body, else_body)| {
+            StepKind::If {
+                cond: Box::new(Expr::Literal(Value::bool(flag))),
+                then_body,
+                else_ifs: vec![],
+                else_body: Some(else_body),
+            }
+        }),
+        (any::<bool>(), arb_body()).prop_map(|(flag, body)| StepKind::While {
+            cond: Box::new(Expr::Literal(Value::bool(flag))),
+            body,
+        }),
+        ("FUZZ[A-Z0-9_]*", arb_body()).prop_map(|(name, body)| StepKind::FuncDef {
+            name,
+            params: vec![("coverage".to_string(), "STRING".to_string())],
+            body,
+        }),
+        arb_command_body().prop_map(|body| StepKind::Timeout {
+            duration: Arg::String("10s".to_string(), false),
+            body,
+        }),
+        arb_command_body().prop_map(|body| StepKind::Isolated { body }),
+        arb_body().prop_map(|body| StepKind::AsyncBlock { body }),
+        ("[a-z][a-zA-Z0-9_]*", arb_body()).prop_map(|(var, body)| StepKind::AssignAsync {
+            var,
+            decl_type: "HANDLE".to_string(),
+            body,
+        }),
+        arb_body().prop_map(|body| StepKind::RemoteBlock {
+            target: "coveragetarget".to_string(),
+            vars: vec![],
+            env: vec![],
+            body,
+        }),
+        ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::AssignCapture {
+            var,
+            decl_type: "STRING".to_string(),
+            cmd: Box::new(StepKind::Echo("coverage echo".into())),
+        }),
+        ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::AwaitCapture {
+            out_var: var.clone(),
+            out_type: "STRING".to_string(),
+            task_var: var,
+        }),
+        ("[a-z][a-zA-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(var, item)| {
+            StepKind::For {
+                key_var: None,
+                key_type: None,
+                var,
+                var_type: "STRING".to_string(),
+                in_expr: Expr::List(vec![Expr::Literal(Value::string(item))]),
+                body: vec![],
+            }
+        }),
+        Just(StepKind::WithIo {
+            bindings: vec![IoBinding {
+                stream: IoStream::Stdout,
+                pipe: Some(PipeTarget::Var("coverage".to_string())),
+            }],
+            cmd: Box::new(StepKind::Echo("coverage echo".into())),
+        }),
+    ]
+}
+
+/// Zero scope markers recursively: generated steps carry 0/0 while
+/// parsed bodies earn real markers from structure. Both pathways parse
+/// the same text, so markers agree after normalization.
+fn zero_markers(steps: &mut [Step]) {
+    for step in steps.iter_mut() {
+        step.scope_enter = 0;
+        step.scope_exit = 0;
+        zero_kind_markers(&mut step.kind);
+    }
+}
+
+fn zero_kind_markers(kind: &mut StepKind) {
+    match kind {
+        StepKind::If {
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            zero_markers(then_body);
+            for (_, body) in else_ifs.iter_mut() {
+                zero_markers(body);
+            }
+            if let Some(body) = else_body {
+                zero_markers(body);
+            }
+        }
+        StepKind::For { body, .. }
+        | StepKind::While { body, .. }
+        | StepKind::FuncDef { body, .. }
+        | StepKind::Timeout { body, .. }
+        | StepKind::Isolated { body, .. }
+        | StepKind::AsyncBlock { body, .. }
+        | StepKind::AssignAsync { body, .. }
+        | StepKind::RemoteBlock { body, .. } => zero_markers(body),
+        StepKind::AssignCapture { cmd, .. } | StepKind::WithIo { cmd, .. } => {
+            zero_kind_markers(cmd)
+        }
+        _ => {}
+    }
+}
+
+/// Command-subset bodies for single-form wrappers (`TIMEOUT`,
+/// `ISOLATED`): one-step bodies render as `WRAPPER <command>`, where the
+/// grammar takes commands but never `LET`, so bodies draw from the
+/// command subset. Multi-step bodies render block form either way.
+fn arb_command_body() -> impl Strategy<Value = Vec<Step>> {
+    prop::collection::vec(
+        (prop::option::of(arb_guard_expr()), arb_command_body_kind()).prop_map(|(guard, kind)| {
+            Step {
+                guard,
+                kind,
+                scope_enter: 0,
+                scope_exit: 0,
+            }
+        }),
+        1..=2,
+    )
+}
+
+fn arb_command_body_kind() -> impl Strategy<Value = StepKind> {
+    prop_oneof![
+        Just(StepKind::Echo("coverage echo".into())),
+        Just(StepKind::Write {
+            path: "coverage.txt".into(),
+            contents: Some("covered".into()),
+        }),
+        Just(StepKind::Env {
+            key: "COVERAGE".to_string(),
+            value: "covered".into(),
+        }),
+        Just(StepKind::AssertEq {
+            hash: None,
+            actual: AssertTarget::Value("coverage-actual".into()),
+            expected: Some("coverage-expected".into()),
+        }),
+    ]
+}
+fn arb_body() -> impl Strategy<Value = Vec<Step>> {
+    prop::collection::vec(
+        (prop::option::of(arb_guard_expr()), arb_body_step_kind()).prop_map(|(guard, kind)| Step {
+            guard,
+            kind,
+            scope_enter: 0,
+            scope_exit: 0,
+        }),
+        1..=2,
+    )
+}
+
+/// Body-safe flat kinds: prelude directives (`INHERIT_ENV`, `TYPE`)
+/// are top-level-only and fail inside blocks, so bodies draw from the
+/// executable subset.
+fn arb_body_step_kind() -> impl Strategy<Value = StepKind> {
+    prop_oneof![
+        Just(StepKind::Echo("coverage echo".into())),
+        Just(StepKind::Write {
+            path: "coverage.txt".into(),
+            contents: Some("covered".into()),
+        }),
+        Just(StepKind::Env {
+            key: "COVERAGE".to_string(),
+            value: "covered".into(),
+        }),
+        Just(StepKind::Assign {
+            var: "coverage".to_string(),
+            decl_type: "STRING".to_string(),
+            expr: Expr::Literal(Value::string("covered".to_string())),
+        }),
+        Just(StepKind::AssertEq {
+            hash: None,
+            actual: AssertTarget::Value("coverage-actual".into()),
+            expected: Some("coverage-expected".into()),
+        }),
     ]
 }
 
@@ -652,7 +969,247 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 );
             }
         }
+        (
+            StepKind::Assign {
+                var: lv,
+                decl_type: lt,
+                expr: le,
+            },
+            StepKind::Assign {
+                var: rv,
+                decl_type: rt,
+                expr: re,
+            },
+        ) => {
+            assert_eq!(lv, rv, "Assign var mismatch: {}", msg);
+            assert_eq!(lt, rt, "Assign type mismatch: {}", msg);
+            assert_eq!(le, re, "Assign expr mismatch: {}", msg);
+        }
+        (StepKind::Set { var: lv, expr: le }, StepKind::Set { var: rv, expr: re }) => {
+            assert_eq!(lv, rv, "Set var mismatch: {}", msg);
+            assert_eq!(le, re, "Set expr mismatch: {}", msg);
+        }
+        (StepKind::Return { expr: le }, StepKind::Return { expr: re }) => {
+            assert_eq!(le, re, "Return expr mismatch: {}", msg);
+        }
+        (StepKind::Break, StepKind::Break) => {}
+        (StepKind::Continue, StepKind::Continue) => {}
+        (StepKind::Sleep { duration: l }, StepKind::Sleep { duration: r }) => {
+            assert!(arg_content_eq(l, r), "Sleep duration mismatch: {}", msg)
+        }
+        (
+            StepKind::ListAppend { list: ll, item: li },
+            StepKind::ListAppend { list: rl, item: ri },
+        ) => {
+            assert_eq!(ll, rl, "ListAppend list mismatch: {}", msg);
+            assert!(arg_content_eq(li, ri), "ListAppend item mismatch: {}", msg);
+        }
+        (StepKind::Await { var: l }, StepKind::Await { var: r }) => {
+            assert_eq!(l, r, "Await var mismatch: {}", msg)
+        }
+        (StepKind::Cancel { var: l }, StepKind::Cancel { var: r }) => {
+            assert_eq!(l, r, "Cancel var mismatch: {}", msg)
+        }
+        (
+            StepKind::If {
+                cond: lc,
+                then_body: lt,
+                else_ifs: le,
+                else_body: lb,
+            },
+            StepKind::If {
+                cond: rc,
+                then_body: rt,
+                else_ifs: re,
+                else_body: rb,
+            },
+        ) => {
+            assert_eq!(lc, rc, "If cond mismatch: {}", msg);
+            assert_bodies_eq(lt, rt, msg);
+            assert_eq!(le.len(), re.len(), "If else-if mismatch: {}", msg);
+            for ((c1, b1), (c2, b2)) in le.iter().zip(re.iter()) {
+                assert_eq!(c1, c2, "If else-if cond mismatch: {}", msg);
+                assert_bodies_eq(b1, b2, msg);
+            }
+            match (lb, rb) {
+                (None, None) => {}
+                (Some(x), Some(y)) => assert_bodies_eq(x, y, msg),
+                _ => panic!("If else-body mismatch: {}", msg),
+            }
+        }
+        (StepKind::While { cond: lc, body: lb }, StepKind::While { cond: rc, body: rb }) => {
+            assert_eq!(lc, rc, "While cond mismatch: {}", msg);
+            assert_bodies_eq(lb, rb, msg);
+        }
+        (
+            StepKind::FuncDef {
+                name: ln,
+                params: lp,
+                body: lb,
+            },
+            StepKind::FuncDef {
+                name: rn,
+                params: rp,
+                body: rb,
+            },
+        ) => {
+            assert_eq!(ln, rn, "FuncDef name mismatch: {}", msg);
+            assert_eq!(lp, rp, "FuncDef params mismatch: {}", msg);
+            assert_bodies_eq(lb, rb, msg);
+        }
+        (
+            StepKind::Timeout {
+                duration: ld,
+                body: lb,
+            },
+            StepKind::Timeout {
+                duration: rd,
+                body: rb,
+            },
+        ) => {
+            assert!(arg_content_eq(ld, rd), "Timeout duration mismatch: {}", msg);
+            assert_bodies_eq(lb, rb, msg);
+        }
+        (StepKind::Isolated { body: lb }, StepKind::Isolated { body: rb }) => {
+            assert_bodies_eq(lb, rb, msg)
+        }
+        (StepKind::AsyncBlock { body: lb }, StepKind::AsyncBlock { body: rb }) => {
+            assert_bodies_eq(lb, rb, msg)
+        }
+        (
+            StepKind::AssignAsync {
+                var: lv,
+                decl_type: lt,
+                body: lb,
+            },
+            StepKind::AssignAsync {
+                var: rv,
+                decl_type: rt,
+                body: rb,
+            },
+        ) => {
+            assert_eq!(lv, rv, "AssignAsync var mismatch: {}", msg);
+            assert_eq!(lt, rt, "AssignAsync type mismatch: {}", msg);
+            assert_bodies_eq(lb, rb, msg);
+        }
+        (
+            StepKind::RemoteBlock {
+                target: lt,
+                vars: lv,
+                env: le,
+                body: lb,
+            },
+            StepKind::RemoteBlock {
+                target: rt,
+                vars: rv,
+                env: re,
+                body: rb,
+            },
+        ) => {
+            assert_eq!(lt, rt, "RemoteBlock target mismatch: {}", msg);
+            assert_eq!(lv, rv, "RemoteBlock vars mismatch: {}", msg);
+            assert_eq!(le, re, "RemoteBlock env mismatch: {}", msg);
+            assert_bodies_eq(lb, rb, msg);
+        }
+        (
+            StepKind::AssignCapture {
+                var: lv,
+                decl_type: lt,
+                cmd: lc,
+            },
+            StepKind::AssignCapture {
+                var: rv,
+                decl_type: rt,
+                cmd: rc,
+            },
+        ) => {
+            assert_eq!(lv, rv, "AssignCapture var mismatch: {}", msg);
+            assert_eq!(lt, rt, "AssignCapture type mismatch: {}", msg);
+            assert_bodies_eq(&[shell_of_kind(lc)], &[shell_of_kind(rc)], msg);
+        }
+        (
+            StepKind::AwaitCapture {
+                out_var: lo,
+                out_type: lt,
+                task_var: lv,
+            },
+            StepKind::AwaitCapture {
+                out_var: ro,
+                out_type: rt,
+                task_var: rv,
+            },
+        ) => {
+            assert_eq!(lo, ro, "AwaitCapture out mismatch: {}", msg);
+            assert_eq!(lt, rt, "AwaitCapture type mismatch: {}", msg);
+            assert_eq!(lv, rv, "AwaitCapture task mismatch: {}", msg);
+        }
+        (
+            StepKind::WithIo {
+                bindings: lb,
+                cmd: lc,
+            },
+            StepKind::WithIo {
+                bindings: rb,
+                cmd: rc,
+            },
+        ) => {
+            assert_eq!(lb, rb, "WithIo bindings mismatch: {}", msg);
+            assert_bodies_eq(&[shell_of_kind(lc)], &[shell_of_kind(rc)], msg);
+        }
+        (
+            StepKind::For {
+                key_var: lk,
+                key_type: lkt,
+                var: lv,
+                var_type: lvt,
+                in_expr: li,
+                body: lb,
+            },
+            StepKind::For {
+                key_var: rk,
+                key_type: rkt,
+                var: rv,
+                var_type: rvt,
+                in_expr: ri,
+                body: rb,
+            },
+        ) => {
+            assert_eq!(lk, rk, "For key var mismatch: {}", msg);
+            assert_eq!(lkt, rkt, "For key type mismatch: {}", msg);
+            assert_eq!(lv, rv, "For var mismatch: {}", msg);
+            assert_eq!(lvt, rvt, "For var type mismatch: {}", msg);
+            assert_eq!(li, ri, "For iterable mismatch: {}", msg);
+            assert_bodies_eq(lb, rb, msg);
+        }
+        (StepKind::Call { name: ln, args: la }, StepKind::Call { name: rn, args: ra }) => {
+            assert_eq!(ln, rn, "Call name mismatch: {}", msg);
+            assert_eq!(la, ra, "Call args mismatch: {}", msg);
+        }
         _ => assert_eq!(left.kind, right.kind, "Kind mismatch: {}", msg),
+    }
+}
+
+/// Compare two bodies after normalizing scope markers: parsed bodies
+/// earn real markers from structure while generated ones carry 0/0.
+fn assert_bodies_eq(l: &[Step], r: &[Step], msg: &str) {
+    let mut l = l.to_vec();
+    let mut r = r.to_vec();
+    zero_markers(&mut l);
+    zero_markers(&mut r);
+    assert_eq!(l.len(), r.len(), "Body length mismatch: {}", msg);
+    for (a, b) in l.iter().zip(r.iter()) {
+        assert_steps_eq(a, b, msg);
+    }
+}
+
+/// Wrap a boxed command kind in a marker-free shell step for body
+/// comparison.
+fn shell_of_kind(kind: &StepKind) -> Step {
+    Step {
+        guard: None,
+        kind: kind.clone(),
+        scope_enter: 0,
+        scope_exit: 0,
     }
 }
 
@@ -668,22 +1225,22 @@ proptest! {
         // 1. Parse string
         let parsed_steps = oxdock_core::parse_script(&s).expect("failed to parse generated string");
         assert_eq!(parsed_steps.len(), 1);
-        let mut parsed_step = parsed_steps[0].clone();
-        parsed_step.scope_enter = 0;
-        parsed_step.scope_exit = 0;
+        let mut parsed = parsed_steps;
+        zero_markers(&mut parsed);
+        let parsed_step = &parsed[0];
 
-        assert_steps_eq(&parsed_step, &step, &format!("String parse mismatch: {}", s));
+        assert_steps_eq(parsed_step, &step, &format!("String parse mismatch: {}", s));
 
         // 2. Parse tokens (if feature enabled)
         let ts: proc_macro2::TokenStream = s.parse().expect("failed to tokenize string");
         let token_steps = parse_braced_tokens(&ts, oxdock_core::lower_command).expect("failed to parse tokens");
 
         assert_eq!(token_steps.len(), 1);
-        let mut token_step = token_steps[0].clone();
-        token_step.scope_enter = 0;
-        token_step.scope_exit = 0;
+        let mut tokenized = token_steps;
+        zero_markers(&mut tokenized);
+        let token_step = &tokenized[0];
 
-        assert_steps_eq(&token_step, &step, &format!("Token parse mismatch: {}", s));
+        assert_steps_eq(token_step, &step, &format!("Token parse mismatch: {}", s));
     }
 }
 
@@ -828,6 +1385,150 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             name: "COVERAGE".to_string(),
             target: "MAP".to_string(),
         },
+        StepKind::Assign {
+            var: "coverage".to_string(),
+            decl_type: "STRING".to_string(),
+            expr: Expr::Literal(Value::string("covered".to_string())),
+        },
+        StepKind::Set {
+            var: "coverage".to_string(),
+            expr: Expr::Literal(Value::int(7)),
+        },
+        StepKind::Return {
+            expr: Box::new(Expr::Literal(Value::bool(true))),
+        },
+        StepKind::Break,
+        StepKind::Continue,
+        StepKind::Sleep {
+            duration: Arg::String("10s".to_string(), false),
+        },
+        StepKind::ListAppend {
+            list: "coverage".to_string(),
+            item: Arg::String("covered".to_string(), false),
+        },
+        StepKind::Await {
+            var: "coverage".to_string(),
+        },
+        StepKind::Cancel {
+            var: "coverage".to_string(),
+        },
+        StepKind::Append {
+            path: "coverage.txt".into(),
+            contents: Some("covered".into()),
+        },
+        StepKind::Expand {
+            path: None,
+            overrides: vec![(
+                "COVERAGE".to_string(),
+                Arg::String("covered".to_string(), false),
+            )],
+        },
+        StepKind::If {
+            cond: Box::new(Expr::Literal(Value::bool(true))),
+            then_body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+            else_ifs: vec![],
+            else_body: None,
+        },
+        StepKind::While {
+            cond: Box::new(Expr::Literal(Value::bool(true))),
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        },
+        StepKind::FuncDef {
+            name: "COVERAGEFUNC".to_string(),
+            params: vec![("coverage".to_string(), "STRING".to_string())],
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        },
+        StepKind::Timeout {
+            duration: Arg::String("10s".to_string(), false),
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        },
+        StepKind::Isolated {
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        },
+        StepKind::AsyncBlock {
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        },
+        StepKind::AssignAsync {
+            var: "coverage".to_string(),
+            decl_type: "HANDLE".to_string(),
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        },
+        StepKind::RemoteBlock {
+            target: "coveragetarget".to_string(),
+            vars: vec![],
+            env: vec![],
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        },
+        StepKind::AssignCapture {
+            var: "coverage".to_string(),
+            decl_type: "STRING".to_string(),
+            cmd: Box::new(StepKind::Echo("coverage echo".into())),
+        },
+        StepKind::AwaitCapture {
+            out_var: "coverage".to_string(),
+            out_type: "STRING".to_string(),
+            task_var: "coverage".to_string(),
+        },
+        StepKind::For {
+            key_var: None,
+            key_type: None,
+            var: "coverage".to_string(),
+            var_type: "STRING".to_string(),
+            in_expr: Expr::List(vec![Expr::Literal(Value::string("covered".to_string()))]),
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        },
+        StepKind::WithIo {
+            bindings: vec![IoBinding {
+                stream: IoStream::Stdout,
+                pipe: Some(PipeTarget::Var("coverage".to_string())),
+            }],
+            cmd: Box::new(StepKind::Echo("coverage echo".into())),
+        },
     ]
 }
 
@@ -866,36 +1567,39 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         | StepKind::TypeAlias { .. } => true,
         // Expression bodies need Expr strategies (literals, math,
         // calls, keypaths) before generation is sound.
-        StepKind::Assign { .. } => false,
-        StepKind::Set { .. } => false,
-        StepKind::AssignCapture { .. } => false,
-        StepKind::AwaitCapture { .. } => false,
-        StepKind::AsyncBlock { .. } => false,
-        StepKind::AssignAsync { .. } => false,
-        StepKind::Await { .. } => false,
-        StepKind::Cancel { .. } => false,
-        StepKind::Timeout { .. } => false,
-        StepKind::Isolated { .. } => false,
+        StepKind::Assign { .. } => true,
+        StepKind::Set { .. } => true,
+        StepKind::AssignCapture { .. } => true,
+        StepKind::AwaitCapture { .. } => true,
+        StepKind::AsyncBlock { .. } => true,
+        StepKind::AssignAsync { .. } => true,
+        StepKind::Await { .. } => true,
+        StepKind::Cancel { .. } => true,
+        StepKind::Timeout { .. } => true,
+        StepKind::Isolated { .. } => true,
         StepKind::IsolatedInheritEnv { .. } => false,
-        StepKind::RemoteBlock { .. } => false,
-        StepKind::FuncDef { .. } => false,
+        StepKind::RemoteBlock { .. } => true,
+        StepKind::FuncDef { .. } => true,
+        // Token path carries no module table, so qualified calls cannot
+        // resolve there; single-step text cannot carry IMPORT either.
+        // Covered through the real macro in the corpus instead.
         StepKind::Call { .. } => false,
-        StepKind::Return { .. } => false,
-        StepKind::While { .. } => false,
-        StepKind::Break => false,
-        StepKind::Continue => false,
+        StepKind::Return { .. } => true,
+        StepKind::While { .. } => true,
+        StepKind::Break => true,
+        StepKind::Continue => true,
         // Bodies (step vectors, bindings) need recursive generation.
-        StepKind::WithIo { .. } => false,
+        StepKind::WithIo { .. } => true,
         StepKind::WithIoBlock { .. } => false,
-        StepKind::For { .. } => false,
-        StepKind::If { .. } => false,
+        StepKind::For { .. } => true,
+        StepKind::If { .. } => true,
         // Durations and list items need value-shaped strategies.
-        StepKind::Sleep { .. } => false,
-        StepKind::ListAppend { .. } => false,
+        StepKind::Sleep { .. } => true,
+        StepKind::ListAppend { .. } => true,
         // Overrides render `KEY=value` lines needing assignment-aware
         // comparison, not plain content equality.
-        StepKind::Append { .. } => false,
-        StepKind::Expand { .. } => false,
+        StepKind::Append { .. } => true,
+        StepKind::Expand { .. } => true,
     }
 }
 
@@ -931,7 +1635,11 @@ fn fuzz_inventory_covers_claimed_kinds() {
         let token_steps = parse_braced_tokens(&ts, oxdock_core::lower_command)
             .expect("sample must parse from tokens");
         assert_eq!(token_steps.len(), 1, "token walk split lines: {s}");
-        assert_steps_eq(&parsed_steps[0], &step, &format!("String mismatch: {s}"));
-        assert_steps_eq(&token_steps[0], &step, &format!("Token mismatch: {s}"));
+        let mut parsed = parsed_steps;
+        zero_markers(&mut parsed);
+        let mut tokenized = token_steps;
+        zero_markers(&mut tokenized);
+        assert_steps_eq(&parsed[0], &step, &format!("String mismatch: {s}"));
+        assert_steps_eq(&tokenized[0], &step, &format!("Token mismatch: {s}"));
     }
 }

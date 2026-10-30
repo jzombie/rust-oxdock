@@ -225,6 +225,7 @@ fn emit_template_placeholder(
     line: &mut String,
     span: proc_macro2::Span,
     gap_space: bool,
+    in_guard: bool,
     last_span_end: &mut Option<LineColumn>,
 ) {
     let Some(TokenTree::Group(inner)) = g.stream().into_iter().next() else {
@@ -252,6 +253,7 @@ fn emit_template_placeholder(
         &mut Vec::new(),
         &mut last_was_command,
         false,
+        in_guard,
         &mut capture_has_inner,
         &mut inner_span_end,
     )
@@ -271,16 +273,40 @@ fn line_expects_inner_command(line: &str) -> bool {
     )
 }
 
+/// True when the line ends in a `TIMEOUT <duration>` still awaiting its
+/// command: `TIMEOUT 10s` or `LET $x: STRING = TIMEOUT 10s`. Mirrors
+/// `timeout_literal` (`digits` plus optional `ms`/`s`/`m`/`h`; bare
+/// digits are seconds), so the wrapped command glues instead of
+/// starting a new line.
+fn line_ends_in_timeout_duration(line: &str) -> bool {
+    let mut words = line.split_whitespace().rev();
+    let duration = words.next().unwrap_or("");
+    if words.next() != Some("TIMEOUT") {
+        return false;
+    }
+    let digits = duration.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    matches!(&duration[digits.len()..], "" | "ms" | "s" | "m" | "h")
+}
+
 fn line_is_run_context(line: &str) -> bool {
     matches!(current_line_command(line), Some(Command::Run))
 }
 
+/// Token-to-text rebuild: threading eight independent states (input,
+/// line buffers, command tracking, interpolation/guard modes, capture
+/// flags, span tracking) is clearer than bundling them into a context
+/// object the ten call sites would construct field by field.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     ts: TokenStream2,
     line: &mut String,
     lines: &mut Vec<String>,
     last_was_command: &mut bool,
     in_interpolation: bool,
+    in_guard: bool,
     capture_has_inner: &mut bool,
     last_span_end: &mut Option<LineColumn>,
 ) -> Result<()> {
@@ -290,9 +316,28 @@ fn walk(
         let tt = tokens[idx].clone();
         let next = tokens.get(idx + 1);
         let span = tt.span();
-        let gap_space = last_span_end
+        let raw_gap = last_span_end
             .map(|prev| span_gap_requires_space(prev, span.start()))
             .unwrap_or(false);
+        // Inside `${ guard_line ... }` implicit whitespace is off, so the
+        // rebuild must not invent spaces the grammar cannot skip: glue at
+        // structural punctuation, keep source spacing elsewhere (bare
+        // values like `a b` need their space). Commas always allow the
+        // space (`ws?` in the grammar); brackets, parens, colons, pipes,
+        // and `$` never do.
+        let gap_space = if in_guard {
+            let prev_punct = line
+                .trim_end()
+                .ends_with(['(', ')', ',', '[', ']', ':', '|', '$']);
+            let next_punct = matches!(
+                &tt,
+                TokenTree::Punct(p)
+                    if matches!(p.as_char(), '(' | ')' | ',' | '[' | ']' | ':' | '|' | '$')
+            );
+            raw_gap && (line.trim_end().ends_with(',') || (!prev_punct && !next_punct))
+        } else {
+            raw_gap
+        };
         // A RUN step consumes the rest of its source line as shell text
         // (`RUN echo && ls` stays one step), but any token opening on a later
         // line starts a new statement: without this, `RUN echo hi` followed by
@@ -325,6 +370,7 @@ fn walk(
                                     lines,
                                     last_was_command,
                                     true,
+                                    in_guard,
                                     capture_has_inner,
                                     &mut inner_span_end,
                                 )?;
@@ -333,7 +379,14 @@ fn walk(
                             // 2. Template placeholder: {{ env:KEY }}
                             //    Rust lexes this as nested brace groups.
                             else if is_template_group(&g) {
-                                emit_template_placeholder(&g, line, span, gap_space, last_span_end);
+                                emit_template_placeholder(
+                                    &g,
+                                    line,
+                                    span,
+                                    gap_space,
+                                    in_guard,
+                                    last_span_end,
+                                );
                             }
                             // 3. DSL statement block: WITH_IO [...] {, FOR ..., LET ...
                             //    Attach opening brace to the current line, then walk body.
@@ -348,6 +401,7 @@ fn walk(
                                     lines,
                                     last_was_command,
                                     false,
+                                    in_guard,
                                     capture_has_inner,
                                     &mut inner_span_end,
                                 )?;
@@ -368,6 +422,7 @@ fn walk(
                                     lines,
                                     last_was_command,
                                     false,
+                                    in_guard,
                                     capture_has_inner,
                                     &mut inner_span_end,
                                 )?;
@@ -404,6 +459,7 @@ fn walk(
                                     lines,
                                     last_was_command,
                                     false,
+                                    in_guard,
                                     capture_has_inner,
                                     &mut inner_span_end,
                                 )?;
@@ -432,6 +488,7 @@ fn walk(
                                     lines,
                                     last_was_command,
                                     false,
+                                    true,
                                     capture_has_inner,
                                     &mut inner_span_end,
                                 )?;
@@ -454,7 +511,10 @@ fn walk(
                                 && last_span_end
                                     .map(|prev| prev == span.start())
                                     .unwrap_or(true);
-                            if attach_call {
+                            // Guard parens glue unconditionally: the
+                            // atomic context admits no gaps around them.
+                            let guard_paren = in_guard && (open == '(' || open == ')');
+                            if attach_call || guard_paren {
                                 line.push(open);
                             } else {
                                 push_fragment(
@@ -471,10 +531,15 @@ fn walk(
                                 lines,
                                 last_was_command,
                                 in_interpolation,
+                                in_guard,
                                 capture_has_inner,
                                 &mut inner_span_end,
                             )?;
-                            push_fragment(line, &close.to_string(), *last_was_command);
+                            if in_guard && close == ')' {
+                                line.push(close);
+                            } else {
+                                push_fragment(line, &close.to_string(), *last_was_command);
+                            }
                         }
                     }
                 } else {
@@ -485,6 +550,7 @@ fn walk(
                         lines,
                         last_was_command,
                         in_interpolation,
+                        in_guard,
                         capture_has_inner,
                         &mut inner_span_end,
                     )?;
@@ -512,7 +578,10 @@ fn walk(
                     && last_span_end
                         .map(|prev| prev == span.start())
                         .unwrap_or(false);
-                if fuse {
+                // Contiguous quote junctions fuse regardless of context;
+                // structural junctions inside guards glue for the same
+                // reason: the grammar takes no gap in either spot.
+                if fuse || in_guard && line.trim_end().ends_with(['(', ',', '[', ':', '|', '$']) {
                     line.push_str(&frag);
                 } else {
                     push_fragment(line, &frag, *last_was_command || gap_space);
@@ -532,7 +601,16 @@ fn walk(
                 {
                     force_space = true;
                 }
-                push_fragment(line, &ch.to_string(), force_space);
+                // Atomic guard context admits no implicit gaps around
+                // structural punctuation: push directly instead of
+                // letting `push_fragment` invent spacing the grammar
+                // cannot skip. (No trailing space can exist here: pushes
+                // never leave any, so gluing is always faithful.)
+                if in_guard && matches!(ch, '(' | ')' | ',' | '[' | ']' | ':' | '|' | '$') {
+                    line.push(ch);
+                } else {
+                    push_fragment(line, &ch.to_string(), force_space);
+                }
                 *last_was_command = false;
                 *last_span_end = Some(span.end());
                 if ch == ';' {
@@ -609,11 +687,17 @@ fn walk(
                 // expression next: `LET $o: STRING = ECHO hi`,
                 // `LET $r: STRING = F()`,
                 // `LET $t: HANDLE = ASYNC ...`, `FOR $x: STRING IN [...]`.
+                // A trailing `ASYNC` expects its command the same way:
+                // without this, `LET $t: HANDLE = ASYNC ECHO hi` splits
+                // the command onto its own line and misparses.
                 // A statement keyword there continues the line instead of
                 // starting a new one.
                 let trimmed_end = trimmed.trim_end();
+                let last_word = trimmed_end.split_whitespace().last();
                 let expects_expr = trimmed_end.ends_with('=')
-                    || trimmed_end.split_whitespace().last() == Some("IN");
+                    || last_word == Some("IN")
+                    || last_word == Some("ASYNC")
+                    || line_ends_in_timeout_duration(trimmed_end);
                 let mut should_finalize = false;
                 // ELSE always appends to current line : grammar handles } \n ELSE via blank*
                 // IF after ELSE stays on same line (ELSE IF clause)
@@ -651,7 +735,14 @@ fn walk(
                 if should_finalize {
                     finalize_line(lines, line, capture_has_inner);
                 }
-                push_fragment(line, &ident_text, *last_was_command || gap_space);
+                // Guard structural punctuation glues to the next token:
+                // `(env`, `,env` need no space (the grammar takes none),
+                // while word-word junctions keep source spacing below.
+                if in_guard && line.trim_end().ends_with(['(', ',', '[', ':', '|', '$']) {
+                    line.push_str(&ident_text);
+                } else {
+                    push_fragment(line, &ident_text, *last_was_command || gap_space);
+                }
                 if is_command
                     && line_expects_inner_command(line)
                     && !matches!(
@@ -725,6 +816,7 @@ pub fn script_from_braced_tokens(ts: &TokenStream2) -> Result<String> {
         &mut lines,
         &mut last_was_command,
         false,
+        false,
         &mut capture_has_inner,
         &mut last_span_end,
     )?;
@@ -770,6 +862,30 @@ mod tests {
     /// Mock lowering for macro_input tests.
     fn mock_lower(name: &str, args: Vec<crate::Arg>) -> crate::ParseResult<StepKind> {
         crate::test_lower_mock::lower(name, args)
+    }
+
+    #[test]
+    fn braced_wrapper_continuations_stay_glued() {
+        // Every wrapper that takes a trailing command must rebuild on
+        // one line, exactly as the string grammar requires. Regression
+        // coverage for the `ASYNC` split and the `TIMEOUT` duration split.
+        for text in [
+            "TIMEOUT 10s ECHO hi",
+            "WITH_IO [stdout=$p] ECHO hi",
+            "ISOLATED ECHO hi",
+            "RETURN $x",
+            "LET $t: HANDLE = ASYNC ECHO hi",
+            "LET $o: STRING = AWAIT $t",
+            "ASYNC ECHO hi",
+            "LET $x: STRING = TIMEOUT 10s ECHO hi",
+        ] {
+            let ts: proc_macro2::TokenStream = text.parse().expect("tokens");
+            let script = script_from_braced_tokens(&ts).expect("rebuild");
+            assert_eq!(script.lines().count(), 1, "{text:?} split: {script:?}");
+            let braced = parse_braced_tokens(&ts, mock_lower).expect("braced parse");
+            let string = crate::parse_script(text, mock_lower).expect("string parse");
+            assert_eq!(braced, string, "pathways must agree on {text:?}");
+        }
     }
 
     #[test]
@@ -936,6 +1052,48 @@ mod tests {
         assert!(syn::parse_str::<DslMacroInput>("script: \"x\", out_dir: \"y\"").is_err());
         assert!(syn::parse_str::<DslMacroInput>("name: foo, out_dir: \"y\"").is_err());
         assert!(syn::parse_str::<DslMacroInput>("name: foo, script: \"x\"").is_err());
+    }
+
+    #[test]
+    fn braced_and_string_agree_on_escape_layers() {
+        // Escaped content (`\"`, `\\`) stays verbatim through lowering on
+        // purpose (runtime decodes it), so both pathways must produce the
+        // SAME layered value. This pins the agreement the fuzzer cannot
+        // cover: its alphabet excludes `\` and `"` as unrepresentable
+        // across render cycles, but direct source parses fine on both.
+        for text in [
+            "ECHO \"a\\\"b\"",
+            "ECHO \"a\\\\b\"",
+            "ECHO \"\"\"\nescaped \\\"\\\"\\\" stays\n\"\"\"",
+        ] {
+            let ts: proc_macro2::TokenStream = text.parse().expect("tokens");
+            let braced = parse_braced_tokens(&ts, mock_lower).expect("braced parse");
+            let string = crate::parse_script(text, mock_lower).expect("string parse");
+            assert_eq!(braced, string, "pathways must agree on {text:?}");
+        }
+    }
+
+    #[test]
+    fn braced_quote_shredding_divergence_is_pinned() {
+        // KNOWN DIVERGENCE, not parity: a block holding a raw `"` cannot
+        // cross a token stream (the lexer ends the literal at every
+        // quote), so the string path reads one block while the token
+        // path reads glued fragments. The shape is indistinguishable
+        // from legitimate multi-arg statements, so no walker rule can
+        // separate them. This test locks the divergence in place: if
+        // either side shifts, it fails and forces a conscious decision.
+        let text = "ECHO \"\"\"\nsay \"hi\"\n\"\"\"";
+        let string = crate::parse_script(text, mock_lower).expect("string parse");
+        match &string[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "say \"hi\""),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+        let ts: proc_macro2::TokenStream = text.parse().expect("tokens");
+        let braced = parse_braced_tokens(&ts, mock_lower).expect("braced parse");
+        assert_ne!(
+            braced, string,
+            "if these ever agree, delete this test and celebrate"
+        );
     }
 
     #[test]

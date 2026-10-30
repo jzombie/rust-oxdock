@@ -912,6 +912,67 @@ mod tests {
     }
 
     #[test]
+    fn probe_expr_display_shapes() {
+        for src in [
+            "LET $x: INT = STD::TEXT_LENGTH(\"hi\")",
+            "LET $o: STRING = AWAIT $t",
+            "LET $c: STRING = ECHO hi",
+            "WITH_IO [stdout=$p] ECHO hi",
+        ] {
+            match parse_script(src, test_lower) {
+                Ok(steps) => {
+                    eprintln!("OK   {src:?} -> {:?}", steps[0].to_string());
+                }
+                Err(e) => eprintln!("ERR  {src:?} -> {:#}", e),
+            }
+        }
+    }
+
+    #[test]
+    fn block_map_key_dedents() {
+        let steps = parse_script("LET $m: MAP = {\"\"\"\nkey\n\"\"\": \"v\"}", test_lower)
+            .expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => {
+                assert_eq!(
+                    expr,
+                    &Expr::Map(vec![(
+                        "key".to_string(),
+                        Expr::Literal(Value::string("v".to_string()))
+                    )])
+                );
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_guard_value_dedents() {
+        let steps =
+            parse_script("[eq(env:K, \"\"\"\nv\n\"\"\")] WRITE x", test_lower).expect("parse ok");
+        match &steps[0].guard {
+            Some(GuardExpr::Predicate(Guard::Attr { val, .. })) => {
+                assert_eq!(val.as_deref(), Some("v"));
+            }
+            other => panic!("expected env guard, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_escaped_opener_stays_literal() {
+        let script = indoc! {r#"
+            ECHO """
+                \{{ $x }} stays
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "\\{{ $x }} stays"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
     fn assignment_key_allows_colons() {
         let steps = parse_script("ENV a:b=c", test_lower).expect("parse ok");
         match &steps[0].kind {
