@@ -33,34 +33,44 @@ mod mcp;
 use oxdock_macros::oxdock_embed;
 oxdock_embed! {
     name: UsageAssets,
-    script: {
+    script: r#"
         INHERIT_ENV [CARGO_PKG_VERSION, CARGO_PKG_DESCRIPTION]
         FUNC EMIT_BODY($is_net: BOOL) {
-            ECHO "oxdock {{ env:CARGO_PKG_VERSION }} — {{ env:CARGO_PKG_DESCRIPTION }}"
-            ECHO ""
-            ECHO "Usage: oxdock [OPTIONS] [SCRIPT]"
-            ECHO "  SCRIPT             script file path (same as `--script <file>`); `-` reads stdin"
-            ECHO "  --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin"
-            ECHO "  --shell            run the script, then drop into an interactive shell (requires a TTY)"
-            ECHO "  --mcp              serve EXPORTed FUNCs as MCP tools over stdio (requires the `mcp` feature)"
+            LET $net_flags: STRING = """
+              --offline          open no sockets (endpoint flags require the `net` feature)
+            """
+
+            LET $tail: STRING = """
+            Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).
+            """
+
             IF $is_net {
-                ECHO "  --listen <addr>    expose a logical service port ([host:]port, repeatable)"
-                ECHO "  -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)"
-                ECHO "  --offline          open no sockets (conflicts with --listen/-p)"
-                ECHO "  --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)"
-            } ELSE {
-                ECHO "  --offline          open no sockets (endpoint flags require the `net` feature)"
+                $net_flags = """
+                  --listen <addr>    expose a logical service port ([host:]port, repeatable)
+                  -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)
+                  --offline          open no sockets (conflicts with --listen/-p)
+                  --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
+                """
+                $tail = "Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces."
             }
-            ECHO "  --help, -h         print this help and exit"
-            ECHO "  --version, -V      print the version and exit"
-            ECHO ""
-            ECHO "With no script given, reads the script from stdin (must be piped unless `--shell`)."
-            IF $is_net {
-                ECHO "Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces."
-            } ELSE {
-                ECHO "Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net)."
-            }
+
+            ECHO """
+            oxdock {{ env:CARGO_PKG_VERSION }} — {{ env:CARGO_PKG_DESCRIPTION }}
+
+            Usage: oxdock [OPTIONS] [SCRIPT]
+              SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
+              --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
+              --shell            run the script, then drop into an interactive shell (requires a TTY)
+              --mcp              serve EXPORTed FUNCs as MCP tools over stdio (requires the `mcp` feature)
+            {{ $net_flags }}
+              --help, -h         print this help and exit
+              --version, -V      print the version and exit
+
+            With no script given, reads the script from stdin (must be piped unless `--shell`).
+            {{ $tail }}
+            """
         }
+
         LET $p: PIPE
         WITH_IO [stdout=$p] {
             EMIT_BODY(true)
@@ -70,7 +80,7 @@ oxdock_embed! {
             EMIT_BODY(false)
         }
         WITH_IO [stdin=$p] WRITE dist/usage-lean.txt
-    },
+    "#,
     out_dir: "usage-prebuilt",
 }
 #[cfg(feature = "net")]
