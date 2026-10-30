@@ -1,5 +1,5 @@
 use oxdock_parser::ast::*;
-use oxdock_parser::parse_braced_tokens;
+use oxdock_parser::parse_braced_tokens_with_modules;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use std::str::FromStr;
@@ -541,6 +541,20 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             }],
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         }),
+        Just(StepKind::Call {
+            name: "STD::TEXT_LENGTH".to_string(),
+            args: vec![Expr::Literal(Value::string("coverage".to_string()))],
+        }),
+        Just(StepKind::Isolated {
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::IsolatedInheritEnv {
+                    keys: vec!["COVERAGE".to_string()],
+                },
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        }),
     ]
 }
 
@@ -659,6 +673,17 @@ fn arb_body_step_kind() -> impl Strategy<Value = StepKind> {
             expected: Some("coverage-expected".into()),
         }),
     ]
+}
+
+/// Token-path parse with the same module table the string path uses,
+/// so qualified calls resolve identically on both sides.
+fn parse_tokens_with_std_modules(
+    ts: &proc_macro2::TokenStream,
+) -> anyhow::Result<Vec<oxdock_parser::Step>> {
+    let table = oxdock_core::std_module_table();
+    let mut reserved = oxdock_core::builtin_function_names();
+    reserved.extend(table.reserved_base_names());
+    parse_braced_tokens_with_modules(ts, oxdock_core::lower_command, reserved, table)
 }
 
 fn arb_step() -> impl Strategy<Value = Step> {
@@ -1233,7 +1258,7 @@ proptest! {
 
         // 2. Parse tokens (if feature enabled)
         let ts: proc_macro2::TokenStream = s.parse().expect("failed to tokenize string");
-        let token_steps = parse_braced_tokens(&ts, oxdock_core::lower_command).expect("failed to parse tokens");
+        let token_steps = parse_tokens_with_std_modules(&ts).expect("failed to parse tokens");
 
         assert_eq!(token_steps.len(), 1);
         let mut tokenized = token_steps;
@@ -1286,8 +1311,8 @@ fn keyword_args_round_trip_through_both_pathways() {
             assert_steps_eq(&parsed_steps[0], &step, &format!("String mismatch: {s}"));
 
             let ts: proc_macro2::TokenStream = s.parse().expect("rendered step must tokenize");
-            let token_steps = parse_braced_tokens(&ts, oxdock_core::lower_command)
-                .expect("token parse must round-trip");
+            let token_steps =
+                parse_tokens_with_std_modules(&ts).expect("token parse must round-trip");
             assert_eq!(token_steps.len(), 1, "token walk split lines: {s}");
             assert_steps_eq(&token_steps[0], &step, &format!("Token mismatch: {s}"));
         }
@@ -1529,6 +1554,20 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             }],
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         },
+        StepKind::Call {
+            name: "STD::TEXT_LENGTH".to_string(),
+            args: vec![Expr::Literal(Value::string("coverage".to_string()))],
+        },
+        StepKind::Isolated {
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::IsolatedInheritEnv {
+                    keys: vec!["COVERAGE".to_string()],
+                },
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        },
     ]
 }
 
@@ -1577,19 +1616,22 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         StepKind::Cancel { .. } => true,
         StepKind::Timeout { .. } => true,
         StepKind::Isolated { .. } => true,
-        StepKind::IsolatedInheritEnv { .. } => false,
+        // Covered nested inside `Isolated` bodies (the rewrite's only
+        // source): top-level generation would bypass the rewrite that
+        // mints this node.
+        StepKind::IsolatedInheritEnv { .. } => true,
         StepKind::RemoteBlock { .. } => true,
         StepKind::FuncDef { .. } => true,
-        // Token path carries no module table, so qualified calls cannot
-        // resolve there; single-step text cannot carry IMPORT either.
-        // Covered through the real macro in the corpus instead.
-        StepKind::Call { .. } => false,
+        StepKind::Call { .. } => true,
         StepKind::Return { .. } => true,
         StepKind::While { .. } => true,
         StepKind::Break => true,
         StepKind::Continue => true,
         // Bodies (step vectors, bindings) need recursive generation.
         StepKind::WithIo { .. } => true,
+        // Never survives lowering (`handle_command` consumes it into an
+        // io scope without emitting a step), so no source text can round
+        // through it: permanently ungeneratable, correctly excluded.
         StepKind::WithIoBlock { .. } => false,
         StepKind::For { .. } => true,
         StepKind::If { .. } => true,
@@ -1632,8 +1674,8 @@ fn fuzz_inventory_covers_claimed_kinds() {
         let parsed_steps = oxdock_core::parse_script(&s).expect("sample must parse from string");
         assert_eq!(parsed_steps.len(), 1, "string split lines: {s}");
         let ts: proc_macro2::TokenStream = s.parse().expect("sample must tokenize");
-        let token_steps = parse_braced_tokens(&ts, oxdock_core::lower_command)
-            .expect("sample must parse from tokens");
+        let token_steps =
+            parse_tokens_with_std_modules(&ts).expect("sample must parse from tokens");
         assert_eq!(token_steps.len(), 1, "token walk split lines: {s}");
         let mut parsed = parsed_steps;
         zero_markers(&mut parsed);

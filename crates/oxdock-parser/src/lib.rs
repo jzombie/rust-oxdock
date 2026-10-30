@@ -42,8 +42,8 @@ pub use lexer::LANGUAGE_SPEC;
 pub use literal::{escape_dsl_string, render_dsl_literal, render_quoted};
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
-    DslMacroInput, ScriptSource, parse_braced_tokens, script_from_braced_tokens,
-    split_modules_prefix,
+    DslMacroInput, ScriptSource, parse_braced_tokens, parse_braced_tokens_with_modules,
+    script_from_braced_tokens, split_modules_prefix,
 };
 pub use markdown::{BlockMetadata, FencedBlock, expect_error_from_info, extract_fenced_blocks};
 pub use parser::{

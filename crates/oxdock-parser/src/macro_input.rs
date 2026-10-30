@@ -852,6 +852,35 @@ pub fn parse_braced_tokens(
     })
 }
 
+/// Parse a braced token stream with an explicit module table, so
+/// qualified calls resolve exactly like the string pathway with the
+/// same table. `parse_braced_tokens` stays table-free for callers
+/// without host modules.
+pub fn parse_braced_tokens_with_modules(
+    ts: &TokenStream2,
+    lower: impl Fn(&str, Vec<crate::Arg>) -> crate::ParseResult<crate::StepKind>,
+    reserved_names: std::collections::HashSet<String>,
+    modules: crate::ModuleTable,
+) -> Result<Vec<Step>> {
+    let script = script_from_braced_tokens(ts)?;
+    let head_ctx = ts.clone().into_iter().next().map(|t| {
+        let start = t.span().start();
+        crate::SpanContext::from_compiler_span(
+            start.line.max(1),
+            Some(start.column.saturating_add(1)),
+            Some(start.column.saturating_add(1)),
+            t.span(),
+        )
+    });
+    crate::parse_script_with_modules(&script, lower, reserved_names, modules).map_err(|e| {
+        let e = match &head_ctx {
+            Some(ctx) => e.with_span(ctx),
+            None => e,
+        };
+        anyhow::Error::from(e)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

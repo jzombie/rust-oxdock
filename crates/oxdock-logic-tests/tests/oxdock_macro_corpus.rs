@@ -6,7 +6,9 @@
 
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_logic_tests::mock_remote::MockRemoteRunner;
 use oxdock_macros::oxdock;
+use std::sync::Arc;
 
 fn run_steps(root: &GuardedPath, steps: &[oxdock_parser::Step]) {
     run_steps_with_context_result_with_io(root, root, steps, ExecIo::new()).unwrap();
@@ -414,6 +416,40 @@ fn macro_inspect_and_fresh_pipe() {
     };
     let temp = GuardedPath::tempdir().unwrap();
     run_steps(temp.as_guarded_path(), &steps);
+    assert_macro_string_roundtrip(&steps);
+}
+
+#[test]
+fn macro_isolated_inherit_env_rewrites() {
+    let steps = oxdock! {
+        INHERIT_ENV [OXDOCK_CORPUS_ABSENT_XYZ]
+        ISOLATED {
+            INHERIT_ENV [OXDOCK_CORPUS_ABSENT_XYZ]
+            WRITE iso-inherit.txt yes
+        }
+    };
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_steps(&root, &steps);
+    assert_macro_string_roundtrip(&steps);
+    assert_eq!(read_file(&root, "iso-inherit.txt"), "yes");
+}
+
+#[test]
+fn macro_remote_block_runs_on_mock_transport() {
+    let steps = oxdock! {
+        LET $cap: PIPE
+        WITH_IO [stdout=$cap] REMOTE guest {
+            ECHO "guest says hi"
+        }
+        WITH_IO [stdin=$cap] READ_LINE $line
+        ASSERT_EQ $line "guest says hi"
+    };
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let mut io = ExecIo::new();
+    io.set_remote_runner_for_target("guest".to_string(), Arc::new(MockRemoteRunner));
+    run_steps_with_context_result_with_io(&root, &root, &steps, io).unwrap();
     assert_macro_string_roundtrip(&steps);
 }
 
