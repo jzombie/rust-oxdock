@@ -30,7 +30,8 @@ pub enum TokKind {
     /// Any run of non-delimiter chars; never contains whitespace.
     Word(String),
     /// Verbatim inner of `"..."` / `'...'` (escapes intact for runtime).
-    Str(String),
+    /// The quote style round-trips raw-text positions (in-arg groups).
+    Str { text: String, quote: char },
     /// Full `"""..."""` spelling including delimiters; lower with
     /// `lower_block_string` at parse time.
     BlockStr(String),
@@ -38,8 +39,17 @@ pub enum TokKind {
     /// `&`, `@`). Multi-char operators compose in the parser using
     /// `joint`.
     Punct(char),
-    /// Delimited group with recursively lexed contents.
-    Group { delim: GroupDelim, inner: Vec<Tok> },
+    /// Delimited group with recursively lexed contents. `open_joint`
+    /// is gaplessness between the opener and the first inner token;
+    /// `close_joint` between the last inner token and the closer (both
+    /// vacuously true when empty). Statement splitting and guard
+    /// parsing ignore them; raw-text splices need them.
+    Group {
+        delim: GroupDelim,
+        inner: Vec<Tok>,
+        open_joint: bool,
+        close_joint: bool,
+    },
     /// Literal newline (`\n`, `\r\n`, `\r` all normalize to one).
     Newline,
     /// Explicit `;` statement terminator.
@@ -57,7 +67,7 @@ pub struct Tok {
 }
 
 impl Tok {
-    fn fresh(kind: TokKind, joint: bool) -> Self {
+    pub(crate) fn fresh(kind: TokKind, joint: bool) -> Self {
         Self { kind, joint }
     }
 }
@@ -163,7 +173,13 @@ fn scan_string(s: &str) -> Result<(TokKind, usize), String> {
         }
         if c == quote {
             end += c.len_utf8();
-            return Ok((TokKind::Str(s[1..end - 1].to_string()), end));
+            return Ok((
+                TokKind::Str {
+                    text: s[1..end - 1].to_string(),
+                    quote,
+                },
+                end,
+            ));
         }
         end += c.len_utf8();
     }
@@ -301,10 +317,13 @@ impl<'a> StrLexer<'a> {
 
     /// Scan a delimited group, copying its raw inner text (with `"..."`
     /// and `'...'` regions protected so brackets inside strings never
-    /// affect nesting) and re-lexing it recursively.
+    /// affect nesting) and re-lexing it recursively. Edge gaps are
+    /// positional: `open_joint` is false when whitespace follows the
+    /// opener, `close_joint` is false when it precedes the closer.
     fn lex_group(&mut self, close: char, delim: GroupDelim) -> Result<(), LexError> {
         let (start_line, start_col) = (self.line, self.col);
         self.bump(1, 0);
+        let open_joint = !self.rest().starts_with([' ', '\t', '\r', '\n']);
         let mut stack: Vec<char> = Vec::new();
         let mut inner_src = String::new();
         while self.pos < self.src.len() {
@@ -313,10 +332,10 @@ impl<'a> StrLexer<'a> {
             if c == '"' || (c == '\'' && quote_opens_before(&inner_src)) {
                 let (kind, used) = scan_string(rest).map_err(|m| self.err(m))?;
                 match kind {
-                    TokKind::Str(t) => {
-                        inner_src.push('"');
-                        inner_src.push_str(&t);
-                        inner_src.push('"');
+                    TokKind::Str { text, quote } => {
+                        inner_src.push(quote);
+                        inner_src.push_str(&text);
+                        inner_src.push(quote);
                     }
                     TokKind::BlockStr(full) => inner_src.push_str(&full),
                     _ => unreachable!(),
@@ -329,13 +348,28 @@ impl<'a> StrLexer<'a> {
                 stack.push(c);
             } else if c == ']' || c == ')' || c == '}' {
                 if c == close && stack.is_empty() {
+                    let close_joint = !matches!(
+                        self.src[..self.pos].chars().next_back(),
+                        Some(' ' | '\t' | '\r' | '\n')
+                    );
                     self.bump(c.len_utf8(), 0);
-                    let inner = lex_str_inner(&inner_src).map_err(|e| LexError {
+                    let mut inner = lex_str_inner(&inner_src).map_err(|e| LexError {
                         line: start_line,
                         col: start_col,
                         msg: e.msg,
                     })?;
-                    self.push(TokKind::Group { delim, inner });
+                    if open_joint
+                        && let Some(first) = inner.first()
+                        && !matches!(first.kind, TokKind::Newline | TokKind::Semicolon)
+                    {
+                        inner[0].joint = true;
+                    }
+                    self.push(TokKind::Group {
+                        delim,
+                        inner,
+                        open_joint,
+                        close_joint,
+                    });
                     return Ok(());
                 }
                 if stack.pop().is_none() {
@@ -583,19 +617,36 @@ pub fn lex_tokens(ts: &proc_macro2::TokenStream) -> Result<Vec<Tok>, LexError> {
                         let mut inner = Walker::new();
                         inner.walk_stream(&g.stream())?;
                         inner.flush_str()?;
+                        // Edge gaps are positional: the opener sits at the
+                        // group start (one column wide), the closer just
+                        // before the group end. Degenerate spans report a
+                        // gap (spaced reading, like string lexing).
+                        let inner_trees: Vec<TokenTree> = g.stream().into_iter().collect();
+                        let open_joint = inner_trees.first().is_some_and(|first| {
+                            let s = first.span().start();
+                            s.line == start.line && s.column == start.column + 1
+                        }) || inner_trees.is_empty();
+                        let close_joint = inner_trees.last().is_some_and(|last| {
+                            let e = last.span().end();
+                            e.line == end.line && e.column + 1 == end.column
+                        }) || inner_trees.is_empty();
+                        if open_joint
+                            && let Some(idx) = inner.out.iter().position(|t| {
+                                !matches!(t.kind, TokKind::Newline | TokKind::Semicolon)
+                            })
+                        {
+                            inner.out[idx].joint = true;
+                        }
+                        let mut group = |delim| TokKind::Group {
+                            delim,
+                            inner: std::mem::take(&mut inner.out),
+                            open_joint,
+                            close_joint,
+                        };
                         match g.delimiter() {
-                            Delimiter::Parenthesis => self.push(TokKind::Group {
-                                delim: GroupDelim::Paren,
-                                inner: inner.out,
-                            }),
-                            Delimiter::Bracket => self.push(TokKind::Group {
-                                delim: GroupDelim::Bracket,
-                                inner: inner.out,
-                            }),
-                            Delimiter::Brace => self.push(TokKind::Group {
-                                delim: GroupDelim::Brace,
-                                inner: inner.out,
-                            }),
+                            Delimiter::Parenthesis => self.push(group(GroupDelim::Paren)),
+                            Delimiter::Bracket => self.push(group(GroupDelim::Bracket)),
+                            Delimiter::Brace => self.push(group(GroupDelim::Brace)),
                             // Transparent: splice contents through.
                             Delimiter::None => {
                                 for mut t in inner.out {
@@ -697,7 +748,17 @@ mod tests {
     }
 
     fn str_tok(s: &str) -> Tok {
-        Tok::fresh(TokKind::Str(s.to_string()), false)
+        str_tok_q(s, '"')
+    }
+
+    fn str_tok_q(s: &str, quote: char) -> Tok {
+        Tok::fresh(
+            TokKind::Str {
+                text: s.to_string(),
+                quote,
+            },
+            false,
+        )
     }
 
     fn block_tok(s: &str) -> Tok {
@@ -767,7 +828,7 @@ mod tests {
         let toks = lex_str("ECHO \"a\\nb\"").unwrap();
         assert_eq!(toks, vec![w("ECHO"), str_tok("a\\nb")]);
         let toks = lex_str("ECHO 'hi'").unwrap();
-        assert_eq!(toks, vec![w("ECHO"), str_tok("hi")]);
+        assert_eq!(toks, vec![w("ECHO"), str_tok_q("hi", '\'')]);
     }
 
     #[test]
@@ -785,7 +846,9 @@ mod tests {
                 Tok::fresh(
                     TokKind::Group {
                         delim: GroupDelim::Bracket,
-                        inner: vec![w("env"), punctj(':'), wj("X")],
+                        inner: vec![wj("env"), punctj(':'), wj("X")],
+                        open_joint: true,
+                        close_joint: true,
                     },
                     false,
                 ),
@@ -869,7 +932,9 @@ mod tests {
                 Tok::fresh(
                     TokKind::Group {
                         delim: GroupDelim::Bracket,
-                        inner: vec![w("env"), punctj(':'), wj("X")],
+                        inner: vec![wj("env"), punctj(':'), wj("X")],
+                        open_joint: true,
+                        close_joint: true,
                     },
                     false,
                 ),
@@ -916,7 +981,7 @@ mod tests {
         let toks = lex_tokens(&ts).expect("degenerate lex must succeed");
         let strs: Vec<_> = toks
             .iter()
-            .filter(|t| matches!(t.kind, TokKind::Str(_)))
+            .filter(|t| matches!(t.kind, TokKind::Str { .. }))
             .collect();
         assert_eq!(strs.len(), 2, "synthetic spans must not fuse: {toks:?}");
     }
