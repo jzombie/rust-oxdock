@@ -174,7 +174,9 @@ fn scan_string(s: &str) -> Result<(TokKind, usize), String> {
 /// shreds, or a single literal): `""".."""` reads as one
 /// [`TokKind::BlockStr`], `"a""b"` as two [`TokKind::Str`]. The first
 /// token inherits `joint`; later ones are always joint (no gap inside a
-/// spelling).
+/// spelling). Only the `TokenStream` frontend needs multi-spelling
+/// input; the string lexer calls [`scan_string`] directly.
+#[cfg(feature = "proc-macro-api")]
 fn lex_string_spelling(s: &str, joint: bool) -> Result<Vec<Tok>, String> {
     let mut out = Vec::new();
     let mut rest = s;

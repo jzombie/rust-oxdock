@@ -26,6 +26,7 @@ pub mod literal;
 mod macro_input;
 pub mod markdown;
 pub mod parser;
+pub mod parser_v2;
 pub mod strip_flags;
 pub mod tag;
 pub mod tok;
@@ -52,6 +53,7 @@ pub use parser::{
     parse_script_with_exports, parse_script_with_modules, parse_script_with_modules_and_exports,
     parse_script_with_preseed,
 };
+pub use parser_v2::{V2Error, parse_v2};
 pub use strip_flags::strip_flags;
 pub use tag::{
     ANY_TAG, Field, LIST_TAG, MAP_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, TypeTag,
