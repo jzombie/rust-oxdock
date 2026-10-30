@@ -9,7 +9,7 @@
 //! a `Newline`/`Semicolon` ends the statement. Continuation exceptions
 //! (trailing `=`, `IN`, trailing `ASYNC`, bare wrapper heads) land with
 //! their structural slices; the decision point is
-//! [`boundary_ends_statement`].
+//! `boundary_ends_statement`.
 //!
 //! Slice 1 covers generic commands only (`ECHO`, `WRITE`, `CWD`,
 //! `ENV`, `RUN`, ...): head word plus gap-split args assembled with

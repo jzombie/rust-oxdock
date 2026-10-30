@@ -3906,7 +3906,12 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
-            StepKind::FuncDef { name, params, body, docs } => {
+            StepKind::FuncDef {
+                name,
+                params,
+                body,
+                docs,
+            } => {
                 // Doc blocks render back as `#` lines so Display
                 // reparses to identical docs (first line is the
                 // summary, the rest follow verbatim).
@@ -5245,7 +5250,13 @@ mod tests {
             lower_command,
         )
         .expect("func def parses");
-        let StepKind::FuncDef { name, params, body, docs } = &steps[0].kind else {
+        let StepKind::FuncDef {
+            name,
+            params,
+            body,
+            docs,
+        } = &steps[0].kind
+        else {
             panic!("expected FuncDef, got {:?}", steps[0].kind);
         };
         assert_eq!(name, "GREET");

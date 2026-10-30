@@ -226,16 +226,16 @@ mod tests {
                         oxdock_parser::StepKind::FuncDef { name, docs, .. } if name == want => {
                             Some(docs.clone())
                         }
-                        oxdock_parser::StepKind::If { then_body, .. } => then_body
-                            .iter()
-                            .find_map(|s| match &s.kind {
+                        oxdock_parser::StepKind::If { then_body, .. } => {
+                            then_body.iter().find_map(|s| match &s.kind {
                                 oxdock_parser::StepKind::FuncDef { name, docs, .. }
                                     if name == want =>
                                 {
                                     Some(docs.clone())
                                 }
                                 _ => None,
-                            }),
+                            })
+                        }
                         _ => None,
                     })
                     .next()
@@ -243,10 +243,7 @@ mod tests {
             };
             assert_eq!(
                 doc_of("AAA"),
-                Some((
-                    "First does A.".to_string(),
-                    "First does A.".to_string()
-                )),
+                Some(("First does A.".to_string(), "First does A.".to_string())),
                 "AAA owns its docs"
             );
             assert_eq!(
@@ -363,7 +360,10 @@ mod tests {
         });
         assert_eq!(
             func_docs,
-            Some(("Adds one.".to_string(), "Adds one.\nSecond line.".to_string())),
+            Some((
+                "Adds one.".to_string(),
+                "Adds one.\nSecond line.".to_string()
+            )),
             "step docs must match the map"
         );
         assert!(

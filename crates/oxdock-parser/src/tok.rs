@@ -8,7 +8,7 @@
 //! continues a wrapper) is grammar state, so it lives in the parser
 //! backend, never here.
 //!
-//! String semantics are single-sourced in [`lex_string_spelling`]: the
+//! String semantics are single-sourced in `lex_string_spelling`: the
 //! `TokenStream` frontend fuses span-adjacent shredded literals back to
 //! their source spelling (`""` + `"hi"` + `""` is `"""hi"""`) and runs
 //! the same scanner. Contents stay verbatim (escapes expand at runtime
@@ -715,7 +715,7 @@ pub fn lex_str(s: &str) -> Result<Vec<Tok>, LexError> {
 /// Lex a `TokenStream` into the same context-free tokens. Newlines come
 /// from span positions only (one per line advanced, inside groups too);
 /// no syntax is consulted. Span-adjacent string shreds fuse back to
-/// source spelling before [`lex_string_spelling`]; degenerate
+/// source spelling before `lex_string_spelling`; degenerate
 /// (zero-width, e.g. `quote!`) spans carry no adjacency signal, so
 /// literals there take the spaced reading.
 #[cfg(feature = "proc-macro-api")]

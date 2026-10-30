@@ -611,14 +611,14 @@ fn macro_func_docs_associate_per_function_including_nested() {
                 oxdock_parser::StepKind::FuncDef { name, docs, .. } if name == want => {
                     Some(docs.clone())
                 }
-                oxdock_parser::StepKind::If { then_body, .. } => then_body
-                    .iter()
-                    .find_map(|s| match &s.kind {
+                oxdock_parser::StepKind::If { then_body, .. } => {
+                    then_body.iter().find_map(|s| match &s.kind {
                         oxdock_parser::StepKind::FuncDef { name, docs, .. } if name == want => {
                             Some(docs.clone())
                         }
                         _ => None,
-                    }),
+                    })
+                }
                 _ => None,
             })
             .next()

@@ -1442,7 +1442,12 @@ fn emit_stepkind(
             let args: Vec<_> = argv.iter().map(|a| emit_arg(a, interp)).collect();
             quote! { StepKind::RunExec { argv: vec![#(#args),*] } }
         }
-        StepKind::FuncDef { name, params, body, docs } => {
+        StepKind::FuncDef {
+            name,
+            params,
+            body,
+            docs,
+        } => {
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             let ps: Vec<_> = params
                 .iter()

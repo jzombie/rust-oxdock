@@ -5,7 +5,7 @@
 //! through [`parser_v2`](crate::parser_v2), the single parser for both
 //! string scripts and braced-macro token streams. Public signatures are
 //! unchanged, and lowering failures keep their machine-readable
-//! [`ParseErrorKind`](crate::error::ParseErrorKind) by construction
+//! `ParseErrorKind` by construction
 //! (the backend preserves the dispatcher's classification instead of
 //! stringifying it). Backend-native syntax failures report the
 //! statement's source line with its text; column spans stay where the
@@ -320,7 +320,9 @@ fn collect_func_docs(
 fn stamp_func_docs(input: &str, steps: &mut [Step]) {
     let docs = collect_func_docs(input, steps);
     for step in steps {
-        if let StepKind::FuncDef { name, docs: slot, .. } = &mut step.kind
+        if let StepKind::FuncDef {
+            name, docs: slot, ..
+        } = &mut step.kind
             && slot.is_none()
             && let Some(pair) = docs.get(name)
         {
