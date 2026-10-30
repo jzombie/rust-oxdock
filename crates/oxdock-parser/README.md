@@ -4,12 +4,30 @@ Parser and AST definitions for the OxDock DSL.
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
 
-1. The lexers (`tok`) turn each source into a context-free `Tok`
-   stream, recording gap adjacency and literal newlines along the way.
-2. The unified backend (`parser_v2`) splits statements from grammar
-   state, folds guards, resolves calls, and constructs `StepKind`
-   values through the shared lowering cores.
+1. Two frontends lex two distinct input domains into one intermediate
+   representation. `lex_str` consumes raw `&str` text (scripts, files,
+   rebuilt macro output). `lex_tokens` consumes `rustc`'s `TokenStream`
+   (braced `oxdock! { ... }` input, where string literals arrive
+   shredded, spacing is normalized, and comments are already gone).
+   Both emit the same bespoke IR: a `Vec<Tok>` of words, strings,
+   groups, punctuation, newlines, and comment markers with
+   gap-adjacency flags. Neither frontend decides statement boundaries.
+2. The single parser backend (`parser_v2`) consumes only `[Tok]`
+   slices. It splits statements from grammar state, folds guards,
+   resolves calls, and constructs `StepKind` values through the shared
+   lowering cores. It never sees source text and never sees a
+   `TokenStream`.
 3. The resulting `Vec<Step>` is consumed by runtimes (CLI, macros, tests, etc.).
+
+The shape is a V converging on `Tok`, not a funnel into `TokenStream`.
+`TokenStream` is one input domain among two, never the universal
+denominator: the parser only ever sees `Tok`. The convergence is
+proven, not assumed: the lexer-agreement oracle (`assert_parity` in
+`parser_v2` tests) runs the same script through both lexers into the
+same backend on every case and asserts identical steps. Production
+braced entry points (`parse_braced_tokens*`) travel via the text
+rebuild (`script_from_braced_tokens` into `parse_script`), which the
+oracle pins equivalent to lexing the tokens directly.
 
 All existing semantics—including guard combinations, case sensitivity,
 semicolon behaviour, and error messages—remain the same, but they are now

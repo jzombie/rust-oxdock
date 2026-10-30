@@ -10,7 +10,7 @@
 //! keeping both pathways unified.
 
 use super::constants::MODULE_SEPARATOR;
-use super::{Command, Step, parse_script};
+use super::{Command, Step};
 use anyhow::Result;
 use proc_macro2::{Delimiter, LineColumn, Spacing, TokenStream as TokenStream2, TokenTree};
 use syn::parse::{Parse, ParseStream};
@@ -651,6 +651,19 @@ fn walk(
                 {
                     force_space = true;
                 }
+                // A `#` comment opening on a later line starts a new
+                // rebuilt line, so contiguous doc blocks above `FUNC`
+                // stay one-comment-per-line for `func_docs` collection.
+                // Same-line `#` (`#var` interpolation, `#{expr}`) keeps
+                // gluing; guards keep gluing (never a comment there).
+                if ch == '#'
+                    && !in_guard
+                    && !in_interpolation
+                    && !line.trim().is_empty()
+                    && last_span_end.is_some_and(|prev| span.start().line > prev.line)
+                {
+                    finalize_line(lines, line, capture_has_inner);
+                }
                 // A `$var` mutate statement opening on a later line starts
                 // a new statement, mirroring the Ident arm: without this,
                 // `$x = 1` after a complete step glues onto its line.
@@ -915,6 +928,19 @@ pub fn parse_braced_tokens(
     ts: &TokenStream2,
     lower: impl Fn(&str, Vec<crate::Arg>) -> crate::ParseResult<crate::StepKind>,
 ) -> Result<Vec<Step>> {
+    Ok(parse_braced_tokens_with_exports(ts, lower)?.steps)
+}
+
+/// Parse a braced token stream with single-file `EXPORT` metadata and
+/// `#` doc comments for top-level `FUNC`s, mirroring
+/// [`crate::parse_script_with_exports`]. `#` comment lines survive the
+/// `walk()` rebuild as literal `# ...` lines (like the existing `#cmd`
+/// comment test), so `func_docs` collection sees the same text the
+/// string path would.
+pub fn parse_braced_tokens_with_exports(
+    ts: &TokenStream2,
+    lower: impl Fn(&str, Vec<crate::Arg>) -> crate::ParseResult<crate::StepKind>,
+) -> Result<crate::ParsedScript> {
     let script = script_from_braced_tokens(ts)?;
     // The string rebuild loses per token positions. Forward the head
     // token coordinates so failures still carry a macro position; the
@@ -928,7 +954,7 @@ pub fn parse_braced_tokens(
             t.span(),
         )
     });
-    parse_script(&script, lower).map_err(|e| {
+    crate::parse_script_with_exports(&script, lower).map_err(|e| {
         let e = match &head_ctx {
             Some(ctx) => e.with_span(ctx),
             None => e,
@@ -947,6 +973,20 @@ pub fn parse_braced_tokens_with_modules(
     reserved_names: std::collections::HashSet<String>,
     modules: crate::ModuleTable,
 ) -> Result<Vec<Step>> {
+    Ok(parse_braced_tokens_with_modules_and_exports(ts, lower, reserved_names, modules)?.steps)
+}
+
+/// Parse a braced token stream with an explicit module table plus
+/// single-file `EXPORT` metadata and `#` doc comments, mirroring
+/// [`crate::parse_script_with_modules_and_exports`]. Future MCP hosts
+/// reading braced input get the same `exports` + `func_docs` the file
+/// path provides today.
+pub fn parse_braced_tokens_with_modules_and_exports(
+    ts: &TokenStream2,
+    lower: impl Fn(&str, Vec<crate::Arg>) -> crate::ParseResult<crate::StepKind>,
+    reserved_names: std::collections::HashSet<String>,
+    modules: crate::ModuleTable,
+) -> Result<crate::ParsedScript> {
     let script = script_from_braced_tokens(ts)?;
     let head_ctx = ts.clone().into_iter().next().map(|t| {
         let start = t.span().start();
@@ -957,13 +997,15 @@ pub fn parse_braced_tokens_with_modules(
             t.span(),
         )
     });
-    crate::parse_script_with_modules(&script, lower, reserved_names, modules).map_err(|e| {
-        let e = match &head_ctx {
-            Some(ctx) => e.with_span(ctx),
-            None => e,
-        };
-        anyhow::Error::from(e)
-    })
+    crate::parse_script_with_modules_and_exports(&script, lower, reserved_names, modules).map_err(
+        |e| {
+            let e = match &head_ctx {
+                Some(ctx) => e.with_span(ctx),
+                None => e,
+            };
+            anyhow::Error::from(e)
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1345,7 +1387,7 @@ mod tests {
         .trim();
         let ts: proc_macro2::TokenStream = text.parse().expect("tokens");
         let braced = parse_braced_tokens(&ts, mock_lower).expect("braced parse");
-        let string = parse_script(text, mock_lower).expect("string parse");
+        let string = crate::parse_script(text, mock_lower).expect("string parse");
         assert_eq!(braced, string, "template AST parity between forms");
     }
 

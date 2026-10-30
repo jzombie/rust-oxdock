@@ -167,6 +167,44 @@ mod tests {
     }
 
     #[test]
+    fn braced_and_string_agree_on_func_docs() {
+        // Capture proof, both paths: the same `#`-commented source must
+        // yield identical docs, exports, and steps through the string
+        // entry point and the braced `TokenStream` entry point. Docs are
+        // read back out of the product here, not just tolerated.
+        let text = indoc! {r#"
+            # Adds one.
+            # Second line.
+            FUNC FOO() {
+                RETURN "x"
+            }
+            EXPORT FOO
+        "#};
+        let ts: TokenStream = text.parse().unwrap();
+        let string = oxdock_parser::parse_script_with_modules_and_exports(
+            text,
+            crate::common::mock_lower,
+            std::collections::HashSet::new(),
+            oxdock_parser::ModuleTable::default(),
+        )
+        .expect("string path parses");
+        let braced = oxdock_parser::parse_braced_tokens_with_modules_and_exports(
+            &ts,
+            crate::common::mock_lower,
+            std::collections::HashSet::new(),
+            oxdock_parser::ModuleTable::default(),
+        )
+        .expect("braced path parses");
+        assert_eq!(braced.func_docs, string.func_docs);
+        assert_eq!(braced.exports, string.exports);
+        assert_eq!(braced.steps, string.steps);
+        let (summary, docs) = braced.func_docs.get("FOO").expect("docs captured");
+        assert_eq!(summary, "Adds one.");
+        assert!(docs.contains("Second line"), "{docs}");
+        assert_eq!(braced.exports, vec!["FOO".to_string()]);
+    }
+
+    #[test]
     fn guard_value_named_like_command_and_env_key_stay_glued() {
         // Regression: guard idents that match command names (`LS`) or
         // follow `env:` must glue inside guard brackets. Splitting them
@@ -191,5 +229,47 @@ mod tests {
         let run: TokenStream = "RUN W-XYZ".parse().unwrap();
         let script = script_from_braced_tokens(&run).expect("failed to render RUN script");
         assert_eq!(script, "RUN W-XYZ", "got: {script:?}");
+    }
+
+    #[test]
+    fn braced_func_docs_and_exports_survive() {
+        // The braced path must carry the same `ParsedScript` metadata the
+        // string path provides: `#` doc blocks above top-level `FUNC`s
+        // plus `EXPORT` names. Future MCP hosts reading braced input
+        // need both to describe and expose tools.
+        let ts: TokenStream = indoc! {r#"
+            # Adds one.
+            # Second line.
+            FUNC FOO() {
+                RETURN "x"
+            }
+            EXPORT FOO
+        "#}
+        .parse()
+        .unwrap();
+        let parsed = oxdock_parser::parse_braced_tokens_with_modules_and_exports(
+            &ts,
+            crate::common::mock_lower,
+            std::collections::HashSet::new(),
+            oxdock_parser::ModuleTable::default(),
+        )
+        .expect("braced export with docs parses");
+        let (summary, docs) = parsed.func_docs.get("FOO").expect("docs collected");
+        assert_eq!(summary, "Adds one.");
+        assert!(docs.contains("Second line"), "{docs}");
+        assert_eq!(parsed.exports, vec!["FOO".to_string()]);
+        assert!(
+            parsed
+                .steps
+                .iter()
+                .any(|s| matches!(s.kind, oxdock_parser::StepKind::FuncDef { .. })),
+            "got: {:?}",
+            parsed.steps
+        );
+        // The plain braced entry points keep their signatures and agree
+        // on steps.
+        let steps = oxdock_parser::parse_braced_tokens(&ts, crate::common::mock_lower)
+            .expect("plain braced parse agrees");
+        assert_eq!(steps.len(), parsed.steps.len());
     }
 }

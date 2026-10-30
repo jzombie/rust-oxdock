@@ -599,7 +599,10 @@ fn is_placeholder(s: &str) -> Option<usize> {
 /// but returns `Vec<oxdock_parser::Step>` instead of embedding files.
 ///
 /// Use `#var` to inject Rust variables (must implement `Display`, used via `.to_string()`).
-/// DSL variables (`$var` in LET/FOR) are distinct and unaffected.
+/// The `#` must ride gapless against the name: `#var` interpolates,
+/// while a gapped `#` starts a DSL comment (`# comment`, whole line,
+/// like string scripts). DSL variables (`$var` in LET/FOR) are distinct
+/// and unaffected.
 #[proc_macro]
 pub fn oxdock(input: TokenStream) -> TokenStream {
     match expand_oxdock(input) {
@@ -664,6 +667,23 @@ fn collect_hash_idents(
     Ok(interp)
 }
 
+/// True when `ident` rides gapless right after the `#` punct: the
+/// interpolation shape (`#var`). A gapped `#` (`# comment`) is a DSL
+/// comment, never interpolation, mirroring the string grammar where
+/// `#` comments occupy whole lines. Degenerate spans (synthetic
+/// `call_site`/`quote!` streams, zero-width everywhere) carry no
+/// adjacency signal and keep the greedy reading, preserving old
+/// behavior there.
+fn hash_glued(punct: &proc_macro2::Punct, ident: &proc_macro2::Ident) -> bool {
+    let span = punct.span();
+    if span.start() == span.end() {
+        return true;
+    }
+    let end = span.end();
+    let start = ident.span().start();
+    end.line == start.line && end.column == start.column
+}
+
 fn collect_hash_idents_inner(
     tokens: &[TokenTree],
     interp: &mut Vec<(proc_macro2::Ident, usize)>,
@@ -676,6 +696,7 @@ fn collect_hash_idents_inner(
             if p.as_char() == '#'
                 && i + 1 < tokens.len()
                 && let TokenTree::Ident(ident) = &tokens[i + 1]
+                && hash_glued(p, ident)
             {
                 if !interp.iter().any(|(id, _)| id == ident) {
                     interp.push((ident.clone(), *idx));
@@ -715,6 +736,7 @@ fn sanitize_hash_tokens_inner(
             if p.as_char() == '#'
                 && i + 1 < tokens.len()
                 && let TokenTree::Ident(ident) = &tokens[i + 1]
+                && hash_glued(p, ident)
                 && let Some((_, idx)) = interp.iter().find(|(id, _)| id == ident)
             {
                 let ph = placeholder_for(*idx);
@@ -1577,6 +1599,21 @@ mod tests {
         let root = temp.as_guarded_path().clone();
         let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
         (temp, resolver, root)
+    }
+
+    #[test]
+    fn hash_glued_stays_greedy_without_span_signal() {
+        // Synthetic spans (`call_site`, `quote!`) are zero-width: with
+        // no adjacency signal the old greedy reading must hold, so
+        // every `#ident` still interpolates there. Real-span behavior
+        // (adjacent interpolates, gapped comments) is pinned by the
+        // real-macro corpus test, which runs under rustc spans.
+        let punct = proc_macro2::Punct::new('#', proc_macro2::Spacing::Alone);
+        let ident = proc_macro2::Ident::new("word", proc_macro2::Span::call_site());
+        assert!(
+            hash_glued(&punct, &ident),
+            "degenerate spans must keep greedy interpolation"
+        );
     }
 
     #[test]

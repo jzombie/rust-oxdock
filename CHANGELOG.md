@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Fixed
 
+- Braced `TokenStream` parsing returns full `ParsedScript` metadata: new `parse_braced_tokens_with_exports` and `parse_braced_tokens_with_modules_and_exports` carry `EXPORT` names and `#` doc blocks for top-level `FUNC`s (`func_docs`), mirroring the string entry points for future MCP hosts reading braced input. The plain `parse_braced_tokens*` variants keep their signatures and delegate. The rebuild also starts a fresh line at each `#` opening on a later source line, so contiguous doc blocks stay one-comment-per-line instead of gluing into a single summary.
 - Macro text rebuild keeps guard and shell text glued: guard idents (even command-named values like `LS`, and keys after `env:`) never split across lines inside brackets, and glued dashes in `RUN` shell text (`W-XYZ`) keep no invented space (the flag-spacing heuristic now applies only when spans carry no adjacency signal). Both shapes previously rebuilt into text the parser rejects or reads differently.
 - Chained comparisons fail loudly (`$a < $b < $c` names the chaining with parenthesization help) instead of stranding text for a confusing downstream error; `$a < $b == $c` still parses as equality over ordering.
 

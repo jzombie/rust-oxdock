@@ -514,6 +514,57 @@ fn macro_sleep_and_exit_code() {
     );
 }
 
+#[test]
+fn macro_rust_comment_styles_are_invisible_to_the_parser() {
+    // `//` and `/* */` never reach the macro: rustc strips them from
+    // the TokenStream before expansion. `#` comments work because
+    // interpolation claims only gapless `#var`: a gapped `#` rebuilds
+    // as a `# ...` line, which the string grammar reads as a comment.
+    let word = "hi";
+    let plain = oxdock! {
+        ECHO #word
+        IF true {
+            ECHO #word
+        }
+    };
+    let commented = oxdock! {
+        // leading line comment
+        # leading hash comment
+        ECHO #word // trailing line comment
+        # hash comment between steps
+        /* block comment between steps */
+        IF true {
+            // comment inside a block
+            # hash comment inside a block
+            ECHO #word
+        }
+        # trailing hash comment
+        /* trailing
+           multi-line block */
+    };
+    // Interpolation fired (not literal passthrough): the `#` proved
+    // it works by producing a value.
+    for step in plain.iter().chain(commented.iter()) {
+        match &step.kind {
+            oxdock_parser::StepKind::Echo(arg) => {
+                assert_eq!(arg, &oxdock_parser::Arg::String("hi".to_string(), false));
+            }
+            oxdock_parser::StepKind::If { .. } => {}
+            other => panic!("unexpected kind under comments: {other:?}"),
+        }
+    }
+    assert_eq!(commented.len(), plain.len(), "comments must not add steps");
+    for (index, (got, want)) in commented.iter().zip(plain.iter()).enumerate() {
+        assert!(
+            step_content_eq(got, want),
+            "step {index} differs under comments"
+        );
+    }
+    let temp = GuardedPath::tempdir().unwrap();
+    run_steps(temp.as_guarded_path(), &commented);
+    assert_macro_string_roundtrip(&commented);
+}
+
 /// Coverage gate twin to the fuzzer inventory: every `StepKind`
 /// variant appears here with no wildcard, so a new variant fails
 /// compilation until classified. The comparison below stays total

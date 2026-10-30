@@ -43,7 +43,8 @@ pub use error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 pub use literal::{escape_dsl_string, render_dsl_literal, render_quoted};
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
-    DslMacroInput, ScriptSource, parse_braced_tokens, parse_braced_tokens_with_modules,
+    DslMacroInput, ScriptSource, parse_braced_tokens, parse_braced_tokens_with_exports,
+    parse_braced_tokens_with_modules, parse_braced_tokens_with_modules_and_exports,
     script_from_braced_tokens, split_modules_prefix,
 };
 pub use markdown::{BlockMetadata, FencedBlock, expect_error_from_info, extract_fenced_blocks};
