@@ -2,12 +2,12 @@
 {{ $files.stubs.installer-doc-header }}
 
 #
-#   curl -fsSL https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.sh | bash
+#   {{ $docs_global.installer_cmd_sh }}
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   (export VERSION=v{{ env:CRATE_VERSION }}; curl -fsSL ... | bash)
+#   (export VERSION=v{{ env:CRATE_VERSION }}; {{ $docs_global.installer_cmd_sh }})
 #
 {{ $files.stubs.installer-doc-env }}
 

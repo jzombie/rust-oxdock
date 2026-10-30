@@ -1,12 +1,12 @@
 {{ $files.stubs.installer-doc-header }}
 
 #
-#   irm https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.ps1 | iex
+#   {{ $docs_global.installer_cmd_ps1 }}
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v{{ env:CRATE_VERSION }}'; irm ... | iex
+#   $env:VERSION = 'v{{ env:CRATE_VERSION }}'; {{ $docs_global.installer_cmd_ps1 }}
 #
 {{ $files.stubs.installer-doc-env }}
 
