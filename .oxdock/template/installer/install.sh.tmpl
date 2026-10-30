@@ -7,7 +7,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   VERSION=v{{ env:CRATE_VERSION }} curl -fsSL ... | bash
+#   (export VERSION=v{{ env:CRATE_VERSION }}; curl -fsSL ... | bash)
 #
 {{ $files.stubs.installer-doc-env }}
 

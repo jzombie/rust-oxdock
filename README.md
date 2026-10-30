@@ -64,7 +64,7 @@ Installs to `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH. Set `$env:I
 For a reproducible install, pin an explicit release:
 
 ```sh
-VERSION=v0.32.2-alpha curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash
+(export VERSION=v0.32.2-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
 ```
 
 ```powershell

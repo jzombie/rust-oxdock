@@ -17,7 +17,7 @@ Installs to `{{ $docs_global.windows_default_prefix }}{{ $docs_global.windows_de
 For a reproducible install, pin an explicit release:
 
 ```sh
-VERSION=v{{ env:CRATE_VERSION }} {{ $docs_global.installer_cmd_sh }}
+(export VERSION=v{{ env:CRATE_VERSION }}; {{ $docs_global.installer_cmd_sh }})
 ```
 
 ```powershell
