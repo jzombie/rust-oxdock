@@ -911,22 +911,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn probe_expr_display_shapes() {
-        for src in [
-            "LET $x: INT = STD::TEXT_LENGTH(\"hi\")",
-            "LET $o: STRING = AWAIT $t",
-            "LET $c: STRING = ECHO hi",
-            "WITH_IO [stdout=$p] ECHO hi",
-        ] {
-            match parse_script(src, test_lower) {
-                Ok(steps) => {
-                    eprintln!("OK   {src:?} -> {:?}", steps[0].to_string());
-                }
-                Err(e) => eprintln!("ERR  {src:?} -> {:#}", e),
-            }
-        }
-    }
+
 
     #[test]
     fn block_map_key_dedents() {
