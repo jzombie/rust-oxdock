@@ -1727,7 +1727,7 @@ fn dispatch_flow_step<P: ProcessManager>(
     idx: usize,
 ) -> Result<Flow> {
     match cmd {
-        StepKind::FuncDef { name, params, body } => {
+        StepKind::FuncDef { name, params, body, .. } => {
             handlers::define_func(cx, name, params, body)?;
             Ok(Flow::Done)
         }

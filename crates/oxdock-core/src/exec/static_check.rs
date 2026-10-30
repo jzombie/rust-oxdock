@@ -582,7 +582,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     fn collect_step(&mut self, step: &Step) -> Result<()> {
         match &step.kind {
-            StepKind::FuncDef { name, params, body } => {
+            StepKind::FuncDef { name, params, body, .. } => {
                 let mut resolved = Vec::with_capacity(params.len());
                 for (pname, ptype) in params {
                     let tag = self
@@ -912,7 +912,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 out.types = body_out.types;
                 Ok(out)
             }
-            StepKind::FuncDef { name, params, body } => {
+            StepKind::FuncDef { name, params, body, .. } => {
                 let mut resolved = Vec::with_capacity(params.len());
                 for (pname, ptype) in params {
                     let tag = self

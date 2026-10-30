@@ -789,6 +789,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             name,
             params: vec![("coverage".to_string(), "STRING".to_string())],
             body,
+            docs: None,
         }),
         arb_command_body().prop_map(|body| StepKind::Timeout {
             duration: Arg::String("10s".to_string(), false),
@@ -1434,15 +1435,18 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 name: ln,
                 params: lp,
                 body: lb,
+                docs: ld,
             },
             StepKind::FuncDef {
                 name: rn,
                 params: rp,
                 body: rb,
+                docs: rd,
             },
         ) => {
             assert_eq!(ln, rn, "FuncDef name mismatch: {}", msg);
             assert_eq!(lp, rp, "FuncDef params mismatch: {}", msg);
+            assert_eq!(ld, rd, "FuncDef docs mismatch: {}", msg);
             assert_bodies_eq(lb, rb, msg);
         }
         (
@@ -1968,6 +1972,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 scope_enter: 0,
                 scope_exit: 0,
             }],
+            docs: None,
         },
         StepKind::Timeout {
             duration: Arg::String("10s".to_string(), false),

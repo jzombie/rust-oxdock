@@ -956,7 +956,7 @@ declare_commands! {
         IsolatedInheritEnv { keys: Vec<String> },
         RemoteBlock { target: String, vars: Vec<String>, env: Vec<String>, body: Vec<Step> },
         RunExec { argv: Vec<Arg> },
-        FuncDef { name: String, params: Vec<(String, String)>, body: Vec<Step> },
+        FuncDef { name: String, params: Vec<(String, String)>, body: Vec<Step>, docs: Option<(String, String)> },
         Call { name: String, args: Vec<Expr> },
         Return { expr: Box<Expr> },
         While { cond: Box<Expr>, body: Vec<Step> },
@@ -3906,7 +3906,15 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
-            StepKind::FuncDef { name, params, body } => {
+            StepKind::FuncDef { name, params, body, docs } => {
+                // Doc blocks render back as `#` lines so Display
+                // reparses to identical docs (first line is the
+                // summary, the rest follow verbatim).
+                if let Some((_, full)) = docs {
+                    for doc_line in full.split('\n') {
+                        writeln!(f, "# {doc_line}")?;
+                    }
+                }
                 let ps: Vec<String> = params
                     .iter()
                     .map(|(p, t)| format!("${}: {}", p, t))
@@ -5237,7 +5245,7 @@ mod tests {
             lower_command,
         )
         .expect("func def parses");
-        let StepKind::FuncDef { name, params, body } = &steps[0].kind else {
+        let StepKind::FuncDef { name, params, body, docs } = &steps[0].kind else {
             panic!("expected FuncDef, got {:?}", steps[0].kind);
         };
         assert_eq!(name, "GREET");
@@ -5247,6 +5255,7 @@ mod tests {
             "{params:?}"
         );
         assert!(matches!(body[0].kind, StepKind::Return { .. }));
+        assert!(docs.is_none(), "undocumented FUNC carries no docs");
     }
 
     #[test]
@@ -5707,6 +5716,7 @@ mod tests {
                 name: "F".to_string(),
                 params: Vec::new(),
                 body: Vec::new(),
+                docs: None,
             },
             StepKind::Call {
                 name: "F".to_string(),

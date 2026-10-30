@@ -367,6 +367,22 @@ fn walk(
         } else {
             raw_gap
         };
+        // Blank source lines survive the rebuild as empty lines:
+        // TokenStreams carry no blank tokens, but span line numbers jump
+        // over them, and blank lines are significant (a blank line severs
+        // a `#` doc block from its FUNC). Finalize any open line, then
+        // emit one empty line per skipped line. Degenerate spans never
+        // gap, so synthetic streams are unaffected.
+        if !in_guard
+            && !in_interpolation
+            && let Some(prev) = *last_span_end
+            && span.start().line > prev.line + 1
+        {
+            finalize_line(lines, line, capture_has_inner);
+            for _ in prev.line + 1..span.start().line {
+                lines.push(String::new());
+            }
+        }
         // A RUN step consumes the rest of its source line as shell text
         // (`RUN echo && ls` stays one step), but any token opening on a later
         // line starts a new statement: without this, `RUN echo hi` followed by

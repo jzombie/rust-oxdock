@@ -605,14 +605,14 @@ fn is_placeholder(s: &str) -> Option<usize> {
 /// and unaffected.
 #[proc_macro]
 pub fn oxdock(input: TokenStream) -> TokenStream {
-    match expand_oxdock(input) {
-        Ok(ts) => ts,
+    match expand_oxdock(input.into()) {
+        Ok(ts) => ts.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
-    let ts: proc_macro2::TokenStream = input.into();
+fn expand_oxdock(input: proc_macro2::TokenStream) -> syn::Result<proc_macro2::TokenStream> {
+    let ts = input;
     let interp = collect_hash_idents(ts.clone())?;
 
     // Opaque host modules (membership unknown at compile time) declared up
@@ -632,17 +632,22 @@ fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
     let dsl_text = dsl_text.trim();
     if dsl_text.is_empty() {
         let ts_out = quote! { Vec::<oxdock_parser::Step>::new() };
-        return Ok(ts_out.into());
+        return Ok(ts_out);
     }
 
     let mut table = oxdock_core::std_module_table();
     for module in opaque_modules {
         table.modules.insert(module, None);
     }
-    let steps = oxdock_core::parse_script_with_modules(dsl_text, table).map_err(|e| {
-        let msg = format!("parse error: {e}\ndsl:\n{dsl_text}");
-        syn::Error::new(proc_macro2::Span::call_site(), msg)
-    })?;
+    // Docs ride on the steps themselves (stamped from `#` blocks), so
+    // the macro product carries function documentation without a
+    // signature change; exports stay out (the macro returns steps).
+    let steps = oxdock_core::parse_script_with_modules_and_exports(dsl_text, table)
+        .map(|parsed| parsed.steps)
+        .map_err(|e| {
+            let msg = format!("parse error: {e}\ndsl:\n{dsl_text}");
+            syn::Error::new(proc_macro2::Span::call_site(), msg)
+        })?;
 
     let step_tokens: Vec<_> = steps.iter().map(|step| emit_step(step, &interp)).collect();
 
@@ -653,7 +658,7 @@ fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
             vec![#(#step_tokens),*]
         }
     };
-    Ok(ts_out.into())
+    Ok(ts_out)
 }
 
 /// Walk the token stream and collect all `#ident` pairs, recursing into groups.
@@ -1437,7 +1442,7 @@ fn emit_stepkind(
             let args: Vec<_> = argv.iter().map(|a| emit_arg(a, interp)).collect();
             quote! { StepKind::RunExec { argv: vec![#(#args),*] } }
         }
-        StepKind::FuncDef { name, params, body } => {
+        StepKind::FuncDef { name, params, body, docs } => {
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             let ps: Vec<_> = params
                 .iter()
@@ -1446,7 +1451,11 @@ fn emit_stepkind(
                     quote! { (#p.to_string(), #tt) }
                 })
                 .collect();
-            quote! { StepKind::FuncDef { name: #name.to_string(), params: vec![#(#ps),*], body: vec![#(#steps),*] } }
+            let docs = match docs {
+                Some((summary, full)) => quote! { Some((#summary.to_string(), #full.to_string())) },
+                None => quote! { None },
+            };
+            quote! { StepKind::FuncDef { name: #name.to_string(), params: vec![#(#ps),*], body: vec![#(#steps),*], docs: #docs } }
         }
         StepKind::Call { name, args } => {
             let toks: Vec<_> = args.iter().map(|a| emit_expr(a, interp)).collect();

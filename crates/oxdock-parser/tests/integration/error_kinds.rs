@@ -636,6 +636,56 @@ fn comment_brace_keeps_head_span() {
 }
 
 #[test]
+fn comment_line_between_brace_and_else_severs_the_chain() {
+    // Visible proof comments parse: the identical script without the
+    // `//` line merges into one If with an else body; with it, the
+    // hold releases, the IF closes bare, and the dangling ELSE fails
+    // as InvalidSyntax ELSE (never silently glued, never attached).
+    // Production lowering classifies the dangling ELSE; the mock table
+    // used elsewhere knows fewer names.
+    let merged = parse_script(
+        indoc! {r#"
+            IF true {
+                ECHO a
+            }
+            ELSE {
+                ECHO b
+            }
+        "#},
+        lower_command,
+    )
+    .expect("uncommented merges");
+    assert_eq!(merged.len(), 1);
+    match &merged[0].kind {
+        oxdock_parser::StepKind::If { else_body, .. } => {
+            assert!(else_body.is_some(), "else must attach without comment");
+        }
+        other => panic!("expected If, got {other:?}"),
+    }
+    let err = parse_script(
+        indoc! {r#"
+            IF true {
+                ECHO a
+            }
+            // severed
+            ELSE {
+                ECHO b
+            }
+        "#},
+        lower_command,
+    )
+    .expect_err("comment must sever the ELSE chain");
+    assert!(
+        matches!(
+            err.kind(),
+            ParseErrorKind::InvalidSyntax { command } if command == "ELSE"
+        ),
+        "unexpected kind: {:?}",
+        err.kind()
+    );
+}
+
+#[test]
 fn dangling_else_if_keeps_head_span() {
     // A complete but dangling `ELSE IF` (no enclosing `IF`) is a head
     // error: the clause matches as a prefix, the sibling clause fails on

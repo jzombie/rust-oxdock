@@ -4029,7 +4029,7 @@ pub(crate) fn dispatch_func_def<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::FuncDef { name, params, body } = step else {
+    let StepKind::FuncDef { name, params, body, .. } = step else {
         unreachable!()
     };
     define_func(cx, name, params, body)

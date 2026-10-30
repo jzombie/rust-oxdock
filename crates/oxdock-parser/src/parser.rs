@@ -126,6 +126,8 @@ fn parse_with_ctx(
     ctx.funcs.borrow_mut()[0].extend(preseed_funcs);
     ctx.imports.borrow_mut()[0].extend(preseed_imports);
     let steps = parse_v2_with_ctx(&toks, &ctx).map_err(|e| v2_error(input, e))?;
+    let mut steps = steps;
+    stamp_func_docs(input, &mut steps);
     Ok((steps, ctx.exports.borrow().clone()))
 }
 
@@ -309,6 +311,22 @@ fn collect_func_docs(
         }
     }
     out
+}
+
+/// Stamp `#` doc blocks onto top-level `FUNC` steps, from the same map
+/// that feeds `func_docs`, so step-carried docs and the sidecar can
+/// never disagree. Only top-level definitions qualify (same rule as
+/// collection); nested shadowing keeps `docs: None`.
+fn stamp_func_docs(input: &str, steps: &mut [Step]) {
+    let docs = collect_func_docs(input, steps);
+    for step in steps {
+        if let StepKind::FuncDef { name, docs: slot, .. } = &mut step.kind
+            && slot.is_none()
+            && let Some(pair) = docs.get(name)
+        {
+            *slot = Some(pair.clone());
+        }
+    }
 }
 
 fn strip_func_head(trimmed: &str) -> Option<String> {

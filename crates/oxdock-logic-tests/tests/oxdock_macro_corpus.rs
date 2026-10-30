@@ -563,6 +563,107 @@ fn macro_rust_comment_styles_are_invisible_to_the_parser() {
     let temp = GuardedPath::tempdir().unwrap();
     run_steps(temp.as_guarded_path(), &commented);
     assert_macro_string_roundtrip(&commented);
+    // A comment alone parses to nothing: this invocation carries a
+    // single `#` comment line and must expand to zero steps, proving
+    // the `#` was read as a comment rather than interpolation (which
+    // would demand a Rust variable named `some`).
+    let only_comment: Vec<oxdock_parser::Step> = oxdock! {
+        # some comment
+    };
+    assert!(
+        only_comment.is_empty(),
+        "comment-only macro must expand to zero steps"
+    );
+}
+
+#[test]
+fn macro_func_docs_associate_per_function_including_nested() {
+    // Association proof inside the real macro: distinct docs per
+    // function, a blank-line orphan attaching to nothing, and a nested
+    // definition staying undocumented. Docs are read back off the
+    // steps themselves.
+    let steps = oxdock! {
+        # First does A.
+        FUNC AAA() {
+            RETURN "a"
+        }
+        # Second does B.
+        # With two lines.
+        FUNC BBB() {
+            RETURN "b"
+        }
+        # Orphaned by a blank line.
+
+        FUNC CCC() {
+            RETURN "c"
+        }
+        IF true {
+            # Looks like docs but nested.
+            FUNC NESTED() {
+                RETURN "n"
+            }
+        }
+    };
+    let doc_of = |want: &str| {
+        steps
+            .iter()
+            .flat_map(|s| match &s.kind {
+                oxdock_parser::StepKind::FuncDef { name, docs, .. } if name == want => {
+                    Some(docs.clone())
+                }
+                oxdock_parser::StepKind::If { then_body, .. } => then_body
+                    .iter()
+                    .find_map(|s| match &s.kind {
+                        oxdock_parser::StepKind::FuncDef { name, docs, .. } if name == want => {
+                            Some(docs.clone())
+                        }
+                        _ => None,
+                    }),
+                _ => None,
+            })
+            .next()
+            .unwrap_or(None)
+    };
+    assert_eq!(
+        doc_of("AAA"),
+        Some(("First does A.".to_string(), "First does A.".to_string())),
+        "AAA owns its docs"
+    );
+    assert_eq!(
+        doc_of("BBB"),
+        Some((
+            "Second does B.".to_string(),
+            "Second does B.\nWith two lines.".to_string()
+        )),
+        "BBB owns its two lines"
+    );
+    assert_eq!(doc_of("CCC"), None, "blank line orphans the docs");
+    assert_eq!(doc_of("NESTED"), None, "nested defs stay undocumented");
+    assert_macro_string_roundtrip(&steps);
+}
+
+#[test]
+fn macro_func_doc_comment_rides_on_the_step() {
+    // The demand: a `#` doc comment above a FUNC must describe the
+    // function inside the DSL product itself. `docs` rides on
+    // `StepKind::FuncDef` on every path (string, braced, macro),
+    // stamped from the same map that feeds `func_docs`.
+    let steps = oxdock! {
+        # This function does something
+        FUNC DO_SOMETHING() {
+            RETURN "done"
+        }
+    };
+    assert_eq!(steps.len(), 1);
+    match &steps[0].kind {
+        oxdock_parser::StepKind::FuncDef { docs, .. } => {
+            let (summary, full) = docs.as_ref().expect("docs must ride on FuncDef");
+            assert_eq!(summary, "This function does something");
+            assert!(full.contains("This function does something"), "{full}");
+        }
+        other => panic!("expected FuncDef, got {other:?}"),
+    }
+    assert_macro_string_roundtrip(&steps);
 }
 
 /// Coverage gate twin to the fuzzer inventory: every `StepKind`
@@ -873,13 +974,15 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
                 name: nx,
                 params: px,
                 body: bx,
+                docs: dx,
             },
             StepKind::FuncDef {
                 name: ny,
                 params: py,
                 body: by,
+                docs: dy,
             },
-        ) => nx == ny && px == py && steps_content_eq(bx, by),
+        ) => nx == ny && px == py && dx == dy && steps_content_eq(bx, by),
         (StepKind::Call { name: nx, args: ax }, StepKind::Call { name: ny, args: ay }) => {
             nx == ny && ax == ay
         }

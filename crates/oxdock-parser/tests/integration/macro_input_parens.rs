@@ -167,6 +167,103 @@ mod tests {
     }
 
     #[test]
+    fn func_docs_associate_with_the_correct_function_on_both_paths() {
+        // Association proof across three scenarios: distinct docs per
+        // function, blank-line orphans attaching to nothing, and nested
+        // definitions staying undocumented. String and braced paths must
+        // agree exactly, on the map and on the steps.
+        let text = indoc! {r#"
+            # First does A.
+            FUNC AAA() {
+                RETURN "a"
+            }
+            # Second does B.
+            # With two lines.
+            FUNC BBB() {
+                RETURN "b"
+            }
+            # Orphaned by a blank line.
+
+            FUNC CCC() {
+                RETURN "c"
+            }
+            IF true {
+                # Looks like docs but nested.
+                FUNC NESTED() {
+                    RETURN "n"
+                }
+            }
+        "#};
+        let ts: TokenStream = text.parse().unwrap();
+        let parse_string = || {
+            oxdock_parser::parse_script_with_modules_and_exports(
+                text,
+                crate::common::mock_lower,
+                std::collections::HashSet::new(),
+                oxdock_parser::ModuleTable::default(),
+            )
+            .expect("string path parses")
+        };
+        let parse_braced = || {
+            oxdock_parser::parse_braced_tokens_with_modules_and_exports(
+                &ts,
+                crate::common::mock_lower,
+                std::collections::HashSet::new(),
+                oxdock_parser::ModuleTable::default(),
+            )
+            .expect("braced path parses")
+        };
+        let string = parse_string();
+        let braced = parse_braced();
+        assert_eq!(braced.func_docs, string.func_docs);
+        assert_eq!(braced.steps, string.steps);
+        for parsed in [&string, &braced] {
+            let doc_of = |want: &str| {
+                parsed
+                    .steps
+                    .iter()
+                    .flat_map(|s| match &s.kind {
+                        oxdock_parser::StepKind::FuncDef { name, docs, .. } if name == want => {
+                            Some(docs.clone())
+                        }
+                        oxdock_parser::StepKind::If { then_body, .. } => then_body
+                            .iter()
+                            .find_map(|s| match &s.kind {
+                                oxdock_parser::StepKind::FuncDef { name, docs, .. }
+                                    if name == want =>
+                                {
+                                    Some(docs.clone())
+                                }
+                                _ => None,
+                            }),
+                        _ => None,
+                    })
+                    .next()
+                    .unwrap_or(None)
+            };
+            assert_eq!(
+                doc_of("AAA"),
+                Some((
+                    "First does A.".to_string(),
+                    "First does A.".to_string()
+                )),
+                "AAA owns its docs"
+            );
+            assert_eq!(
+                doc_of("BBB"),
+                Some((
+                    "Second does B.".to_string(),
+                    "Second does B.\nWith two lines.".to_string()
+                )),
+                "BBB owns its two lines"
+            );
+            assert_eq!(doc_of("CCC"), None, "blank line orphans the docs");
+            assert_eq!(doc_of("NESTED"), None, "nested defs stay undocumented");
+        }
+        assert_eq!(string.func_docs.len(), 2, "map holds AAA and BBB only");
+    }
+
+    #[test]
     fn braced_and_string_agree_on_func_docs() {
         // Capture proof, both paths: the same `#`-commented source must
         // yield identical docs, exports, and steps through the string
@@ -258,6 +355,17 @@ mod tests {
         assert_eq!(summary, "Adds one.");
         assert!(docs.contains("Second line"), "{docs}");
         assert_eq!(parsed.exports, vec!["FOO".to_string()]);
+        // The comment describes the function inside the product, not
+        // just the sidecar: step-level docs match the map.
+        let func_docs = parsed.steps.iter().find_map(|s| match &s.kind {
+            oxdock_parser::StepKind::FuncDef { name, docs, .. } if name == "FOO" => docs.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            func_docs,
+            Some(("Adds one.".to_string(), "Adds one.\nSecond line.".to_string())),
+            "step docs must match the map"
+        );
         assert!(
             parsed
                 .steps

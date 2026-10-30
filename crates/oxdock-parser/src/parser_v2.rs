@@ -4136,6 +4136,7 @@ fn parse_func_at(
         name: def_name,
         params,
         body,
+        docs: None,
     };
     Ok(Some((kind, p + 1 - pos)))
 }
