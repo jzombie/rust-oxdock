@@ -84,15 +84,15 @@ release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 cargo install oxdock@0.32.2-alpha
 ```
 
+</details>
+
 ### Add to Rust project
 
 ```sh
 cargo add oxdock@0.32.2-alpha
 ```
 
-</details>
-
-Run a script:
+### Run a script
 
 ```sh
 oxdock <PATH>
