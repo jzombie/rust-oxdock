@@ -33,7 +33,7 @@ mod mcp;
 use oxdock_macros::oxdock_embed;
 oxdock_embed! {
     name: UsageAssets,
-    script: r#"
+    script: {
         INHERIT_ENV [CARGO_PKG_VERSION, CARGO_PKG_DESCRIPTION]
         FUNC EMIT_BODY($is_net: BOOL) {
             LET $net_flags: STRING = """
@@ -80,7 +80,7 @@ oxdock_embed! {
             EMIT_BODY(false)
         }
         WITH_IO [stdin=$p] WRITE dist/usage-lean.txt
-    "#,
+    },
     out_dir: "usage-prebuilt",
 }
 #[cfg(feature = "net")]

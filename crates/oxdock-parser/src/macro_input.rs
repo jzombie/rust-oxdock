@@ -492,7 +492,26 @@ fn walk(
                 *last_span_end = Some(span.end());
             }
             TokenTree::Literal(lit) => {
-                push_fragment(line, &lit.to_string(), *last_was_command || gap_space);
+                let frag = lit.to_string();
+                // Fused string runs: Rust lexes `"""..."""` as adjacent
+                // string literals, and the string grammar reads contiguous
+                // literals with no gap. Rebuilding them spaced would glue a
+                // different value (or shred a block), so a quote junction
+                // with no span gap fuses verbatim instead. Spaced literals
+                // keep their separating space. Synthetic (`quote!`) spans
+                // are zero-width and carry no adjacency signal, so they
+                // always take the spaced reading.
+                let fuse = frag.starts_with('"')
+                    && line.trim_end().ends_with('"')
+                    && span.start() != span.end()
+                    && last_span_end
+                        .map(|prev| prev == span.start())
+                        .unwrap_or(false);
+                if fuse {
+                    line.push_str(&frag);
+                } else {
+                    push_fragment(line, &frag, *last_was_command || gap_space);
+                }
                 *last_was_command = false;
                 *last_span_end = Some(span.end());
             }
@@ -746,6 +765,106 @@ mod tests {
     /// Mock lowering for macro_input tests.
     fn mock_lower(name: &str, args: Vec<crate::Arg>) -> crate::ParseResult<StepKind> {
         crate::test_lower_mock::lower(name, args)
+    }
+
+    #[test]
+    fn braced_triple_quote_fuses_to_block() {
+        // Rust lexes `"""hi"""` as three adjacent string literals. The
+        // walker fuses the quote junction back, so the string grammar
+        // reads one block, exactly as the string path does.
+        let ts: proc_macro2::TokenStream = "ECHO \"\"\"hi\"\"\"".parse().expect("tokens");
+        let script = script_from_braced_tokens(&ts).expect("rebuild");
+        assert_eq!(script, "ECHO \"\"\"hi\"\"\"", "got: {script}");
+        let braced = parse_braced_tokens(&ts, mock_lower).expect("parse");
+        let string = crate::parse_script("ECHO \"\"\"hi\"\"\"", mock_lower).expect("string parse");
+        assert_eq!(braced, string, "braced and string forms must agree");
+        match &braced[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "hi"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn braced_multiline_block_dedents() {
+        // Contiguous literals fuse with their newlines intact, so block
+        // payloads keep their indentation and dedent normally.
+        let ts: proc_macro2::TokenStream = "ECHO \"\"\"\n    SELECT *\n    FROM users\n    \"\"\""
+            .parse()
+            .expect("tokens");
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("parse");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "SELECT *\nFROM users"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn braced_statement_after_block_starts_new_line() {
+        // Fused newlines must not glue the next statement onto the block.
+        let ts: proc_macro2::TokenStream = "ECHO \"\"\"\n    hi\n    \"\"\"\nWRITE out.txt done"
+            .parse()
+            .expect("tokens");
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("parse");
+        assert_eq!(steps.len(), 2, "got: {steps:?}");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "hi"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn braced_contiguous_strings_match_string_path() {
+        // `"a""b"` fuses to its source spelling, agreeing with the
+        // string grammar (one glued value), instead of the spaced
+        // reading (`a b`).
+        let ts: proc_macro2::TokenStream = "ECHO \"a\"\"b\"".parse().expect("tokens");
+        let braced = parse_braced_tokens(&ts, mock_lower).expect("parse");
+        let string = crate::parse_script("ECHO \"a\"\"b\"", mock_lower).expect("string parse");
+        assert_eq!(braced, string, "braced and string forms must agree");
+    }
+
+    #[test]
+    fn braced_adjacent_strings_with_gaps_still_rebuild() {
+        // Spaced literals are genuinely separate fragments: no triple
+        // quote forms, so the guard must stay quiet. Parsed from text,
+        // so spans are real, exactly as rustc hands a proc macro.
+        let ts: proc_macro2::TokenStream = "ECHO \"a\" \"b\"".parse().expect("tokens");
+        let script = script_from_braced_tokens(&ts).expect("rebuild");
+        assert_eq!(script, "ECHO \"a\" \"b\"", "got: {script}");
+    }
+
+    #[test]
+    fn braced_quote_macro_strings_stay_unflagged() {
+        // `quote!` spans are synthetic (zero-width, no adjacency
+        // signal), so the triple-quote guard cannot apply there. This
+        // pins the exemption: contiguous literals from `quote!` rebuild
+        // spaced, and the string grammar glues them into one value.
+        // Divergent from the string path (`"a""b"` reads `ab`), but the
+        // token stream no longer carries the contiguity proof, so the
+        // walker takes the spaced reading instead of guessing.
+        let ts = quote! { ECHO "a" "b" };
+        let script = script_from_braced_tokens(&ts).expect("rebuild");
+        assert_eq!(script, "ECHO \"a\" \"b\"", "got: {script}");
+        let braced = parse_braced_tokens(&ts, mock_lower).expect("parse");
+        let string = crate::parse_script("ECHO \"a\" \"b\"", mock_lower).expect("string parse");
+        assert_eq!(braced, string, "braced and string forms must agree");
+    }
+
+    #[test]
+    fn literal_script_form_parses_block_string() {
+        // The supported route for blocks in macros: a string literal
+        // passes through untouched, so dedent baselines survive.
+        let src = "name: foo, script: r#\"ECHO \"\"\"\n    hi\n    \"\"\"\"#, out_dir: \"out\"";
+        let input: DslMacroInput = syn::parse_str(src).expect("parse literal script");
+        let ScriptSource::Literal(lit) = input.script else {
+            panic!("expected literal script");
+        };
+        let steps = crate::parse_script(&lit.value(), mock_lower).expect("block parses");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "hi"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
     }
 
     #[test]
