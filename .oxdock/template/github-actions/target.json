@@ -5,11 +5,7 @@
       "out": ".github/actions/setup-oxdock/action.yml",
       "values": ".oxdock/template/github-actions/values.json",
       "template": ".oxdock/template/github-actions/setup-oxdock-action.yml.tmpl",
-      "fragments": {
-        "shared": [
-          ".oxdock/template/shared/install-cmd-*"
-        ]
-      }
+      "fragments": {}
     }
   ]
 }

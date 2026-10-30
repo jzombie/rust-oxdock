@@ -11,12 +11,12 @@
 # Override the cache root with OXDOCK_CACHE_DIR.
 
 #
-#   irm https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1 | iex
+#   (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v0.32.2-alpha'; irm ... | iex
+#   $env:VERSION = 'v0.32.3-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
