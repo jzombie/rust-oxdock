@@ -78,7 +78,6 @@ fn safe_msg() -> impl Strategy<Value = String> {
         .prop_filter("Avoids comments", |s| {
             !s.contains("//") && !s.contains("/*")
         })
-        // Avoid hyphenated words without whitespace (ambiguous in TokenStream).
         .prop_filter("Avoids ambiguous hyphens", |s| {
             let chars: Vec<char> = s.chars().collect();
             for i in 0..chars.len() {
@@ -120,6 +119,65 @@ fn safe_msg() -> impl Strategy<Value = String> {
         })
 }
 
+/// Message alphabet that exercises quoting and `"""` blocks: embedded
+/// newlines render as blocks, quotes escape inline, and leading spaces
+/// probe dedent baselines. Always quoted-or-block on Display (never a
+/// bare word), so spacing survives both pathways. Comment markers,
+/// templates, and digit leads stay excluded: unrelated edges with
+/// their own coverage.
+fn rich_line() -> impl Strategy<Value = String> {
+    // No double quotes: Display must escape them and the parser keeps
+    // escapes verbatim, so each render cycle adds a layer (runtime
+    // behavior stays stable; parse-level comparison cannot). Single
+    // quotes pass through raw and stay covered here; `"`-in-block is
+    // pinned by parser unit tests at the verbatim level instead.
+    prop::collection::vec(
+        prop_oneof![
+            "[a-zA-Z0-9]",
+            Just(" ".to_string()),
+            Just("'".to_string()),
+            Just(".".to_string()),
+            Just(",".to_string()),
+            Just("-".to_string()),
+            Just("_".to_string()),
+            Just("/".to_string()),
+            Just(":".to_string()),
+            Just("!".to_string()),
+            Just("?".to_string()),
+        ],
+        1..=12,
+    )
+    .prop_map(|cs| cs.concat())
+    .prop_filter("No comment markers", |s| {
+        !s.contains("//") && !s.contains("/*")
+    })
+    .prop_filter("No templates", |s| !s.contains("{{") && !s.contains("}}"))
+    .prop_filter("No digit lead", |s| {
+        !s.starts_with(|c: char| c.is_ascii_digit())
+    })
+    .prop_filter("No invalid numeric prefixes", |s| {
+        !has_invalid_prefixed_literal(s)
+    })
+}
+
+fn rich_msg() -> impl Strategy<Value = String> {
+    prop::collection::vec(rich_line(), 1..=3)
+        .prop_map(|lines| lines.join("\n"))
+        .prop_filter("No digit lead", |s| {
+            !s.starts_with(|c: char| c.is_ascii_digit())
+        })
+        // Bare `true`/`false` reparse as bools in ASSERT position via
+        // `lower_assert_operand`, diverging from the generated string.
+        // Every other bare-safe shape round-trips verbatim.
+        .prop_filter("No bool literals", |s| s != "true" && s != "false")
+}
+
+/// Either plain or rich message text: keeps the established population
+/// while routing half the samples through quoting and `"""` blocks.
+fn any_msg() -> impl Strategy<Value = String> {
+    prop_oneof![safe_msg(), rich_msg()]
+}
+
 fn has_invalid_prefixed_literal(s: &str) -> bool {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -159,10 +217,18 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             Just(WorkspaceTarget::System)
         ]
         .prop_map(StepKind::Workspace),
-        (safe_string(), safe_string()).prop_map(|(key, value)| StepKind::Env {
-            key,
-            value: value.into()
-        }),
+        // `:` is outside the `assign_key` charset, so keys holding it
+        // cannot Display-round-trip (separate grammar-scope issue).
+        (
+            safe_string().prop_filter("Env keys admit the assignment charset", |k| {
+                !k.contains(':')
+            }),
+            any_msg(),
+        )
+            .prop_map(|(key, value)| StepKind::Env {
+                key,
+                value: value.into()
+            }),
         safe_msg().prop_map(|s| StepKind::Run(s.into())),
         prop::collection::vec(safe_string(), 1..3).prop_map(|items| StepKind::RunExec {
             argv: items
@@ -170,7 +236,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                 .map(|s| Arg::Expr(Expr::Literal(Value::string(s))))
                 .collect(),
         }),
-        safe_msg().prop_map(|s| StepKind::Echo(s.into())),
+        any_msg().prop_map(|s| StepKind::Echo(s.into())),
         (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Copy {
             from_workspace: None,
             from_host: false,
@@ -230,8 +296,8 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         "[a-zA-Z_][a-zA-Z0-9_]*".prop_map(|v| StepKind::ReadLine { var: v }),
         (
             "[a-zA-Z_][a-zA-Z0-9_]*",
-            safe_msg(),
-            prop::option::of(safe_msg()),
+            any_msg(),
+            prop::option::of(any_msg()),
         )
             .prop_map(|(var, message, default)| StepKind::Prompt {
                 var,
@@ -242,7 +308,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             path: path.into(),
             recursive: false,
         }),
-        (safe_string(), safe_msg()).prop_map(|(path, contents)| StepKind::Write {
+        (safe_string(), any_msg()).prop_map(|(path, contents)| StepKind::Write {
             path: path.into(),
             contents: Some(contents.into())
         }),
@@ -264,12 +330,12 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                 expected: None,
             }
         }),
-        (safe_string(), safe_msg()).prop_map(|(actual, expected)| StepKind::AssertEq {
+        (any_msg(), any_msg()).prop_map(|(actual, expected)| StepKind::AssertEq {
             hash: None,
             actual: AssertTarget::Value(actual.into()),
             expected: Some(expected.into()),
         }),
-        (safe_string(), safe_msg()).prop_map(|(haystack, needle)| StepKind::AssertContains {
+        (safe_string(), any_msg()).prop_map(|(haystack, needle)| StepKind::AssertContains {
             haystack: AssertTarget::Value(haystack.into()),
             needle: needle.into(),
         }),
@@ -677,5 +743,204 @@ fn keyword_args_round_trip_through_both_pathways() {
             assert_eq!(token_steps.len(), 1, "token walk split lines: {s}");
             assert_steps_eq(&token_steps[0], &step, &format!("Token mismatch: {s}"));
         }
+    }
+}
+
+/// One canonical instance per generated variant. The fuzzer proves the
+/// alphabet (quoting, blocks, escapes) across these shapes; the samples
+/// below prove every generated shape survives both pathways at least
+/// once, deterministically.
+fn sample_covered_kinds() -> Vec<StepKind> {
+    vec![
+        StepKind::InheritEnv {
+            keys: vec!["COVERAGE".to_string()],
+        },
+        StepKind::Workdir("coverage".into()),
+        StepKind::Workspace(WorkspaceTarget::Local),
+        StepKind::Env {
+            key: "COVERAGE".to_string(),
+            value: "covered".into(),
+        },
+        StepKind::Run("coveragerun".into()),
+        StepKind::RunExec {
+            argv: vec![Arg::Expr(Expr::Literal(Value::string(
+                "coverage".to_string(),
+            )))],
+        },
+        StepKind::Echo("coverage echo".into()),
+        StepKind::Copy {
+            from_workspace: None,
+            from_host: false,
+            to_host: false,
+            from: "coverage-from".into(),
+            to: "coverage-to".into(),
+        },
+        StepKind::Symlink {
+            from_workspace: None,
+            from: "coverage-from".into(),
+            to: "coverage-to".into(),
+        },
+        StepKind::Mkdir("coverage-dir".into()),
+        StepKind::Install {
+            from: "coverage-from".into(),
+            to: "coverage-to".into(),
+        },
+        StepKind::Archive {
+            src: "coverage-src".into(),
+            dst: "coverage-dst".into(),
+            raw: false,
+        },
+        StepKind::Unarchive {
+            src: "coverage-src".into(),
+            dst: "coverage-dst".into(),
+            max_bytes: None,
+        },
+        StepKind::Ls(Some("coverage".into())),
+        StepKind::Cwd,
+        StepKind::Read(Some("coverage".into())),
+        StepKind::ReadLine {
+            var: "coverage".to_string(),
+        },
+        StepKind::Prompt {
+            var: "coverage".to_string(),
+            message: "coverage message".into(),
+            default: Some("coverage-default".into()),
+        },
+        StepKind::Remove {
+            path: "coverage".into(),
+            recursive: false,
+        },
+        StepKind::Write {
+            path: "coverage.txt".into(),
+            contents: Some("covered".into()),
+        },
+        StepKind::CopyGit {
+            rev: "coverage-rev".into(),
+            from: "coverage-from".into(),
+            to: "coverage-to".into(),
+            include_dirty: false,
+        },
+        StepKind::HashSha256 {
+            path: "coverage".into(),
+        },
+        StepKind::AssertEq {
+            hash: None,
+            actual: AssertTarget::Value("coverage-actual".into()),
+            expected: Some("coverage-expected".into()),
+        },
+        StepKind::AssertContains {
+            haystack: AssertTarget::Value("coverage haystack".into()),
+            needle: "coverage".into(),
+        },
+        StepKind::Exit(Arg::String("3".to_string(), false)),
+        StepKind::TypeAlias {
+            name: "COVERAGE".to_string(),
+            target: "MAP".to_string(),
+        },
+    ]
+}
+
+/// Fuzzer coverage inventory: every `StepKind` variant appears here
+/// explicitly with no wildcard, so adding a variant fails compilation
+/// until it is classified as generated (`true`) or out of scope
+/// (`false`, reason beside it). String/macro parity cannot rot silently
+/// as the language grows.
+fn fuzz_covers_kind(kind: &StepKind) -> bool {
+    match kind {
+        StepKind::Workdir(..)
+        | StepKind::Workspace(..)
+        | StepKind::Env { .. }
+        | StepKind::InheritEnv { .. }
+        | StepKind::Echo(..)
+        | StepKind::Run(..)
+        | StepKind::RunExec { .. }
+        | StepKind::Copy { .. }
+        | StepKind::CopyGit { .. }
+        | StepKind::Symlink { .. }
+        | StepKind::Mkdir(..)
+        | StepKind::Install { .. }
+        | StepKind::Archive { .. }
+        | StepKind::Unarchive { .. }
+        | StepKind::Ls(..)
+        | StepKind::Cwd
+        | StepKind::Read(..)
+        | StepKind::ReadLine { .. }
+        | StepKind::Prompt { .. }
+        | StepKind::Remove { .. }
+        | StepKind::Write { .. }
+        | StepKind::HashSha256 { .. }
+        | StepKind::AssertEq { .. }
+        | StepKind::AssertContains { .. }
+        | StepKind::Exit(..)
+        | StepKind::TypeAlias { .. } => true,
+        // Expression bodies need Expr strategies (literals, math,
+        // calls, keypaths) before generation is sound.
+        StepKind::Assign { .. } => false,
+        StepKind::Set { .. } => false,
+        StepKind::AssignCapture { .. } => false,
+        StepKind::AwaitCapture { .. } => false,
+        StepKind::AsyncBlock { .. } => false,
+        StepKind::AssignAsync { .. } => false,
+        StepKind::Await { .. } => false,
+        StepKind::Cancel { .. } => false,
+        StepKind::Timeout { .. } => false,
+        StepKind::Isolated { .. } => false,
+        StepKind::IsolatedInheritEnv { .. } => false,
+        StepKind::RemoteBlock { .. } => false,
+        StepKind::FuncDef { .. } => false,
+        StepKind::Call { .. } => false,
+        StepKind::Return { .. } => false,
+        StepKind::While { .. } => false,
+        StepKind::Break => false,
+        StepKind::Continue => false,
+        // Bodies (step vectors, bindings) need recursive generation.
+        StepKind::WithIo { .. } => false,
+        StepKind::WithIoBlock { .. } => false,
+        StepKind::For { .. } => false,
+        StepKind::If { .. } => false,
+        // Durations and list items need value-shaped strategies.
+        StepKind::Sleep { .. } => false,
+        StepKind::ListAppend { .. } => false,
+        // Overrides render `KEY=value` lines needing assignment-aware
+        // comparison, not plain content equality.
+        StepKind::Append { .. } => false,
+        StepKind::Expand { .. } => false,
+    }
+}
+
+/// Every claimed-covered variant round-trips both pathways, and every
+/// sample claims coverage: the inventory and the generator cannot drift
+/// apart without failing here.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires real TokenStream/proc-macro parsing to validate API parity"
+)]
+fn fuzz_inventory_covers_claimed_kinds() {
+    let samples = sample_covered_kinds();
+    assert!(
+        !samples.is_empty(),
+        "coverage inventory must hold at least one sample"
+    );
+    for step_kind in &samples {
+        assert!(
+            fuzz_covers_kind(step_kind),
+            "sampled {step_kind:?} must claim coverage"
+        );
+        let step = Step {
+            guard: None,
+            kind: step_kind.clone(),
+            scope_enter: 0,
+            scope_exit: 0,
+        };
+        let s = step.to_string();
+        let parsed_steps = oxdock_core::parse_script(&s).expect("sample must parse from string");
+        assert_eq!(parsed_steps.len(), 1, "string split lines: {s}");
+        let ts: proc_macro2::TokenStream = s.parse().expect("sample must tokenize");
+        let token_steps = parse_braced_tokens(&ts, oxdock_core::lower_command)
+            .expect("sample must parse from tokens");
+        assert_eq!(token_steps.len(), 1, "token walk split lines: {s}");
+        assert_steps_eq(&parsed_steps[0], &step, &format!("String mismatch: {s}"));
+        assert_steps_eq(&token_steps[0], &step, &format!("Token mismatch: {s}"));
     }
 }
