@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- Multi-line `"""` string literals (#155): triple-quoted blocks span source lines for prompts, configs, and templates. A newline after the opening delimiter strips once, shared indentation dedents to the closing delimiter baseline, and the newline before a lone closing delimiter strips once. Single and double quotes need no escaping, `\"\"\"` embeds a delimiter, and escapes plus `{{ }}` resolve at runtime like double-quoted strings. CRLF normalizes to LF during lowering, unterminated blocks fail at the opening line, and multi-line values render back as blocks so `Display` reparses exactly. Usable everywhere single-line strings are: arguments, `LET` expressions, list/map literals, comparisons, `RUN` exec args, assignments, and guard values.
+
+### Changed
+
+- Installer success report is one summary block naming the configured stem (`installed <name> <version> to <dir>`, with indented `binary:` and PATH lines) instead of two flat `ECHO` lines.
+
 ## [0.32.3-alpha] - 2026-10-29
 
 ### Fixed

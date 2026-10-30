@@ -1894,7 +1894,7 @@ fn parse_run_exec_arg(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> P
         Rule::block => Ok(Expr::Block(parse_block_elements_with_lower(
             ctx, inner, lctx,
         )?)),
-        Rule::string_literal | Rule::quoted_string => {
+        Rule::string_literal | Rule::quoted_string | Rule::block_string => {
             let s = parse_quoted_string(inner)?;
             Ok(Expr::Literal(Value::string(s)))
         }
@@ -1959,6 +1959,7 @@ fn lower_command_value(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> 
         ParseError::structural("assignment", "assignment value is empty".to_string(), &span)
     })?;
     match inner.as_rule() {
+        Rule::block_string => Ok(Arg::String(parse_quoted_string(inner)?, true)),
         Rule::quoted_string => Ok(Arg::String(parse_quoted_string(inner)?, true)),
         Rule::assign_expr => {
             let shape = inner.into_inner().next().ok_or_else(|| {
@@ -1999,6 +2000,7 @@ fn lower_raw_fragments(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Arg> 
     let mut body = String::new();
     for fragment in pair.into_inner() {
         match fragment.as_rule() {
+            Rule::block_string => body.push_str(&parse_quoted_string(fragment)?),
             Rule::quoted_string => body.push_str(&parse_quoted_string(fragment)?),
             Rule::templated_arg => body.push_str(fragment.as_str()),
             Rule::raw_text => body.push_str(&collapse_ws(fragment.as_str())),
@@ -2883,6 +2885,9 @@ fn parse_timeout_duration_arg(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResul
         let arg = match inner.as_rule() {
             Rule::timeout_literal => Arg::String(inner.as_str().to_string(), false),
             Rule::dollar_ident => Arg::Expr(Expr::Var(parse_dollar_ident(inner))),
+            Rule::block_string => {
+                Arg::String(crate::command::lower_block_string(inner.as_str()), true)
+            }
             Rule::quoted_string => Arg::String(
                 crate::command::strip_surrounding_quotes(inner.as_str()).to_string(),
                 true,
@@ -3780,9 +3785,23 @@ fn parse_argument(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> Parse
 
 fn parse_quoted_string(pair: Pair<Rule>) -> ParseResult<String> {
     let s = pair.as_str();
+    if s.starts_with("\"\"\"") {
+        return Ok(crate::command::lower_block_string(s));
+    }
     let content = &s[1..s.len() - 1];
     // Pass contents verbatim : all escape processing deferred to runtime expand_string
     Ok(content.to_string())
+}
+
+/// Unquote one string literal span: block literals dedent per the
+/// closing-indent baseline, single/double quotes strip one layer.
+/// Verbatim in both cases for runtime `expand_string`.
+fn unquote_string_literal(s: &str) -> String {
+    if s.starts_with("\"\"\"") {
+        crate::command::lower_block_string(s)
+    } else {
+        s[1..s.len() - 1].to_string()
+    }
 }
 
 /// Concatenate fragment pairs (string_literal, templated_arg, unquoted_arg, expr)
@@ -3791,8 +3810,7 @@ fn parse_quoted_string(pair: Pair<Rule>) -> ParseResult<String> {
 fn parse_fragments(parts: &[Pair<Rule>]) -> ParseResult<String> {
     // Single quoted string: unquote unconditionally
     if parts.len() == 1 && parts[0].as_rule() == Rule::string_literal {
-        let s = parts[0].as_str();
-        return Ok(s[1..s.len() - 1].to_string());
+        return Ok(unquote_string_literal(parts[0].as_str()));
     }
 
     let mut body = String::new();
@@ -3806,9 +3824,7 @@ fn parse_fragments(parts: &[Pair<Rule>]) -> ParseResult<String> {
         }
         match part.as_rule() {
             Rule::string_literal => {
-                let s = part.as_str();
-                let unquoted = &s[1..s.len() - 1];
-                body.push_str(unquoted);
+                body.push_str(&unquote_string_literal(part.as_str()));
             }
             Rule::templated_arg | Rule::unquoted_arg => {
                 body.push_str(part.as_str());
@@ -4206,7 +4222,7 @@ fn parse_func_guard(pair: Pair<Rule>) -> ParseResult<Guard> {
             Rule::env_key if saw_env_prefix => {
                 key = inner.as_str().trim().to_string();
             }
-            Rule::bare_guard_value | Rule::quoted_string => {
+            Rule::bare_guard_value | Rule::quoted_string | Rule::block_string => {
                 value = unquote(inner.as_str().trim()).to_string();
             }
             _ => {}
@@ -4219,11 +4235,15 @@ fn parse_func_guard(pair: Pair<Rule>) -> ParseResult<Guard> {
     })
 }
 
-fn unquote(s: &str) -> &str {
+fn unquote(s: &str) -> String {
+    if s.starts_with("\"\"\"") {
+        return crate::command::lower_block_string(s);
+    }
     s.strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
         .or_else(|| s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
         .unwrap_or(s)
+        .to_string()
 }
 
 fn parse_env_guard(pair: Pair<Rule>) -> ParseResult<Guard> {
@@ -4828,7 +4848,7 @@ fn parse_expr_atom(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> Pars
         Rule::block => Ok(Expr::Block(parse_block_elements_with_lower(
             ctx, inner, lctx,
         )?)),
-        Rule::string_literal | Rule::quoted_string => {
+        Rule::string_literal | Rule::quoted_string | Rule::block_string => {
             let s = parse_quoted_string(inner)?;
             Ok(Expr::Literal(Value::string(s)))
         }
@@ -5004,6 +5024,9 @@ fn parse_map_literal(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> Pa
             let mut value = None;
             for entry_inner in inner.into_inner() {
                 match entry_inner.as_rule() {
+                    Rule::string_literal | Rule::block_string => {
+                        key = parse_quoted_string(entry_inner)?;
+                    }
                     Rule::quoted_string => {
                         key = parse_quoted_string(entry_inner)?;
                     }

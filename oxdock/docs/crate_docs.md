@@ -906,6 +906,29 @@ ECHO 'semi;colon'
 ASSERT_CONTAINS stdout "semi;colon"
 ```
 
+Triple-quoted blocks span source lines for prompts, configs, and templates. A newline right after the opening delimiter strips once, shared indentation dedents to the closing delimiter baseline, and the newline before a lone closing delimiter strips once. Interpolation and backslash escapes resolve at runtime like double-quoted strings, while single and double quotes need no escaping and `\"\"\"` embeds a delimiter:
+
+```oxdock
+# Block literals hold multi-line text without joins.
+LET $prompt: STRING = """
+    SELECT *
+    FROM users
+    """
+ASSERT_EQ $prompt "SELECT *\nFROM users"
+
+# Blocks round-trip through files byte identical.
+WRITE query.txt $prompt
+LET $back: STRING = READ query.txt
+ASSERT_EQ $back $prompt
+
+# Placeholders interpolate inside blocks like quoted strings.
+LET $table: STRING = "users"
+LET $filtered: STRING = """
+    SELECT * FROM {{ $table }}
+    """
+ASSERT_EQ $filtered "SELECT * FROM users"
+```
+
 ## Guards and scoped blocks
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:

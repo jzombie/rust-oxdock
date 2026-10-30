@@ -707,6 +707,226 @@ mod tests {
     }
 
     #[test]
+    fn block_string_dedents_to_closing_baseline() {
+        let script = indoc! {r#"
+            ECHO """
+                SELECT *
+                FROM users
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "SELECT *\nFROM users"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_preserves_relative_indent_and_blank_lines() {
+        let script = indoc! {r#"
+            ECHO """
+                outer
+                    inner
+
+                after-blank
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => {
+                assert_eq!(arg.as_str(), "outer\n    inner\n\nafter-blank");
+            }
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_inline_opening_keeps_first_line() {
+        let script = indoc! {r#"
+            ECHO """hello
+                world
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "hello\nworld"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_allows_single_and_double_quotes() {
+        let script = indoc! {r#"
+            ECHO """
+                say "hi" and 'bye'
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "say \"hi\" and 'bye'"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_escape_defers_to_runtime_verbatim() {
+        let script = indoc! {r#"
+            ECHO """
+                escaped \"\"\" stays
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "escaped \\\"\\\"\\\" stays"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_keeps_templates_verbatim() {
+        let script = indoc! {r#"
+            ECHO """
+                hello {{ $name }}
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "hello {{ $name }}"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_empty_yields_empty() {
+        for script in ["ECHO \"\"\"\"\"\"", "ECHO \"\"\"\n\"\"\""] {
+            let steps = parse_script(script, test_lower).expect("parse ok");
+            match &steps[0].kind {
+                StepKind::Echo(arg) => assert_eq!(arg.as_str(), ""),
+                other => panic!("expected Echo, saw {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn block_string_crlf_normalizes_to_lf() {
+        let script = "ECHO \"\"\"\r\n    line one\r\n    line two\r\n    \"\"\"";
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "line one\nline two"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_unterminated_fails_at_opening_line() {
+        let script = "ECHO ok\nECHO \"\"\"\n    stranded\n";
+        let err = parse_script(script, test_lower).expect_err("unterminated must fail");
+        let text = format!("{err:#}");
+        assert!(text.contains("line 2"), "{text}");
+    }
+
+    #[test]
+    fn block_string_next_step_keeps_line_number() {
+        let script = indoc! {r#"
+            ECHO """
+                multi
+                line
+                """
+            ECHO after
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 2);
+        match &steps[1].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "after"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_in_let_list_map_and_call() {
+        let script = indoc! {r#"
+            LET $text: STRING = """
+                hello
+                """
+            LET $items: LIST = ["""
+                one
+                """, "two"]
+            LET $entry: MAP = {key: """
+                value
+                """}
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 3);
+        match &steps[0].kind {
+            StepKind::Assign { var, expr, .. } => {
+                assert_eq!(var, "text");
+                assert_eq!(expr, &Expr::Literal(Value::string("hello".to_string())));
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+        match &steps[1].kind {
+            StepKind::Assign { var, expr, .. } => {
+                assert_eq!(var, "items");
+                assert_eq!(
+                    expr,
+                    &Expr::List(vec![
+                        Expr::Literal(Value::string("one".to_string())),
+                        Expr::Literal(Value::string("two".to_string())),
+                    ])
+                );
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+        match &steps[2].kind {
+            StepKind::Assign { var, expr, .. } => {
+                assert_eq!(var, "entry");
+                assert_eq!(
+                    expr,
+                    &Expr::Map(vec![(
+                        "key".to_string(),
+                        Expr::Literal(Value::string("value".to_string()))
+                    )])
+                );
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_in_assignment_value() {
+        let script = indoc! {r#"
+            ENV GREETING="""
+                hi there
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Env { key, value } => {
+                assert_eq!(key, "GREETING");
+                assert_eq!(value.as_str(), "hi there");
+            }
+            other => panic!("expected Env, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_display_round_trips() {
+        let script = indoc! {r#"
+            ECHO """
+                SELECT *
+                FROM users
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        let rendered = steps[0].to_string();
+        assert!(rendered.contains("\"\"\""), "{rendered}");
+        let reparsed = parse_script(&rendered, test_lower).expect("reparse ok");
+        assert_eq!(steps, reparsed);
+    }
+
+    #[test]
     fn templated_argument_with_spaces() {
         let script = "WRITE {{ env:OXBOOK_RUNNER_DIR }}";
         let steps = parse_script(script, test_lower).expect("parse ok");

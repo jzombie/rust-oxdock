@@ -63,8 +63,8 @@ ns_guard = { ns_name ~ ":" ~ ns_value }
 ns_name = @{ guard_key_char+ }
 ns_value = @{ guard_key_char+ }
 guard_key_char = _{ !( ":" | "=" | "!" | "," | "|" | "(" | ")" | "]" | "$" | " " | "\t" | linebreak | "//" | "/*" ) ~ ANY }
-guard_value = _{ quoted_string | bare_guard_value }
-bare_guard_value = @{ (!( "," | "|" | ")" | "]" | "$" | linebreak | "//" | "/*" ) ~ ANY)+ }
+guard_value = _{ block_string | quoted_string | bare_guard_value }
+bare_guard_value = @{ !"\"\"\"" ~ (!( "," | "|" | ")" | "]" | "$" | linebreak | "//" | "/*" ) ~ ANY)+ }
 
 // Comparison and arithmetic operators (used by expression tiers in LET/IF expressions)
 eq_op = @{ "==" }
@@ -92,9 +92,15 @@ and_op = @{ "&&" }
 parenthesized_expr = ${ "(" ~ gap_nl ~ expr ~ gap_nl ~ ")" }
 
 quoted_string = @{
-    "\"" ~ ( "\\\"" | (!"\"" ~ ANY) )* ~ "\"" |
+    !"\"\"\"" ~ "\"" ~ ( "\\\"" | (!"\"" ~ ANY) )* ~ "\"" |
     "'" ~ ( "\\'" | (!"'" ~ ANY) )* ~ "'"
 }
+// Triple-quoted block literal spanning source lines. Atomic so implicit
+// whitespace and instruction terminators cannot match inside the payload;
+// `{{ }}` stays verbatim for runtime `expand_string`. Body admits single
+// `"` and `""` (negative lookahead only rejects a third `"`) and
+// backslash escapes (`\"`, `\"\"\"`) that pass through to runtime.
+block_string = @{ "\"\"\"" ~ ( "\\" ~ ANY | !"\"\"\"" ~ ANY )* ~ "\"\"\"" }
 bare_word = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/")+ }
 // Numeric literal: unsigned digits with optional fraction, Rust-style
 // `_` separators inside either run (`1_000_000`, `1_5.5_5`). No leading `-`
@@ -118,12 +124,12 @@ variable = ${ "$" ~ ident }
 key_path_segment = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHA | "_" | ASCII_DIGIT)* | ASCII_DIGIT+ }
 key_path = ${ "$" ~ ident ~ ("." ~ key_path_segment)+ }
 list_literal = ${ "[" ~ gap_nl ~ (expr ~ gap_nl ~ ("," ~ gap_nl ~ expr ~ gap_nl)*)? ~ "]" }
-map_entry = ${ (quoted_string | bare_word) ~ gap ~ ":" ~ gap ~ ws? ~ gap ~ expr }
+map_entry = ${ (block_string | quoted_string | bare_word) ~ gap ~ ":" ~ gap ~ ws? ~ gap ~ expr }
 // Maps span lines and take comments like call args and lists: entries stay
 // single-line (`key: value`), but anything between entries or braces may
 // hold newlines and `//` / `/* */` comments.
 map_literal = ${ "{" ~ gap_nl ~ (map_entry ~ gap_nl ~ ("," ~ gap_nl ~ map_entry ~ gap_nl)*)? ~ "}" }
-string_literal = { quoted_string }
+string_literal = { block_string | quoted_string }
 expr_atom = { parenthesized_expr | func_call | key_path | variable | env_read | list_literal | map_literal | block | string_literal | numeric_literal | bare_word }
 
 // Ordering level (<, <=, >, >=) — operands are additive so `+`/`-` bind
@@ -322,7 +328,7 @@ timeout_keyword = _{ "TIMEOUT" ~ !(ASCII_ALPHANUMERIC | "_") }
 // dynamics resolve (and type-check) at runtime via the declared Duration
 // arg type instead of freezing at parse.
 timeout_literal = @{ ASCII_DIGIT+ ~ ("ms" | "s" | "m" | "h")? }
-timeout_duration = { timeout_literal | dollar_ident | quoted_string | templated_arg }
+timeout_duration = { timeout_literal | dollar_ident | block_string | quoted_string | templated_arg }
 timeout_statement = ${ timeout_keyword ~ sep ~ timeout_duration ~ sep ~ (block | await_statement | cancel_statement | call_statement | while_statement | command) }
 
 // ISOLATED { ... } — run a block with a scrubbed script environment: the
@@ -430,7 +436,7 @@ gap_nl = _{ (WHITESPACE | linebreak | COMMENT | hash_comment)* }
 // literal; any other `env:` shape (lowercase keys, `$` tails) keeps the
 // historical literal reading.
 // Inner loop excludes { to prevent consuming {{ }} as a single token.
-unquoted_arg = @{ !"$" ~ !("env" ~ ":" ~ ASCII_ALPHA_UPPER) ~ !("{{") ~ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"{" ~ !"//" ~ !"/*" ~ ANY)+ }
+unquoted_arg = @{ !"$" ~ !"\"\"\"" ~ !("env" ~ ":" ~ ASCII_ALPHA_UPPER) ~ !("{{") ~ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"{" ~ !"//" ~ !"/*" ~ ANY)+ }
 
 // argument repeats to support contiguous fragments: dist/{{ $file }}.txt
 // Single expr fragment -> Arg::Expr; mixed/string fragments -> Arg::String.
@@ -447,7 +453,7 @@ templated_arg = @{ "{{" ~ (!"}}" ~ ANY)* ~ "}}" }
 // `argument` as one token and `strip_flags` splits it downstream.
 assignment = ${ !"--" ~ assign_key ~ gap ~ "=" ~ gap ~ assign_value? }
 assign_key = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/")+ }
-assign_value = { quoted_string | assign_expr | raw_fragments }
+assign_value = { block_string | quoted_string | assign_expr | raw_fragments }
 // An assignment boundary: whitespace followed by `KEY=` — the start of a
 // sibling assignment (`EXPAND K1=$x K2=$y`). Values never consume across it,
 // so multi-assignment lines split uniformly regardless of value shape (a bare
@@ -468,8 +474,8 @@ assign_expr_cont = _{ "{{" | (!assignment_boundary ~ raw_text_char) }
 // linebreak, `;`, `}` (single-line block bodies), comments, and lone `{`
 // (block starts); `{{` always opens a template fragment instead.
 raw_fragments = { raw_fragment+ }
-raw_fragment = _{ quoted_string | templated_arg | raw_text }
-raw_text = @{ raw_text_char+ }
+raw_fragment = _{ block_string | quoted_string | templated_arg | raw_text }
+raw_text = @{ !"\"\"\"" ~ raw_text_char+ }
 raw_text_char = _{ !assignment_boundary ~ (!linebreak ~ !";" ~ !"}" ~ !"{" ~ !"//" ~ !"/*" ~ ANY) }
 
 ws = _{ (WHITESPACE | linebreak)* }
