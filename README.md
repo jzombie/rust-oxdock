@@ -599,7 +599,14 @@ client or host gates them behind an explicit approval policy.
 Default-routed stdout and stderr stream to the client as
 notifications while the call runs, so anything a tool prints can
 enter client and model context: do not print secrets, pass them via
-env or files, and redact or suppress logs.
+env or files, and redact or suppress logs. Failures report the
+captured output tails inside the error text, and return values cross
+as result blocks, so a secret-bearing result (for example a minted
+`SSH_GENERATE_PASSWORD()` password) reaches the client by design
+when a tool returns one: assume anything a tool prints or returns
+may be exposed to connected clients and retained in logs or
+transcripts, and only serve secret-bearing tools where the
+deployment accounts for that egress.
 
 ## Extending OxDock from Rust
 
