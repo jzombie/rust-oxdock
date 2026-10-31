@@ -1168,7 +1168,7 @@ jobs:
           # Baseline the real PATH file, then blank CI routing: script
           # wins over the host mirror, so children see empty strings.
           LET $realgh: STRING = "{{ env:GITHUB_PATH }}"
-          LET $h0: STRING = HASH_SHA256 $realgh
+          LET $h0: STRING = HASH_SHA256($realgh)
           ENV GITHUB_PATH=""
           ENV GITHUB_ENV=""
 
@@ -1177,7 +1177,7 @@ jobs:
           [family:windows] WITH_IO [stdout=$o] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
           ASSERT_CONTAINS $o "installed oxdock {{ env:VERSION }} to "
 
-          LET $h1: STRING = HASH_SHA256 $realgh
+          LET $h1: STRING = HASH_SHA256($realgh)
           ASSERT_EQ $h1 $h0
 
           # Dangling PATH name: a file that does not exist must also
@@ -1188,7 +1188,7 @@ jobs:
           [family:windows] WITH_IO [stderr=$o2] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
           ASSERT_CONTAINS $o2 "using cached"
 
-          LET $h2: STRING = HASH_SHA256 $realgh
+          LET $h2: STRING = HASH_SHA256($realgh)
           ASSERT_EQ $h2 $h0
 
           # The product still installed and verifies directly; only the
