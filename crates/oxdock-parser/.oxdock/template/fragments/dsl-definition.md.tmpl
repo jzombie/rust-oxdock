@@ -2,7 +2,7 @@ The language is defined by two context-free lexers plus one unified
 backend, all in this crate. `tok` turns string sources (`lex_str`) and
 braced-macro token streams (`lex_tokens`) into a single `Tok` stream:
 words, strings, groups, punctuation, newlines, and comment markers with
-gap-adjacency flags, never statement decisions. `parser_v2` resolves
+gap-adjacency flags, never statement decisions. `parser` resolves
 statement boundaries from grammar state and lowers to `Step`s; shared
 lowering cores (expression folding, call resolution, instruction
 tokens, wrapper and REMOTE validators) live in `commands` and

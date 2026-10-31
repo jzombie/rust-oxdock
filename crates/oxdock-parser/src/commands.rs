@@ -4432,7 +4432,7 @@ pub(crate) fn collect_remote_kind_symbols(
 
 /// Expression lowering core, promoted verbatim from the retired pest
 /// backend: folding constructors, RPN compilation, boundary rejection,
-/// and numeric classification. The token backend (`parser_v2`) calls
+/// and numeric classification. The parser calls
 /// these directly, so folding and overflow behavior are single-sourced.
 /// Reject a staged `UnsignedIntBoundary` in any position where unary `-`
 /// cannot consume it (every composite constructor calls this on children).

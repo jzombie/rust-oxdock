@@ -6,7 +6,7 @@
    Both emit the same bespoke IR: a `Vec<Tok>` of words, strings,
    groups, punctuation, newlines, and comment markers with
    gap-adjacency flags. Neither frontend decides statement boundaries.
-2. The single parser backend (`parser_v2`) consumes only `[Tok]`
+2. The single parser backend (`parser`) consumes only `[Tok]`
    slices. It splits statements from grammar state, folds guards,
    resolves calls, and constructs `StepKind` values through the shared
    lowering cores. It never sees source text and never sees a
@@ -17,7 +17,7 @@ The shape is a V converging on `Tok`, not a funnel into `TokenStream`.
 `TokenStream` is one input domain among two, never the universal
 denominator: the parser only ever sees `Tok`. The convergence is
 proven, not assumed: the lexer-agreement oracle (`assert_parity` in
-`parser_v2` tests) runs the same script through both lexers into the
+`parser` tests) runs the same script through both lexers into the
 same backend on every case and asserts identical steps. Production
 braced entry points (`parse_braced_tokens*`) travel via the text
 rebuild (`script_from_braced_tokens` into `parse_script`), which the

@@ -1043,11 +1043,10 @@ fn parse_string_with_std_modules(s: &str) -> anyhow::Result<Vec<Step>> {
     oxdock_core::parse_script_with_modules(s, oxdock_core::std_module_table())
 }
 
-/// Unified-backend (`parser_v2`) oracle: the same string through
+/// Unified-backend oracle: the same string through
 /// `lex_str` + `parse_v2_with_ctx` under the identical table and
 /// reserved set. Every generated script must agree three ways
-/// (string/token/v2); divergences fail here before cutover instead
-/// of after.
+/// (string/token/v2); divergences fail here.
 fn parse_v2_with_std_modules(s: &str) -> anyhow::Result<Vec<Step>> {
     let table = oxdock_core::std_module_table();
     let mut reserved = oxdock_core::builtin_function_names();
@@ -1652,7 +1651,9 @@ proptest! {
         assert_steps_eq(token_step, &step, &format!("Token parse mismatch: {}", s));
         assert_steps_eq(parsed_step, token_step, &format!("Pathway mismatch: {}", s));
 
-        // 3. Unified-backend oracle (migration gate for cutover).
+        // 3. Direct token-API oracle (same backend, no entry-point
+        // adapters): catches divergences between the string entry
+        // points and the raw `Tok` API.
         let v2_steps =
             parse_v2_with_std_modules(&s).expect("failed to parse generated string via v2");
         assert_eq!(v2_steps.len(), 1);

@@ -1,7 +1,7 @@
 //! Language-level constants: the module separator, system module names,
 //! and reserved keywords.
 //!
-//! Single source of truth shared by the token backend (`parser_v2`), the
+//! Single source of truth shared by the parser (`parser`), the
 //! macro token walker (`macro_input.rs`), and the runtime registry
 //! (`oxdock-core`). Changing any of these must update exactly one
 //! definition here; the backend's structural dispatch carries the same

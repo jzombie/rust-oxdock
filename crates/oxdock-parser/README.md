@@ -12,7 +12,7 @@ Parser and AST definitions for the OxDock DSL.
    Both emit the same bespoke IR: a `Vec<Tok>` of words, strings,
    groups, punctuation, newlines, and comment markers with
    gap-adjacency flags. Neither frontend decides statement boundaries.
-2. The single parser backend (`parser_v2`) consumes only `[Tok]`
+2. The single parser backend (`parser`) consumes only `[Tok]`
    slices. It splits statements from grammar state, folds guards,
    resolves calls, and constructs `StepKind` values through the shared
    lowering cores. It never sees source text and never sees a
@@ -23,7 +23,7 @@ The shape is a V converging on `Tok`, not a funnel into `TokenStream`.
 `TokenStream` is one input domain among two, never the universal
 denominator: the parser only ever sees `Tok`. The convergence is
 proven, not assumed: the lexer-agreement oracle (`assert_parity` in
-`parser_v2` tests) runs the same script through both lexers into the
+`parser` tests) runs the same script through both lexers into the
 same backend on every case and asserts identical steps. Production
 braced entry points (`parse_braced_tokens*`) travel via the text
 rebuild (`script_from_braced_tokens` into `parse_script`), which the
@@ -37,7 +37,7 @@ The language is defined by two context-free lexers plus one unified
 backend, all in this crate. `tok` turns string sources (`lex_str`) and
 braced-macro token streams (`lex_tokens`) into a single `Tok` stream:
 words, strings, groups, punctuation, newlines, and comment markers with
-gap-adjacency flags, never statement decisions. `parser_v2` resolves
+gap-adjacency flags, never statement decisions. `parser` resolves
 statement boundaries from grammar state and lowers to `Step`s; shared
 lowering cores (expression folding, call resolution, instruction
 tokens, wrapper and REMOTE validators) live in `commands` and
