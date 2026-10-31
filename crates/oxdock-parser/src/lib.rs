@@ -75,6 +75,7 @@ pub mod test_lower_mock {
 
     pub fn lower(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
         match name {
+            "LS" => Ok(StepKind::Ls(None)),
             "WRITE" => {
                 let mut it = args.into_iter();
                 let path = it

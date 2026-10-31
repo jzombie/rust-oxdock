@@ -496,8 +496,8 @@ fn walk(
                             // A bracket opening on a later line than the
                             // previous token starts a new statement (a
                             // leading guard), even right after a bare
-                            // command: without this, `CWD` followed by
-                            // `[env:X] ECHO` glues into `CWD [env:X]`,
+                            // command: without this, `LS` followed by
+                            // `[env:X] ECHO` glues into `LS [env:X]`,
                             // dropping the guard or failing arity.
                             // Expression continuations (`=`/`IN`/etc.)
                             // still attach across lines.
@@ -1039,11 +1039,11 @@ mod tests {
     #[test]
     fn leading_guard_after_bare_command_starts_new_line() {
         // A guard opening on a later line than a bare command starts a
-        // new statement: without this, `CWD` followed by `[env:X] ECHO`
-        // glues into `CWD [env:X]` and fails arity. Found by multistep
-        // fuzz (`CWD` + guarded step); real `oxdock!` users hit the same
+        // new statement: without this, `LS` followed by `[env:X] ECHO`
+        // glues into `LS [env:X]` and fails arity. Found by multistep
+        // fuzz (`LS` + guarded step); real `oxdock!` users hit the same
         // shape writing guarded steps after bare commands.
-        let text = "CWD\n[env:X] ECHO hi";
+        let text = "LS\n[env:X] ECHO hi";
         let ts: proc_macro2::TokenStream = text.parse().expect("tokens");
         let script = script_from_braced_tokens(&ts).expect("rebuild");
         let braced = parse_braced_tokens(&ts, mock_lower).expect("braced parse");
