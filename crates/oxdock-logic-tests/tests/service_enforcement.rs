@@ -73,6 +73,9 @@ const NON_SERVICE_SSH: &[&str] = &[
     // Session-scoped like SSH_PTY_RUN: takes a session and pipes, never
     // a service name.
     "SSH_RUN",
+    // Pure randomness mint: takes no arguments at all, never a
+    // service name.
+    "SSH_GENERATE_PASSWORD",
 ];
 
 fn registration_name(registration: &HostRegistration<DefaultProcessManager>) -> &str {
