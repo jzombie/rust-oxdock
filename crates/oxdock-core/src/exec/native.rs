@@ -1126,6 +1126,11 @@ fn hash_sha256<P: ProcessManager>(
 
 /// Current working directory as a workspace-absolute path.
 ///
+/// Returns `STRING` because the result is already resolved: a `PATH`
+/// value is workspace-relative text awaiting guard checks at use time,
+/// while this directory is already checked and concrete, or absent
+/// entirely under a pending snapshot. Compare or display it as text.
+///
 /// Reports the snapshot-pending sentinel when no concrete directory
 /// exists yet, so snapshot scripts keep working unchanged.
 ///
