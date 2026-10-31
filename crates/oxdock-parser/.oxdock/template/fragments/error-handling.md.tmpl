@@ -10,7 +10,7 @@ Only a name that matches nothing in any case fails as `unknown command`.
 
 The kinds:
 
-- `PestParse`: low-level syntax the backend never reaches lowering
+- `Syntax`: low-level syntax the parser never lowers
   for (unbalanced groups, literal scans, lowercase heads). Always
   carries line plus the source line and caret; lowercase commands land
   here with an uppercase note.

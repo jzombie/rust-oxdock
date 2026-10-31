@@ -90,7 +90,7 @@ fn bare_structural_keywords_are_invalid_syntax() {
 fn lowercase_command_is_parse_error_with_uppercase_note() {
     let err = parse_script("echo hi\n", mock_lower).expect_err("must fail");
     assert!(
-        matches!(err.kind(), ParseErrorKind::PestParse),
+        matches!(err.kind(), ParseErrorKind::Syntax),
         "unexpected kind: {:?}",
         err.kind()
     );
@@ -288,7 +288,7 @@ fn block_error_inside_if_reports_inner_failure() {
     )
     .expect_err("unbalanced WHILE must fail");
     assert!(
-        matches!(err.kind(), ParseErrorKind::PestParse),
+        matches!(err.kind(), ParseErrorKind::Syntax),
         "unexpected kind: {:?}",
         err.kind()
     );
@@ -331,7 +331,7 @@ fn block_error_inside_while_reports_inner_failure() {
     )
     .expect_err("unbalanced WHILE must fail");
     assert!(
-        matches!(err.kind(), ParseErrorKind::PestParse),
+        matches!(err.kind(), ParseErrorKind::Syntax),
         "unexpected kind: {:?}",
         err.kind()
     );
@@ -469,7 +469,7 @@ fn fragmented_block_matrix_reports_inner_failure() {
             Ok(_) => panic!("case {name}: unbalanced block must fail"),
         };
         assert!(
-            matches!(err.kind(), ParseErrorKind::PestParse),
+            matches!(err.kind(), ParseErrorKind::Syntax),
             "case {name}: expected an inner grammar failure, got {:?}: {err}",
             err.kind()
         );
@@ -522,7 +522,7 @@ fn triple_nested_block_reports_past_innermost_head() {
     )
     .expect_err("unbalanced FOR must fail");
     assert!(
-        matches!(err.kind(), ParseErrorKind::PestParse),
+        matches!(err.kind(), ParseErrorKind::Syntax),
         "unexpected kind: {:?}",
         err.kind()
     );
@@ -723,7 +723,7 @@ fn dangling_unclosed_else_if_reports_inner_failure() {
     )
     .expect_err("unclosed ELSE must fail");
     assert!(
-        matches!(err.kind(), ParseErrorKind::PestParse),
+        matches!(err.kind(), ParseErrorKind::Syntax),
         "unexpected kind: {:?}",
         err.kind()
     );

@@ -48,9 +48,9 @@ pub use macro_input::{
 };
 pub use markdown::{BlockMetadata, FencedBlock, expect_error_from_info, extract_fenced_blocks};
 pub use parser::{
-    ParsedScript, V2Ctx, V2Error, parse_expression_str, parse_guard_expr_str, parse_script,
+    ParseCtx, ParsedScript, TokenError, parse_expression_str, parse_guard_expr_str, parse_script,
     parse_script_with_exports, parse_script_with_modules, parse_script_with_modules_and_exports,
-    parse_script_with_preseed, parse_v2, parse_v2_with_ctx,
+    parse_script_with_preseed, parse_tokens, parse_tokens_with_ctx,
 };
 pub use strip_flags::strip_flags;
 pub use tag::{

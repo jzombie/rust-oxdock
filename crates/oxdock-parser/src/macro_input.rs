@@ -158,7 +158,7 @@ fn current_line_command(line: &str) -> Option<Command> {
 }
 
 /// True for UPPERCASE function heads (`GREET`, `LOAD_TOML`): the token-level
-/// mirror of the `func_call_head` grammar rule.
+/// call-head rule.
 fn is_upper_func_head(text: &str) -> bool {
     let mut chars = text.chars();
     match chars.next() {

@@ -105,7 +105,7 @@ use std::fmt;
 /// failures from the shared `lower` dispatcher stringify through here
 /// so success paths compare exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct V2Error {
+pub struct TokenError {
     pub stmt: usize,
     /// 1-based source line, `0` when unknown (the split loops stamp the
     /// enclosing statement's line on the way out, so only genuinely
@@ -121,26 +121,26 @@ pub struct V2Error {
     pub kind: Option<ParseErrorKind>,
 }
 
-impl fmt::Display for V2Error {
+impl fmt::Display for TokenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "parse_v2 error in statement {}: {}",
+            "parse error in statement {}: {}",
             self.stmt + 1,
             self.msg
         )
     }
 }
 
-impl std::error::Error for V2Error {}
+impl std::error::Error for TokenError {}
 
-/// Lift a dispatcher/resolver [`ParseError`] into a [`V2Error`],
+/// Lift a dispatcher/resolver [`ParseError`] into a [`TokenError`],
 /// preserving its machine-readable classification (the entry points
 /// convert it back verbatim, so `UnknownCommand`/`InvalidSyntax`/
 /// `Validation` survive the round trip). The message is the
 /// dispatcher's own display text; the split loops stamp the line.
-fn lower_err(stmt: usize, e: ParseError) -> V2Error {
-    V2Error {
+fn lower_err(stmt: usize, e: ParseError) -> TokenError {
+    TokenError {
         stmt,
         line: 0,
         col: 0,
@@ -306,8 +306,8 @@ fn tok_newlines(tok: &Tok) -> usize {
 /// Stamp an error with the innermost statement's position when it
 /// has none yet (deeper frames stamp first, so outer frames never
 /// overwrite real positions). Each component fills independently.
-fn stamp_pos(err: V2Error, line: usize, col: usize) -> V2Error {
-    V2Error {
+fn stamp_pos(err: TokenError, line: usize, col: usize) -> TokenError {
+    TokenError {
         line: if err.line == 0 { line } else { err.line },
         col: if err.col == 0 { col } else { err.col },
         ..err
@@ -323,7 +323,7 @@ fn stamp_pos(err: V2Error, line: usize, col: usize) -> V2Error {
 /// grammar. Mid-line `//` runs and `#`/`/*` opens with an empty body
 /// skip as comments (statement position, like the grammar's silent
 /// elements); anywhere else they stay payload text for the arg engine.
-fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
+fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> {
     let mut stmts = Vec::new();
     let mut guard = Vec::new();
     let mut body: Vec<Tok> = Vec::new();
@@ -362,7 +362,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                          start_line: usize,
                          start_col: usize,
                          line: usize|
-     -> Result<(), V2Error> {
+     -> Result<(), TokenError> {
         if body.is_empty() {
             guard.clear();
             *detached = false;
@@ -386,7 +386,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                     })
                 );
             if !lone_brace {
-                return Err(V2Error {
+                return Err(TokenError {
                     stmt: *stmt_idx,
                     msg: "WITH_IO block must be followed by '{'".to_string(),
                     line: pending_line,
@@ -453,7 +453,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
         }
         if is_bare_with_io(body) {
             if pending_io.is_some() {
-                return Err(V2Error {
+                return Err(TokenError {
                     stmt: *stmt_idx,
                     msg: "previous WITH_IO block is still waiting for '{'".to_string(),
                     line,
@@ -535,7 +535,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                     continue;
                 }
                 None => {
-                    return Err(V2Error {
+                    return Err(TokenError {
                         stmt: stmt_idx,
                         msg: "unclosed block comment".to_string(),
                         line,
@@ -603,7 +603,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                     )?,
                     Ok(false) => {}
                     Err(msg) => {
-                        return Err(V2Error {
+                        return Err(TokenError {
                             stmt: stmt_idx,
                             msg,
                             line: start_line,
@@ -649,7 +649,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                     )?,
                     Ok(false) => {}
                     Err(msg) => {
-                        return Err(V2Error {
+                        return Err(TokenError {
                             stmt: stmt_idx,
                             msg,
                             line: start_line,
@@ -690,7 +690,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                     match skip_inline_comment(toks, i) {
                         Some(past) => i = past,
                         None => {
-                            return Err(V2Error {
+                            return Err(TokenError {
                                 stmt: stmt_idx,
                                 msg: "unclosed block comment".to_string(),
                                 line,
@@ -750,7 +750,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
                 line,
             )?,
             Err(msg) => {
-                return Err(V2Error {
+                return Err(TokenError {
                     stmt: stmt_idx,
                     msg,
                     line: start_line,
@@ -762,7 +762,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
     } else if !guard.is_empty() {
         // Trailing guards with no following command error (probed: a
         // lone `[env:X]` is an error), never drop silently.
-        return Err(V2Error {
+        return Err(TokenError {
             stmt: stmt_idx,
             msg: "guard declared without a following command".to_string(),
             line,
@@ -781,7 +781,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
         });
     }
     if let Some((_, _, pending_line, pending_col)) = pending_io.take() {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt: stmt_idx,
             msg: "WITH_IO block must be followed by '{'".to_string(),
             line: pending_line,
@@ -800,7 +800,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, V2Error> {
 /// Recursion handles nesting; edge joints ride along untouched. Brace
 /// groups stay put (blocks, never args). Newlines/semicolons spliced
 /// from multi-line groups fail loudly in assembly.
-fn splice_arg_groups(body: &[Tok], stmt: usize) -> Result<Vec<Tok>, V2Error> {
+fn splice_arg_groups(body: &[Tok], stmt: usize) -> Result<Vec<Tok>, TokenError> {
     let _ = stmt;
     let mut out = Vec::new();
     for tok in body.iter() {
@@ -916,7 +916,7 @@ fn at_assign_boundary(toks: &[Tok], pos: usize) -> bool {
 /// their inner bytes, blocks lowered, groups spliced. Gaps collapse
 /// to one space like `collapse_ws`; newlines/semicolons fail (the
 /// grammar's raw span excludes them).
-fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
+fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
     let mut out = String::new();
     let mut i = 0;
     while i < toks.len() {
@@ -944,7 +944,7 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
                         )
                     });
                     if brace_next {
-                        return Err(V2Error {
+                        return Err(TokenError {
                             stmt,
                             msg: "unexpected `$` in argument".to_string(),
                             line: 0,
@@ -1006,7 +1006,7 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
                 ..
             } => out.push_str(&render_group('(', ')', inner, *open_joint, *close_joint)),
             TokKind::Newline | TokKind::Semicolon => {
-                return Err(V2Error {
+                return Err(TokenError {
                     stmt,
                     msg: "unexpected line break in argument".to_string(),
                     line: 0,
@@ -1029,9 +1029,9 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
 fn build_value_arg(
     region: &[Tok],
     stmt: usize,
-    ctx: &V2Ctx,
+    ctx: &ParseCtx,
     lone_ok: bool,
-) -> Result<Arg, V2Error> {
+) -> Result<Arg, TokenError> {
     if region.is_empty() {
         return Ok(Arg::String(String::new(), false));
     }
@@ -1048,7 +1048,7 @@ fn build_value_arg(
         && matches!(&region[0].kind, TokKind::Str { .. } | TokKind::BlockStr(_))
         && region[1].joint
     {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: "unexpected text after quoted value".to_string(),
             line: 0,
@@ -1126,7 +1126,11 @@ fn try_squote_value(region: &[Tok]) -> Option<String> {
 /// Lone assignable shapes (`assign_expr` without continuation): `$var`,
 /// key paths, `env:KEY`, and full-region calls (resolved). Anything
 /// longer renders raw; the caller decides strictness.
-fn try_lone_value_expr(region: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Option<Arg>, V2Error> {
+fn try_lone_value_expr(
+    region: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<Arg>, TokenError> {
     // `$` shapes: exactly Punct+Word or dotted runs, all joint past
     // the first (the region starts at an argument start by construction).
     if matches!(region.first().map(|t| &t.kind), Some(TokKind::Punct('$'))) {
@@ -1190,7 +1194,7 @@ fn try_lone_value_expr(region: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Optio
         let args = parse_call_args(&inner, stmt, ctx)?;
         if name == "INSPECT" {
             let [arg] = args.as_slice() else {
-                return Err(V2Error {
+                return Err(TokenError {
                     stmt,
                     msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
                     line: 0,
@@ -1201,7 +1205,7 @@ fn try_lone_value_expr(region: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Optio
             if let Expr::Var(var) = arg {
                 return Ok(Some(Arg::Expr(Expr::Inspect(var.clone()))));
             }
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
                 line: 0,
@@ -1209,7 +1213,7 @@ fn try_lone_value_expr(region: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Optio
                 kind: None,
             });
         }
-        let qualified = v2_resolve(ctx, stmt, &name)?;
+        let qualified = resolve_name(ctx, stmt, &name)?;
         return Ok(Some(Arg::Expr(Expr::Call {
             name: qualified,
             args,
@@ -1228,8 +1232,8 @@ fn try_expr_arg(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(Arg, usize)>, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<Option<(Arg, usize)>, TokenError> {
     let extend = matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Punct('$')))
         || matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == "env");
     if !extend {
@@ -1293,7 +1297,11 @@ fn quoted_word_inner(w: &str) -> Option<String> {
 /// merge across gaps to the next boundary, `$`/`env:`-led runs extend
 /// as expressions, brace-led runs try templates then maps/blocks, and
 /// everything else renders raw. Single quoted strings keep their flag.
-fn build_arg_tokens(toks: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Vec<InsToken>, V2Error> {
+fn build_arg_tokens(
+    toks: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Vec<InsToken>, TokenError> {
     // Splice bracket/paren groups first: they read as ordinary
     // characters (whitespace splits inside them), with strings
     // re-quoted back to word text. Brace groups stay structural
@@ -1367,7 +1375,7 @@ fn build_arg_tokens(toks: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Vec<InsTok
                 vend += 1;
             }
             if let Some(msg) = failed {
-                return Err(V2Error {
+                return Err(TokenError {
                     stmt,
                     msg,
                     line: 0,
@@ -1506,7 +1514,7 @@ fn build_arg_tokens(toks: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Vec<InsTok
 /// verbatim text exactly like the grammar's mixed fragments (byte
 /// for byte, since joint runs admit no span gaps); an unparseable
 /// start fails loudly (the argument fails there too).
-fn parse_slash_run(run: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Arg, V2Error> {
+fn parse_slash_run(run: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Arg, TokenError> {
     let mut cur = Cursor::expr(run, stmt);
     let expr = parse_expr_checked(&mut cur, ctx)?;
     if cur.done() {
@@ -1533,10 +1541,10 @@ fn lower_generic_args(
     name: &str,
     tokens: Vec<InsToken>,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<StepKind, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<StepKind, TokenError> {
     if name == "ENV" {
-        return lower_env_tokens(&lowering_ctx(stmt), tokens).map_err(|e| V2Error {
+        return lower_env_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
             line: 0,
@@ -1545,7 +1553,7 @@ fn lower_generic_args(
         });
     }
     if name == "EXPAND" {
-        return lower_expand_tokens(&lowering_ctx(stmt), tokens).map_err(|e| V2Error {
+        return lower_expand_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
             line: 0,
@@ -1676,8 +1684,8 @@ impl<'t> Cursor<'t> {
         }
     }
 
-    fn err(&self, msg: impl Into<String>) -> V2Error {
-        V2Error {
+    fn err(&self, msg: impl Into<String>) -> TokenError {
+        TokenError {
             stmt: self.stmt,
             line: 0,
             col: 0,
@@ -1827,7 +1835,7 @@ fn key_char(c: char) -> bool {
 
 /// Consume a joint run of words/punctuation as one bare key or value.
 /// Gaps end the run; terminators and groups end or fail it per `extra`.
-fn bare_run(cur: &mut Cursor, extra: fn(char) -> bool, what: &str) -> Result<String, V2Error> {
+fn bare_run(cur: &mut Cursor, extra: fn(char) -> bool, what: &str) -> Result<String, TokenError> {
     let mut out = String::new();
     loop {
         let tok = match cur.toks.get(cur.pos) {
@@ -1855,7 +1863,7 @@ fn bare_run(cur: &mut Cursor, extra: fn(char) -> bool, what: &str) -> Result<Str
 
 /// The `guard_term` negative lookahead: a complete term followed by
 /// `(`, `:`, `=`, or `!` is malformed, never a longer form.
-fn check_term_end(cur: &mut Cursor) -> Result<(), V2Error> {
+fn check_term_end(cur: &mut Cursor) -> Result<(), TokenError> {
     cur.skip_newlines();
     match cur.toks.get(cur.pos) {
         Some(t) => match &t.kind {
@@ -1882,7 +1890,7 @@ fn os_guard(value: &str) -> GuardExpr {
 
 /// Namespace validation for guard predicates with closed domains
 /// (`family`, `os`, `arch`); open namespaces pass through.
-fn ns_guard(ns: &str, val: &str, cur: &Cursor) -> Result<GuardExpr, V2Error> {
+fn ns_guard(ns: &str, val: &str, cur: &Cursor) -> Result<GuardExpr, TokenError> {
     match ns {
         "family" => match val {
             "unix" => Ok(GuardExpr::or(vec![os_guard("macos"), os_guard("linux")])),
@@ -1917,7 +1925,7 @@ fn ns_guard(ns: &str, val: &str, cur: &Cursor) -> Result<GuardExpr, V2Error> {
     }
 }
 
-fn parse_guard_term(cur: &mut Cursor) -> Result<GuardExpr, V2Error> {
+fn parse_guard_term(cur: &mut Cursor) -> Result<GuardExpr, TokenError> {
     let tok = cur
         .next()
         .ok_or_else(|| cur.err("missing guard predicate"))?;
@@ -2035,7 +2043,7 @@ fn parse_guard_term(cur: &mut Cursor) -> Result<GuardExpr, V2Error> {
 /// span keeps them); a *leading* quote never reaches here (the
 /// caller strips it as the `quoted_string` alternative, which then
 /// requires end-of-region like the grammar's committed choice).
-fn value_run(arg: &mut Cursor) -> Result<String, V2Error> {
+fn value_run(arg: &mut Cursor) -> Result<String, TokenError> {
     let mut out = String::new();
     while let Some(tok) = arg.toks.get(arg.pos) {
         // Terminators: the grammar's negative-lookahead set.
@@ -2099,7 +2107,7 @@ fn at_call(cur: &Cursor, name: &str) -> bool {
     )
 }
 
-fn parse_guard_primary(cur: &mut Cursor) -> Result<GuardExpr, V2Error> {
+fn parse_guard_primary(cur: &mut Cursor) -> Result<GuardExpr, TokenError> {
     // Call shapes dispatch on word + paren group regardless of gap
     // width (the grammar's implicit whitespace); anything else is a term.
     for name in ["not", "any", "all"] {
@@ -2177,7 +2185,7 @@ fn parse_guard_primary(cur: &mut Cursor) -> Result<GuardExpr, V2Error> {
     }
 }
 
-fn parse_guard_seq(cur: &mut Cursor) -> Result<GuardExpr, V2Error> {
+fn parse_guard_seq(cur: &mut Cursor) -> Result<GuardExpr, TokenError> {
     let first = parse_guard_primary(cur)?;
     let mut rest = vec![first];
     while cur.eat_punct(',') {
@@ -2191,7 +2199,7 @@ fn parse_guard_seq(cur: &mut Cursor) -> Result<GuardExpr, V2Error> {
 }
 
 /// Parse one bracket group's contents as a guard expression.
-fn parse_guard_inner(inner: &[Tok], stmt: usize) -> Result<GuardExpr, V2Error> {
+fn parse_guard_inner(inner: &[Tok], stmt: usize) -> Result<GuardExpr, TokenError> {
     let mut cur = Cursor::new(inner, stmt);
     let expr = parse_guard_seq(&mut cur)?;
     if !cur.done() {
@@ -2202,8 +2210,8 @@ fn parse_guard_inner(inner: &[Tok], stmt: usize) -> Result<GuardExpr, V2Error> {
 
 /// Parse one standalone guard expression from lexed tokens (the
 /// `parse_guard_expr_str` entry point): a bare `guard_seq` with full
-/// consumption, mirroring the grammar rule exactly.
-pub(crate) fn parse_single_guard(toks: &[Tok], stmt: usize) -> Result<GuardExpr, V2Error> {
+/// consumption.
+pub(crate) fn parse_single_guard(toks: &[Tok], stmt: usize) -> Result<GuardExpr, TokenError> {
     let mut cur = Cursor::new(toks, stmt);
     if cur.done() {
         return Err(cur.err("empty guard"));
@@ -2217,7 +2225,7 @@ pub(crate) fn parse_single_guard(toks: &[Tok], stmt: usize) -> Result<GuardExpr,
 
 /// Combine a statement's leading guard groups: stacked brackets `All`
 /// together, a single bracket stands alone.
-fn parse_guard_groups(guard: &[Tok], stmt: usize) -> Result<Option<GuardExpr>, V2Error> {
+fn parse_guard_groups(guard: &[Tok], stmt: usize) -> Result<Option<GuardExpr>, TokenError> {
     let mut acc: Option<GuardExpr> = None;
     for tok in guard {
         let inner = match &tok.kind {
@@ -2227,9 +2235,9 @@ fn parse_guard_groups(guard: &[Tok], stmt: usize) -> Result<Option<GuardExpr>, V
                 ..
             } => inner.clone(),
             _ => {
-                return Err(V2Error {
+                return Err(TokenError {
                     stmt,
-                    msg: "unsupported in parse_v2 slice 2: non-bracket guard".to_string(),
+                    msg: "unsupported non-bracket guard".to_string(),
                     line: 0,
                     col: 0,
                     kind: None,
@@ -2256,7 +2264,7 @@ fn parse_guard_groups(guard: &[Tok], stmt: usize) -> Result<Option<GuardExpr>, V
 
 /// Parse context: shared lowering dispatcher plus module table for
 /// static call resolution, with `FUNC`/import frames per braced body.
-pub struct V2Ctx<'a> {
+pub struct ParseCtx<'a> {
     pub lower: &'a dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
     pub modules: &'a ModuleTable,
     /// Host-registered function names for the `FUNC` shadow check
@@ -2278,7 +2286,7 @@ pub struct V2Ctx<'a> {
     pub current_line: RefCell<usize>,
 }
 
-impl<'a> V2Ctx<'a> {
+impl<'a> ParseCtx<'a> {
     /// Context with empty tables.
     pub fn empty(
         lower: &'a dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
@@ -2344,17 +2352,17 @@ impl<'a> V2Ctx<'a> {
     }
 }
 
-fn v2_resolve(ctx: &V2Ctx, stmt: usize, name: &str) -> Result<String, V2Error> {
+fn resolve_name(ctx: &ParseCtx, stmt: usize, name: &str) -> Result<String, TokenError> {
     let (funcs, imports) = ctx.visible_snapshot();
     resolve_call_name(ctx.modules, &funcs, &imports, &lowering_ctx(stmt), name)
         .map_err(|e| lower_err(stmt, e))
 }
 
 /// Call shape at `pos`: UPPERCASE head plus joint `::` segments and a
-/// paren group (joint iff required: statements forbid the gap via
-/// `call_head_paren`; expressions allow it via `func_call`'s `gap`).
-/// Peek-only; anything else falls through exactly like the grammar's
-/// `func_call` mismatch. Returns the dotted name and paren index.
+/// paren group (joint iff required: statements forbid the gap;
+/// expressions allow it).
+/// Peek-only; anything else falls through (not a call shape).
+/// Returns the dotted name and paren index.
 fn call_shape_at(toks: &[Tok], pos: usize, joint_paren: bool) -> Option<(String, usize)> {
     let head = match toks.get(pos).map(|t| &t.kind) {
         Some(TokKind::Word(w))
@@ -2402,7 +2410,7 @@ fn call_shape_at(toks: &[Tok], pos: usize, joint_paren: bool) -> Option<(String,
 /// Call arguments over a paren group's contents: comma-separated full
 /// expressions with `gap_nl` newlines at the edges (each arg rejects
 /// a stray boundary).
-fn parse_call_args(inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Vec<Expr>, V2Error> {
+fn parse_call_args(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Vec<Expr>, TokenError> {
     let mut cur = Cursor::expr(inner, stmt);
     cur.skip_gap_nl();
     if cur.done() {
@@ -2429,11 +2437,16 @@ fn parse_call_args(inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Vec<Expr>,
 /// Lower a call-shape to `Expr`: `INSPECT` keeps its variable
 /// unevaluated; everything else
 /// resolves statically through the shared resolver.
-fn parse_expr_call(name: String, inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_expr_call(
+    name: String,
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Expr, TokenError> {
     let args = parse_call_args(inner, stmt, ctx)?;
     if name == "INSPECT" {
         let [arg] = args.as_slice() else {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
                 line: 0,
@@ -2444,7 +2457,7 @@ fn parse_expr_call(name: String, inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Res
         if let Expr::Var(var) = arg {
             return Ok(Expr::Inspect(var.clone()));
         }
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
             line: 0,
@@ -2452,7 +2465,7 @@ fn parse_expr_call(name: String, inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Res
             kind: None,
         });
     }
-    let qualified = v2_resolve(ctx, stmt, &name)?;
+    let qualified = resolve_name(ctx, stmt, &name)?;
     Ok(Expr::Call {
         name: qualified,
         args,
@@ -2469,7 +2482,11 @@ fn parse_expr_call(name: String, inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Res
 /// shared lowering decide (POSIX `[ -f ... ]` stays shell, malformed
 /// shapes fail there exactly like the grammar). Only the
 /// joint-bracket gate stays a hard error (it precedes this function).
-fn parse_run_exec_list(inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Option<Expr>, V2Error> {
+fn parse_run_exec_list(
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<Expr>, TokenError> {
     let mut cur = Cursor::expr(inner, stmt);
     cur.skip_gap();
     if cur.done() {
@@ -2502,7 +2519,7 @@ fn parse_run_exec_list(inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Option
 /// One RUN-exec item: brace groups try maps only (blocks miss);
 /// everything else parses as a full atom (nested lists and map
 /// values still admit blocks, like the grammar).
-fn parse_run_exec_atom(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Option<Expr>, V2Error> {
+fn parse_run_exec_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Option<Expr>, TokenError> {
     if matches!(
         cur.toks.get(cur.pos).map(|t| &t.kind),
         Some(TokKind::Group {
@@ -2581,7 +2598,7 @@ fn parse_timeout_duration_at(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-) -> Result<Option<(Arg, usize)>, V2Error> {
+) -> Result<Option<(Arg, usize)>, TokenError> {
     let Some(head) = toks.get(pos) else {
         return Ok(None);
     };
@@ -2616,7 +2633,7 @@ fn parse_timeout_duration_at(
         TokKind::Punct('$') => 2,
         _ => 1,
     };
-    ArgType::Duration.check_arg(&arg).map_err(|e| V2Error {
+    ArgType::Duration.check_arg(&arg).map_err(|e| TokenError {
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -2634,7 +2651,7 @@ fn parse_timeout_duration_at(
 /// Grammar-matched but invalid bindings (tty
 /// values, out-of-range geometry) fail loudly, mirroring
 /// `parse_io_binding`'s messages one by one.
-fn parse_io_bindings(inner: &[Tok], stmt: usize) -> Result<Option<Vec<IoBinding>>, V2Error> {
+fn parse_io_bindings(inner: &[Tok], stmt: usize) -> Result<Option<Vec<IoBinding>>, TokenError> {
     let mut parts: Vec<&[Tok]> = Vec::new();
     let mut start = 0;
     for (i, tok) in inner.iter().enumerate() {
@@ -2672,8 +2689,8 @@ fn parse_io_bindings(inner: &[Tok], stmt: usize) -> Result<Option<Vec<IoBinding>
 /// (atomic `dollar_ident`). Streams and size names outside the
 /// grammar's words miss the shape; a valued `tty` and out-of-range
 /// geometry fail loudly with exact messages.
-fn parse_io_binding_part(part: &[&Tok], stmt: usize) -> Result<Option<IoBinding>, V2Error> {
-    let fail = |msg: String| V2Error {
+fn parse_io_binding_part(part: &[&Tok], stmt: usize) -> Result<Option<IoBinding>, TokenError> {
+    let fail = |msg: String| TokenError {
         stmt,
         msg,
         line: 0,
@@ -2787,7 +2804,7 @@ fn parse_await_cancel_at(
     pos: usize,
     stmt: usize,
     var_joint: bool,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     let head = match toks.get(pos).map(|t| &t.kind) {
         Some(TokKind::Word(w)) if w == "AWAIT" || w == "CANCEL" => w.clone(),
         _ => return Ok(None),
@@ -2809,7 +2826,7 @@ fn parse_await_cancel_at(
             }
         }
         _ => {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: format!("{head} requires a variable"),
                 line: 0,
@@ -2849,9 +2866,9 @@ fn parse_single_inner(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
+    ctx: &ParseCtx,
     rules: InnerRules,
-) -> Result<(StepKind, usize), V2Error> {
+) -> Result<(StepKind, usize), TokenError> {
     let head_word = match toks.get(pos).map(|t| &t.kind) {
         Some(TokKind::Word(w)) => Some(w.clone()),
         _ => None,
@@ -2897,7 +2914,7 @@ fn parse_single_inner(
             crate::resolve::check_func_ident(&lowering_ctx(stmt), &call_name)
                 .map_err(|e| lower_err(stmt, e))?;
         }
-        let qualified = v2_resolve(ctx, stmt, &call_name)?;
+        let qualified = resolve_name(ctx, stmt, &call_name)?;
         return Ok((
             StepKind::Call {
                 name: qualified,
@@ -2918,7 +2935,7 @@ fn parse_single_inner(
         // Gapped like the grammar's `sep`; a joint bracket is a
         // hard error, never a spliced arg (probed `RUN["a"]`).
         if toks[pos + 1].joint {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "RUN [...] requires a gap after RUN".to_string(),
                 line: 0,
@@ -2966,7 +2983,7 @@ fn parse_single_inner(
         },
         // `INHERIT_ENV [...]` parses strictly here (shared with
         // element level); the caller either rejects the nesting or
-        // rewrites it, exactly like the finish validator. Trailing
+        // rewrites it, same as the shared validator. Trailing
         // elements loop on outside (a bad follower fails there, like
         // the grammar's line end).
         Some("INHERIT_ENV") => {
@@ -2993,7 +3010,7 @@ fn parse_single_inner(
 /// Statement-level `INHERIT_ENV` stays generic (slice 5 directives);
 /// this serves wrapper inners, where the nesting check (or the
 /// isolated rewrite) consumes the result.
-fn parse_inherit_keys(inner: &[Tok], stmt: usize) -> Result<Option<Vec<String>>, V2Error> {
+fn parse_inherit_keys(inner: &[Tok], stmt: usize) -> Result<Option<Vec<String>>, TokenError> {
     let mut parts: Vec<&[Tok]> = Vec::new();
     let mut start = 0;
     for (i, tok) in inner.iter().enumerate() {
@@ -3090,7 +3107,7 @@ fn skip_inline_comment(toks: &[Tok], pos: usize) -> Option<usize> {
 /// stays literal, a gapped one opens a trailing comment. Groups and
 /// strings render raw for the exclusion check (they read as
 /// ordinary characters here). `None` on shape miss.
-fn render_inherit_key(part: &[Tok], stmt: usize) -> Result<Option<String>, V2Error> {
+fn render_inherit_key(part: &[Tok], stmt: usize) -> Result<Option<String>, TokenError> {
     let mut out = String::new();
     let mut i = 0;
     // Key run: words, puncts (except comment opens), groups and
@@ -3168,7 +3185,7 @@ fn render_inherit_key(part: &[Tok], stmt: usize) -> Result<Option<String>, V2Err
                 j += 1;
             }
             TokKind::Punct('/') if is_comment_open(part, j) => {
-                j = skip_inline_comment(part, j).ok_or(V2Error {
+                j = skip_inline_comment(part, j).ok_or(TokenError {
                     stmt,
                     msg: "unclosed block comment".to_string(),
                     line: 0,
@@ -3209,7 +3226,7 @@ fn parse_inherit_env_at(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     // The bracket rides gapped (`sep`); anything else misses and
     // generic fails it in lowering.
     let bracket = match toks.get(pos + 1) {
@@ -3249,9 +3266,9 @@ fn parse_inherit_env_at(
 fn parse_body_steps(
     inner: &[Tok],
     stmt: usize,
-    ctx: &V2Ctx,
+    ctx: &ParseCtx,
     mark: bool,
-) -> Result<Vec<Step>, V2Error> {
+) -> Result<Vec<Step>, TokenError> {
     // One function/import scope per braced body (mirroring the
     // runtime push/pop boundary): same-block
     // `FUNC` redefinition errors, nested shadowing stays allowed.
@@ -3290,8 +3307,8 @@ fn parse_with_io_single(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     let bracket = match toks.get(pos + 1) {
         // The bracket rides gapped (`sep`); anything else misses the
         // shape and generic fails it in lowering.
@@ -3330,7 +3347,7 @@ fn parse_with_io_single(
         )
         && !is_template_brace(next)
     {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
@@ -3361,7 +3378,7 @@ fn parse_with_io_single(
         },
     )?;
     let span = lowering_ctx(stmt);
-    check_tty_wrapping(&bindings, Some(&cmd), &span).map_err(|e| V2Error {
+    check_tty_wrapping(&bindings, Some(&cmd), &span).map_err(|e| TokenError {
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -3372,7 +3389,7 @@ fn parse_with_io_single(
         bindings,
         cmd: Box::new(cmd),
     };
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| V2Error {
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -3390,8 +3407,8 @@ fn parse_timeout_single(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     let Some((duration, dused)) = parse_timeout_duration_at(toks, pos + 1, stmt)? else {
         return Ok(None);
     };
@@ -3446,7 +3463,7 @@ fn parse_timeout_single(
         body: body.0,
     };
     let span = lowering_ctx(stmt);
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| V2Error {
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -3463,8 +3480,8 @@ fn parse_isolated_single(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     let Some(next) = toks.get(pos + 1) else {
         return Ok(None);
     };
@@ -3520,8 +3537,8 @@ fn parse_async_single(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     let Some(next) = toks.get(pos + 1) else {
         return Ok(None);
     };
@@ -3541,7 +3558,7 @@ fn parse_async_single(
         };
         let body = parse_body_steps(&inner, stmt, ctx, false)?;
         let span = lowering_ctx(stmt);
-        crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| V2Error {
+        crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
             line: 0,
@@ -3549,7 +3566,7 @@ fn parse_async_single(
             kind: None,
         })?;
         let kind = StepKind::AsyncBlock { body };
-        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| V2Error {
+        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
             line: 0,
@@ -3580,7 +3597,7 @@ fn parse_async_single(
         col: 0,
     }];
     let span = lowering_ctx(stmt);
-    crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| V2Error {
+    crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| TokenError {
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -3588,7 +3605,7 @@ fn parse_async_single(
         kind: None,
     })?;
     let kind = StepKind::AsyncBlock { body };
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| V2Error {
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -3607,7 +3624,7 @@ fn parse_async_single(
 // bindings, bodies, and outer-call containment through the shared
 // validators. Guard blocks fold guards with scope markers at top
 // level and mirror the nested quirk formula in bodies. A whole-script
-// post-pass mirrors the finish validations (prelude order, COPY
+// post-pass runs the shared validations (prelude order, COPY
 // placement, EXPORT membership).
 
 /// Uppercase identifier mirror (`func_ident`, `type_name`,
@@ -3711,15 +3728,15 @@ fn parse_if_at(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     // Condition entry skips leading gap comments (`IF` uses `gap`).
     let mut lead = Cursor::expr(&toks[pos + 1..], stmt);
     lead.skip_gap();
     let mut cur = Cursor::expr(&toks[pos + 1 + lead.pos..], stmt);
     let cond = match parse_expr_checked(&mut cur, ctx) {
         Ok(expr) => expr,
-        Err(e) if e.msg.starts_with("unsupported in parse_v2") => return Err(e),
+        Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
         Err(_) => return Ok(None),
     };
     let cond_end = pos + 1 + lead.pos + cur.pos;
@@ -3767,7 +3784,7 @@ fn parse_if_at(
             ecur.skip_gap();
             let econd = match parse_expr_checked(&mut ecur, ctx) {
                 Ok(expr) => expr,
-                Err(e) if e.msg.starts_with("unsupported in parse_v2") => return Err(e),
+                Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
                 Err(_) => break,
             };
             let ebrace = p + 2 + ecur.pos;
@@ -3840,8 +3857,8 @@ fn parse_for_at(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     let mut p = pos + 1;
     let mut idents = Vec::new();
     let mut types = Vec::new();
@@ -3916,7 +3933,7 @@ fn parse_for_at(
     ecur.skip_gap();
     let in_expr = match parse_expr_checked(&mut ecur, ctx) {
         Ok(expr) => expr,
-        Err(e) if e.msg.starts_with("unsupported in parse_v2") => return Err(e),
+        Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
         Err(_) => return Ok(None),
     };
     p += ecur.pos;
@@ -3937,7 +3954,7 @@ fn parse_for_at(
     let body = parse_body_steps(&inner, stmt, ctx, false)?;
     p += 1;
     if idents.len() != types.len() {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: format!(
                 "FOR requires explicit types: FOR $item: TYPE IN <expr> (got {} vars, {} types)",
@@ -3969,7 +3986,7 @@ fn parse_for_at(
             )
         }
         _ => {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "FOR requires one or two variables".to_string(),
                 line: 0,
@@ -3984,7 +4001,7 @@ fn parse_for_at(
         && kt != "STRING"
         && kt != "INT"
     {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: format!("FOR key variable must be INT or STRING, got {kt}"),
             line: 0,
@@ -4016,12 +4033,12 @@ fn parse_while_single(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     let mut cur = Cursor::expr(&toks[pos + 1..], stmt);
     let cond = match parse_expr_checked(&mut cur, ctx) {
         Ok(expr) => expr,
-        Err(e) if e.msg.starts_with("unsupported in parse_v2") => return Err(e),
+        Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
         Err(_) => return Ok(None),
     };
     let brace = pos + 1 + cur.pos;
@@ -4057,9 +4074,9 @@ fn parse_func_at(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
-    let fail = |msg: String| V2Error {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let fail = |msg: String| TokenError {
         stmt,
         msg,
         line: 0,
@@ -4190,7 +4207,7 @@ fn parse_func_at(
 fn parse_remote_bindings(
     inner: &[Tok],
     stmt: usize,
-) -> Result<Option<(Vec<String>, Vec<String>)>, V2Error> {
+) -> Result<Option<(Vec<String>, Vec<String>)>, TokenError> {
     let _ = stmt;
     let mut parts: Vec<&[Tok]> = Vec::new();
     let mut start = 0;
@@ -4267,9 +4284,9 @@ fn parse_import_at(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<usize>, V2Error> {
-    let fail = |msg: String| V2Error {
+    ctx: &ParseCtx,
+) -> Result<Option<usize>, TokenError> {
+    let fail = |msg: String| TokenError {
         stmt,
         msg,
         line: 0,
@@ -4450,7 +4467,7 @@ fn parse_type_stmt_at(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     let name = match toks.get(pos + 1).map(|t| &t.kind) {
         Some(TokKind::Word(w)) if is_upper_ident(w) => w.clone(),
         _ => return Ok(None),
@@ -4486,9 +4503,9 @@ fn parse_remote_single(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
-    let fail = |msg: String| V2Error {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let fail = |msg: String| TokenError {
         stmt,
         msg,
         line: 0,
@@ -4665,13 +4682,13 @@ fn eat_op(cur: &mut Cursor, first: char, second: Option<char>) -> bool {
 
 /// Dummy span for the shared lowering constructors: v2 owns no source
 /// positions yet, so only success values (span-free) participate in
-/// parity; failures surface through [`V2Error`] text.
+/// parity; failures surface through [`TokenError`] text.
 fn lowering_ctx(stmt: usize) -> SpanContext<'static> {
     let _ = stmt;
     SpanContext::line_only(0)
 }
 
-fn parse_expr_or(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_expr_or(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let mut left = parse_expr_and(cur, ctx)?;
     while eat_op(cur, '|', Some('|')) {
         cur.skip_gap();
@@ -4687,7 +4704,7 @@ fn parse_expr_or(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
     Ok(left)
 }
 
-fn parse_expr_and(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_expr_and(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let mut left = parse_expr_cmp(cur, ctx)?;
     while eat_op(cur, '&', Some('&')) {
         cur.skip_gap();
@@ -4703,7 +4720,7 @@ fn parse_expr_and(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
     Ok(left)
 }
 
-fn parse_expr_cmp(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_expr_cmp(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let left = parse_expr_ord(cur, ctx)?;
     let op = if eat_op(cur, '=', Some('=')) {
         CompareOp::Eq
@@ -4727,7 +4744,7 @@ fn parse_expr_cmp(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
 /// `$a == $b < $c < $d`); the ordering tier rejects ordering only
 /// (`$a < $b < $c`), since `$a < $b == $c` is a legitimate equality
 /// over an ordering result. Probes without consuming.
-fn reject_chained_compare(cur: &mut Cursor, ordering_only: bool) -> Result<(), V2Error> {
+fn reject_chained_compare(cur: &mut Cursor, ordering_only: bool) -> Result<(), TokenError> {
     let mut probe = Cursor::expr(cur.toks, cur.stmt);
     probe.pos = cur.pos;
     probe.skip_gap();
@@ -4743,7 +4760,7 @@ fn reject_chained_compare(cur: &mut Cursor, ordering_only: bool) -> Result<(), V
     Ok(())
 }
 
-fn parse_expr_ord(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_expr_ord(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let left = parse_expr_add(cur, ctx)?;
     let op = if eat_op(cur, '<', Some('=')) {
         CompareOp::Le
@@ -4764,7 +4781,7 @@ fn parse_expr_ord(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
     Ok(expr)
 }
 
-fn parse_expr_add(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_expr_add(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let mut left = parse_expr_mul(cur, ctx)?;
     loop {
         let op = if eat_op(cur, '+', None) {
@@ -4782,7 +4799,7 @@ fn parse_expr_add(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
     Ok(left)
 }
 
-fn parse_expr_mul(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_expr_mul(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let mut left = parse_expr_unary(cur, ctx)?;
     loop {
         let op = if eat_op(cur, '*', None) {
@@ -4817,7 +4834,7 @@ fn dash_is_bare(cur: &Cursor) -> bool {
     }
 }
 
-fn parse_expr_unary(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_expr_unary(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let mut prefixes = Vec::new();
     loop {
         match cur.toks.get(cur.pos).map(|t| &t.kind) {
@@ -4881,7 +4898,7 @@ fn is_env_key(w: &str) -> bool {
 /// Backslash escapes are arg-position syntax: the bare-word shape admits
 /// no `\`, so expression runs containing one fail here (never drift
 /// into a string the grammar rejects).
-fn expr_bare_run(cur: &mut Cursor, leading_dash: bool) -> Result<String, V2Error> {
+fn expr_bare_run(cur: &mut Cursor, leading_dash: bool) -> Result<String, TokenError> {
     let mut out = String::new();
     if leading_dash {
         match cur.next() {
@@ -4990,7 +5007,7 @@ fn number_falls_to_bare(cur: &Cursor, consumed: usize) -> bool {
     }
 }
 
-fn parse_expr_atom(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     match cur.toks.get(cur.pos).map(|t| &t.kind) {
         Some(TokKind::Group {
             delim: GroupDelim::Paren,
@@ -5124,9 +5141,13 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
 }
 
 /// Bare-word atom with a `-` lead (the caller proved it is not
-/// negation): consumes the joint `-/.'/'` run for the `bare_word`
+/// negation): consumes the joint `-/.'/'` run for the bare-word
 /// shape.
-fn parse_bare_atom(cur: &mut Cursor, _ctx: &V2Ctx, leading_dash: bool) -> Result<Expr, V2Error> {
+fn parse_bare_atom(
+    cur: &mut Cursor,
+    _ctx: &ParseCtx,
+    leading_dash: bool,
+) -> Result<Expr, TokenError> {
     let text = expr_bare_run(cur, leading_dash)?;
     match text.as_str() {
         "true" => Ok(Expr::Literal(Value::bool(true))),
@@ -5138,9 +5159,9 @@ fn parse_bare_atom(cur: &mut Cursor, _ctx: &V2Ctx, leading_dash: bool) -> Result
 /// Numeric atom: rejoin dotted tails, apply the shape gate and the
 /// follower rule, then the shared classifier. Anything failing the
 /// gate or follower reparses as a bare word (durations, versions,
-/// paths), exactly like the grammar's `numeric_literal`-or-`bare_word`
+/// paths), exactly like the grammar's numeric-literal-or-bare-word
 /// order.
-fn parse_numeric_atom(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_numeric_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let start = cur.pos;
     let text = number_head(cur).ok_or_else(|| cur.err("missing expression operand"))?;
     let consumed = {
@@ -5169,7 +5190,7 @@ fn parse_numeric_atom(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
 /// Full expression with the top-level boundary rejection (mirrors
 /// `parse_expr`): a stray `UnsignedIntBoundary` that no unary `-`
 /// consumed is an overflow error.
-fn parse_expr_checked(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_expr_checked(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let expr = parse_expr_or(cur, ctx)?;
     if matches!(expr, Expr::UnsignedIntBoundary(_)) {
         return Err(cur.err("integer overflow: 9223372036854775808 exceeds i64::MAX"));
@@ -5179,7 +5200,7 @@ fn parse_expr_checked(cur: &mut Cursor, ctx: &V2Ctx) -> Result<Expr, V2Error> {
 
 /// List literal over a bracket group's contents: `gap_nl` newlines
 /// skip at the edges and after commas only, mirroring the grammar.
-fn parse_list_literal(inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_list_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let mut cur = Cursor::expr(inner, stmt);
     cur.skip_gap_nl();
     if cur.done() {
@@ -5208,7 +5229,7 @@ fn parse_list_literal(inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Expr, V
 /// Any entry failing the shape is not a map: the caller reports the
 /// deferred block slice (the grammar tries `block` next, which fails
 /// the same inputs at this stage).
-fn parse_map_literal(inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_map_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let mut entries = Vec::new();
     // Empty (or blank/comment-only) braces are an empty map.
     if inner
@@ -5251,9 +5272,9 @@ fn parse_map_literal(inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Expr, V2
     Ok(Expr::Map(entries))
 }
 
-/// Bare map key: joint `-/.'/'`-run, mirroring `bare_word` charset
+/// Bare map key: joint `-/.'/'`-run, mirroring the bare-word charset
 /// (no bool/numeric classification: keys are always strings).
-fn map_bare_key(sub: &mut Cursor) -> Result<String, V2Error> {
+fn map_bare_key(sub: &mut Cursor) -> Result<String, TokenError> {
     let mut out = String::new();
     if matches!(
         sub.toks.get(sub.pos).map(|t| &t.kind),
@@ -5307,7 +5328,7 @@ fn map_bare_key(sub: &mut Cursor) -> Result<String, V2Error> {
 /// Map-or-block over a brace group's contents: maps parse literally;
 /// anything else is an inline block (`Expr::Block` over the body
 /// steps, scopes unmarked like every braced body).
-fn parse_map_or_block(inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+fn parse_map_or_block(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     match parse_map_literal(inner, stmt, ctx) {
         Ok(map) => Ok(map),
         Err(_) => Ok(Expr::Block(parse_body_steps(inner, stmt, ctx, false)?)),
@@ -5315,10 +5336,13 @@ fn parse_map_or_block(inner: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Expr, V
 }
 
 /// Parse one standalone expression from lexed tokens (the
-/// `parse_expression_str` entry point): a full tier parse with the
-/// top-level boundary rejection and full consumption, mirroring the
-/// grammar rule exactly.
-pub(crate) fn parse_single_expr(toks: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<Expr, V2Error> {
+/// `parse_expression_str` entry point): a full tier parse with
+/// top-level boundary rejection and full consumption.
+pub(crate) fn parse_single_expr(
+    toks: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Expr, TokenError> {
     let mut cur = Cursor::expr(toks, stmt);
     let expr = parse_expr_checked(&mut cur, ctx)?;
     if !cur.done() {
@@ -5353,7 +5377,7 @@ fn find_assign_eq(body: &[Tok]) -> Option<usize> {
 
 /// Render a type region joint-aware (`LIST< MAP >` keeps its gaps for
 /// the shared canonicalizer, exactly like `type_tag.as_str()`).
-fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
+fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
     let mut out = String::new();
     for tok in toks {
         if !tok.joint && !out.is_empty() {
@@ -5363,7 +5387,7 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
             TokKind::Word(w) => out.push_str(w),
             TokKind::Punct(c) => out.push(*c),
             _ => {
-                return Err(V2Error {
+                return Err(TokenError {
                     stmt,
                     msg: "malformed type in LET".to_string(),
                     line: 0,
@@ -5374,7 +5398,7 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
         }
     }
     if out.is_empty() {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
             line: 0,
@@ -5385,7 +5409,7 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, V2Error> {
     Ok(crate::canonicalize_spelling(&out))
 }
 
-fn expect_dollar_var(cur: &mut Cursor, msg: &str) -> Result<String, V2Error> {
+fn expect_dollar_var(cur: &mut Cursor, msg: &str) -> Result<String, TokenError> {
     // Atomic `dollar_ident`: no gap between `$` and the name (the
     // enclosing statements are compound-atomic, so implicit spacing is
     // off and only explicit `gap`s admit whitespace).
@@ -5413,8 +5437,8 @@ fn expect_dollar_var(cur: &mut Cursor, msg: &str) -> Result<String, V2Error> {
 fn parse_let_body(
     body: &[Tok],
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     let mut cur = Cursor::expr(body, stmt);
     match cur.next() {
         Some(t) if matches!(&t.kind, TokKind::Word(w) if w == "LET") => {}
@@ -5476,8 +5500,8 @@ fn parse_let_rhs(
     var: String,
     decl_type: String,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<(StepKind, usize), V2Error> {
+    ctx: &ParseCtx,
+) -> Result<(StepKind, usize), TokenError> {
     // Leading gap comments vanish like the `=` gap (but a `//`/`#`
     // to end of input leaves no expression, failing).
     let mut lead = Cursor::expr(rhs, stmt);
@@ -5510,14 +5534,14 @@ fn parse_let_rhs(
         && let Some((kind, used)) = parse_timeout_single(rhs, 0, stmt, ctx)?
     {
         let span = lowering_ctx(stmt);
-        crate::commands::reject_async_in_capture(&span, &kind).map_err(|e| V2Error {
+        crate::commands::reject_async_in_capture(&span, &kind).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
             line: 0,
             col: 0,
             kind: None,
         })?;
-        crate::commands::reject_pipe_stdout_in_capture(&span, &kind).map_err(|e| V2Error {
+        crate::commands::reject_pipe_stdout_in_capture(&span, &kind).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
             line: 0,
@@ -5596,24 +5620,25 @@ fn parse_let_rhs(
         Some(head) if is_known_command(head) => {
             let (cmd, used) = parse_inner_command(rhs, stmt, ctx)?;
             let span = lowering_ctx(stmt);
-            crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| V2Error {
+            crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| TokenError {
                 stmt,
                 msg: e.to_string(),
                 line: 0,
                 col: 0,
                 kind: None,
             })?;
-            crate::commands::reject_pipe_stdout_in_capture(&span, &cmd).map_err(|e| V2Error {
-                stmt,
-                msg: e.to_string(),
-                line: 0,
-                col: 0,
-                kind: None,
+            crate::commands::reject_pipe_stdout_in_capture(&span, &cmd).map_err(|e| {
+                TokenError {
+                    stmt,
+                    msg: e.to_string(),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                }
             })?;
             // `INHERIT_ENV`-led lines land here (generic): the
-            // nesting check rejects them exactly like the finish
-            // validator (probed).
-            crate::commands::reject_nested_inherit_env(&span, &cmd).map_err(|e| V2Error {
+            // nesting check rejects them (probed).
+            crate::commands::reject_nested_inherit_env(&span, &cmd).map_err(|e| TokenError {
                 stmt,
                 msg: e.to_string(),
                 line: 0,
@@ -5656,8 +5681,8 @@ fn try_let_with_io_rhs(
     var: String,
     decl_type: String,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<Option<(StepKind, usize)>, V2Error> {
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
     let bracket = match rhs.get(1) {
         Some(t)
             if !t.joint
@@ -5681,7 +5706,7 @@ fn try_let_with_io_rhs(
         Some(bindings) => bindings,
         None => return Ok(None),
     };
-    let fail = |msg: String| V2Error {
+    let fail = |msg: String| TokenError {
         stmt,
         msg,
         line: 0,
@@ -5806,7 +5831,7 @@ fn try_let_with_io_rhs(
             body: vec![wrapped],
         };
         let span = lowering_ctx(stmt);
-        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| V2Error {
+        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
             line: 0,
@@ -5847,7 +5872,7 @@ fn try_let_with_io_rhs(
                 .to_string(),
         ));
     }
-    crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| V2Error {
+    crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| TokenError {
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -5876,10 +5901,10 @@ fn parse_let_async_rhs(
     var: String,
     decl_type: String,
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<(StepKind, usize), V2Error> {
+    ctx: &ParseCtx,
+) -> Result<(StepKind, usize), TokenError> {
     let Some(first) = rest.first() else {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: "LET $var: HANDLE = ASYNC requires a body".to_string(),
             line: 0,
@@ -5906,7 +5931,7 @@ fn parse_let_async_rhs(
             body,
         };
         let span = lowering_ctx(stmt);
-        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| V2Error {
+        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
             line: 0,
@@ -5916,7 +5941,7 @@ fn parse_let_async_rhs(
         return Ok((kind, 1));
     }
     if first.joint {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: "LET $var: HANDLE = ASYNC requires a body".to_string(),
             line: 0,
@@ -5947,7 +5972,7 @@ fn parse_let_async_rhs(
         }],
     };
     let span = lowering_ctx(stmt);
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| V2Error {
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -5957,7 +5982,11 @@ fn parse_let_async_rhs(
     Ok((kind, used))
 }
 
-fn parse_set_body(body: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<(StepKind, usize), V2Error> {
+fn parse_set_body(
+    body: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<(StepKind, usize), TokenError> {
     let mut cur = Cursor::expr(body, stmt);
     let var = expect_dollar_var(&mut cur, "mutation requires a variable: $var = <expr>")?;
     let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);
@@ -5974,7 +6003,11 @@ fn parse_set_body(body: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<(StepKind, u
     Ok((StepKind::Set { var, expr }, cur.pos))
 }
 
-fn parse_return_body(body: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<(StepKind, usize), V2Error> {
+fn parse_return_body(
+    body: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<(StepKind, usize), TokenError> {
     let mut cur = Cursor::expr(body, stmt);
     match cur.next() {
         Some(t) if matches!(&t.kind, TokKind::Word(w) if w == "RETURN") => {}
@@ -6004,10 +6037,10 @@ fn parse_return_body(body: &[Tok], stmt: usize, ctx: &V2Ctx) -> Result<(StepKind
 fn lower_stmt_steps(
     stmt: &Stmt,
     idx: usize,
-    ctx: &V2Ctx,
+    ctx: &ParseCtx,
     in_block: bool,
     mark: bool,
-) -> Result<Vec<Step>, V2Error> {
+) -> Result<Vec<Step>, TokenError> {
     let guard = parse_guard_groups(&stmt.guard, idx)?;
     // Statement-head braces route here (mid-run braces fail inside
     // the element loop): templates and guardless/bare blocks fail
@@ -6044,13 +6077,13 @@ fn parse_brace_head(
     stmt: &Stmt,
     guard: Option<GuardExpr>,
     idx: usize,
-    ctx: &V2Ctx,
+    ctx: &ParseCtx,
     in_block: bool,
     mark: bool,
-) -> Result<Vec<Step>, V2Error> {
+) -> Result<Vec<Step>, TokenError> {
     let brace = &stmt.body[0];
     if is_template_brace(brace) {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt: idx,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
@@ -6066,7 +6099,7 @@ fn parse_brace_head(
         // Attached guarded braces only: pending holds all groups but
         // the last (the block's own), mirroring the pair structure.
         if guard.is_none() || stmt.brace_detached || stmt.guard.is_empty() {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt: idx,
                 msg: "unexpected '{' in block body".to_string(),
                 line: 0,
@@ -6079,7 +6112,7 @@ fn parse_brace_head(
         if n > 1 {
             pending = parse_guard_groups(&stmt.guard[..n - 1], idx)?;
         }
-        let block_guard = parse_guard_groups(&stmt.guard[n - 1..n], idx)?.ok_or(V2Error {
+        let block_guard = parse_guard_groups(&stmt.guard[n - 1..n], idx)?.ok_or(TokenError {
             stmt: idx,
             msg: "unexpected '{' in block body".to_string(),
             line: 0,
@@ -6121,7 +6154,7 @@ fn parse_brace_head(
     // Top level: guardless braces fail; guarded braces open a guard
     // scope (each step folds outer-then-inner with markers).
     let Some(outer) = guard else {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt: idx,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
@@ -6131,7 +6164,7 @@ fn parse_brace_head(
     };
     let mut steps = parse_body_steps(&inner, idx, ctx, mark)?;
     if steps.is_empty() {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt: idx,
             msg: "guard block must contain at least one command".to_string(),
             line: 0,
@@ -6166,10 +6199,10 @@ fn parse_brace_head(
 fn parse_elements(
     toks: &[Tok],
     stmt: usize,
-    ctx: &V2Ctx,
+    ctx: &ParseCtx,
     guard: Option<GuardExpr>,
     in_block: bool,
-) -> Result<Vec<Step>, V2Error> {
+) -> Result<Vec<Step>, TokenError> {
     let mut steps = Vec::new();
     let mut pos = 0;
     // Statement guard: consumed by the first element that yields a
@@ -6203,7 +6236,7 @@ fn parse_elements(
                     continue;
                 }
                 None => {
-                    return Err(V2Error {
+                    return Err(TokenError {
                         stmt,
                         msg: "unclosed block comment".to_string(),
                         line: 0,
@@ -6223,7 +6256,7 @@ fn parse_elements(
         ) && let Some(used) = parse_import_at(toks, pos, stmt, ctx)?
         {
             if !in_block && pending_guard.is_some() {
-                return Err(V2Error {
+                return Err(TokenError {
                     stmt,
                     msg: "IMPORT cannot be guarded".to_string(),
                     line: 0,
@@ -6237,7 +6270,7 @@ fn parse_elements(
         let guard = pending_guard.take();
         let (mut got, used) = parse_element_at(toks, pos, stmt, ctx, guard, in_block)?;
         if used == 0 {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "element consumed no input".to_string(),
                 line: 0,
@@ -6258,10 +6291,10 @@ fn parse_element_at(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
+    ctx: &ParseCtx,
     first_guard: Option<GuardExpr>,
     in_block: bool,
-) -> Result<(Vec<Step>, usize), V2Error> {
+) -> Result<(Vec<Step>, usize), TokenError> {
     let step = |kind: StepKind| Step {
         guard: first_guard.clone(),
         kind,
@@ -6279,7 +6312,7 @@ fn parse_element_at(
     // `WITH_IO` wait, both consumed), so fail loudly. Statement-head
     // braces route through `lower_stmt_steps`, never here.
     if starts_brace(&toks[pos..]) {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
@@ -6393,7 +6426,7 @@ fn parse_element_at(
     // level and guard violations fail loudly like the backend.
     if head_word.as_deref() == Some("EXPORT") {
         if in_block {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "EXPORT is only allowed at the top level".to_string(),
                 line: 0,
@@ -6402,7 +6435,7 @@ fn parse_element_at(
             });
         }
         if first_guard.is_some() {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "EXPORT cannot be guarded".to_string(),
                 line: 0,
@@ -6417,7 +6450,7 @@ fn parse_element_at(
                         .map_err(|e| lower_err(stmt, e))?;
                 }
                 if ctx.exports.borrow().contains(name) {
-                    return Err(V2Error {
+                    return Err(TokenError {
                         stmt,
                         msg: format!("duplicate EXPORT `{name}`"),
                         line: 0,
@@ -6436,7 +6469,7 @@ fn parse_element_at(
     // violations fail loudly, shape misses fall to generic.
     if head_word.as_deref() == Some("TYPE") {
         if in_block {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "TYPE must appear at top level".to_string(),
                 line: 0,
@@ -6445,7 +6478,7 @@ fn parse_element_at(
             });
         }
         if first_guard.is_some() {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "TYPE cannot be guarded".to_string(),
                 line: 0,
@@ -6464,12 +6497,12 @@ fn parse_element_at(
         && let upper = head.to_ascii_uppercase()
         && (is_known_command(&upper) || crate::STRUCTURAL_KEYWORDS.contains(&upper.as_str()))
     {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: format!("command must be uppercase: found `{head}`, expected `{upper}`"),
             line: 0,
             col: 0,
-            kind: Some(ParseErrorKind::PestParse),
+            kind: Some(ParseErrorKind::Syntax),
         });
     }
     // RUN-exec ends mid-run (trailing loops on, probed); generic
@@ -6487,9 +6520,9 @@ fn parse_with_io_element(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &V2Ctx,
+    ctx: &ParseCtx,
     first_guard: Option<GuardExpr>,
-) -> Result<(Vec<Step>, usize), V2Error> {
+) -> Result<(Vec<Step>, usize), TokenError> {
     // The bracket rides gapped (`sep`); anything else misses the
     // shape and generic fails it in lowering.
     let bracket = match toks.get(pos + 1) {
@@ -6563,7 +6596,7 @@ fn parse_with_io_element(
         };
         let mut steps = parse_body_steps(&brace_inner, stmt, ctx, false)?;
         if steps.is_empty() {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "WITH_IO block must contain at least one command".to_string(),
                 line: 0,
@@ -6593,7 +6626,7 @@ fn parse_with_io_element(
         }
         let span = lowering_ctx(stmt);
         for s in &steps {
-            crate::commands::reject_nested_inherit_env(&span, &s.kind).map_err(|e| V2Error {
+            crate::commands::reject_nested_inherit_env(&span, &s.kind).map_err(|e| TokenError {
                 stmt,
                 msg: e.to_string(),
                 line: 0,
@@ -6627,7 +6660,7 @@ fn parse_with_io_element(
     // A joint follower misses the inner `sep`: the pending wait
     // fails exactly like the grammar.
     if toks[rest].joint {
-        return Err(V2Error {
+        return Err(TokenError {
             stmt,
             msg: "WITH_IO block must be followed by '{'".to_string(),
             line: 0,
@@ -6647,7 +6680,7 @@ fn parse_with_io_element(
         },
     )?;
     let span = lowering_ctx(stmt);
-    check_tty_wrapping(&bindings, Some(&cmd), &span).map_err(|e| V2Error {
+    check_tty_wrapping(&bindings, Some(&cmd), &span).map_err(|e| TokenError {
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -6658,7 +6691,7 @@ fn parse_with_io_element(
         bindings,
         cmd: Box::new(cmd),
     };
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| V2Error {
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -6679,7 +6712,7 @@ fn parse_with_io_element(
 }
 
 /// Shared inner-command parser: statement calls (joint paren, even on
-/// known commands, mirroring `call_head_paren` routing), RUN exec
+/// known commands), RUN exec
 /// form, and generic instructions. Returns the kind and tokens
 /// consumed: calls and RUN-exec end mid-run (the caller continues
 /// past them, like the grammar's `element*`); generic instructions
@@ -6689,8 +6722,8 @@ fn parse_with_io_element(
 fn parse_inner_command(
     body: &[Tok],
     stmt: usize,
-    ctx: &V2Ctx,
-) -> Result<(StepKind, usize), V2Error> {
+    ctx: &ParseCtx,
+) -> Result<(StepKind, usize), TokenError> {
     // Bare `NAME(...)` calls invoke functions with one syntax; the head
     // and `(` ride gapless or the shape stays an instruction (which
     // fails later as UnknownCommand), exactly like the grammar.
@@ -6707,7 +6740,7 @@ fn parse_inner_command(
             crate::resolve::check_func_ident(&lowering_ctx(stmt), &call_name)
                 .map_err(|e| lower_err(stmt, e))?;
         }
-        let qualified = v2_resolve(ctx, stmt, &call_name)?;
+        let qualified = resolve_name(ctx, stmt, &call_name)?;
         return Ok((
             StepKind::Call {
                 name: qualified,
@@ -6719,7 +6752,7 @@ fn parse_inner_command(
     let head = match body.first().map(|t| &t.kind) {
         Some(TokKind::Word(n)) => n.clone(),
         _ => {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "statement must open with a command word".to_string(),
                 line: 0,
@@ -6743,7 +6776,7 @@ fn parse_inner_command(
         )
     {
         if body[1].joint {
-            return Err(V2Error {
+            return Err(TokenError {
                 stmt,
                 msg: "RUN [...] requires a gap after RUN".to_string(),
                 line: 0,
@@ -6770,19 +6803,19 @@ fn parse_inner_command(
 
 /// Parse a token stream (either lexer) into steps. Markers normalize to
 /// 0/0 like the fuzz harness; scopes arrive with block slices.
-pub fn parse_v2(
+pub fn parse_tokens(
     toks: &[Tok],
     lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
-) -> Result<Vec<Step>, V2Error> {
+) -> Result<Vec<Step>, TokenError> {
     let modules = ModuleTable::default();
     let reserved = HashSet::new();
-    let ctx = V2Ctx::empty(&lower, &modules, &reserved);
-    parse_v2_with_ctx(toks, &ctx)
+    let ctx = ParseCtx::empty(&lower, &modules, &reserved);
+    parse_tokens_with_ctx(toks, &ctx)
 }
 
 /// Parse with an explicit context (module table for call resolution).
-/// `parse_v2` uses empty modules.
-pub fn parse_v2_with_ctx(toks: &[Tok], ctx: &V2Ctx) -> Result<Vec<Step>, V2Error> {
+/// `parse_tokens` uses empty modules.
+pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, TokenError> {
     let mut out = Vec::new();
     *ctx.current_line.borrow_mut() = 1;
     for (i, s) in split_statements(toks, 1)?.iter().enumerate() {
@@ -6799,7 +6832,7 @@ pub fn parse_v2_with_ctx(toks: &[Tok], ctx: &V2Ctx) -> Result<Vec<Step>, V2Error
             match &step.kind {
                 StepKind::InheritEnv { .. } => {
                     if seen_non_prelude {
-                        return Err(V2Error {
+                        return Err(TokenError {
                             stmt: out.len(),
                             msg: "INHERIT_ENV must appear before any other commands".to_string(),
                             line: 0,
@@ -6810,7 +6843,7 @@ pub fn parse_v2_with_ctx(toks: &[Tok], ctx: &V2Ctx) -> Result<Vec<Step>, V2Error
                 }
                 kind => {
                     if crate::commands::contains_inherit_env(kind) {
-                        return Err(V2Error {
+                        return Err(TokenError {
                             stmt: out.len(),
                             msg: "INHERIT_ENV cannot be nested inside other commands".to_string(),
                             line: 0,
@@ -6824,7 +6857,7 @@ pub fn parse_v2_with_ctx(toks: &[Tok], ctx: &V2Ctx) -> Result<Vec<Step>, V2Error
         }
     }
     crate::commands::validate_remote_copy_placement(&out, &lowering_ctx(out.len())).map_err(
-        |e| V2Error {
+        |e| TokenError {
             stmt: out.len(),
             msg: e.to_string(),
             line: 0,
@@ -6840,7 +6873,7 @@ pub fn parse_v2_with_ctx(toks: &[Tok], ctx: &V2Ctx) -> Result<Vec<Step>, V2Error
             &top,
             ctx.modules,
         )
-        .map_err(|e| V2Error {
+        .map_err(|e| TokenError {
             stmt: out.len(),
             msg: e.to_string(),
             line: 0,
@@ -6900,7 +6933,7 @@ fn lex_error(input: &str, e: LexError) -> ParseError {
     } else {
         Vec::new()
     };
-    ParseError::pest(e.msg, expected, None, &ctx)
+    ParseError::syntax(e.msg, expected, None, &ctx)
 }
 
 /// Convert a backend failure, preserving the dispatcher's error kind
@@ -6908,7 +6941,7 @@ fn lex_error(input: &str, e: LexError) -> ParseError {
 /// open at the statement's start column and cover its whole first line
 /// (multi-line spans clamp to the start line), so caret blocks render
 /// for every string-path error.
-fn v2_error(input: &str, e: V2Error) -> ParseError {
+fn token_error(input: &str, e: TokenError) -> ParseError {
     let line = if e.line == 0 {
         last_line(input)
     } else {
@@ -6934,8 +6967,8 @@ fn v2_error(input: &str, e: V2Error) -> ParseError {
         Some(crate::error::ParseErrorKind::Validation { command }) => {
             ParseError::validation(&command, e.msg, &ctx)
         }
-        Some(crate::error::ParseErrorKind::PestParse) => {
-            ParseError::pest(e.msg, Vec::new(), None, &ctx)
+        Some(crate::error::ParseErrorKind::Syntax) => {
+            ParseError::syntax(e.msg, Vec::new(), None, &ctx)
         }
         Some(crate::error::ParseErrorKind::Structural { rule }) => {
             ParseError::structural(&rule, e.msg, &ctx)
@@ -6956,12 +6989,12 @@ fn parse_with_ctx(
     preseed_imports: Vec<String>,
 ) -> ParseResult<(Vec<Step>, Vec<String>)> {
     let toks = lex_str(input).map_err(|e| lex_error(input, e))?;
-    let ctx = V2Ctx::empty(&lower, &modules, &reserved_names);
+    let ctx = ParseCtx::empty(&lower, &modules, &reserved_names);
     // Snippet re-parses seed their base frames so lookup behaves
     // identically; snippets never define, only read.
     ctx.funcs.borrow_mut()[0].extend(preseed_funcs);
     ctx.imports.borrow_mut()[0].extend(preseed_imports);
-    let steps = parse_v2_with_ctx(&toks, &ctx).map_err(|e| v2_error(input, e))?;
+    let steps = parse_tokens_with_ctx(&toks, &ctx).map_err(|e| token_error(input, e))?;
     let mut steps = steps;
     stamp_func_docs(input, &mut steps);
     Ok((steps, ctx.exports.borrow().clone()))
@@ -7077,16 +7110,16 @@ pub fn parse_expression_str(input: &str) -> ParseResult<Expr> {
     let modules = ModuleTable::default();
     let reserved = HashSet::new();
     let lower = crate::commands::lower_command as fn(&str, Vec<Arg>) -> ParseResult<StepKind>;
-    let ctx = V2Ctx::empty(&lower, &modules, &reserved);
+    let ctx = ParseCtx::empty(&lower, &modules, &reserved);
     *ctx.current_line.borrow_mut() = 1;
-    parse_single_expr(&toks, 0, &ctx).map_err(|e| v2_error(trimmed, e))
+    parse_single_expr(&toks, 0, &ctx).map_err(|e| token_error(trimmed, e))
 }
 
 /// Parse one guard expression from source text (a bare `guard_seq`:
 /// predicates, `not`/`any`/`all`, comma lists), for tooling and tests.
 pub fn parse_guard_expr_str(input: &str) -> ParseResult<GuardExpr> {
     let toks = lex_str(input).map_err(|e| lex_error(input, e))?;
-    parse_single_guard(&toks, 0).map_err(|e| v2_error(input, e))
+    parse_single_guard(&toks, 0).map_err(|e| token_error(input, e))
 }
 
 /// Parsed script with single-file `EXPORT` metadata. `steps` is the
@@ -7231,18 +7264,19 @@ mod tests {
 
     /// Lexer-agreement oracle: both frontends must deliver identical
     /// steps through the single backend. `parse_script` is the string
-    /// entry point; `parse_v2` runs each lexer's output directly.
+    /// entry point; `parse_tokens` runs each lexer's output directly.
     fn assert_parity(text: &str) {
         let old = crate::parse_script(text, lower)
             .unwrap_or_else(|e| panic!("backend must parse parity script {text:?}: {e}"));
         let toks = crate::tok::lex_str(text).expect("string lex must succeed");
-        let new = parse_v2(&toks, lower).unwrap_or_else(|e| panic!("v2 must parse {text:?}: {e}"));
-        assert_eq!(new, old, "v2/string-lex mismatch for {text:?}");
+        let new = parse_tokens(&toks, lower)
+            .unwrap_or_else(|e| panic!("token path must parse {text:?}: {e}"));
+        assert_eq!(new, old, "token/string-lex mismatch for {text:?}");
         #[cfg(feature = "proc-macro-api")]
         {
             let ts: proc_macro2::TokenStream = text.parse().expect("must tokenize");
             let toks = crate::tok::lex_tokens(&ts).expect("token lex must succeed");
-            let new = parse_v2(&toks, lower).expect("v2 must parse token script");
+            let new = parse_tokens(&toks, lower).expect("token path must parse token script");
             assert_eq!(new, old, "v2/token-lex mismatch for {text:?}");
         }
     }
@@ -7253,8 +7287,9 @@ mod tests {
         let old = crate::parse_script(text, lower)
             .unwrap_or_else(|e| panic!("backend must parse parity script {text:?}: {e}"));
         let toks = crate::tok::lex_str(text).expect("string lex must succeed");
-        let new = parse_v2(&toks, lower).unwrap_or_else(|e| panic!("v2 must parse {text:?}: {e}"));
-        assert_eq!(new, old, "v2/string-lex mismatch for {text:?}");
+        let new = parse_tokens(&toks, lower)
+            .unwrap_or_else(|e| panic!("token path must parse {text:?}: {e}"));
+        assert_eq!(new, old, "token/string-lex mismatch for {text:?}");
     }
 
     #[test]
@@ -7493,7 +7528,10 @@ mod tests {
         // tokenize before v2 is ever reached.
         let toks = crate::tok::lex_str("ECHO a\\nb").expect("string lex keeps escapes");
         let old = crate::parse_script("ECHO a\\nb", lower).expect("string path parses it");
-        assert_eq!(parse_v2(&toks, lower).expect("v2 parses it"), old);
+        assert_eq!(
+            parse_tokens(&toks, lower).expect("token path parses it"),
+            old
+        );
         assert!("ECHO a\\nb".parse::<proc_macro2::TokenStream>().is_err());
     }
 
@@ -7604,17 +7642,17 @@ mod tests {
                 crate::parse_script_with_modules(text, lower_fn, HashSet::new(), table.clone())
                     .unwrap_or_else(|e| panic!("backend must parse parity script {text:?}: {e}"));
             let reserved = HashSet::new();
-            let ctx = V2Ctx::empty(&lower_fn, &table, &reserved);
+            let ctx = ParseCtx::empty(&lower_fn, &table, &reserved);
             let toks = crate::tok::lex_str(text).expect("string lex must succeed");
-            let new = parse_v2_with_ctx(&toks, &ctx)
-                .unwrap_or_else(|e| panic!("v2 must parse {text:?}: {e}"));
-            assert_eq!(new, old, "v2/string-lex mismatch for {text:?}");
+            let new = parse_tokens_with_ctx(&toks, &ctx)
+                .unwrap_or_else(|e| panic!("token path must parse {text:?}: {e}"));
+            assert_eq!(new, old, "token/string-lex mismatch for {text:?}");
             #[cfg(feature = "proc-macro-api")]
             {
                 let ts: proc_macro2::TokenStream = text.parse().expect("must tokenize");
                 let toks = crate::tok::lex_tokens(&ts).expect("token lex must succeed");
-                let new = parse_v2_with_ctx(&toks, &ctx)
-                    .unwrap_or_else(|e| panic!("v2 must parse token {text:?}: {e}"));
+                let new = parse_tokens_with_ctx(&toks, &ctx)
+                    .unwrap_or_else(|e| panic!("token path must parse token {text:?}: {e}"));
                 assert_eq!(new, old, "v2/token-lex mismatch for {text:?}");
             }
         }
@@ -7674,7 +7712,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_rejects_slices_not_yet_built() {
+    fn malformed_shapes_fail_on_both_paths() {
         // Malformed shapes fail on both lexers (messages may differ;
         // success/failure must agree). Unbalanced groups fail even
         // earlier, at lex time: both layers reject, which is what the
@@ -7808,7 +7846,7 @@ mod tests {
                 }
                 Ok(toks) => {
                     assert!(
-                        parse_v2(&toks, lower).is_err(),
+                        parse_tokens(&toks, lower).is_err(),
                         "v2 must explicitly reject (not silently drift): {text:?}"
                     );
                 }
