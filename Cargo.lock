@@ -1927,8 +1927,10 @@ dependencies = [
 name = "oxdock-ssh-plugin"
 version = "0.33.0-alpha"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "bytes",
+ "hex",
  "indoc",
  "oxdock-core",
  "oxdock-fs",
