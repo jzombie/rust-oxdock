@@ -24,9 +24,8 @@ use oxdock_pty::{PtyInput, PtyOutcome, PtyRequest, WatchSize, run_pty_session};
 use oxdock_remote_proto::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
 use sha2::{Digest, Sha256};
 
-use super::SNAPSHOT_PENDING_DISPLAY;
 use super::args::parse_bool_str;
-use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
+use super::fs_ops::copy_entry;
 use super::io::{StreamHandle, TaskTee, TeeStream, write_stdout};
 use super::native::FuncBody;
 use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
@@ -1225,30 +1224,6 @@ fn restore_archive_mode(
     Ok(())
 }
 
-pub(super) fn hash_sha256<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    path: &str,
-) -> Result<()> {
-    let target = cx
-        .state
-        .fs
-        .resolve_read(&cx.state.cwd, path)
-        .with_context(|| format!("step {}: HASH_SHA256 {}", idx + 1, path))?;
-    let mut hasher = Sha256::new();
-    hash_path(cx.state.fs.as_ref(), &target, "", &mut hasher)?;
-    let digest = hasher.finalize();
-    let bytes: &[u8] = digest.as_ref();
-    write_stdout(cx.out.clone(), |writer| {
-        for b in bytes {
-            write!(writer, "{b:02x}")?;
-        }
-        writeln!(writer)?;
-        Ok(())
-    })?;
-    Ok(())
-}
-
 pub(super) fn symlink<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
@@ -1352,30 +1327,6 @@ pub(super) fn ls<P: ProcessManager>(
         for entry in &entries {
             writeln!(writer, "{}", entry.file_name().to_string_lossy())?;
         }
-        Ok(())
-    })?;
-    Ok(())
-}
-
-pub(super) fn cwd<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize) -> Result<()> {
-    // A pending snapshot has no concrete directory yet: report the stable
-    // sentinel instead of a local path or a fabricated location (issue #131).
-    if cx.state.fs.is_snapshot_pending() {
-        return write_stdout(cx.out.clone(), |writer| {
-            writeln!(writer, "{SNAPSHOT_PENDING_DISPLAY}")?;
-            Ok(())
-        });
-    }
-    let concrete = cx.state.fs.concretize_cwd(&cx.state.cwd);
-    let real = canonical_cwd(cx.state.fs.as_ref(), &concrete).with_context(|| {
-        format!(
-            "step {}: CWD failed to canonicalize {}",
-            idx + 1,
-            concrete.display()
-        )
-    })?;
-    write_stdout(cx.out.clone(), |writer| {
-        writeln!(writer, "{}", real)?;
         Ok(())
     })?;
     Ok(())
@@ -3554,13 +3505,6 @@ pub(crate) fn dispatch_ls<P: ProcessManager>(
     ls(cx, 0, &resolved)
 }
 
-pub(crate) fn dispatch_cwd<P: ProcessManager>(
-    _step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    cwd(cx, 0)
-}
-
 pub(crate) fn dispatch_read<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -3892,17 +3836,6 @@ pub(crate) fn dispatch_assert_contains<P: ProcessManager>(
     };
     let target = super::steps::resolve_assert_target(haystack, cx)?;
     assert_contains(cx, 0, 0, 0, &target, needle)
-}
-
-pub(crate) fn dispatch_hash_sha256<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::HashSha256 { path } = step else {
-        unreachable!()
-    };
-    let path_resolved = super::args::resolve_arg(path, cx)?;
-    hash_sha256(cx, 0, &path_resolved)
 }
 
 pub(crate) fn dispatch_exit<P: ProcessManager>(

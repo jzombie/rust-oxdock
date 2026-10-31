@@ -685,7 +685,6 @@ impl StepKind {
             | StepKind::Echo(arg)
             | StepKind::Run(arg)
             | StepKind::Mkdir(arg)
-            | StepKind::HashSha256 { path: arg }
             | StepKind::Exit(arg) => walk_arg(arg, f),
             StepKind::Env { value, .. } => walk_arg(value, f),
             StepKind::Copy { from, to, .. }
@@ -752,7 +751,6 @@ impl StepKind {
             | StepKind::InheritEnv { .. }
             | StepKind::Isolated { .. }
             | StepKind::IsolatedInheritEnv { .. }
-            | StepKind::Cwd
             | StepKind::ReadLine { .. }
             | StepKind::AssignCapture { .. }
             | StepKind::AwaitCapture { .. }
@@ -818,7 +816,6 @@ impl StepKind {
             | StepKind::Install { .. }
             | StepKind::Mkdir(_)
             | StepKind::Ls(_)
-            | StepKind::Cwd
             | StepKind::Read(_)
             | StepKind::ReadLine { .. }
             | StepKind::Prompt { .. }
@@ -828,7 +825,6 @@ impl StepKind {
             | StepKind::Expand { .. }
             | StepKind::AssertEq { .. }
             | StepKind::AssertContains { .. }
-            | StepKind::HashSha256 { .. }
             | StepKind::Exit(_)
             | StepKind::WithIoBlock { .. }
             | StepKind::Assign { .. }
@@ -1601,27 +1597,6 @@ declare_commands! {
         lower: |_flags, args| Ok(StepKind::Ls(args.into_iter().next())),
     ],
 
-    Cwd => [
-        name: "CWD",
-        variant: Cwd,
-        syntax: "CWD",
-        summary: "Print working directory.",
-        description: "Outputs cwd.",
-        args: &[],
-        flags: &[],
-        default_output: Some(Stream::Stdout),
-        examples: &[ Example { name: "cwd", fence_meta: None, code: indoc! {r#"
-            CWD
-
-            # CWD tracks WORKDIR: the listing names the new directory.
-            MKDIR sub
-            WORKDIR sub
-            LET $c: STRING = CWD
-            ASSERT_CONTAINS $c "sub"
-        "#} } ],
-        lower: |_flags, _args| Ok(StepKind::Cwd),
-    ],
-
     Read => [
         name: "READ",
         variant: Read(Option<Arg>),
@@ -2034,25 +2009,6 @@ declare_commands! {
             let needle = join_value(remaining, "ASSERT_CONTAINS")?;
             Ok(StepKind::AssertContains { haystack, needle })
         },
-    ],
-
-    HashSha256 => [
-        name: "HASH_SHA256",
-        variant: HashSha256 { path: Arg },
-        syntax: "HASH_SHA256 <path>",
-        summary: "Print SHA-256.",
-        description: "Computes digest.",
-        args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "File", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
-        flags: &[],
-        default_output: Some(Stream::Stdout),
-        examples: &[ Example { name: "hash", fence_meta: None, code: indoc! {r#"
-            WRITE payload.txt hello
-            HASH_SHA256 payload.txt
-
-            LET $digest: STRING = HASH_SHA256 payload.txt
-            ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
-        "#} } ],
-        lower: |_flags, args| Ok(StepKind::HashSha256 { path: args.into_iter().next().ok_or_else(|| ParseError::validation("HASH_SHA256", "HASH_SHA256 requires a path".to_string(), &SpanContext::line_only(0)))? }),
     ],
 
     Exit => [
@@ -3639,7 +3595,6 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
-            StepKind::Cwd => write!(f, "CWD"),
             StepKind::Read(a) => {
                 write!(f, "READ")?;
                 if let Some(x) = a {
@@ -3749,9 +3704,6 @@ impl fmt::Display for StepKind {
                         fmt_value(to, quote_arg)
                     )
                 }
-            }
-            StepKind::HashSha256 { path } => {
-                write!(f, "HASH_SHA256 {}", fmt_value(path, quote_arg))
             }
             StepKind::Exit(code) => write!(f, "EXIT {}", fmt_raw_arg(code)),
             StepKind::Sleep { duration } => write!(f, "SLEEP {}", fmt_raw_arg(duration)),
@@ -5635,7 +5587,6 @@ mod tests {
                 | StepKind::Unarchive { .. }
                 | StepKind::Install { .. }
                 | StepKind::Ls(_)
-                | StepKind::Cwd
                 | StepKind::Read(_)
                 | StepKind::ReadLine { .. }
                 | StepKind::Prompt { .. }
@@ -5646,7 +5597,6 @@ mod tests {
                 | StepKind::AssertEq { .. }
                 | StepKind::AssertContains { .. }
                 | StepKind::CopyGit { .. }
-                | StepKind::HashSha256 { .. }
                 | StepKind::Exit(_)
                 | StepKind::Sleep { .. }
                 | StepKind::ListAppend { .. } => None,

@@ -70,6 +70,20 @@ fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
     temp.as_guarded_path().clone()
 }
 
+fn read_exact(path: &GuardedPath) -> String {
+    let resolver = PathResolver::new(path.root(), path.root()).unwrap();
+    // Retry briefly to accommodate background tasks that may write files asynchronously.
+    for _ in 0..600 {
+        match resolver.read_to_string(path) {
+            Ok(s) => return s,
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+    resolver
+        .read_to_string(path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
+}
+
 fn read_trimmed(path: &GuardedPath) -> String {
     let resolver = PathResolver::new(path.root(), path.root()).unwrap();
     // Retry briefly to accommodate background tasks that may write files asynchronously.
@@ -723,18 +737,13 @@ fn capture_cat_emits_file_contents() {
 fn capture_cwd_canonicalizes_and_writes() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let steps = vec![Step {
-        guard: None,
-        kind: StepKind::Workdir("a/b".into()),
-        scope_enter: 0,
-        scope_exit: 0,
-        line: 0,
-        col: 0,
-    }];
-    let mut steps = steps;
-    steps.extend(capture_pipeline("cap-cwd", "pwd.txt", *parse_one("CWD")));
-
-    run_steps(&root, &steps).unwrap();
+    let script = indoc! {r#"
+        IMPORT [STD]
+        WORKDIR a/b
+        LET $c: STRING = CWD()
+        WRITE pwd.txt $c
+    "#};
+    run_script(&root, script).unwrap();
 
     let expected = PathResolver::new(root.root(), root.root())
         .unwrap()
@@ -742,7 +751,9 @@ fn capture_cwd_canonicalizes_and_writes() {
         .unwrap()
         .display()
         .to_string();
-    assert_eq!(read_trimmed(&root.join("a/b/pwd.txt").unwrap()), expected);
+    // Exact bytes: the builtin returns the bare path with no trailing
+    // newline to trim.
+    assert_eq!(read_exact(&root.join("a/b/pwd.txt").unwrap()), expected);
 }
 
 #[test]
@@ -1258,26 +1269,14 @@ fn cat_reads_file_contents_without_error() {
 fn cwd_prints_to_stdout() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let steps = vec![
-        Step {
-            guard: None,
-            kind: StepKind::Workdir("/".into()),
-            scope_enter: 0,
-            scope_exit: 0,
-            line: 0,
-            col: 0,
-        },
-        Step {
-            guard: None,
-            kind: StepKind::Cwd,
-            scope_enter: 0,
-            scope_exit: 0,
-            line: 0,
-            col: 0,
-        },
-    ];
-    // Should succeed and print the canonical cwd; we only assert it doesn't error.
-    run_steps(&root, &steps).unwrap();
+    let script = indoc! {r#"
+        IMPORT [STD]
+        WORKDIR /
+        LET $c: STRING = CWD()
+        ECHO $c
+    "#};
+    // Should succeed and resolve the canonical cwd; we only assert it doesn't error.
+    run_script(&root, script).unwrap();
 }
 
 #[test]
@@ -2743,7 +2742,6 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Archive { .. } => {}
         StepKind::Unarchive { .. } => {}
         StepKind::Ls(_) => {}
-        StepKind::Cwd => {}
         StepKind::Read(_) => {}
         StepKind::ReadLine { .. } => {}
         StepKind::Prompt { .. } => {}
@@ -2755,7 +2753,6 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::AssertContains { .. } => {}
         StepKind::WithIo { .. } => {}
         StepKind::WithIoBlock { .. } => {}
-        StepKind::HashSha256 { .. } => {}
         StepKind::Exit(_) => {}
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
@@ -2786,7 +2783,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
 fn step_kind_exhaustiveness_check() {
     // Trigger compile-time exhaustiveness: if a new StepKind variant is added
     // without updating _assert_step_kind_exhaustiveness, this will fail to compile.
-    _assert_step_kind_exhaustiveness(&StepKind::Cwd);
+    _assert_step_kind_exhaustiveness(&StepKind::Break);
 }
 
 // ---------------------------------------------------------------------------
@@ -3889,13 +3886,15 @@ fn hash_sha256_captures_output() {
     // sha256("hello")
     let expected_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
     let script = indoc! {r#"
+        IMPORT [STD]
         WRITE data.txt "hello"
-        LET $cap_hash_txt: PIPE
-        WITH_IO [stdout=$cap_hash_txt] HASH_SHA256 data.txt
-        WITH_IO [stdin=$cap_hash_txt] WRITE hash.txt
+        LET $h: STRING = HASH_SHA256("data.txt")
+        WRITE hash.txt $h
     "#};
     run_script(&root, script).expect("hash_sha256 passes");
-    assert_eq!(read_trimmed(&root.join("hash.txt").unwrap()), expected_hash);
+    // Exact bytes: the builtin returns the bare 64 hex chars with no
+    // trailing newline to trim.
+    assert_eq!(read_exact(&root.join("hash.txt").unwrap()), expected_hash);
 }
 
 // ---------------------------------------------------------------------------

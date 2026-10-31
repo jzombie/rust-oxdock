@@ -63,9 +63,7 @@ jobs:
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          LET $hp: PIPE
-          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
-          WITH_IO [stdin=$hp] READ_LINE $lock
+          LET $lock: STRING = HASH_SHA256("Cargo.lock")
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]

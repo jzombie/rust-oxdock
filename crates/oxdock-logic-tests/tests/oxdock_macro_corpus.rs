@@ -679,7 +679,6 @@ fn kind_covered(kind: &oxdock_parser::StepKind) -> bool {
         | StepKind::Echo(..)
         | StepKind::Run(..)
         | StepKind::Mkdir(..)
-        | StepKind::HashSha256 { .. }
         | StepKind::Exit(..)
         | StepKind::Env { .. }
         | StepKind::InheritEnv { .. }
@@ -692,7 +691,6 @@ fn kind_covered(kind: &oxdock_parser::StepKind) -> bool {
         | StepKind::Archive { .. }
         | StepKind::Unarchive { .. }
         | StepKind::Ls(..)
-        | StepKind::Cwd
         | StepKind::Read(..)
         | StepKind::ReadLine { .. }
         | StepKind::Prompt { .. }
@@ -743,7 +741,6 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
         | (StepKind::Echo(x), StepKind::Echo(y))
         | (StepKind::Run(x), StepKind::Run(y))
         | (StepKind::Mkdir(x), StepKind::Mkdir(y))
-        | (StepKind::HashSha256 { path: x }, StepKind::HashSha256 { path: y })
         | (StepKind::Exit(x), StepKind::Exit(y)) => arg_content_eq(x, y),
         (StepKind::Env { key: kx, value: vx }, StepKind::Env { key: ky, value: vy }) => {
             kx == ky && arg_content_eq(vx, vy)
@@ -803,7 +800,6 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
             },
         ) => arg_content_eq(sx, sy) && arg_content_eq(dx, dy),
         (StepKind::Ls(x), StepKind::Ls(y)) => opt_arg_eq(x, y),
-        (StepKind::Cwd, StepKind::Cwd) => true,
         (StepKind::Read(x), StepKind::Read(y)) => opt_arg_eq(x, y),
         (StepKind::ReadLine { var: x }, StepKind::ReadLine { var: y }) => x == y,
         (

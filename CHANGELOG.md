@@ -32,6 +32,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Changed
 
+- `HASH_SHA256` and `CWD` are STD builtins returning `STRING`, no longer
+  statement commands: `LET $digest: STRING = HASH_SHA256("payload.txt")`
+  and `LET $c: STRING = CWD()` replace the bare forms. The builtins
+  return bare values with no trailing newline (the command forms printed
+  `<hex>\n` / `<path>\n`, polluting every capture), compose in
+  expressions and RPN, and read through the same workspace guards;
+  `CWD()` keeps the snapshot-pending sentinel rule. Removed:
+  `Command::Cwd`, `Command::HashSha256`, `StepKind::Cwd`,
+  `StepKind::HashSha256`, and their dispatch arms. `ASSERT_EQ --hash`
+  is unaffected (it hashes the actual's bytes itself).
 - Parser cutover: `parse_script` and friends lower through the token backend. Error kinds are preserved verbatim (`UnknownCommand`/`InvalidSyntax`/`Validation` flow through from lowering); syntax errors report statement granularity (whole first line with source text and caret, lexer-exact positions for unbalanced groups) instead of sub-statement columns. Removed: `src/dsl.pest`, the pest lexer/backend, `LANGUAGE_SPEC`, and the `pest`/`pest_derive`/`pest_meta` dependencies.
 - Installer success report is one summary block naming the configured stem (`installed <name> <version> to <dir>`, with indented `binary:` and PATH lines) instead of two flat `ECHO` lines.
 

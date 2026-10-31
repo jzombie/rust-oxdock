@@ -2181,58 +2181,33 @@ fn exec_io_pipe_endpoints_resolve_through_handles() {
 #[test]
 fn hash_sha256_matches_known_digest_for_file() {
     // sha256("hello")
-    const HELLO_DIGEST: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-
-    let backing = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let sink: SharedOutput = backing.clone();
-    let steps = vec![
-        step(StepKind::Write {
-            path: "hello.txt".into(),
-            contents: Some("hello".into()),
-        }),
-        step(StepKind::HashSha256 {
-            path: "hello.txt".into(),
-        }),
-    ];
-    let fs = MockFs::new();
-    let mut state = create_exec_state(fs);
-    let mut proc = MockProcessManager::default();
-    execute_steps(
-        &mut state,
-        &mut proc,
-        &steps,
-        CommandStdin::Null,
-        false,
-        Some(StreamHandle::Stream(sink.clone())),
-        None,
-        None,
-        None,
-        true,
-    )
-    .expect("hash pipeline");
-
-    let produced = String::from_utf8(backing.lock().unwrap().clone()).unwrap();
-    assert_eq!(produced.trim(), HELLO_DIGEST);
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        WRITE hello.txt hello
+        LET $digest: STRING = HASH_SHA256("hello.txt")
+        ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    "#})
+    .expect("parse ok");
+    // Exact in-script equality: the builtin returns the bare 64 hex
+    // chars with no trailing newline to trim.
+    run_with_mock_fs(&steps);
 }
 
 #[test]
 fn hash_sha256_directory_digest_is_deterministic() {
     let digests: Vec<String> = (0..2)
         .map(|_| {
-            let backing = Arc::new(Mutex::new(Vec::<u8>::new()));
-            let sink: SharedOutput = backing.clone();
-            let steps = vec![
-                step(StepKind::Mkdir("pkg".into())),
-                step(StepKind::Write {
-                    path: "pkg/b.txt".into(),
-                    contents: Some("22".into()),
-                }),
-                step(StepKind::Write {
-                    path: "pkg/a.txt".into(),
-                    contents: Some("1".into()),
-                }),
-                step(StepKind::HashSha256 { path: "pkg".into() }),
-            ];
+            let steps = crate::parse_script(indoc! {r#"
+                IMPORT [STD]
+                MKDIR pkg
+                WRITE pkg/b.txt 22
+                WRITE pkg/a.txt 1
+                LET $d: STRING = HASH_SHA256("pkg")
+                LET $n: INT = TEXT_LENGTH($d)
+                ASSERT_EQ $n 64
+                WRITE hex.txt $d
+            "#})
+            .expect("parse ok");
             let temp = GuardedPath::tempdir().unwrap();
             let root = temp.as_guarded_path().clone();
             let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
@@ -2240,16 +2215,23 @@ fn hash_sha256_directory_digest_is_deterministic() {
                 fs,
                 &steps,
                 MockProcessManager::default(),
-                assemble_default_io(None, Some(sink.clone())),
+                assemble_default_io(None, None),
             )
             .expect("hash dir pipeline");
-            String::from_utf8(backing.lock().unwrap().clone()).unwrap()
+            PathResolver::new(root.as_path(), root.as_path())
+                .expect("resolver")
+                .read_to_string(&root.join("hex.txt").expect("join"))
+                .expect("read digest")
         })
         .collect();
 
     assert_eq!(digests[0], digests[1], "directory hashing must be stable");
-    let hex = digests[0].trim();
+    let hex = &digests[0];
     assert_eq!(hex.len(), 64, "full sha256 hex expected: {hex}");
+    assert!(
+        hex.chars().all(|c| c.is_ascii_hexdigit()),
+        "hex digest expected: {hex}"
+    );
 }
 
 #[test]
@@ -2762,22 +2744,14 @@ fn archive_round_trips_unix_modes() {
 fn archive_hashes_through_hash_sha256() {
     // No built-in hashing flag: the finished archive hashes like any
     // other file.
-    let backing = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let sink: SharedOutput = backing.clone();
-    let steps = vec![
-        step(StepKind::Write {
-            path: "tool.bin".into(),
-            contents: Some("tool".into()),
-        }),
-        step(StepKind::Archive {
-            src: "tool.bin".into(),
-            dst: "tool.tar.gz".into(),
-            raw: false,
-        }),
-        step(StepKind::HashSha256 {
-            path: "tool.tar.gz".into(),
-        }),
-    ];
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        WRITE tool.bin tool
+        ARCHIVE tool.bin tool.tar.gz
+        LET $hex: STRING = HASH_SHA256("tool.tar.gz")
+        WRITE hex.txt $hex
+    "#})
+    .expect("parse ok");
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
@@ -2785,11 +2759,13 @@ fn archive_hashes_through_hash_sha256() {
         fs,
         &steps,
         MockProcessManager::default(),
-        assemble_default_io(None, Some(sink.clone())),
+        assemble_default_io(None, None),
     )
     .expect("hash pipeline");
-    let hex = String::from_utf8(backing.lock().unwrap().clone()).unwrap();
-    let hex = hex.trim();
+    let hex = PathResolver::new(root.as_path(), root.as_path())
+        .expect("resolver")
+        .read_to_string(&root.join("hex.txt").expect("join"))
+        .expect("read digest");
     assert_eq!(hex.len(), 64, "full sha256 hex expected: {hex}");
     assert!(
         hex.chars().all(|c| c.is_ascii_hexdigit()),

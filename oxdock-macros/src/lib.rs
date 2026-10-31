@@ -1102,7 +1102,6 @@ fn emit_stepkind(
             };
             quote! { StepKind::Unarchive { src: #s, dst: #d, max_bytes: #m } }
         }
-        StepKind::Cwd => quote! { StepKind::Cwd },
         StepKind::AssertEq {
             hash,
             actual,
@@ -1278,10 +1277,6 @@ fn emit_stepkind(
             let f = emit_arg(from, interp);
             let t = emit_arg(to, interp);
             quote! { StepKind::CopyGit { rev: #r, from: #f, to: #t, include_dirty: #include_dirty } }
-        }
-        StepKind::HashSha256 { path } => {
-            let p = emit_arg(path, interp);
-            quote! { StepKind::HashSha256 { path: #p } }
         }
         StepKind::Exit(code) => {
             let c = emit_arg(code, interp);

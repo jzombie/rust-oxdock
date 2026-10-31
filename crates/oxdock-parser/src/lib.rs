@@ -67,7 +67,7 @@ pub use tok::{GroupDelim, LexError, Tok, TokKind, lex_str};
 /// all exercise the same command set against the same grammar.
 pub mod test_lower_mock {
     use crate::error::{ParseError, SpanContext};
-    use crate::{Arg, AssertTarget, ParseResult, StepKind, WorkspaceTarget};
+    use crate::{Arg, ParseResult, StepKind, WorkspaceTarget};
 
     fn validation(cmd: &str, msg: &str) -> ParseError {
         ParseError::validation(cmd, msg.to_string(), &SpanContext::line_only(0))
@@ -75,7 +75,7 @@ pub mod test_lower_mock {
 
     pub fn lower(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
         match name {
-            "CWD" => Ok(StepKind::Cwd),
+            "LS" => Ok(StepKind::Ls(None)),
             "WRITE" => {
                 let mut it = args.into_iter();
                 let path = it
@@ -93,38 +93,6 @@ pub mod test_lower_mock {
                     Some(Arg::String(joined, false))
                 };
                 Ok(StepKind::Write { path, contents })
-            }
-            "HASH_SHA256" => {
-                let mut a = args;
-                if a.first().map(|a| a.as_str()) == Some("--hash") {
-                    a.remove(0);
-                    let hash = a
-                        .first()
-                        .ok_or_else(|| validation("HASH_SHA256", "--hash requires value"))?
-                        .as_str()
-                        .to_string();
-                    a.remove(0);
-                    let path = a
-                        .first()
-                        .ok_or_else(|| validation("HASH_SHA256", "HASH_SHA256 requires path"))?
-                        .clone();
-                    Ok(StepKind::AssertEq {
-                        hash: Some(hash),
-                        actual: AssertTarget::Value(path),
-                        expected: None,
-                    })
-                } else {
-                    let path = a
-                        .first()
-                        .ok_or_else(|| validation("HASH_SHA256", "HASH_SHA256 requires path"))?
-                        .clone();
-                    let contents = a.get(1).cloned();
-                    Ok(StepKind::AssertEq {
-                        hash: None,
-                        actual: AssertTarget::Value(path),
-                        expected: contents,
-                    })
-                }
             }
             "ENV" => crate::commands::lower_env_assignment(args)
                 .map_err(|e| validation("ENV", &e.to_string())),
@@ -280,10 +248,10 @@ mod tests {
     fn string_dsl_supports_rust_style_comments() {
         let script = indoc! {r#"
             // leading comment line
-            CWD // inline comment
+            WRITE out.txt // inline comment
             WRITE 'echo "keep // literal"'
             /* block comment
-               CWD ignored
+               WRITE ignored
                /* nested inner */
                WRITE ignored as well
             */
@@ -292,7 +260,7 @@ mod tests {
         "#};
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 4, "expected 4 executable steps");
-        assert!(matches!(&steps[0].kind, StepKind::Cwd));
+        assert!(matches!(&steps[0].kind, StepKind::Write { .. }));
         assert!(matches!(&steps[1].kind, StepKind::Write { .. }));
         assert!(matches!(&steps[2].kind, StepKind::Write { .. }));
         assert!(matches!(&steps[3].kind, StepKind::Write { .. }));
@@ -658,8 +626,10 @@ mod tests {
 
     #[test]
     fn mock_hash_form_parses() {
-        let script = "HASH_SHA256 --hash aabb path.txt";
-        let steps = parse_script(script, test_lower).expect("parse ok");
+        // The `--hash` flag threads through real lowering into the
+        // AssertEq hash slot (the mock covers grammar, not flags).
+        let script = "ASSERT_EQ --hash aabb path.txt";
+        let steps = parse_script(script, crate::commands::lower_command).expect("parse ok");
         match &steps[0].kind {
             StepKind::AssertEq {
                 hash,
@@ -1560,7 +1530,7 @@ mod tests {
 
     #[test]
     fn guard_block_with_mock_command() {
-        let script = "CWD\n[env:GATE] {\n    WRITE gated\n}\n[eq(env:A, 1)] WRITE eq\n";
+        let script = "WRITE probe.txt\n[env:GATE] {\n    WRITE gated\n}\n[eq(env:A, 1)] WRITE eq\n";
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert!(
             steps.len() >= 2,

@@ -75,9 +75,7 @@ jobs:
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
 
-          LET $hp: PIPE
-          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
-          WITH_IO [stdin=$hp] READ_LINE $lock
+          LET $lock: STRING = HASH_SHA256("Cargo.lock")
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
 
@@ -231,9 +229,7 @@ jobs:
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $hp: PIPE
-          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
-          WITH_IO [stdin=$hp] READ_LINE $lock
+          LET $lock: STRING = HASH_SHA256("Cargo.lock")
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
@@ -326,9 +322,7 @@ jobs:
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $hp: PIPE
-          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
-          WITH_IO [stdin=$hp] READ_LINE $lock
+          LET $lock: STRING = HASH_SHA256("Cargo.lock")
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
@@ -414,9 +408,7 @@ jobs:
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $hp: PIPE
-          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
-          WITH_IO [stdin=$hp] READ_LINE $lock
+          LET $lock: STRING = HASH_SHA256("Cargo.lock")
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]

@@ -146,8 +146,8 @@ IF $has_piped {
             }
         }
     } ELSE {
-        LET $actual: STRING = HASH_SHA256 $asset
-        ASSERT_EQ $actual "{{ $want }}\n"
+        LET $actual: STRING = HASH_SHA256($asset)
+        ASSERT_EQ $actual "{{ $want }}"
 
         INSTALL $bin $dest
 

@@ -2009,31 +2009,6 @@ ASSERT_CONTAINS stdout "a.txt"
 ```
 
 
-### CWD
-
-Print working directory.
-
-**Syntax:** `CWD`
-
-Outputs cwd.
-
-**Output:** Stdout
-
-**Examples:**
-
-**Example: cwd**
-
-```oxdock
-CWD
-
-# CWD tracks WORKDIR: the listing names the new directory.
-MKDIR sub
-WORKDIR sub
-LET $c: STRING = CWD
-ASSERT_CONTAINS $c "sub"
-```
-
-
 ### READ
 
 Read file to stdout.
@@ -2455,35 +2430,6 @@ holding a `PIPE` observes its backend bytes.
 ```oxdock
 ECHO build-complete
 ASSERT_CONTAINS stdout "build-complete"
-```
-
-
-### HASH_SHA256
-
-Print SHA-256.
-
-**Syntax:** `HASH_SHA256 <path>`
-
-Computes digest.
-
-**Arguments:**
-
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `path` | [`PATH`](#value-type-path) | yes | File |
-
-**Output:** Stdout
-
-**Examples:**
-
-**Example: hash**
-
-```oxdock
-WRITE payload.txt hello
-HASH_SHA256 payload.txt
-
-LET $digest: STRING = HASH_SHA256 payload.txt
-ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
 ```
 
 
