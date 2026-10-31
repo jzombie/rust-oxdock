@@ -58,14 +58,12 @@ pub enum Command {
     Copy,
     WithIo,
     CopyGit,
-    HashSha256,
     Symlink,
     Mkdir,
     Install,
     Archive,
     Unarchive,
     Ls,
-    Cwd,
     Read,
     ReadLine,
     Prompt,
@@ -93,14 +91,12 @@ pub const COMMANDS: &[Command] = &[
     Command::Copy,
     Command::WithIo,
     Command::CopyGit,
-    Command::HashSha256,
     Command::Symlink,
     Command::Mkdir,
     Command::Install,
     Command::Archive,
     Command::Unarchive,
     Command::Ls,
-    Command::Cwd,
     Command::Read,
     Command::ReadLine,
     Command::Prompt,
@@ -136,14 +132,12 @@ impl Command {
             Command::Copy => "COPY",
             Command::WithIo => "WITH_IO",
             Command::CopyGit => "COPY_GIT",
-            Command::HashSha256 => "HASH_SHA256",
             Command::Symlink => "SYMLINK",
             Command::Mkdir => "MKDIR",
             Command::Install => "INSTALL",
             Command::Archive => "ARCHIVE",
             Command::Unarchive => "UNARCHIVE",
             Command::Ls => "LS",
-            Command::Cwd => "CWD",
             Command::Read => "READ",
             Command::ReadLine => "READ_LINE",
             Command::Prompt => "PROMPT",
@@ -173,7 +167,6 @@ impl Command {
             Command::Copy => "COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>",
             Command::CopyGit => "COPY_GIT [--include-dirty] <rev> <src> <dst>",
             Command::WithIo => "WITH_IO [bindings] [command | { block }]",
-            Command::HashSha256 => "HASH_SHA256 <path>",
             Command::Symlink => {
                 "SYMLINK [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>"
             }
@@ -182,7 +175,6 @@ impl Command {
             Command::Archive => "ARCHIVE [--raw] <src> <dst>",
             Command::Unarchive => "UNARCHIVE <src> <dst> [--max-bytes <bytes>]",
             Command::Ls => "LS [<path>]",
-            Command::Cwd => "CWD",
             Command::Read => "READ [<path>]",
             Command::ReadLine => "READ_LINE $var",
             Command::Prompt => "PROMPT $var <message> [<default>]",
@@ -223,14 +215,12 @@ impl Command {
             "COPY" => Some(Command::Copy),
             "WITH_IO" => Some(Command::WithIo),
             "COPY_GIT" => Some(Command::CopyGit),
-            "HASH_SHA256" => Some(Command::HashSha256),
             "SYMLINK" => Some(Command::Symlink),
             "MKDIR" => Some(Command::Mkdir),
             "INSTALL" => Some(Command::Install),
             "ARCHIVE" => Some(Command::Archive),
             "UNARCHIVE" => Some(Command::Unarchive),
             "LS" => Some(Command::Ls),
-            "CWD" => Some(Command::Cwd),
             "READ" => Some(Command::Read),
             "READ_LINE" => Some(Command::ReadLine),
             "PROMPT" => Some(Command::Prompt),
@@ -259,8 +249,8 @@ impl Command {
     }
 }
 
-/// Statement starters parsed by PEG rules rather than command lowering
-/// (`dsl.pest`, token-walker branches), living outside the [`Command`]
+/// Statement starters parsed structurally rather than through command
+/// lowering (token-backend dispatch), living outside the [`Command`]
 /// enum. Canonical registry backing `Command::is_statement_keyword`;
 /// iterate this (plus [`crate::all_metadata`] names) instead of
 /// hardcoding keyword lists elsewhere.
@@ -686,13 +676,35 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Step {
     pub guard: Option<GuardExpr>,
     pub kind: StepKind,
     pub scope_enter: usize,
     pub scope_exit: usize,
+    /// 1-based source line of the statement that produced this step
+    /// (`0` when unknown: hand-built steps, synthetic streams). Stamped
+    /// at lower time from the split statement, so runtime errors can
+    /// name the failing line. Never rendered by `Display` (output must
+    /// stay reparse-stable) and never compared by content equality
+    /// (provenance, like quoting flags and scope markers).
+    pub line: usize,
+    /// 1-based column where the statement starts (`0` when unknown).
+    /// Same stamping, same provenance rules as `line`; runtime errors
+    /// render both.
+    pub col: usize,
 }
+
+impl PartialEq for Step {
+    fn eq(&self, other: &Self) -> bool {
+        self.guard == other.guard
+            && self.kind == other.kind
+            && self.scope_enter == other.scope_enter
+            && self.scope_exit == other.scope_exit
+    }
+}
+
+impl Eq for Step {}
 
 impl Expr {
     /// Visit this expression and every descendant, depth first. `Block`
@@ -1226,7 +1238,10 @@ impl fmt::Display for Expr {
                 write!(f, " }}")
             }
             Expr::Compare { op, left, right } => {
-                write!(f, "{} {} {}", left, op, right)
+                // Parenthesized like `Arithmetic`/`Logical` below, so
+                // nested comparisons round-trip (`(a == b) == c` parses;
+                // `a == b == c` does not). Found by expression fuzz.
+                write!(f, "({} {} {})", left, op, right)
             }
             Expr::Arithmetic { op, left, right } => {
                 write!(f, "({} {} {})", left, op, right)
@@ -1414,82 +1429,77 @@ impl fmt::Display for Step {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Bidirectional lock between `dsl.pest` and the keyword registry.
+    /// Bidirectional lock between the token backend and the keyword registry.
     /// Fails CI if a statement keyword is renamed or deleted on either side.
-    /// The grammar is parsed with `pest_meta` (no line-format or rule-name
-    /// conventions): every [`STRUCTURAL_KEYWORDS`] entry must occur as a
-    /// string literal somewhere in the grammar, and every uppercase literal
-    /// reachable from the top-level instruction rules (`element`,
-    /// `block_element`, following rule references transitively) must
-    /// classify as a statement starter ([`Command::is_statement_keyword`])
-    /// or a clause keyword ([`CLAUSE_KEYWORDS`]). Type tags, argument
-    /// enums, and value-level function names validate at lowering time via
-    /// generic ident rules, so they are outside this test's scope by design
-    /// rather than via synthetic registries.
+    /// Every [`STRUCTURAL_KEYWORDS`] entry must be claimed by the backend:
+    /// parsing it bare either succeeds (operand-less forms like `BREAK`)
+    /// or fails structurally — never as a bare `unknown command` (issue
+    /// #143). Conversely every head the element loop treats structurally
+    /// must be registered here or in the command table.
     #[test]
-    fn statement_keywords_match_pest_grammar() {
-        use pest_meta::{ast::Expr, parser};
-        use std::collections::{HashMap, HashSet};
-
-        let pest_src = include_str!("dsl.pest");
-        let pairs = parser::parse(parser::Rule::grammar_rules, pest_src)
-            .expect("dsl.pest must parse as a pest grammar");
-        let rules = parser::consume_rules(pairs).expect("dsl.pest rules must consume");
-        let by_name: HashMap<&str, &Expr> = rules
-            .iter()
-            .map(|rule| (rule.name.as_str(), &rule.expr))
-            .collect();
-
-        let mut all_literals = HashSet::new();
-        for rule in &rules {
-            for node in rule.expr.iter_top_down() {
-                match node {
-                    Expr::Str(literal) | Expr::Insens(literal) => {
-                        all_literals.insert(literal.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
+    fn statement_keywords_match_backend() {
+        // Transparency lock: for a bare keyword the backend must never
+        // invent a failure of its own. Either it claims the shape
+        // (`BREAK`/`CONTINUE`/operand-less `RETURN` lower directly) or
+        // it routes straight to lowering and reports lowering's own
+        // kind (production lowering, which knows every structural
+        // head). A backend hard-fail shadowing lowering would fire
+        // here; kind drift between the two would fire too.
         for kw in STRUCTURAL_KEYWORDS {
-            assert!(
-                all_literals.contains(*kw),
-                "keyword {kw} in STRUCTURAL_KEYWORDS missing from dsl.pest"
-            );
-        }
-
-        let mut seen = HashSet::new();
-        let mut stack = vec!["element".to_string(), "block_element".to_string()];
-        let mut stmt_literals = HashSet::new();
-        while let Some(name) = stack.pop() {
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            let Some(expr) = by_name.get(name.as_str()) else {
-                continue;
-            };
-            for node in expr.iter_top_down() {
-                match node {
-                    Expr::Str(literal) | Expr::Insens(literal) => {
-                        stmt_literals.insert(literal.clone());
-                    }
-                    Expr::Ident(dependency) => stack.push(dependency.clone()),
-                    _ => {}
+            let via_backend = crate::parse_script(kw, crate::commands::lower_command);
+            let via_lowering =
+                crate::commands::lower_command(kw, Vec::new()).map(|kind| crate::Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                    line: 0,
+                    col: 0,
+                });
+            match (via_backend, via_lowering) {
+                (Ok(_), _) => {}
+                (Err(a), Err(b)) => {
+                    assert_eq!(
+                        a.kind(),
+                        b.kind(),
+                        "backend kind drift for bare keyword {kw}: {a} vs {b}"
+                    );
+                }
+                (Err(a), Ok(_)) => {
+                    panic!("backend rejects bare keyword {kw} that lowering accepts: {a}")
                 }
             }
         }
-        assert!(
-            seen.contains("element") && seen.contains("block_element"),
-            "grammar must define element and block_element instruction rules"
-        );
-        for kw in stmt_literals {
-            if kw.len() > 1 && kw.chars().all(|c| c.is_ascii_uppercase()) {
-                assert!(
-                    crate::Command::is_statement_keyword(&kw)
-                        || CLAUSE_KEYWORDS.contains(&kw.as_str()),
-                    "uppercase literal \"{kw}\" reachable from dsl.pest instruction rules is not a registered statement or clause keyword"
-                );
-            }
+        // Heads the element loop dispatches structurally (not through
+        // generic lowering) must stay registered; update this list with
+        // the dispatch when adding a head.
+        for head in [
+            "LET",
+            "RETURN",
+            "BREAK",
+            "CONTINUE",
+            "IF",
+            "FOR",
+            "WHILE",
+            "FUNC",
+            "REMOTE",
+            "INHERIT_ENV",
+            "WITH_IO",
+            "ASYNC",
+            "TIMEOUT",
+            "ISOLATED",
+            "AWAIT",
+            "CANCEL",
+            "RUN",
+            "IMPORT",
+            "EXPORT",
+            "TYPE",
+        ] {
+            assert!(
+                STRUCTURAL_KEYWORDS.contains(&head)
+                    || crate::all_metadata().iter().any(|m| m.name == head),
+                "structural head {head} is not registered"
+            );
         }
     }
 

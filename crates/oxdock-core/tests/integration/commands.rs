@@ -29,6 +29,8 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -41,6 +43,8 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -56,12 +60,28 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ]
 }
 
 fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
     temp.as_guarded_path().clone()
+}
+
+fn read_exact(path: &GuardedPath) -> String {
+    let resolver = PathResolver::new(path.root(), path.root()).unwrap();
+    // Retry briefly to accommodate background tasks that may write files asynchronously.
+    for _ in 0..600 {
+        match resolver.read_to_string(path) {
+            Ok(s) => return s,
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+    resolver
+        .read_to_string(path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
 }
 
 fn read_trimmed(path: &GuardedPath) -> String {
@@ -250,18 +270,24 @@ fn commands_behave_cross_platform() {
             kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Mkdir("client".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Mkdir("client/dist".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -271,6 +297,8 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -280,12 +308,16 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Run(run_cmd.into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -295,10 +327,14 @@ fn commands_behave_cross_platform() {
                     kind: StepKind::Run(bg_cmd.into()),
                     scope_enter: 0,
                     scope_exit: 0,
+                    line: 0,
+                    col: 0,
                 }],
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -311,6 +347,8 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -321,24 +359,32 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Ls(Some("client".into())),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("client/dist".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Echo("echo from workdir".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -348,18 +394,24 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workspace(WorkspaceTarget::Local),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -369,18 +421,24 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workspace(WorkspaceTarget::Snapshot),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -390,6 +448,8 @@ fn commands_behave_cross_platform() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
 
@@ -538,12 +598,16 @@ fn exit_stops_pipeline_and_reports_code() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Exit(oxdock_parser::Arg::String("9".to_string(), false)),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -553,6 +617,8 @@ fn exit_stops_pipeline_and_reports_code() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
 
@@ -605,6 +671,8 @@ fn capture_echo_interpolates_env() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
     let mut steps = steps;
     steps.extend(capture_pipeline(
@@ -631,6 +699,8 @@ fn capture_ls_lists_entries_with_header() {
         kind: StepKind::Workdir("items".into()),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
     let mut steps = steps;
     steps.extend(capture_pipeline("cap-ls", "ls.txt", *parse_one("LS")));
@@ -667,16 +737,13 @@ fn capture_cat_emits_file_contents() {
 fn capture_cwd_canonicalizes_and_writes() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let steps = vec![Step {
-        guard: None,
-        kind: StepKind::Workdir("a/b".into()),
-        scope_enter: 0,
-        scope_exit: 0,
-    }];
-    let mut steps = steps;
-    steps.extend(capture_pipeline("cap-cwd", "pwd.txt", *parse_one("CWD")));
-
-    run_steps(&root, &steps).unwrap();
+    let script = indoc! {r#"
+        IMPORT [STD]
+        WORKDIR a/b
+        LET $c: STRING = CWD()
+        WRITE pwd.txt $c
+    "#};
+    run_script(&root, script).unwrap();
 
     let expected = PathResolver::new(root.root(), root.root())
         .unwrap()
@@ -684,7 +751,9 @@ fn capture_cwd_canonicalizes_and_writes() {
         .unwrap()
         .display()
         .to_string();
-    assert_eq!(read_trimmed(&root.join("a/b/pwd.txt").unwrap()), expected);
+    // Exact bytes: the builtin returns the bare path with no trailing
+    // newline to trim.
+    assert_eq!(read_exact(&root.join("a/b/pwd.txt").unwrap()), expected);
 }
 
 #[test]
@@ -913,6 +982,8 @@ fn workdir_cannot_escape_root() {
         kind: StepKind::Workdir("../".into()),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let err = run_steps(&root, &steps).unwrap_err();
@@ -935,6 +1006,8 @@ fn write_cannot_escape_root() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let err = run_steps(&root, &steps).unwrap_err();
@@ -971,6 +1044,8 @@ fn read_cannot_escape_root() {
         kind: StepKind::Read(Some("../secret.txt".into())),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let err = run_steps(&root, &steps).unwrap_err();
@@ -1025,6 +1100,8 @@ fn read_symlink_escape_is_blocked() {
         kind: StepKind::Read(Some("leak.txt".into())),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let err = run_steps(&root, &steps).unwrap_err();
@@ -1062,6 +1139,8 @@ fn workdir_accepts_symlink_into_workspace_root() {
             kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -1072,12 +1151,16 @@ fn workdir_accepts_symlink_into_workspace_root() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("client".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
 
@@ -1134,6 +1217,8 @@ fn write_missing_path_cannot_escape_root() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let err = run_steps(&root, &steps).unwrap_err();
@@ -1153,6 +1238,8 @@ fn workdir_creates_missing_dirs_within_root() {
         kind: StepKind::Workdir("a/b/c".into()),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     run_steps(&root, &steps).unwrap();
@@ -1170,6 +1257,8 @@ fn cat_reads_file_contents_without_error() {
         kind: StepKind::Read(Some("file.txt".into())),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     // This should succeed and emit contents to stdout; we only verify it does not error.
@@ -1180,22 +1269,14 @@ fn cat_reads_file_contents_without_error() {
 fn cwd_prints_to_stdout() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let steps = vec![
-        Step {
-            guard: None,
-            kind: StepKind::Workdir("/".into()),
-            scope_enter: 0,
-            scope_exit: 0,
-        },
-        Step {
-            guard: None,
-            kind: StepKind::Cwd,
-            scope_enter: 0,
-            scope_exit: 0,
-        },
-    ];
-    // Should succeed and print the canonical cwd; we only assert it doesn't error.
-    run_steps(&root, &steps).unwrap();
+    let script = indoc! {r#"
+        IMPORT [STD]
+        WORKDIR /
+        LET $c: STRING = CWD()
+        ECHO $c
+    "#};
+    // Should succeed and resolve the canonical cwd; we only assert it doesn't error.
+    run_script(&root, script).unwrap();
 }
 
 #[test]
@@ -1218,6 +1299,8 @@ fn cat_reads_stdin_with_io() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     let mut io_cfg = ExecIo::new();
@@ -2099,7 +2182,7 @@ fn prompt_without_default_fails_closed_on_non_tty() {
     let err = run_script_headless(&root, "PROMPT $dir \"Install destination?\"")
         .expect_err("headless prompt without default must fail");
     assert!(
-        err.to_string().contains("non-TTY"),
+        format!("{err:#}").contains("non-TTY"),
         "failure names the non-TTY: {err}"
     );
 }
@@ -2156,7 +2239,7 @@ fn prompt_with_redirected_stdin_ignores_host_tty() {
     )
     .expect_err("redirected stdin without default must fail");
     assert!(
-        err.to_string().contains("non-TTY"),
+        format!("{err:#}").contains("non-TTY"),
         "failure names the non-TTY: {err}"
     );
 }
@@ -2458,6 +2541,32 @@ fn run_exec_nonzero_status_bails_with_step_context() {
     );
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "spawns processes; Miri does not support process execution"
+)]
+#[test]
+fn failing_step_reports_source_line_and_column() {
+    // Coordinates ride on the steps: a runtime failure names the
+    // statement's source line and column, not just its index. The
+    // failing command sits on line 2 (indoc strips the margin).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    let steps = oxdock_core::parse_script(indoc! {r#"
+        ECHO banner
+        RUN ["cargo", "--invalid-oxdock-flag-xyz"]
+    "#})
+    .unwrap();
+    let err = run_steps(&root, &steps).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("step 2, line 2, col 1"),
+        "error must name line+col, got: {msg}"
+    );
+    assert!(msg.contains("failed with status"), "got: {msg}");
+}
+
 // ---------------------------------------------------------------------------
 // Grouped numerics survive every coercion and arithmetic they touch.
 // ---------------------------------------------------------------------------
@@ -2633,7 +2742,6 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Archive { .. } => {}
         StepKind::Unarchive { .. } => {}
         StepKind::Ls(_) => {}
-        StepKind::Cwd => {}
         StepKind::Read(_) => {}
         StepKind::ReadLine { .. } => {}
         StepKind::Prompt { .. } => {}
@@ -2645,7 +2753,6 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::AssertContains { .. } => {}
         StepKind::WithIo { .. } => {}
         StepKind::WithIoBlock { .. } => {}
-        StepKind::HashSha256 { .. } => {}
         StepKind::Exit(_) => {}
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
@@ -2676,7 +2783,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
 fn step_kind_exhaustiveness_check() {
     // Trigger compile-time exhaustiveness: if a new StepKind variant is added
     // without updating _assert_step_kind_exhaustiveness, this will fail to compile.
-    _assert_step_kind_exhaustiveness(&StepKind::Cwd);
+    _assert_step_kind_exhaustiveness(&StepKind::Break);
 }
 
 // ---------------------------------------------------------------------------
@@ -3779,13 +3886,15 @@ fn hash_sha256_captures_output() {
     // sha256("hello")
     let expected_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
     let script = indoc! {r#"
+        IMPORT [STD]
         WRITE data.txt "hello"
-        LET $cap_hash_txt: PIPE
-        WITH_IO [stdout=$cap_hash_txt] HASH_SHA256 data.txt
-        WITH_IO [stdin=$cap_hash_txt] WRITE hash.txt
+        LET $h: STRING = HASH_SHA256("data.txt")
+        WRITE hash.txt $h
     "#};
     run_script(&root, script).expect("hash_sha256 passes");
-    assert_eq!(read_trimmed(&root.join("hash.txt").unwrap()), expected_hash);
+    // Exact bytes: the builtin returns the bare 64 hex chars with no
+    // trailing newline to trim.
+    assert_eq!(read_exact(&root.join("hash.txt").unwrap()), expected_hash);
 }
 
 // ---------------------------------------------------------------------------
@@ -4076,6 +4185,8 @@ fn read_large_file_streams_without_oom() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -4088,6 +4199,8 @@ fn read_large_file_streams_without_oom() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -4103,6 +4216,8 @@ fn read_large_file_streams_without_oom() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     run_steps_with_context(&root, &root, &io_steps).expect("read pipeline");
@@ -4131,6 +4246,8 @@ fn read_stdin_streaming_via_pipe() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -4141,6 +4258,8 @@ fn read_stdin_streaming_via_pipe() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -4153,6 +4272,8 @@ fn read_stdin_streaming_via_pipe() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -4168,6 +4289,8 @@ fn read_stdin_streaming_via_pipe() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
     run_steps_with_context(&root, &root, &steps).expect("pipe read pipeline");

@@ -74,18 +74,15 @@ fn let_capture_hash_sha256() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        IMPORT [STD]
         WRITE data.txt payload
-        LET $sha: STRING = HASH_SHA256 data.txt
-        WRITE sha.txt "{{ $sha }}"
+        LET $sha: STRING = HASH_SHA256("data.txt")
+        WRITE sha.txt $sha
     "#};
     run_script(&root, script).expect("capture HASH_SHA256");
     let sha = read_file(&root.join("sha.txt").unwrap());
-    // HASH_SHA256 prints "<hex>\n"; capture keeps exact bytes.
-    assert!(
-        sha.ends_with('\n'),
-        "capture keeps trailing newline, got {sha:?}"
-    );
-    let sha = sha.trim_end();
+    // The builtin returns the bare digest: exact 64 hex chars, no
+    // trailing newline to trim.
     assert_eq!(sha.len(), 64, "sha256 hex digest, got {sha:?}");
     assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "{sha:?}");
 }

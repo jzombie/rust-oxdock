@@ -44,3 +44,27 @@ with `{"a": 2, "b": 3}` resolves `{"result": 5}`, and `ECHO`
 output streams live instead of landing in the result. Wire shapes,
 the detach pattern for long calls, and reload semantics live in
 [crates/oxdock-mcp/README.md](./crates/oxdock-mcp/README.md).
+
+Only serve scripts you trust. Exports and `#` docs become the MCP
+tool surface verbatim (names, descriptions, schemas), so a script
+author controls what an MCP client shows its model. Treat a served
+script like installed software, not data. Script docs are untrusted
+model input when the script source is: prefer allowlisted scripts
+you curate, and sanitize or rewrite descriptions before exposing
+them to an LLM-facing client, since no filtering at this layer
+makes untrusted provider text safe to show one. A `tools/call`
+dispatches straight into the live session with no per-call
+confirmation here, so keep high-impact capabilities (`RUN`, `NET`,
+`SSH`, filesystem mutation) out of served scripts unless your
+client or host gates them behind an explicit approval policy.
+Default-routed stdout and stderr stream to the client as
+notifications while the call runs, so anything a tool prints can
+enter client and model context: do not print secrets, pass them via
+env or files, and redact or suppress logs. Failures report the
+captured output tails inside the error text, and return values cross
+as result blocks, so a secret-bearing result (for example a minted
+`SSH_GENERATE_PASSWORD()` password) reaches the client by design
+when a tool returns one: assume anything a tool prints or returns
+may be exposed to connected clients and retained in logs or
+transcripts, and only serve secret-bearing tools where the
+deployment accounts for that egress.

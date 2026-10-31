@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.33.0-alpha] - TBD
+
+### Added
+
+- `SSH_GENERATE_PASSWORD()` (SSH plugin): mint a random server password (256-bit OS-RNG key material, 64 hex chars) for scripts that serve. Committed scripts carry no usable credential: mint at runtime, hand the value to both sides, drop it after. Pure, so it runs anywhere a STRING binds, including `SSH_SERVE` option maps. The same mint backs the new `oxdock_ssh_plugin::generate_password()` Rust helper used by the integration suite.
+- Unified token layer (`oxdock-parser::tok`): two context-free lexers emit one `Tok` stream — `lex_str` for string sources, `lex_tokens` for braced-macro `TokenStream`. Both record gap adjacency and literal newlines but never decide statement boundaries; those stay parser grammar state. String semantics are single-sourced (the macro frontend fuses span-adjacent shredded literals back to source spelling, then runs the same scanner; degenerate `quote!` spans take the spaced reading). The punct set mirrors `rustc` splitting so both frontends emit identical streams, proven by `assert_both` tests. The pest grammar, its pair-walking backend, and the `LANGUAGE_SPEC` export are retired: this backend is now the single parser behind every entry point.
+- Unified parser backend (`oxdock-parser::parser`): `Tok` → `Step` for generic commands with grammar-state statement splitting, full guard parsing, `LET`/`SET`/`RETURN` with the complete expression tiers, static calls (`INSPECT`, resolved `MOD::NAME`, statement calls), RUN-exec form, instruction exactness (gap-spanning `KEY=value` assignments with boundary splitting, `$`/`env:` expression extension, quote-accurate group splices, templates), plus single-command wrappers (`WITH_IO` bindings with tty checks, `TIMEOUT` static/dynamic durations, `ISOLATED` with inherit rewrite, `ASYNC` with `WITH_IO` scan), io-blocks with scope markers and guard folding, `AWAIT`/`CANCEL` statements, multi-element statements (structural pairs end mid-line, trailing elements loop on), and block statements with directives (`IF`/`ELSE` chains with cross-newline holds, `FOR`/`WHILE`/`FUNC` with pushed scopes, `REMOTE` with target/binding/containment checks, `TYPE` aliases, `IMPORT`/`EXPORT` frame directives, guard blocks with top-level scope marking and the nested quirk, whole-script post-pass). Comments ride as markers with statement/gap/arg-position rules; the splitter holds `WITH_IO`/`ELSE` waits with `/*` depth tracking. Lowering runs through promoted shared constructors; call resolution (`resolve.rs`), instruction tokens (`InsToken`, ENV/EXPAND cores), wrapper validators, and REMOTE/export validators are extracted and shared verbatim (`LowerCtx` delegates, behavior unchanged). Differential tests prove three-way agreement per script under one module table. Pinned string-only exclusions: raw-`"` blocks, unquoted backslash escapes (args keep them; expressions reject them), lifetime-like quotes.
+- Multi-line `"""` string literals (#155): triple-quoted blocks span source lines for prompts, configs, and templates. A newline after the opening delimiter strips once, shared indentation dedents to the closing delimiter baseline, and the newline before a lone closing delimiter strips once. Single and double quotes need no escaping, `\"\"\"` embeds a delimiter, and escapes plus `{{ }}` resolve at runtime like double-quoted strings. CRLF normalizes to LF during lowering, unterminated blocks fail at the opening line, and multi-line values render back as blocks so `Display` reparses exactly. Usable everywhere single-line strings are: arguments, `LET` expressions, list/map literals, comparisons, `RUN` exec args, assignments, and guard values.
+- Braced macro scripts (`oxdock!`, `oxdock_embed!`) support blocks: contiguous string literals fuse back to their source spelling (span-proven, so the string grammar reads one block), wrapper continuations (`ASYNC`, `TIMEOUT` durations) stay glued, and guard brackets rebuild without invented spacing (the atomic grammar context skips none). Real-macro corpus suite (`oxdock_macro_corpus`) covers the language through actual `oxdock!` expansion with macro→string round-trip assertions on every case, including `REMOTE` on the mock transport.
+- String/macro parity enforcement: the fuzz generator now emits quoting, blocks, scalar/list/map/inspect/call expressions, dynamic math/logic (lowering images proven strictly pathway-vs-pathway), inline blocks, recursive bodies to depth 2, and multi-step scripts across both pathways under one module table, plus a unified-backend oracle asserting string/token/v2 agreement on every generated script, with exhaustive `StepKind` and `Expr` inventory gates (new variants fail compilation until classified; every `true` must be hit by its generator, generators must emit only claimed shapes, every `false` needs a witness proving it unroundtrippable — flipping either boolean without the matching change fails) and deterministic per-variant samples. Blocks holding raw `"` stay string-pathway-only (no token stream can carry them) with the divergence pinned by test.
+
+### Fixed
+
+- Runtime failures name the failing statement's source position (`step N, line L, col C`) instead of an index alone: every parsed step carries its statement's start coordinates (stamped at lower time on all paths, preserved through macro expansion), and the dispatch loop wraps each step's error once, so nested bodies chain outer and inner positions. Coordinates are provenance (never rendered by `Display`, never compared by content equality), and `Tok` carries the underlying token positions with the same rules.
+- Braced `TokenStream` parsing returns full `ParsedScript` metadata: new `parse_braced_tokens_with_exports` and `parse_braced_tokens_with_modules_and_exports` carry `EXPORT` names and `#` doc blocks for top-level `FUNC`s (`func_docs`), mirroring the string entry points for future MCP hosts reading braced input. The plain `parse_braced_tokens*` variants keep their signatures and delegate. The rebuild also starts a fresh line at each `#` opening on a later source line, so contiguous doc blocks stay one-comment-per-line instead of gluing into a single summary.
+- Macro text rebuild keeps guard and shell text glued: guard idents (even command-named values like `LS`, and keys after `env:`) never split across lines inside brackets, and glued dashes in `RUN` shell text (`W-XYZ`) keep no invented space (the flag-spacing heuristic now applies only when spans carry no adjacency signal). Both shapes previously rebuilt into text the parser rejects or reads differently.
+- Chained comparisons fail loudly (`$a < $b < $c` names the chaining with parenthesization help) instead of stranding text for a confusing downstream error; `$a < $b == $c` still parses as equality over ordering.
+
+- Macro emitter preserves argument quoting flags (dropping them changed runtime typing: unquoted `200` in `ASSERT_EQ` position converts to `INT`).
+- Display rendering adds no escape layers: recognized escapes pass through verbatim, so render cycles stay parse-stable on both pathways.
+- Single-command `TIMEOUT`/`ISOLATED` Display uses block form for guarded bodies instead of silently dropping inner guards (the single form has no guard slot).
+- `Compare` Display parenthesizes like `Arithmetic`/`Logical`, so nested comparisons round-trip (`(a == b) == c` parses; `a == b == c` does not).
+- Token rebuild splits a new statement keyword, `$`-led mutate statement, or leading guard opening on a later source line (bare commands no longer swallow the next step's guard; complete single-form wrappers no longer glue to the next step), with degenerate-span fallback preserving `quote!` behavior.
+- Assignment keys admit `:` (`ENV a:b=c` round-trips).
+
+### Changed
+
+- `HASH_SHA256` and `CWD` are STD builtins returning `STRING`, no longer
+  statement commands: `LET $digest: STRING = HASH_SHA256("payload.txt")`
+  and `LET $c: STRING = CWD()` replace the bare forms. The builtins
+  return bare values with no trailing newline (the command forms printed
+  `<hex>\n` / `<path>\n`, polluting every capture), compose in
+  expressions and RPN, and read through the same workspace guards;
+  `CWD()` keeps the snapshot-pending sentinel rule. Removed:
+  `Command::Cwd`, `Command::HashSha256`, `StepKind::Cwd`,
+  `StepKind::HashSha256`, and their dispatch arms. `ASSERT_EQ --hash`
+  is unaffected (it hashes the actual's bytes itself).
+- Parser cutover: `parse_script` and friends lower through the token backend. Error kinds are preserved verbatim (`UnknownCommand`/`InvalidSyntax`/`Validation` flow through from lowering); syntax errors report statement granularity (whole first line with source text and caret, lexer-exact positions for unbalanced groups) instead of sub-statement columns. Removed: `src/dsl.pest`, the pest lexer/backend, `LANGUAGE_SPEC`, and the `pest`/`pest_derive`/`pest_meta` dependencies.
+- Installer success report is one summary block naming the configured stem (`installed <name> <version> to <dir>`, with indented `binary:` and PATH lines) instead of two flat `ECHO` lines.
+
+### Security
+
+- MCP tool descriptions come verbatim from script `#` docs (`func_docs` preferred over `FuncMeta`). Only serve scripts you trust over `--mcp`: a script author controls the descriptions an MCP client shows its model. Descriptions are served with no sanitization (filtering cannot make untrusted provider text safe to show a model), so the trust boundary is which scripts you serve.
+
 ## [0.32.3-alpha] - 2026-10-29
 
 ### Fixed

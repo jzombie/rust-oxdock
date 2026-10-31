@@ -233,13 +233,115 @@ fn check_one(
     }
 }
 
-/// Strip one layer of surrounding `"` or `'` quotes (both kinds, everywhere).
+/// Strip one layer of surrounding quotes (`"`, `'`, or `"""` block).
+/// Block delimiters strip without dedenting: pest-lowered paths dedent
+/// in [`lower_block_string`] before this fringe ever runs.
 pub fn strip_surrounding_quotes(value: &str) -> &str {
+    if let Some(inner) = value
+        .strip_prefix("\"\"\"")
+        .and_then(|s| s.strip_suffix("\"\"\""))
+    {
+        return inner;
+    }
     value
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
         .or_else(|| value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
         .unwrap_or(value)
+}
+
+/// Lower a `"""..."""` block literal to its string value. Escapes and
+/// `{{ }}` pass through verbatim for runtime `expand_string`. Steps:
+/// 1. Strip the delimiters, normalize `\r\n` and lone `\r` to `\n`.
+/// 2. Leading newline: if the opening `"""` is followed only by
+///    spaces/tabs then a newline, drop through that newline
+///    (`split_leading_newline`). Otherwise the opening line holds
+///    inline text (`"""text`), kept verbatim at zero indent and
+///    excluded from prefix computation.
+/// 3. Closing line: if the text holds a newline and the last line is
+///    whitespace-only, the closing `"""` sits on its own line. Pop
+///    that line (with its newline) and seat its whitespace as the
+///    indentation baseline among the prefix candidates.
+/// 4. Common prefix: longest shared leading-whitespace run across all
+///    non-blank content lines. Blank lines never vote. No qualifying
+///    line means an empty value.
+/// 5. Strip the prefix from every non-blank line. The inline first
+///    line and blank lines pass through untouched.
+/// 6. Rejoin the lines with `\n`.
+pub fn lower_block_string(s: &str) -> String {
+    let inner = s.strip_prefix("\"\"\"").unwrap_or(s);
+    let inner = inner.strip_suffix("\"\"\"").unwrap_or(inner);
+    let norm = inner.replace("\r\n", "\n").replace('\r', "\n");
+    let (body, inline_first) = match split_leading_newline(&norm) {
+        Some(rest) => (rest.to_string(), false),
+        None => (norm.clone(), true),
+    };
+    if body.is_empty() {
+        return String::new();
+    }
+    let mut lines: Vec<&str> = body.split('\n').collect();
+    let closing_own_line = norm.contains('\n') && lines.last().is_some_and(|l| l.trim().is_empty());
+    let closing_indent = if closing_own_line {
+        lines.pop().unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+    let content: &[&str] = if inline_first && !lines.is_empty() {
+        &lines[1..]
+    } else {
+        &lines[..]
+    };
+    if inline_first && lines.len() == 1 && lines[0].trim().is_empty() {
+        return String::new();
+    }
+    if !(inline_first && !lines.is_empty() && !lines[0].trim().is_empty())
+        && !content.iter().any(|l| !l.trim().is_empty())
+    {
+        return String::new();
+    }
+    let mut candidates: Vec<&str> = Vec::new();
+    if closing_own_line {
+        candidates.push(closing_indent.as_str());
+    }
+    for line in content {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let len = line
+            .char_indices()
+            .find(|(_, c)| *c != ' ' && *c != '\t')
+            .map(|(i, _)| i)
+            .unwrap_or(line.len());
+        candidates.push(&line[..len]);
+    }
+    let mut prefix = candidates.first().copied().unwrap_or("").to_string();
+    for indent in candidates.iter().skip(1) {
+        prefix = common_prefix(&prefix, indent);
+    }
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    for (idx, line) in lines.iter().enumerate() {
+        if (inline_first && idx == 0) || line.trim().is_empty() {
+            out.push(line);
+        } else {
+            out.push(line.strip_prefix(prefix.as_str()).unwrap_or(line));
+        }
+    }
+    out.join("\n")
+}
+
+/// Split one leading newline preceded only by spaces/tabs.
+fn split_leading_newline(s: &str) -> Option<&str> {
+    let trimmed = s.trim_start_matches([' ', '\t']);
+    trimmed.strip_prefix('\n')
+}
+
+/// Longest shared prefix of two indent strings.
+fn common_prefix(a: &str, b: &str) -> String {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x)
+        .collect()
 }
 
 /// Single-token `KEY=value` split for direct `lower_command` callers and

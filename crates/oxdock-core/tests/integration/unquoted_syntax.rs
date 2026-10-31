@@ -108,7 +108,11 @@ fn hash_sha256_unquoted_path() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     run_script(&root, "WRITE data.txt 'hashme'").unwrap();
-    run_script(&root, "HASH_SHA256 data.txt").unwrap();
+    run_script(
+        &root,
+        "IMPORT [STD]\nLET $h: STRING = HASH_SHA256(data.txt)",
+    )
+    .unwrap();
 }
 
 #[test]

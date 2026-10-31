@@ -5,7 +5,7 @@
 //! error must never surface as a bare `unknown command: X`.
 //!
 //! String and file parsers populate line, column span, and source line
-//! from pest spans. Token stream parsers (`macro_input.rs`) set
+//! from lexer spans. Token stream parsers (`macro_input.rs`) set
 //! `source_line` to `None` and forward the compiler span instead, since
 //! `proc_macro2::Span` carries coordinates but not source text.
 
@@ -19,8 +19,9 @@ pub type ParseResult<T> = std::result::Result<T, ParseError>;
 /// Machine readable classification of a parse failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseErrorKind {
-    /// The pest grammar could not tokenize the input at all.
-    PestParse,
+    /// Low-level syntax failure: the input never reached lowering
+    /// (lexer rejection or token-level structural failure).
+    Syntax,
     /// First word is a known command or structural keyword, but the
     /// rest of the line is malformed. Never report these as unknown.
     InvalidSyntax { command: String },
@@ -37,7 +38,7 @@ pub enum ParseErrorKind {
 /// Location and diagnostic context threaded through lowering.
 ///
 /// String parsers fill `col_start`, `col_end`, and `source_line` from
-/// pest spans. Token stream parsers leave `source_line` as `None`;
+/// lexer spans. Token stream parsers leave `source_line` as `None`;
 /// macro call sites keep their own `proc_macro2::Span` for
 /// `syn::Error` conversion (a span handle is not `Send`/`Sync`, so it
 /// never lives inside `ParseError`, which must stay convertible into
@@ -64,7 +65,7 @@ pub struct SpanContext<'a> {
     /// Never transferred into `ParseError`.
     #[cfg(feature = "proc-macro-api")]
     pub compiler_span: Option<proc_macro2::Span>,
-    /// Zero-based step index in `ScriptParser::parse`, when known.
+    /// Zero-based step index in the parsed script, when known.
     pub step_index: Option<usize>,
 }
 
@@ -190,17 +191,17 @@ impl ParseError {
             }),
         }
     }
-    /// Pest grammar failure. `message` must already contain the
+    /// Low-level syntax failure. `message` must already contain the
     /// `parse error (expected: ...)` header; the location block is
     /// appended by `Display` unless already present.
-    pub fn pest(
+    pub fn syntax(
         message: String,
         expected: Vec<String>,
         hint: Option<String>,
         ctx: &SpanContext,
     ) -> Self {
         Self::new(
-            ParseErrorKind::PestParse,
+            ParseErrorKind::Syntax,
             ctx.line,
             ctx,
             None,
@@ -286,7 +287,7 @@ impl ParseError {
     /// Enrich an error produced without span context (e.g. from a
     /// direct `lower_command` call) with the caller's location.
     /// Existing span fields are only overwritten when the current
-    /// value is `None`, so pest spans are never clobbered.
+    /// value is `None`, so lexer spans are never clobbered.
     pub fn with_span(mut self, ctx: &SpanContext) -> Self {
         if self.line == 0 {
             self.line = ctx.line;
@@ -382,7 +383,7 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.detail.message)?;
         if let Some(block) = self.caret_block() {
-            // Pest bodies already end with the caret block; do not duplicate it.
+            // Messages already ending with the caret block do not duplicate it.
             if !self.detail.message.contains("--> line") {
                 write!(f, "{block}")?;
             }

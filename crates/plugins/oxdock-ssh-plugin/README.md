@@ -352,6 +352,39 @@ AWAIT $runner
 SSH_CLOSE($m.server)
 ```
 
+### SSH_GENERATE_PASSWORD
+
+Mint a random server password (256 bits, hex).
+
+Each call draws fresh OS-RNG key material and renders 64
+lowercase hex chars, so committed scripts carry no usable
+credential: mint at runtime, hand the value to both sides, drop
+it after. Pure (no step context), so it runs anywhere a STRING
+binds, including option maps and placeholders.
+
+**Signature:** `SSH_GENERATE_PASSWORD() -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: mint and serve**
+
+```oxdock
+IMPORT [STD, SSH]
+
+# Fresh draws mint 64 hex chars with no committed secret.
+LET $pass: STRING = SSH_GENERATE_PASSWORD()
+LET $len: INT = TEXT_LENGTH($pass)
+ASSERT_EQ $len 64
+
+# The minted value serves directly as a server password.
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-gen-pass", {username: "u", password: $pass})
+SSH_CLOSE($m.server)
+```
+
 ### SSH_PTY_RUN
 
 Run a command under a sized local terminal into pipes.

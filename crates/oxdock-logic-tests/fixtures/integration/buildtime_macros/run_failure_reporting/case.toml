@@ -11,5 +11,6 @@ contains = [
   "invalid-oxdock-flag-xyz",
   "failed with status",
   "filesystem snapshot",
-  "(command",
+  "command",
+  "step 2, line 2, col 1",
 ]

@@ -599,17 +599,20 @@ fn is_placeholder(s: &str) -> Option<usize> {
 /// but returns `Vec<oxdock_parser::Step>` instead of embedding files.
 ///
 /// Use `#var` to inject Rust variables (must implement `Display`, used via `.to_string()`).
-/// DSL variables (`$var` in LET/FOR) are distinct and unaffected.
+/// The `#` must ride gapless against the name: `#var` interpolates,
+/// while a gapped `#` starts a DSL comment (`# comment`, whole line,
+/// like string scripts). DSL variables (`$var` in LET/FOR) are distinct
+/// and unaffected.
 #[proc_macro]
 pub fn oxdock(input: TokenStream) -> TokenStream {
-    match expand_oxdock(input) {
-        Ok(ts) => ts,
+    match expand_oxdock(input.into()) {
+        Ok(ts) => ts.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
-    let ts: proc_macro2::TokenStream = input.into();
+fn expand_oxdock(input: proc_macro2::TokenStream) -> syn::Result<proc_macro2::TokenStream> {
+    let ts = input;
     let interp = collect_hash_idents(ts.clone())?;
 
     // Opaque host modules (membership unknown at compile time) declared up
@@ -629,17 +632,22 @@ fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
     let dsl_text = dsl_text.trim();
     if dsl_text.is_empty() {
         let ts_out = quote! { Vec::<oxdock_parser::Step>::new() };
-        return Ok(ts_out.into());
+        return Ok(ts_out);
     }
 
     let mut table = oxdock_core::std_module_table();
     for module in opaque_modules {
         table.modules.insert(module, None);
     }
-    let steps = oxdock_core::parse_script_with_modules(dsl_text, table).map_err(|e| {
-        let msg = format!("parse error: {e}\ndsl:\n{dsl_text}");
-        syn::Error::new(proc_macro2::Span::call_site(), msg)
-    })?;
+    // Docs ride on the steps themselves (stamped from `#` blocks), so
+    // the macro product carries function documentation without a
+    // signature change; exports stay out (the macro returns steps).
+    let steps = oxdock_core::parse_script_with_modules_and_exports(dsl_text, table)
+        .map(|parsed| parsed.steps)
+        .map_err(|e| {
+            let msg = format!("parse error: {e}\ndsl:\n{dsl_text}");
+            syn::Error::new(proc_macro2::Span::call_site(), msg)
+        })?;
 
     let step_tokens: Vec<_> = steps.iter().map(|step| emit_step(step, &interp)).collect();
 
@@ -650,7 +658,7 @@ fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
             vec![#(#step_tokens),*]
         }
     };
-    Ok(ts_out.into())
+    Ok(ts_out)
 }
 
 /// Walk the token stream and collect all `#ident` pairs, recursing into groups.
@@ -662,6 +670,23 @@ fn collect_hash_idents(
     let mut idx = 0;
     collect_hash_idents_inner(&tokens, &mut interp, &mut idx);
     Ok(interp)
+}
+
+/// True when `ident` rides gapless right after the `#` punct: the
+/// interpolation shape (`#var`). A gapped `#` (`# comment`) is a DSL
+/// comment, never interpolation, mirroring the string grammar where
+/// `#` comments occupy whole lines. Degenerate spans (synthetic
+/// `call_site`/`quote!` streams, zero-width everywhere) carry no
+/// adjacency signal and keep the greedy reading, preserving old
+/// behavior there.
+fn hash_glued(punct: &proc_macro2::Punct, ident: &proc_macro2::Ident) -> bool {
+    let span = punct.span();
+    if span.start() == span.end() {
+        return true;
+    }
+    let end = span.end();
+    let start = ident.span().start();
+    end.line == start.line && end.column == start.column
 }
 
 fn collect_hash_idents_inner(
@@ -676,6 +701,7 @@ fn collect_hash_idents_inner(
             if p.as_char() == '#'
                 && i + 1 < tokens.len()
                 && let TokenTree::Ident(ident) = &tokens[i + 1]
+                && hash_glued(p, ident)
             {
                 if !interp.iter().any(|(id, _)| id == ident) {
                     interp.push((ident.clone(), *idx));
@@ -715,6 +741,7 @@ fn sanitize_hash_tokens_inner(
             if p.as_char() == '#'
                 && i + 1 < tokens.len()
                 && let TokenTree::Ident(ident) = &tokens[i + 1]
+                && hash_glued(p, ident)
                 && let Some((_, idx)) = interp.iter().find(|(id, _)| id == ident)
             {
                 let ph = placeholder_for(*idx);
@@ -747,12 +774,12 @@ fn sanitize_hash_tokens_inner(
 
 fn emit_arg(arg: &Arg, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2::TokenStream {
     match arg {
-        Arg::String(s, _) => {
+        Arg::String(s, quoted) => {
             if let Some(idx) = is_placeholder(s) {
                 let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
                 quote! { Arg::String(#ident.to_string(), false) }
             } else {
-                quote! { Arg::String(#s.to_string(), false) }
+                quote! { Arg::String(#s.to_string(), #quoted) }
             }
         }
         Arg::Expr(e) => {
@@ -1075,7 +1102,6 @@ fn emit_stepkind(
             };
             quote! { StepKind::Unarchive { src: #s, dst: #d, max_bytes: #m } }
         }
-        StepKind::Cwd => quote! { StepKind::Cwd },
         StepKind::AssertEq {
             hash,
             actual,
@@ -1252,10 +1278,6 @@ fn emit_stepkind(
             let t = emit_arg(to, interp);
             quote! { StepKind::CopyGit { rev: #r, from: #f, to: #t, include_dirty: #include_dirty } }
         }
-        StepKind::HashSha256 { path } => {
-            let p = emit_arg(path, interp);
-            quote! { StepKind::HashSha256 { path: #p } }
-        }
         StepKind::Exit(code) => {
             let c = emit_arg(code, interp);
             quote! { StepKind::Exit(#c) }
@@ -1415,7 +1437,12 @@ fn emit_stepkind(
             let args: Vec<_> = argv.iter().map(|a| emit_arg(a, interp)).collect();
             quote! { StepKind::RunExec { argv: vec![#(#args),*] } }
         }
-        StepKind::FuncDef { name, params, body } => {
+        StepKind::FuncDef {
+            name,
+            params,
+            body,
+            docs,
+        } => {
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             let ps: Vec<_> = params
                 .iter()
@@ -1424,7 +1451,11 @@ fn emit_stepkind(
                     quote! { (#p.to_string(), #tt) }
                 })
                 .collect();
-            quote! { StepKind::FuncDef { name: #name.to_string(), params: vec![#(#ps),*], body: vec![#(#steps),*] } }
+            let docs = match docs {
+                Some((summary, full)) => quote! { Some((#summary.to_string(), #full.to_string())) },
+                None => quote! { None },
+            };
+            quote! { StepKind::FuncDef { name: #name.to_string(), params: vec![#(#ps),*], body: vec![#(#steps),*], docs: #docs } }
         }
         StepKind::Call { name, args } => {
             let toks: Vec<_> = args.iter().map(|a| emit_expr(a, interp)).collect();
@@ -1558,12 +1589,16 @@ fn emit_step(step: &Step, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
     let kind = emit_stepkind(&step.kind, interp);
     let scope_enter = step.scope_enter;
     let scope_exit = step.scope_exit;
+    let line = step.line;
+    let col = step.col;
     quote! {
         oxdock_parser::Step {
             guard: #guard,
             kind: #kind,
             scope_enter: #scope_enter,
             scope_exit: #scope_exit,
+            line: #line,
+            col: #col,
         }
     }
 }
@@ -1577,6 +1612,21 @@ mod tests {
         let root = temp.as_guarded_path().clone();
         let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
         (temp, resolver, root)
+    }
+
+    #[test]
+    fn hash_glued_stays_greedy_without_span_signal() {
+        // Synthetic spans (`call_site`, `quote!`) are zero-width: with
+        // no adjacency signal the old greedy reading must hold, so
+        // every `#ident` still interpolates there. Real-span behavior
+        // (adjacent interpolates, gapped comments) is pinned by the
+        // real-macro corpus test, which runs under rustc spans.
+        let punct = proc_macro2::Punct::new('#', proc_macro2::Spacing::Alone);
+        let ident = proc_macro2::Ident::new("word", proc_macro2::Span::call_site());
+        assert!(
+            hash_glued(&punct, &ident),
+            "degenerate spans must keep greedy interpolation"
+        );
     }
 
     #[test]
@@ -1902,6 +1952,8 @@ mod tests {
                 kind: StepKind::Run(Arg::String("echo hi".to_string(), false)),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         }
     }
@@ -1947,6 +1999,8 @@ mod tests {
                 kind: StepKind::Echo(Arg::String("hi".to_string(), false)),
                 scope_enter: 0,
                 scope_exit: 0,
+                line: 0,
+                col: 0,
             }],
         };
         let rendered = emit_stepkind(&task, &[]).to_string();
@@ -1967,6 +2021,8 @@ mod tests {
             kind: timeout_kind("2s"),
             scope_enter: 1,
             scope_exit: 1,
+            line: 0,
+            col: 0,
         };
         let rendered = emit_step(&step, &[]).to_string();
         assert!(rendered.contains("Timeout"), "shape: {rendered}");

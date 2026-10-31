@@ -30,6 +30,8 @@ fn incremental_execution_persists_filesystem_state() {
         },
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     }];
 
     run_steps(&root, &steps1).unwrap();
@@ -59,6 +61,8 @@ fn incremental_execution_persists_cwd() {
             kind: StepKind::Mkdir("subdir".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -68,6 +72,8 @@ fn incremental_execution_persists_cwd() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
 

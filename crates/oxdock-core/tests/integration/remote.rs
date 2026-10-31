@@ -285,7 +285,7 @@ fn remote_without_runner_names_the_binding() {
         .map(|_| ())
         .expect_err("REMOTE without a runner must bail");
     assert!(
-        err.to_string().contains("--remote prod="),
+        format!("{err:#}").contains("--remote prod="),
         "actionable bail, got: {err:#}"
     );
 }

@@ -2,7 +2,7 @@
 
 > **Prototype status**: OxDock is still being prototyped. DSL syntax and Rust APIs may change without deprecation warnings until the first stable release.
 
-Scripts are sequences of instructions, one per line (`;` separates two; quoted separators stay literal). Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The authoritative grammar is [`crates/oxdock-parser/src/dsl.pest`]({{ $docs_global.workspace_url }}/blob/main/crates/oxdock-parser/src/dsl.pest), which is also embedded in the parser crate as the `LANGUAGE_SPEC` constant for tooling.
+Scripts are sequences of instructions, one per line (`;` separates two; quoted separators stay literal). Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The language is defined by the parser in [`crates/oxdock-parser/src/parser.rs`]({{ $docs_global.workspace_url }}/blob/main/crates/oxdock-parser/src/parser.rs), fed by the two context-free lexers in [`crates/oxdock-parser/src/tok.rs`]({{ $docs_global.workspace_url }}/blob/main/crates/oxdock-parser/src/tok.rs): one parser serves string scripts and braced-macro token streams alike.
 
 ## Lexical structure
 
@@ -116,6 +116,8 @@ ASSERT_CONTAINS stdout "quoted // kept"
 
 Comment markers inside quoted strings are always preserved.
 
+Two scope notes. Only `#` blocks count as `FUNC` documentation (collected into `func_docs` and served verbatim as MCP tool descriptions); `//` comments never feed docs. Script docs are provider content: only serve scripts you trust over MCP, since a script author controls the descriptions an MCP client shows its model, and served scripts must not print secrets, since tool stdout and stderr stream to the client as notifications. And inside braced `oxdock! { }` macros only `#` whole-line comments exist: `//` and `/* ... */` are stripped by Rust before the macro runs, so they neither parse, document, nor affect `ELSE` chains there.
+
 ### Command flags
 
 Commands that take flags accept the value either after a space or joined with `=`: `--from-workspace LOCAL` and `--from-workspace=LOCAL` mean the same thing. Boolean flags take no value. Quoted arguments are never treated as flags, even when they start with `--`.
@@ -145,6 +147,29 @@ ASSERT_CONTAINS stdout 'escaped " quote'
 // Quoted separators stay literal: no instruction splits here.
 ECHO 'semi;colon'
 ASSERT_CONTAINS stdout "semi;colon"
+```
+
+Triple-quoted blocks span source lines for prompts, configs, and templates. A newline right after the opening delimiter strips once, shared indentation dedents to the closing delimiter baseline, and the newline before a lone closing delimiter strips once. Interpolation and backslash escapes resolve at runtime like double-quoted strings, while single and double quotes need no escaping and `\"\"\"` embeds a delimiter:
+
+```oxdock
+# Block literals hold multi-line text without joins.
+LET $prompt: STRING = """
+    SELECT *
+    FROM users
+    """
+ASSERT_EQ $prompt "SELECT *\nFROM users"
+
+# Blocks round-trip through files byte identical.
+WRITE query.txt $prompt
+LET $back: STRING = READ query.txt
+ASSERT_EQ $back $prompt
+
+# Placeholders interpolate inside blocks like quoted strings.
+LET $table: STRING = "users"
+LET $filtered: STRING = """
+    SELECT * FROM \{{ $table }}
+    """
+ASSERT_EQ $filtered "SELECT * FROM users"
 ```
 
 ## Guards and scoped blocks

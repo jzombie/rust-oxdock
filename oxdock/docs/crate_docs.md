@@ -8,7 +8,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.32.3-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.33.0-alpha/oxdock/)
 
 ## Dynamically embed assets at compile time
 
@@ -102,8 +102,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.32.3-alpha"
-    ASSERT_EQ $b "beta OxDock 0.32.3-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.33.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.33.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -115,7 +115,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.32.3-alpha"
+    "alpha OxDock 0.33.0-alpha"
 );
 ```
 
@@ -761,7 +761,7 @@ time.
 
 > **Prototype status**: OxDock is still being prototyped. DSL syntax and Rust APIs may change without deprecation warnings until the first stable release.
 
-Scripts are sequences of instructions, one per line (`;` separates two; quoted separators stay literal). Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The authoritative grammar is [`crates/oxdock-parser/src/dsl.pest`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/dsl.pest), which is also embedded in the parser crate as the `LANGUAGE_SPEC` constant for tooling.
+Scripts are sequences of instructions, one per line (`;` separates two; quoted separators stay literal). Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The language is defined by the parser in [`crates/oxdock-parser/src/parser.rs`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/parser.rs), fed by the two context-free lexers in [`crates/oxdock-parser/src/tok.rs`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/tok.rs): one parser serves string scripts and braced-macro token streams alike.
 
 ## Lexical structure
 
@@ -875,6 +875,8 @@ ASSERT_CONTAINS stdout "quoted // kept"
 
 Comment markers inside quoted strings are always preserved.
 
+Two scope notes. Only `#` blocks count as `FUNC` documentation (collected into `func_docs` and served verbatim as MCP tool descriptions); `//` comments never feed docs. Script docs are provider content: only serve scripts you trust over MCP, since a script author controls the descriptions an MCP client shows its model, and served scripts must not print secrets, since tool stdout and stderr stream to the client as notifications. And inside braced `oxdock! { }` macros only `#` whole-line comments exist: `//` and `/* ... */` are stripped by Rust before the macro runs, so they neither parse, document, nor affect `ELSE` chains there.
+
 ### Command flags
 
 Commands that take flags accept the value either after a space or joined with `=`: `--from-workspace LOCAL` and `--from-workspace=LOCAL` mean the same thing. Boolean flags take no value. Quoted arguments are never treated as flags, even when they start with `--`.
@@ -904,6 +906,29 @@ ASSERT_CONTAINS stdout 'escaped " quote'
 // Quoted separators stay literal: no instruction splits here.
 ECHO 'semi;colon'
 ASSERT_CONTAINS stdout "semi;colon"
+```
+
+Triple-quoted blocks span source lines for prompts, configs, and templates. A newline right after the opening delimiter strips once, shared indentation dedents to the closing delimiter baseline, and the newline before a lone closing delimiter strips once. Interpolation and backslash escapes resolve at runtime like double-quoted strings, while single and double quotes need no escaping and `\"\"\"` embeds a delimiter:
+
+```oxdock
+# Block literals hold multi-line text without joins.
+LET $prompt: STRING = """
+    SELECT *
+    FROM users
+    """
+ASSERT_EQ $prompt "SELECT *\nFROM users"
+
+# Blocks round-trip through files byte identical.
+WRITE query.txt $prompt
+LET $back: STRING = READ query.txt
+ASSERT_EQ $back $prompt
+
+# Placeholders interpolate inside blocks like quoted strings.
+LET $table: STRING = "users"
+LET $filtered: STRING = """
+    SELECT * FROM {{ $table }}
+    """
+ASSERT_EQ $filtered "SELECT * FROM users"
 ```
 
 ## Guards and scoped blocks
@@ -1117,7 +1142,6 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`ARCHIVE`](#archive) | `ARCHIVE [--raw] <src> <dst>` |
 | [`UNARCHIVE`](#unarchive) | `UNARCHIVE <src> <dst> [--max-bytes <bytes>]` |
 | [`LS`](#ls) | `LS [<path>]` |
-| [`CWD`](#cwd) | `CWD` |
 | [`READ`](#read) | `READ [<path>]` |
 | [`READ_LINE`](#read_line) | `READ_LINE $var` |
 | [`PROMPT`](#prompt) | `PROMPT $var <message> [<default>]` |
@@ -1127,7 +1151,6 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
 | [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ <actual> <expected> \| ASSERT_EQ --hash <sha256> <actual>` |
 | [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
-| [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
 | [`LIST_APPEND`](#list_append) | `LIST_APPEND $list <item>` |
@@ -3160,31 +3183,6 @@ ASSERT_CONTAINS stdout "a.txt"
 ```
 
 
-### CWD
-
-Print working directory.
-
-**Syntax:** `CWD`
-
-Outputs cwd.
-
-**Output:** Stdout
-
-**Examples:**
-
-**Example: cwd**
-
-```oxdock
-CWD
-
-# CWD tracks WORKDIR: the listing names the new directory.
-MKDIR sub
-WORKDIR sub
-LET $c: STRING = CWD
-ASSERT_CONTAINS $c "sub"
-```
-
-
 ### READ
 
 Read file to stdout.
@@ -3609,35 +3607,6 @@ ASSERT_CONTAINS stdout "build-complete"
 ```
 
 
-### HASH_SHA256
-
-Print SHA-256.
-
-**Syntax:** `HASH_SHA256 <path>`
-
-Computes digest.
-
-**Arguments:**
-
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `path` | [`PATH`](#value-type-path) | yes | File |
-
-**Output:** Stdout
-
-**Examples:**
-
-**Example: hash**
-
-```oxdock
-WRITE payload.txt hello
-HASH_SHA256 payload.txt
-
-LET $digest: STRING = HASH_SHA256 payload.txt
-ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
-```
-
-
 ### EXIT
 
 Exit pipeline.
@@ -3867,6 +3836,31 @@ standard decoder. Pairs with `BASE64_DECODE` for the round trip.
 IMPORT [STD]
 LET $encoded: STRING = BASE64_ENCODE("hello")
 ASSERT_EQ $encoded "aGVsbG8="
+```
+
+### STD::CWD
+
+Current working directory as a workspace-absolute path.
+
+Reports the snapshot-pending sentinel when no concrete directory
+exists yet, so snapshot scripts keep working unchanged.
+
+
+**Signature:** `STD::CWD() -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: cwd**
+
+```oxdock
+IMPORT [STD]
+WORKDIR sub
+LET $c: STRING = CWD()
+ASSERT_CONTAINS $c "sub"
 ```
 
 ### STD::DESCRIBE
@@ -4104,6 +4098,39 @@ WRITE "other.txt" "c"
 LET $found: LIST<STRING> = GLOB("notes-*.md")
 ASSERT_EQ $found.0 "notes-a.md"
 ASSERT_EQ $found.1 "notes-b.md"
+```
+
+### STD::HASH_SHA256
+
+Hash a workspace file or directory with SHA-256.
+
+The argument is always a path: reads through the workspace guard
+like the file-loading builtins, so relative paths resolve against
+the script cwd. To hash a literal string's bytes instead, use
+`ASSERT_EQ --hash <digest> <string>`, which hashes the actual
+directly. Returns the 64 lowercase hex chars with no trailing
+newline.
+
+
+**Signature:** `STD::HASH_SHA256($path: STRING|PATH) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$path` (`STRING|PATH`): Workspace file or directory path to hash.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: hash**
+
+```oxdock
+IMPORT [STD]
+WRITE payload.txt hello
+LET $digest: STRING = HASH_SHA256("payload.txt")
+ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 ```
 
 ### STD::HAS_KEY
@@ -6121,7 +6148,7 @@ let expected = indoc! {"
 assert_eq!(err.to_string(), expected.trim_end());
 ```
 
-Lowercase commands are caught by the grammar with a correction note:
+Lowercase commands are caught at parse time with a correction note:
 ```rust
 use indoc::indoc;
 use oxdock::oxdock_parser;
@@ -6132,21 +6159,21 @@ let script = indoc! {"
 let err = oxdock_parser::parse_script(script, oxdock_parser::lower_command)
     .expect_err("must fail");
 let expected = indoc! {"
-    parse error (expected: script)
-    note: command must be uppercase: found `echo`, expected `ECHO`
-      --> line 1, col 1-1
+    command must be uppercase: found `echo`, expected `ECHO`
+      --> line 1, col 1-7
       1 | echo hi
-        | ^
+        | ^^^^^^^
 "};
 assert_eq!(err.to_string(), expected.trim_end());
 ```
 
 Reading an error, top to bottom: the first line states the kind and the
 fix (expected syntax or a `did you mean` hint), the `-->` line gives the
-exact position, and the caret marks the token to change. For block and
-guard mistakes the caret covers the statement; for argument mistakes such
-as a bad `WITH_IO` binding or a wrong `FOR` key type it points at the
-specific token.
+statement's line, and the caret marks the statement to change (lexer-level
+mistakes such as unbalanced groups point at their exact position).
+Runtime failures name their position the same way: `step N, line L, col C`
+(the step index, then the statement's source coordinates), so a failing
+run points at the exact script line instead of an index alone.
 
 ## Selective environment inheritance
 

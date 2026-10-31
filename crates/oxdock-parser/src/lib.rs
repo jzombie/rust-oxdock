@@ -20,14 +20,15 @@ pub mod command;
 pub mod commands;
 pub mod constants;
 pub mod error;
-mod lexer;
 pub mod literal;
 #[cfg(feature = "proc-macro-api")]
 mod macro_input;
 pub mod markdown;
 pub mod parser;
+mod resolve;
 pub mod strip_flags;
 pub mod tag;
+pub mod tok;
 pub mod value;
 
 pub use ast::*;
@@ -38,18 +39,18 @@ pub use command::{
 pub use commands::{all_metadata, all_structural_metadata, lower_command};
 pub use constants::*;
 pub use error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
-pub use lexer::LANGUAGE_SPEC;
 pub use literal::{escape_dsl_string, render_dsl_literal, render_quoted};
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
-    DslMacroInput, ScriptSource, parse_braced_tokens, script_from_braced_tokens,
-    split_modules_prefix,
+    DslMacroInput, ScriptSource, parse_braced_tokens, parse_braced_tokens_with_exports,
+    parse_braced_tokens_with_modules, parse_braced_tokens_with_modules_and_exports,
+    script_from_braced_tokens, split_modules_prefix,
 };
 pub use markdown::{BlockMetadata, FencedBlock, expect_error_from_info, extract_fenced_blocks};
 pub use parser::{
-    ParsedScript, parse_expression_str, parse_guard_expr_str, parse_script,
+    ParseCtx, ParsedScript, TokenError, parse_expression_str, parse_guard_expr_str, parse_script,
     parse_script_with_exports, parse_script_with_modules, parse_script_with_modules_and_exports,
-    parse_script_with_preseed,
+    parse_script_with_preseed, parse_tokens, parse_tokens_with_ctx,
 };
 pub use strip_flags::strip_flags;
 pub use tag::{
@@ -57,13 +58,16 @@ pub use tag::{
     canonicalize_spelling, check_value, check_value_at, intern_composed, lookup_composed,
     parse_spelling, render_structural,
 };
+#[cfg(feature = "proc-macro-api")]
+pub use tok::lex_tokens;
+pub use tok::{GroupDelim, LexError, Tok, TokKind, lex_str};
 
 /// Shared mock lowering for parser tests.
 /// Centralizes AST lowering so unit tests, integration tests, and macro_input tests
 /// all exercise the same command set against the same grammar.
 pub mod test_lower_mock {
     use crate::error::{ParseError, SpanContext};
-    use crate::{Arg, AssertTarget, ParseResult, StepKind, WorkspaceTarget};
+    use crate::{Arg, ParseResult, StepKind, WorkspaceTarget};
 
     fn validation(cmd: &str, msg: &str) -> ParseError {
         ParseError::validation(cmd, msg.to_string(), &SpanContext::line_only(0))
@@ -71,7 +75,7 @@ pub mod test_lower_mock {
 
     pub fn lower(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
         match name {
-            "CWD" => Ok(StepKind::Cwd),
+            "LS" => Ok(StepKind::Ls(None)),
             "WRITE" => {
                 let mut it = args.into_iter();
                 let path = it
@@ -89,38 +93,6 @@ pub mod test_lower_mock {
                     Some(Arg::String(joined, false))
                 };
                 Ok(StepKind::Write { path, contents })
-            }
-            "HASH_SHA256" => {
-                let mut a = args;
-                if a.first().map(|a| a.as_str()) == Some("--hash") {
-                    a.remove(0);
-                    let hash = a
-                        .first()
-                        .ok_or_else(|| validation("HASH_SHA256", "--hash requires value"))?
-                        .as_str()
-                        .to_string();
-                    a.remove(0);
-                    let path = a
-                        .first()
-                        .ok_or_else(|| validation("HASH_SHA256", "HASH_SHA256 requires path"))?
-                        .clone();
-                    Ok(StepKind::AssertEq {
-                        hash: Some(hash),
-                        actual: AssertTarget::Value(path),
-                        expected: None,
-                    })
-                } else {
-                    let path = a
-                        .first()
-                        .ok_or_else(|| validation("HASH_SHA256", "HASH_SHA256 requires path"))?
-                        .clone();
-                    let contents = a.get(1).cloned();
-                    Ok(StepKind::AssertEq {
-                        hash: None,
-                        actual: AssertTarget::Value(path),
-                        expected: contents,
-                    })
-                }
             }
             "ENV" => crate::commands::lower_env_assignment(args)
                 .map_err(|e| validation("ENV", &e.to_string())),
@@ -276,10 +248,10 @@ mod tests {
     fn string_dsl_supports_rust_style_comments() {
         let script = indoc! {r#"
             // leading comment line
-            CWD // inline comment
+            WRITE out.txt // inline comment
             WRITE 'echo "keep // literal"'
             /* block comment
-               CWD ignored
+               WRITE ignored
                /* nested inner */
                WRITE ignored as well
             */
@@ -288,7 +260,7 @@ mod tests {
         "#};
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 4, "expected 4 executable steps");
-        assert!(matches!(&steps[0].kind, StepKind::Cwd));
+        assert!(matches!(&steps[0].kind, StepKind::Write { .. }));
         assert!(matches!(&steps[1].kind, StepKind::Write { .. }));
         assert!(matches!(&steps[2].kind, StepKind::Write { .. }));
         assert!(matches!(&steps[3].kind, StepKind::Write { .. }));
@@ -605,10 +577,7 @@ mod tests {
 
     #[test]
     fn guard_or_guard_line_parses() {
-        use crate::lexer::{LanguageParser, Rule};
-        use pest::Parser;
-        LanguageParser::parse(Rule::guard_line, "[any(os:linux, env:FOO)]")
-            .expect("guard guard line should parse");
+        parse_guard_expr_str("any(os:linux, env:FOO)").expect("guard line should parse");
     }
 
     #[test]
@@ -657,8 +626,10 @@ mod tests {
 
     #[test]
     fn mock_hash_form_parses() {
-        let script = "HASH_SHA256 --hash aabb path.txt";
-        let steps = parse_script(script, test_lower).expect("parse ok");
+        // The `--hash` flag threads through real lowering into the
+        // AssertEq hash slot (the mock covers grammar, not flags).
+        let script = "ASSERT_EQ --hash aabb path.txt";
+        let steps = parse_script(script, crate::commands::lower_command).expect("parse ok");
         match &steps[0].kind {
             StepKind::AssertEq {
                 hash,
@@ -704,6 +675,297 @@ mod tests {
             StepKind::Write { path, .. } => assert_eq!(path, "echo \"a; b\""),
             other => panic!("expected Write, saw {:?}", other),
         }
+    }
+
+    #[test]
+    fn block_string_dedents_to_closing_baseline() {
+        let script = indoc! {r#"
+            ECHO """
+                SELECT *
+                FROM users
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "SELECT *\nFROM users"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_preserves_relative_indent_and_blank_lines() {
+        let script = indoc! {r#"
+            ECHO """
+                outer
+                    inner
+
+                after-blank
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => {
+                assert_eq!(arg.as_str(), "outer\n    inner\n\nafter-blank");
+            }
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_inline_opening_keeps_first_line() {
+        let script = indoc! {r#"
+            ECHO """hello
+                world
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "hello\nworld"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_allows_single_and_double_quotes() {
+        let script = indoc! {r#"
+            ECHO """
+                say "hi" and 'bye'
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "say \"hi\" and 'bye'"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_escape_defers_to_runtime_verbatim() {
+        let script = indoc! {r#"
+            ECHO """
+                escaped \"\"\" stays
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "escaped \\\"\\\"\\\" stays"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_keeps_templates_verbatim() {
+        let script = indoc! {r#"
+            ECHO """
+                hello {{ $name }}
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "hello {{ $name }}"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_empty_yields_empty() {
+        for script in ["ECHO \"\"\"\"\"\"", "ECHO \"\"\"\n\"\"\""] {
+            let steps = parse_script(script, test_lower).expect("parse ok");
+            match &steps[0].kind {
+                StepKind::Echo(arg) => assert_eq!(arg.as_str(), ""),
+                other => panic!("expected Echo, saw {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn block_string_crlf_normalizes_to_lf() {
+        let script = "ECHO \"\"\"\r\n    line one\r\n    line two\r\n    \"\"\"";
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "line one\nline two"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_unterminated_fails_at_opening_line() {
+        let script = "ECHO ok\nECHO \"\"\"\n    stranded\n";
+        let err = parse_script(script, test_lower).expect_err("unterminated must fail");
+        let text = format!("{err:#}");
+        assert!(text.contains("line 2"), "{text}");
+    }
+
+    #[test]
+    fn block_string_next_step_keeps_line_number() {
+        let script = indoc! {r#"
+            ECHO """
+                multi
+                line
+                """
+            ECHO after
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 2);
+        match &steps[1].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "after"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_in_let_list_map_and_call() {
+        let script = indoc! {r#"
+            LET $text: STRING = """
+                hello
+                """
+            LET $items: LIST = ["""
+                one
+                """, "two"]
+            LET $entry: MAP = {key: """
+                value
+                """}
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 3);
+        match &steps[0].kind {
+            StepKind::Assign { var, expr, .. } => {
+                assert_eq!(var, "text");
+                assert_eq!(expr, &Expr::Literal(Value::string("hello".to_string())));
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+        match &steps[1].kind {
+            StepKind::Assign { var, expr, .. } => {
+                assert_eq!(var, "items");
+                assert_eq!(
+                    expr,
+                    &Expr::List(vec![
+                        Expr::Literal(Value::string("one".to_string())),
+                        Expr::Literal(Value::string("two".to_string())),
+                    ])
+                );
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+        match &steps[2].kind {
+            StepKind::Assign { var, expr, .. } => {
+                assert_eq!(var, "entry");
+                assert_eq!(
+                    expr,
+                    &Expr::Map(vec![(
+                        "key".to_string(),
+                        Expr::Literal(Value::string("value".to_string()))
+                    )])
+                );
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_in_assignment_value() {
+        let script = indoc! {r#"
+            ENV GREETING="""
+                hi there
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Env { key, value } => {
+                assert_eq!(key, "GREETING");
+                assert_eq!(value.as_str(), "hi there");
+            }
+            other => panic!("expected Env, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_map_key_dedents() {
+        let steps = parse_script("LET $m: MAP = {\"\"\"\nkey\n\"\"\": \"v\"}", test_lower)
+            .expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => {
+                assert_eq!(
+                    expr,
+                    &Expr::Map(vec![(
+                        "key".to_string(),
+                        Expr::Literal(Value::string("v".to_string()))
+                    )])
+                );
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_guard_value_dedents() {
+        let steps =
+            parse_script("[eq(env:K, \"\"\"\nv\n\"\"\")] WRITE x", test_lower).expect("parse ok");
+        match &steps[0].guard {
+            Some(GuardExpr::Predicate(Guard::Attr { val, .. })) => {
+                assert_eq!(val.as_deref(), Some("v"));
+            }
+            other => panic!("expected env guard, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_escaped_opener_stays_literal() {
+        let script = indoc! {r#"
+            ECHO """
+                \{{ $x }} stays
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "\\{{ $x }} stays"),
+            other => panic!("expected Echo, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn with_io_block_form_consumes_node() {
+        // `WITH_IO [..] { .. }` lowers through a transient WithIoBlock
+        // node that `handle_command` consumes into an io scope without
+        // emitting a step: no parsed script ever holds one.
+        let steps =
+            parse_script("WITH_IO [stdout=$p] {\n    ECHO hi\n}", test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        assert!(
+            !matches!(steps[0].kind, StepKind::WithIoBlock { .. }),
+            "transient node leaked: {:?}",
+            steps[0].kind
+        );
+    }
+
+    #[test]
+    fn assignment_key_allows_colons() {
+        let steps = parse_script("ENV a:b=c", test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Env { key, value } => {
+                assert_eq!(key, "a:b");
+                assert_eq!(value.as_str(), "c");
+            }
+            other => panic!("expected Env, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_string_display_round_trips() {
+        let script = indoc! {r#"
+            ECHO """
+                SELECT *
+                FROM users
+                """
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        let rendered = steps[0].to_string();
+        assert!(rendered.contains("\"\"\""), "{rendered}");
+        let reparsed = parse_script(&rendered, test_lower).expect("reparse ok");
+        assert_eq!(steps, reparsed);
     }
 
     #[test]
@@ -1188,26 +1450,13 @@ mod tests {
     }
 
     #[test]
-    fn if_keyword_matches_directly() {
-        use crate::lexer::{LanguageParser, Rule};
-        use pest::Parser;
-        let result = LanguageParser::parse(Rule::if_keyword, "IF ");
+    fn if_head_parses_through_backend() {
+        let steps = parse_script("IF true {\n    WRITE yes\n}", test_lower).expect("IF parses");
+        assert_eq!(steps.len(), 1);
         assert!(
-            result.is_ok(),
-            "if_keyword should match 'IF ': {:?}",
-            result.err()
-        );
-    }
-
-    #[test]
-    fn if_statement_pest_matches() {
-        use crate::lexer::{LanguageParser, Rule};
-        use pest::Parser;
-        let result = LanguageParser::parse(Rule::if_statement, "IF true {\n    WRITE yes\n}");
-        assert!(
-            result.is_ok(),
-            "if_statement should match: {:?}",
-            result.err()
+            matches!(steps[0].kind, StepKind::If { .. }),
+            "expected If, got {:?}",
+            steps[0].kind
         );
     }
 
@@ -1281,7 +1530,7 @@ mod tests {
 
     #[test]
     fn guard_block_with_mock_command() {
-        let script = "CWD\n[env:GATE] {\n    WRITE gated\n}\n[eq(env:A, 1)] WRITE eq\n";
+        let script = "WRITE probe.txt\n[env:GATE] {\n    WRITE gated\n}\n[eq(env:A, 1)] WRITE eq\n";
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert!(
             steps.len() >= 2,

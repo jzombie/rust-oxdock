@@ -54,9 +54,11 @@ LET $r3: STRING = TIME_EVENT("arith/bash", "bash scripts/bench/arith.sh", "49999
 LET $r4: STRING = TIME_EVENT("callstr/oxdock", "target/release/oxdock --script scripts/bench/callstr.oxdock", "19999")
 LET $r5: STRING = TIME_EVENT("callstr/python", "python3 scripts/bench/callstr.py", "19999")
 LET $r6: STRING = TIME_EVENT("callstr/bash", "bash scripts/bench/callstr.sh", "19999")
-ECHO $r1
-ECHO $r2
-ECHO $r3
-ECHO $r4
-ECHO $r5
-ECHO $r6
+ECHO """
+{{ $r1 }}
+{{ $r2 }}
+{{ $r3 }}
+{{ $r4 }}
+{{ $r5 }}
+{{ $r6 }}
+"""

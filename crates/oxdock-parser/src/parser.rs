@@ -1,287 +1,2319 @@
+//! Script parser: [`Tok`] stream to [`Step`].
+//!
+//! The single parser for string scripts and braced-macro token
+//! streams. The string entry points at the bottom of this module lex
+//! with `lex_str` and lower here; the braced-macro frontend fuses
+//! span-adjacent literals, runs the same scanner, and lowers here.
+//!
+//! Statement boundaries resolve here from grammar state, never in the
+//! lexers: groups arrive structurally atomic, so at each nesting level
+//! a `Newline`/`Semicolon` ends the statement. Continuation exceptions
+//! (trailing `=`, `IN`, trailing `ASYNC`, bare wrapper heads) land with
+//! their structural slices; the decision point is
+//! `boundary_ends_statement`.
+//!
+//! Coverage: generic commands (head word plus gap-split args with
+//! quote-accurate joins), guards (leading `[..]` groups; in-body
+//! brackets splice to raw text), `LET`/`SET`/`RETURN` with the full
+//! expression tiers, static calls and RUN-exec with instruction
+//! exactness, single-command wrappers (`WITH_IO`/`TIMEOUT`/`ISOLATED`/
+//! `ASYNC`), io-blocks, `AWAIT`/`CANCEL`, multi-element statements,
+//! block statements (`IF`/`FOR`/`WHILE`/`FUNC`/`REMOTE`/`TYPE`/
+//! `IMPORT`/`EXPORT`), guard blocks, and a whole-script post-pass
+//! (prelude order, COPY placement, EXPORT membership). Comments ride
+//! as `TokKind::Comment` markers plus mid-line `//`/`#`/`/*` gap
+//! rules.
+//!
+//! Design record: shared lowering cores with parser-native token
+//! classification. Each item below states what is shared and what is
+//! parser-native (verified by the lexer-agreement oracle and the fuzz
+//! harness).
+//! - Argument assembly matches single-quoted-string `quoted=true` and
+//!   multi-fragment space-or-empty joins by the `joint` flag.
+//! - `key_char`/`bare_run`/`value_run` implement the guard key/value
+//!   charsets (everything but `: = ! , | ( ) ] $`, whitespace, and
+//!   comment opens; `eq` values cross gaps like the atomic span).
+//! - `ns_guard` validates namespaces with shared messages.
+//! - Guard validation strings (`any(...)/all(...)/eq(...)` shapes)
+//!   carry shared messages.
+//! - `parse_guard_groups` folds stacked brackets with `All` (the
+//!   statement-guard stash semantics).
+//! - The expression tiers implement or/and/compare/ordering/add/mul/
+//!   unary/atom precedence over [`Tok`]; lowering runs through the
+//!   shared constructors (`make_arith`, `make_compare`,
+//!   `apply_unary_neg`, `reject_boundary`, `classify_numeric_text`,
+//!   `canonicalize_spelling`, `lower_block_string`).
+//! - Static call resolution is truly shared (`resolve_call_name`,
+//!   `check_func_ident` in `resolve.rs`).
+//! - Instruction tokens are truly shared (`InsToken`,
+//!   `lower_env_tokens`, `lower_expand_tokens`,
+//!   `canonical_assignment_arg` in `commands.rs`); only the
+//!   token-level classifiers (key runs, boundaries, call shapes,
+//!   expression extension) are parser-native.
+//! - Numeric `_`-separator shape gating, bare-word charsets, and
+//!   `-`-prefix dispatch match the lexical rules (durations, paths,
+//!   and versions lex as bare words; `-f` stays literal).
+//! - Wrapper validators are truly shared (`check_tty_wrapping`,
+//!   `reject_async_in_capture`, `reject_pipe_stdout_in_capture`,
+//!   `rewrite_isolated_inherit`, `contains_inherit_env`,
+//!   `reject_nested_inherit_env`, `merge_bindings`, `IoBindingSet`,
+//!   `and_guard_exprs`, `reject_with_io_in_async` in `commands.rs`;
+//!   in `commands.rs`); only the token-level shape classifiers
+//!   (duration gate, binding splitter, await/cancel shapes,
+//!   block-vs-template, inherit keys) are parser-native.
+//! - The element loop lowers consecutive elements to end of run:
+//!   structural pairs end mid-line and trailing elements form
+//!   following steps (guards attach to the first only); the `WITH_IO`
+//!   pending wait holds bare brackets across separators.
+//! - Block headers: `IF`/`FOR`/`WHILE`
+//!   conditions miss to generic on expression failure (inline-block
+//!   failures propagate); `FUNC` paren-group params parse with `gap`
+//!   discipline; `REMOTE` targets/blocks/bindings; `TYPE` maximal
+//!   shape match; `IMPORT`/`EXPORT` lists. Shared
+//!   validators are truly shared (`validate_remote_copy_placement`,
+//!   `contains_remote_block`, `collect_remote_body_symbols`,
+//!   `validate_exports` in `commands.rs`).
+//! - Scope marking: top-level guard nesting
+//!   bumps each level (stateful `pending_scope_enters`); wrapper and
+//!   guard-block bodies pin 0/0 (`parse_body_steps` without marking).
+//! - Comment handling: statement-position
+//!   comments vanish (releasing `ELSE` holds), gap positions skip,
+//!   arg positions type or glue literally; `/*` depth protects
+//!   separators in the splitter, and group scanning copies comments
+//!   through for the recursive re-lex.
+
 use crate::ast::{
-    ARCH_VALUES, Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable, Ns,
-    PipeTarget, Step, StepKind,
+    Arg, ArithOp, CompareOp, Expr, Guard, GuardExpr, IoBinding, IoStream, LogicalOp, ModuleTable,
+    Ns, Step, StepKind, Value,
 };
 use crate::command::ArgType;
-use crate::constants::{
-    KEYWORD_EXPORT, KEYWORD_IMPORT, KEYWORD_INSPECT, KEYWORD_TYPE, MODULE_SEPARATOR,
-    SCRIPT_MODULE_NAME, qualify, split_qualified,
+use crate::commands::{
+    InsToken, apply_unary_neg, canonical_assignment_arg, check_tty_wrapping, classify_numeric_text,
+    is_known_command, lower_env_tokens, lower_expand_tokens, make_arith, make_compare,
+    reject_boundary,
 };
-use crate::error::{ParseError, ParseResult, SpanContext};
-use crate::lexer::{
-    self, LanguageParser, RawToken, Rule, parse_pest_error, refine_span, span_for_line, span_of,
-};
-use pest::Parser as _;
-use pest::iterators::Pair;
-use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 
-/// Lowering context threaded through every grammar rule that can contain a
-/// block or a `FUNC` definition (issue #146).
-///
-/// This replaces the bare `lower: &dyn Fn` parameter the free lowering
-/// functions used to take. Bundling matters: `FUNC` duplicate and shadow
-/// validation needs the exact pest `SpanContext` at the definition site
-/// (post-parse AST walks only see the end of file), so the per-scope
-/// `FUNC` names ride alongside the dispatcher instead of a second pass.
-pub(super) struct LowerCtx<'a> {
-    /// Production command dispatcher (`lower_command`).
-    pub lower: &'a dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
-    /// Host-registered function names for parse-time shadow rejection.
-    /// Empty when hosts are unknown at parse time; the runtime
-    /// `define_func` guard still rejects those redefinitions.
-    pub reserved_names: &'a HashSet<String>,
-    /// Shared per-scope defined `FUNC` names. The `RefCell` lets every free
-    /// lowering function share one scope stack through plain `&LowerCtx`
-    /// references: `parse()` owns the stack plus the top-level scope, and
-    /// each `LowerCtx` is built fresh per statement so no `&self` borrow is
-    /// ever held across a `&mut self` call.
-    func_scopes: &'a RefCell<Vec<HashSet<String>>>,
-    /// Module provenance table for static call resolution.
-    modules: &'a ModuleTable,
-    /// Import frames mirroring scope structure, each holding imported
-    /// module names in `IMPORT` order. Chained lookup like var scopes:
-    /// inner frames see outer imports, frames drop on scope exit.
-    import_scopes: &'a RefCell<Vec<Vec<String>>>,
+use crate::resolve::resolve_call_name;
+use crate::tok::{GroupDelim, LexError, Tok, TokKind, lex_str};
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::fmt;
+
+/// Backend error. Carries the statement index and message; the string
+/// entry points below map it to [`crate::ParseError`]. Lowering
+/// failures from the shared `lower` dispatcher stringify through here
+/// so success paths compare exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenError {
+    pub stmt: usize,
+    /// 1-based source line, `0` when unknown (the split loops stamp the
+    /// enclosing statement's line on the way out, so only genuinely
+    /// position-less errors stay `0`).
+    pub line: usize,
+    /// 1-based start column of the enclosing statement, `0` when
+    /// unknown (stamped alongside `line`).
+    pub col: usize,
+    pub msg: String,
+    /// Lowering failures preserve the dispatcher's classification
+    /// (`UnknownCommand`, `InvalidSyntax`, `Validation`); `None` means
+    /// a parser-native structural failure.
+    pub kind: Option<ParseErrorKind>,
 }
 
-impl<'a> LowerCtx<'a> {
-    pub(super) fn new(
+impl fmt::Display for TokenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "parse error in statement {}: {}",
+            self.stmt + 1,
+            self.msg
+        )
+    }
+}
+
+impl std::error::Error for TokenError {}
+
+/// Lift a dispatcher/resolver [`ParseError`] into a [`TokenError`],
+/// preserving its machine-readable classification (the entry points
+/// convert it back verbatim, so `UnknownCommand`/`InvalidSyntax`/
+/// `Validation` survive the round trip). The message is the
+/// dispatcher's own display text; the split loops stamp the line.
+fn lower_err(stmt: usize, e: ParseError) -> TokenError {
+    TokenError {
+        stmt,
+        line: 0,
+        col: 0,
+        msg: e.to_string(),
+        kind: Some(e.kind().clone()),
+    }
+}
+
+/// One split statement: leading bracket groups (guard region) plus
+/// the body tokens. `brace_detached` records a
+/// `Newline`/`Semicolon` between the guard region and a brace-headed
+/// body: in-body such statements are hard errors (a bare `{` is
+/// illegal inside blocks), while top level merges or parses guard
+/// blocks regardless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stmt {
+    guard: Vec<Tok>,
+    body: Vec<Tok>,
+    brace_detached: bool,
+    /// 1-based source line where the body starts (guards ride on
+    /// earlier lines; errors report this).
+    line: usize,
+    /// 1-based column where the body starts (`0` when the head token
+    /// carries no coordinates: synthetic streams). Read off the first
+    /// body token, which always has the statement's own start.
+    col: usize,
+}
+
+/// Grammar-state boundary decision: does this `Newline`/`Semicolon`
+/// end the statement? Groups are atomic, so every statement fits one
+/// logical token line; every keyword-headed statement (commands,
+/// wrappers, `LET`/`AWAIT`, block statements, directives) ends here.
+/// Only non-word heads fail, exactly like the grammar's element
+/// mismatch.
+fn boundary_ends_statement(body: &[Tok]) -> Result<bool, String> {
+    let head = match body.first() {
+        None => return Ok(true),
+        Some(t) => t,
+    };
+    match &head.kind {
+        TokKind::Word(_) | TokKind::Punct('$') => Ok(true),
+        // A lone leading `{...}` ends here too: the splitter merges
+        // it into pending waits (`WITH_IO`, `IF`/`ELSE` chains) or
+        // emits it for block-statement lowering, never splitting
+        // inside.
+        TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        } => Ok(true),
+        _ => Err("statement must open with a command word".to_string()),
+    }
+}
+
+/// Bare `WITH_IO [..]` with no inner command: holds the line for a
+/// following `{...}` block (bare-bracket hold), which merges into one
+/// io-block statement. Anything else (or EOF) fails exactly like the
+/// grammar's `must be followed by '{'`.
+fn is_bare_with_io(body: &[Tok]) -> bool {
+    matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == "WITH_IO")
+        && matches!(
+            body.get(1).map(|t| (&t.kind, t.joint)),
+            Some((
+                TokKind::Group {
+                    delim: GroupDelim::Bracket,
+                    ..
+                },
+                false
+            ))
+        )
+        && body.len() == 2
+}
+
+/// An if-tailed statement body: head `IF`, ends with a non-template
+/// brace (the then/else-if block), ignoring trailing gap comments.
+/// Trailing `//`/`#` runs and balanced `/* */` strip backward (the
+/// grammar's `gap` eats them before the `ELSE` chain, joint state
+/// irrelevant after a complete pair); anything else trailing (text,
+/// groups, strings) breaks the tail. Over-holding is safe: a merged
+/// non-`ELSE` follower releases, and a merged `ELSE` parses exactly
+/// where the grammar would.
+fn is_if_tail(body: &[Tok]) -> bool {
+    if !matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == "IF") {
+        return false;
+    }
+    let mut end = body.len();
+    loop {
+        // Lexer comment markers.
+        while end > 0 && matches!(&body[end - 1].kind, TokKind::Comment(_)) {
+            end -= 1;
+        }
+        // Earliest comment opener (`//`-pair, `#`, `/*`-pair) starts
+        // trailing comment territory.
+        let mut cut = None;
+        let mut k = 0;
+        while k < end {
+            match &body[k].kind {
+                TokKind::Punct('#') => {
+                    cut = Some(k);
+                    break;
+                }
+                TokKind::Punct('/') if is_comment_open(&body[..end], k) => {
+                    cut = Some(k);
+                    break;
+                }
+                _ => k += 1,
+            }
+        }
+        match cut {
+            Some(k) => {
+                // A balanced `/* */` may be followed by more gap
+                // comments; anything else ends the strip for the
+                // brace check below.
+                if matches!(&body[k].kind, TokKind::Punct('/'))
+                    && !matches!(body.get(k + 1).map(|t| &t.kind), Some(TokKind::Punct('/')))
+                {
+                    match skip_inline_comment(&body[..end], k) {
+                        Some(past) if past < end => {
+                            end = past;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                end = k;
+                continue;
+            }
+            None => break,
+        }
+    }
+    matches!(
+        body[..end].last().map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        })
+    ) && body[..end].last().is_some_and(|t| !is_template_brace(t))
+}
+
+/// True when a body opens with a brace group (guard-block position
+/// or bare block).
+fn starts_brace(body: &[Tok]) -> bool {
+    matches!(
+        body.first().map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        })
+    )
+}
+
+/// Source lines spanned by one token (for the splitter's line
+/// counter): newlines, `/* */` comment interiors, and nested group
+/// contents. Everything else occupies its own line.
+fn tok_newlines(tok: &Tok) -> usize {
+    match &tok.kind {
+        TokKind::Newline => 1,
+        TokKind::Comment(text) => text.matches('\n').count(),
+        TokKind::Group { inner, .. } => inner.iter().map(tok_newlines).sum(),
+        _ => 0,
+    }
+}
+
+/// Stamp an error with the innermost statement's position when it
+/// has none yet (deeper frames stamp first, so outer frames never
+/// overwrite real positions). Each component fills independently.
+fn stamp_pos(err: TokenError, line: usize, col: usize) -> TokenError {
+    TokenError {
+        line: if err.line == 0 { line } else { err.line },
+        col: if err.col == 0 { col } else { err.col },
+        ..err
+    }
+}
+
+/// Split top-level tokens into statements. Leading `[..]` groups attach
+/// to the following statement as its guard region; `Newline`/`Semicolon`
+/// end statements per [`boundary_ends_statement`]. Empty statements
+/// (blank lines, stray `;`) drop, matching the blank/semicolon
+/// grammar elements. Comment markers drop silently everywhere except
+/// pending `ELSE` waits, which a comment line breaks exactly like the
+/// grammar. Mid-line `//` runs and `#`/`/*` opens with an empty body
+/// skip as comments (statement position, like the grammar's silent
+/// elements); anywhere else they stay payload text for the arg engine.
+fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> {
+    let mut stmts = Vec::new();
+    let mut guard = Vec::new();
+    let mut body: Vec<Tok> = Vec::new();
+    let mut stmt_idx = 0;
+    // 1-based source line tracker: `base` is the line `toks[0]` starts
+    // on (1 at top level, the enclosing statement's line inside
+    // groups, where headers are single-line so the brace shares it).
+    // Groups and block comments advance past their inner newlines;
+    // every pushed statement records its body's start line for errors.
+    let mut line = base;
+    let mut start_line = base;
+    let mut start_col = 0;
+    // Bare `WITH_IO [..]` awaiting its `{...}` block (see
+    // `is_bare_with_io`): the guard and body hold across any
+    // separator until the brace arrives or the wait fails.
+    // Pending holds carry their body's start line with them.
+    let mut pending_io: Option<(Vec<Tok>, Vec<Tok>, usize, usize)> = None;
+    // If-tailed statement awaiting an `ELSE` continuation across
+    // newlines only (a `;` breaks the chain like the grammar).
+    let mut pending_if: Option<(Vec<Tok>, Vec<Tok>, usize, usize)> = None;
+    // Separator crossed between the guard region and the body start:
+    // only observed for brace-headed bodies (`brace_detached`).
+    let mut detached = false;
+    // Flush a statement, resolving pending waits first. `via_newline`
+    // records the separator kind: only newlines hold/merge `ELSE`
+    // chains; `;` and EOF release them. `line` is the current tracker
+    // for wait-failure errors; `start_line` is this body's start.
+    let flush_or_hold = |stmts: &mut Vec<Stmt>,
+                         guard: &mut Vec<Tok>,
+                         body: &mut Vec<Tok>,
+                         detached: &mut bool,
+                         stmt_idx: &mut usize,
+                         pending_io: &mut Option<(Vec<Tok>, Vec<Tok>, usize, usize)>,
+                         pending_if: &mut Option<(Vec<Tok>, Vec<Tok>, usize, usize)>,
+                         via_newline: bool,
+                         start_line: usize,
+                         start_col: usize,
+                         line: usize|
+     -> Result<(), TokenError> {
+        if body.is_empty() {
+            guard.clear();
+            *detached = false;
+            return Ok(());
+        }
+        // Pending `WITH_IO` wait takes precedence (the holds are
+        // mutually exclusive: setting either returns first).
+        if let Some((pending_guard, mut pending_body, pending_line, pending_col)) =
+            pending_io.take()
+        {
+            // Only a lone guard-less `{...}` group satisfies the wait;
+            // anything else (commands, guarded braces) fails like the
+            // grammar's `must be followed by '{'`.
+            let lone_brace = guard.is_empty()
+                && body.len() == 1
+                && matches!(
+                    body.first().map(|t| &t.kind),
+                    Some(TokKind::Group {
+                        delim: GroupDelim::Brace,
+                        ..
+                    })
+                );
+            if !lone_brace {
+                return Err(TokenError {
+                    stmt: *stmt_idx,
+                    msg: "WITH_IO block must be followed by '{'".to_string(),
+                    line: pending_line,
+                    col: pending_col,
+                    kind: None,
+                });
+            }
+            pending_body.extend(std::mem::take(body));
+            guard.clear();
+            *detached = false;
+            stmts.push(Stmt {
+                guard: pending_guard,
+                body: pending_body,
+                brace_detached: false,
+                line: pending_line,
+                col: pending_col,
+            });
+            *stmt_idx += 1;
+            return Ok(());
+        }
+        // Pending `ELSE` wait: merge guard-less `ELSE`-led statements.
+        // The wait was set across a newline (only newlines hold), so
+        // the separator kind of *this* flush is irrelevant — `;` and
+        // EOF merge too; anything else releases the held IF.
+        if let Some((held_guard, mut held_body, held_line, held_col)) = pending_if.take() {
+            let else_start = guard.is_empty()
+                && matches!(
+                    body.first().map(|t| &t.kind),
+                    Some(TokKind::Word(w)) if w == "ELSE"
+                );
+            if !else_start {
+                stmts.push(Stmt {
+                    guard: held_guard,
+                    body: held_body,
+                    brace_detached: false,
+                    line: held_line,
+                    col: held_col,
+                });
+                *stmt_idx += 1;
+            } else {
+                // The merged chain may hold again for a further
+                // `ELSE`, newlines only, like the grammar. A newline
+                // marker joins the parts: `#` comments end at it
+                // (their extent is unrecoverable post-merge), while
+                // `//`/`/*` carry their own extents.
+                held_body.push(Tok::fresh(TokKind::Newline, false));
+                held_body.extend(std::mem::take(body));
+                guard.clear();
+                *detached = false;
+                if via_newline && is_if_tail(&held_body) {
+                    *pending_if = Some((held_guard, held_body, held_line, held_col));
+                    return Ok(());
+                }
+                stmts.push(Stmt {
+                    guard: held_guard,
+                    body: held_body,
+                    brace_detached: false,
+                    line: held_line,
+                    col: held_col,
+                });
+                *stmt_idx += 1;
+                return Ok(());
+            }
+        }
+        if is_bare_with_io(body) {
+            if pending_io.is_some() {
+                return Err(TokenError {
+                    stmt: *stmt_idx,
+                    msg: "previous WITH_IO block is still waiting for '{'".to_string(),
+                    line,
+                    col: start_col,
+                    kind: None,
+                });
+            }
+            *pending_io = Some((
+                std::mem::take(guard),
+                std::mem::take(body),
+                start_line,
+                start_col,
+            ));
+            *detached = false;
+            return Ok(());
+        }
+        // Ordinary statement: emit it, holding if-tailed bodies for
+        // an `ELSE` continuation across newlines only.
+        if via_newline && is_if_tail(body) {
+            *pending_if = Some((
+                std::mem::take(guard),
+                std::mem::take(body),
+                start_line,
+                start_col,
+            ));
+            *detached = false;
+            return Ok(());
+        }
+        let brace_detached = *detached && !guard.is_empty() && starts_brace(body);
+        stmts.push(Stmt {
+            guard: std::mem::take(guard),
+            body: std::mem::take(body),
+            brace_detached,
+            line: start_line,
+            col: start_col,
+        });
+        *detached = false;
+        *stmt_idx += 1;
+        Ok(())
+    };
+    // Release a pending `ELSE` wait by emitting the held IF as-is.
+    // (Inlined at use sites: a closure would collide with
+    // `flush_or_hold`'s borrow of the statement buffer.)
+    let mut i = 0;
+    // Open text-`/*` depth (line-start comments arrive as `Comment`
+    // toks; `//` never spans separators): newlines and semicolons
+    // inside never split, and `[` never guards (the closer, an
+    // error, or downstream rules resolve everything, exactly like
+    // the grammar).
+    let mut comment_depth = 0usize;
+    // True when `toks[i]` opens a text block comment (`/` plus a
+    // joint `*`; `//` is line-comment territory, handled elsewhere).
+    let block_open_at = |toks: &[Tok], i: usize| {
+        matches!(toks.get(i).map(|t| &t.kind), Some(TokKind::Punct('/')))
+            && matches!(
+                toks.get(i + 1).map(|t| (&t.kind, t.joint)),
+                Some((TokKind::Punct('*'), true))
+            )
+    };
+    // True when `toks[i]` closes one (`*` plus a joint `/`).
+    let block_close_at = |toks: &[Tok], i: usize| {
+        matches!(toks.get(i).map(|t| &t.kind), Some(TokKind::Punct('*')))
+            && matches!(
+                toks.get(i + 1).map(|t| (&t.kind, t.joint)),
+                Some((TokKind::Punct('/'), true))
+            )
+    };
+    while i < toks.len() {
+        let tok = &toks[i];
+        // Statement-start `/*` (silent gap position): skip balanced,
+        // failing unclosed like the grammar; mid-body opens only
+        // deepen the tracker below and ride into args as payload.
+        if body.is_empty() && comment_depth == 0 && block_open_at(toks, i) {
+            match skip_inline_comment(toks, i) {
+                Some(past) => {
+                    // The skipped span may cross lines (`/*a\nb*/`).
+                    line += toks[i..past].iter().map(tok_newlines).sum::<usize>();
+                    i = past;
+                    continue;
+                }
+                None => {
+                    return Err(TokenError {
+                        stmt: stmt_idx,
+                        msg: "unclosed block comment".to_string(),
+                        line,
+                        col: tok.col,
+                        kind: None,
+                    });
+                }
+            }
+        }
+        // Nesting transitions on text pairs (mid-body opens deepen;
+        // closers pop when nested).
+        if block_open_at(toks, i) && (comment_depth > 0 || !body.is_empty()) {
+            comment_depth += 1;
+        } else if block_close_at(toks, i) && comment_depth > 0 {
+            comment_depth -= 1;
+        }
+        // Inside a block comment everything rides into the current
+        // body (never splits, never guards, never releases waits,
+        // never skips): gap positions swallow it downstream, arg
+        // positions fail or math over it, exactly like the grammar.
+        if comment_depth > 0 {
+            if body.is_empty() {
+                // Head-token coordinates are authoritative: the line
+                // tracker lags content stripped before lexing (comments
+                // vanish on the token path, leaving no newline behind).
+                // Zero coordinates (synthetic streams) keep the tracker.
+                if tok.line > 0 {
+                    start_line = tok.line;
+                } else {
+                    start_line = line;
+                }
+                if tok.col > 0 {
+                    start_col = tok.col;
+                }
+            }
+            line += tok_newlines(tok);
+            body.push(tok.clone());
+            detached = false;
+            i += 1;
+            continue;
+        }
+        match &tok.kind {
+            TokKind::Newline => {
+                if body.is_empty() {
+                    // A separator between the guard region and a
+                    // following brace matters (see `brace_detached`).
+                    detached = true;
+                    line += 1;
+                    i += 1;
+                    continue;
+                }
+                match boundary_ends_statement(&body) {
+                    Ok(true) => flush_or_hold(
+                        &mut stmts,
+                        &mut guard,
+                        &mut body,
+                        &mut detached,
+                        &mut stmt_idx,
+                        &mut pending_io,
+                        &mut pending_if,
+                        true,
+                        start_line,
+                        start_col,
+                        line,
+                    )?,
+                    Ok(false) => {}
+                    Err(msg) => {
+                        return Err(TokenError {
+                            stmt: stmt_idx,
+                            msg,
+                            line: start_line,
+                            col: start_col,
+                            kind: None,
+                        });
+                    }
+                }
+                line += 1;
+                i += 1;
+            }
+            TokKind::Semicolon => {
+                if body.is_empty() {
+                    // A `;` breaks `ELSE` chains (release the hold)
+                    // but not `WITH_IO` waits (probed `;` merge).
+                    if let Some((held_guard, held_body, held_line, held_col)) = pending_if.take() {
+                        stmts.push(Stmt {
+                            guard: held_guard,
+                            body: held_body,
+                            brace_detached: false,
+                            line: held_line,
+                            col: held_col,
+                        });
+                        stmt_idx += 1;
+                    }
+                    detached = true;
+                    i += 1;
+                    continue;
+                }
+                match boundary_ends_statement(&body) {
+                    Ok(true) => flush_or_hold(
+                        &mut stmts,
+                        &mut guard,
+                        &mut body,
+                        &mut detached,
+                        &mut stmt_idx,
+                        &mut pending_io,
+                        &mut pending_if,
+                        false,
+                        start_line,
+                        start_col,
+                        line,
+                    )?,
+                    Ok(false) => {}
+                    Err(msg) => {
+                        return Err(TokenError {
+                            stmt: stmt_idx,
+                            msg,
+                            line: start_line,
+                            col: start_col,
+                            kind: None,
+                        });
+                    }
+                }
+                i += 1;
+            }
+            // Lexer comment markers drop silently, but release a
+            // pending `ELSE` wait (a comment line breaks the chain
+            // like the grammar); `WITH_IO` waits survive comments.
+            TokKind::Comment(text) => {
+                if let Some((held_guard, held_body, held_line, held_col)) = pending_if.take() {
+                    stmts.push(Stmt {
+                        guard: held_guard,
+                        body: held_body,
+                        brace_detached: false,
+                        line: held_line,
+                        col: held_col,
+                    });
+                    stmt_idx += 1;
+                }
+                // Block markers may span lines (`/*a\nb*/`).
+                line += text.matches('\n').count();
+                i += 1;
+            }
+            // A `//` run with an empty body (mid-line, e.g. after
+            // `;`) is a comment to the line end; with a non-empty
+            // body the slash-run rule owns it as payload text.
+            TokKind::Punct('/') if body.is_empty() && is_comment_open(toks, i) => {
+                if matches!(toks.get(i + 1).map(|t| &t.kind), Some(TokKind::Punct('/'))) {
+                    while i < toks.len() && !matches!(&toks[i].kind, TokKind::Newline) {
+                        i += 1;
+                    }
+                } else {
+                    match skip_inline_comment(toks, i) {
+                        Some(past) => i = past,
+                        None => {
+                            return Err(TokenError {
+                                stmt: stmt_idx,
+                                msg: "unclosed block comment".to_string(),
+                                line,
+                                col: tok.col,
+                                kind: None,
+                            });
+                        }
+                    }
+                }
+            }
+            // `#` with an empty body (e.g. after `;`) is a comment
+            // to the line end; mid-body it stays arg text.
+            TokKind::Punct('#') if body.is_empty() => {
+                while i < toks.len() && !matches!(&toks[i].kind, TokKind::Newline) {
+                    i += 1;
+                }
+            }
+            TokKind::Group { delim, .. } if body.is_empty() && *delim == GroupDelim::Bracket => {
+                // Guard groups may span lines; the body starts after.
+                line += tok_newlines(tok);
+                guard.push(tok.clone());
+                detached = false;
+                i += 1;
+            }
+            _ => {
+                if body.is_empty() {
+                    // Head-token coordinates are authoritative (see
+                    // above); the tracker is the fallback.
+                    if tok.line > 0 {
+                        start_line = tok.line;
+                    } else {
+                        start_line = line;
+                    }
+                    if tok.col > 0 {
+                        start_col = tok.col;
+                    }
+                }
+                line += tok_newlines(tok);
+                body.push(tok.clone());
+                i += 1;
+            }
+        }
+    }
+    if !body.is_empty() {
+        match boundary_ends_statement(&body) {
+            Ok(_) => flush_or_hold(
+                &mut stmts,
+                &mut guard,
+                &mut body,
+                &mut detached,
+                &mut stmt_idx,
+                &mut pending_io,
+                &mut pending_if,
+                false,
+                start_line,
+                start_col,
+                line,
+            )?,
+            Err(msg) => {
+                return Err(TokenError {
+                    stmt: stmt_idx,
+                    msg,
+                    line: start_line,
+                    col: start_col,
+                    kind: None,
+                });
+            }
+        }
+    } else if !guard.is_empty() {
+        // Trailing guards with no following command error (probed: a
+        // lone `[env:X]` is an error), never drop silently.
+        return Err(TokenError {
+            stmt: stmt_idx,
+            msg: "guard declared without a following command".to_string(),
+            line,
+            col: 0,
+            kind: None,
+        });
+    }
+    // Release a trailing `ELSE` wait; a trailing `WITH_IO` wait fails.
+    if let Some((held_guard, held_body, held_line, held_col)) = pending_if.take() {
+        stmts.push(Stmt {
+            guard: held_guard,
+            body: held_body,
+            brace_detached: false,
+            line: held_line,
+            col: held_col,
+        });
+    }
+    if let Some((_, _, pending_line, pending_col)) = pending_io.take() {
+        return Err(TokenError {
+            stmt: stmt_idx,
+            msg: "WITH_IO block must be followed by '{'".to_string(),
+            line: pending_line,
+            col: pending_col,
+            kind: None,
+        });
+    }
+    Ok(stmts)
+}
+
+/// Splice in-body bracket/paren groups to flat raw text: arg-position
+/// brackets read as ordinary characters split purely on whitespace
+/// (`ECHO [a, b]` is args `"[a,"` + `"b]"`), so the parser expands
+/// each group to open-punct + inner + close-punct and lets the normal
+/// gap-split/render reproduce the bytes exactly (probed parity).
+/// Recursion handles nesting; edge joints ride along untouched. Brace
+/// groups stay put (blocks, never args). Newlines/semicolons spliced
+/// from multi-line groups fail loudly in assembly.
+fn splice_arg_groups(body: &[Tok], stmt: usize) -> Result<Vec<Tok>, TokenError> {
+    let _ = stmt;
+    let mut out = Vec::new();
+    for tok in body.iter() {
+        match &tok.kind {
+            TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            } => out.push(tok.clone()),
+            TokKind::Group {
+                delim,
+                inner,
+                close_joint,
+                ..
+            } => {
+                let (open, close) = match delim {
+                    GroupDelim::Bracket => ('[', ']'),
+                    GroupDelim::Paren => ('(', ')'),
+                    GroupDelim::Brace => unreachable!(),
+                };
+                out.push(Tok::fresh(TokKind::Punct(open), tok.joint));
+                // Inside brackets raw-text rules apply: quotes are
+                // characters, blocks never dedent, and whitespace splits
+                // runs (`['a b']` is args `"['a"` + `"b']"`). Convert
+                // spliced strings back to word text (splitting it like
+                // raw text); top-level strings stay structural.
+                for t in splice_arg_groups(inner, stmt)? {
+                    match &t.kind {
+                        TokKind::Str { text, quote } => {
+                            out.extend(split_word_text(&format!("{quote}{text}{quote}"), t.joint));
+                        }
+                        TokKind::BlockStr(full) => {
+                            out.extend(split_word_text(full, t.joint));
+                        }
+                        _ => out.push(t),
+                    }
+                }
+                out.push(Tok::fresh(TokKind::Punct(close), *close_joint));
+            }
+            _ => out.push(tok.clone()),
+        }
+    }
+    Ok(out)
+}
+
+/// Split re-quoted raw text on whitespace runs. The first piece keeps the source joint flag; the rest break
+/// (whitespace separates args). Multi-space gaps normalize to one
+/// (documented edge, same class as group rendering).
+fn split_word_text(text: &str, joint: bool) -> Vec<Tok> {
+    let mut out = Vec::new();
+    let mut first = true;
+    for piece in text.split_whitespace() {
+        out.push(Tok::fresh(
+            TokKind::Word(piece.to_string()),
+            if first { joint } else { false },
+        ));
+        first = false;
+    }
+    if out.is_empty() {
+        out.push(Tok::fresh(TokKind::Word(text.to_string()), joint));
+    }
+    out
+}
+
+/// Assignment key charset, minus the `=` the
+/// classifier handles separately. Words are pre-filtered by the same
+/// set; `$`, quotes, and groups never start a key.
+fn is_assign_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':')
+}
+
+/// Match an assignment key run at an argument start: joint
+/// word/punct run in the key charset, non-empty, not `--`-led
+/// (flags keep their literal reading). Returns the key and end index.
+fn match_assign_key(toks: &[Tok], pos: usize) -> Option<(String, usize)> {
+    let mut out = String::new();
+    let mut p = pos;
+    loop {
+        let t = toks.get(p)?;
+        if !out.is_empty() && !t.joint {
+            break;
+        }
+        match &t.kind {
+            TokKind::Word(w) => out.push_str(w),
+            TokKind::Punct(c) if is_assign_key_char(*c) => out.push(*c),
+            _ => break,
+        }
+        p += 1;
+    }
+    if out.is_empty() || out.starts_with("--") {
+        return None;
+    }
+    if !out
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+    {
+        return None;
+    }
+    Some((out, p))
+}
+
+/// Assignment boundary ahead (for value scanning): an argument start
+/// holding `KEY=` (key run plus `=` at any gap).
+/// Groups and strings are opaque: a `=` inside them never counts.
+fn at_assign_boundary(toks: &[Tok], pos: usize) -> bool {
+    match match_assign_key(toks, pos) {
+        Some((_, end)) => matches!(toks.get(end).map(|t| &t.kind), Some(TokKind::Punct('='))),
+        None => false,
+    }
+}
+
+/// Raw-text render of one gap-run (or value span): words/puncts
+/// literally (`$`+word literally, `$` elsewhere errors), strings by
+/// their inner bytes, blocks lowered, groups spliced. Gaps collapse
+/// to one space like `collapse_ws`; newlines/semicolons fail (the
+/// grammar's raw span excludes them).
+fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < toks.len() {
+        let tok = &toks[i];
+        if !tok.joint && !out.is_empty() {
+            out.push(' ');
+        }
+        match &tok.kind {
+            TokKind::Word(w) => out.push_str(w),
+            TokKind::Punct(c) => {
+                if *c == '$' {
+                    // Lone-`$` runs never reach here (expression
+                    // extension claims them first and fails loudly).
+                    // Elsewhere `$` renders literally (probed `a$(x)`
+                    // reads raw) except before a brace group, where
+                    // the grammar strands it (probed `K=${x}` fails).
+                    let next = toks.get(i + 1);
+                    let brace_next = next.is_some_and(|t| {
+                        matches!(
+                            &t.kind,
+                            TokKind::Group {
+                                delim: GroupDelim::Brace,
+                                ..
+                            }
+                        )
+                    });
+                    if brace_next {
+                        return Err(TokenError {
+                            stmt,
+                            msg: "unexpected `$` in argument".to_string(),
+                            line: 0,
+                            col: 0,
+                            kind: None,
+                        });
+                    }
+                    out.push('$');
+                } else {
+                    out.push(*c);
+                }
+            }
+            // Standalone quotes strip (the caller handles single-tok
+            // runs); glued quotes keep their marks, like the grammar's
+            // mixed fragments (`>"a"` stays quoted, `"a"` strips).
+            TokKind::Str { text: s, quote } => {
+                let glued = tok.joint || toks.get(i + 1).is_some_and(|t| t.joint);
+                if toks.len() > 1 && glued {
+                    out.push(*quote);
+                    out.push_str(s);
+                    out.push(*quote);
+                } else {
+                    out.push_str(s);
+                }
+            }
+            // Comments reproduce verbatim (templates keep comment
+            // text like the atomic grammar span); gaps collapse
+            // around them like other fragments per the documented
+            // single-space normalization.
+            TokKind::Comment(text) => out.push_str(text),
+            TokKind::BlockStr(full) => {
+                // Glued blocks keep their delimiters, like quotes.
+                let glued = tok.joint || toks.get(i + 1).is_some_and(|t| t.joint);
+                if toks.len() > 1 && glued {
+                    out.push_str(full);
+                } else {
+                    out.push_str(&crate::command::lower_block_string(full));
+                }
+            }
+            TokKind::Group {
+                delim: GroupDelim::Brace,
+                inner,
+                open_joint,
+                close_joint,
+                ..
+            } => out.push_str(&render_brace_run_text(inner, *open_joint, *close_joint)),
+            TokKind::Group {
+                delim: GroupDelim::Bracket,
+                inner,
+                open_joint,
+                close_joint,
+                ..
+            } => out.push_str(&render_group('[', ']', inner, *open_joint, *close_joint)),
+            TokKind::Group {
+                delim: GroupDelim::Paren,
+                inner,
+                open_joint,
+                close_joint,
+                ..
+            } => out.push_str(&render_group('(', ')', inner, *open_joint, *close_joint)),
+            TokKind::Newline | TokKind::Semicolon => {
+                return Err(TokenError {
+                    stmt,
+                    msg: "unexpected line break in argument".to_string(),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                });
+            }
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
+/// Build an assignment value `Arg` over a region that runs to the next
+/// boundary or end. Single quoted/block strings keep `quoted=true`; a
+/// region that is exactly one lone `$var`/keypath/`env:`/call shape
+/// stays typed (calls resolve through the shared resolver, matching
+/// `assign_expr`); everything else renders raw. A quoted unit followed
+/// by joint content errors (probed: `K="a"b` fails), like the grammar.
+fn build_value_arg(
+    region: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+    lone_ok: bool,
+) -> Result<Arg, TokenError> {
+    if region.is_empty() {
+        return Ok(Arg::String(String::new(), false));
+    }
+    if region.len() == 1 {
+        match &region[0].kind {
+            TokKind::Str { text: s, .. } => return Ok(Arg::String(s.clone(), true)),
+            TokKind::BlockStr(full) => {
+                return Ok(Arg::String(crate::command::lower_block_string(full), true));
+            }
+            _ => {}
+        }
+    }
+    if region.len() > 1
+        && matches!(&region[0].kind, TokKind::Str { .. } | TokKind::BlockStr(_))
+        && region[1].joint
+    {
+        return Err(TokenError {
+            stmt,
+            msg: "unexpected text after quoted value".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    // Single-quoted values mid-line (`K='a b'`): the string lexer only
+    // opens `'` gapped, so these arrive as fragments; the grammar's
+    // `quoted_string` admits them anywhere. Reassemble a region that
+    // opens with `'` and closes at its end, stripping exactly like a
+    // structural string (escapes intact for runtime, like `Str`).
+    if matches!(&region[0].kind, TokKind::Punct('\''))
+        && let Some(text) = try_squote_value(region)
+    {
+        return Ok(Arg::String(text, true));
+    }
+    // Lone typed values apply only at a true end/boundary, never
+    // past a comment (the grammar's `!assign_expr_cont` guard).
+    if lone_ok && let Some(expr) = try_lone_value_expr(region, stmt, ctx)? {
+        return Ok(expr);
+    }
+    Ok(Arg::String(render_raw_text(region, stmt)?, false))
+}
+
+/// Reassemble a single-quoted assignment value (`K='a b'`) from its
+/// lexer fragments: the opener must close at the region end (a
+/// trailing fragment falls back to raw text, which fails downstream
+/// like the grammar). Inner gaps join with one space and nested
+/// double quotes re-quote (the atomic span keeps them); `\'` escapes
+/// pass through intact for runtime, like structural strings. `None`
+/// on shape miss.
+fn try_squote_value(region: &[Tok]) -> Option<String> {
+    // Closing `'`: first unescaped quote past the opener.
+    let mut close = None;
+    let mut i = 1;
+    while i < region.len() {
+        match &region[i].kind {
+            TokKind::Punct('\\') => i += 2,
+            TokKind::Punct('\'') => {
+                close = Some(i);
+                break;
+            }
+            _ => i += 1,
+        }
+    }
+    if close != Some(region.len() - 1) {
+        return None;
+    }
+    let mut out = String::new();
+    for tok in &region[1..region.len() - 1] {
+        if !tok.joint && !out.is_empty() {
+            out.push(' ');
+        }
+        match &tok.kind {
+            TokKind::Word(w) => out.push_str(w),
+            TokKind::Punct(c) => out.push(*c),
+            TokKind::Semicolon => out.push(';'),
+            // Nested double quotes keep their marks (the atomic span
+            // never strips them); triple quotes pass through whole.
+            TokKind::Str { text, quote } => {
+                out.push(*quote);
+                out.push_str(text);
+                out.push(*quote);
+            }
+            TokKind::BlockStr(full) => out.push_str(full),
+            // Groups and newlines never occur in value regions (the
+            // splitter owns them); anything else breaks the shape.
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Lone assignable shapes (`assign_expr` without continuation): `$var`,
+/// key paths, `env:KEY`, and full-region calls (resolved). Anything
+/// longer renders raw; the caller decides strictness.
+fn try_lone_value_expr(
+    region: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<Arg>, TokenError> {
+    // `$` shapes: exactly Punct+Word or dotted runs, all joint past
+    // the first (the region starts at an argument start by construction).
+    if matches!(region.first().map(|t| &t.kind), Some(TokKind::Punct('$'))) {
+        let mut cur = Cursor::expr(region, stmt);
+        cur.pos += 1;
+        let base = match cur.next() {
+            Some(t) if t.joint && matches!(&t.kind, TokKind::Word(w) if is_ident_word(w)) => {
+                match &t.kind {
+                    TokKind::Word(w) => w.clone(),
+                    _ => unreachable!(),
+                }
+            }
+            _ => return Ok(None),
+        };
+        let mut keys = Vec::new();
+        loop {
+            let dot = matches!(
+                cur.toks.get(cur.pos).map(|t| &t.kind),
+                Some(TokKind::Punct('.'))
+            ) && cur.toks.get(cur.pos).is_some_and(|t| t.joint);
+            let seg = cur.toks.get(cur.pos + 1);
+            let seg_ok = dot
+                && matches!(seg.map(|t| &t.kind), Some(TokKind::Word(w)) if is_key_segment(w))
+                && seg.is_some_and(|t| t.joint);
+            if !seg_ok {
+                break;
+            }
+            if let Some(TokKind::Word(w)) = seg.map(|t| &t.kind) {
+                keys.push(w.clone());
+            }
+            cur.pos += 2;
+        }
+        if cur.pos != region.len() {
+            return Ok(None);
+        }
+        return Ok(Some(Arg::Expr(if keys.is_empty() {
+            Expr::Var(base)
+        } else {
+            Expr::KeyPath { base, keys }
+        })));
+    }
+    // `env:KEY` read, gapless and exact.
+    if region.len() == 3
+        && matches!(&region[0].kind, TokKind::Word(w) if w == "env")
+        && matches!(&region[1].kind, TokKind::Punct(':'))
+        && region[1].joint
+        && let TokKind::Word(k) = &region[2].kind
+        && is_env_key(k)
+        && region[2].joint
+    {
+        return Ok(Some(Arg::Expr(Expr::Env(k.clone()))));
+    }
+    // Full-region call: resolve and keep typed (canonical rendering
+    // happens per command: verbatim for ENV/EXPAND, `K=`-joined text
+    // elsewhere, all from the same `Arg::Expr`).
+    if let Some((name, paren)) = call_shape_at(region, 0, false)
+        && paren + 1 == region.len()
+        && let TokKind::Group { inner, .. } = &region[paren].kind
+    {
+        let inner = inner.clone();
+        let args = parse_call_args(&inner, stmt, ctx)?;
+        if name == "INSPECT" {
+            let [arg] = args.as_slice() else {
+                return Err(TokenError {
+                    stmt,
+                    msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                });
+            };
+            if let Expr::Var(var) = arg {
+                return Ok(Some(Arg::Expr(Expr::Inspect(var.clone()))));
+            }
+            return Err(TokenError {
+                stmt,
+                msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        let qualified = resolve_name(ctx, stmt, &name)?;
+        return Ok(Some(Arg::Expr(Expr::Call {
+            name: qualified,
+            args,
+        })));
+    }
+    Ok(None)
+}
+
+/// Expression extension for `$`/`env:`-led argument starts: parse a
+/// full expression (operators reach across gaps exactly like the
+/// grammar's inner `gap`s). Ending at a gap/end yields a typed single
+/// group; ending mid-run falls back to raw text of the run (`$x=K`);
+/// parse failure is fatal (every fragment alternative failed).
+/// Returns the arg and tokens consumed.
+fn try_expr_arg(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(Arg, usize)>, TokenError> {
+    let extend = matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Punct('$')))
+        || matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == "env");
+    if !extend {
+        return Ok(None);
+    }
+    // A bare `env` head only extends into a real `env:KEY` read (joint
+    // `:`); dotted bare words (`env.txt`) stay raw strings like the
+    // grammar's `unquoted_arg`, which precedes `expr`.
+    if matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == "env")
+        && !matches!(
+            (
+                toks.get(pos + 1).map(|t| &t.kind),
+                toks.get(pos + 1).map(|t| t.joint)
+            ),
+            (Some(TokKind::Punct(':')), Some(true))
+        )
+    {
+        return Ok(None);
+    }
+    let mut cur = Cursor::expr(&toks[pos..], stmt);
+    let expr = parse_expr_or(&mut cur, ctx)?;
+    let end = pos + cur.pos;
+    // Mid-run stop (joint follower): the whole run renders raw
+    // (`$x=K`, `$a$b`); the run always ends the fallback span here
+    // because extension starts groups.
+    if toks.get(end).is_some_and(|t| t.joint) {
+        let mut run_end = end;
+        while toks.get(run_end).is_some_and(|t| t.joint) {
+            run_end += 1;
+        }
+        let text = render_raw_text(&toks[pos..run_end], stmt)?;
+        return Ok(Some((Arg::String(text, false), run_end - pos)));
+    }
+    Ok(Some((Arg::Expr(expr), end - pos)))
+}
+
+/// Render a brace group inside raw text (`{{..}}` templates and
+/// mid-run `{..}` shapes): verbatim bytes, single-space-normalized
+/// gaps. Run-start non-template braces never reach here (they parse
+/// as maps/blocks in `build_arg_tokens`).
+fn render_brace_run_text(inner: &[Tok], open_joint: bool, close_joint: bool) -> String {
+    render_group('{', '}', inner, open_joint, close_joint)
+}
+
+/// Inner bytes of a fully-quoted word (`"hi"`, `'a'`): the re-quoted
+/// standalone strings spliced from groups strip exactly like
+/// structural ones. Triple-quote pieces never qualify (block lowering
+/// owns them); glued quotes (`['a`) never reach here as sole runs.
+fn quoted_word_inner(w: &str) -> Option<String> {
+    if w.len() >= 2 && !w.starts_with("\"\"\"") {
+        let q = w.as_bytes()[0] as char;
+        if (q == '"' || q == '\'') && w.ends_with(q) {
+            return Some(w[1..w.len() - 1].to_string());
+        }
+    }
+    None
+}
+
+/// Build instruction tokens over generic args, mirroring
+/// `assignment | argument` order at every argument start: assignments
+/// merge across gaps to the next boundary, `$`/`env:`-led runs extend
+/// as expressions, brace-led runs try templates then maps/blocks, and
+/// everything else renders raw. Single quoted strings keep their flag.
+fn build_arg_tokens(
+    toks: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Vec<InsToken>, TokenError> {
+    // Splice bracket/paren groups first: they read as ordinary
+    // characters (whitespace splits inside them), with strings
+    // re-quoted back to word text. Brace groups stay structural
+    // (templates render whole; blocks parse as expressions).
+    let flat = splice_arg_groups(toks, stmt)?;
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos < flat.len() {
+        // 1. Assignment: key run plus `=` at any gap.
+        if let Some((key, key_end)) = match_assign_key(&flat, pos)
+            && let Some(tok) = flat.get(key_end)
+            && matches!(&tok.kind, TokKind::Punct('='))
+        {
+            // Value runs to the next boundary, but raw text also
+            // stops at `//` / `/*` (raw-text rule):
+            // a line comment swallows the rest silently, a block
+            // comment must be followed by nothing or a boundary
+            // (anything else strands text and fails the line, like
+            // the grammar). Lone typed values (`$x`, calls) apply
+            // only at a true end/boundary, never past a comment
+            // (the grammar's `!assign_expr_cont` guard).
+            let mut vend = key_end + 1;
+            let mut lone_ok = true;
+            let mut failed: Option<String> = None;
+            'scan: while vend < flat.len() {
+                if !flat[vend].joint && at_assign_boundary(&flat, vend) {
+                    break;
+                }
+                // Lexer comment markers end the raw span like `//`
+                // (they run to end of line by construction).
+                if matches!(&flat[vend].kind, TokKind::Comment(_)) {
+                    lone_ok = false;
+                    vend = flat.len();
+                    break;
+                }
+                if matches!(&flat[vend].kind, TokKind::Punct('/')) && is_comment_open(&flat, vend) {
+                    // Comments end the raw span: line comments eat
+                    // the rest silently, block comments must be
+                    // followed by nothing, a boundary, or more
+                    // comments (stranded text fails the line, like
+                    // the grammar).
+                    lone_ok = false;
+                    loop {
+                        if vend >= flat.len()
+                            || (!flat[vend].joint && at_assign_boundary(&flat, vend))
+                        {
+                            break 'scan;
+                        }
+                        if !matches!(&flat[vend].kind, TokKind::Punct('/'))
+                            || !is_comment_open(&flat, vend)
+                        {
+                            failed = Some("unexpected text after assignment value".to_string());
+                            break 'scan;
+                        }
+                        if matches!(
+                            flat.get(vend + 1).map(|t| &t.kind),
+                            Some(TokKind::Punct('/'))
+                        ) {
+                            vend = flat.len();
+                            break 'scan;
+                        }
+                        match skip_inline_comment(&flat, vend) {
+                            None => {
+                                failed = Some("unclosed block comment".to_string());
+                                break 'scan;
+                            }
+                            Some(past) => vend = past,
+                        }
+                    }
+                }
+                vend += 1;
+            }
+            if let Some(msg) = failed {
+                return Err(TokenError {
+                    stmt,
+                    msg,
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                });
+            }
+            let value = build_value_arg(&flat[key_end + 1..vend], stmt, ctx, lone_ok)?;
+            out.push(InsToken::Assign(key, value));
+            pos = vend;
+            continue;
+        }
+        // 2. Brace-led run: template text, else map/block expression.
+        if matches!(
+            flat.get(pos).map(|t| &t.kind),
+            Some(TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            })
+        ) {
+            let mut run_end = pos + 1;
+            while flat.get(run_end).is_some_and(|t| t.joint) {
+                run_end += 1;
+            }
+            let run = &flat[pos..run_end];
+            let is_template = is_template_brace(&run[0]);
+            if is_template {
+                out.push(InsToken::Pos(Arg::String(
+                    render_raw_text(run, stmt)?,
+                    false,
+                )));
+            } else {
+                let inner = match &run[0].kind {
+                    TokKind::Group { inner, .. } => inner.clone(),
+                    _ => unreachable!(),
+                };
+                // Map success alone stays typed; map success with a
+                // joint tail renders raw (`{k:1}x`, like the grammar's
+                // mixed fragments); map failure defers/errors exactly
+                // like the expression path.
+                match parse_map_or_block(&inner, stmt, ctx) {
+                    Ok(expr) if run.len() == 1 => {
+                        out.push(InsToken::Pos(Arg::Expr(expr)));
+                    }
+                    Ok(_) => out.push(InsToken::Pos(Arg::String(
+                        render_raw_text(run, stmt)?,
+                        false,
+                    ))),
+                    Err(e) => return Err(e),
+                }
+            }
+            pos = run_end;
+            continue;
+        }
+        // 3. `$`/`env:`-led expression extension.
+        if let Some((arg, used)) = try_expr_arg(&flat, pos, stmt, ctx)? {
+            // A lone expression group stays typed; the fallback
+            // already rendered text above.
+            out.push(InsToken::Pos(arg));
+            pos += used;
+            continue;
+        }
+        // 4. Raw text run to the next gap.
+        let mut run_end = pos + 1;
+        while flat.get(run_end).is_some_and(|t| t.joint) {
+            run_end += 1;
+        }
+        let run = &flat[pos..run_end];
+        // Slash-pair-led runs (`/*c*/`; `//` arrives as `Comment`
+        // toks) parse as expression fragments (typed when single,
+        // glued verbatim otherwise).
+        if is_slash_run(run) {
+            out.push(InsToken::Pos(parse_slash_run(run, stmt, ctx)?));
+            pos = run_end;
+            continue;
+        }
+        // Trailing `Comment` (`//` to end of line) glues as a
+        // literal fragment (typed when alone, verbatim otherwise),
+        // exactly like the grammar's expression fragments.
+        if let Some(TokKind::Comment(text)) = run.last().map(|t| &t.kind) {
+            if run.len() == 1 {
+                out.push(InsToken::Pos(Arg::Expr(Expr::Literal(Value::string(
+                    text.clone(),
+                )))));
+            } else {
+                let mut bytes = render_raw_text(&run[..run.len() - 1], stmt)?;
+                bytes.push_str(text);
+                out.push(InsToken::Pos(Arg::String(bytes, false)));
+            }
+            pos = run_end;
+            continue;
+        }
+        if run.len() == 1 {
+            match &run[0].kind {
+                TokKind::Str { text: s, .. } => {
+                    out.push(InsToken::Pos(Arg::String(s.clone(), true)));
+                    pos = run_end;
+                    continue;
+                }
+                TokKind::BlockStr(full) => {
+                    out.push(InsToken::Pos(Arg::String(
+                        crate::command::lower_block_string(full),
+                        true,
+                    )));
+                    pos = run_end;
+                    continue;
+                }
+                // Re-quoted standalone strings (spliced from groups)
+                // strip exactly like structural ones (`( "hi" )` gives
+                // `hi`); glued quotes stay literal (`['a` keeps its
+                // mark). Triple-quote pieces never qualify.
+                TokKind::Word(w) if quoted_word_inner(w).is_some() => {
+                    out.push(InsToken::Pos(Arg::String(
+                        quoted_word_inner(w).unwrap(),
+                        true,
+                    )));
+                    pos = run_end;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(InsToken::Pos(Arg::String(
+            render_raw_text(run, stmt)?,
+            false,
+        )));
+        pos = run_end;
+    }
+    Ok(out)
+}
+
+/// A raw run starting with `//` or `/*` (a slash-pair: `/` plus a
+/// joint `/` or `*`) parses as expression fragments: both route to
+/// `expr` there (so `//c` types as a literal and `/*c*/` as math). A single
+/// fully-consuming expression stays typed; anything longer glues to
+/// verbatim text exactly like the grammar's mixed fragments (byte
+/// for byte, since joint runs admit no span gaps); an unparseable
+/// start fails loudly (the argument fails there too).
+fn parse_slash_run(run: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Arg, TokenError> {
+    let mut cur = Cursor::expr(run, stmt);
+    let expr = parse_expr_checked(&mut cur, ctx)?;
+    if cur.done() {
+        return Ok(Arg::Expr(expr));
+    }
+    Ok(Arg::String(render_raw_text(run, stmt)?, false))
+}
+
+/// True when a raw run opens with a slash-pair (`/` plus a joint
+/// `/` or `*`), routing it to expression fragments (see
+/// [`parse_slash_run`]). A lone `/` (`/a`, `/`) stays raw text.
+fn is_slash_run(run: &[Tok]) -> bool {
+    matches!(run.first().map(|t| &t.kind), Some(TokKind::Punct('/')))
+        && matches!(
+            run.get(1).map(|t| (&t.kind, t.joint)),
+            Some((TokKind::Punct('/'), true)) | Some((TokKind::Punct('*'), true))
+        )
+}
+
+/// Lower generic args through the shared cores: `ENV`/`EXPAND` bypass
+/// the injected dispatcher; everything else
+/// canonicalizes assignments and calls it.
+fn lower_generic_args(
+    name: &str,
+    tokens: Vec<InsToken>,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<StepKind, TokenError> {
+    if name == "ENV" {
+        return lower_env_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
+            stmt,
+            msg: e.to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    if name == "EXPAND" {
+        return lower_expand_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
+            stmt,
+            msg: e.to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    let args = tokens
+        .into_iter()
+        .map(|token| match token {
+            InsToken::Pos(arg) => arg,
+            InsToken::Assign(key, value) => canonical_assignment_arg(&key, &value),
+        })
+        .collect();
+    (ctx.lower)(name, args).map_err(|e| lower_err(stmt, e))
+}
+
+/// Render a bracket/paren/brace group back to source text for raw-text
+/// positions (in-body groups are args, template braces render whole).
+/// Fragments join with a space on gaps and glue on `joint`, so both
+/// lexers render the same source identically; quote styles round-trip
+/// exactly. Known normalization (documented, not silent): multi-space
+/// gaps collapse to one.
+fn render_group(
+    open: char,
+    close: char,
+    inner: &[Tok],
+    open_joint: bool,
+    close_joint: bool,
+) -> String {
+    let mut out = String::from(open);
+    if !open_joint && !inner.is_empty() {
+        out.push(' ');
+    }
+    let mut first = true;
+    for tok in inner {
+        match &tok.kind {
+            TokKind::Newline => out.push('\n'),
+            TokKind::Semicolon => out.push(';'),
+            // Comments reproduce verbatim (templates keep comment
+            // text like the atomic grammar span); like newlines they
+            // carry their own separation, never a synthetic space.
+            TokKind::Comment(text) => out.push_str(text),
+            _ => {
+                if !first && !tok.joint {
+                    out.push(' ');
+                }
+                match &tok.kind {
+                    TokKind::Word(w) => out.push_str(w),
+                    TokKind::Punct(c) => out.push(*c),
+                    TokKind::Str { text, quote } => {
+                        out.push(*quote);
+                        out.push_str(text);
+                        out.push(*quote);
+                    }
+                    TokKind::BlockStr(full) => out.push_str(full),
+                    TokKind::Group {
+                        delim: GroupDelim::Bracket,
+                        inner,
+                        open_joint,
+                        close_joint,
+                        ..
+                    } => out.push_str(&render_group('[', ']', inner, *open_joint, *close_joint)),
+                    TokKind::Group {
+                        delim: GroupDelim::Paren,
+                        inner,
+                        open_joint,
+                        close_joint,
+                        ..
+                    } => out.push_str(&render_group('(', ')', inner, *open_joint, *close_joint)),
+                    TokKind::Group {
+                        delim: GroupDelim::Brace,
+                        inner,
+                        open_joint,
+                        close_joint,
+                        ..
+                    } => out.push_str(&render_group('{', '}', inner, *open_joint, *close_joint)),
+                    // Comments reproduce verbatim (nested groups keep
+                    // comment text like the atomic grammar span).
+                    TokKind::Comment(text) => out.push_str(text),
+                    TokKind::Newline | TokKind::Semicolon => unreachable!(),
+                }
+            }
+        }
+        first = false;
+    }
+    if !close_joint && !inner.is_empty() {
+        out.push(' ');
+    }
+    out.push(close);
+    out
+}
+
+/// Positional cursor over guard/group token slices. Newlines skip
+/// freely between tokens (`ws` admits linebreaks in the grammar);
+/// bare key/value runs never cross them (the grammar excludes
+/// linebreaks there), so runs read raw.
+///
+/// Expression parsing reuses this cursor with `nl_skip = false`:
+/// expressions are single-line (`gap`, never `gap_nl`, between
+/// operands), so a newline terminates instead of vanishing. Newlines
+/// inside group inners (call args, lists, maps) skip via explicit
+/// `skip_newlines` calls at the grammar's `gap_nl` junctures.
+struct Cursor<'t> {
+    toks: &'t [Tok],
+    pos: usize,
+    stmt: usize,
+    nl_skip: bool,
+}
+
+impl<'t> Cursor<'t> {
+    fn new(toks: &'t [Tok], stmt: usize) -> Self {
+        Self {
+            toks,
+            pos: 0,
+            stmt,
+            nl_skip: true,
+        }
+    }
+
+    /// Expression-mode cursor: newlines stop, never skip.
+    fn expr(toks: &'t [Tok], stmt: usize) -> Self {
+        Self {
+            toks,
+            pos: 0,
+            stmt,
+            nl_skip: false,
+        }
+    }
+
+    fn err(&self, msg: impl Into<String>) -> TokenError {
+        TokenError {
+            stmt: self.stmt,
+            line: 0,
+            col: 0,
+            msg: msg.into(),
+            kind: None,
+        }
+    }
+
+    fn skip_newlines(&mut self) {
+        while matches!(
+            self.toks.get(self.pos).map(|t| &t.kind),
+            Some(TokKind::Newline)
+        ) {
+            self.pos += 1;
+        }
+    }
+
+    fn peek(&mut self) -> Option<&'t Tok> {
+        if self.nl_skip {
+            self.skip_newlines();
+        }
+        self.toks.get(self.pos)
+    }
+
+    fn next(&mut self) -> Option<&'t Tok> {
+        if self.nl_skip {
+            self.skip_newlines();
+        }
+        let t = self.toks.get(self.pos)?;
+        self.pos += 1;
+        Some(t)
+    }
+
+    fn done(&mut self) -> bool {
+        if self.nl_skip {
+            self.skip_newlines();
+        }
+        self.pos >= self.toks.len()
+    }
+
+    fn eat_punct(&mut self, c: char) -> bool {
+        if self.nl_skip {
+            self.skip_newlines();
+        }
+        match self.peek() {
+            Some(t) if matches!(&t.kind, TokKind::Punct(p) if *p == c) => {
+                self.pos += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Skip one gap's worth of comments (`gap`: `//`-to-newline,
+    /// balanced `/* */` even across newlines, `#`-to-newline —
+    /// never a standalone newline, which ends single-line
+    /// expressions. Greedy gap before operators and operands; whitespace itself is
+    /// already invisible in the token stream.
+    fn skip_gap(&mut self) {
+        loop {
+            match self.toks.get(self.pos).map(|t| &t.kind) {
+                Some(TokKind::Comment(_)) => {
+                    self.pos += 1;
+                }
+                Some(TokKind::Punct('/')) if is_comment_open(self.toks, self.pos) => {
+                    match skip_inline_comment(self.toks, self.pos) {
+                        Some(next) => self.pos = next,
+                        // Unclosed block comments fail the gap (and
+                        // the enclosing rule) like the grammar.
+                        None => break,
+                    }
+                }
+                Some(TokKind::Punct('#')) => {
+                    while self.pos < self.toks.len()
+                        && !matches!(&self.toks[self.pos].kind, TokKind::Newline)
+                    {
+                        self.pos += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Skip gap comments plus standalone newlines (`gap_nl`: call
+    /// args, list items, maps, parenthesized expressions).
+    fn skip_gap_nl(&mut self) {
+        loop {
+            match self.toks.get(self.pos).map(|t| &t.kind) {
+                Some(TokKind::Newline) => {
+                    self.pos += 1;
+                }
+                _ => {
+                    let before = self.pos;
+                    self.skip_gap();
+                    if self.pos == before {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Consume the parenthesized group following a call word (`not`,
+    /// `any`, `all`, `eq`, `ne`), ignoring gap width exactly like the
+    /// grammar's implicit whitespace.
+    fn eat_paren_group(&mut self) -> Option<Vec<Tok>> {
+        match self.peek() {
+            Some(t) => match &t.kind {
+                TokKind::Group {
+                    delim: GroupDelim::Paren,
+                    inner,
+                    ..
+                } => {
+                    let inner = inner.clone();
+                    self.pos += 1;
+                    Some(inner)
+                }
+                _ => None,
+            },
+            None => None,
+        }
+    }
+}
+
+/// Split a flat token slice on top-level commas (nesting lives inside
+/// atomic groups, so a flat scan is exact).
+fn split_top_commas(toks: &[Tok]) -> Vec<&[Tok]> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (i, t) in toks.iter().enumerate() {
+        if matches!(&t.kind, TokKind::Punct(',')) {
+            parts.push(&toks[start..i]);
+            start = i + 1;
+        }
+    }
+    parts.push(&toks[start..]);
+    parts
+}
+
+/// Punctuation admissible inside bare guard key runs: everything but
+/// the terminators the parser enforces separately. `;` arrives as its
+/// own token kind; the key charset admits it, so runs accept it literally.
+fn key_char(c: char) -> bool {
+    !matches!(c, ':' | '=' | '!' | ',' | '|' | '(' | ')' | ']' | '$')
+}
+
+/// Consume a joint run of words/punctuation as one bare key or value.
+/// Gaps end the run; terminators and groups end or fail it per `extra`.
+fn bare_run(cur: &mut Cursor, extra: fn(char) -> bool, what: &str) -> Result<String, TokenError> {
+    let mut out = String::new();
+    loop {
+        let tok = match cur.toks.get(cur.pos) {
+            Some(t) if matches!(&t.kind, TokKind::Newline) => break,
+            Some(t) => t,
+            None => break,
+        };
+        // First element may follow a gap; continuations must be gapless.
+        if !out.is_empty() && !tok.joint {
+            break;
+        }
+        match &tok.kind {
+            TokKind::Word(w) => out.push_str(w),
+            TokKind::Punct(c) if key_char(*c) && extra(*c) => out.push(*c),
+            TokKind::Semicolon if extra(';') => out.push(';'),
+            _ => break,
+        }
+        cur.pos += 1;
+    }
+    if out.is_empty() {
+        return Err(cur.err(format!("missing {what}")));
+    }
+    Ok(out)
+}
+
+/// The `guard_term` negative lookahead: a complete term followed by
+/// `(`, `:`, `=`, or `!` is malformed, never a longer form.
+fn check_term_end(cur: &mut Cursor) -> Result<(), TokenError> {
+    cur.skip_newlines();
+    match cur.toks.get(cur.pos) {
+        Some(t) => match &t.kind {
+            TokKind::Group {
+                delim: GroupDelim::Paren,
+                ..
+            } => Err(cur.err("unexpected `(` after guard term")),
+            TokKind::Punct(c) if matches!(c, ':' | '=' | '!') => {
+                Err(cur.err(format!("unexpected `{c}` after guard term")))
+            }
+            _ => Ok(()),
+        },
+        None => Ok(()),
+    }
+}
+
+fn os_guard(value: &str) -> GuardExpr {
+    GuardExpr::Predicate(Guard::Attr {
+        ns: Ns::Os,
+        key: None,
+        val: Some(value.to_string()),
+    })
+}
+
+/// Namespace validation for guard predicates with closed domains
+/// (`family`, `os`, `arch`); open namespaces pass through.
+fn ns_guard(ns: &str, val: &str, cur: &Cursor) -> Result<GuardExpr, TokenError> {
+    match ns {
+        "family" => match val {
+            "unix" => Ok(GuardExpr::or(vec![os_guard("macos"), os_guard("linux")])),
+            "windows" => Ok(os_guard("windows")),
+            _ => Err(cur.err(format!(
+                "unknown family '{val}'; known values: unix, windows"
+            ))),
+        },
+        "os" => match val {
+            "macos" | "linux" | "windows" => Ok(os_guard(val)),
+            _ => Err(cur.err(format!(
+                "unknown os '{val}'; known values: macos, linux, windows"
+            ))),
+        },
+        "arch" => {
+            if crate::ARCH_VALUES.contains(&val) {
+                Ok(GuardExpr::Predicate(Guard::Attr {
+                    ns: Ns::Arch,
+                    key: None,
+                    val: Some(val.to_string()),
+                }))
+            } else {
+                Err(cur.err(format!(
+                    "unknown arch '{val}'; known values: {}",
+                    crate::ARCH_VALUES.join(", ")
+                )))
+            }
+        }
+        _ => Err(cur.err(format!(
+            "unknown guard namespace '{ns}'; known namespaces: family, os, arch, env, bool"
+        ))),
+    }
+}
+
+fn parse_guard_term(cur: &mut Cursor) -> Result<GuardExpr, TokenError> {
+    let tok = cur
+        .next()
+        .ok_or_else(|| cur.err("missing guard predicate"))?;
+    // A `!` prefix is never negation in guards (only `not(...)` negates).
+    if matches!(&tok.kind, TokKind::Punct('!')) {
+        return Err(cur.err("unexpected `!` in guard; negation uses `not(...)`"));
+    }
+    let word = match &tok.kind {
+        TokKind::Word(w) => w.clone(),
+        _ => return Err(cur.err("missing guard predicate")),
+    };
+    // `__OXDOCK_INJECT_N__` interpolation placeholder: env-key shape.
+    if let Some(rest) = word.strip_prefix("__OXDOCK_INJECT_") {
+        if !rest.is_empty()
+            && rest
+                .strip_suffix("__")
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        {
+            return Ok(GuardExpr::Predicate(Guard::Attr {
+                ns: Ns::Env,
+                key: Some(word),
+                val: None,
+            }));
+        }
+        return Err(cur.err("missing guard predicate"));
+    }
+    match word.as_str() {
+        "eq" | "ne" => {
+            let inner = cur
+                .eat_paren_group()
+                .ok_or_else(|| cur.err(format!("`{word}` requires `(env:KEY, value)`")))?;
+            let mut arg = Cursor::new(&inner, cur.stmt);
+            if arg.next().map(|t| &t.kind) != Some(&TokKind::Word("env".to_string())) {
+                return Err(arg.err(format!("`{word}` requires `(env:KEY, value)`")));
+            }
+            if !arg.eat_punct(':') {
+                return Err(arg.err(format!("`{word}` requires `(env:KEY, value)`")));
+            }
+            let key = bare_run(&mut arg, |_| true, "guard key")?;
+            if !arg.eat_punct(',') {
+                return Err(arg.err(format!("`{word}` requires `(env:KEY, value)`")));
+            }
+            arg.skip_newlines();
+            let value = match arg.next() {
+                Some(t) => match &t.kind {
+                    TokKind::Str { text, .. } => text.clone(),
+                    TokKind::BlockStr(full) => crate::command::lower_block_string(full),
+                    _ => {
+                        // Bare value: runs to the region end (commas and
+                        // groups terminate it with an error, matching the
+                        // bare-value exclusions).
+                        arg.pos -= 1;
+                        value_run(&mut arg)?
+                    }
+                },
+                None => return Err(arg.err(format!("`{word}` requires `(env:KEY, value)`"))),
+            };
+            if !arg.done() {
+                return Err(arg.err(format!("unexpected text after `{word}` value")));
+            }
+            let pred = GuardExpr::Predicate(Guard::Attr {
+                ns: Ns::Env,
+                key: Some(key),
+                val: Some(value),
+            });
+            if word == "ne" {
+                Ok(GuardExpr::Not(Box::new(pred)))
+            } else {
+                Ok(pred)
+            }
+        }
+        "bool" => {
+            if !cur.eat_punct(':') {
+                return Err(cur.err("`bool` requires `:value`"));
+            }
+            let val = bare_run(cur, |_| true, "bool value")?;
+            check_term_end(cur)?;
+            Ok(GuardExpr::Predicate(Guard::Attr {
+                ns: Ns::Bool,
+                key: None,
+                val: Some(val),
+            }))
+        }
+        "env" => {
+            if !cur.eat_punct(':') {
+                return Err(cur.err("`env` requires `:KEY`"));
+            }
+            let key = bare_run(cur, |_| true, "guard key")?;
+            check_term_end(cur)?;
+            Ok(GuardExpr::Predicate(Guard::Attr {
+                ns: Ns::Env,
+                key: Some(key),
+                val: None,
+            }))
+        }
+        _ => {
+            if !cur.eat_punct(':') {
+                return Err(cur.err("missing guard predicate"));
+            }
+            let val = bare_run(cur, |_| true, "guard value")?;
+            check_term_end(cur)?;
+            ns_guard(&word, &val, cur)
+        }
+    }
+}
+
+/// Bare `eq`/`ne` value run: key charset plus `:`/`=`/`!` (the grammar
+/// admits them in values, never in keys), with nested groups rendered
+/// for the pathological `(`-in-value shape. `$`, `|`, `,` terminate
+/// with an error downstream.
+/// Bare `eq`/`ne` value with atomic bare-value semantics:
+/// everything except `, | ) ] $`, linebreaks, and comment opens —
+/// gaps included (joined with one space; the token stream cannot
+/// preserve gap width). Quotes ride literally mid-run (the atomic
+/// span keeps them); a *leading* quote never reaches here (the
+/// caller strips it as the `quoted_string` alternative, which then
+/// requires end-of-region like the grammar's committed choice).
+fn value_run(arg: &mut Cursor) -> Result<String, TokenError> {
+    let mut out = String::new();
+    while let Some(tok) = arg.toks.get(arg.pos) {
+        // Terminators: the grammar's negative-lookahead set.
+        match &tok.kind {
+            TokKind::Newline | TokKind::Comment(_) => break,
+            TokKind::Punct(',')
+            | TokKind::Punct('|')
+            | TokKind::Punct(']')
+            | TokKind::Punct(')') => break,
+            TokKind::Punct('$') => break,
+            TokKind::Punct('/') if is_comment_open(arg.toks, arg.pos) => break,
+            TokKind::Group { .. } => break,
+            _ => {}
+        }
+        if !out.is_empty() && !tok.joint {
+            out.push(' ');
+        }
+        match &tok.kind {
+            TokKind::Word(w) => out.push_str(w),
+            TokKind::Punct(c) => out.push(*c),
+            TokKind::Semicolon => out.push(';'),
+            // Mid-run quotes keep their marks, like the atomic span.
+            TokKind::Str { text, quote } => {
+                out.push(*quote);
+                out.push_str(text);
+                out.push(*quote);
+            }
+            TokKind::BlockStr(full) => out.push_str(full),
+            _ => break,
+        }
+        arg.pos += 1;
+    }
+    if out.is_empty() {
+        return Err(arg.err("missing guard value"));
+    }
+    Ok(out)
+}
+
+/// True when the cursor sits on `name` followed (over newlines,
+/// like the grammar's implicit whitespace) by a paren group.
+fn at_call(cur: &Cursor, name: &str) -> bool {
+    let mut pos = cur.pos;
+    // Leading newlines skip (the grammar's implicit whitespace gaps
+    // multi-line guards, e.g. `[\nnot(env:K)\n]`).
+    while matches!(cur.toks.get(pos).map(|t| &t.kind), Some(TokKind::Newline)) {
+        pos += 1;
+    }
+    match cur.toks.get(pos) {
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == name) => pos += 1,
+        _ => return false,
+    }
+    while matches!(cur.toks.get(pos).map(|t| &t.kind), Some(TokKind::Newline)) {
+        pos += 1;
+    }
+    matches!(
+        cur.toks.get(pos).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Paren,
+            ..
+        })
+    )
+}
+
+fn parse_guard_primary(cur: &mut Cursor) -> Result<GuardExpr, TokenError> {
+    // Call shapes dispatch on word + paren group regardless of gap
+    // width (the grammar's implicit whitespace); anything else is a term.
+    for name in ["not", "any", "all"] {
+        if at_call(cur, name) {
+            cur.next();
+            let inner = cur
+                .eat_paren_group()
+                .ok_or_else(|| cur.err("unreachable"))?;
+            let parts = split_top_commas(&inner);
+            match name {
+                "not" => {
+                    if parts.len() != 1 {
+                        return Err(cur.err("`not` takes exactly one guard expression"));
+                    }
+                    let mut sub = Cursor::new(parts[0], cur.stmt);
+                    let expr = parse_guard_seq(&mut sub)?;
+                    if !sub.done() {
+                        return Err(sub.err("unexpected text in `not`"));
+                    }
+                    return Ok(GuardExpr::Not(Box::new(expr)));
+                }
+                "any" => {
+                    if parts.len() < 2 {
+                        return Err(cur.err("any(...) requires at least two guard expressions"));
+                    }
+                    let mut exprs = Vec::new();
+                    for part in parts {
+                        let mut sub = Cursor::new(part, cur.stmt);
+                        exprs.push(parse_guard_seq(&mut sub)?);
+                        if !sub.done() {
+                            return Err(sub.err("unexpected text in `any`"));
+                        }
+                    }
+                    return Ok(GuardExpr::or(exprs));
+                }
+                _ => {
+                    if parts.is_empty() {
+                        return Err(cur.err("all(...) requires at least one guard expression"));
+                    }
+                    let mut exprs = Vec::new();
+                    for part in parts {
+                        if part.iter().all(|t| matches!(&t.kind, TokKind::Newline)) {
+                            return Err(cur.err("all(...) requires at least one guard expression"));
+                        }
+                        let mut sub = Cursor::new(part, cur.stmt);
+                        exprs.push(parse_guard_seq(&mut sub)?);
+                        if !sub.done() {
+                            return Err(sub.err("unexpected text in `all`"));
+                        }
+                    }
+                    return Ok(GuardExpr::all(exprs));
+                }
+            }
+        }
+    }
+    match cur.peek() {
+        Some(t) => match &t.kind {
+            TokKind::Group {
+                delim: GroupDelim::Paren,
+                inner,
+                ..
+            } => {
+                let inner = inner.clone();
+                cur.next();
+                let mut sub = Cursor::new(&inner, cur.stmt);
+                let expr = parse_guard_seq(&mut sub)?;
+                if !sub.done() {
+                    return Err(sub.err("unexpected text in guard group"));
+                }
+                Ok(expr)
+            }
+            _ => parse_guard_term(cur),
+        },
+        None => Err(cur.err("missing guard expression")),
+    }
+}
+
+fn parse_guard_seq(cur: &mut Cursor) -> Result<GuardExpr, TokenError> {
+    let first = parse_guard_primary(cur)?;
+    let mut rest = vec![first];
+    while cur.eat_punct(',') {
+        rest.push(parse_guard_primary(cur)?);
+    }
+    if rest.len() == 1 {
+        Ok(rest.pop().unwrap())
+    } else {
+        Ok(GuardExpr::all(rest))
+    }
+}
+
+/// Parse one bracket group's contents as a guard expression.
+fn parse_guard_inner(inner: &[Tok], stmt: usize) -> Result<GuardExpr, TokenError> {
+    let mut cur = Cursor::new(inner, stmt);
+    let expr = parse_guard_seq(&mut cur)?;
+    if !cur.done() {
+        return Err(cur.err("unexpected text in guard"));
+    }
+    Ok(expr)
+}
+
+/// Parse one standalone guard expression from lexed tokens (the
+/// `parse_guard_expr_str` entry point): a bare `guard_seq` with full
+/// consumption.
+pub(crate) fn parse_single_guard(toks: &[Tok], stmt: usize) -> Result<GuardExpr, TokenError> {
+    let mut cur = Cursor::new(toks, stmt);
+    if cur.done() {
+        return Err(cur.err("empty guard"));
+    }
+    let expr = parse_guard_seq(&mut cur)?;
+    if !cur.done() {
+        return Err(cur.err("unexpected text in guard"));
+    }
+    Ok(expr)
+}
+
+/// Combine a statement's leading guard groups: stacked brackets `All`
+/// together, a single bracket stands alone.
+fn parse_guard_groups(guard: &[Tok], stmt: usize) -> Result<Option<GuardExpr>, TokenError> {
+    let mut acc: Option<GuardExpr> = None;
+    for tok in guard {
+        let inner = match &tok.kind {
+            TokKind::Group {
+                delim: GroupDelim::Bracket,
+                inner,
+                ..
+            } => inner.clone(),
+            _ => {
+                return Err(TokenError {
+                    stmt,
+                    msg: "unsupported non-bracket guard".to_string(),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                });
+            }
+        };
+        let expr = parse_guard_inner(&inner, stmt)?;
+        acc = Some(match acc {
+            None => expr,
+            Some(prev) => GuardExpr::all(vec![prev, expr]),
+        });
+    }
+    Ok(acc)
+}
+
+// ---- Calls, RUN-exec, instruction exactness ----
+// Static call resolution runs through the shared `resolve_call_name`
+// (same module table, same messages); only the token-level call-shape
+// detector is v2-native. Generic arguments classify like the
+// `assignment | argument` grammar order (assignments merge across
+// gaps, `$`/`env:`-led runs extend as expressions, everything else
+// renders raw), and `ENV`/`EXPAND` lower through the shared direct
+// cores instead of the injected dispatcher.
+
+/// Parse context: shared lowering dispatcher plus module table for
+/// static call resolution, with `FUNC`/import frames per braced body.
+pub struct ParseCtx<'a> {
+    pub lower: &'a dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    pub modules: &'a ModuleTable,
+    /// Host-registered function names for the `FUNC` shadow check
+    /// (empty when hosts are unknown).
+    pub reserved: &'a HashSet<String>,
+    /// `FUNC` scopes (innermost last) and import frames, pushed per
+    /// braced body; short borrows only,
+    /// never held across recursive parses.
+    pub funcs: RefCell<Vec<HashSet<String>>>,
+    pub imports: RefCell<Vec<Vec<String>>>,
+    /// `EXPORT` names in source order, validated at end of parse
+    /// (forward references allowed).
+    pub exports: RefCell<Vec<String>>,
+    /// 1-based source line of the statement currently lowering (the
+    /// innermost split statement; updated per statement by the body
+    /// loops, read as the base for nested splits). Lets every error
+    /// carry its statement's line without threading it through every
+    /// header function by hand.
+    pub current_line: RefCell<usize>,
+}
+
+impl<'a> ParseCtx<'a> {
+    /// Context with empty tables.
+    pub fn empty(
         lower: &'a dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
-        reserved_names: &'a HashSet<String>,
-        func_scopes: &'a RefCell<Vec<HashSet<String>>>,
         modules: &'a ModuleTable,
-        import_scopes: &'a RefCell<Vec<Vec<String>>>,
+        reserved: &'a HashSet<String>,
     ) -> Self {
         Self {
             lower,
-            reserved_names,
-            func_scopes,
             modules,
-            import_scopes,
+            reserved,
+            funcs: RefCell::new(vec![HashSet::new()]),
+            imports: RefCell::new(vec![Vec::new()]),
+            exports: RefCell::new(Vec::new()),
+            current_line: RefCell::new(0),
         }
     }
 
-    pub(super) fn enter_scope(&self) {
-        self.func_scopes.borrow_mut().push(HashSet::new());
-        self.import_scopes.borrow_mut().push(Vec::new());
-    }
-
-    pub(super) fn exit_scope(&self) {
-        self.func_scopes.borrow_mut().pop();
-        self.import_scopes.borrow_mut().pop();
-    }
-
-    /// Record a `FUNC` name in the innermost scope. Returns false when the
-    /// name was already defined in that same scope (nested shadowing of an
-    /// outer DSL name stays allowed).
-    pub(super) fn declare_func(&self, name: &str) -> bool {
-        let mut scopes = self.func_scopes.borrow_mut();
-        match scopes.last_mut() {
-            Some(current) => current.insert(name.to_string()),
-            None => true,
-        }
-    }
-
-    /// All `FUNC` names visible from the current position (every enclosing
-    /// scope, innermost last). Used by `REMOTE` self-containment: a body
-    /// call resolving to one of these without a same-body definition
-    /// would die on the guest with `UnknownFunction`.
-    pub(super) fn visible_func_names(&self) -> HashSet<String> {
-        self.func_scopes
-            .borrow()
-            .iter()
-            .flatten()
-            .cloned()
-            .collect()
-    }
-
-    /// Record `IMPORT`ed modules in the innermost import frame.
-    pub(super) fn import_modules(&self, ctx: &SpanContext, modules: &[String]) -> ParseResult<()> {
-        let mut known: Vec<String> = self.modules.modules.keys().cloned().collect();
-        known.sort();
-        for module in modules {
-            if !self.modules.modules.contains_key(module) {
-                return Err(ParseError::validation(
-                    KEYWORD_IMPORT,
-                    format!(
-                        "unknown module `{module}`; known modules: {}",
-                        known.join(", ")
-                    ),
-                    ctx,
-                ));
-            }
-            let mut frames = self.import_scopes.borrow_mut();
-            match frames.last_mut() {
-                Some(frame) => {
-                    if !frame.contains(module) {
-                        frame.push(module.clone());
-                    }
-                }
-                None => {
-                    frames.push(vec![module.clone()]);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Resolve a call name to its qualified `MODULE::NAME` form.
-    ///
-    /// Qualified names check module membership directly (opaque modules pass
-    /// through for runtime checking). Bare names resolve to `SCRIPT` defs
-    /// first, then to exactly one exporting module across all visible
-    /// import frames; zero or several matches fail. `INSPECT` passes
-    /// through untouched: it is a dedicated AST node, not a registry entry.
-    pub(super) fn resolve_call(&self, ctx: &SpanContext, name: &str) -> ParseResult<String> {
-        if let Some((module, base)) = split_qualified(name) {
-            if base == KEYWORD_INSPECT {
-                return Err(ParseError::validation(
-                    "FUNC",
-                    "INSPECT is a builtin keyword and cannot be module-qualified".to_string(),
-                    ctx,
-                ));
-            }
-            check_func_ident(ctx, module)?;
-            check_func_ident(ctx, base)?;
-            match self.modules.modules.get(module) {
-                None => {
-                    let mut known: Vec<String> = self.modules.modules.keys().cloned().collect();
-                    known.sort();
-                    Err(ParseError::validation(
-                        "FUNC",
-                        format!(
-                            "unknown module `{module}`; known modules: {}",
-                            known.join(", ")
-                        ),
-                        ctx,
-                    ))
-                }
-                Some(None) => Ok(name.to_string()),
-                Some(Some(funcs)) => {
-                    if funcs.functions.contains(base) {
-                        Ok(qualify(module, base))
-                    } else {
-                        Err(ParseError::validation(
-                            "FUNC",
-                            format!("unknown function `{module}::{base}`"),
-                            ctx,
-                        ))
-                    }
-                }
-            }
-        } else {
-            if name == KEYWORD_IMPORT || name == KEYWORD_EXPORT {
-                return Err(ParseError::validation(
-                    "FUNC",
-                    format!("`{name}` is a directive, not a function"),
-                    ctx,
-                ));
-            }
-            if name == KEYWORD_INSPECT {
-                return Ok(name.to_string());
-            }
-            let scopes = self.func_scopes.borrow();
-            if scopes.iter().rev().any(|scope| scope.contains(name)) {
-                return Ok(qualify(SCRIPT_MODULE_NAME, name));
-            }
-            drop(scopes);
-            // Distinct exporting modules across all visible import frames.
-            // Several matches fail instead of shadowing silently: qualify it.
-            let frames = self.import_scopes.borrow();
-            let mut known_matches: Vec<String> = Vec::new();
-            let mut opaque_matches: Vec<String> = Vec::new();
-            for frame in frames.iter() {
-                for module in frame {
-                    match self.modules.modules.get(module) {
-                        Some(Some(funcs)) => {
-                            if funcs.functions.contains(name) && !known_matches.contains(module) {
-                                known_matches.push(module.clone());
-                            }
-                        }
-                        Some(None) if !opaque_matches.contains(module) => {
-                            opaque_matches.push(module.clone());
-                        }
-                        Some(None) | None => {}
-                    }
-                }
-            }
-            drop(frames);
-            if known_matches.len() > 1 {
-                known_matches.sort();
-                return Err(ParseError::validation(
-                    "FUNC",
-                    format!(
-                        "ambiguous function `{name}`: exported by {}; qualify it (e.g. `{}::{name}`)",
-                        known_matches.join(", "),
-                        known_matches[0],
-                    ),
-                    ctx,
-                ));
-            }
-            if let Some(module) = known_matches.pop() {
-                return Ok(qualify(&module, name));
-            }
-            if opaque_matches.len() > 1 {
-                opaque_matches.sort();
-                return Err(ParseError::validation(
-                    "FUNC",
-                    format!(
-                        "ambiguous function `{name}`: imported opaque modules {}; qualify it",
-                        opaque_matches.join(", "),
-                    ),
-                    ctx,
-                ));
-            }
-            if let Some(module) = opaque_matches.pop() {
-                return Ok(qualify(&module, name));
-            }
-            // Nothing in scope: point at the fix when a known module
-            // exports the name but was never imported.
-            let mut exporters: Vec<String> = self
-                .modules
-                .modules
-                .iter()
-                .filter_map(|(module, funcs)| match funcs {
-                    Some(funcs) if funcs.functions.contains(name) => Some(module.clone()),
-                    _ => None,
-                })
-                .collect();
-            exporters.sort();
-            if let Some(first) = exporters.first() {
-                return Err(ParseError::validation(
-                    "FUNC",
-                    format!(
-                        "unknown function `{name}`; qualify it (`{first}::{name}`) or add `IMPORT [{first}]`"
-                    ),
-                    ctx,
-                ));
-            }
-            Err(ParseError::validation(
-                "FUNC",
-                format!("unknown function `{name}`"),
-                ctx,
-            ))
-        }
-    }
-
-    /// Base names exported by every known module. Backs the `FUNC` shadow
-    /// check alongside the flat reserved set.
-    pub(super) fn module_base_names(&self) -> HashSet<String> {
-        self.modules.reserved_base_names()
-    }
-
-    /// Snapshot of everything visible at this point: `FUNC` names unioned
-    /// across frames plus imports flattened outer-to-inner. Snippet
-    /// re-parses (async inner commands) seed their base frames with this so
-    /// lookup behaves identically; snippets never define, only read.
+    /// Snapshot of everything visible at this point: `FUNC` names
+    /// unioned across frames plus imports flattened outer-to-inner
+    /// (unions `FUNC` names across frames, flattens imports outer-to-inner).
     fn visible_snapshot(&self) -> (HashSet<String>, Vec<String>) {
         let mut funcs = HashSet::new();
-        for scope in self.func_scopes.borrow().iter() {
+        for scope in self.funcs.borrow().iter() {
             funcs.extend(scope.iter().cloned());
         }
         let mut imports = Vec::new();
-        for frame in self.import_scopes.borrow().iter() {
+        for frame in self.imports.borrow().iter() {
             for module in frame {
                 if !imports.contains(module) {
                     imports.push(module.clone());
@@ -290,881 +2322,4698 @@ impl<'a> LowerCtx<'a> {
         }
         (funcs, imports)
     }
-}
 
-#[derive(Clone)]
-struct ScopeFrame {
-    line_no: usize,
-    had_command: bool,
-}
-
-/// Parsed script with single-file `EXPORT` metadata. `steps` is the
-/// linear execution plan, `exports` the `EXPORT` names in source order,
-/// and `func_docs` maps top-level `FUNC` base names to (summary, docs)
-/// collected from the immediately preceding `#` comment block.
-#[derive(Debug, Clone, Default)]
-pub struct ParsedScript {
-    pub steps: Vec<Step>,
-    pub exports: Vec<String>,
-    pub func_docs: std::collections::HashMap<String, (String, String)>,
-}
-
-#[derive(Clone)]
-struct PendingIoBlock<'a> {
-    line_no: usize,
-    span: SpanContext<'a>,
-    bindings: Vec<IoBinding>,
-    guards: Option<GuardExpr>,
-}
-
-#[derive(Clone)]
-struct IoScopeFrame {
-    line_no: usize,
-    had_command: bool,
-    bindings: Vec<IoBinding>,
-    guards: Option<GuardExpr>,
-    /// Step index where this block's first command will land. Used to mark
-    /// scope boundaries so WITH_IO block bodies scope LET/ENV/WORKDIR like
-    /// every other braced block (only pipes leak).
-    first_step: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum BlockKind {
-    Guard,
-    Io,
-}
-
-#[derive(Default)]
-struct IoBindingSet {
-    stdin: Option<IoBinding>,
-    stdout: Option<IoBinding>,
-    stderr: Option<IoBinding>,
-    tty: Option<IoBinding>,
-    rows: Option<IoBinding>,
-    cols: Option<IoBinding>,
-}
-
-impl IoBindingSet {
-    fn insert(&mut self, binding: IoBinding) {
-        match binding.stream {
-            IoStream::Stdin => self.stdin = Some(binding),
-            IoStream::Stdout => self.stdout = Some(binding),
-            IoStream::Stderr => self.stderr = Some(binding),
-            IoStream::Tty => self.tty = Some(binding),
-            IoStream::Rows(_) => self.rows = Some(binding),
-            IoStream::Cols(_) => self.cols = Some(binding),
+    /// Record a `FUNC` name in the innermost scope. Returns false when
+    /// already defined in that same scope (nested shadowing stays
+    /// allowed (nested shadowing stays permitted).
+    fn declare_func(&self, name: &str) -> bool {
+        match self.funcs.borrow_mut().last_mut() {
+            Some(current) => current.insert(name.to_string()),
+            None => true,
         }
     }
 
-    fn into_vec(self) -> Vec<IoBinding> {
-        let mut out = Vec::new();
-        if let Some(binding) = self.stdin {
-            out.push(binding);
+    /// Record `IMPORT`ed modules in the innermost frame (deduped,
+    /// (deduped; the unknown-module table check lives at the import site),
+    /// which lives at the import site).
+    fn import_into_frame(&self, modules: &[String]) {
+        match self.imports.borrow_mut().last_mut() {
+            Some(frame) => {
+                for module in modules {
+                    if !frame.contains(module) {
+                        frame.push(module.clone());
+                    }
+                }
+            }
+            None => {
+                self.imports.borrow_mut().push(modules.to_vec());
+            }
         }
-        if let Some(binding) = self.stdout {
-            out.push(binding);
-        }
-        if let Some(binding) = self.stderr {
-            out.push(binding);
-        }
-        if let Some(binding) = self.tty {
-            out.push(binding);
-        }
-        if let Some(binding) = self.rows {
-            out.push(binding);
-        }
-        if let Some(binding) = self.cols {
-            out.push(binding);
-        }
-        out
     }
 }
 
-pub struct ScriptParser<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> {
-    input: &'a str,
-    tokens: VecDeque<RawToken<'a>>,
-    steps: Vec<Step>,
-    guard_stack: Vec<Option<GuardExpr>>,
-    pending_guards: Option<GuardExpr>,
-    pending_inline_guards: Option<GuardExpr>,
-    pending_can_open_block: bool,
-    pending_scope_enters: usize,
-    scope_stack: Vec<ScopeFrame>,
-    pending_io_block: Option<PendingIoBlock<'a>>,
-    io_scope_stack: Vec<IoScopeFrame>,
-    block_stack: Vec<BlockKind>,
-    lower: F,
-    /// Host-registered function names, consulted by the post-parse scope
-    /// validation so `FUNC` cannot shadow runtime hosts. Empty when hosts
-    /// are unknown at parse time (e.g. compile-time macros); the runtime
-    /// `define_func` guard still rejects those redefinitions.
-    reserved_names: HashSet<String>,
-    /// Module provenance table for static call resolution. Empty when
-    /// modules are unknown at parse time; resolved calls stay qualified
-    /// only against this table.
-    modules: ModuleTable,
-    /// Seed for the base import frame, from an enclosing parse's visible
-    /// imports (snippet re-parses). Empty for top-level parses.
-    preseed_imports: Vec<String>,
-    /// Seed for the base `FUNC` scope, from an enclosing parse's visible
-    /// definitions (snippet re-parses). Empty for top-level parses.
-    preseed_funcs: HashSet<String>,
-    /// Single-file `EXPORT` names in source order. Top-level only;
-    /// validated against top-level `FUNC` definitions at end of parse.
-    exports: Vec<String>,
-    /// Source line per entry in `steps`, in order. Post-parse
-    /// validations point at real lines instead of end of file.
-    step_lines: Vec<usize>,
+fn resolve_name(ctx: &ParseCtx, stmt: usize, name: &str) -> Result<String, TokenError> {
+    let (funcs, imports) = ctx.visible_snapshot();
+    resolve_call_name(ctx.modules, &funcs, &imports, &lowering_ctx(stmt), name)
+        .map_err(|e| lower_err(stmt, e))
 }
 
-impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
-    pub fn new(input: &'a str, lower: F) -> ParseResult<Self> {
-        Self::new_with_hosts(input, lower, HashSet::new())
+/// Call shape at `pos`: UPPERCASE head plus joint `::` segments and a
+/// paren group (joint iff required: statements forbid the gap;
+/// expressions allow it).
+/// Peek-only; anything else falls through (not a call shape).
+/// Returns the dotted name and paren index.
+fn call_shape_at(toks: &[Tok], pos: usize, joint_paren: bool) -> Option<(String, usize)> {
+    let head = match toks.get(pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w))
+            if !w.is_empty()
+                && w.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && w.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') =>
+        {
+            w.clone()
+        }
+        _ => return None,
+    };
+    let mut name = head;
+    let mut p = pos + 1;
+    loop {
+        let colons = matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct(':')))
+            && toks.get(p).is_some_and(|t| t.joint)
+            && matches!(toks.get(p + 1).map(|t| &t.kind), Some(TokKind::Punct(':')))
+            && toks.get(p + 1).is_some_and(|t| t.joint)
+            && matches!(toks.get(p + 2).map(|t| &t.kind), Some(TokKind::Word(_)))
+            && toks.get(p + 2).is_some_and(|t| t.joint);
+        if !colons {
+            break;
+        }
+        if let Some(TokKind::Word(seg)) = toks.get(p + 2).map(|t| &t.kind) {
+            name.push_str("::");
+            name.push_str(seg);
+        }
+        p += 3;
     }
-
-    pub fn new_with_hosts(
-        input: &'a str,
-        lower: F,
-        reserved_names: HashSet<String>,
-    ) -> ParseResult<Self> {
-        Self::new_with_modules(input, lower, reserved_names, ModuleTable::default())
+    match toks.get(p).map(|t| &t.kind) {
+        Some(TokKind::Group {
+            delim: GroupDelim::Paren,
+            ..
+        }) => {
+            if joint_paren && !toks[p].joint {
+                return None;
+            }
+            Some((name, p))
+        }
+        _ => None,
     }
+}
 
-    pub fn new_with_modules(
-        input: &'a str,
-        lower: F,
-        reserved_names: HashSet<String>,
-        modules: ModuleTable,
-    ) -> ParseResult<Self> {
-        Self::new_with_preseed(
-            input,
-            lower,
-            reserved_names,
-            modules,
-            HashSet::new(),
-            Vec::new(),
+/// Call arguments over a paren group's contents: comma-separated full
+/// expressions with `gap_nl` newlines at the edges (each arg rejects
+/// a stray boundary).
+fn parse_call_args(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Vec<Expr>, TokenError> {
+    let mut cur = Cursor::expr(inner, stmt);
+    cur.skip_gap_nl();
+    if cur.done() {
+        return Ok(vec![]);
+    }
+    let mut args = Vec::new();
+    loop {
+        let arg = parse_expr_or(&mut cur, ctx)?;
+        reject_boundary(&lowering_ctx(stmt), &arg).map_err(|e| cur.err(e.to_string()))?;
+        args.push(arg);
+        cur.skip_gap_nl();
+        if cur.eat_punct(',') {
+            cur.skip_gap_nl();
+            continue;
+        }
+        break;
+    }
+    if !cur.done() {
+        return Err(cur.err("unexpected text in call"));
+    }
+    Ok(args)
+}
+
+/// Lower a call-shape to `Expr`: `INSPECT` keeps its variable
+/// unevaluated; everything else
+/// resolves statically through the shared resolver.
+fn parse_expr_call(
+    name: String,
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Expr, TokenError> {
+    let args = parse_call_args(inner, stmt, ctx)?;
+    if name == "INSPECT" {
+        let [arg] = args.as_slice() else {
+            return Err(TokenError {
+                stmt,
+                msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        };
+        if let Expr::Var(var) = arg {
+            return Ok(Expr::Inspect(var.clone()));
+        }
+        return Err(TokenError {
+            stmt,
+            msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    let qualified = resolve_name(ctx, stmt, &name)?;
+    Ok(Expr::Call {
+        name: qualified,
+        args,
+    })
+}
+
+/// RUN exec-form items: atoms only, except parenthesized/calls/lists/maps
+/// which recurse fully. Anything that is not a clean comma-separated list misses the whole
+/// exec shape (`None`): the grammar falls through to the shell path,
+/// which reads the bracket literally and lets the shared lowering
+/// decide (POSIX `[ -f ... ]` stays shell; non-map blocks and malformed
+/// shapes behave exactly like the grammar's fallthrough).
+/// (`instruction`), which reads the bracket literally and lets the
+/// shared lowering decide (POSIX `[ -f ... ]` stays shell, malformed
+/// shapes fail there exactly like the grammar). Only the
+/// joint-bracket gate stays a hard error (it precedes this function).
+fn parse_run_exec_list(
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<Expr>, TokenError> {
+    let mut cur = Cursor::expr(inner, stmt);
+    cur.skip_gap();
+    if cur.done() {
+        return Ok(Some(Expr::List(vec![])));
+    }
+    let mut items = Vec::new();
+    loop {
+        let item = match parse_run_exec_atom(&mut cur, ctx) {
+            Ok(Some(item)) => item,
+            // Not an exec shape at all: shell fallthrough.
+            _ => return Ok(None),
+        };
+        if reject_boundary(&lowering_ctx(stmt), &item).is_err() {
+            return Ok(None);
+        }
+        items.push(item);
+        cur.skip_gap();
+        if cur.eat_punct(',') {
+            cur.skip_gap();
+            continue;
+        }
+        break;
+    }
+    if !cur.done() {
+        return Ok(None);
+    }
+    Ok(Some(Expr::List(items)))
+}
+
+/// One RUN-exec item: brace groups try maps only (blocks miss);
+/// everything else parses as a full atom (nested lists and map
+/// values still admit blocks, like the grammar).
+fn parse_run_exec_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Option<Expr>, TokenError> {
+    if matches!(
+        cur.toks.get(cur.pos).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        })
+    ) {
+        let inner = match &cur.toks[cur.pos].kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        return match parse_map_literal(&inner, cur.stmt, ctx) {
+            Ok(map) => {
+                cur.pos += 1;
+                Ok(Some(map))
+            }
+            Err(_) => Ok(None),
+        };
+    }
+    parse_expr_atom(cur, ctx).map(Some)
+}
+
+// ---- Single-command wrappers + AWAIT/CANCEL ----
+// Wrappers parse through the shared validators (`check_tty_wrapping`,
+// capture rejects, isolated rewrite, nesting reject, binding merge,
+// guard `and`) promoted verbatim to `commands.rs`; only the
+// token-level shape classifiers (duration gate, binding splitter,
+// await/cancel shapes, block-vs-template) are v2-native. Statements
+// lower to step VECTORS: structural pairs (calls, RUN-exec,
+// await/cancel, wrapper blocks) end mid-line and trailing elements
+// form following steps, exactly like the grammar's `element*`.
+//
+// Deferred: block STATEMENTS (slice 5: top-level `IF`/`FOR`/`WHILE`
+// bodies, guard blocks, `REMOTE`, directives).
+
+/// Static duration shape mirror (`timeout_literal`, atomic): ASCII
+/// digits plus one optional unit, full-match only. Anything else
+/// (`10ss`, `banana`, `-5s`) misses the wrapper shape and falls back
+/// to the generic instruction path, which fails in lowering exactly
+/// like the grammar's committed `instruction`.
+fn is_timeout_literal(text: &str) -> bool {
+    let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return false;
+    }
+    matches!(&text[digits..], "" | "ms" | "s" | "m" | "h")
+}
+
+/// Template-brace test: a brace group whose first inner token opens
+/// another brace (`{{...}}`); anything else braced is a block body.
+/// Same shape the arg engine uses; single source from here.
+fn is_template_brace(tok: &Tok) -> bool {
+    matches!(
+        &tok.kind,
+        TokKind::Group {
+            delim: GroupDelim::Brace,
+            inner,
+            ..
+        } if matches!(
+            inner.first().map(|t| &t.kind),
+            Some(TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            })
         )
-    }
+    )
+}
 
-    pub fn new_with_preseed(
-        input: &'a str,
-        lower: F,
-        reserved_names: HashSet<String>,
-        modules: ModuleTable,
-        preseed_funcs: HashSet<String>,
-        preseed_imports: Vec<String>,
-    ) -> ParseResult<Self> {
-        let tokens = VecDeque::from(lexer::tokenize(input)?);
-        Ok(Self {
-            input,
-            tokens,
-            steps: Vec::new(),
-            guard_stack: vec![None],
-            pending_guards: None,
-            pending_inline_guards: None,
-            pending_can_open_block: false,
-            pending_scope_enters: 0,
-            scope_stack: Vec::new(),
-            pending_io_block: None,
-            io_scope_stack: Vec::new(),
-            block_stack: Vec::new(),
-            lower,
-            reserved_names,
-            modules,
-            preseed_funcs,
-            preseed_imports,
-            exports: Vec::new(),
-            step_lines: Vec::new(),
-        })
+/// Parse one TIMEOUT duration unit at `pos` (the token after the
+/// head, gapped like the grammar's `sep`). Returns the arg and
+/// tokens consumed, or `None` on shape miss (caller falls back to
+/// generic, which fails in lowering). Static
+/// literals validate now through the shared Duration check
+/// (`TIMEOUT 0s` fails here, probed); dynamics defer to runtime.
+fn parse_timeout_duration_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+) -> Result<Option<(Arg, usize)>, TokenError> {
+    let Some(head) = toks.get(pos) else {
+        return Ok(None);
+    };
+    if head.joint {
+        return Ok(None);
     }
+    let arg = match &head.kind {
+        TokKind::Word(w) if is_timeout_literal(w) => Arg::String(w.clone(), false),
+        TokKind::Punct('$') => match toks.get(pos + 1) {
+            Some(var) if var.joint && matches!(&var.kind, TokKind::Word(w) if is_ident_word(w)) => {
+                match &var.kind {
+                    TokKind::Word(w) => Arg::Expr(Expr::Var(w.clone())),
+                    _ => unreachable!(),
+                }
+            }
+            _ => return Ok(None),
+        },
+        TokKind::Str { text, .. } => Arg::String(text.clone(), true),
+        TokKind::BlockStr(full) => Arg::String(crate::command::lower_block_string(full), true),
+        TokKind::Group {
+            delim: GroupDelim::Brace,
+            inner,
+            open_joint,
+            close_joint,
+        } if is_template_brace(&toks[pos]) => Arg::String(
+            render_group('{', '}', inner, *open_joint, *close_joint),
+            false,
+        ),
+        _ => return Ok(None),
+    };
+    let used = match &head.kind {
+        TokKind::Punct('$') => 2,
+        _ => 1,
+    };
+    ArgType::Duration.check_arg(&arg).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    Ok(Some((arg, used)))
+}
 
-    /// Span for end of script errors (no failing token site).
-    fn eof_span(&self) -> SpanContext<'_> {
-        let lines = self.input.lines().count().max(1);
-        span_for_line(self.input, lines)
+/// Parse `WITH_IO [...]` bindings over a bracket group's inner
+/// tokens: comma-separated `stream[=$var]` / `rows|cols=int`
+/// bindings, newlines skipping freely like `ws`. Returns `None` on
+/// shape miss (empty flags, bad stream words, missing commas or
+/// values: the caller falls back to generic, which fails in lowering).
+/// Grammar-matched but invalid bindings (tty
+/// values, out-of-range geometry) fail loudly, mirroring
+/// `parse_io_binding`'s messages one by one.
+fn parse_io_bindings(inner: &[Tok], stmt: usize) -> Result<Option<Vec<IoBinding>>, TokenError> {
+    let mut parts: Vec<&[Tok]> = Vec::new();
+    let mut start = 0;
+    for (i, tok) in inner.iter().enumerate() {
+        // Newlines skip freely like `ws` (filtered per part below);
+        // commas split bindings; everything else is content.
+        if matches!(&tok.kind, TokKind::Punct(',')) {
+            parts.push(&inner[start..i]);
+            start = i + 1;
+        }
     }
-
-    pub fn parse(self) -> ParseResult<Vec<Step>> {
-        Ok(self.parse_with_exports()?.steps)
+    parts.push(&inner[start..]);
+    // An empty flag list (`[]`, `[,]`) misses the shape.
+    if parts.len() == 1 && parts[0].iter().all(|t| matches!(&t.kind, TokKind::Newline)) {
+        return Ok(None);
     }
+    let mut out = Vec::new();
+    for part in parts {
+        let part: Vec<&Tok> = part
+            .iter()
+            .filter(|t| !matches!(&t.kind, TokKind::Newline))
+            .collect();
+        match parse_io_binding_part(&part, stmt)? {
+            Some(binding) => out.push(binding),
+            None => return Ok(None),
+        }
+    }
+    if out.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(out))
+}
 
-    /// Parse and return steps plus single-file `EXPORT` names and
-    /// preceding `#` doc comments for top-level `FUNC`s. Forward
-    /// references allowed: `EXPORT` may precede its `FUNC`s.
-    pub fn parse_with_exports(mut self) -> ParseResult<ParsedScript> {
-        // Function scope tracking rides alongside lowering (issue #146).
-        // `func_scopes` is a parse-local stack: the bottom is the top-level
-        // scope, `{`/`}` toggle nested ones below, and braced statement
-        // bodies push their own in `parse_block_elements_with_lower`. This
-        // mirrors the runtime `push_scope`/`pop_scope` boundaries, so
-        // duplicate and shadow errors fire at the definition line instead of
-        // end of file. Each `LowerCtx` is built fresh per statement from
-        // short borrows, so no `&self` borrow crosses a `&mut self` call.
-        let func_scopes: RefCell<Vec<HashSet<String>>> = RefCell::new(vec![HashSet::new()]);
-        // Import frames ride the same boundaries: the bottom is the top-level
-        // scope, blocks and `FUNC` bodies push their own, and exit drops
-        // them, so `IMPORT` applies from its line to the enclosing block end.
-        let import_scopes: RefCell<Vec<Vec<String>>> = RefCell::new(vec![Vec::new()]);
-        // Snippet re-parses seed their base frames with the enclosing
-        // parse's visible state so lookup behaves identically.
-        func_scopes.borrow_mut()[0].extend(self.preseed_funcs.iter().cloned());
-        import_scopes.borrow_mut()[0].extend(self.preseed_imports.iter().cloned());
-        while let Some(token) = self.tokens.pop_front() {
-            let step_index = self.steps.len();
-            if self.pending_io_block.is_some()
-                && !matches!(
-                    token,
-                    RawToken::BlockStart { .. }
-                        | RawToken::Command { .. }
-                        | RawToken::Instruction { .. }
-                        | RawToken::RunExec { .. }
+/// One `stream[=$var]` / `rows|cols=int` binding. Gaps ride free
+/// around `=`/`,`/names like `ws?`; only `$`+name stays gapless
+/// (atomic `dollar_ident`). Streams and size names outside the
+/// grammar's words miss the shape; a valued `tty` and out-of-range
+/// geometry fail loudly with exact messages.
+fn parse_io_binding_part(part: &[&Tok], stmt: usize) -> Result<Option<IoBinding>, TokenError> {
+    let fail = |msg: String| TokenError {
+        stmt,
+        msg,
+        line: 0,
+        col: 0,
+        kind: None,
+    };
+    let Some(first) = part.first() else {
+        return Ok(None);
+    };
+    let TokKind::Word(stream) = &first.kind else {
+        return Ok(None);
+    };
+    let is_stream = matches!(stream.as_str(), "stdin" | "stdout" | "stderr" | "tty");
+    let is_size = matches!(stream.as_str(), "rows" | "cols");
+    if !is_stream && !is_size {
+        return Ok(None);
+    }
+    let rest = &part[1..];
+    if rest.is_empty() {
+        if is_size {
+            // Bare `rows` misses `io_size` (`=` + digits required).
+            return Ok(None);
+        }
+        return Ok(Some(IoBinding {
+            stream: io_stream_of(stream),
+            pipe: None,
+        }));
+    }
+    // `= value` at any gap.
+    if !matches!(rest.first().map(|t| &t.kind), Some(TokKind::Punct('='))) {
+        return Ok(None);
+    }
+    let value = &rest[1..];
+    if is_size {
+        // Geometry: one all-digit word, 1-65535 (mirrors `parse_io_size`).
+        if value.len() != 1 {
+            return Ok(None);
+        }
+        let TokKind::Word(digits) = &value[0].kind else {
+            return Ok(None);
+        };
+        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+            return Ok(None);
+        }
+        let dim = digits
+            .parse::<u64>()
+            .ok()
+            .filter(|v| (1..=u64::from(u16::MAX)).contains(v))
+            .ok_or_else(|| {
+                fail(
+                    "WITH_IO terminal geometry needs a positive integer 1-65535 (e.g. `rows=40`)"
+                        .to_string(),
                 )
+            })?;
+        let dim = dim as u16;
+        return Ok(Some(IoBinding {
+            stream: if stream == "rows" {
+                IoStream::Rows(dim)
+            } else {
+                IoStream::Cols(dim)
+            },
+            pipe: None,
+        }));
+    }
+    // Stream pipe: `= $var` with a gapless name.
+    if value.len() != 2 {
+        return Ok(None);
+    }
+    if !matches!(&value[0].kind, TokKind::Punct('$')) {
+        return Ok(None);
+    }
+    let TokKind::Word(var) = &value[1].kind else {
+        return Ok(None);
+    };
+    if !value[1].joint || !is_ident_word(var) {
+        return Ok(None);
+    }
+    if stream == "tty" {
+        // `tty` is a bare flag (mirrors `parse_io_binding`).
+        return Err(fail(
+            "WITH_IO [tty] takes no value: use bare `tty`, with `rows = <int>` / `cols = <int>` for geometry (e.g. `[tty, rows=40, cols=100]`)"
+                .to_string(),
+        ));
+    }
+    Ok(Some(IoBinding {
+        stream: io_stream_of(stream),
+        pipe: Some(crate::ast::PipeTarget::Var(var.clone())),
+    }))
+}
+
+/// Stream word to [`IoStream`]: only grammar words reach here, so
+/// the mapping is total (mirrors `parse_io_stream`).
+fn io_stream_of(name: &str) -> IoStream {
+    match name {
+        "stdin" => IoStream::Stdin,
+        "stdout" => IoStream::Stdout,
+        "stderr" => IoStream::Stderr,
+        _ => IoStream::Tty,
+    }
+}
+
+/// `AWAIT`/`CANCEL $var` shape at `pos`. A head without `$` misses
+/// (`None`: generic fails it in lowering); once `$`
+/// commits, the name must follow and parse errors stay loud, like
+/// the grammar's committed `"$" ~ ident`. `var_joint` enforces the
+/// atomic `$var` adjacency inside compound-atomic parents; element
+/// level admits the gap (probed `AWAIT $ t`). The caller continues
+/// its element loop past the shape.
+fn parse_await_cancel_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    var_joint: bool,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let head = match toks.get(pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) if w == "AWAIT" || w == "CANCEL" => w.clone(),
+        _ => return Ok(None),
+    };
+    if !matches!(
+        toks.get(pos + 1).map(|t| &t.kind),
+        Some(TokKind::Punct('$'))
+    ) {
+        return Ok(None);
+    }
+    let var = match toks.get(pos + 2) {
+        Some(t)
+            if matches!(&t.kind, TokKind::Word(w) if is_ident_word(w))
+                && (!var_joint || t.joint) =>
+        {
+            match &t.kind {
+                TokKind::Word(w) => w.clone(),
+                _ => unreachable!(),
+            }
+        }
+        _ => {
+            return Err(TokenError {
+                stmt,
+                msg: format!("{head} requires a variable"),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+    };
+    Ok(Some((
+        if head == "AWAIT" {
+            StepKind::Await { var }
+        } else {
+            StepKind::Cancel { var }
+        },
+        3,
+    )))
+}
+
+/// Wrapper strictness for one single-command inner: `AWAIT` parses
+/// dedicated in `TIMEOUT`/`ISOLATED` inners but falls to generic in
+/// `WITH_IO`/`ASYNC` inners (where lowering fails it, probed), and
+/// `WITH_IO` recurses everywhere but directly under `ASYNC` (where
+/// lowering fails it, probed). Shared predicates, never restated.
+#[derive(Clone, Copy)]
+struct InnerRules {
+    allow_await: bool,
+    allow_with_io: bool,
+}
+
+/// Parse one single (non-block) inner command, returning the kind
+/// and tokens consumed: dedicated await/cancel, while/remote, calls,
+/// RUN-exec, nested wrappers, strict `INHERIT_ENV` (the caller
+/// rejects the nesting or rewrites it), or the generic instruction
+/// path (which consumes everything and fails unknown heads in
+/// lowering, exactly like the grammar's committed `instruction`).
+fn parse_single_inner(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+    rules: InnerRules,
+) -> Result<(StepKind, usize), TokenError> {
+    let head_word = match toks.get(pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) => Some(w.clone()),
+        _ => None,
+    };
+    // Nested `WHILE`/`REMOTE` recurse structurally (both ride every
+    // inner-command set in the grammar); misses fall through to
+    // generic below.
+    if head_word.as_deref() == Some("WHILE") {
+        match parse_while_single(toks, pos, stmt, ctx) {
+            Ok(Some((kind, used))) => return Ok((kind, used)),
+            Ok(None) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if head_word.as_deref() == Some("REMOTE") {
+        match parse_remote_single(toks, pos, stmt, ctx) {
+            Ok(Some((kind, used))) => return Ok((kind, used)),
+            Ok(None) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    // Dedicated await/cancel first (await gated by parent); anything
+    // they decline falls through to generic below.
+    if head_word.as_deref() == Some("AWAIT")
+        && rules.allow_await
+        && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true)?
+    {
+        return Ok(found);
+    }
+    if head_word.as_deref() == Some("CANCEL")
+        && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true)?
+    {
+        return Ok(found);
+    }
+    // Calls and RUN-exec end mid-run; the caller continues past them.
+    if let Some((call_name, paren)) = call_shape_at(toks, pos, true) {
+        let inner = match &toks[paren].kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        let args = parse_call_args(&inner, stmt, ctx)?;
+        if !call_name.contains("::") {
+            crate::resolve::check_func_ident(&lowering_ctx(stmt), &call_name)
+                .map_err(|e| lower_err(stmt, e))?;
+        }
+        let qualified = resolve_name(ctx, stmt, &call_name)?;
+        return Ok((
+            StepKind::Call {
+                name: qualified,
+                args,
+            },
+            paren + 1 - pos,
+        ));
+    }
+    if head_word.as_deref() == Some("RUN")
+        && matches!(
+            toks.get(pos + 1).map(|t| &t.kind),
+            Some(TokKind::Group {
+                delim: GroupDelim::Bracket,
+                ..
+            })
+        )
+    {
+        // Gapped like the grammar's `sep`; a joint bracket is a
+        // hard error, never a spliced arg (probed `RUN["a"]`).
+        if toks[pos + 1].joint {
+            return Err(TokenError {
+                stmt,
+                msg: "RUN [...] requires a gap after RUN".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        let inner = match &toks[pos + 1].kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        let exec_list = parse_run_exec_list(&inner, stmt, ctx)?;
+        // Non-map blocks miss the exec shape (the grammar has no
+        // `block` alternative here); fall through to generic below,
+        // which reads the shell path literally.
+        if let Some(list) = exec_list {
+            let kind = (ctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
+            return Ok((kind, 2));
+        }
+    }
+    // Nested wrappers recurse structurally; a `WITH_IO` directly
+    // under `ASYNC` goes generic instead (lowering fails it, probed).
+    match head_word.as_deref() {
+        Some("WITH_IO") if rules.allow_with_io => {
+            match parse_with_io_single(toks, pos, stmt, ctx) {
+                Ok(Some((kind, used))) => return Ok((kind, used)),
+                Ok(None) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Some("TIMEOUT") => match parse_timeout_single(toks, pos, stmt, ctx) {
+            Ok(Some((kind, used))) => return Ok((kind, used)),
+            Ok(None) => {}
+            Err(e) => return Err(e),
+        },
+        Some("ISOLATED") => match parse_isolated_single(toks, pos, stmt, ctx) {
+            Ok(Some((kind, used))) => return Ok((kind, used)),
+            Ok(None) => {}
+            Err(e) => return Err(e),
+        },
+        Some("ASYNC") => match parse_async_single(toks, pos, stmt, ctx) {
+            Ok(Some((kind, used))) => return Ok((kind, used)),
+            Ok(None) => {}
+            Err(e) => return Err(e),
+        },
+        // `INHERIT_ENV [...]` parses strictly here (shared with
+        // element level); the caller either rejects the nesting or
+        // rewrites it, same as the shared validator. Trailing
+        // elements loop on outside (a bad follower fails there, like
+        // the grammar's line end).
+        Some("INHERIT_ENV") => {
+            if let Some(found) = parse_inherit_env_at(toks, pos, stmt)? {
+                return Ok(found);
+            }
+        }
+        _ => {}
+    }
+    // Generic instruction: consumes the whole run; unknown heads
+    // (LET/RETURN/FUNC/IF/...) fail in lowering.
+    let (kind, used) = parse_inner_command(&toks[pos..], stmt, ctx)?;
+    Ok((kind, used))
+}
+
+/// Parse an `INHERIT_ENV [...]` key list over a bracket group's
+/// inner tokens, mirroring `inherit_list` strictly: comma-separated
+/// keys, gaps/newlines only around keys and commas (never inside:
+/// keys are atomic), each key a joint run validated against the
+/// `guard_key_char` exclusions (`: = ! , | ( ) ] $`, plus the `//`
+/// and `/*` comment opens). Groups and strings render raw (they read
+/// as ordinary characters here); anything else misses
+/// the shape (`None`: generic fails it in lowering).
+/// Statement-level `INHERIT_ENV` stays generic (slice 5 directives);
+/// this serves wrapper inners, where the nesting check (or the
+/// isolated rewrite) consumes the result.
+fn parse_inherit_keys(inner: &[Tok], stmt: usize) -> Result<Option<Vec<String>>, TokenError> {
+    let mut parts: Vec<&[Tok]> = Vec::new();
+    let mut start = 0;
+    for (i, tok) in inner.iter().enumerate() {
+        if matches!(&tok.kind, TokKind::Punct(',')) {
+            parts.push(&inner[start..i]);
+            start = i + 1;
+        }
+    }
+    parts.push(&inner[start..]);
+    let mut out = Vec::new();
+    for part in parts {
+        // Newlines skip at the edges only, like `ws?`.
+        let mut part = part;
+        while matches!(part.first().map(|t| &t.kind), Some(TokKind::Newline)) {
+            part = &part[1..];
+        }
+        while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
+            part = &part[..part.len() - 1];
+        }
+        let Some(key) = render_inherit_key(part, stmt)? else {
+            return Ok(None);
+        };
+        out.push(key);
+    }
+    if out.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(out))
+}
+
+/// True when a `/` opens an inline comment: joint `//` or `/*`
+/// (mirroring the grammar's comment literals, which need adjacency;
+/// a gapped second char is payload text, like `a/ /b`). Used
+/// everywhere `gap`/`gap_nl` admit comments.
+fn is_comment_open(toks: &[Tok], pos: usize) -> bool {
+    matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Punct('/')))
+        && matches!(
+            toks.get(pos + 1).map(|t| (&t.kind, t.joint)),
+            Some((TokKind::Punct('/'), true)) | Some((TokKind::Punct('*'), true))
+        )
+}
+
+/// Skip one inline comment starting at `pos` (which holds the `/`;
+/// see [`is_comment_open`): `//` runs to a newline or the end,
+/// `/* */` balances (nesting like the grammar) across newlines.
+/// Returns the first position past the comment, or `None` when the
+/// block never closes (the grammar fails unclosed comments too).
+fn skip_inline_comment(toks: &[Tok], pos: usize) -> Option<usize> {
+    let second = match toks.get(pos + 1).map(|t| &t.kind) {
+        Some(TokKind::Punct('/')) => '/',
+        Some(TokKind::Punct('*')) => '*',
+        _ => return None,
+    };
+    if second == '/' {
+        let mut p = pos + 2;
+        while p < toks.len() && !matches!(&toks[p].kind, TokKind::Newline) {
+            p += 1;
+        }
+        return Some(p);
+    }
+    let mut depth = 1usize;
+    let mut p = pos + 2;
+    while p < toks.len() {
+        let is_open = matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('/')))
+            && matches!(
+                toks.get(p + 1).map(|t| (&t.kind, t.joint)),
+                Some((TokKind::Punct('*'), true))
+            );
+        let is_close = matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('*')))
+            && matches!(
+                toks.get(p + 1).map(|t| (&t.kind, t.joint)),
+                Some((TokKind::Punct('/'), true))
+            );
+        if is_open {
+            depth += 1;
+            p += 2;
+        } else if is_close {
+            depth -= 1;
+            p += 2;
+            if depth == 0 {
+                return Some(p);
+            }
+        } else {
+            p += 1;
+        }
+    }
+    None
+}
+
+/// Parse one inherit key: a maximal key-char run, then only
+/// trailing gap content (`gap_nl`: newlines, comments, `#`). Key
+/// chars exclude `: = ! , | ( ) ] $`, whitespace, and the `//` / `/*`
+/// comment opens; a joint `#`
+/// stays literal, a gapped one opens a trailing comment. Groups and
+/// strings render raw for the exclusion check (they read as
+/// ordinary characters here). `None` on shape miss.
+fn render_inherit_key(part: &[Tok], stmt: usize) -> Result<Option<String>, TokenError> {
+    let mut out = String::new();
+    let mut i = 0;
+    // Key run: words, puncts (except comment opens), groups and
+    // strings rendered raw; ends at any gap, newline, comment, or
+    // `//` / `/*` open.
+    while i < part.len() {
+        let tok = &part[i];
+        if i > 0 && !tok.joint {
+            break;
+        }
+        match &tok.kind {
+            TokKind::Word(w) => {
+                out.push_str(w);
+                i += 1;
+            }
+            TokKind::Punct('/') if is_comment_open(part, i) => break,
+            // `#` stays literal at key start (`#c`) or joint
+            // (`a#b`); gapped mid-key it opens a trailing
+            // comment like the grammar's `gap_nl`.
+            TokKind::Punct('#') if tok.joint || out.is_empty() => {
+                // `#` stays literal at key start (`#c`) or joint
+                // (`a#b`).
+                out.push('#');
+                i += 1;
+            }
+            // Gapped mid-key `#` opens a trailing comment (handled
+            // by the trailer check below, like `gap_nl`).
+            TokKind::Punct('#') => break,
+            TokKind::Punct(c) => {
+                out.push(*c);
+                i += 1;
+            }
+            TokKind::Semicolon => {
+                out.push(';');
+                i += 1;
+            }
+            TokKind::Str { text, quote } => {
+                out.push(*quote);
+                out.push_str(text);
+                out.push(*quote);
+                i += 1;
+            }
+            TokKind::BlockStr(full) => {
+                out.push_str(full);
+                i += 1;
+            }
+            TokKind::Group {
+                delim,
+                inner,
+                open_joint,
+                close_joint,
+            } => {
+                let (open, close) = match delim {
+                    GroupDelim::Bracket => ('[', ']'),
+                    GroupDelim::Paren => ('(', ')'),
+                    GroupDelim::Brace => ('{', '}'),
+                };
+                out.push_str(&render_group(open, close, inner, *open_joint, *close_joint));
+                i += 1;
+            }
+            // Newlines and comment markers end the key; the trailer
+            // check below admits them.
+            TokKind::Newline | TokKind::Comment(_) => break,
+        }
+    }
+    if out.is_empty() {
+        return Ok(None);
+    }
+    // Trailer: only gap content (`gap_nl`) may follow the key.
+    let mut j = i;
+    while j < part.len() {
+        let tok = &part[j];
+        match &tok.kind {
+            TokKind::Newline | TokKind::Comment(_) => {
+                j += 1;
+            }
+            TokKind::Punct('/') if is_comment_open(part, j) => {
+                j = skip_inline_comment(part, j).ok_or(TokenError {
+                    stmt,
+                    msg: "unclosed block comment".to_string(),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                })?;
+            }
+            TokKind::Punct('#') => {
+                // `#` comment runs to a newline or the part end.
+                while j < part.len() && !matches!(&part[j].kind, TokKind::Newline) {
+                    j += 1;
+                }
+            }
+            _ => return Ok(None),
+        }
+    }
+    // `guard_key_char` exclusions: the single-char set plus the
+    // comment opens (`//`, `/*`); lone `/` stays legal.
+    if out.contains("//") || out.contains("/*") {
+        return Ok(None);
+    }
+    if out
+        .chars()
+        .any(|c| matches!(c, ':' | '=' | '!' | ',' | '|' | '(' | ')' | ']' | '$'))
+    {
+        return Ok(None);
+    }
+    Ok(Some(out))
+}
+
+/// Strict `INHERIT_ENV [...]` at an element or single-inner
+/// position: bracket riding gapped with valid keys yields the
+/// directive (trailing elements loop on outside); anything else
+/// misses (`None`) and generic fails it in lowering.
+/// Serves both levels so keys stay exact everywhere; slice 5 adds
+/// only the prelude-order validation.
+fn parse_inherit_env_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    // The bracket rides gapped (`sep`); anything else misses and
+    // generic fails it in lowering.
+    let bracket = match toks.get(pos + 1) {
+        Some(t)
+            if !t.joint
+                && matches!(
+                    &t.kind,
+                    TokKind::Group {
+                        delim: GroupDelim::Bracket,
+                        ..
+                    }
+                ) =>
+        {
+            Some(t)
+        }
+        _ => None,
+    };
+    let Some(bracket) = bracket else {
+        return Ok(None);
+    };
+    let inner = match &bracket.kind {
+        TokKind::Group { inner, .. } => inner,
+        _ => unreachable!(),
+    };
+    match parse_inherit_keys(inner, stmt)? {
+        Some(keys) => Ok(Some((StepKind::InheritEnv { keys }, 2))),
+        None => Ok(None),
+    }
+}
+
+/// Parse a brace block body into steps: statements split and lower
+/// recursively, each keeping its own guard. `mark` selects scope
+/// marking: top-level guard-block bodies mark (each nesting level
+/// bumps first/last); wrapper bodies
+/// (`IF`/`FOR`/`WHILE`/`FUNC`/`REMOTE`/wrappers/io-blocks) never mark
+/// (block-element lowering pins 0/0).
+fn parse_body_steps(
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+    mark: bool,
+) -> Result<Vec<Step>, TokenError> {
+    // One function/import scope per braced body (mirroring the
+    // runtime push/pop boundary): same-block
+    // `FUNC` redefinition errors, nested shadowing stays allowed.
+    // Errors abort the whole parse (frames discarded with it), so no
+    // exit runs on failure.
+    ctx.funcs.borrow_mut().push(HashSet::new());
+    ctx.imports.borrow_mut().push(Vec::new());
+    // Nested splits count lines from the enclosing statement's line
+    // (headers are single-line, so the brace shares it). Save and
+    // restore the discipline around the loop: sibling bodies after
+    // this one must see the enclosing line, not the last inner one.
+    // (On error the parse aborts and the context is discarded.)
+    let saved = *ctx.current_line.borrow();
+    let mut out = Vec::new();
+    for s in split_statements(inner, saved)? {
+        // The innermost statement owns error positions: record it for
+        // nested splits and stamp failures that have none yet (deeper
+        // frames stamp first, so this never overwrites real positions).
+        *ctx.current_line.borrow_mut() = s.line;
+        out.extend(
+            lower_stmt_steps(&s, stmt, ctx, true, mark).map_err(|e| stamp_pos(e, s.line, s.col))?,
+        );
+    }
+    *ctx.current_line.borrow_mut() = saved;
+    ctx.funcs.borrow_mut().pop();
+    ctx.imports.borrow_mut().pop();
+    Ok(out)
+}
+
+/// Single (non-block) `WITH_IO`: bindings plus an optional inner
+/// command. `None` on shape miss (no/gapped bracket: generic fails
+/// it in lowering). A brace in single-inner position is
+/// the grammar's pending-guard error, never an io-block; a bare
+/// bracket leaks the transient `WithIoBlock` into the body (probed).
+fn parse_with_io_single(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let bracket = match toks.get(pos + 1) {
+        // The bracket rides gapped (`sep`); anything else misses the
+        // shape and generic fails it in lowering.
+        Some(t)
+            if !t.joint
+                && matches!(
+                    &t.kind,
+                    TokKind::Group {
+                        delim: GroupDelim::Bracket,
+                        ..
+                    }
+                ) =>
+        {
+            t
+        }
+        _ => return Ok(None),
+    };
+    let inner = match &bracket.kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    let bindings = match parse_io_bindings(&inner, stmt)? {
+        Some(bindings) => bindings,
+        None => return Ok(None),
+    };
+    let rest = pos + 2;
+    // A brace directly after the bracket is the pending-guard error
+    // in single-inner position (probed); templates fall to generic.
+    if let Some(next) = toks.get(rest)
+        && matches!(
+            &next.kind,
+            TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            }
+        )
+        && !is_template_brace(next)
+    {
+        return Err(TokenError {
+            stmt,
+            msg: "'{' without a pending guard".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    if rest >= toks.len() {
+        // Bare bracket: the transient block node leaks into wrapper
+        // bodies (statement level never reaches
+        // here; the splitter holds it for `{`).
+        return Ok(Some((StepKind::WithIoBlock { bindings }, 2)));
+    }
+    // A joint follower misses the inner `sep`: the bracket stands
+    // bare (probed `TIMEOUT 10s WITH_IO [..]ECHO hi` yields the
+    // transient node) and trailing elements loop on outside.
+    if toks[rest].joint {
+        return Ok(Some((StepKind::WithIoBlock { bindings }, 2)));
+    }
+    let (cmd, used) = parse_single_inner(
+        toks,
+        rest,
+        stmt,
+        ctx,
+        InnerRules {
+            allow_await: false,
+            allow_with_io: true,
+        },
+    )?;
+    let span = lowering_ctx(stmt);
+    check_tty_wrapping(&bindings, Some(&cmd), &span).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    let kind = StepKind::WithIo {
+        bindings,
+        cmd: Box::new(cmd),
+    };
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    Ok(Some((kind, 2 + used)))
+}
+
+/// Single (non-block) `TIMEOUT`: duration plus one inner command.
+/// `None` on shape miss (bad duration, missing/joint inner: generic
+/// fails it in lowering). Blocks parse inline; the body
+/// holds one step for single inners.
+fn parse_timeout_single(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let Some((duration, dused)) = parse_timeout_duration_at(toks, pos + 1, stmt)? else {
+        return Ok(None);
+    };
+    let rest = pos + 1 + dused;
+    let Some(next) = toks.get(rest) else {
+        // `TIMEOUT 10s` alone is a generic instruction (lowering
+        // fails it, probed), never a bare wrapper.
+        return Ok(None);
+    };
+    if next.joint {
+        return Ok(None);
+    }
+    let body = if matches!(
+        &next.kind,
+        TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        }
+    ) && !is_template_brace(next)
+    {
+        let inner = match &next.kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        let steps = parse_body_steps(&inner, stmt, ctx, false)?;
+        (steps, 1)
+    } else {
+        let (cmd, used) = parse_single_inner(
+            toks,
+            rest,
+            stmt,
+            ctx,
+            InnerRules {
+                allow_await: true,
+                allow_with_io: true,
+            },
+        )?;
+        (
+            vec![Step {
+                guard: None,
+                kind: cmd,
+                scope_enter: 0,
+                scope_exit: 0,
+                line: 0,
+                col: 0,
+            }],
+            used,
+        )
+    };
+    let kind = StepKind::Timeout {
+        duration,
+        body: body.0,
+    };
+    let span = lowering_ctx(stmt);
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    Ok(Some((kind, 1 + dused + body.1)))
+}
+
+/// Single (non-block) `ISOLATED`: one inner command or block; the
+/// body rewrites nested `INHERIT_ENV` through the shared pass.
+/// `None` on shape miss (missing/joint inner: generic fails it).
+fn parse_isolated_single(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let Some(next) = toks.get(pos + 1) else {
+        return Ok(None);
+    };
+    if next.joint {
+        return Ok(None);
+    }
+    let (mut body, used) = if matches!(
+        &next.kind,
+        TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        }
+    ) && !is_template_brace(next)
+    {
+        let inner = match &next.kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        (parse_body_steps(&inner, stmt, ctx, false)?, 1)
+    } else {
+        let (cmd, used) = parse_single_inner(
+            toks,
+            pos + 1,
+            stmt,
+            ctx,
+            InnerRules {
+                allow_await: true,
+                allow_with_io: true,
+            },
+        )?;
+        (
+            vec![Step {
+                guard: None,
+                kind: cmd,
+                scope_enter: 0,
+                scope_exit: 0,
+                line: 0,
+                col: 0,
+            }],
+            used,
+        )
+    };
+    crate::commands::rewrite_isolated_inherit(&mut body);
+    Ok(Some((StepKind::Isolated { body }, 1 + used)))
+}
+
+/// Single (non-block) `ASYNC`: one inner command or block (blocks
+/// admit a joint brace, like `async_statement_block`'s `sep?`).
+/// Top-level `WITH_IO` steps fail through the shared reject; the
+/// `LET` path never scans (probed: it accepts). `None` on shape
+/// miss (missing/joint-single inner: generic fails it).
+fn parse_async_single(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let Some(next) = toks.get(pos + 1) else {
+        return Ok(None);
+    };
+    // Block form admits a joint brace (`ASYNC{...}`, probed); the
+    // single form needs its `sep`.
+    if matches!(
+        &next.kind,
+        TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        }
+    ) && !is_template_brace(next)
+    {
+        let inner = match &next.kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        let body = parse_body_steps(&inner, stmt, ctx, false)?;
+        let span = lowering_ctx(stmt);
+        crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| TokenError {
+            stmt,
+            msg: e.to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        })?;
+        let kind = StepKind::AsyncBlock { body };
+        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
+            stmt,
+            msg: e.to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        })?;
+        return Ok(Some((kind, 2)));
+    }
+    if next.joint {
+        return Ok(None);
+    }
+    let (cmd, used) = parse_single_inner(
+        toks,
+        pos + 1,
+        stmt,
+        ctx,
+        InnerRules {
+            allow_await: false,
+            allow_with_io: false,
+        },
+    )?;
+    let body = vec![Step {
+        guard: None,
+        kind: cmd,
+        scope_enter: 0,
+        scope_exit: 0,
+        line: 0,
+        col: 0,
+    }];
+    let span = lowering_ctx(stmt);
+    crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    let kind = StepKind::AsyncBlock { body };
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    Ok(Some((kind, 1 + used)))
+}
+
+// ---- Block statements, directives, REMOTE ----
+// `IF`/`FOR`/`WHILE`/`FUNC` parse their headers token-natively with
+// miss-to-generic fallback (the grammar's committed `instruction`
+// path); bodies lower recursively with pushed scopes. `TYPE` builds
+// aliases through a maximal type-shape match; `IMPORT`/`EXPORT` are
+// zero-step frame/table directives; `REMOTE` validates targets,
+// bindings, bodies, and outer-call containment through the shared
+// validators. Guard blocks fold guards with scope markers at top
+// level and mirror the nested quirk formula in bodies. A whole-script
+// post-pass runs the shared validations (prelude order, COPY
+// placement, EXPORT membership).
+
+/// Uppercase identifier mirror (`func_ident`, `type_name`,
+/// `import_module`): ASCII upper start, upper/digit/`_` rest.
+fn is_upper_ident(w: &str) -> bool {
+    !w.is_empty()
+        && w.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && w.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Lowercase identifier mirror (`field_name`): ASCII lower start,
+/// lower/digit/`_` rest.
+fn is_lower_ident(w: &str) -> bool {
+    !w.is_empty()
+        && w.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && w.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// `$name` with gapless adjacency (atomic `dollar_ident`); `None` on
+/// shape miss (the caller falls back to generic, which fails in
+/// lowering like the grammar's committed `instruction`).
+fn peek_dollar_var(toks: &[Tok], pos: usize) -> Option<(String, usize)> {
+    match (toks.get(pos), toks.get(pos + 1)) {
+        (Some(dollar), Some(name))
+            if matches!(&dollar.kind, TokKind::Punct('$'))
+                && name.joint
+                && matches!(&name.kind, TokKind::Word(w) if is_ident_word(w)) =>
+        {
+            match &name.kind {
+                TokKind::Word(w) => Some((w.clone(), 2)),
+                _ => unreachable!(),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Maximal `type_tag` match over toks (non-atomic: gaps free
+/// everywhere): atoms with `<>` args, `|` unions, `name?:` fields.
+/// Returns the exclusive end index, or `None` on shape miss.
+fn parse_type_shape(toks: &[Tok], pos: usize) -> Option<usize> {
+    let mut p = parse_type_atom(toks, pos)?;
+    while matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('|'))) {
+        p = parse_type_atom(toks, p + 1)?;
+    }
+    Some(p)
+}
+
+fn parse_type_atom(toks: &[Tok], pos: usize) -> Option<usize> {
+    match toks.get(pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) if is_upper_ident(w) => {}
+        _ => return None,
+    }
+    let mut p = pos + 1;
+    if matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('<'))) {
+        p = parse_type_args(toks, p + 1)?;
+        if !matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('>'))) {
+            return None;
+        }
+        p += 1;
+    }
+    Some(p)
+}
+
+fn parse_type_args(toks: &[Tok], pos: usize) -> Option<usize> {
+    let mut p = parse_type_field(toks, pos)?;
+    while matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct(','))) {
+        p = parse_type_field(toks, p + 1)?;
+    }
+    Some(p)
+}
+
+fn parse_type_field(toks: &[Tok], pos: usize) -> Option<usize> {
+    let mut p = pos;
+    // Optional `name?:` prefix (lowercase names only, like the
+    // grammar's `field_name`).
+    if let Some(TokKind::Word(w)) = toks.get(p).map(|t| &t.kind)
+        && is_lower_ident(w)
+    {
+        let mut q = p + 1;
+        if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Punct('?'))) {
+            q += 1;
+        }
+        if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Punct(':'))) {
+            p = q + 1;
+        }
+    }
+    parse_type_shape(toks, p)
+}
+
+/// Single (non-block) `IF`: condition plus then-block with an
+/// opportunistic `ELSE` chain (a malformed `ELSE` stays for the
+/// element loop, which fails it in lowering exactly like the
+/// grammar). `None` on shape miss (missing/joint-agnostic block or
+/// bad condition: generic fails it); expression failures
+/// with an inline-block failure propagate (blocks lower here, so
+/// their errors surface directly).
+fn parse_if_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    // Condition entry skips leading gap comments (`IF` uses `gap`).
+    let mut lead = Cursor::expr(&toks[pos + 1..], stmt);
+    lead.skip_gap();
+    let mut cur = Cursor::expr(&toks[pos + 1 + lead.pos..], stmt);
+    let cond = match parse_expr_checked(&mut cur, ctx) {
+        Ok(expr) => expr,
+        Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+        Err(_) => return Ok(None),
+    };
+    let cond_end = pos + 1 + lead.pos + cur.pos;
+    // Then-block: any gap (`gap` zero-width), never a template.
+    let then_brace = match toks.get(cond_end) {
+        Some(t)
+            if matches!(
+                &t.kind,
+                TokKind::Group {
+                    delim: GroupDelim::Brace,
+                    ..
+                }
+            ) && !is_template_brace(t) =>
+        {
+            t
+        }
+        _ => return Ok(None),
+    };
+    let then_inner = match &then_brace.kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    let then_body = parse_body_steps(&then_inner, stmt, ctx, false)?;
+    let mut p = cond_end + 1;
+    // Gap comments between the blocks and `ELSE` vanish (merge
+    // junctions contribute newlines, crossed like `blank*`).
+    {
+        let mut gcur = Cursor::expr(&toks[p..], stmt);
+        gcur.skip_gap_nl();
+        p += gcur.pos;
+    }
+    let mut else_ifs = Vec::new();
+    let mut else_body = None;
+    loop {
+        // `ELSE IF cond block`: any gaps (non-atomic chain).
+        let is_else_if = matches!(
+            toks.get(p).map(|t| &t.kind),
+            Some(TokKind::Word(w)) if w == "ELSE"
+        ) && matches!(
+            toks.get(p + 1).map(|t| &t.kind),
+            Some(TokKind::Word(w)) if w == "IF"
+        );
+        if is_else_if {
+            let mut ecur = Cursor::expr(&toks[p + 2..], stmt);
+            ecur.skip_gap();
+            let econd = match parse_expr_checked(&mut ecur, ctx) {
+                Ok(expr) => expr,
+                Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+                Err(_) => break,
+            };
+            let ebrace = p + 2 + ecur.pos;
+            let eblock_ok = matches!(
+                toks.get(ebrace).map(|t| &t.kind),
+                Some(TokKind::Group {
+                    delim: GroupDelim::Brace,
+                    ..
+                })
+            ) && toks.get(ebrace).is_some_and(|t| !is_template_brace(t));
+            if !eblock_ok {
+                break;
+            }
+            let einner = match &toks[ebrace].kind {
+                TokKind::Group { inner, .. } => inner.clone(),
+                _ => unreachable!(),
+            };
+            let ebody = parse_body_steps(&einner, stmt, ctx, false)?;
+            else_ifs.push((Box::new(econd), ebody));
+            p = ebrace + 1;
+            // Gap comments before a further `ELSE` vanish too
+            // (merge junctions contribute newlines).
             {
-                let pending = self.pending_io_block.take().unwrap();
-                return Err(ParseError::structural(
-                    "with_io",
-                    format!(
-                        "line {}: WITH_IO block must be followed by '{{'",
-                        pending.line_no
-                    ),
-                    &pending.span,
-                ));
+                let mut gcur = Cursor::expr(&toks[p..], stmt);
+                gcur.skip_gap_nl();
+                p += gcur.pos;
             }
-            match token {
-                RawToken::Guard {
-                    pair,
-                    line_end,
-                    span,
-                } => {
-                    let span = span.with_step(step_index);
-                    let groups = parse_guard_line(&span, pair)?;
-                    self.handle_guard_token(line_end, groups)?;
-                }
-                RawToken::BlockStart { line_no, span } => {
-                    let span = span.with_step(step_index);
-                    self.start_block(&span, line_no)?;
-                    LowerCtx::new(
-                        &self.lower,
-                        &self.reserved_names,
-                        &func_scopes,
-                        &self.modules,
-                        &import_scopes,
-                    )
-                    .enter_scope();
-                }
-                RawToken::BlockEnd { line_no, span } => {
-                    let span = span.with_step(step_index);
-                    self.end_block(&span, line_no)?;
-                    LowerCtx::new(
-                        &self.lower,
-                        &self.reserved_names,
-                        &func_scopes,
-                        &self.modules,
-                        &import_scopes,
-                    )
-                    .exit_scope();
-                }
-                RawToken::Command {
-                    pair,
-                    line_no,
-                    span,
-                } => {
-                    let span = span.with_step(step_index);
-                    let lctx = LowerCtx::new(
-                        &self.lower,
-                        &self.reserved_names,
-                        &func_scopes,
-                        &self.modules,
-                        &import_scopes,
-                    );
-                    // IMPORT/EXPORT are lowering directives, not steps:
-                    // IMPORT updates the import frames, EXPORT records
-                    // single-file tool names. Both emit zero runtime
-                    // steps. Neither may be guarded: a guard here would
-                    // leak onto the following statement.
-                    if pair.as_rule() == Rule::import_statement {
-                        if self.pending_guards.is_some() || self.pending_inline_guards.is_some() {
-                            return Err(ParseError::structural(
-                                KEYWORD_IMPORT,
-                                "IMPORT cannot be guarded".to_string(),
-                                &span,
-                            ));
-                        }
-                        self.lower_import(&span, pair, &lctx)?;
-                        continue;
-                    }
-                    if pair.as_rule() == Rule::export_statement {
-                        if self.pending_guards.is_some() || self.pending_inline_guards.is_some() {
-                            return Err(ParseError::structural(
-                                KEYWORD_EXPORT,
-                                "EXPORT cannot be guarded".to_string(),
-                                &span,
-                            ));
-                        }
-                        self.lower_export(&span, pair)?;
-                        continue;
-                    }
-                    if pair.as_rule() == Rule::type_statement
-                        && (self.pending_guards.is_some() || self.pending_inline_guards.is_some())
-                    {
-                        return Err(ParseError::structural(
-                            KEYWORD_TYPE,
-                            "TYPE cannot be guarded".to_string(),
-                            &span,
-                        ));
-                    }
-                    let kind = parse_structural_command_with_lower(&span, pair, &lctx)?;
-                    self.handle_command_token(&span, line_no, kind)?;
-                }
-                RawToken::Instruction {
-                    pair,
-                    line_no,
-                    span,
-                } => {
-                    let span = span.with_step(step_index);
-                    let lctx = LowerCtx::new(
-                        &self.lower,
-                        &self.reserved_names,
-                        &func_scopes,
-                        &self.modules,
-                        &import_scopes,
-                    );
-                    // A `{` token on the same line after a keyword-led
-                    // instruction marks a fragmented block statement (issue
-                    // #215). The peek is free and the head name below
-                    // allocates only in that rare case, so valid scripts
-                    // pay nothing for the diagnostic fallback. The pair
-                    // always starts with its command name (grammar-ordered
-                    // first child: comments lex as separate elements and
-                    // compact `IF(` forms lex as calls), so the first
-                    // token is the keyword.
-                    let input = self.input;
-                    let opens_block = matches!(
-                        self.tokens.front(),
-                        Some(RawToken::BlockStart { line_no: next, .. }) if *next == line_no
-                    );
-                    let head_start = pair.as_span().start();
-                    let head_name = opens_block.then(|| {
-                        pair.as_str()
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or("")
-                            .to_string()
-                    });
-                    let head_line = span.line;
-                    let head_step = span.step_index;
-                    let kind = self.lower_instruction(&span, pair, &lctx).map_err(|e| {
-                        let headed = e.with_span(&span);
-                        match head_name {
-                            Some(name) => refine_fragmented_block_error(
-                                input, head_start, &name, head_line, head_step, headed,
-                            ),
-                            None => headed,
-                        }
-                    })?;
-                    self.handle_command_token(&span, line_no, kind)?;
-                }
-                RawToken::RunExec {
-                    pair,
-                    line_no,
-                    span,
-                } => {
-                    let span = span.with_step(step_index);
-                    let lctx = LowerCtx::new(
-                        &self.lower,
-                        &self.reserved_names,
-                        &func_scopes,
-                        &self.modules,
-                        &import_scopes,
-                    );
-                    let kind = lower_run_exec_pair(&span, pair, &lctx)?;
-                    self.handle_command_token(&span, line_no, kind)?;
-                }
-            }
+            continue;
         }
+        // `ELSE block`: same opportunism (a bare `ELSE` stays for
+        // the loop, failing in lowering like the grammar).
+        let is_else = matches!(
+            toks.get(p).map(|t| &t.kind),
+            Some(TokKind::Word(w)) if w == "ELSE"
+        ) && matches!(
+            toks.get(p + 1).map(|t| &t.kind),
+            Some(TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            })
+        ) && toks.get(p + 1).is_some_and(|t| !is_template_brace(t));
+        if !is_else {
+            break;
+        }
+        let einner = match &toks[p + 1].kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        else_body = Some(parse_body_steps(&einner, stmt, ctx, false)?);
+        p += 2;
+        break;
+    }
+    let kind = StepKind::If {
+        cond: Box::new(cond),
+        then_body,
+        else_ifs,
+        else_body,
+    };
+    Ok(Some((kind, p - pos)))
+}
 
-        if let Some(pending) = self.pending_io_block.take() {
-            return Err(ParseError::structural(
-                "with_io",
-                format!(
-                    "line {}: WITH_IO block must be followed by '{{'",
-                    pending.line_no
-                ),
-                &pending.span,
-            ));
-        }
-
-        if self.guard_stack.len() != 1 {
-            let ctx = self.eof_span();
-            return Err(ParseError::structural(
-                "guard",
-                "unclosed guard block at end of script".to_string(),
-                &ctx,
-            ));
-        }
-        if self.pending_guards.is_some() {
-            let ctx = self.eof_span();
-            return Err(ParseError::structural(
-                "guard",
-                "guard declared on final lines without a following command".to_string(),
-                &ctx,
-            ));
-        }
-
-        if let Some(frame) = self.io_scope_stack.last() {
-            let ctx = span_for_line(self.input, frame.line_no);
-            return Err(ParseError::structural(
-                "with_io",
-                format!(
-                    "WITH_IO block starting on line {} was not closed",
-                    frame.line_no
-                ),
-                &ctx,
-            ));
-        }
-
-        // Validate `INHERIT_ENV` directives: only allowed in the prelude
-        // (before any other commands). Several may appear so
-        // platform-specific names ride guarded lines
-        // (`[family:windows] INHERIT_ENV [SystemRoot]`); each guarded
-        // line runs only when its guard passes, like any other step.
-        {
-            let mut seen_non_prelude = false;
-            for (index, step) in self.steps.iter().enumerate() {
-                let span = |index: usize| {
-                    let line = self.step_lines.get(index).copied().unwrap_or(1).max(1);
-                    span_for_line(self.input, line)
+/// Single (non-block) `FOR`: `$var[: TYPE] (, $var[: TYPE])? IN
+/// expr` plus block. Header shapes miss to generic (a third variable,
+/// a missing block, a bad name all fail in lowering like the
+/// grammar); completed headers validate counts and key types loudly.
+/// Expression failures from inline blocks propagate (blocks lower
+/// here); other expression failures miss (generic fails them like a
+/// committed `instruction` would).
+fn parse_for_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let mut p = pos + 1;
+    let mut idents = Vec::new();
+    let mut types = Vec::new();
+    // First `$var[: TYPE]` (gapless `$var`; gaps free elsewhere).
+    let Some((var1, _)) = peek_dollar_var(toks, p) else {
+        return Ok(None);
+    };
+    idents.push(var1);
+    p += 2;
+    let mut cur = Cursor::expr(&toks[p..], stmt);
+    cur.skip_gap();
+    p += cur.pos;
+    if matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct(':'))) {
+        p += 1;
+        let mut tcur = Cursor::expr(&toks[p..], stmt);
+        tcur.skip_gap();
+        let tstart = p + tcur.pos;
+        let Some(tend) = parse_type_shape(toks, tstart) else {
+            return Ok(None);
+        };
+        // `render_type_region` canonicalizes (shared spelling).
+        types.push(render_type_region(&toks[tstart..tend], stmt)?);
+        p = tend;
+    }
+    // Optional `, $var2[: TYPE2]`.
+    {
+        let mut ccur = Cursor::expr(&toks[p..], stmt);
+        ccur.skip_gap();
+        if matches!(
+            ccur.toks.get(ccur.pos).map(|t| &t.kind),
+            Some(TokKind::Punct(','))
+        ) {
+            ccur.pos += 1;
+            ccur.skip_gap();
+            let base = p + ccur.pos;
+            let Some((var2, _)) = peek_dollar_var(toks, base) else {
+                return Ok(None);
+            };
+            idents.push(var2);
+            let mut q = base + 2;
+            let mut qcur = Cursor::expr(&toks[q..], stmt);
+            qcur.skip_gap();
+            q += qcur.pos;
+            if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Punct(':'))) {
+                q += 1;
+                let mut tcur = Cursor::expr(&toks[q..], stmt);
+                tcur.skip_gap();
+                let tstart = q + tcur.pos;
+                let Some(tend) = parse_type_shape(toks, tstart) else {
+                    return Ok(None);
                 };
-                match &step.kind {
-                    StepKind::InheritEnv { .. } => {
-                        if seen_non_prelude {
-                            let ctx = span(index);
-                            return Err(ParseError::structural(
-                                "inherit_env",
-                                "INHERIT_ENV must appear before any other commands".to_string(),
-                                &ctx,
-                            ));
-                        }
-                    }
-                    kind => {
-                        if contains_inherit_env(kind) {
-                            let ctx = span(index);
-                            return Err(ParseError::structural(
-                                "inherit_env",
-                                "INHERIT_ENV cannot be nested inside other commands".to_string(),
-                                &ctx,
-                            ));
-                        }
-                        seen_non_prelude = true;
-                    }
-                }
+                types.push(render_type_region(&toks[tstart..tend], stmt)?);
+                q = tend;
             }
+            p = q;
         }
-
-        // Validate `COPY --from-host` / `--to-host` placement: transfer
-        // declarations are only meaningful inside a `REMOTE` body, where
-        // the session hoists them around execution. Anywhere else they
-        // would silently behave as local copies, so they fail fast.
-        {
-            let ctx = self.eof_span();
-            validate_remote_copy_placement(&self.steps, &ctx)?;
+    }
+    // `IN expr block`.
+    {
+        let mut icur = Cursor::expr(&toks[p..], stmt);
+        icur.skip_gap();
+        if !matches!(
+            icur.toks.get(icur.pos).map(|t| &t.kind),
+            Some(TokKind::Word(w)) if w == "IN"
+        ) {
+            return Ok(None);
         }
-
-        // Validate `EXPORT` names at end of parse. Forward references
-        // are allowed (EXPORT may precede its FUNCs), so this runs
-        // against the completed top-level scope. Bare names must match
-        // a top-level `FUNC`; qualified `MOD::NAME` names must match a
-        // known module member (opaque modules skip the member check;
-        // the runtime registry resolves them or fails serving).
-        // Duplicates are rejected at the EXPORT site.
-        {
-            let top: HashSet<String> = func_scopes.borrow()[0].clone();
-            for name in &self.exports {
-                let valid = match name.split_once("::") {
-                    None => top.contains(name),
-                    Some((module, base)) if module == SCRIPT_MODULE_NAME => top.contains(base),
-                    Some((module, base)) => match self.modules.modules.get(module) {
-                        None => false,
-                        Some(None) => true,
-                        Some(Some(funcs)) => funcs.functions.contains(base),
-                    },
-                };
-                if !valid {
-                    let ctx = self.eof_span();
-                    return Err(ParseError::validation(
-                        KEYWORD_EXPORT,
-                        format!(
-                            "EXPORT `{name}` does not match any top-level FUNC or known module member"
-                        ),
-                        &ctx,
-                    ));
-                }
-            }
-        }
-
-        let func_docs = collect_func_docs(self.input, &self.steps);
-        let exports = std::mem::take(&mut self.exports);
-        let steps = std::mem::take(&mut self.steps);
-        Ok(ParsedScript {
-            steps,
-            exports,
-            func_docs,
+        icur.pos += 1;
+        p += icur.pos;
+    }
+    let mut ecur = Cursor::expr(&toks[p..], stmt);
+    ecur.skip_gap();
+    let in_expr = match parse_expr_checked(&mut ecur, ctx) {
+        Ok(expr) => expr,
+        Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+        Err(_) => return Ok(None),
+    };
+    p += ecur.pos;
+    let block_ok = matches!(
+        toks.get(p).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
         })
+    ) && toks.get(p).is_some_and(|t| !is_template_brace(t));
+    if !block_ok {
+        return Ok(None);
     }
-
-    fn lower_instruction(
-        &self,
-        ctx: &SpanContext,
-        pair: Pair<Rule>,
-        lctx: &LowerCtx,
-    ) -> ParseResult<StepKind> {
-        lower_instruction_pair(ctx, pair, lctx)
+    let inner = match &toks[p].kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    let body = parse_body_steps(&inner, stmt, ctx, false)?;
+    p += 1;
+    if idents.len() != types.len() {
+        return Err(TokenError {
+            stmt,
+            msg: format!(
+                "FOR requires explicit types: FOR $item: TYPE IN <expr> (got {} vars, {} types)",
+                idents.len(),
+                types.len()
+            ),
+            line: 0,
+            col: 0,
+            kind: Some(ParseErrorKind::Validation {
+                command: "FOR".to_string(),
+            }),
+        });
     }
-
-    /// Lower an `IMPORT` statement: update the import frames, emit nothing.
-    /// Guards are rejected by the caller: with zero steps there is nothing
-    /// to attach them to, so they would leak onto the next statement.
-    fn lower_import(
-        &self,
-        ctx: &SpanContext,
-        pair: Pair<Rule>,
-        lctx: &LowerCtx,
-    ) -> ParseResult<()> {
-        lower_import_statement(ctx, pair, lctx)
+    let (key_var, key_type, var, var_type) = match idents.len() {
+        1 => (
+            None,
+            None,
+            idents.into_iter().next().unwrap_or_default(),
+            types.into_iter().next().unwrap_or_default(),
+        ),
+        2 => {
+            let mut iv = idents.into_iter();
+            let mut tv = types.into_iter();
+            (
+                Some(iv.next().unwrap_or_default()),
+                Some(tv.next().unwrap_or_default()),
+                iv.next().unwrap_or_default(),
+                tv.next().unwrap_or_default(),
+            )
+        }
+        _ => {
+            return Err(TokenError {
+                stmt,
+                msg: "FOR requires one or two variables".to_string(),
+                line: 0,
+                col: 0,
+                kind: Some(ParseErrorKind::Validation {
+                    command: "FOR".to_string(),
+                }),
+            });
+        }
+    };
+    if let Some(kt) = &key_type
+        && kt != "STRING"
+        && kt != "INT"
+    {
+        return Err(TokenError {
+            stmt,
+            msg: format!("FOR key variable must be INT or STRING, got {kt}"),
+            line: 0,
+            col: 0,
+            kind: Some(ParseErrorKind::Validation {
+                command: "FOR".to_string(),
+            }),
+        });
     }
+    let kind = StepKind::For {
+        key_var,
+        key_type,
+        var,
+        var_type,
+        in_expr,
+        body,
+    };
+    Ok(Some((kind, p - pos)))
+}
 
-    /// Lower an `EXPORT` statement: record script tool names plus
-    /// qualified host names in source order, emit nothing. Guards are
-    /// rejected by the caller. Duplicates fail here; unknown names fail
-    /// at end of parse so forward references (`EXPORT` before `FUNC`)
-    /// keep working.
-    fn lower_export(&mut self, ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<()> {
-        let mut names = Vec::new();
-        for inner in pair.into_inner() {
-            match inner.as_rule() {
-                Rule::export_list => {
-                    for item in inner.into_inner() {
-                        if item.as_rule() == Rule::export_ident {
-                            names.push(item.as_str().to_string());
-                        }
-                    }
+/// Single (non-block) `WHILE`: condition plus block. `None` on
+/// shape miss (missing block: generic fails it);
+/// expression failures from inline blocks propagate, others miss
+/// (generic fails them like a committed `instruction` would).
+/// No leading gap-skip: `WHILE` takes `sep`, so a joint follower
+/// never reaches here with a valid shape... (misses fall through
+/// the same way regardless).
+fn parse_while_single(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let mut cur = Cursor::expr(&toks[pos + 1..], stmt);
+    let cond = match parse_expr_checked(&mut cur, ctx) {
+        Ok(expr) => expr,
+        Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+        Err(_) => return Ok(None),
+    };
+    let brace = pos + 1 + cur.pos;
+    let block_ok = matches!(
+        toks.get(brace).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        })
+    ) && toks.get(brace).is_some_and(|t| !is_template_brace(t));
+    if !block_ok {
+        return Ok(None);
+    }
+    let inner = match &toks[brace].kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    let body = parse_body_steps(&inner, stmt, ctx, false)?;
+    let kind = StepKind::While {
+        cond: Box::new(cond),
+        body,
+    };
+    Ok(Some((kind, brace + 1 - pos)))
+}
+
+/// Single (non-block) `FUNC`: name, parenthesized params, block. The
+/// shape parses purely first (misses fall to generic, declaring
+/// nothing — the grammar only lowers matched pairs); then the name
+/// declares in the enclosing scope before the body lowers (so
+/// recursion resolves), and the body pushes a fresh scope.
+/// Duplicates, reserved shadows, and parameter dupes fail loudly.
+fn parse_func_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let fail = |msg: String| TokenError {
+        stmt,
+        msg,
+        line: 0,
+        col: 0,
+        kind: Some(ParseErrorKind::Validation {
+            command: "FUNC".to_string(),
+        }),
+    };
+    // Phase 1 (pure shape): name, parens, params, block presence.
+    // Name: UPPERCASE ident (lowercase misses to generic, probed).
+    let def_name = match toks.get(pos + 1).map(|t| &t.kind) {
+        Some(TokKind::Word(w))
+            if crate::resolve::check_func_ident(&lowering_ctx(stmt), w).is_ok() =>
+        {
+            w.clone()
+        }
+        _ => return Ok(None),
+    };
+    // Paren group at any gap (`gap` zero-width): params live inside
+    // its inner tokens, parsed with `gap` discipline (newlines miss,
+    // like the grammar).
+    let mut p = pos + 2;
+    let paren_inner = match toks.get(p).map(|t| &t.kind) {
+        Some(TokKind::Group {
+            delim: GroupDelim::Paren,
+            inner,
+            ..
+        }) => inner.clone(),
+        _ => return Ok(None),
+    };
+    p += 1;
+    let mut params = Vec::new();
+    {
+        let mut pcur = Cursor::expr(&paren_inner, stmt);
+        pcur.skip_gap();
+        if !pcur.done() {
+            loop {
+                let base = pcur.pos;
+                let Some((pname, _)) = peek_dollar_var(&paren_inner, base) else {
+                    return Ok(None);
+                };
+                pcur.pos = base + 2;
+                pcur.skip_gap();
+                if !pcur.eat_punct(':') {
+                    return Ok(None);
                 }
-                Rule::export_ident => names.push(inner.as_str().to_string()),
-                _ => {}
+                pcur.skip_gap();
+                let tstart = pcur.pos;
+                let Some(tend) = parse_type_shape(&paren_inner, tstart) else {
+                    return Ok(None);
+                };
+                // Post-match the span holds words/puncts only, so the
+                // shared renderer cannot fail; stay failed regardless.
+                let ptype =
+                    render_type_region(&paren_inner[tstart..tend], stmt).unwrap_or_default();
+                params.push((pname, ptype));
+                pcur.pos = tend;
+                pcur.skip_gap();
+                if pcur.eat_punct(',') {
+                    pcur.skip_gap();
+                    // Trailing comma misses (a param must follow).
+                    if pcur.done() {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                break;
             }
+            // Trailing junk (including newlines) misses to generic.
+            if !pcur.done() {
+                return Ok(None);
+            }
+        }
+    }
+    // Block at any gap (never a template); missing blocks miss to
+    // generic (probed `FUNC FOO() ECHO hi`).
+    let block_ok = matches!(
+        toks.get(p).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        })
+    ) && toks.get(p).is_some_and(|t| !is_template_brace(t));
+    if !block_ok {
+        return Ok(None);
+    }
+    // Phase 2 (effects): reserved shadows and same-scope duplicates
+    // fail at the definition line, verbatim.
+    if ctx.reserved.contains(&def_name) || ctx.modules.reserved_base_names().contains(&def_name) {
+        return Err(fail(format!(
+            "FUNC {def_name} cannot shadow reserved function `{def_name}`"
+        )));
+    }
+    if !ctx.declare_func(&def_name) {
+        return Err(fail(format!(
+            "duplicate function `{def_name}` in same scope"
+        )));
+    }
+    let mut seen = HashSet::new();
+    for (pname, _) in &params {
+        if !seen.insert(pname.clone()) {
+            return Err(fail(format!(
+                "FUNC {def_name} declares duplicate parameter ${pname}"
+            )));
+        }
+    }
+    let inner = match &toks[p].kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    let body = parse_body_steps(&inner, stmt, ctx, false)?;
+    let kind = StepKind::FuncDef {
+        name: def_name,
+        params,
+        body,
+        docs: None,
+    };
+    Ok(Some((kind, p + 1 - pos)))
+}
+
+/// `REMOTE` header bindings `[$var, env:KEY]` over a bracket
+/// group's inner tokens: comma-separated, newlines and comments free
+/// like `gap_nl`. `$`+name and `env`+`:`+key all ride gapless (the
+/// enclosing rule is compound-atomic). Empty lists parse (probed);
+/// anything else misses the shape (`None`: generic fails it like
+/// the grammar's dropped optional).
+#[allow(clippy::type_complexity)]
+fn parse_remote_bindings(
+    inner: &[Tok],
+    stmt: usize,
+) -> Result<Option<(Vec<String>, Vec<String>)>, TokenError> {
+    let _ = stmt;
+    let mut parts: Vec<&[Tok]> = Vec::new();
+    let mut start = 0;
+    for (i, tok) in inner.iter().enumerate() {
+        if matches!(&tok.kind, TokKind::Punct(',')) {
+            parts.push(&inner[start..i]);
+            start = i + 1;
+        }
+    }
+    parts.push(&inner[start..]);
+    // An empty list (`[]`, whitespace/comment-only) holds no bindings.
+    if parts.len() == 1
+        && parts[0]
+            .iter()
+            .all(|t| matches!(&t.kind, TokKind::Newline | TokKind::Comment(_)))
+    {
+        return Ok(Some((Vec::new(), Vec::new())));
+    }
+    let mut vars = Vec::new();
+    let mut env = Vec::new();
+    for part in parts {
+        // Edges admit gaps, newlines, and comments, like `gap_nl`.
+        let mut part = part;
+        while matches!(
+            part.first().map(|t| &t.kind),
+            Some(TokKind::Newline | TokKind::Comment(_))
+        ) {
+            part = &part[1..];
+        }
+        while matches!(
+            part.last().map(|t| &t.kind),
+            Some(TokKind::Newline | TokKind::Comment(_))
+        ) {
+            part = &part[..part.len() - 1];
+        }
+        // `$var`: gapless `$` + ident.
+        if matches!(part.first().map(|t| &t.kind), Some(TokKind::Punct('$'))) && part.len() == 2 {
+            if part[1].joint
+                && let TokKind::Word(w) = &part[1].kind
+                && is_ident_word(w)
+            {
+                vars.push(w.clone());
+                continue;
+            }
+            return Ok(None);
+        }
+        // `env:KEY`: gapless triple with an uppercase key.
+        if part.len() == 3
+            && matches!(&part[0].kind, TokKind::Word(w) if w == "env")
+            && matches!(&part[1].kind, TokKind::Punct(':'))
+            && part[1].joint
+            && part[2].joint
+        {
+            if let TokKind::Word(k) = &part[2].kind
+                && is_env_key(k)
+            {
+                env.push(k.clone());
+                continue;
+            }
+            return Ok(None);
+        }
+        return Ok(None);
+    }
+    Ok(Some((vars, env)))
+}
+
+/// `IMPORT [...]` or bare `IMPORT MOD` at `pos`: bracket rides
+/// gapped (`sep`), modules validate against the table with the exact
+/// backend message, and the innermost frame records them (deduped).
+/// Returns tokens consumed, or `None` on shape miss (generic fails
+/// it in lowering like the grammar). Emits no step; the caller
+/// owns guard handling (top-level guarded fails, in-block leaks).
+fn parse_import_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<usize>, TokenError> {
+    let fail = |msg: String| TokenError {
+        stmt,
+        msg,
+        line: 0,
+        col: 0,
+        kind: Some(ParseErrorKind::Validation {
+            command: "IMPORT".to_string(),
+        }),
+    };
+    let next = match toks.get(pos + 1) {
+        // `sep` after `IMPORT`: joint followers miss.
+        Some(t) if !t.joint => t,
+        _ => return Ok(None),
+    };
+    let mut modules = Vec::new();
+    if matches!(
+        &next.kind,
+        TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        }
+    ) {
+        return Ok(None);
+    }
+    if let TokKind::Group {
+        delim: GroupDelim::Bracket,
+        inner,
+        ..
+    } = &next.kind
+    {
+        // `import_list`: comma-separated uppercase modules, `ws?`
+        // gaps (newlines ok, comments MISS — `ws` admits neither).
+        let mut parts: Vec<&[Tok]> = Vec::new();
+        let mut start = 0;
+        for (i, tok) in inner.iter().enumerate() {
+            if matches!(&tok.kind, TokKind::Punct(',')) {
+                parts.push(&inner[start..i]);
+                start = i + 1;
+            }
+        }
+        parts.push(&inner[start..]);
+        for part in parts {
+            let mut part = part;
+            while matches!(part.first().map(|t| &t.kind), Some(TokKind::Newline)) {
+                part = &part[1..];
+            }
+            while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
+                part = &part[..part.len() - 1];
+            }
+            match part {
+                [tok] => match &tok.kind {
+                    TokKind::Word(w) if is_upper_ident(w) => modules.push(w.clone()),
+                    _ => return Ok(None),
+                },
+                _ => return Ok(None),
+            }
+        }
+        if modules.is_empty() {
+            return Ok(None);
+        }
+    } else if let TokKind::Word(w) = &next.kind {
+        // Bare `IMPORT MOD` (single module, probed).
+        if !is_upper_ident(w) {
+            return Ok(None);
+        }
+        modules.push(w.clone());
+    } else {
+        return Ok(None);
+    }
+    // Unknown modules fail with the exact backend message (sorted
+    // known list (sorted, like the old backend)).
+    for module in &modules {
+        if !ctx.modules.modules.contains_key(module) {
+            let mut known: Vec<String> = ctx.modules.modules.keys().cloned().collect();
+            known.sort();
+            return Err(fail(format!(
+                "unknown module `{module}`; known modules: {}",
+                known.join(", ")
+            )));
+        }
+    }
+    ctx.import_into_frame(&modules);
+    Ok(Some(2))
+}
+
+/// One `EXPORT` name: an uppercase word with an optional joint
+/// `::UPPER` tail. Returns the name and tokens consumed, or `None`
+/// on shape miss.
+fn parse_export_name(toks: &[Tok], pos: usize) -> Option<(String, usize)> {
+    let head = match toks.get(pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) if is_upper_ident(w) => w.clone(),
+        _ => return None,
+    };
+    let mut name = head;
+    let mut used = 1;
+    // Greedy-prefix `::tail` (atomic, like the grammar): a valid
+    // tail joins, an invalid one stays trailing (failing downstream
+    // exactly like the grammar's committed prefix).
+    if matches!(
+        toks.get(pos + 1).map(|t| &t.kind),
+        Some(TokKind::Punct(':'))
+    ) && toks.get(pos + 1).is_some_and(|t| t.joint)
+        && matches!(
+            toks.get(pos + 2).map(|t| &t.kind),
+            Some(TokKind::Punct(':'))
+        )
+        && toks.get(pos + 2).is_some_and(|t| t.joint)
+        && let Some(TokKind::Word(tail)) = toks.get(pos + 3).map(|t| &t.kind)
+        && toks[pos + 3].joint
+        && is_upper_ident(tail)
+    {
+        name.push_str("::");
+        name.push_str(tail);
+        used = 4;
+    }
+    Some((name, used))
+}
+
+/// `EXPORT ...` names at `pos`: bracket list (strict, `ws` gaps:
+/// newlines ok, comments miss) or a bare greedy-prefix name.
+/// Returns names plus tokens consumed, or `None` on shape miss
+/// (generic fails it in lowering like the grammar). Recording and
+/// duplicate checks live with the caller (they need the guard and
+/// level context).
+fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(Vec<String>, usize)> {
+    let next = match toks.get(pos + 1) {
+        // `sep` after `EXPORT`: joint followers miss.
+        Some(t) if !t.joint => t,
+        _ => return None,
+    };
+    if let TokKind::Group {
+        delim: GroupDelim::Bracket,
+        inner,
+        ..
+    } = &next.kind
+    {
+        let mut parts: Vec<&[Tok]> = Vec::new();
+        let mut start = 0;
+        for (i, tok) in inner.iter().enumerate() {
+            if matches!(&tok.kind, TokKind::Punct(',')) {
+                parts.push(&inner[start..i]);
+                start = i + 1;
+            }
+        }
+        parts.push(&inner[start..]);
+        let mut names = Vec::new();
+        for part in parts {
+            let mut part = part;
+            while matches!(part.first().map(|t| &t.kind), Some(TokKind::Newline)) {
+                part = &part[1..];
+            }
+            while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
+                part = &part[..part.len() - 1];
+            }
+            // Exactly one name per entry (entries never trail).
+            let (name, used) = parse_export_name(part, 0)?;
+            if used != part.len() {
+                return None;
+            }
+            names.push(name);
         }
         if names.is_empty() {
-            return Err(ParseError::validation(
-                KEYWORD_EXPORT,
-                "EXPORT requires at least one function name, e.g. `EXPORT FOO` or `EXPORT [FOO, BAR]`"
-                    .to_string(),
-                ctx,
-            ));
+            return None;
         }
-        for name in names {
-            for part in name.split("::") {
-                check_func_ident(ctx, part)?;
+        return Some((names, 2));
+    }
+    if matches!(&next.kind, TokKind::Group { .. }) {
+        return None;
+    }
+    // Bare name (greedy `::` prefix; trailing loops outside).
+    parse_export_name(toks, pos + 1).map(|(name, used)| (vec![name], 1 + used))
+}
+
+/// `TYPE NAME = SHAPE` at `pos`: uppercase name, single `=`, maximal
+/// type-tag shape canonicalized through the shared spelling.
+/// Returns the alias plus tokens consumed, or `None` on shape miss
+/// (generic fails it in lowering like the grammar).
+fn parse_type_stmt_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let name = match toks.get(pos + 1).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) if is_upper_ident(w) => w.clone(),
+        _ => return Ok(None),
+    };
+    // Single `=` at any gap (`gap` zero-width); `==` misses.
+    if !matches!(
+        toks.get(pos + 2).map(|t| &t.kind),
+        Some(TokKind::Punct('='))
+    ) {
+        return Ok(None);
+    }
+    if matches!(
+        toks.get(pos + 3).map(|t| &t.kind),
+        Some(TokKind::Punct('='))
+    ) {
+        return Ok(None);
+    }
+    let Some(end) = parse_type_shape(toks, pos + 3) else {
+        return Ok(None);
+    };
+    // Post-match the span holds words/puncts only, so the shared
+    // renderer cannot fail; stay failed regardless.
+    let target = render_type_region(&toks[pos + 3..end], stmt).unwrap_or_default();
+    Ok(Some((StepKind::TypeAlias { name, target }, end - pos)))
+}
+
+/// Single (non-block) `REMOTE`: target, optional bindings, block.
+/// The target reads a maximal joint run in the grammar's superset
+/// charset (misses fall to generic); strict validity fails loudly
+/// with the exact backend message. Bindings miss to generic;
+/// empty/missing bodies and nesting violations fail loudly.
+fn parse_remote_single(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let fail = |msg: String| TokenError {
+        stmt,
+        msg,
+        line: 0,
+        col: 0,
+        kind: Some(ParseErrorKind::Validation {
+            command: "REMOTE".to_string(),
+        }),
+    };
+    // Target: joint run in the superset charset (alnum/`_`/`-`/`.`/`:`).
+    // Anything else (joint or not) ends the run; an empty run misses
+    // to generic. (`sep` needs no explicit check: a joint `(` is a
+    // call routed before this ever runs, and anything unparseable
+    // misses the same way.)
+    let mut target = String::new();
+    let mut p = pos + 1;
+    while let Some(t) = toks.get(p) {
+        if !t.joint && !target.is_empty() {
+            break;
+        }
+        match &t.kind {
+            TokKind::Word(w)
+                if w.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == ':'
+                }) =>
+            {
+                // Words arrive whole from the lexer; a bad word ends
+                // the run (never partially appends), like the grammar.
+                target.push_str(w);
+                p += 1;
             }
-            if self.exports.contains(&name) {
-                return Err(ParseError::validation(
-                    KEYWORD_EXPORT,
-                    format!("duplicate EXPORT `{name}`"),
-                    ctx,
-                ));
+            TokKind::Punct(c)
+                if matches!(c, '_' | '-' | '.' | ':') && (target.is_empty() || t.joint) =>
+            {
+                target.push(*c);
+                p += 1;
             }
-            self.exports.push(name);
+            _ => break,
         }
-        Ok(())
     }
-
-    fn handle_guard_token(&mut self, line_end: usize, expr: GuardExpr) -> ParseResult<()> {
-        if let Some(RawToken::Command { line_no, .. }) = self.tokens.front()
-            && *line_no == line_end
-        {
-            self.pending_inline_guards = Some(expr);
-            self.pending_can_open_block = false;
-            return Ok(());
-        }
-        self.stash_pending_guard(expr);
-        self.pending_can_open_block = true;
-        Ok(())
+    if target.is_empty() {
+        return Ok(None);
     }
-
-    fn handle_command_token(
-        &mut self,
-        ctx: &SpanContext<'a>,
-        line_no: usize,
-        kind: StepKind,
-    ) -> ParseResult<()> {
-        let inline = self.pending_inline_guards.take();
-        self.handle_command(ctx, line_no, kind, inline)
+    if !crate::commands::is_valid_remote_target(&target) {
+        return Err(fail(format!(
+            "invalid REMOTE target `{target}`: start alphanumeric, then alphanumeric, `_`, or `-`, max 64 chars, never SNAPSHOT, LOCAL, CACHE, SYSTEM, or REMOTE"
+        )));
     }
-
-    fn stash_pending_guard(&mut self, guard: GuardExpr) {
-        self.pending_guards = Some(if let Some(existing) = self.pending_guards.take() {
-            GuardExpr::all(vec![existing, guard])
-        } else {
-            guard
-        });
-    }
-
-    fn start_guard_block_from_pending(
-        &mut self,
-        ctx: &SpanContext,
-        line_no: usize,
-    ) -> ParseResult<()> {
-        let guards = self.pending_guards.take().ok_or_else(|| {
-            ParseError::structural(
-                "guard",
-                format!("line {}: '{{' without a pending guard", line_no),
-                ctx,
-            )
-        })?;
-        if !self.pending_can_open_block {
-            return Err(ParseError::structural(
-                "guard",
-                format!("line {}: '{{' must directly follow a guard", line_no),
-                ctx,
-            ));
-        }
-        self.pending_can_open_block = false;
-        self.enter_guard_block(guards, line_no)
-    }
-
-    fn enter_guard_block(&mut self, guard: GuardExpr, line_no: usize) -> ParseResult<()> {
-        let composed = if let Some(pending) = self.pending_guards.take() {
-            GuardExpr::all(vec![pending, guard])
-        } else {
-            guard
+    // Optional bindings `[$var, env:KEY]` at any gap (even joint,
+    // probed); malformed bindings miss the whole shape to generic.
+    let mut vars = Vec::new();
+    let mut env = Vec::new();
+    if let Some(bracket) = toks.get(p)
+        && matches!(
+            &bracket.kind,
+            TokKind::Group {
+                delim: GroupDelim::Bracket,
+                ..
+            }
+        )
+    {
+        let inner = match &bracket.kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
         };
-        let parent = self.guard_stack.last().cloned().unwrap_or(None);
-        let next = and_guard_exprs(parent, Some(composed));
-        self.guard_stack.push(next);
-        self.scope_stack.push(ScopeFrame {
-            line_no,
-            had_command: false,
-        });
-        self.pending_scope_enters += 1;
-        Ok(())
-    }
-
-    fn begin_io_block(
-        &mut self,
-        ctx: &SpanContext<'a>,
-        line_no: usize,
-        bindings: Vec<IoBinding>,
-        guards: Option<GuardExpr>,
-    ) -> ParseResult<()> {
-        if self.pending_io_block.is_some() {
-            return Err(ParseError::structural(
-                "with_io",
-                format!(
-                    "line {}: previous WITH_IO block is still waiting for '{{'",
-                    line_no
-                ),
-                ctx,
-            ));
+        match parse_remote_bindings(&inner, stmt)? {
+            Some((v, e)) => {
+                vars = v;
+                env = e;
+            }
+            None => return Ok(None),
         }
-        self.pending_io_block = Some(PendingIoBlock {
-            line_no,
-            span: ctx.clone(),
-            bindings,
-            guards,
-        });
-        Ok(())
+        p += 1;
     }
+    // Block required (any gap, never a template); missing blocks
+    // miss to generic.
+    let block_ok = matches!(
+        toks.get(p).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        })
+    ) && toks.get(p).is_some_and(|t| !is_template_brace(t));
+    if !block_ok {
+        return Ok(None);
+    }
+    let inner = match &toks[p].kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    let body = parse_body_steps(&inner, stmt, ctx, false)?;
+    p += 1;
+    if body.is_empty() {
+        return Err(fail("REMOTE requires a non-empty braced block".to_string()));
+    }
+    if crate::commands::contains_remote_block(&body) {
+        return Err(fail(format!(
+            "REMOTE blocks cannot nest (target `{target}` contains another REMOTE block)"
+        )));
+    }
+    if body
+        .iter()
+        .any(|s| crate::commands::contains_inherit_env(&s.kind))
+    {
+        return Err(fail(
+            "INHERIT_ENV cannot appear inside a REMOTE block: the guest inherits its own process environment".to_string(),
+        ));
+    }
+    // Outer-function containment (same rule as the shared remote
+    // validators): body calls resolving to visible
+    // outer `SCRIPT` defs (without same-body definitions) fail.
+    {
+        let mut inner_defs = HashSet::new();
+        let mut calls = Vec::new();
+        crate::commands::collect_remote_body_symbols(&body, &mut inner_defs, &mut calls);
+        let outer_defs: HashSet<String> = ctx.funcs.borrow().iter().flatten().cloned().collect();
+        for call in &calls {
+            let bare = crate::constants::base_name(call);
+            let is_script_call = match crate::constants::split_qualified(call) {
+                Some((module, _)) => module == crate::constants::SCRIPT_MODULE_NAME,
+                None => true,
+            };
+            if is_script_call && outer_defs.contains(bare) && !inner_defs.contains(bare) {
+                return Err(fail(format!(
+                    "REMOTE '{target}' calls outer function '{bare}' (functions must be defined inside the block)"
+                )));
+            }
+        }
+    }
+    Ok(Some((
+        StepKind::RemoteBlock {
+            target,
+            vars,
+            env,
+            body,
+        },
+        p - pos,
+    )))
+}
+// ---- LET/SET/RETURN + expressions ----
+// Expression tiers over [`Tok`] implement the precedence chain
+// (or > and > comparison > ordering > add > mul > unary > atom);
+// arithmetic/comparison lowering runs through the shared constructors
+// (`make_arith`, `make_compare`, `apply_unary_neg`), so folding, RPN
+// compilation, and overflow behavior are identical by construction,
+// never re-derived.
 
-    fn start_block(&mut self, ctx: &SpanContext, line_no: usize) -> ParseResult<()> {
-        if let Some(pending) = self.pending_io_block.take() {
-            self.block_stack.push(BlockKind::Io);
-            self.io_scope_stack.push(IoScopeFrame {
-                line_no: pending.line_no,
-                had_command: false,
-                bindings: pending.bindings,
-                guards: pending.guards,
-                first_step: self.steps.len(),
-            });
-            Ok(())
+/// Eat a one- or two-char operator: single puncts match directly;
+/// pairs (`==`, `!=`, `<=`, `>=`, `&&`, `||`, `::`) require a joint
+/// second punct. Newlines never skip here (expression mode).
+fn eat_op(cur: &mut Cursor, first: char, second: Option<char>) -> bool {
+    // Gaps (comments included) are skipped before every operator.
+    cur.skip_gap();
+    let (a, b) = match (cur.toks.get(cur.pos), cur.toks.get(cur.pos + 1)) {
+        (Some(a), b) => (a, b),
+        _ => return false,
+    };
+    if !matches!(&a.kind, TokKind::Punct(c) if *c == first) {
+        return false;
+    }
+    match second {
+        None => {
+            cur.pos += 1;
+            true
+        }
+        Some(c2) => match b {
+            Some(t) if t.joint && matches!(&t.kind, TokKind::Punct(c) if *c == c2) => {
+                cur.pos += 2;
+                true
+            }
+            _ => false,
+        },
+    }
+}
+
+/// Dummy span for the shared lowering constructors: v2 owns no source
+/// positions yet, so only success values (span-free) participate in
+/// parity; failures surface through [`TokenError`] text.
+fn lowering_ctx(stmt: usize) -> SpanContext<'static> {
+    let _ = stmt;
+    SpanContext::line_only(0)
+}
+
+fn parse_expr_or(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let mut left = parse_expr_and(cur, ctx)?;
+    while eat_op(cur, '|', Some('|')) {
+        cur.skip_gap();
+        let right = parse_expr_and(cur, ctx)?;
+        // No folding, no boundary checks: unfused literal runs stay
+        // literal here.
+        left = Expr::Logical {
+            op: LogicalOp::Or,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+    }
+    Ok(left)
+}
+
+fn parse_expr_and(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let mut left = parse_expr_cmp(cur, ctx)?;
+    while eat_op(cur, '&', Some('&')) {
+        cur.skip_gap();
+        let right = parse_expr_cmp(cur, ctx)?;
+        reject_boundary(&lowering_ctx(cur.stmt), &left).map_err(|e| cur.err(e.to_string()))?;
+        reject_boundary(&lowering_ctx(cur.stmt), &right).map_err(|e| cur.err(e.to_string()))?;
+        left = Expr::Logical {
+            op: LogicalOp::And,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+    }
+    Ok(left)
+}
+
+fn parse_expr_cmp(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let left = parse_expr_ord(cur, ctx)?;
+    let op = if eat_op(cur, '=', Some('=')) {
+        CompareOp::Eq
+    } else if eat_op(cur, '!', Some('=')) {
+        CompareOp::Ne
+    } else {
+        return Ok(left);
+    };
+    cur.skip_gap();
+    let right = parse_expr_ord(cur, ctx)?;
+    let expr = make_compare(&lowering_ctx(cur.stmt), op, left, right)
+        .map_err(|e| cur.err(e.to_string()))?;
+    reject_chained_compare(cur, false)?;
+    Ok(expr)
+}
+
+/// Reject a comparison operator trailing a complete comparison:
+/// no grammar position continues with one, so the shape always fails —
+/// loudly here instead of stranding text for a confusing downstream
+/// error. The equality tier rejects all six (`$a == $b == $c`,
+/// `$a == $b < $c < $d`); the ordering tier rejects ordering only
+/// (`$a < $b < $c`), since `$a < $b == $c` is a legitimate equality
+/// over an ordering result. Probes without consuming.
+fn reject_chained_compare(cur: &mut Cursor, ordering_only: bool) -> Result<(), TokenError> {
+    let mut probe = Cursor::expr(cur.toks, cur.stmt);
+    probe.pos = cur.pos;
+    probe.skip_gap();
+    let chained = match probe.toks.get(probe.pos).map(|t| &t.kind) {
+        Some(TokKind::Punct('<' | '>')) => true,
+        Some(TokKind::Punct('=' | '!')) => !ordering_only,
+        _ => false,
+    };
+    if chained {
+        return Err(cur
+            .err("chained comparison operators need explicit parentheses, e.g. `($a < $b) < $c`"));
+    }
+    Ok(())
+}
+
+fn parse_expr_ord(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let left = parse_expr_add(cur, ctx)?;
+    let op = if eat_op(cur, '<', Some('=')) {
+        CompareOp::Le
+    } else if eat_op(cur, '>', Some('=')) {
+        CompareOp::Ge
+    } else if eat_op(cur, '<', None) {
+        CompareOp::Lt
+    } else if eat_op(cur, '>', None) {
+        CompareOp::Gt
+    } else {
+        return Ok(left);
+    };
+    cur.skip_gap();
+    let right = parse_expr_add(cur, ctx)?;
+    let expr = make_compare(&lowering_ctx(cur.stmt), op, left, right)
+        .map_err(|e| cur.err(e.to_string()))?;
+    reject_chained_compare(cur, true)?;
+    Ok(expr)
+}
+
+fn parse_expr_add(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let mut left = parse_expr_mul(cur, ctx)?;
+    loop {
+        let op = if eat_op(cur, '+', None) {
+            ArithOp::Add
+        } else if eat_op(cur, '-', None) {
+            ArithOp::Sub
         } else {
-            self.start_guard_block_from_pending(ctx, line_no)?;
-            self.block_stack.push(BlockKind::Guard);
-            Ok(())
+            break;
+        };
+        cur.skip_gap();
+        let right = parse_expr_mul(cur, ctx)?;
+        left = make_arith(&lowering_ctx(cur.stmt), op, left, right)
+            .map_err(|e| cur.err(e.to_string()))?;
+    }
+    Ok(left)
+}
+
+fn parse_expr_mul(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let mut left = parse_expr_unary(cur, ctx)?;
+    loop {
+        let op = if eat_op(cur, '*', None) {
+            ArithOp::Mul
+        } else if eat_op(cur, '/', None) {
+            ArithOp::Div
+        } else {
+            break;
+        };
+        cur.skip_gap();
+        let right = parse_expr_unary(cur, ctx)?;
+        left = make_arith(&lowering_ctx(cur.stmt), op, left, right)
+            .map_err(|e| cur.err(e.to_string()))?;
+    }
+    Ok(left)
+}
+
+/// A `-` opens a bare word (never negation) when gaplessly followed by
+/// a letter, `_`, or `/` — the `neg_op` lookahead, read off `joint`.
+fn dash_is_bare(cur: &Cursor) -> bool {
+    let next = cur.toks.get(cur.pos + 1);
+    match next {
+        Some(t) if t.joint => match &t.kind {
+            TokKind::Word(w) => w
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_'),
+            TokKind::Punct('/') => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn parse_expr_unary(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let mut prefixes = Vec::new();
+    loop {
+        match cur.toks.get(cur.pos).map(|t| &t.kind) {
+            Some(TokKind::Punct('!')) => {
+                cur.pos += 1;
+                // Each prefix is gap-separated.
+                cur.skip_gap();
+                prefixes.push(false);
+            }
+            Some(TokKind::Punct('-')) if !dash_is_bare(cur) => {
+                cur.pos += 1;
+                cur.skip_gap();
+                prefixes.push(true);
+            }
+            _ => break,
         }
     }
-
-    fn end_block(&mut self, ctx: &SpanContext, line_no: usize) -> ParseResult<()> {
-        let kind = self.block_stack.pop().ok_or_else(|| {
-            ParseError::structural("block", format!("line {}: unexpected '}}'", line_no), ctx)
-        })?;
-        match kind {
-            BlockKind::Guard => self.end_guard_block(ctx, line_no),
-            BlockKind::Io => self.end_io_block(ctx, line_no),
+    let mut expr = parse_expr_atom(cur, ctx)?;
+    // Innermost prefix is closest to the atom: apply in reverse order.
+    for is_neg in prefixes.into_iter().rev() {
+        if is_neg {
+            expr = apply_unary_neg(&lowering_ctx(cur.stmt), expr)
+                .map_err(|e| cur.err(e.to_string()))?;
+        } else {
+            reject_boundary(&lowering_ctx(cur.stmt), &expr).map_err(|e| cur.err(e.to_string()))?;
+            expr = Expr::Not(Box::new(expr));
         }
     }
+    Ok(expr)
+}
 
-    fn end_guard_block(&mut self, ctx: &SpanContext, line_no: usize) -> ParseResult<()> {
-        if self.guard_stack.len() == 1 {
-            return Err(ParseError::structural(
-                "guard",
-                format!("line {}: unexpected '}}'", line_no),
-                ctx,
-            ));
+/// Identifier charset for `$var` and `.segment` parts. Segments admit
+/// digits-only too (`$a.0`); anything else ends the key path and errors
+/// downstream, like the grammar's backtrack to `variable`.
+fn is_ident_word(w: &str) -> bool {
+    !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_key_segment(w: &str) -> bool {
+    !w.is_empty()
+        && (w.chars().all(|c| c.is_ascii_digit())
+            || (w
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')))
+}
+
+fn is_env_key(w: &str) -> bool {
+    !w.is_empty()
+        && w.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && w.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Maximal joint run of words and `-/.'/'` puncts: the bare-word
+/// shape (which admits `/` anywhere, so `//c`, `/a`, `a/b`, and the
+/// `/`-`c`-`/` operands of `/*c*/` math all read literally here).
+/// Callers classify (`true`/`false`/string); the numeric path
+/// runs first and falls back here on shape/follower mismatch.
+/// Backslash escapes are arg-position syntax: the bare-word shape admits
+/// no `\`, so expression runs containing one fail here (never drift
+/// into a string the grammar rejects).
+fn expr_bare_run(cur: &mut Cursor, leading_dash: bool) -> Result<String, TokenError> {
+    let mut out = String::new();
+    if leading_dash {
+        match cur.next() {
+            Some(t) if matches!(&t.kind, TokKind::Punct('-')) => out.push('-'),
+            _ => return Err(cur.err("missing expression operand")),
         }
-        if self.pending_guards.is_some() {
-            return Err(ParseError::structural(
-                "guard",
-                format!(
-                    "line {}: guard declared immediately before '}}' without a command",
-                    line_no
-                ),
-                ctx,
-            ));
+    }
+    match cur.next() {
+        Some(t) => match &t.kind {
+            TokKind::Word(w) => out.push_str(w),
+            // Leading `/` (operand position only; operators are
+            // consumed by the tiers before operands parse).
+            TokKind::Punct('/') => out.push('/'),
+            _ => return Err(cur.err("missing expression operand")),
+        },
+        None => return Err(cur.err("missing expression operand")),
+    }
+    loop {
+        let next = match cur.toks.get(cur.pos) {
+            Some(t) if t.joint => t,
+            _ => break,
+        };
+        match &next.kind {
+            TokKind::Word(w) => {
+                // Abutting words only continue through an operator gap
+                // the tiers own (`a -b` never fuses); without a joint
+                // punct between, stop. Since this token IS joint, the
+                // previous token must have been a bare punct.
+                out.push_str(w);
+                cur.pos += 1;
+            }
+            TokKind::Punct(c) if matches!(c, '-' | '.' | '/') => {
+                out.push(*c);
+                cur.pos += 1;
+            }
+            _ => break,
         }
-        let frame = self.scope_stack.last().cloned().ok_or_else(|| {
-            ParseError::structural(
-                "guard",
-                format!("line {}: scope stack underflow", line_no),
-                ctx,
+    }
+    if out.contains('\\') {
+        return Err(cur.err("unexpected escape in expression"));
+    }
+    Ok(out)
+}
+
+/// Numeric literal head: digit-led word plus joint `.digits` tails.
+/// Callers apply the separator-shape gate and the follower rule, then
+/// the shared classifier.
+fn number_head(cur: &mut Cursor) -> Option<String> {
+    let first = match cur.toks.get(cur.pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) if w.chars().next().is_some_and(|c| c.is_ascii_digit()) => w.clone(),
+        _ => return None,
+    };
+    let mut text = first;
+    let mut pos = cur.pos + 1;
+    loop {
+        let dot = matches!(
+            cur.toks.get(pos).map(|t| &t.kind),
+            Some(TokKind::Punct('.'))
+        ) && cur.toks.get(pos).is_some_and(|t| t.joint);
+        let digits = cur.toks.get(pos + 1);
+        let digits_ok = dot
+            && matches!(digits.map(|t| &t.kind), Some(TokKind::Word(w)) if w.chars().all(|c| c.is_ascii_digit() || c == '_'))
+            && digits.is_some_and(|t| t.joint);
+        if !digits_ok {
+            break;
+        }
+        text.push('.');
+        if let Some(TokKind::Word(w)) = digits.map(|t| &t.kind) {
+            text.push_str(w);
+        }
+        pos += 2;
+    }
+    Some(text)
+}
+
+/// `_`-separator shape gate mirroring the `numeric_literal` rule:
+/// digits with single-underscore separators, at most one fraction.
+fn numeric_shape_ok(text: &str) -> bool {
+    let mut parts = text.split('.');
+    let int_part = parts.next().unwrap_or("");
+    let frac_part = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    fn run_ok(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_digit() || c == '_')
+            && !s.starts_with('_')
+            && !s.ends_with('_')
+            && !s.contains("__")
+    }
+    run_ok(int_part) && frac_part.is_none_or(run_ok)
+}
+
+/// Follower rule mirroring the `numeric_literal` trailing guard
+/// (`!(ALNUM | "_" | "." | "/")`): a joint word, `.`, or `/` continues
+/// into a bare word (`30s`, `1.`, `4/2`); `-`/`+`/operators let the
+/// number stand for the tiers (`1-2` is `Sub`, like the grammar).
+fn number_falls_to_bare(cur: &Cursor, consumed: usize) -> bool {
+    match cur.toks.get(cur.pos + consumed) {
+        Some(t) if t.joint => matches!(
+            &t.kind,
+            TokKind::Word(_) | TokKind::Punct('.') | TokKind::Punct('/')
+        ),
+        _ => false,
+    }
+}
+
+fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    match cur.toks.get(cur.pos).map(|t| &t.kind) {
+        Some(TokKind::Group {
+            delim: GroupDelim::Paren,
+            inner,
+            ..
+        }) => {
+            let inner = inner.clone();
+            cur.pos += 1;
+            let mut sub = Cursor::expr(&inner, cur.stmt);
+            sub.skip_gap_nl();
+            let expr = parse_expr_or(&mut sub, ctx)?;
+            sub.skip_gap_nl();
+            if !sub.done() {
+                return Err(sub.err("unexpected text in parentheses"));
+            }
+            Ok(expr)
+        }
+        Some(TokKind::Word(_)) if call_shape_at(cur.toks, cur.pos, false).is_some() => {
+            let (name, paren) =
+                call_shape_at(cur.toks, cur.pos, false).ok_or_else(|| cur.err("unreachable"))?;
+            let inner = match &cur.toks[paren].kind {
+                TokKind::Group { inner, .. } => inner.clone(),
+                _ => unreachable!(),
+            };
+            cur.pos = paren + 1;
+            parse_expr_call(name, &inner, cur.stmt, ctx)
+        }
+        Some(TokKind::Punct('$')) => {
+            cur.pos += 1;
+            // Atomic `variable`: `$` and the name ride gapless (the
+            // enclosing rules are compound-atomic).
+            let base = match cur.next() {
+                Some(t) if t.joint && matches!(&t.kind, TokKind::Word(w) if is_ident_word(w)) => {
+                    match &t.kind {
+                        TokKind::Word(w) => w.clone(),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => return Err(cur.err("`$` requires a variable name")),
+            };
+            let mut keys = Vec::new();
+            loop {
+                // Key-path dots are gapless too (`~` without `gap`).
+                let dot = matches!(
+                    cur.toks.get(cur.pos).map(|t| &t.kind),
+                    Some(TokKind::Punct('.'))
+                ) && cur.toks.get(cur.pos).is_some_and(|t| t.joint);
+                let seg = cur.toks.get(cur.pos + 1);
+                let seg_ok = dot
+                    && matches!(seg.map(|t| &t.kind), Some(TokKind::Word(w)) if is_key_segment(w))
+                    && seg.is_some_and(|t| t.joint);
+                if !seg_ok {
+                    break;
+                }
+                if let Some(TokKind::Word(w)) = seg.map(|t| &t.kind) {
+                    keys.push(w.clone());
+                }
+                cur.pos += 2;
+            }
+            if keys.is_empty() {
+                Ok(Expr::Var(base))
+            } else {
+                Ok(Expr::KeyPath { base, keys })
+            }
+        }
+        Some(TokKind::Word(w)) if w == "env" => {
+            // `env:KEY` read when the full shape matches gaplessly
+            // (atomic `env_read`); otherwise a bare word (`env` alone,
+            // `env:k` lowercase) for the error path, exactly like the
+            // grammar's mismatch.
+            let key_ok = matches!(
+                cur.toks.get(cur.pos + 1).map(|t| &t.kind),
+                Some(TokKind::Punct(':'))
+            ) && cur.toks.get(cur.pos + 1).is_some_and(|t| t.joint)
+                && matches!(
+                    cur.toks.get(cur.pos + 2).map(|t| &t.kind),
+                    Some(TokKind::Word(k)) if is_env_key(k)
+                )
+                && cur.toks.get(cur.pos + 2).is_some_and(|t| t.joint);
+            if !key_ok {
+                return parse_bare_atom(cur, ctx, false);
+            }
+            cur.pos += 1;
+            cur.pos += 1;
+            match cur.next() {
+                Some(t) => match &t.kind {
+                    TokKind::Word(k) => Ok(Expr::Env(k.clone())),
+                    _ => Err(cur.err("unreachable")),
+                },
+                None => Err(cur.err("unreachable")),
+            }
+        }
+        Some(TokKind::Group {
+            delim: GroupDelim::Bracket,
+            inner,
+            ..
+        }) => {
+            let inner = inner.clone();
+            cur.pos += 1;
+            parse_list_literal(&inner, cur.stmt, ctx)
+        }
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            inner,
+            ..
+        }) => {
+            let inner = inner.clone();
+            cur.pos += 1;
+            parse_map_or_block(&inner, cur.stmt, ctx)
+        }
+        Some(TokKind::Str { text, .. }) => {
+            let text = text.clone();
+            cur.pos += 1;
+            Ok(Expr::Literal(Value::string(text)))
+        }
+        Some(TokKind::BlockStr(full)) => {
+            let full = full.clone();
+            cur.pos += 1;
+            Ok(Expr::Literal(Value::string(
+                crate::command::lower_block_string(&full),
+            )))
+        }
+        Some(TokKind::Word(w)) if w.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
+            parse_numeric_atom(cur, ctx)
+        }
+        Some(TokKind::Word(_)) => parse_bare_atom(cur, ctx, false),
+        Some(TokKind::Punct('-')) => parse_bare_atom(cur, ctx, true),
+        Some(TokKind::Punct('/')) => parse_bare_atom(cur, ctx, false),
+        _ => Err(cur.err("missing expression operand")),
+    }
+}
+
+/// Bare-word atom with a `-` lead (the caller proved it is not
+/// negation): consumes the joint `-/.'/'` run for the bare-word
+/// shape.
+fn parse_bare_atom(
+    cur: &mut Cursor,
+    _ctx: &ParseCtx,
+    leading_dash: bool,
+) -> Result<Expr, TokenError> {
+    let text = expr_bare_run(cur, leading_dash)?;
+    match text.as_str() {
+        "true" => Ok(Expr::Literal(Value::bool(true))),
+        "false" => Ok(Expr::Literal(Value::bool(false))),
+        _ => Ok(Expr::Literal(Value::string(text))),
+    }
+}
+
+/// Numeric atom: rejoin dotted tails, apply the shape gate and the
+/// follower rule, then the shared classifier. Anything failing the
+/// gate or follower reparses as a bare word (durations, versions,
+/// paths), exactly like the grammar's numeric-literal-or-bare-word
+/// order.
+fn parse_numeric_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let start = cur.pos;
+    let text = number_head(cur).ok_or_else(|| cur.err("missing expression operand"))?;
+    let consumed = {
+        let mut n = 1;
+        let mut p = start + 1;
+        while matches!(cur.toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('.')))
+            && cur.toks.get(p).is_some_and(|t| t.joint)
+            && matches!(
+                cur.toks.get(p + 1).map(|t| &t.kind),
+                Some(TokKind::Word(w)) if w.chars().all(|c| c.is_ascii_digit() || c == '_')
             )
-        })?;
-        if !frame.had_command {
-            return Err(ParseError::structural(
-                "guard",
-                format!(
-                    "line {}: guard block starting on line {} must contain at least one command",
-                    line_no, frame.line_no
-                ),
-                ctx,
-            ));
+            && cur.toks.get(p + 1).is_some_and(|t| t.joint)
+        {
+            n += 2;
+            p += 2;
         }
-        let step = self.steps.last_mut().ok_or_else(|| {
-            ParseError::structural(
-                "guard",
-                format!("line {}: guard block closed without any commands", line_no),
-                ctx,
-            )
-        })?;
-        step.scope_exit += 1;
-        self.scope_stack.pop();
-        self.guard_stack.pop();
-        Ok(())
+        n
+    };
+    if !numeric_shape_ok(&text) || number_falls_to_bare(cur, consumed) {
+        return parse_bare_atom(cur, ctx, false);
     }
+    cur.pos += consumed;
+    classify_numeric_text(&text).map_err(|msg| cur.err(msg))
+}
 
-    fn end_io_block(&mut self, ctx: &SpanContext, line_no: usize) -> ParseResult<()> {
-        let frame = self.io_scope_stack.pop().ok_or_else(|| {
-            ParseError::structural("with_io", format!("line {}: unexpected '}}'", line_no), ctx)
+/// Full expression with the top-level boundary rejection (mirrors
+/// `parse_expr`): a stray `UnsignedIntBoundary` that no unary `-`
+/// consumed is an overflow error.
+fn parse_expr_checked(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let expr = parse_expr_or(cur, ctx)?;
+    if matches!(expr, Expr::UnsignedIntBoundary(_)) {
+        return Err(cur.err("integer overflow: 9223372036854775808 exceeds i64::MAX"));
+    }
+    Ok(expr)
+}
+
+/// List literal over a bracket group's contents: `gap_nl` newlines
+/// skip at the edges and after commas only, mirroring the grammar.
+fn parse_list_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let mut cur = Cursor::expr(inner, stmt);
+    cur.skip_gap_nl();
+    if cur.done() {
+        return Ok(Expr::List(vec![]));
+    }
+    let mut items = Vec::new();
+    loop {
+        let item = parse_expr_checked(&mut cur, ctx)?;
+        reject_boundary(&lowering_ctx(stmt), &item).map_err(|e| cur.err(e.to_string()))?;
+        items.push(item);
+        cur.skip_gap_nl();
+        if cur.eat_punct(',') {
+            cur.skip_gap_nl();
+            continue;
+        }
+        break;
+    }
+    if !cur.done() {
+        return Err(cur.err("unexpected text in list"));
+    }
+    Ok(Expr::List(items))
+}
+
+/// Map literal attempt over a brace group's contents: comma-separated
+/// `key: value` entries with `gap` (never newline) around the colon.
+/// Any entry failing the shape is not a map: the caller reports the
+/// deferred block slice (the grammar tries `block` next, which fails
+/// the same inputs at this stage).
+fn parse_map_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    let mut entries = Vec::new();
+    // Empty (or blank/comment-only) braces are an empty map.
+    if inner
+        .iter()
+        .all(|t| matches!(&t.kind, TokKind::Newline | TokKind::Comment(_)))
+    {
+        return Ok(Expr::Map(vec![]));
+    }
+    for part in split_top_commas(inner) {
+        let mut sub = Cursor::expr(part, stmt);
+        sub.skip_gap_nl();
+        let key = match sub.toks.get(sub.pos).map(|t| &t.kind) {
+            Some(TokKind::Str { text, .. }) => {
+                let key = text.clone();
+                sub.pos += 1;
+                key
+            }
+            Some(TokKind::BlockStr(full)) => {
+                let key = crate::command::lower_block_string(full);
+                sub.pos += 1;
+                key
+            }
+            Some(TokKind::Word(_)) | Some(TokKind::Punct('-')) | Some(TokKind::Punct('/')) => {
+                map_bare_key(&mut sub)?
+            }
+            _ => return Err(sub.err("not a map literal")),
+        };
+        sub.skip_gap();
+        if !sub.eat_punct(':') {
+            return Err(sub.err("not a map literal"));
+        }
+        let val = parse_expr_checked(&mut sub, ctx)?;
+        reject_boundary(&lowering_ctx(stmt), &val).map_err(|e| sub.err(e.to_string()))?;
+        sub.skip_gap_nl();
+        if !sub.done() {
+            return Err(sub.err("not a map literal"));
+        }
+        entries.push((key, val));
+    }
+    Ok(Expr::Map(entries))
+}
+
+/// Bare map key: joint `-/.'/'`-run, mirroring the bare-word charset
+/// (no bool/numeric classification: keys are always strings).
+fn map_bare_key(sub: &mut Cursor) -> Result<String, TokenError> {
+    let mut out = String::new();
+    if matches!(
+        sub.toks.get(sub.pos).map(|t| &t.kind),
+        Some(TokKind::Punct('-'))
+    ) {
+        out.push('-');
+        sub.pos += 1;
+    }
+    // Leading `/` reads literally too (the bare-word shape admits `/`
+    // anywhere: `{/a: 1}`, `{//c: 1}`); the joint loop below
+    // continues the run.
+    if matches!(
+        sub.toks.get(sub.pos).map(|t| &t.kind),
+        Some(TokKind::Punct('/'))
+    ) {
+        out.push('/');
+        sub.pos += 1;
+    }
+    match sub.toks.get(sub.pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) => {
+            out.push_str(w);
+            sub.pos += 1;
+        }
+        // A leading `/` above already started the run; anything
+        // else still needs a word head.
+        _ if !out.is_empty() => {}
+        _ => return Err(sub.err("not a map literal")),
+    }
+    while let Some(t) = sub.toks.get(sub.pos) {
+        if !t.joint {
+            break;
+        }
+        match &t.kind {
+            TokKind::Word(w) => {
+                out.push_str(w);
+                sub.pos += 1;
+            }
+            TokKind::Punct(c) if matches!(c, '-' | '.' | '/') => {
+                out.push(*c);
+                sub.pos += 1;
+            }
+            _ => break,
+        }
+    }
+    if out.contains('\\') {
+        return Err(sub.err("unexpected escape in map key"));
+    }
+    Ok(out)
+}
+
+/// Map-or-block over a brace group's contents: maps parse literally;
+/// anything else is an inline block (`Expr::Block` over the body
+/// steps, scopes unmarked like every braced body).
+fn parse_map_or_block(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
+    match parse_map_literal(inner, stmt, ctx) {
+        Ok(map) => Ok(map),
+        Err(_) => Ok(Expr::Block(parse_body_steps(inner, stmt, ctx, false)?)),
+    }
+}
+
+/// Parse one standalone expression from lexed tokens (the
+/// `parse_expression_str` entry point): a full tier parse with
+/// top-level boundary rejection and full consumption.
+pub(crate) fn parse_single_expr(
+    toks: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Expr, TokenError> {
+    let mut cur = Cursor::expr(toks, stmt);
+    let expr = parse_expr_checked(&mut cur, ctx)?;
+    if !cur.done() {
+        return Err(cur.err("unexpected text in expression"));
+    }
+    Ok(expr)
+}
+
+/// Assignment `=`: the first `=` neither glued to a following `=`
+/// (`==`) nor glued after `!`/`<`/`>`/`=` (`!=`, `<=`, `>=`, second of
+/// `==`). Glued-ness reads off the `=`'s own `joint` (gap before it)
+/// and the follower's (gap after it). Anything else leaves the
+/// statement bare (`LET $p: PIPE`), exactly where the grammar's `"="`
+/// match fails.
+fn find_assign_eq(body: &[Tok]) -> Option<usize> {
+    for (i, tok) in body.iter().enumerate() {
+        if !matches!(&tok.kind, TokKind::Punct('=')) {
+            continue;
+        }
+        let next_eq = body
+            .get(i + 1)
+            .is_some_and(|t| t.joint && matches!(&t.kind, TokKind::Punct('=')));
+        let prev_op = tok.joint
+            && i > 0
+            && matches!(&body[i - 1].kind, TokKind::Punct('!' | '<' | '>' | '='));
+        if !next_eq && !prev_op {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Render a type region joint-aware (`LIST< MAP >` keeps its gaps for
+/// the shared canonicalizer, exactly like `type_tag.as_str()`).
+fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
+    let mut out = String::new();
+    for tok in toks {
+        if !tok.joint && !out.is_empty() {
+            out.push(' ');
+        }
+        match &tok.kind {
+            TokKind::Word(w) => out.push_str(w),
+            TokKind::Punct(c) => out.push(*c),
+            _ => {
+                return Err(TokenError {
+                    stmt,
+                    msg: "malformed type in LET".to_string(),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                });
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err(TokenError {
+            stmt,
+            msg: "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    Ok(crate::canonicalize_spelling(&out))
+}
+
+fn expect_dollar_var(cur: &mut Cursor, msg: &str) -> Result<String, TokenError> {
+    // Atomic `dollar_ident`: no gap between `$` and the name (the
+    // enclosing statements are compound-atomic, so implicit spacing is
+    // off and only explicit `gap`s admit whitespace).
+    match cur.next() {
+        Some(t) if matches!(&t.kind, TokKind::Punct('$')) => {}
+        _ => return Err(cur.err(msg)),
+    }
+    match cur.next() {
+        Some(t) if t.joint && matches!(&t.kind, TokKind::Word(w) if is_ident_word(w)) => {
+            match &t.kind {
+                TokKind::Word(w) => Ok(w.clone()),
+                _ => unreachable!(),
+            }
+        }
+        _ => Err(cur.err(msg)),
+    }
+}
+
+/// `LET` body: `LET` is already matched. Returns `None` (miss to
+/// generic, which fails in lowering like the grammar's committed
+/// `instruction`) when the shape cannot match any `LET` form: no
+/// gapless `$var`, or no `:` after it
+/// (every form needs `: TYPE`). Past that the shape is committed and
+/// malformed tails fail loudly.
+fn parse_let_body(
+    body: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let mut cur = Cursor::expr(body, stmt);
+    match cur.next() {
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == "LET") => {}
+        _ => return Err(cur.err("unreachable")),
+    }
+    // No `$var`: no `LET` form can match (miss, never a hard fail).
+    let var = match expect_dollar_var(&mut cur, "LET requires a variable") {
+        Ok(var) => var,
+        Err(_) => return Ok(None),
+    };
+    // The header allows gaps (comments, never newlines).
+    cur.skip_gap();
+    // No `:`: no `LET` form can match (miss, like `LET $x = 1`).
+    if !cur.eat_punct(':') {
+        return Ok(None);
+    }
+    // Type region runs to the assignment `=`; it cannot contain one.
+    let type_start = cur.pos;
+    let assign = find_assign_eq(&body[type_start..]).map(|i| i + type_start);
+    let Some(eq) = assign else {
+        // Bare `LET $p: PIPE` mints a fresh pipe and ends with the
+        // type word (trailing elements loop on, probed); every other
+        // bare type is a validation error, mirroring the grammar.
+        if matches!(
+            body.get(type_start).map(|t| &t.kind),
+            Some(TokKind::Word(w)) if w == "PIPE"
+        ) {
+            return Ok(Some((
+                StepKind::Assign {
+                    var,
+                    decl_type: "PIPE".to_string(),
+                    expr: Expr::FreshPipe,
+                },
+                type_start + 1,
+            )));
+        }
+        return Err(cur.err(
+            "LET requires an expression: LET $var: TYPE = <expr> (only LET $p: PIPE omits the initializer)",
+        ));
+    };
+    let decl_type = render_type_region(&body[type_start..eq], stmt)?;
+    let (kind, rhs_used) = parse_let_rhs(&body[eq + 1..], var, decl_type, stmt, ctx)?;
+    Ok(Some((kind, eq + 1 + rhs_used)))
+}
+
+/// LET right-hand side dispatch, mirroring the grammar order
+/// (`let_async`, then `let_capture`, then `let_statement`):
+/// `WITH_IO`-led lines branch async/sync like
+/// `parse_let_async_statement_from_pair`, `ASYNC`-led lines spawn
+/// tasks, `TIMEOUT`-led lines capture through the wrapper,
+/// `AWAIT $v` captures, RUN exec-form captures, known commands
+/// capture through the generic parser (lowering failures fatal,
+/// exactly like the committed grammar alternative), and anything
+/// else parses as an expression (unknown leads included). Returns
+/// the kind and RHS tokens consumed: captures ending in structural
+/// pairs leave trailing elements for the caller.
+fn parse_let_rhs(
+    rhs: &[Tok],
+    var: String,
+    decl_type: String,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<(StepKind, usize), TokenError> {
+    // Leading gap comments vanish like the `=` gap (but a `//`/`#`
+    // to end of input leaves no expression, failing).
+    let mut lead = Cursor::expr(rhs, stmt);
+    lead.skip_gap();
+    let (rhs, skipped) = (&rhs[lead.pos..], lead.pos);
+    let head_word = match rhs.first().map(|t| &t.kind) {
+        Some(TokKind::Word(w)) => Some(w.clone()),
+        _ => None,
+    };
+    // `WITH_IO`-led lines share `let_async_statement` with the
+    // `ASYNC` forms (the grammar claims every WITH_IO-led LET
+    // there); shape misses fall through to generic below.
+    if head_word.as_deref() == Some("WITH_IO")
+        && let Some(found) = try_let_with_io_rhs(rhs, var.clone(), decl_type.clone(), stmt, ctx)?
+    {
+        let (kind, used) = found;
+        return Ok((kind, skipped + used));
+    }
+    // `ASYNC`-led lines (with followers; alone they commit to the
+    // generic path like the grammar, failing in lowering) spawn
+    // background tasks. No `WITH_IO` scan here (probed: the LET
+    // path accepts what statement `ASYNC` rejects).
+    if head_word.as_deref() == Some("ASYNC") && rhs.len() > 1 {
+        let (kind, used) = parse_let_async_rhs(&rhs[1..], var, decl_type, stmt, ctx)?;
+        return Ok((kind, skipped + 1 + used));
+    }
+    // `TIMEOUT`-led lines capture through the wrapper (shape misses
+    // fall through to generic, which fails in lowering).
+    if head_word.as_deref() == Some("TIMEOUT")
+        && let Some((kind, used)) = parse_timeout_single(rhs, 0, stmt, ctx)?
+    {
+        let span = lowering_ctx(stmt);
+        crate::commands::reject_async_in_capture(&span, &kind).map_err(|e| TokenError {
+            stmt,
+            msg: e.to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
         })?;
-        if !frame.had_command {
-            return Err(ParseError::structural(
-                "with_io",
-                format!(
-                    "line {}: WITH_IO block starting on line {} must contain at least one command",
-                    line_no, frame.line_no
-                ),
-                ctx,
+        crate::commands::reject_pipe_stdout_in_capture(&span, &kind).map_err(|e| TokenError {
+            stmt,
+            msg: e.to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        })?;
+        return Ok((
+            StepKind::AssignCapture {
+                var,
+                decl_type,
+                cmd: Box::new(kind),
+            },
+            skipped + used,
+        ));
+    }
+    // `AWAIT $v` captures the task output (`$`+name ride gapless in
+    // this atomic position, like the grammar); anything else
+    // `AWAIT`-led goes generic below (lowering fails it, probed).
+    if head_word.as_deref() == Some("AWAIT")
+        && rhs.len() == 3
+        && let (Some(dollar), Some(task)) = (rhs.get(1), rhs.get(2))
+        && matches!(&dollar.kind, TokKind::Punct('$'))
+        && task.joint
+        && let TokKind::Word(task_var) = &task.kind
+        && is_ident_word(task_var)
+    {
+        return Ok((
+            StepKind::AwaitCapture {
+                out_var: var,
+                out_type: decl_type,
+                task_var: task_var.clone(),
+            },
+            skipped + 3,
+        ));
+    }
+    // RUN exec form captures the structured argv (gapped bracket;
+    // a joint bracket falls through to generic, which fails it in
+    // lowering).
+    if head_word.as_deref() == Some("RUN")
+        && matches!(
+            rhs.get(1).map(|t| (&t.kind, t.joint)),
+            Some((
+                TokKind::Group {
+                    delim: GroupDelim::Bracket,
+                    ..
+                },
+                false
+            ))
+        )
+        && rhs.len() == 2
+    {
+        let inner = match &rhs[1].kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        // Non-map blocks miss the exec shape; fall through below
+        // (known-command capture, then expression), mirroring the
+        // grammar's ordered alternatives.
+        if let Some(list) = parse_run_exec_list(&inner, stmt, ctx)? {
+            let kind = (ctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
+            return Ok((
+                StepKind::AssignCapture {
+                    var,
+                    decl_type,
+                    cmd: Box::new(kind),
+                },
+                skipped + 2,
             ));
         }
-        // WITH_IO block bodies are lexical scopes like guard blocks: mark
-        // scope boundaries so LET/ENV/WORKDIR/WORKSPACE revert on exit.
-        // Pipe registrations live in ExecIo and are unaffected (they leak).
-        if self.steps.len() > frame.first_step {
-            self.steps[frame.first_step].scope_enter += 1;
-            if let Some(last) = self.steps.last_mut() {
+    }
+    // Known-command leads capture through the generic parser
+    // (lowering failures are fatal here, exactly like the committed
+    // grammar alternative: probed wrapper-alone and `ISOLATED`-led
+    // shapes error in lowering); unknown leads parse as expressions.
+    match &head_word {
+        Some(head) if is_known_command(head) => {
+            let (cmd, used) = parse_inner_command(rhs, stmt, ctx)?;
+            let span = lowering_ctx(stmt);
+            crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| TokenError {
+                stmt,
+                msg: e.to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            })?;
+            crate::commands::reject_pipe_stdout_in_capture(&span, &cmd).map_err(|e| {
+                TokenError {
+                    stmt,
+                    msg: e.to_string(),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                }
+            })?;
+            // `INHERIT_ENV`-led lines land here (generic): the
+            // nesting check rejects them (probed).
+            crate::commands::reject_nested_inherit_env(&span, &cmd).map_err(|e| TokenError {
+                stmt,
+                msg: e.to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            })?;
+            return Ok((
+                StepKind::AssignCapture {
+                    var,
+                    decl_type,
+                    cmd: Box::new(cmd),
+                },
+                skipped + used,
+            ));
+        }
+        _ => {}
+    }
+    let mut cur = Cursor::expr(rhs, stmt);
+    let expr = parse_expr_checked(&mut cur, ctx)?;
+    let used = skipped + cur.pos;
+    Ok((
+        StepKind::Assign {
+            var,
+            decl_type,
+            expr,
+        },
+        used,
+    ))
+}
+
+/// `WITH_IO`-led LET right-hand side, mirroring
+/// `parse_let_async_statement_from_pair`'s `with_io_command` branch:
+/// wrapping `ASYNC` binds a pipe-wired background task (multi-step
+/// blocks fail loudly), wrapping a sync command captures its stdout
+/// (async bodies and `stdout` pipes fail loudly), and a bare
+/// bracket fails validation. `None` on shape miss (bad bracket:
+/// the caller goes generic, which fails in lowering).
+fn try_let_with_io_rhs(
+    rhs: &[Tok],
+    var: String,
+    decl_type: String,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let bracket = match rhs.get(1) {
+        Some(t)
+            if !t.joint
+                && matches!(
+                    &t.kind,
+                    TokKind::Group {
+                        delim: GroupDelim::Bracket,
+                        ..
+                    }
+                ) =>
+        {
+            t
+        }
+        _ => return Ok(None),
+    };
+    let inner = match &bracket.kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    let bindings = match parse_io_bindings(&inner, stmt)? {
+        Some(bindings) => bindings,
+        None => return Ok(None),
+    };
+    let fail = |msg: String| TokenError {
+        stmt,
+        msg,
+        line: 0,
+        col: 0,
+        kind: None,
+    };
+    let rest = &rhs[2..];
+    let Some(first) = rest.first() else {
+        // Bare bracket: the grammar's committed validation error.
+        return Err(fail(
+            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+                .to_string(),
+        ));
+    };
+    if first.joint {
+        // The inner rides after a `sep`: joint followers miss the
+        // shape and fail validation like the grammar's bare bracket.
+        return Err(fail(
+            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+                .to_string(),
+        ));
+    }
+    if matches!(&first.kind, TokKind::Word(w) if w == "ASYNC") {
+        // `WITH_IO [..] ASYNC <single|block>`: the bindings apply
+        // inside the task thread (same shape as a one-step body
+        // holding one `WITH_IO` step, which the runtime supports).
+        // A bare `ASYNC` goes generic and fails in lowering
+        // (`unknown command: ASYNC`, probed).
+        let after = &rest[1..];
+        if after.is_empty() {
+            // Bare `ASYNC`: the grammar commits to `instruction`
+            // and lowering fails it (`unknown command: ASYNC`,
+            // probed); mirror by running generic, staying failed
+            // even under a lenient dispatcher.
+            match parse_inner_command(&rest[..1], stmt, ctx) {
+                Err(e) => return Err(e),
+                Ok(_) => {
+                    return Err(fail("LET $var: HANDLE = ASYNC requires a body".to_string()));
+                }
+            }
+        }
+        if let Some(second) = after.first()
+            && matches!(
+                &second.kind,
+                TokKind::Group {
+                    delim: GroupDelim::Brace,
+                    ..
+                }
+            )
+            && !is_template_brace(second)
+        {
+            let brace_inner = match &second.kind {
+                TokKind::Group { inner, .. } => inner.clone(),
+                _ => unreachable!(),
+            };
+            let body = parse_body_steps(&brace_inner, stmt, ctx, false)?;
+            if body.len() != 1 {
+                return Err(fail(
+                        "LET $var: TYPE = WITH_IO [..] ASYNC accepts a single command; use LET $var: HANDLE = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks"
+                            .to_string(),
+                    ));
+            }
+            let wrapped = Step {
+                guard: None,
+                kind: StepKind::WithIo {
+                    bindings,
+                    cmd: Box::new(
+                        body.into_iter()
+                            .next()
+                            .ok_or_else(|| {
+                                fail("LET $var: HANDLE = ASYNC requires a body".to_string())
+                            })?
+                            .kind,
+                    ),
+                },
+                scope_enter: 0,
+                scope_exit: 0,
+                line: 0,
+                col: 0,
+            };
+            return Ok(Some((
+                StepKind::AssignAsync {
+                    var,
+                    decl_type,
+                    body: vec![wrapped],
+                },
+                2 + 2,
+            )));
+        }
+        if after.first().is_some_and(|t| t.joint) {
+            // Joint followers miss the inner `sep`: same validation
+            // error as the bare bracket.
+            return Err(fail(
+                "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+                    .to_string(),
+            ));
+        }
+        let (cmd, used) = parse_single_inner(
+            rest,
+            1,
+            stmt,
+            ctx,
+            InnerRules {
+                allow_await: false,
+                allow_with_io: false,
+            },
+        )?;
+        let wrapped = Step {
+            guard: None,
+            kind: StepKind::WithIo {
+                bindings,
+                cmd: Box::new(cmd),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 0,
+            col: 0,
+        };
+        let kind = StepKind::AssignAsync {
+            var,
+            decl_type,
+            body: vec![wrapped],
+        };
+        let span = lowering_ctx(stmt);
+        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
+            stmt,
+            msg: e.to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        })?;
+        return Ok(Some((kind, 2 + 1 + used)));
+    }
+    if matches!(
+        &first.kind,
+        TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        }
+    ) {
+        // A brace is no sync command: same validation error (probed).
+        return Err(fail(
+            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+                .to_string(),
+        ));
+    }
+    // Sync inner: capture with the shared checks (the capture sink
+    // owns stdout; async never runs inline).
+    let (cmd, used) = parse_single_inner(
+        rest,
+        0,
+        stmt,
+        ctx,
+        InnerRules {
+            allow_await: false,
+            allow_with_io: true,
+        },
+    )?;
+    let span = lowering_ctx(stmt);
+    if crate::commands::has_stdout_pipe(&bindings) {
+        return Err(fail(
+            "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
+                .to_string(),
+        ));
+    }
+    crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    Ok(Some((
+        StepKind::AssignCapture {
+            var,
+            decl_type,
+            cmd: Box::new(StepKind::WithIo {
+                bindings,
+                cmd: Box::new(cmd),
+            }),
+        },
+        2 + used,
+    )))
+}
+
+/// `ASYNC`-led LET right-hand side (the tokens after `ASYNC`):
+/// a block or single command becomes the task body. No `WITH_IO`
+/// scan (probed: this path accepts what statement `ASYNC`
+/// rejects); nesting still fails loudly through the shared check.
+fn parse_let_async_rhs(
+    rest: &[Tok],
+    var: String,
+    decl_type: String,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<(StepKind, usize), TokenError> {
+    let Some(first) = rest.first() else {
+        return Err(TokenError {
+            stmt,
+            msg: "LET $var: HANDLE = ASYNC requires a body".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    };
+    if matches!(
+        &first.kind,
+        TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        }
+    ) && !is_template_brace(first)
+    {
+        let inner = match &first.kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        let body = parse_body_steps(&inner, stmt, ctx, false)?;
+        let kind = StepKind::AssignAsync {
+            var,
+            decl_type,
+            body,
+        };
+        let span = lowering_ctx(stmt);
+        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
+            stmt,
+            msg: e.to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        })?;
+        return Ok((kind, 1));
+    }
+    if first.joint {
+        return Err(TokenError {
+            stmt,
+            msg: "LET $var: HANDLE = ASYNC requires a body".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    let (cmd, used) = parse_single_inner(
+        rest,
+        0,
+        stmt,
+        ctx,
+        InnerRules {
+            allow_await: false,
+            allow_with_io: false,
+        },
+    )?;
+    let kind = StepKind::AssignAsync {
+        var,
+        decl_type,
+        body: vec![Step {
+            guard: None,
+            kind: cmd,
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 0,
+            col: 0,
+        }],
+    };
+    let span = lowering_ctx(stmt);
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    Ok((kind, used))
+}
+
+fn parse_set_body(
+    body: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<(StepKind, usize), TokenError> {
+    let mut cur = Cursor::expr(body, stmt);
+    let var = expect_dollar_var(&mut cur, "mutation requires a variable: $var = <expr>")?;
+    let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);
+    let eq = match assign {
+        Some(eq) => eq,
+        None => {
+            return Err(cur.err("mutation requires a variable: $var = <expr>"));
+        }
+    };
+    cur.pos = eq + 1;
+    // Leading gap comments vanish like the `=` gap.
+    cur.skip_gap();
+    let expr = parse_expr_checked(&mut cur, ctx)?;
+    Ok((StepKind::Set { var, expr }, cur.pos))
+}
+
+fn parse_return_body(
+    body: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<(StepKind, usize), TokenError> {
+    let mut cur = Cursor::expr(body, stmt);
+    match cur.next() {
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == "RETURN") => {}
+        _ => return Err(cur.err("unreachable")),
+    }
+    if cur.done() {
+        return Ok((
+            StepKind::Return {
+                expr: Box::new(Expr::Literal(Value::string(String::new()))),
+            },
+            cur.pos,
+        ));
+    }
+    let expr = parse_expr_checked(&mut cur, ctx)?;
+    Ok((
+        StepKind::Return {
+            expr: Box::new(expr),
+        },
+        cur.pos,
+    ))
+}
+
+/// Lower one statement to steps through the element loop: the
+/// statement guard attaches to the first element only (trailing
+/// elements ride guardless, probed): the pending guard clears after
+/// the first command token.
+fn lower_stmt_steps(
+    stmt: &Stmt,
+    idx: usize,
+    ctx: &ParseCtx,
+    in_block: bool,
+    mark: bool,
+) -> Result<Vec<Step>, TokenError> {
+    let guard = parse_guard_groups(&stmt.guard, idx)?;
+    // Statement-head braces route here (mid-run braces fail inside
+    // the element loop): templates and guardless/bare blocks fail
+    // loudly; guarded braces open guard blocks (top level) or the
+    // nested quirk (in bodies).
+    let mut steps = if starts_brace(&stmt.body) {
+        parse_brace_head(stmt, guard, idx, ctx, in_block, mark)?
+    } else {
+        parse_elements(&stmt.body, idx, ctx, guard, in_block)?
+    };
+    // Stamp the statement's source position on every directly
+    // produced step still missing one. Nested body steps were stamped
+    // by their own statements during recursion, so only direct
+    // products are claimed here; inner statements keep their own
+    // lines and columns.
+    for step in &mut steps {
+        if step.line == 0 {
+            step.line = stmt.line;
+        }
+        if step.col == 0 {
+            step.col = stmt.col;
+        }
+    }
+    Ok(steps)
+}
+
+/// Statement-head `{...}` dispatcher. Template braces fail (the
+/// grammar strands them); guardless top-level braces fail; detached
+/// or guardless in-body braces fail (no `block_start` in
+/// `block_element`); guarded braces open a guard scope at top level
+/// or mirror the nested quirk formula in bodies. Trailing elements
+/// loop on guardless outside (like the grammar's continued line).
+fn parse_brace_head(
+    stmt: &Stmt,
+    guard: Option<GuardExpr>,
+    idx: usize,
+    ctx: &ParseCtx,
+    in_block: bool,
+    mark: bool,
+) -> Result<Vec<Step>, TokenError> {
+    let brace = &stmt.body[0];
+    if is_template_brace(brace) {
+        return Err(TokenError {
+            stmt: idx,
+            msg: "'{' without a pending guard".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    let inner = match &brace.kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    if in_block {
+        // Attached guarded braces only: pending holds all groups but
+        // the last (the block's own), mirroring the pair structure.
+        if guard.is_none() || stmt.brace_detached || stmt.guard.is_empty() {
+            return Err(TokenError {
+                stmt: idx,
+                msg: "unexpected '{' in block body".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        let n = stmt.guard.len();
+        let mut pending = None;
+        if n > 1 {
+            pending = parse_guard_groups(&stmt.guard[..n - 1], idx)?;
+        }
+        let block_guard = parse_guard_groups(&stmt.guard[n - 1..n], idx)?.ok_or(TokenError {
+            stmt: idx,
+            msg: "unexpected '{' in block body".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        })?;
+        let mut steps = parse_body_steps(&inner, idx, ctx, mark)?;
+        // Guard-block bodies propagate the ambient marking context
+        // (top-level nesting marks; wrapper bodies never mark).
+        // Quirk formula verbatim (including the dropped block guard
+        // with inner guards, probed).
+        for s in &mut steps {
+            let inner_guard = s.guard.take();
+            s.guard = Some(match (pending.clone(), inner_guard) {
+                (Some(p), Some(e)) => GuardExpr::all(vec![p, e]),
+                (Some(p), None) => GuardExpr::all(vec![p, block_guard.clone()]),
+                (None, Some(e)) => e,
+                (None, None) => block_guard.clone(),
+            });
+        }
+        // Marking contexts bump each nesting level (probed top-level
+        // double-block 2/2); wrapper bodies stay 0/0.
+        // Trailing elements ride outside, unmarked.
+        if mark {
+            if let Some(first) = steps.first_mut() {
+                first.scope_enter += 1;
+            }
+            if let Some(last) = steps.last_mut() {
                 last.scope_exit += 1;
             }
         }
-        Ok(())
+        // Trailing elements loop on guardless outside.
+        if stmt.body.len() > 1 {
+            let mut rest = parse_elements(&stmt.body[1..], idx, ctx, None, in_block)?;
+            steps.append(&mut rest);
+        }
+        return Ok(steps);
     }
-
-    fn guard_context(&mut self, inline: Option<GuardExpr>) -> Option<GuardExpr> {
-        let mut context = self.guard_stack.last().cloned().unwrap_or(None);
-        if let Some(pending) = self.pending_guards.take() {
-            context = and_guard_exprs(context, Some(pending));
-            self.pending_can_open_block = false;
-        }
-        if let Some(inline_guard) = inline {
-            context = and_guard_exprs(context, Some(inline_guard));
-        }
-        context
-    }
-
-    fn handle_command(
-        &mut self,
-        ctx: &SpanContext<'a>,
-        line_no: usize,
-        kind: StepKind,
-        inline_guards: Option<GuardExpr>,
-    ) -> ParseResult<()> {
-        if let StepKind::WithIoBlock { bindings } = kind {
-            let guards = self.guard_context(inline_guards);
-            self.begin_io_block(ctx, line_no, bindings, guards)?;
-            return Ok(());
-        }
-
-        let guards = self.guard_context(inline_guards);
-        let guards = self.apply_io_guards(guards);
-        let scope_enter = self.pending_scope_enters;
-        self.pending_scope_enters = 0;
-        for frame in self.scope_stack.iter_mut() {
-            frame.had_command = true;
-        }
-        for frame in self.io_scope_stack.iter_mut() {
-            frame.had_command = true;
-        }
-        let kind = self.apply_io_defaults(kind);
-        self.steps.push(Step {
-            guard: guards,
-            kind,
-            scope_enter,
-            scope_exit: 0,
+    // Top level: guardless braces fail; guarded braces open a guard
+    // scope (each step folds outer-then-inner with markers).
+    let Some(outer) = guard else {
+        return Err(TokenError {
+            stmt: idx,
+            msg: "'{' without a pending guard".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
         });
-        self.step_lines.push(line_no);
-        Ok(())
+    };
+    let mut steps = parse_body_steps(&inner, idx, ctx, mark)?;
+    if steps.is_empty() {
+        return Err(TokenError {
+            stmt: idx,
+            msg: "guard block must contain at least one command".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
     }
-
-    fn apply_io_defaults(&self, kind: StepKind) -> StepKind {
-        let defaults = self.current_io_defaults();
-        if defaults.is_empty() {
-            return kind;
-        }
-        match kind {
-            StepKind::WithIo { bindings, cmd } => StepKind::WithIo {
-                bindings: merge_bindings(&defaults, &bindings),
-                cmd,
-            },
-            other => StepKind::WithIo {
-                bindings: defaults,
-                cmd: Box::new(other),
-            },
-        }
+    for s in &mut steps {
+        let inner_guard = s.guard.take();
+        s.guard = Some(match inner_guard {
+            Some(e) => GuardExpr::all(vec![outer.clone(), e]),
+            None => outer.clone(),
+        });
     }
+    if let Some(first) = steps.first_mut() {
+        first.scope_enter += 1;
+    }
+    if let Some(last) = steps.last_mut() {
+        last.scope_exit += 1;
+    }
+    if stmt.body.len() > 1 {
+        let mut rest = parse_elements(&stmt.body[1..], idx, ctx, None, in_block)?;
+        steps.append(&mut rest);
+    }
+    Ok(steps)
+}
 
-    fn current_io_defaults(&self) -> Vec<IoBinding> {
-        if self.io_scope_stack.is_empty() {
-            return Vec::new();
+/// Parse consecutive elements to end of run (the grammar's
+/// `element*`): structural pairs (calls, RUN-exec, await/cancel,
+/// wrapper blocks) end mid-run and trailing elements form following
+/// steps; instructions and expressions consume greedily to the end.
+fn parse_elements(
+    toks: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+    guard: Option<GuardExpr>,
+    in_block: bool,
+) -> Result<Vec<Step>, TokenError> {
+    let mut steps = Vec::new();
+    let mut pos = 0;
+    // Statement guard: consumed by the first element that yields a
+    // step. `IMPORT` yields none, so the guard leaks to the next
+    // element (probed).
+    let mut pending_guard: Option<GuardExpr> = guard;
+    while pos < toks.len() {
+        // Trailing gap comments between elements (`} #c`, `F("a")
+        // /*c*/ ECHO`, `LET $x = 1 //c` — the pair ended, so the
+        // comment is silent like the grammar, never payload):
+        // `#` and lexer `Comment` markers run to the run end, `//`
+        // likewise (line comments eat `;` too, and runs hold no
+        // newlines), `/* */` balances. Mid-run `#`/`/*` stay payload
+        // text inside the generic path, which consumes everything
+        // and never loops back here.
+        if matches!(&toks[pos].kind, TokKind::Punct('#'))
+            || matches!(&toks[pos].kind, TokKind::Comment(_))
+        {
+            break;
         }
-        let mut set = IoBindingSet::default();
-        for frame in &self.io_scope_stack {
-            for binding in &frame.bindings {
-                set.insert(binding.clone());
+        if matches!(&toks[pos].kind, TokKind::Punct('/')) && is_comment_open(toks, pos) {
+            if matches!(
+                toks.get(pos + 1).map(|t| &t.kind),
+                Some(TokKind::Punct('/'))
+            ) {
+                break;
+            }
+            match skip_inline_comment(toks, pos) {
+                Some(past) => {
+                    pos = past;
+                    continue;
+                }
+                None => {
+                    return Err(TokenError {
+                        stmt,
+                        msg: "unclosed block comment".to_string(),
+                        line: 0,
+                        col: 0,
+                        kind: None,
+                    });
+                }
             }
         }
-        set.into_vec()
+        // `IMPORT` directives update the import frames and emit no
+        // step; the guard leaks to the next element (probed) unless
+        // this is top level, where a guarded `IMPORT` fails. Shape
+        // misses fall through to generic (lowering fails them).
+        if matches!(
+            toks.get(pos).map(|t| &t.kind),
+            Some(TokKind::Word(w)) if w == "IMPORT"
+        ) && let Some(used) = parse_import_at(toks, pos, stmt, ctx)?
+        {
+            if !in_block && pending_guard.is_some() {
+                return Err(TokenError {
+                    stmt,
+                    msg: "IMPORT cannot be guarded".to_string(),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                });
+            }
+            pos += used;
+            continue;
+        }
+        let guard = pending_guard.take();
+        let (mut got, used) = parse_element_at(toks, pos, stmt, ctx, guard, in_block)?;
+        if used == 0 {
+            return Err(TokenError {
+                stmt,
+                msg: "element consumed no input".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        steps.append(&mut got);
+        pos += used;
     }
+    Ok(steps)
+}
 
-    fn apply_io_guards(&self, guard: Option<GuardExpr>) -> Option<GuardExpr> {
-        self.io_scope_stack.iter().fold(guard, |acc, frame| {
-            and_guard_exprs(acc, frame.guards.clone())
-        })
+/// Parse one element at `pos`, returning built steps (guard already
+/// assigned: `first_guard` for the first, folded per io-block inner
+/// step) and tokens consumed.
+fn parse_element_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+    first_guard: Option<GuardExpr>,
+    in_block: bool,
+) -> Result<(Vec<Step>, usize), TokenError> {
+    let step = |kind: StepKind| Step {
+        guard: first_guard.clone(),
+        kind,
+        scope_enter: 0,
+        scope_exit: 0,
+        line: 0,
+        col: 0,
+    };
+    let head_word = match toks.get(pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) => Some(w.clone()),
+        _ => None,
+    };
+    // Mid-run `{...}` (after a call, wrapper block, ...): the
+    // grammar strands it (`block_start` needs a pending guard or
+    // `WITH_IO` wait, both consumed), so fail loudly. Statement-head
+    // braces route through `lower_stmt_steps`, never here.
+    if starts_brace(&toks[pos..]) {
+        return Err(TokenError {
+            stmt,
+            msg: "'{' without a pending guard".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    // LET/SET/RETURN heads parse with groups intact, then trailing
+    // elements loop on (probed `LET $x: INT = 1 ECHO bye`). LET shape
+    // misses fall to generic (lowering fails them like a committed
+    // `instruction` would, e.g. `LET foo`).
+    if head_word.as_deref() == Some("LET")
+        && let Some((kind, used)) = parse_let_body(&toks[pos..], stmt, ctx)?
+    {
+        return Ok((vec![step(kind)], used));
+    }
+    if matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Punct('$'))) {
+        let (kind, used) = parse_set_body(&toks[pos..], stmt, ctx)?;
+        return Ok((vec![step(kind)], used));
+    }
+    if head_word.as_deref() == Some("RETURN") {
+        let (kind, used) = parse_return_body(&toks[pos..], stmt, ctx)?;
+        return Ok((vec![step(kind)], used));
+    }
+    // Calls route before heads (even known commands take the call
+    // path with a joint paren, probed `ECHO("hi")`); the call ends
+    // mid-run and trailing elements loop on (fixes the slice-4a
+    // divergence, probed).
+    if call_shape_at(toks, pos, true).is_some() {
+        let (kind, used) = parse_inner_command(&toks[pos..], stmt, ctx)?;
+        return Ok((vec![step(kind)], used));
+    }
+    // Block statements (shape misses fall to generic, which fails
+    // them in lowering like the grammar's committed `instruction`).
+    // `BREAK`/`CONTINUE` take no args (structural, like the grammar):
+    // each consumes one token and trailing elements loop on (probed
+    // `BREAK ECHO hi`); a lone trailing word fails downstream like
+    // the grammar's committed mismatch.
+    match head_word.as_deref() {
+        Some("BREAK") => {
+            return Ok((vec![step(StepKind::Break)], 1));
+        }
+        Some("CONTINUE") => {
+            return Ok((vec![step(StepKind::Continue)], 1));
+        }
+        Some("IF") => {
+            if let Some((kind, used)) = parse_if_at(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
+        Some("FOR") => {
+            if let Some((kind, used)) = parse_for_at(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
+        Some("WHILE") => {
+            if let Some((kind, used)) = parse_while_single(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
+        Some("FUNC") => {
+            if let Some((kind, used)) = parse_func_at(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
+        Some("REMOTE") => {
+            if let Some((kind, used)) = parse_remote_single(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
+        _ => {}
+    }
+    // Wrappers (block or single); shape misses fall to generic.
+    match head_word.as_deref() {
+        Some("WITH_IO") => {
+            return parse_with_io_element(toks, pos, stmt, ctx, first_guard);
+        }
+        Some("TIMEOUT") => {
+            if let Some((kind, used)) = parse_timeout_single(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
+        Some("ISOLATED") => {
+            if let Some((kind, used)) = parse_isolated_single(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
+        Some("ASYNC") => {
+            if let Some((kind, used)) = parse_async_single(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
+        _ => {}
+    }
+    // AWAIT/CANCEL statements (element level admits the `$` gap,
+    // probed); heads without `$` go generic (lowering fails them).
+    if matches!(head_word.as_deref(), Some("AWAIT") | Some("CANCEL"))
+        && let Some((kind, used)) = parse_await_cancel_at(toks, pos, stmt, false)?
+    {
+        return Ok((vec![step(kind)], used));
+    }
+    // `INHERIT_ENV [...]` parses strictly even at element level
+    // (keys stay exact everywhere; slice 5 adds only the
+    // prelude-order validation). Shape misses go generic.
+    if head_word.as_deref() == Some("INHERIT_ENV")
+        && let Some((kind, used)) = parse_inherit_env_at(toks, pos, stmt)?
+    {
+        return Ok((vec![step(kind)], used));
+    }
+    // `EXPORT ...` records names (zero steps) or misses to generic;
+    // level and guard violations fail loudly like the backend.
+    if head_word.as_deref() == Some("EXPORT") {
+        if in_block {
+            return Err(TokenError {
+                stmt,
+                msg: "EXPORT is only allowed at the top level".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        if first_guard.is_some() {
+            return Err(TokenError {
+                stmt,
+                msg: "EXPORT cannot be guarded".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        if let Some((names, used)) = parse_export_at(toks, pos) {
+            for name in &names {
+                for part in name.split("::") {
+                    crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
+                        .map_err(|e| lower_err(stmt, e))?;
+                }
+                if ctx.exports.borrow().contains(name) {
+                    return Err(TokenError {
+                        stmt,
+                        msg: format!("duplicate EXPORT `{name}`"),
+                        line: 0,
+                        col: 0,
+                        kind: Some(ParseErrorKind::Validation {
+                            command: "EXPORT".to_string(),
+                        }),
+                    });
+                }
+                ctx.exports.borrow_mut().push(name.clone());
+            }
+            return Ok((Vec::new(), used));
+        }
+    }
+    // `TYPE NAME = SHAPE` aliases (zero or one step); level and guard
+    // violations fail loudly, shape misses fall to generic.
+    if head_word.as_deref() == Some("TYPE") {
+        if in_block {
+            return Err(TokenError {
+                stmt,
+                msg: "TYPE must appear at top level".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        if first_guard.is_some() {
+            return Err(TokenError {
+                stmt,
+                msg: "TYPE cannot be guarded".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        if let Some((kind, used)) = parse_type_stmt_at(toks, pos, stmt)? {
+            return Ok((vec![step(kind)], used));
+        }
+    }
+    // Lowercase heads name their uppercase form (the grammar's
+    // `command_name` mismatch): never a bare unknown-command.
+    if let Some(head) = head_word.as_deref()
+        && head.chars().all(|c| c.is_ascii_lowercase())
+        && let upper = head.to_ascii_uppercase()
+        && (is_known_command(&upper) || crate::STRUCTURAL_KEYWORDS.contains(&upper.as_str()))
+    {
+        return Err(TokenError {
+            stmt,
+            msg: format!("command must be uppercase: found `{head}`, expected `{upper}`"),
+            line: 0,
+            col: 0,
+            kind: Some(ParseErrorKind::Syntax),
+        });
+    }
+    // RUN-exec ends mid-run (trailing loops on, probed); generic
+    // instructions consume everything.
+    let (kind, used) = parse_inner_command(&toks[pos..], stmt, ctx)?;
+    Ok((vec![step(kind)], used))
+}
+
+/// Element-level `WITH_IO`: a same-run brace (any gap: `]{` works,
+/// probed) opens the io-block form, wrapping every inner step with
+/// scope markers; a joint non-brace follower is the pending-guard
+/// error (the splitter only holds bare brackets); anything else is
+/// the single form. Shape misses go generic.
+fn parse_with_io_element(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+    first_guard: Option<GuardExpr>,
+) -> Result<(Vec<Step>, usize), TokenError> {
+    // The bracket rides gapped (`sep`); anything else misses the
+    // shape and generic fails it in lowering.
+    let bracket = match toks.get(pos + 1) {
+        Some(t)
+            if !t.joint
+                && matches!(
+                    &t.kind,
+                    TokKind::Group {
+                        delim: GroupDelim::Bracket,
+                        ..
+                    }
+                ) =>
+        {
+            Some(t)
+        }
+        _ => None,
+    };
+    let Some(bracket) = bracket else {
+        // Shape miss: generic fails it in lowering.
+        let (kind, used) = parse_inner_command(&toks[pos..], stmt, ctx)?;
+        return Ok((
+            vec![Step {
+                guard: first_guard,
+                kind,
+                scope_enter: 0,
+                scope_exit: 0,
+                line: 0,
+                col: 0,
+            }],
+            used,
+        ));
+    };
+    let inner = match &bracket.kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    let bindings = match parse_io_bindings(&inner, stmt)? {
+        Some(bindings) => bindings,
+        // Shape miss: generic fails it.
+        None => {
+            let (kind, used) = parse_inner_command(&toks[pos..], stmt, ctx)?;
+            return Ok((
+                vec![Step {
+                    guard: first_guard,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                    line: 0,
+                    col: 0,
+                }],
+                used,
+            ));
+        }
+    };
+    let rest = pos + 2;
+    // Same-run brace opens the io-block form (block-expanded
+    // bindings skip the tty checks: the runtime repeats them).
+    if let Some(next) = toks.get(rest)
+        && matches!(
+            &next.kind,
+            TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            }
+        )
+        && !is_template_brace(next)
+    {
+        let brace_inner = match &next.kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        let mut steps = parse_body_steps(&brace_inner, stmt, ctx, false)?;
+        if steps.is_empty() {
+            return Err(TokenError {
+                stmt,
+                msg: "WITH_IO block must contain at least one command".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        // Every inner step wraps (merging when already wrapped,
+        // like nested io scopes); the line guard folds into each
+        // inner guard, inner-first (probed fold order).
+        for s in &mut steps {
+            let merged = match std::mem::replace(&mut s.kind, StepKind::Continue) {
+                StepKind::WithIo {
+                    bindings: inner_bindings,
+                    cmd,
+                } => StepKind::WithIo {
+                    bindings: crate::commands::merge_bindings(&bindings, &inner_bindings),
+                    cmd,
+                },
+                other => StepKind::WithIo {
+                    bindings: bindings.clone(),
+                    cmd: Box::new(other),
+                },
+            };
+            s.kind = merged;
+            s.guard = crate::commands::and_guard_exprs(s.guard.take(), first_guard.clone());
+        }
+        let span = lowering_ctx(stmt);
+        for s in &steps {
+            crate::commands::reject_nested_inherit_env(&span, &s.kind).map_err(|e| TokenError {
+                stmt,
+                msg: e.to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            })?;
+        }
+        if let Some(first) = steps.first_mut() {
+            first.scope_enter += 1;
+        }
+        if let Some(last) = steps.last_mut() {
+            last.scope_exit += 1;
+        }
+        return Ok((steps, rest + 1 - pos));
+    }
+    if rest >= toks.len() {
+        // Unreachable: the splitter holds bare brackets for `{`.
+        // Kept for body-parsed runs, mirroring the transient node.
+        return Ok((
+            vec![Step {
+                guard: first_guard,
+                kind: StepKind::WithIoBlock { bindings },
+                scope_enter: 0,
+                scope_exit: 0,
+                line: 0,
+                col: 0,
+            }],
+            2,
+        ));
+    }
+    // A joint follower misses the inner `sep`: the pending wait
+    // fails exactly like the grammar.
+    if toks[rest].joint {
+        return Err(TokenError {
+            stmt,
+            msg: "WITH_IO block must be followed by '{'".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    // Single form, shared with single-inner (element guards the step).
+    let (cmd, used) = parse_single_inner(
+        toks,
+        rest,
+        stmt,
+        ctx,
+        InnerRules {
+            allow_await: false,
+            allow_with_io: true,
+        },
+    )?;
+    let span = lowering_ctx(stmt);
+    check_tty_wrapping(&bindings, Some(&cmd), &span).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    let kind = StepKind::WithIo {
+        bindings,
+        cmd: Box::new(cmd),
+    };
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    Ok((
+        vec![Step {
+            guard: first_guard,
+            kind,
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 0,
+            col: 0,
+        }],
+        2 + used,
+    ))
+}
+
+/// Shared inner-command parser: statement calls (joint paren, even on
+/// known commands), RUN exec
+/// form, and generic instructions. Returns the kind and tokens
+/// consumed: calls and RUN-exec end mid-run (the caller continues
+/// past them, like the grammar's `element*`); generic instructions
+/// consume everything. Wrappers never route here (element and
+/// single-inner dispatch own them); slice 4b reuses the call/RUN
+/// arms for trailing elements.
+fn parse_inner_command(
+    body: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<(StepKind, usize), TokenError> {
+    // Bare `NAME(...)` calls invoke functions with one syntax; the head
+    // and `(` ride gapless or the shape stays an instruction (which
+    // fails later as UnknownCommand), exactly like the grammar.
+    if let Some((call_name, paren)) = call_shape_at(body, 0, true) {
+        let inner = match &body[paren].kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        let args = parse_call_args(&inner, stmt, ctx)?;
+        // Statement-level `INSPECT(...)` resolves like any other call
+        // (only expression position mints the node); unknown functions
+        // fail in the shared resolver with identical messages.
+        if !call_name.contains("::") {
+            crate::resolve::check_func_ident(&lowering_ctx(stmt), &call_name)
+                .map_err(|e| lower_err(stmt, e))?;
+        }
+        let qualified = resolve_name(ctx, stmt, &call_name)?;
+        return Ok((
+            StepKind::Call {
+                name: qualified,
+                args,
+            },
+            paren + 1,
+        ));
+    }
+    let head = match body.first().map(|t| &t.kind) {
+        Some(TokKind::Word(n)) => n.clone(),
+        _ => {
+            return Err(TokenError {
+                stmt,
+                msg: "statement must open with a command word".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+    };
+    // RUN exec form: the list routes structured through `lower` (the
+    // mock wraps it in `Run`; production maps it to `RunExec`); the
+    // caller continues past the list, like the grammar. The list
+    // rides gapped (`sep`): a joint bracket is a hard error, never
+    // a spliced arg (probed `RUN["a"]`).
+    if head == "RUN"
+        && matches!(
+            body.get(1).map(|t| &t.kind),
+            Some(TokKind::Group {
+                delim: GroupDelim::Bracket,
+                ..
+            })
+        )
+    {
+        if body[1].joint {
+            return Err(TokenError {
+                stmt,
+                msg: "RUN [...] requires a gap after RUN".to_string(),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        let inner = match &body[1].kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        // Non-map blocks miss the exec shape (the grammar has no
+        // `block` alternative here); fall through to the shell path
+        // below, which reads the bracket literally.
+        if let Some(list) = parse_run_exec_list(&inner, stmt, ctx)? {
+            let kind = (ctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
+            return Ok((kind, 2));
+        }
+    }
+    let tokens = build_arg_tokens(&body[1..], stmt, ctx)?;
+    let kind = lower_generic_args(&head, tokens, stmt, ctx)?;
+    Ok((kind, body.len()))
+}
+
+/// Parse a token stream (either lexer) into steps. Markers normalize to
+/// 0/0 like the fuzz harness; scopes arrive with block slices.
+pub fn parse_tokens(
+    toks: &[Tok],
+    lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+) -> Result<Vec<Step>, TokenError> {
+    let modules = ModuleTable::default();
+    let reserved = HashSet::new();
+    let ctx = ParseCtx::empty(&lower, &modules, &reserved);
+    parse_tokens_with_ctx(toks, &ctx)
+}
+
+/// Parse with an explicit context (module table for call resolution).
+/// `parse_tokens` uses empty modules.
+pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, TokenError> {
+    let mut out = Vec::new();
+    *ctx.current_line.borrow_mut() = 1;
+    for (i, s) in split_statements(toks, 1)?.iter().enumerate() {
+        *ctx.current_line.borrow_mut() = s.line;
+        out.extend(
+            lower_stmt_steps(s, i, ctx, false, true).map_err(|e| stamp_pos(e, s.line, s.col))?,
+        );
+    }
+    // Whole-script validations through the shared validators.
+    // `INHERIT_ENV` prelude order: only leading positions read.
+    {
+        let mut seen_non_prelude = false;
+        for step in &out {
+            match &step.kind {
+                StepKind::InheritEnv { .. } => {
+                    if seen_non_prelude {
+                        return Err(TokenError {
+                            stmt: out.len(),
+                            msg: "INHERIT_ENV must appear before any other commands".to_string(),
+                            line: 0,
+                            col: 0,
+                            kind: None,
+                        });
+                    }
+                }
+                kind => {
+                    if crate::commands::contains_inherit_env(kind) {
+                        return Err(TokenError {
+                            stmt: out.len(),
+                            msg: "INHERIT_ENV cannot be nested inside other commands".to_string(),
+                            line: 0,
+                            col: 0,
+                            kind: None,
+                        });
+                    }
+                    seen_non_prelude = true;
+                }
+            }
+        }
+    }
+    crate::commands::validate_remote_copy_placement(&out, &lowering_ctx(out.len())).map_err(
+        |e| TokenError {
+            stmt: out.len(),
+            msg: e.to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        },
+    )?;
+    {
+        let top: HashSet<String> = ctx.funcs.borrow().first().cloned().unwrap_or_default();
+        crate::commands::validate_exports(
+            &lowering_ctx(out.len()),
+            &ctx.exports.borrow(),
+            &top,
+            ctx.modules,
+        )
+        .map_err(|e| TokenError {
+            stmt: out.len(),
+            msg: e.to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        })?;
+    }
+    Ok(out)
+}
+
+// ---- String entry points: lex, lower, collect exports and docs ----
+
+/// Source text of a 1-based line. The line just past a trailing
+/// newline (where unbalanced groups report) reads as empty text so
+/// caret blocks still render.
+fn source_line_of(input: &str, line: usize) -> Option<String> {
+    let count = input.lines().count();
+    let idx = line.checked_sub(1)?;
+    if idx < count {
+        input.lines().nth(idx).map(str::to_string)
+    } else if idx == count {
+        Some(String::new())
+    } else {
+        None
     }
 }
 
+/// Last script line (end-of-script validations blame it).
+fn last_line(input: &str) -> usize {
+    input.lines().count().max(1)
+}
+
+/// Convert a lexer failure: low-level syntax kind, exact lexer
+/// position, and the source line for the caret block. Unclosed groups
+/// name their opener (no grammar dumps); the closer expectation rides
+/// along so `expected()` stays informative. A lexer-known kind (an
+/// unclosed `WITH_IO` bracket) converts verbatim.
+fn lex_error(input: &str, e: LexError) -> ParseError {
+    let line = e.line.max(1);
+    let ctx = match source_line_of(input, line) {
+        Some(source_line) => SpanContext::full(line, e.col.max(1), e.col.max(1), source_line),
+        None => SpanContext::line_only(line),
+    };
+    if let Some(ParseErrorKind::InvalidSyntax { command }) = e.kind {
+        // Lexer-known command syntax (an unclosed `WITH_IO` bracket).
+        return ParseError::invalid_syntax(
+            &command,
+            e.msg,
+            None,
+            vec!["`]`".to_string()],
+            None,
+            &ctx,
+        );
+    }
+    let expected = if e.msg.starts_with("unclosed") {
+        vec!["`}`".to_string()]
+    } else {
+        Vec::new()
+    };
+    ParseError::syntax(e.msg, expected, None, &ctx)
+}
+
+/// Convert a backend failure, preserving the dispatcher's error kind
+/// and completing line/source context the token stream knows. Spans
+/// open at the statement's start column and cover its whole first line
+/// (multi-line spans clamp to the start line), so caret blocks render
+/// for every string-path error.
+fn token_error(input: &str, e: TokenError) -> ParseError {
+    let line = if e.line == 0 {
+        last_line(input)
+    } else {
+        e.line
+    };
+    let start_col = e.col.max(1);
+    let ctx = match source_line_of(input, line) {
+        Some(source_line) => {
+            let end = source_line.len().max(start_col);
+            SpanContext::full(line, start_col, end, source_line)
+        }
+        None => SpanContext::line_only(line),
+    };
+    // Column spans are statement granularity (every error names its
+    // statement's first column); the caret block still renders.
+    match e.kind {
+        Some(crate::error::ParseErrorKind::UnknownCommand { name }) => {
+            ParseError::unknown_command(&name, e.msg, None, &ctx)
+        }
+        Some(crate::error::ParseErrorKind::InvalidSyntax { command }) => {
+            ParseError::invalid_syntax(&command, e.msg, None, Vec::new(), None, &ctx)
+        }
+        Some(crate::error::ParseErrorKind::Validation { command }) => {
+            ParseError::validation(&command, e.msg, &ctx)
+        }
+        Some(crate::error::ParseErrorKind::Syntax) => {
+            ParseError::syntax(e.msg, Vec::new(), None, &ctx)
+        }
+        Some(crate::error::ParseErrorKind::Structural { rule }) => {
+            ParseError::structural(&rule, e.msg, &ctx)
+        }
+        None => ParseError::structural("statement", e.msg, &ctx),
+    }
+}
+
+/// Shared parse driver: lex, lower with preseeded frames, and collect
+/// `EXPORT` names (validated at end of parse, forward references
+/// allowed).
+fn parse_with_ctx(
+    input: &str,
+    lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    reserved_names: HashSet<String>,
+    modules: ModuleTable,
+    preseed_funcs: HashSet<String>,
+    preseed_imports: Vec<String>,
+) -> ParseResult<(Vec<Step>, Vec<String>)> {
+    let toks = lex_str(input).map_err(|e| lex_error(input, e))?;
+    let ctx = ParseCtx::empty(&lower, &modules, &reserved_names);
+    // Snippet re-parses seed their base frames so lookup behaves
+    // identically; snippets never define, only read.
+    ctx.funcs.borrow_mut()[0].extend(preseed_funcs);
+    ctx.imports.borrow_mut()[0].extend(preseed_imports);
+    let steps = parse_tokens_with_ctx(&toks, &ctx).map_err(|e| token_error(input, e))?;
+    let mut steps = steps;
+    stamp_func_docs(input, &mut steps);
+    Ok((steps, ctx.exports.borrow().clone()))
+}
+
+/// Parse a script with an unknown host environment.
 pub fn parse_script(
     input: &str,
     lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
 ) -> ParseResult<Vec<Step>> {
-    ScriptParser::new(input, lower)?.parse()
+    Ok(parse_with_ctx(
+        input,
+        lower,
+        HashSet::new(),
+        ModuleTable::default(),
+        HashSet::new(),
+        Vec::new(),
+    )?
+    .0)
 }
 
 /// Parse a snippet with an enclosing parse's visible scope state, so
@@ -1178,7 +7027,7 @@ pub fn parse_script_with_preseed(
     preseed_funcs: HashSet<String>,
     preseed_imports: Vec<String>,
 ) -> ParseResult<Vec<Step>> {
-    ScriptParser::new_with_preseed(
+    Ok(parse_with_ctx(
         input,
         lower,
         reserved_names,
@@ -1186,7 +7035,7 @@ pub fn parse_script_with_preseed(
         preseed_funcs,
         preseed_imports,
     )?
-    .parse()
+    .0)
 }
 
 /// Parse with a module provenance table so calls resolve statically:
@@ -1211,7 +7060,19 @@ pub fn parse_script_with_modules_and_exports(
     reserved_names: HashSet<String>,
     modules: ModuleTable,
 ) -> ParseResult<ParsedScript> {
-    ScriptParser::new_with_modules(input, lower, reserved_names, modules)?.parse_with_exports()
+    let (steps, exports) = parse_with_ctx(
+        input,
+        lower,
+        reserved_names,
+        modules,
+        HashSet::new(),
+        Vec::new(),
+    )?;
+    Ok(ParsedScript {
+        func_docs: collect_func_docs(input, &steps),
+        steps,
+        exports,
+    })
 }
 
 /// Parse without modules plus `EXPORT` metadata. Used by tests and
@@ -1220,13 +7081,58 @@ pub fn parse_script_with_exports(
     input: &str,
     lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
 ) -> ParseResult<ParsedScript> {
-    ScriptParser::new(input, lower)?.parse_with_exports()
+    let (steps, exports) = parse_with_ctx(
+        input,
+        lower,
+        HashSet::new(),
+        ModuleTable::default(),
+        HashSet::new(),
+        Vec::new(),
+    )?;
+    Ok(ParsedScript {
+        func_docs: collect_func_docs(input, &steps),
+        steps,
+        exports,
+    })
 }
 
-/// Collect `(summary, docs)` for top-level `FUNC`s from the immediately
-/// preceding `#` comment block. Scoped to FUNC definition lines only:
-/// the global lexer still discards `#` everywhere else, so no grammar
-/// rule changes and no blast radius. A blank line breaks the block.
+/// Parse one expression from source text with an empty module scope, for
+/// tooling that shows lowering without running (docs demos, explain output).
+/// No imports exist here, so bare function calls fail and qualified calls
+/// fail against the empty table; only `INSPECT` passes through untouched.
+/// Arithmetic, comparison, variables, env reads, keypaths, and literals
+/// lower normally, with literal only subtrees folded before flattening.
+pub fn parse_expression_str(input: &str) -> ParseResult<Expr> {
+    // Trailing whitespace lexes unconsumed, so lex the trimmed text:
+    // otherwise padded but valid input fails the full consumption check.
+    let trimmed = input.trim();
+    let toks = lex_str(trimmed).map_err(|e| lex_error(trimmed, e))?;
+    let modules = ModuleTable::default();
+    let reserved = HashSet::new();
+    let lower = crate::commands::lower_command as fn(&str, Vec<Arg>) -> ParseResult<StepKind>;
+    let ctx = ParseCtx::empty(&lower, &modules, &reserved);
+    *ctx.current_line.borrow_mut() = 1;
+    parse_single_expr(&toks, 0, &ctx).map_err(|e| token_error(trimmed, e))
+}
+
+/// Parse one guard expression from source text (a bare `guard_seq`:
+/// predicates, `not`/`any`/`all`, comma lists), for tooling and tests.
+pub fn parse_guard_expr_str(input: &str) -> ParseResult<GuardExpr> {
+    let toks = lex_str(input).map_err(|e| lex_error(input, e))?;
+    parse_single_guard(&toks, 0).map_err(|e| token_error(input, e))
+}
+
+/// Parsed script with single-file `EXPORT` metadata. `steps` is the
+/// linear execution plan, `exports` the `EXPORT` names in source order,
+/// and `func_docs` maps top-level `FUNC` base names to (summary, docs)
+/// collected from the immediately preceding `#` comment block.
+#[derive(Debug, Clone, Default)]
+pub struct ParsedScript {
+    pub steps: Vec<Step>,
+    pub exports: Vec<String>,
+    pub func_docs: std::collections::HashMap<String, (String, String)>,
+}
+
 fn collect_func_docs(
     input: &str,
     steps: &[Step],
@@ -1275,8 +7181,24 @@ fn collect_func_docs(
     out
 }
 
-/// Strip a `FUNC NAME` head, returning the bare uppercase name. Rejects
-/// qualified or malformed heads by returning `None`.
+/// Stamp `#` doc blocks onto top-level `FUNC` steps, from the same map
+/// that feeds `func_docs`, so step-carried docs and the sidecar can
+/// never disagree. Only top-level definitions qualify (same rule as
+/// collection); nested shadowing keeps `docs: None`.
+fn stamp_func_docs(input: &str, steps: &mut [Step]) {
+    let docs = collect_func_docs(input, steps);
+    for step in steps {
+        if let StepKind::FuncDef {
+            name, docs: slot, ..
+        } = &mut step.kind
+            && slot.is_none()
+            && let Some(pair) = docs.get(name)
+        {
+            *slot = Some(pair.clone());
+        }
+    }
+}
+
 fn strip_func_head(trimmed: &str) -> Option<String> {
     let rest = trimmed.strip_prefix("FUNC")?;
     let after = rest.strip_prefix([' ', '\t'])?;
@@ -1300,9 +7222,6 @@ fn strip_func_head(trimmed: &str) -> Option<String> {
     Some(name)
 }
 
-/// Read the contiguous `#` block immediately above `line_no` (1-based).
-/// Returns `(summary, docs)` with `#` prefixes stripped. `None` when no
-/// comment block is adjacent. Exported through unit tests via steps.
 fn docs_above(lines: &[&str], line_no: usize) -> Option<(String, String)> {
     if line_no <= 1 {
         return None;
@@ -1334,3695 +7253,610 @@ fn docs_above(lines: &[&str], line_no: usize) -> Option<(String, String)> {
     Some((summary, docs))
 }
 
-/// Parse one expression from source text with an empty module scope, for
-/// tooling that shows lowering without running (docs demos, explain output).
-/// No imports exist here, so bare function calls fail and qualified calls
-/// fail against the empty table; only `INSPECT` passes through untouched.
-/// Arithmetic, comparison, variables, env reads, keypaths, and literals
-/// lower normally, with literal only subtrees folded before flattening.
-pub fn parse_expression_str(input: &str) -> ParseResult<Expr> {
-    use pest::Parser;
-    // `Rule::expr` leaves trailing whitespace and newlines unconsumed, so
-    // lex the trimmed text and measure the span against it: otherwise padded
-    // but valid input fails the full consumption check below.
-    let trimmed = input.trim();
-    let pairs = lexer::LanguageParser::parse(Rule::expr, trimmed).map_err(parse_pest_error)?;
-    let pair = pairs.into_iter().next().ok_or_else(|| {
-        ParseError::structural(
-            "expr",
-            "empty expression".to_string(),
-            &span_for_line(trimmed, 1),
-        )
-    })?;
-    if pair.as_span().end() != trimmed.len() {
-        return Err(ParseError::structural(
-            "expr",
-            format!("invalid expression {input:?}"),
-            &span_of(&pair, trimmed),
-        ));
-    }
-    let ctx = span_of(&pair, trimmed);
-    let reserved = HashSet::new();
-    let func_scopes = RefCell::new(vec![HashSet::new()]);
-    let modules = ModuleTable {
-        modules: std::collections::HashMap::new(),
-    };
-    let import_scopes = RefCell::new(vec![Vec::new()]);
-    let lower = crate::commands::lower_command as fn(&str, Vec<Arg>) -> ParseResult<StepKind>;
-    let lctx = LowerCtx::new(&lower, &reserved, &func_scopes, &modules, &import_scopes);
-    parse_expr(&ctx, &lctx, pair)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_lower_mock;
 
-pub fn parse_guard_expr_str(input: &str) -> ParseResult<GuardExpr> {
-    use pest::Parser;
-    let pairs = lexer::LanguageParser::parse(Rule::guard_expr, input).map_err(parse_pest_error)?;
-    let pair = pairs.into_iter().next().ok_or_else(|| {
-        ParseError::structural("guard", "empty guard".to_string(), &span_for_line(input, 1))
-    })?;
-    let ctx = span_of(&pair, input);
-    parse_guard_expr(&ctx, pair)
-}
-
-fn and_guard_exprs(left: Option<GuardExpr>, right: Option<GuardExpr>) -> Option<GuardExpr> {
-    match (left, right) {
-        (None, None) => None,
-        (Some(expr), None) | (None, Some(expr)) => Some(expr),
-        (Some(lhs), Some(rhs)) => Some(GuardExpr::all(vec![lhs, rhs])),
+    fn lower(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
+        test_lower_mock::lower(name, args)
     }
-}
 
-/// Candidate structural rules for a fragmented keyword head (issue #215).
-/// Each rule opens its `block` on the head line and may nest further
-/// blocks, so re-parsing the tail with it surfaces pest's deepest inner
-/// failure. Only rules with a demonstrated refinement are listed: every
-/// other block shape (`WITH_IO` bodies, `LET` forms, inline `ASYNC`
-/// commands) resolves through dedicated token paths or fails on its head
-/// line, so no candidate there can ever report past the head. `ELSE`
-/// lists both clauses; furthest failure wins, exactly like PEG recovery.
-/// A candidate that matches the tail reports `Ok`: full consumption means
-/// the head is structurally sound and the lowering error stands, while a
-/// partial prefix match cannot exonerate the head, so evaluation
-/// continues instead of aborting.
-fn block_fragment_candidates(name: &str) -> Option<&'static [Rule]> {
-    match name {
-        "IF" => Some(&[Rule::if_statement]),
-        "WHILE" => Some(&[Rule::while_statement]),
-        "FOR" => Some(&[Rule::for_statement]),
-        "FUNC" => Some(&[Rule::func_def]),
-        "TIMEOUT" => Some(&[Rule::timeout_statement]),
-        "ISOLATED" => Some(&[Rule::isolated_statement]),
-        "REMOTE" => Some(&[Rule::remote_statement]),
-        "ASYNC" => Some(&[Rule::async_statement_block]),
-        "ELSE" => Some(&[Rule::else_if_clause, Rule::else_clause]),
-        _ => None,
+    /// Lexer-agreement oracle: both frontends must deliver identical
+    /// steps through the single backend. `parse_script` is the string
+    /// entry point; `parse_tokens` runs each lexer's output directly.
+    fn assert_parity(text: &str) {
+        let old = crate::parse_script(text, lower)
+            .unwrap_or_else(|e| panic!("backend must parse parity script {text:?}: {e}"));
+        let toks = crate::tok::lex_str(text).expect("string lex must succeed");
+        let new = parse_tokens(&toks, lower)
+            .unwrap_or_else(|e| panic!("token path must parse {text:?}: {e}"));
+        assert_eq!(new, old, "token/string-lex mismatch for {text:?}");
+        #[cfg(feature = "proc-macro-api")]
+        {
+            let ts: proc_macro2::TokenStream = text.parse().expect("must tokenize");
+            let toks = crate::tok::lex_tokens(&ts).expect("token lex must succeed");
+            let new = parse_tokens(&toks, lower).expect("token path must parse token script");
+            assert_eq!(new, old, "v2/token-lex mismatch for {text:?}");
+        }
     }
-}
 
-/// Replace a fragmented block head error with a readable inner diagnostic
-/// (issue #215). The caller has already verified a `{` token on the head
-/// line, so a missing opener cannot misattribute here, and only failures
-/// past the head line refine, which keeps single-line diagnostics
-/// byte-identical. The message names the block and its opener line; the
-/// full pest expected set stays attached as structured data instead of
-/// leaking grammar rule names into user-facing text.
-fn refine_fragmented_block_error(
-    input: &str,
-    start: usize,
-    name: &str,
-    head_line: usize,
-    step_index: Option<usize>,
-    outer: ParseError,
-) -> ParseError {
-    if head_line == 0 || start >= input.len() {
-        return outer;
+    /// String-path-only oracle for shapes `rustc` cannot carry at all
+    /// (lifetime-like quotes). The backend must still agree there.
+    fn assert_parity_string_only(text: &str) {
+        let old = crate::parse_script(text, lower)
+            .unwrap_or_else(|e| panic!("backend must parse parity script {text:?}: {e}"));
+        let toks = crate::tok::lex_str(text).expect("string lex must succeed");
+        let new = parse_tokens(&toks, lower)
+            .unwrap_or_else(|e| panic!("token path must parse {text:?}: {e}"));
+        assert_eq!(new, old, "token/string-lex mismatch for {text:?}");
     }
-    let Some(candidates) = block_fragment_candidates(name) else {
-        return outer;
-    };
-    let tail = &input[start..];
-    let mut best: Option<(usize, usize, usize, Vec<String>)> = None;
-    for rule in candidates {
-        match LanguageParser::parse(*rule, tail) {
-            Ok(mut pairs) => {
-                if pairs
-                    .next()
-                    .is_some_and(|pair| pair.as_span().end() == tail.len())
-                {
-                    return outer;
-                }
+
+    #[test]
+    fn token_and_string_paths_agree_on_wrappers() {
+        // Single-command wrappers, io-blocks, await/cancel,
+        // LET wrapper forms — three-way agreement per script.
+        for text in [
+            "WITH_IO [stdout=$p] ECHO hi",
+            "WITH_IO [stdin=$p] ECHO hi",
+            "WITH_IO [stdin] ECHO hi",
+            "WITH_IO [stdout] ECHO hi",
+            "WITH_IO [stdin=$p, stdout=$q] ECHO hi",
+            "WITH_IO [stdin=$p, stdin=$q] ECHO hi",
+            "WITH_IO [tty] RUN echo hi",
+            "WITH_IO [tty, rows=40, cols=100] RUN echo hi",
+            "WITH_IO [rows=40, cols=100, tty] RUN echo hi",
+            "WITH_IO [stdin =$p] ECHO hi",
+            "WITH_IO [stdin= $p] ECHO hi",
+            "WITH_IO [ stdin=$p ] ECHO hi",
+            "WITH_IO [\nstdin=$p\n] ECHO hi",
+            "WITH_IO [stdin=$p\n, stdout=$q] ECHO hi",
+            "WITH_IO [stdout=$p] ASYNC ECHO hi",
+            "WITH_IO [stdin=$p] WITH_IO [stderr=$e] ECHO hi",
+            "WITH_IO [stdin=$p] TIMEOUT 5s ECHO hi",
+            "WITH_IO [stdin=$p] ISOLATED ECHO hi",
+            "WITH_IO [stdin=$p] CANCEL $t",
+            "WITH_IO [stdin=$p] CANCEL $t ECHO bye",
+            "WITH_IO [stdin=$p] { ECHO hi }",
+            "WITH_IO [stdin=$p]\n{ ECHO hi }",
+            "WITH_IO [stdin=$p]; { ECHO hi }",
+            "WITH_IO [stdin=$p]{ ECHO hi }",
+            "WITH_IO [stdin=$p] { ECHO a\nECHO b }",
+            "WITH_IO [stdin=$p] { ECHO hi } ECHO bye",
+            "WITH_IO [rows=40] { ECHO hi }",
+            "WITH_IO [tty] { ECHO hi }",
+            "WITH_IO [stdin=$p] { WITH_IO [stderr=$e] ECHO hi }",
+            "TIMEOUT 10s ECHO hi",
+            "TIMEOUT 10 ECHO hi",
+            "TIMEOUT 500ms ECHO hi",
+            "TIMEOUT 5m ECHO hi",
+            "TIMEOUT 2h ECHO hi",
+            "TIMEOUT $d ECHO hi",
+            "TIMEOUT \"10s\" ECHO hi",
+            "TIMEOUT \"30 s\" ECHO hi",
+            "TIMEOUT {{ $d }} ECHO hi",
+            "TIMEOUT 10s AWAIT $t",
+            "TIMEOUT 10s CANCEL $t",
+            "TIMEOUT 10s AWAIT $t ECHO bye",
+            "TIMEOUT 10s CANCEL $t ECHO bye",
+            "TIMEOUT 10s { ECHO hi }",
+            "TIMEOUT 10s {\nECHO hi\n}",
+            "TIMEOUT 10s { ECHO hi } ECHO bye",
+            "TIMEOUT 10s { ECHO hi } TIMEOUT 5s ECHO bye",
+            "TIMEOUT 10s TIMEOUT 5s ECHO hi",
+            "TIMEOUT 10s { ECHO a\nECHO b }",
+            "TIMEOUT 10s ECHO hi extra",
+            "ISOLATED ECHO hi",
+            "ISOLATED { ECHO hi }",
+            "ISOLATED { ECHO hi } ECHO bye",
+            "ISOLATED AWAIT $t",
+            "ISOLATED INHERIT_ENV [M]",
+            "ISOLATED { INHERIT_ENV [M] }",
+            "ISOLATED { INHERIT_ENV [MODE]\nECHO hi }",
+            "ASYNC ECHO hi",
+            "ASYNC { ECHO hi }",
+            "ASYNC{ECHO hi}",
+            "ASYNC { ECHO a\nECHO b }",
+            "ASYNC { ECHO hi } ECHO bye",
+            "ASYNC CANCEL $t",
+            "ASYNC CANCEL $t ECHO bye",
+            "AWAIT $t",
+            "AWAIT$t",
+            "AWAIT $ t",
+            "AWAIT $T",
+            "AWAIT $t2",
+            "AWAIT $_t",
+            "CANCEL $t",
+            "CANCEL$t",
+            "CANCEL $ t",
+            "AWAIT $t ECHO bye",
+            "CANCEL $t ECHO bye",
+            "AWAIT $t AWAIT $u",
+            "AWAIT $t\nECHO bye",
+            "LET $t: HANDLE = ASYNC ECHO hi",
+            "LET $t: HANDLE = ASYNC { ECHO hi }",
+            "LET $t: HANDLE = ASYNC { ECHO hi } ECHO bye",
+            "LET $a: STRING = ASYNC ECHO hi",
+            "LET $t: HANDLE = ASYNC { WITH_IO [stdin=$p] ECHO hi }",
+            "LET $w: STRING = WITH_IO [stdin=$p] ASYNC ECHO hi",
+            "LET $w: HANDLE = WITH_IO [stdin=$p] ASYNC ECHO hi",
+            "LET $w: HANDLE = WITH_IO [stdin=$p] ASYNC { ECHO hi }",
+            "LET $w: HANDLE = WITH_IO [stdin=$p] ASYNC { ECHO hi } ECHO bye",
+            "LET $x: STRING = WITH_IO [stdin=$p] ECHO hi",
+            "LET $x: STRING = WITH_IO [stdin=$p] TIMEOUT 5s ECHO hi",
+            "LET $x: STRING = TIMEOUT 10s ECHO hi",
+            "LET $x: STRING = TIMEOUT 10s { ECHO hi }",
+            "LET $x: STRING = TIMEOUT 10s ECHO hi ECHO bye",
+            "LET $o: STRING = AWAIT $t",
+            "LET $p: PIPE ECHO bye",
+            "TIMEOUT 10s WITH_IO [stdin=$p]",
+            "TIMEOUT 10s WITH_IO [stdin=$p]ECHO hi",
+            "ISOLATED INHERIT_ENV [A, B]",
+            "ISOLATED INHERIT_ENV [A-B]",
+            "TIMEOUT 10s { [os:linux] ECHO hi }",
+            "ASYNC { [os:linux] ECHO hi }",
+            "ISOLATED { [os:linux] ECHO hi }",
+            "[os:linux] WITH_IO [stdin=$p]\n{ ECHO hi }",
+            "LET $x: INT = 1 ECHO bye",
+            "CANCEL $t LET $x: INT = 1",
+            "CANCEL $t $x = 1",
+            "CANCEL $t RETURN \"hi\"",
+            "TIMEOUT 10s { ECHO hi } LET $x: INT = 1",
+            "RUN [\"a\"] ECHO bye",
+            "[os:linux] AWAIT $t",
+            "[os:linux] TIMEOUT 10s { ECHO hi } ECHO bye",
+            "[os:linux] ASYNC CANCEL $t ECHO bye",
+            "[os:linux] WITH_IO [stdin=$p] { [os:macos] ECHO hi }",
+        ] {
+            assert_parity(text);
+        }
+    }
+
+    #[test]
+    fn token_and_string_paths_agree_on_blocks() {
+        // Slice 5: `IF`/`FOR`/`WHILE`/`FUNC` with inline and
+        // cross-newline `ELSE` chains, guard blocks (top-level and
+        // nested quirk), and multi-element trailing — three-way
+        // agreement per script.
+        for text in [
+            "IF true { ECHO hi }",
+            "IF $x { ECHO hi } ELSE { ECHO bye }",
+            "IF true { ECHO a } ELSE IF false { ECHO b } ELSE { ECHO c }",
+            "IF true{ ECHO hi }",
+            "IF true { ECHO hi } ECHO bye",
+            "IF true { ECHO hi }\nELSE { ECHO bye }",
+            "IF true { ECHO hi }\nELSE IF false { ECHO b }\nELSE { ECHO c }",
+            "IF true { ECHO hi } //c\nELSE { ECHO bye }",
+            "IF true { ECHO hi } #c\nELSE { ECHO bye }",
+            "IF true { ECHO hi }//c\nELSE { ECHO bye }",
+            "IF true { ECHO hi } /*c*/ ELSE { ECHO bye }",
+            "IF true { ECHO hi } /*c1*/ /*c2*/\nELSE { ECHO bye }",
+            "IF true { /*c*/ ECHO hi }",
+            "IF true { [os:linux] ECHO hi }",
+            "TIMEOUT 10s { IF true { ECHO hi } }",
+            "TIMEOUT 10s { IF true { ECHO hi }\nELSE { ECHO bye } }",
+            "FOR $x: INT IN [1] { ECHO hi }",
+            "FOR $k: STRING, $v: INT IN $m { ECHO hi }",
+            "FOR $k: INT IN [1] { ECHO hi }",
+            "FOR $x: INT IN [1]{ ECHO hi }",
+            "FOR $x: MAP<name: STRING> IN [1] { ECHO hi }",
+            "FOR $x: INT IN [1] { ECHO hi } ECHO bye",
+            "WHILE true { ECHO hi }",
+            "WHILE $x { ECHO hi }",
+            "WHILE true{ ECHO hi }",
+            "TIMEOUT 10s WHILE true { ECHO hi }",
+            "ASYNC WHILE true { ECHO hi }",
+            "FUNC FOO() { RETURN 1 }",
+            "FUNC FOO(){ RETURN 1 }",
+            "FUNC FOO($x: INT) { RETURN $x }",
+            "FUNC FOO($x: INT, $y: STRING) { RETURN $x }",
+            "FUNC FOO() { FUNC FOO() { RETURN 1 } }",
+            "FUNC FOO() { RETURN 1 }\nFUNC BAR() { FOO() }\nBAR()",
+            "TYPE PERSON = MAP<name: STRING>",
+            "TYPE A=B",
+            "TYPE A = B | C",
+            "TYPE A = B\nTYPE A = C",
+            "INHERIT_ENV [A]\nECHO hi",
+            "[os:linux] INHERIT_ENV [M]",
+            "INHERIT_ENV [A]\nINHERIT_ENV [B]\nECHO hi",
+            "ISOLATED INHERIT_ENV [M]",
+            "ISOLATED { INHERIT_ENV [M] }",
+            "ISOLATED INHERIT_ENV [A, B]",
+            "ISOLATED INHERIT_ENV [A-B]",
+            "REMOTE prod { ECHO hi }",
+            "REMOTE prod [$v] { ECHO hi }",
+            "REMOTE prod [$v, env:E] { ECHO hi }",
+            "REMOTE prod [] { ECHO hi }",
+            "REMOTE prod[$v] { ECHO hi }",
+            "REMOTE prod [$v]{ ECHO hi }",
+            "REMOTE prod{ ECHO hi }",
+            "REMOTE  prod  { ECHO hi }",
+            "REMOTE prod [$v, $v] { ECHO hi }",
+            "REMOTE prod { ECHO hi } ECHO bye",
+            "TIMEOUT 10s REMOTE prod { ECHO hi }",
+            "ASYNC REMOTE prod [$v] { ECHO hi }",
+            "[os:linux] { ECHO hi }",
+            "[os:linux]\n{ ECHO hi }",
+            "[os:linux] { [os:macos] ECHO hi }",
+            "[os:linux] { [os:macos] ECHO hi\nECHO bye }",
+            "[os:linux] { [os:macos] { ECHO hi } }",
+            "TIMEOUT 10s { [os:linux] { [os:macos] ECHO hi } }",
+            "TIMEOUT 10s { [os:linux] [os:windows] { ECHO hi } }",
+            "TIMEOUT 10s { [os:linux] { ECHO hi } ECHO bye }",
+            "LET $x: INT = 1 ECHO bye",
+            "BREAK",
+            "CONTINUE",
+            "BREAK ECHO hi",
+            "FOR $x: INT IN [1] { BREAK }",
+            "LET $b: STRING = { RETURN \"hi\" }",
+            "ECHO { RETURN \"hi\" }",
+            "RUN [{ RETURN \"hi\" }]",
+            "[not(env:FOO)] WRITE x",
+            "[\nnot(env:FOO)\n] WRITE x",
+            "WRITE env.txt \"{{ env:GREETING }}\"",
+            "CANCEL $t LET $x: INT = 1",
+            "RUN [\"a\"] ECHO bye",
+        ] {
+            assert_parity(text);
+        }
+    }
+
+    #[test]
+    fn token_and_string_paths_agree_on_flat_commands() {
+        for text in [
+            "ECHO hi",
+            "ECHO hi\nWRITE x out",
+            "WRITE x",
+            "ECHO \"quoted\" unquoted",
+            "ENV COVERAGE=covered",
+            "ECHO a; ECHO b",
+            "// comment\nECHO hi",
+            "ECHO 1.0.0 --flag a/b",
+            "ECHO $x",
+            "\n\nECHO hi\n\n",
+        ] {
+            assert_parity(text);
+        }
+    }
+
+    #[cfg(feature = "proc-macro-api")]
+    #[test]
+    fn backslash_outside_strings_is_string_only() {
+        // `rustc` rejects a bare `\`, so unquoted backslash escapes
+        // cannot cross `TokenStream` (same exclusion class as raw-`"`
+        // blocks): the string lexer keeps them, the token path fails to
+        // tokenize before v2 is ever reached.
+        let toks = crate::tok::lex_str("ECHO a\\nb").expect("string lex keeps escapes");
+        let old = crate::parse_script("ECHO a\\nb", lower).expect("string path parses it");
+        assert_eq!(
+            parse_tokens(&toks, lower).expect("token path parses it"),
+            old
+        );
+        assert!("ECHO a\\nb".parse::<proc_macro2::TokenStream>().is_err());
+    }
+
+    #[test]
+    fn token_and_string_paths_agree_on_guarded_commands() {
+        for text in [
+            "[env:X] ECHO hi",
+            "[env:A] [os:linux] ECHO hi",
+            "[os:macos] WRITE x",
+            "[not(os:windows)] WRITE f x",
+            "[any(os:macos, os:linux)] ECHO hi",
+            "[all(env:A, os:linux)] ECHO hi",
+            "[eq(env:K, v)] ECHO hi",
+            "[ne(env:K, v)] ECHO hi",
+            "[bool:true] ECHO hi",
+            "[arch:arm] ECHO hi",
+            "[family:unix] ECHO hi",
+            "[(os:linux)] ECHO hi",
+            "[env:A, os:linux] ECHO hi",
+            "WRITE x\n[env:X] ECHO hi",
+            "[env:K] ECHO $x",
+            "[__OXDOCK_INJECT_1__] ECHO hi",
+            "[eq(env:K, \"a b\")] ECHO hi",
+            "[\nenv:X\n] ECHO hi",
+            // In-body brackets are raw text split on whitespace (probed
+            // parity: `[a, b]` is args `"[a,"` + `"b]"`, quotes kept).
+            "ECHO [a, b] hi",
+            "WRITE f [env:X]",
+            "ECHO [env:X] hi",
+            "WRITE f [\"a b\"]",
+            "ECHO foo[bar]baz",
+            "ECHO [a ]",
+            "ECHO [ a]",
+            "WRITE out x [env:X]",
+        ] {
+            assert_parity(text);
+        }
+        // `rustc` lexes `'a` as a lifetime start and rejects the
+        // space: string-path-only by construction.
+        assert_parity_string_only("ECHO ['a b']");
+    }
+
+    #[test]
+    fn token_and_string_paths_agree_on_calls_and_exact_args() {
+        use crate::ast::{ModuleFuncs, ModuleTable};
+        use std::collections::{HashMap, HashSet};
+        let std_table = || ModuleTable {
+            modules: HashMap::from([(
+                "STD".to_string(),
+                Some(ModuleFuncs {
+                    functions: HashSet::from(["TEXT_LENGTH".to_string()]),
+                }),
+            )]),
+        };
+        fn lower_fn(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
+            test_lower_mock::lower(name, args)
+        }
+        // One table for both pathways: STD exports TEXT_LENGTH.
+        // Rebuilt per case (parse-time only, keeps borrows local).
+        for text in [
+            "LET $n: INT = STD::TEXT_LENGTH(\"hi\")",
+            "STD::TEXT_LENGTH(\"hi\")",
+            "LET $n: INT = STD::TEXT_LENGTH(\"a\", \"b\")",
+            "LET $s: STRING = INSPECT($x)",
+            "INSPECT($x)",
+            "LET $x: STRING = ECHO hi",
+            "LET $t: STRING = WRITE x",
+            "LET $o: STRING = RUN echo hi",
+            "RUN [\"echo\", \"hi\"]",
+            "RUN echo [a]",
+            "LET $r: STRING = RUN [\"echo\"]",
+            "ECHO K=v",
+            "ECHO K = v",
+            "ECHO K=a b",
+            "ECHO K=a, b",
+            "ECHO K=\"a b\"",
+            "ECHO K=$x",
+            "ECHO K=",
+            "ECHO a = = b",
+            "WRITE f K=v",
+            "ECHO $a + $b",
+            "ECHO $a==$b",
+            "ECHO a $x b",
+            "ECHO 5 + 3",
+            "WRITE f ( \"hi\" )",
+            "ECHO FOO(\"a\")",
+            "ECHO [a, b] hi",
+            "ECHO {{x}}",
+            "ECHO {{ $x }}",
+            "ECHO $x=K",
+            "ECHO a$x",
+            "ECHO a$(x)",
+            "ECHO K=$x tail",
+            "EXPAND K1=$x K2=$y",
+            "EXPAND a",
+            "ENV K = v",
+            "COPY a b",
+            "ECHO foo[bar]baz",
+            "LET $x: STRING = FOOBAR",
+            "STD::TEXT_LENGTH(\"hi\") ECHO bye",
+            "LET $n: INT = STD::TEXT_LENGTH(\"a\") ECHO bye",
+            "TIMEOUT 10s STD::TEXT_LENGTH(\"hi\")",
+            "TIMEOUT 10s STD::TEXT_LENGTH(\"hi\") ECHO bye",
+            "LET $n: INT = STD::TEXT_LENGTH(\"a\")STD::TEXT_LENGTH(\"b\")",
+        ] {
+            let table = std_table();
+            let old =
+                crate::parse_script_with_modules(text, lower_fn, HashSet::new(), table.clone())
+                    .unwrap_or_else(|e| panic!("backend must parse parity script {text:?}: {e}"));
+            let reserved = HashSet::new();
+            let ctx = ParseCtx::empty(&lower_fn, &table, &reserved);
+            let toks = crate::tok::lex_str(text).expect("string lex must succeed");
+            let new = parse_tokens_with_ctx(&toks, &ctx)
+                .unwrap_or_else(|e| panic!("token path must parse {text:?}: {e}"));
+            assert_eq!(new, old, "token/string-lex mismatch for {text:?}");
+            #[cfg(feature = "proc-macro-api")]
+            {
+                let ts: proc_macro2::TokenStream = text.parse().expect("must tokenize");
+                let toks = crate::tok::lex_tokens(&ts).expect("token lex must succeed");
+                let new = parse_tokens_with_ctx(&toks, &ctx)
+                    .unwrap_or_else(|e| panic!("token path must parse token {text:?}: {e}"));
+                assert_eq!(new, old, "v2/token-lex mismatch for {text:?}");
             }
-            Err(pest_err) => {
-                let (rel_line, rel_start, rel_end) =
-                    crate::lexer::pest_span_parts(&pest_err.line_col);
-                if rel_line == 1 {
+        }
+    }
+
+    #[test]
+    fn token_and_string_paths_agree_on_let_set_return() {
+        for text in [
+            "LET $x: INT = 1",
+            "LET $s: STRING = \"hi\"",
+            "LET $b: BOOL = true",
+            "LET $f: FLOAT = 1.5",
+            "LET $p: PIPE",
+            "LET $l: LIST<STRING> = [\"a\", \"b\"]",
+            "LET $e: LIST<STRING> = []",
+            "LET $m: MAP = {k: 1}",
+            "LET $m2: MAP = {\"a b\": 2, k: [1, 2]}",
+            "LET $n: INT = $a + $b",
+            "LET $c: BOOL = ($a == 3) && ($b == 4)",
+            "LET $g: BOOL = !$ok",
+            "LET $nn: BOOL = true && false",
+            "LET $e2: STRING = env:HOME",
+            "LET $k: STRING = $a.b.c",
+            "LET $u: INT = -5",
+            "LET $v: INT = 9223372036854775807",
+            "LET $min: INT = -9223372036854775808",
+            "LET $w: INT = 1_000",
+            "LET $z: STRING = a/b",
+            "LET $d: STRING = -f",
+            "LET $t: STRING = 30s",
+            "LET $q: STRING = \"\"\"hi\"\"\"",
+            "LET $f2: FLOAT = 2 * -3",
+            "LET $o: BOOL = 2 + 3 > 4",
+            "LET $l2: LIST< MAP > = []",
+            "LET $a1: INT = 1 + 2",
+            "LET $s1: INT = 10 - 4 - 3",
+            "LET $m1: INT = 2 * 3 + 4",
+            "LET $x1: BOOL = 1 < 2 == true",
+            "LET $or: BOOL = $a || $b",
+            "LET $dbl: BOOL = !!$x",
+            "LET $ver: STRING = 1.0.0",
+            "LET $dash: STRING = a-b",
+            "LET $div: INT = 4 / 2",
+            "LET $bad: INT = 1__0 + 0",
+            "LET $strdiv: STRING = 4/2",
+            "LET $sp: INT = $a - $b",
+            "$x = 1",
+            "$x = $a + 1",
+            "RETURN 1",
+            "RETURN",
+            "RETURN $x",
+            "[env:X] LET $x: INT = 1",
+            "[os:linux] $x = 2",
+        ] {
+            assert_parity(text);
+        }
+    }
+
+    #[test]
+    fn malformed_shapes_fail_on_both_paths() {
+        // Malformed shapes fail on both lexers (messages may differ;
+        // success/failure must agree). Unbalanced groups fail even
+        // earlier, at lex time: both layers reject, which is what the
+        // oracle pins.
+        for text in [
+            "[a] ECHO hi",
+            "[os:atari] ECHO hi",
+            "[foo:bar] ECHO hi",
+            "[any(os:linux)] ECHO hi",
+            "[all()] ECHO hi",
+            "[env:] ECHO hi",
+            "[eq(env:K)] ECHO hi",
+            "[not] ECHO hi",
+            "ECHO [a;b]",
+            "ECHO (a;b)",
+            "ECHO a;b",
+            "LET $x = 1",
+            "LET $s: STRING",
+            "LET $x: INT = 1 2",
+            "LET $x: INT = (1",
+            "LET $x: INT = 9223372036854775808",
+            "$x =",
+            "RETURN (",
+            "[env:X]",
+            "LET $x: INT = $a == $b == $c",
+            "LET $x: BOOL = $a < $b < $c",
+            "LET $bs: STRING = a\\nb",
+            "FOO(\"a\")",
+            "FOO (\"a\")",
+            "ECHO(\"hi\")",
+            "RUN [a] extra",
+            "RUN[\"a\"]",
+            "TIMEOUT 10s RUN[\"a\"]",
+            "LET $r: STRING = RUN[\"a\"]",
+            "LET $e: STRING = ECHO",
+            "ENV A=1 B=2",
+            "EXPAND \"a b\" c",
+            "ECHO {a}",
+            "ECHO K=${x}",
+            "[!env:A==1] RUN echo no",
+            "run echo hi",
+            "LET $x: STRING = AWAIT",
+            "LET $o: STRING = CANCEL $t",
+            "LET $x: STRING = ASYNC",
+            "LET $x: STRING = WITH_IO",
+            "LET $x: STRING = TIMEOUT",
+            "LET $x: STRING = ISOLATED",
+            "LET $x: STRING = ISOLATED ECHO hi",
+            "COPY A=1",
+            "WITH_IO [rows=40] RUN echo hi",
+            "WITH_IO [tty] ECHO hi",
+            "WITH_IO [tty, stderr=$p] RUN echo hi",
+            "WITH_IO [tty=$p] RUN echo hi",
+            "WITH_IO [cols=0] RUN echo hi",
+            "WITH_IO [cols=65536] RUN echo hi",
+            "WITH_IO [] ECHO hi",
+            "WITH_IO [stdin=$p,] ECHO hi",
+            "WITH_IO stdin=$p ECHO hi",
+            "WITH_IO [STDIN=$p] ECHO hi",
+            "WITH_IO [rows] RUN echo hi",
+            "WITH_IO",
+            "WITH_IO [stdout=$p]",
+            "WITH_IO [stdin=$p]\n[os:linux] { ECHO hi }",
+            "WITH_IO [stdin=$p] { }",
+            "WITH_IO[stdin=$p] ECHO hi",
+            "WITH_IO [stdin=$p]ECHO hi",
+            "WITH_IO [stdin=$p] {{ $x }}",
+            "ASYNC WITH_IO [stdout=$p] ECHO hi",
+            "WITH_IO [stdin=$p] AWAIT $t",
+            "ASYNC AWAIT $t",
+            "WITH_IO [stdin=$p] RETURN \"hi\"",
+            "ASYNC RETURN \"hi\"",
+            "TIMEOUT 10s RETURN \"hi\"",
+            "TIMEOUT banana ECHO hi",
+            "TIMEOUT 10ss ECHO hi",
+            "TIMEOUT 10 s ECHO hi",
+            "TIMEOUT -5s ECHO hi",
+            "TIMEOUT 0s ECHO hi",
+            "TIMEOUT",
+            "TIMEOUT 10s",
+            "TIMEOUT { ECHO hi }",
+            "TIMEOUT \"10s\"",
+            "TIMEOUT 10s{ECHO hi}",
+            "TIMEOUT 10sECHO hi",
+            "TIMEOUT 10s {{ $d }}",
+            "TIMEOUT 10s { $d }",
+            "TIMEOUT { $d } ECHO hi",
+            "ASYNC",
+            "ISOLATED",
+            "ISOLATED{ECHO hi}",
+            "AWAIT",
+            "CANCEL",
+            "AWAIT t",
+            "AWAIT $",
+            "AWAIT $t extra",
+            "CANCEL $t extra",
+            "TIMEOUT 5s INHERIT_ENV [M]",
+            "TIMEOUT 5s { INHERIT_ENV [M] }",
+            "ASYNC { INHERIT_ENV [M] }",
+            "LET $x: STRING = INHERIT_ENV [M]",
+            "TIMEOUT 10s WITH_IO [stdin=$p] { ECHO hi }",
+            "ISOLATED WITH_IO [stdin=$p] { ECHO hi }",
+            "TIMEOUT 10s AWAIT $ t",
+            "LET $o: STRING = AWAIT $ t",
+            "ISOLATED AWAIT $ t",
+            "WITH_IO [stdin=$p] CANCEL $ t",
+            "LET $ x: INT = 1",
+            "LET $x: STRING = WITH_IO [stdin=$p] { ECHO hi }",
+            "LET $x: STRING = WITH_IO [stdin=$p] ASYNC",
+            "LET $w: HANDLE = WITH_IO [stdin=$p] ASYNC { ECHO a\nECHO b }",
+            "LET $x: STRING = WITH_IO [stdout=$p] ECHO hi",
+            "LET $x: STRING = TIMEOUT 10s AWAIT $t",
+            "LET $x: STRING = CANCEL $t",
+            "LET $x: STRING = ASYNC",
+            "LET $x: STRING = WITH_IO",
+            "TIMEOUT 10s LET $x: INT = 1",
+            "LET $x: STRING = FOO bar",
+            "LET(\"a\")",
+            "AWAIT($t)",
+            "CANCEL($t)",
+            "TIMEOUT(\"10s\") ECHO hi",
+            "RETURN ECHO bye",
+        ] {
+            match crate::tok::lex_str(text) {
+                Err(_) => {
+                    assert!(
+                        crate::parse_script(text, lower).is_err(),
+                        "backend must also reject lex-broken input: {text:?}"
+                    );
                     continue;
                 }
-                let (_, expected) = crate::lexer::pest_variant_parts(&pest_err.variant);
-                let abs_line = head_line + rel_line - 1;
-                let deeper = match &best {
-                    None => true,
-                    Some((best_line, best_col, _, _)) => {
-                        (abs_line, rel_start) > (*best_line, *best_col)
-                    }
-                };
-                if deeper {
-                    best = Some((abs_line, rel_start, rel_end, expected));
+                Ok(toks) => {
+                    assert!(
+                        parse_tokens(&toks, lower).is_err(),
+                        "v2 must explicitly reject (not silently drift): {text:?}"
+                    );
                 }
             }
+            assert!(
+                crate::parse_script(text, lower).is_err(),
+                "backend must also reject (oracle agreement): {text:?}"
+            );
         }
+        // No deferred shapes remain: every statement-level block and
+        // inline-block expression parses natively.
     }
-    let Some((abs_line, abs_start, abs_end, expected)) = best else {
-        return outer;
-    };
-    // One short-circuiting pass: a position past the final line is the
-    // empty terminal line of a trailing newline, rendered exactly like
-    // top-level end-of-input diagnostics. That position means the input
-    // ended inside the block, so the block is unclosed; a failure on a
-    // content line is an inner syntax error. Either way the header stays
-    // human: block keyword plus opener line. The pest expected set rides
-    // along as structured data only.
-    let found = input.lines().nth(abs_line.saturating_sub(1));
-    let terminal = found.is_none();
-    let eff_text = found.unwrap_or("").to_string();
-    let header = if terminal {
-        format!("unclosed `{name}` block opened on line {head_line}")
-    } else {
-        format!("syntax error in `{name}` block opened on line {head_line}")
-    };
-    crate::lexer::pest_error_at(&header, expected, abs_line, abs_start, abs_end, eff_text)
-        .with_step(step_index.unwrap_or(0))
-}
-
-fn merge_bindings(defaults: &[IoBinding], overrides: &[IoBinding]) -> Vec<IoBinding> {
-    let mut set = IoBindingSet::default();
-    for binding in defaults {
-        set.insert(binding.clone());
-    }
-    for binding in overrides {
-        set.insert(binding.clone());
-    }
-    set.into_vec()
-}
-
-/// Reject `COPY --from-host` / `--to-host` outside `REMOTE` bodies.
-/// Transfer declarations only mean something where a session hoists them;
-/// anywhere else they would silently behave as local copies.
-fn validate_remote_copy_placement(steps: &[Step], ctx: &SpanContext) -> ParseResult<()> {
-    fn visit_kind(kind: &StepKind, in_remote: bool, ctx: &SpanContext) -> ParseResult<()> {
-        if let StepKind::Copy {
-            from_host, to_host, ..
-        } = kind
-            && (*from_host || *to_host)
-            && !in_remote
-        {
-            return Err(ParseError::structural(
-                "copy",
-                "COPY --from-host and --to-host are only valid inside a REMOTE block".to_string(),
-                ctx,
-            ));
-        }
-        let child_remote = in_remote || matches!(kind, StepKind::RemoteBlock { .. });
-        let mut result = Ok(());
-        kind.walk_child_kinds(&mut |child| {
-            if result.is_ok() {
-                result = visit_kind(child, child_remote, ctx);
-            }
-        });
-        result
-    }
-    for step in steps {
-        visit_kind(&step.kind, false, ctx)?;
-    }
-    Ok(())
-}
-
-fn contains_inherit_env(kind: &StepKind) -> bool {
-    if matches!(kind, StepKind::InheritEnv { .. }) {
-        return true;
-    }
-    let mut found = false;
-    kind.walk_child_kinds(&mut |child| {
-        found = found || contains_inherit_env(child);
-    });
-    found
-}
-
-/// True when bindings reroute stdout into a named pipe. A `LET`-capture owns
-/// the step's stdout, so combining the two is a parse error.
-fn has_stdout_pipe(bindings: &[IoBinding]) -> bool {
-    bindings
-        .iter()
-        .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
-}
-
-/// Reject async machinery inside a capture body: background tasks are
-/// captured via `LET $o: STRING = AWAIT $t`, never inline.
-fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
-    let bad = match kind {
-        StepKind::AsyncBlock { .. }
-        | StepKind::AssignAsync { .. }
-        | StepKind::Await { .. }
-        | StepKind::AwaitCapture { .. }
-        | StepKind::Cancel { .. } => true,
-        _ => {
-            let mut bad = false;
-            kind.walk_child_kinds(&mut |child| {
-                bad = bad || reject_async_in_capture(ctx, child).is_err();
-            });
-            bad
-        }
-    };
-    if bad {
-        return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
-    }
-    Ok(())
-}
-
-/// Reject `WITH_IO [stdout=$var]` anywhere inside a capture body: the
-/// capture sink owns stdout.
-fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
-    if let StepKind::WithIo { bindings, .. } = kind
-        && has_stdout_pipe(bindings)
-    {
-        return Err(ParseError::structural(
-            "let",
-            "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
-                .to_string(),
-            ctx,
-        ));
-    }
-    let mut result = Ok(());
-    kind.walk_child_kinds(&mut |child| {
-        if result.is_ok() {
-            result = reject_pipe_stdout_in_capture(ctx, child);
-        }
-    });
-    result
-}
-
-/// Re-parse raw RHS text as an expression (fallback when the `LET` RHS lead
-/// token is not a known command). Requires the expression to consume the
-/// full text so `LET $x: STRING = FOO bar` stays an error instead of binding `FOO`.
-fn parse_expr_str(ctx: &SpanContext, lctx: &LowerCtx, text: &str) -> ParseResult<Expr> {
-    use pest::Parser;
-    let mut pairs = lexer::LanguageParser::parse(Rule::expr, text).map_err(parse_pest_error)?;
-    let pair = pairs.next().ok_or_else(|| {
-        ParseError::validation("LET", "LET requires an expression".to_string(), ctx)
-    })?;
-    if pair.as_span().end() != text.len() {
-        return Err(ParseError::structural(
-            "expr",
-            format!("invalid LET expression {text:?}"),
-            ctx,
-        ));
-    }
-    parse_expr(ctx, lctx, pair)
-}
-
-fn parse_structural_command_with_lower(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let kind = match pair.as_rule() {
-        Rule::inherit_env_command => {
-            let mut keys = Vec::new();
-            for inner in pair.into_inner() {
-                if inner.as_rule() == Rule::inherit_list {
-                    for key in inner.into_inner() {
-                        if key.as_rule() == Rule::env_key {
-                            keys.push(key.as_str().trim().to_string());
-                        }
-                    }
-                } else if inner.as_rule() == Rule::env_key {
-                    keys.push(inner.as_str().trim().to_string());
-                }
-            }
-            StepKind::InheritEnv { keys }
-        }
-        Rule::with_io_command => {
-            let mut bindings = Vec::new();
-            let mut cmd = None;
-            for inner in pair.into_inner() {
-                match inner.as_rule() {
-                    Rule::io_flags => {
-                        for flag in inner.into_inner() {
-                            if flag.as_rule() == Rule::io_binding {
-                                bindings.push(parse_io_binding(ctx, flag)?);
-                            }
-                        }
-                    }
-                    Rule::with_io_command => {
-                        cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lctx,
-                        )?));
-                    }
-                    Rule::inherit_env_command => {
-                        cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lctx,
-                        )?));
-                    }
-                    Rule::async_statement | Rule::async_statement_block => {
-                        cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lctx,
-                        )?));
-                    }
-                    Rule::timeout_statement | Rule::cancel_statement => {
-                        cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lctx,
-                        )?));
-                    }
-                    Rule::isolated_statement => {
-                        cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lctx,
-                        )?));
-                    }
-                    Rule::remote_statement => {
-                        cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lctx,
-                        )?));
-                    }
-                    Rule::call_statement | Rule::while_statement => {
-                        cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lctx,
-                        )?));
-                    }
-                    Rule::func_def
-                    | Rule::return_statement
-                    | Rule::break_statement
-                    | Rule::continue_statement => {
-                        return Err(ParseError::structural(
-                            "parser",
-                            format!(
-                                "WITH_IO cannot wrap {:?}; place it around a command or block instead",
-                                inner.as_rule()
-                            ),
-                            &span,
-                        ));
-                    }
-                    Rule::instruction | Rule::instruction_inner => {
-                        cmd = Some(Box::new(lower_instruction_pair(ctx, inner, lctx)?));
-                    }
-                    Rule::run_exec_statement | Rule::run_exec_inner => {
-                        cmd = Some(Box::new(lower_run_exec_pair(ctx, inner, lctx)?));
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(cmd) = cmd {
-                check_tty_wrapping(&bindings, Some(cmd.as_ref()), &span)?;
-                StepKind::WithIo { bindings, cmd }
-            } else {
-                StepKind::WithIoBlock { bindings }
-            }
-        }
-        Rule::for_statement => parse_for_statement_from_pair(ctx, pair, lctx)?,
-        Rule::while_statement => parse_while_statement_from_pair(ctx, pair, lctx)?,
-        Rule::func_def => parse_func_def_from_pair(ctx, pair, lctx)?,
-        Rule::call_statement => parse_call_statement_from_pair(ctx, lctx, pair)?,
-        Rule::return_statement => parse_return_statement_from_pair(ctx, lctx, pair)?,
-        Rule::break_statement => StepKind::Break,
-        Rule::continue_statement => StepKind::Continue,
-        Rule::let_statement => parse_let_statement_from_pair(ctx, lctx, pair)?,
-        Rule::mutate_statement => parse_mutate_statement_from_pair(ctx, lctx, pair)?,
-        Rule::let_async_statement => parse_let_async_statement_from_pair(ctx, pair, lctx)?,
-        Rule::let_capture_statement => parse_let_capture_statement_from_pair(ctx, pair, lctx)?,
-        Rule::await_statement => parse_await_statement_from_pair(ctx, pair)?,
-        Rule::cancel_statement => parse_cancel_statement_from_pair(ctx, pair)?,
-        Rule::if_statement => parse_if_statement_from_pair(ctx, pair, lctx)?,
-        Rule::async_statement => parse_async_statement_from_pair(ctx, pair, lctx)?,
-        Rule::async_statement_block => parse_async_statement_block_from_pair(ctx, pair, lctx)?,
-        Rule::timeout_statement => parse_timeout_statement_from_pair(ctx, pair, lctx)?,
-        Rule::isolated_statement => parse_isolated_statement_from_pair(ctx, pair, lctx)?,
-        Rule::remote_statement => parse_remote_statement_from_pair(ctx, pair, lctx)?,
-        Rule::type_statement => parse_type_statement_from_pair(ctx, pair)?,
-        Rule::command_inner => {
-            // command_inner = { inherit_env_command | instruction }
-            // Unwrap to the inner rule
-            let inner = pair.into_inner().next().ok_or_else(|| {
-                ParseError::structural("parser", "empty command_inner".to_string(), &span)
-            })?;
-            parse_structural_command_with_lower(ctx, inner, lctx)?
-        }
-        Rule::instruction | Rule::instruction_inner => lower_instruction_pair(ctx, pair, lctx)?,
-        Rule::run_exec_statement | Rule::run_exec_inner => lower_run_exec_pair(ctx, pair, lctx)?,
-        _ => {
-            return Err(ParseError::structural(
-                "parser",
-                format!("unexpected structural command rule: {:?}", pair.as_rule()),
-                &span,
-            ));
-        }
-    };
-    Ok(kind)
-}
-
-fn extract_instruction(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<(String, Vec<InsToken>)> {
-    let span = refine_span(ctx, &pair);
-    let mut name = None;
-    let mut args = Vec::new();
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::command_name => {
-                name = Some(inner.as_str().to_string());
-            }
-            Rule::argument => {
-                args.extend(
-                    parse_argument(ctx, lctx, inner)?
-                        .into_iter()
-                        .map(InsToken::Pos),
-                );
-            }
-            Rule::assignment => {
-                let (key, value) = parse_assignment(ctx, lctx, inner)?;
-                args.push(InsToken::Assign(key, value));
-            }
-            _ => {}
-        }
-    }
-    let name = name.ok_or_else(|| {
-        ParseError::structural(
-            "instruction",
-            "instruction missing command name".to_string(),
-            &span,
-        )
-    })?;
-    Ok((name, args))
-}
-
-/// One lowered instruction token: a positional argument, or a pre-split
-/// `KEY=value` assignment from the unified grammar rule. Assignments reach
-/// ENV/EXPAND lowerings intact; every other command sees them collapsed to
-/// canonical `key=value` text (see `lower_instruction_pair`).
-enum InsToken {
-    Pos(Arg),
-    Assign(String, Arg),
-}
-
-/// Lower one generic instruction pair: ENV/EXPAND build `StepKind` directly
-/// from pre-split assignments (never via the injected `lower`, mirroring how
-/// LET/FOR/IF bypass it); all other commands flow through `lower` with
-/// assignments in canonical text form.
-fn lower_instruction_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let (name, tokens) = extract_instruction(ctx, pair, lctx)?;
-    if name == "ENV" {
-        return lower_env_command(ctx, tokens);
-    }
-    if name == "EXPAND" {
-        return lower_expand_command(ctx, tokens);
-    }
-    let args = tokens
-        .into_iter()
-        .map(|token| match token {
-            InsToken::Pos(arg) => arg,
-            InsToken::Assign(key, value) => crate::commands::canonical_assignment_arg(&key, &value),
-        })
-        .collect();
-    (lctx.lower)(&name, args).map_err(|e| e.with_span(&span))
-}
-
-/// Lower a `run_exec` grammar pair: the PEG engine has already validated the
-/// full `RUN [...]` span, so extract the inner `list_literal` and route the
-/// structured `Expr::List` through the injected `lower` as `RUN` with one
-/// typed argument (production `lower_command` maps it to `StepKind::RunExec`;
-/// the grammar-test mock wraps it in `StepKind::Run`).
-fn lower_run_exec_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut list = None;
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::run_exec_list {
-            list = Some(parse_run_exec_list(ctx, lctx, inner)?);
-        }
-    }
-    let list = list.ok_or_else(|| {
-        ParseError::structural(
-            "run_exec",
-            "RUN exec form missing list literal".to_string(),
-            &span,
-        )
-    })?;
-    (lctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| e.with_span(&span))
-}
-
-/// Lower a `run_exec_list` pair: like `parse_list_literal` but elements are
-/// atoms only (see `run_exec_arg` in the grammar), so shell bracket content
-/// never parses here. Numeric atoms lower exactly like expression atoms
-/// (including the `i64::MIN` boundary rejection).
-fn parse_run_exec_list(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let mut items = Vec::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::run_exec_arg {
-            let item = parse_run_exec_arg(ctx, lctx, inner)?;
-            reject_boundary(ctx, &item)?;
-            items.push(item);
-        }
-    }
-    Ok(Expr::List(items))
-}
-
-fn parse_run_exec_arg(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let inner = pair.into_inner().next().ok_or_else(|| {
-        ParseError::structural("run_exec", "RUN exec argument is empty".to_string(), &span)
-    })?;
-    match inner.as_rule() {
-        Rule::parenthesized_expr => parse_expr_inner(ctx, lctx, inner.into_inner().next().unwrap()),
-        Rule::func_call => parse_func_call(ctx, lctx, inner),
-        Rule::key_path => parse_key_path(ctx, inner),
-        Rule::variable => {
-            let name = inner.as_str();
-            let name = name.strip_prefix('$').unwrap_or(name).to_string();
-            Ok(Expr::Var(name))
-        }
-        Rule::env_read => parse_env_read(ctx, inner).map(Expr::Env),
-        Rule::list_literal => parse_list_literal(ctx, lctx, inner),
-        Rule::map_literal => parse_map_literal(ctx, lctx, inner),
-        Rule::block => Ok(Expr::Block(parse_block_elements_with_lower(
-            ctx, inner, lctx,
-        )?)),
-        Rule::string_literal | Rule::quoted_string => {
-            let s = parse_quoted_string(inner)?;
-            Ok(Expr::Literal(Value::string(s)))
-        }
-        Rule::numeric_literal => parse_numeric_literal(ctx, inner),
-        Rule::bare_word => {
-            let s = inner.as_str().to_string();
-            match s.as_str() {
-                "true" => Ok(Expr::Literal(Value::bool(true))),
-                "false" => Ok(Expr::Literal(Value::bool(false))),
-                _ => Ok(Expr::Literal(Value::string(s))),
-            }
-        }
-        _ => Err(ParseError::structural(
-            "run_exec",
-            format!("unexpected RUN exec argument rule: {:?}", inner.as_rule()),
-            &span,
-        )),
-    }
-}
-
-/// Split one `assignment` pair into its key and lowered value.
-fn parse_assignment(
-    ctx: &SpanContext,
-    lctx: &LowerCtx,
-    pair: Pair<Rule>,
-) -> ParseResult<(String, Arg)> {
-    let span = refine_span(ctx, &pair);
-    let mut key = None;
-    let mut value = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::assign_key => {
-                key = Some(inner.as_str().to_string());
-            }
-            Rule::assign_value => {
-                value = Some(lower_command_value(ctx, lctx, inner)?);
-            }
-            _ => {
-                return Err(ParseError::structural(
-                    "assignment",
-                    format!("unexpected assignment rule: {:?}", inner.as_rule()),
-                    &span,
-                ));
-            }
-        }
-    }
-    Ok((
-        key.ok_or_else(|| {
-            ParseError::structural("assignment", "assignment missing key".to_string(), &span)
-        })?,
-        value.unwrap_or(Arg::String(String::new(), false)),
-    ))
-}
-
-/// Single unified value lowering: every command's free-text value flows through
-/// here on raw pest spans. Quoted bytes stay exact, lone `$var`/`$a.b`/`F()`
-/// stay typed `Arg::Expr`, and anything else becomes literal text with only
-/// `{{ }}` as the interpolation trigger. No heuristic rewriting, ever.
-fn lower_command_value(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Arg> {
-    let span = refine_span(ctx, &pair);
-    let inner = pair.into_inner().next().ok_or_else(|| {
-        ParseError::structural("assignment", "assignment value is empty".to_string(), &span)
-    })?;
-    match inner.as_rule() {
-        Rule::quoted_string => Ok(Arg::String(parse_quoted_string(inner)?, true)),
-        Rule::assign_expr => {
-            let shape = inner.into_inner().next().ok_or_else(|| {
-                ParseError::structural(
-                    "assignment",
-                    "assignment expression is empty".to_string(),
-                    &span,
-                )
-            })?;
-            match shape.as_rule() {
-                Rule::variable => Ok(Arg::Expr(Expr::Var(parse_dollar_ident(shape)))),
-                Rule::key_path => Ok(Arg::Expr(parse_key_path(ctx, shape)?)),
-                Rule::env_read => Ok(Arg::Expr(Expr::Env(parse_env_read(ctx, shape)?))),
-                Rule::func_call => Ok(Arg::Expr(parse_func_call(ctx, lctx, shape)?)),
-                other => Err(ParseError::structural(
-                    "assignment",
-                    format!("unexpected assignment expression shape: {:?}", other),
-                    &span,
-                )),
-            }
-        }
-        Rule::raw_fragments => lower_raw_fragments(ctx, inner),
-        other => Err(ParseError::structural(
-            "assignment",
-            format!("unexpected assignment value rule: {:?}", other),
-            &span,
-        )),
-    }
-}
-
-/// Assemble a bounded raw span into one literal `Arg::String`: `{{ }}` template
-/// chunks pass through verbatim for `expand_string`, quoted chunks unquote
-/// once with exact bytes, and unquoted runs collapse whitespace to single
-/// spaces (trailing/leading edges trimmed). Pure text needs no `Parts` : every
-/// fragment resolves through the same `expand_string` pass.
-fn lower_raw_fragments(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Arg> {
-    let span = refine_span(ctx, &pair);
-    let mut body = String::new();
-    for fragment in pair.into_inner() {
-        match fragment.as_rule() {
-            Rule::quoted_string => body.push_str(&parse_quoted_string(fragment)?),
-            Rule::templated_arg => body.push_str(fragment.as_str()),
-            Rule::raw_text => body.push_str(&collapse_ws(fragment.as_str())),
-            other => {
-                return Err(ParseError::structural(
-                    "assignment",
-                    format!("unexpected raw value fragment: {:?}", other),
-                    &span,
-                ));
-            }
-        }
-    }
-    Ok(Arg::String(body.trim().to_string(), false))
-}
-
-/// Collapse every whitespace run to a single space, preserving edge positions
-/// (callers trim the assembled value).
-fn collapse_ws(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_run = false;
-    for c in s.chars() {
-        if c.is_whitespace() {
-            if !in_run {
-                out.push(' ');
-                in_run = true;
-            }
-        } else {
-            out.push(c);
-            in_run = false;
-        }
-    }
-    out
-}
-
-/// Parser-direct `ENV` lowering: exactly one assignment. A lone positional
-/// holding `=` is the exotic-key fringe (keys the grammar cannot classify);
-/// anything else is a precise error instead of a silent drop.
-fn lower_env_command(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<StepKind> {
-    if tokens.is_empty() {
-        return Err(ParseError::validation(
-            "ENV",
-            "ENV requires KEY=value".to_string(),
-            ctx,
-        ));
-    }
-    match tokens.as_slice() {
-        [InsToken::Assign(key, value)] => {
-            // Same KEY=value check the ENV lower applies on the
-            // `lower_command` path, over the joined assignment form.
-            if crate::command::split_assignment(&format!("{key}={}", value.render()))
-                .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
-                .is_none()
-            {
-                return Err(ParseError::validation(
-                    "ENV",
-                    "ENV requires KEY=value format".to_string(),
-                    ctx,
-                ));
-            }
-            Ok(StepKind::Env {
-                key: key.clone(),
-                value: value.clone(),
-            })
-        }
-        [InsToken::Pos(Arg::String(text, _))] => match crate::command::split_assignment(text)
-            .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
-        {
-            Some((key, value)) => Ok(StepKind::Env { key, value }),
-            None => Err(ParseError::validation(
-                "ENV",
-                "ENV requires KEY=value format".to_string(),
-                ctx,
-            )),
-        },
-        _ => Err(ParseError::validation(
-            "ENV",
-            "ENV requires KEY=value format".to_string(),
-            ctx,
-        )),
-    }
-}
-
-/// Parser-direct `EXPAND` lowering: positional tokens are the optional path,
-/// assignments are overrides. Split quoted values can never masquerade as
-/// extra paths : tokenize time already proved they are one value.
-fn lower_expand_command(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<StepKind> {
-    let mut path = None;
-    let mut overrides = Vec::new();
-    for token in tokens {
-        match token {
-            InsToken::Assign(key, value) => {
-                if key.is_empty() {
-                    return Err(ParseError::validation(
-                        "EXPAND",
-                        "EXPAND requires KEY=value format for overrides".to_string(),
-                        ctx,
-                    ));
-                }
-                overrides.push((key, value));
-            }
-            InsToken::Pos(arg) => match &arg {
-                Arg::String(text, quoted) if !quoted && text.contains('=') => {
-                    let Some((key, value)) = crate::command::split_assignment(text)
-                        .map_err(|e| ParseError::validation("EXPAND", e.to_string(), ctx))?
-                    else {
-                        return Err(ParseError::validation(
-                            "EXPAND",
-                            "EXPAND requires KEY=value format for overrides".to_string(),
-                            ctx,
-                        ));
-                    };
-                    overrides.push((key, value));
-                }
-                _ => {
-                    if path.is_none() {
-                        // Path-typed positional, checked like every other
-                        // `lower_command` path arg (literals always pass;
-                        // resolution stays runtime).
-                        ArgType::Path
-                            .check_arg(&arg)
-                            .map_err(|e| ParseError::validation("EXPAND", e.to_string(), ctx))?;
-                        path = Some(arg);
-                    } else {
-                        return Err(ParseError::validation(
-                            "EXPAND",
-                            "EXPAND accepts at most one path".to_string(),
-                            ctx,
-                        ));
-                    }
-                }
-            },
-        }
-    }
-    Ok(StepKind::Expand { path, overrides })
-}
-
-fn parse_type_tag(pair: Pair<Rule>) -> String {
-    // Canonicalize to the no-space form: `LIST<MAP>` and `LIST< MAP >`
-    // (including macro token-stream reconstructions, which space
-    // punctuation) are one spelling from here on. Resolution keys
-    // on this form, so interning and pointer equality hold across
-    // parse pathways.
-    crate::canonicalize_spelling(pair.as_str())
-}
-
-/// Lower a `TYPE NAME = <shape>` alias declaration. Both halves flow
-/// through as text: the binder is a bare `type_name`, the target the
-/// full (possibly generic) `type_tag` spelling. Shape validation,
-/// collision checks, and resolution all happen at collection time in
-/// `oxdock-core`, never here.
-fn parse_type_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut name: Option<String> = None;
-    let mut target: Option<String> = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::type_name => name = Some(inner.as_str().trim().to_string()),
-            Rule::type_tag => target = Some(parse_type_tag(inner)),
-            _ => {}
-        }
-    }
-    let (Some(name), Some(target)) = (name, target) else {
-        return Err(ParseError::structural(
-            KEYWORD_TYPE,
-            "TYPE requires a name and a shape (`TYPE NAME = SHAPE`)".to_string(),
-            &span,
-        ));
-    };
-    Ok(StepKind::TypeAlias { name, target })
-}
-
-fn check_func_ident(ctx: &SpanContext, name: &str) -> ParseResult<()> {
-    let ok = name
-        .chars()
-        .next()
-        .map(|c| c.is_ascii_uppercase())
-        .unwrap_or(false)
-        && name
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-    if !ok {
-        return Err(ParseError::validation(
-            "FUNC",
-            format!(
-                "function names must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{name}`"
-            ),
-            ctx,
-        ));
-    }
-    Ok(())
-}
-
-fn parse_while_statement_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut cond = None;
-    let mut body = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::expr => {
-                if cond.is_none() {
-                    cond = Some(parse_expr(ctx, lctx, inner)?);
-                }
-            }
-            Rule::block => {
-                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
-            }
-            _ => {}
-        }
-    }
-    Ok(StepKind::While {
-        cond: Box::new(cond.ok_or_else(|| {
-            ParseError::validation("WHILE", "WHILE requires a condition".to_string(), &span)
-        })?),
-        body: body.ok_or_else(|| {
-            ParseError::validation("WHILE", "WHILE requires a block".to_string(), &span)
-        })?,
-    })
-}
-
-fn parse_func_def_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    // Declare before lowering the body so recursive self-calls resolve:
-    // the name is visible from its definition line, in execution order,
-    // exactly like `LET`. (Mutual recursion stays unsupported: the second
-    // name does not exist while the first body lowers.)
-    let def_name = pair
-        .clone()
-        .into_inner()
-        .find(|inner| inner.as_rule() == Rule::func_ident)
-        .map(|inner| inner.as_str().to_string())
-        .ok_or_else(|| ParseError::validation("FUNC", "FUNC requires a name".to_string(), &span))?;
-    check_func_ident(ctx, &def_name)?;
-    // Same-scope duplicates and reserved-name shadows fail here, at the
-    // definition line: the post-parse AST keeps no spans, so a later walk
-    // could only point at end of file. Nested shadowing of an outer DSL
-    // name stays allowed and reverts on scope exit at runtime. Reserved
-    // covers the flat host set plus every module's base names: a `FUNC`
-    // defines `SCRIPT::NAME`, which would collide on bare resolution.
-    if lctx.reserved_names.contains(&def_name) || lctx.module_base_names().contains(&def_name) {
-        return Err(ParseError::validation(
-            "FUNC",
-            format!("FUNC {def_name} cannot shadow reserved function `{def_name}`"),
-            &span,
-        ));
-    }
-    if !lctx.declare_func(&def_name) {
-        return Err(ParseError::validation(
-            "FUNC",
-            format!("duplicate function `{def_name}` in same scope"),
-            &span,
-        ));
-    }
-    let mut name: Option<String> = None;
-    let mut param_names: Vec<String> = Vec::new();
-    let mut param_types: Vec<String> = Vec::new();
-    let mut body = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::func_ident => {
-                if name.is_none() {
-                    name = Some(inner.as_str().to_string());
-                }
-            }
-            Rule::func_param => {
-                let mut pname = None;
-                let mut ptype = None;
-                for part in inner.into_inner() {
-                    match part.as_rule() {
-                        Rule::dollar_ident => {
-                            pname = Some(parse_dollar_ident(part));
-                        }
-                        Rule::type_tag => {
-                            ptype = Some(parse_type_tag(part));
-                        }
-                        _ => {}
-                    }
-                }
-                param_names.push(pname.ok_or_else(|| {
-                    ParseError::validation(
-                        "FUNC",
-                        "FUNC parameter requires a $variable".to_string(),
-                        &span,
-                    )
-                })?);
-                param_types.push(ptype.ok_or_else(|| {
-                    ParseError::validation(
-                        "FUNC",
-                        "FUNC parameters require explicit types: FUNC NAME($p: TYPE, ...)"
-                            .to_string(),
-                        &span,
-                    )
-                })?);
-            }
-            Rule::block => {
-                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
-            }
-            _ => {}
-        }
-    }
-    let name = name
-        .ok_or_else(|| ParseError::validation("FUNC", "FUNC requires a name".to_string(), &span))?;
-    check_func_ident(ctx, &name)?;
-    if param_names.len() != param_types.len() {
-        return Err(ParseError::validation(
-            "FUNC",
-            format!("FUNC {name} has mismatched parameter names and types"),
-            &span,
-        ));
-    }
-    let mut seen = std::collections::HashSet::new();
-    for pname in &param_names {
-        if !seen.insert(pname.clone()) {
-            return Err(ParseError::validation(
-                "FUNC",
-                format!("FUNC {name} declares duplicate parameter ${pname}"),
-                &span,
-            ));
-        }
-    }
-    Ok(StepKind::FuncDef {
-        name,
-        params: param_names.into_iter().zip(param_types).collect(),
-        body: body.ok_or_else(|| {
-            ParseError::validation("FUNC", "FUNC requires a block".to_string(), &span)
-        })?,
-    })
-}
-
-fn parse_call_statement_from_pair(
-    ctx: &SpanContext,
-    lctx: &LowerCtx,
-    pair: Pair<Rule>,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut name: Option<String> = None;
-    let mut args = Vec::new();
-    // The head arrives wrapped in the atomic `call_head_paren` token (which
-    // is what forbids whitespace before `(`). Atomic tokens produce no
-    // inner pairs, so the name comes from the token text minus its `(`.
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::call_head_paren => {
-                if name.is_none() {
-                    let text = inner.as_str();
-                    name = Some(text.strip_suffix('(').unwrap_or(text).to_string());
-                }
-            }
-            Rule::func_call_head => {
-                if name.is_none() {
-                    name = Some(inner.as_str().to_string());
-                }
-            }
-            Rule::expr => {
-                args.push(parse_expr(ctx, lctx, inner)?);
-            }
-            _ => {}
-        }
-    }
-    let name = name.ok_or_else(|| {
-        ParseError::validation(
-            "FUNC",
-            "function call requires a function name".to_string(),
-            &span,
-        )
-    })?;
-    // Bare heads keep the legacy UPPERCASE check; qualified heads validate
-    // per part inside resolution. Either way the emitted call is qualified.
-    if !name.contains(MODULE_SEPARATOR) {
-        check_func_ident(ctx, &name)?;
-    }
-    let qualified = lctx.resolve_call(&span, &name)?;
-    Ok(StepKind::Call {
-        name: qualified,
-        args,
-    })
-}
-
-fn parse_return_statement_from_pair(
-    ctx: &SpanContext,
-    lctx: &LowerCtx,
-    pair: Pair<Rule>,
-) -> ParseResult<StepKind> {
-    use crate::ast::Value;
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::expr {
-            return Ok(StepKind::Return {
-                expr: Box::new(parse_expr(ctx, lctx, inner)?),
-            });
-        }
-    }
-    Ok(StepKind::Return {
-        expr: Box::new(Expr::Literal(Value::string(String::new()))),
-    })
-}
-
-fn parse_for_statement_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut idents: Vec<String> = Vec::new();
-    let mut types: Vec<String> = Vec::new();
-    let mut type_spans: Vec<SpanContext> = Vec::new();
-    let mut in_expr = None;
-    let mut body_steps = Vec::new();
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::dollar_ident => {
-                idents.push(parse_dollar_ident(inner));
-            }
-            Rule::type_tag => {
-                type_spans.push(refine_span(ctx, &inner));
-                types.push(parse_type_tag(inner));
-            }
-            Rule::expr => {
-                in_expr = Some(parse_expr(ctx, lctx, inner)?);
-            }
-            Rule::block => {
-                body_steps = parse_block_elements_with_lower(ctx, inner, lctx)?;
-            }
-            _ => {}
-        }
-    }
-    if idents.len() != types.len() {
-        return Err(ParseError::validation(
-            "FOR",
-            format!(
-                "FOR requires explicit types: FOR $item: TYPE IN <expr> (got {} vars, {} types)",
-                idents.len(),
-                types.len()
-            ),
-            &span,
-        ));
-    }
-    let (key_var, key_type, var, var_type) = match idents.len() {
-        1 => (
-            None,
-            None,
-            idents.into_iter().next().unwrap(),
-            types.into_iter().next().unwrap(),
-        ),
-        2 => {
-            let mut iv = idents.into_iter();
-            let mut tv = types.into_iter();
-            (
-                Some(iv.next().unwrap()),
-                Some(tv.next().unwrap()),
-                iv.next().unwrap(),
-                tv.next().unwrap(),
-            )
-        }
-        _ => {
-            return Err(ParseError::validation(
-                "FOR",
-                "FOR requires one or two variables".to_string(),
-                &span,
-            ));
-        }
-    };
-    if let Some(kt) = &key_type
-        && kt != "STRING"
-        && kt != "INT"
-    {
-        // Pinpoint the offending key type tag rather than the statement.
-        let at = type_spans.first().unwrap_or(&span);
-        return Err(ParseError::validation(
-            "FOR",
-            format!("FOR key variable must be INT or STRING, got {kt}"),
-            at,
-        ));
-    }
-    Ok(StepKind::For {
-        key_var,
-        key_type,
-        var,
-        var_type,
-        in_expr: in_expr.ok_or_else(|| {
-            ParseError::validation(
-                "FOR",
-                "FOR requires an iterable expression".to_string(),
-                &span,
-            )
-        })?,
-        body: body_steps,
-    })
-}
-
-fn parse_let_statement_from_pair(
-    ctx: &SpanContext,
-    lctx: &LowerCtx,
-    pair: Pair<Rule>,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut var = None;
-    let mut decl_type = None;
-    let mut expr = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::dollar_ident => {
-                var = Some(parse_dollar_ident(inner));
-            }
-            Rule::type_tag => {
-                decl_type = Some(parse_type_tag(inner));
-            }
-            Rule::expr => {
-                expr = Some(parse_expr(ctx, lctx, inner)?);
-            }
-            _ => {}
-        }
-    }
-    let var = var.ok_or_else(|| {
-        ParseError::validation("LET", "LET requires a variable".to_string(), &span)
-    })?;
-    let decl_type = decl_type.ok_or_else(|| {
-        ParseError::validation(
-            "LET",
-            "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
-            &span,
-        )
-    })?;
-    // Bare `LET $p: PIPE` (no initializer) mints a fresh anonymous pipe.
-    // Every other type still requires `= <expr>`.
-    let expr = match expr {
-        Some(e) => e,
-        None if decl_type == "PIPE" => Expr::FreshPipe,
-        None => {
-            return Err(ParseError::validation(
-                "LET",
-                "LET requires an expression: LET $var: TYPE = <expr> (only LET $p: PIPE omits the initializer)".to_string(),
-                &span,
-            ));
-        }
-    };
-    Ok(StepKind::Assign {
-        var,
-        decl_type,
-        expr,
-    })
-}
-
-fn parse_mutate_statement_from_pair(
-    ctx: &SpanContext,
-    lctx: &LowerCtx,
-    pair: Pair<Rule>,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut var = None;
-    let mut expr = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::dollar_ident => {
-                var = Some(parse_dollar_ident(inner));
-            }
-            Rule::expr => {
-                expr = Some(parse_expr(ctx, lctx, inner)?);
-            }
-            _ => {}
-        }
-    }
-    Ok(StepKind::Set {
-        var: var.ok_or_else(|| {
-            ParseError::validation(
-                "mutate",
-                "mutation requires a variable: $var = <expr>".to_string(),
-                &span,
-            )
-        })?,
-        expr: expr.ok_or_else(|| {
-            ParseError::validation(
-                "mutate",
-                "mutation requires an expression: $var = <expr>".to_string(),
-                &span,
-            )
-        })?,
-    })
-}
-
-fn parse_let_async_statement_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut var = None;
-    let mut decl_type: Option<String> = None;
-    let mut body = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::dollar_ident => {
-                var = Some(parse_dollar_ident(inner));
-            }
-            Rule::type_tag => {
-                decl_type = Some(parse_type_tag(inner));
-            }
-            Rule::block => {
-                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
-            }
-            Rule::command_inner => {
-                // command_inner = { inherit_env_command | async_statement | async_statement_block | instruction }
-                // Unwrap to the inner rule
-                let inner = inner.into_inner().next().ok_or_else(|| {
-                    ParseError::structural("let", "empty command_inner".to_string(), &span)
-                })?;
-                let step_kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind: step_kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            Rule::with_io_command => {
-                // LET $var: TYPE = WITH_IO [flags] ... : two shapes share this rule
-                // (`let_async_statement` precedes `let_capture_statement` in
-                // the grammar, so every WITH_IO-led LET lands here):
-                // - wrapping ASYNC binds a pipe-wired background task. The
-                //   bindings apply inside the task thread : the same shape as
-                //   a braced body holding one WITH_IO step, which the
-                //   AssignAsync runtime path supports.
-                // - wrapping a synchronous command captures its stdout into
-                //   the variable (same semantics as LET $x: STRING = <command>).
-                let kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
-                let StepKind::WithIo { bindings, cmd } = kind else {
-                    return Err(ParseError::validation("LET", "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")".to_string(), &span));
-                };
-                match *cmd {
-                    StepKind::AsyncBlock { body: async_body } => {
-                        if async_body.len() != 1 {
-                            return Err(ParseError::structural("let", "LET $var: TYPE = WITH_IO [..] ASYNC accepts a single command; use LET $var: HANDLE = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks".to_string(), &span));
-                        }
-                        let step = async_body.into_iter().next().ok_or_else(|| {
-                            ParseError::validation(
-                                "LET",
-                                "LET $var: HANDLE = ASYNC requires a body".to_string(),
-                                &span,
-                            )
-                        })?;
-                        body = Some(vec![Step {
-                            guard: step.guard,
-                            kind: StepKind::WithIo {
-                                bindings,
-                                cmd: Box::new(step.kind),
-                            },
-                            scope_enter: step.scope_enter,
-                            scope_exit: step.scope_exit,
-                        }]);
-                    }
-                    sync_cmd => {
-                        if has_stdout_pipe(&bindings) {
-                            return Err(ParseError::structural("let", "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout".to_string(), &span));
-                        }
-                        reject_async_in_capture(ctx, &sync_cmd)?;
-                        let name = var.clone().ok_or_else(|| {
-                            ParseError::validation(
-                                "LET",
-                                "LET $var: TYPE = WITH_IO requires a variable".to_string(),
-                                &span,
-                            )
-                        })?;
-                        let dtype = decl_type.ok_or_else(|| {
-                            ParseError::validation(
-                                "LET",
-                                "LET requires explicit type: LET $var: TYPE = ...".to_string(),
-                                &span,
-                            )
-                        })?;
-                        return Ok(StepKind::AssignCapture {
-                            var: name,
-                            decl_type: dtype,
-                            cmd: Box::new(StepKind::WithIo {
-                                bindings,
-                                cmd: Box::new(sync_cmd),
-                            }),
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(StepKind::AssignAsync {
-        var: var.ok_or_else(|| {
-            ParseError::validation(
-                "LET",
-                "LET $var: HANDLE = ASYNC requires a variable".to_string(),
-                &span,
-            )
-        })?,
-        decl_type: decl_type.ok_or_else(|| {
-            ParseError::validation(
-                "LET",
-                "LET requires explicit type: LET $var: TYPE = ...".to_string(),
-                &span,
-            )
-        })?,
-        body: body.ok_or_else(|| {
-            ParseError::validation(
-                "LET",
-                "LET $var: HANDLE = ASYNC requires a body".to_string(),
-                &span,
-            )
-        })?,
-    })
-}
-
-/// Lower `LET $var: STRING = <sync command>` / `LET $out: STRING = AWAIT $task`.
-///
-/// Shadow-safe by construction: the grammar only routes UPPERCASE-led
-/// `instruction` lines here (`let_async_statement` claims ASYNC-led and
-/// WITH_IO-led lines first; lowercase/digit/sigil RHSs never match). Rust
-/// then branches on the lead token: known commands lower to capture,
-/// unknown leads re-parse as plain expressions.
-fn parse_let_capture_statement_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut var = None;
-    let mut decl_type: Option<String> = None;
-    let mut await_pair = None;
-    let mut timeout_pair = None;
-    let mut run_exec_pair = None;
-    let mut instruction_pair = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::dollar_ident => {
-                var = Some(parse_dollar_ident(inner));
-            }
-            Rule::type_tag => {
-                decl_type = Some(parse_type_tag(inner));
-            }
-            Rule::await_statement => {
-                await_pair = Some(inner);
-            }
-            Rule::timeout_statement => {
-                timeout_pair = Some(inner);
-            }
-            Rule::run_exec_statement => {
-                run_exec_pair = Some(inner);
-            }
-            Rule::instruction => {
-                instruction_pair = Some(inner);
-            }
-            _ => {}
-        }
-    }
-    let var = var.ok_or_else(|| {
-        ParseError::validation("LET", "LET requires a variable".to_string(), &span)
-    })?;
-    let dtype: String = decl_type.ok_or_else(|| {
-        ParseError::validation(
-            "LET",
-            "LET requires explicit type: LET $var: TYPE = ...".to_string(),
-            &span,
-        )
-    })?;
-    if let Some(awaited) = await_pair {
-        let mut task_var = None;
-        for inner in awaited.into_inner() {
-            if inner.as_rule() == Rule::ident {
-                task_var = Some(inner.as_str().to_string());
-            }
-        }
-        return Ok(StepKind::AwaitCapture {
-            out_var: var,
-            out_type: dtype,
-            task_var: task_var.ok_or_else(|| {
-                ParseError::validation(
-                    "LET",
-                    "LET $out = AWAIT requires a task variable".to_string(),
-                    &span,
-                )
-            })?,
-        });
-    }
-    if let Some(timeouted) = timeout_pair {
-        let kind = parse_structural_command_with_lower(ctx, timeouted, lctx)?;
-        reject_async_in_capture(ctx, &kind)?;
-        reject_pipe_stdout_in_capture(ctx, &kind)?;
-        return Ok(StepKind::AssignCapture {
-            var,
-            decl_type: dtype,
-            cmd: Box::new(kind),
-        });
-    }
-    if let Some(exec) = run_exec_pair {
-        let kind = lower_run_exec_pair(ctx, exec, lctx)?;
-        reject_async_in_capture(ctx, &kind)?;
-        reject_pipe_stdout_in_capture(ctx, &kind)?;
-        return Ok(StepKind::AssignCapture {
-            var,
-            decl_type: dtype,
-            cmd: Box::new(kind),
-        });
-    }
-    if let Some(ins) = instruction_pair {
-        let text = ins.as_str().to_string();
-        let mut lead = None;
-        for token in ins.clone().into_inner() {
-            if token.as_rule() == Rule::command_name {
-                lead = Some(token.as_str().to_string());
-                break;
-            }
-        }
-        let lead = lead.ok_or_else(|| {
-            ParseError::validation("LET", "LET capture requires a command".to_string(), &span)
-        })?;
-        if crate::commands::is_known_command(&lead) {
-            // Lower the already-parsed pair directly. Re-parsing its
-            // text would nest a second full parse inside this one and
-            // exhaust small stacks (musl release runner); spans also
-            // keep their real line numbers this way.
-            let kind = lower_instruction_pair(ctx, ins, lctx)?;
-            reject_async_in_capture(ctx, &kind)?;
-            reject_pipe_stdout_in_capture(ctx, &kind)?;
-            return Ok(StepKind::AssignCapture {
-                var,
-                decl_type: dtype,
-                cmd: Box::new(kind),
-            });
-        }
-        let expr = parse_expr_str(&span, lctx, &text)?;
-        return Ok(StepKind::Assign {
-            var,
-            decl_type: dtype,
-            expr,
-        });
-    }
-    Err(ParseError::structural(
-        "let",
-        "LET requires a value".to_string(),
-        &span,
-    ))
-}
-
-fn parse_await_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut var = None;
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::ident {
-            var = Some(inner.as_str().to_string());
-        }
-    }
-    Ok(StepKind::Await {
-        var: var.ok_or_else(|| {
-            ParseError::validation("AWAIT", "AWAIT requires a variable".to_string(), &span)
-        })?,
-    })
-}
-
-fn parse_cancel_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut var = None;
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::ident {
-            var = Some(inner.as_str().to_string());
-        }
-    }
-    Ok(StepKind::Cancel {
-        var: var.ok_or_else(|| {
-            ParseError::validation("CANCEL", "CANCEL requires a variable".to_string(), &span)
-        })?,
-    })
-}
-
-/// Build a TIMEOUT duration [`Arg`] from the widened `timeout_duration`
-/// alternatives. Static literals type-check now via the declared Duration
-/// arg type; dynamics (`$var`, templates) resolve at runtime.
-fn parse_timeout_duration_arg(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Arg> {
-    let span = refine_span(ctx, &pair);
-    for inner in pair.into_inner() {
-        let arg = match inner.as_rule() {
-            Rule::timeout_literal => Arg::String(inner.as_str().to_string(), false),
-            Rule::dollar_ident => Arg::Expr(Expr::Var(parse_dollar_ident(inner))),
-            Rule::quoted_string => Arg::String(
-                crate::command::strip_surrounding_quotes(inner.as_str()).to_string(),
-                true,
-            ),
-            Rule::templated_arg => Arg::String(inner.as_str().to_string(), false),
-            _ => continue,
-        };
-        ArgType::Duration
-            .check_arg(&arg)
-            .map_err(|e| ParseError::validation("TIMEOUT", e.to_string(), &span))?;
-        return Ok(arg);
-    }
-    Err(ParseError::validation(
-        "TIMEOUT",
-        "TIMEOUT requires a duration".to_string(),
-        &span,
-    ))
-}
-
-/// Lower `ISOLATED { ... }` (or a single command): parse the body, then
-/// rewrite every nested prelude-shaped `INHERIT_ENV` into
-/// `IsolatedInheritEnv` so the block allowlist reads the isolated
-/// snapshot instead of the host. The rewrite runs here, during lowering,
-/// so later validators only ever see the dedicated node inside `ISOLATED`
-/// bodies and the prelude rule stays untouched.
-fn parse_isolated_statement_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut body: Option<Vec<Step>> = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::block => {
-                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
-            }
-            Rule::await_statement => {
-                let kind = parse_await_statement_from_pair(ctx, inner)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            Rule::cancel_statement => {
-                let kind = parse_cancel_statement_from_pair(ctx, inner)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            Rule::with_io_command
-            | Rule::inherit_env_command
-            | Rule::async_statement
-            | Rule::async_statement_block
-            | Rule::call_statement
-            | Rule::while_statement
-            | Rule::func_def
-            | Rule::return_statement
-            | Rule::break_statement
-            | Rule::continue_statement
-            | Rule::timeout_statement
-            | Rule::isolated_statement
-            | Rule::remote_statement => {
-                let kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            Rule::instruction | Rule::instruction_inner => {
-                let kind = lower_instruction_pair(ctx, inner, lctx)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            Rule::run_exec_statement | Rule::run_exec_inner => {
-                let kind = lower_run_exec_pair(ctx, inner, lctx)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            _ => {}
-        }
-    }
-    let mut body = body.ok_or_else(|| {
-        ParseError::validation(
-            "ISOLATED",
-            "ISOLATED requires a command or block".to_string(),
-            &span,
-        )
-    })?;
-    rewrite_isolated_inherit(&mut body);
-    Ok(StepKind::Isolated { body })
-}
-
-fn parse_timeout_statement_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut duration: Option<Arg> = None;
-    let mut body: Option<Vec<Step>> = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::timeout_duration => {
-                duration = Some(parse_timeout_duration_arg(ctx, inner)?);
-            }
-            Rule::block => {
-                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
-            }
-            Rule::await_statement => {
-                let kind = parse_await_statement_from_pair(ctx, inner)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            Rule::cancel_statement => {
-                let kind = parse_cancel_statement_from_pair(ctx, inner)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            Rule::with_io_command
-            | Rule::inherit_env_command
-            | Rule::async_statement
-            | Rule::async_statement_block
-            | Rule::call_statement
-            | Rule::while_statement
-            | Rule::func_def
-            | Rule::return_statement
-            | Rule::break_statement
-            | Rule::continue_statement
-            | Rule::timeout_statement
-            | Rule::isolated_statement
-            | Rule::remote_statement => {
-                let kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            Rule::instruction | Rule::instruction_inner => {
-                let kind = lower_instruction_pair(ctx, inner, lctx)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            Rule::run_exec_statement | Rule::run_exec_inner => {
-                let kind = lower_run_exec_pair(ctx, inner, lctx)?;
-                body = Some(vec![Step {
-                    guard: None,
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                }]);
-            }
-            _ => {}
-        }
-    }
-    Ok(StepKind::Timeout {
-        duration: duration.ok_or_else(|| {
-            ParseError::validation("TIMEOUT", "TIMEOUT requires a duration".to_string(), &span)
-        })?,
-        body: body.ok_or_else(|| {
-            ParseError::validation(
-                "TIMEOUT",
-                "TIMEOUT requires a command or block".to_string(),
-                &span,
-            )
-        })?,
-    })
-}
-
-/// True when any step in the slice (transitively, through nested bodies)
-/// is a `REMOTE` block. `REMOTE` blocks never nest: the inner block would
-/// have no session, no inventory, and no defined sync boundary.
-fn contains_remote_block(steps: &[Step]) -> bool {
-    steps.iter().any(|step| contains_remote_kind(&step.kind))
-}
-
-/// Rewrite prelude-shaped `INHERIT_ENV` nodes anywhere inside an `ISOLATED`
-/// body into `IsolatedInheritEnv`: the nested allowlist reads the isolated
-/// snapshot, never the host. Distinct node, distinct read rule, so the
-/// prelude validator (which only knows `InheritEnv`) never fires here and
-/// diagnostics stay unambiguous.
-fn rewrite_isolated_inherit(body: &mut [Step]) {
-    for step in body {
-        rewrite_isolated_inherit_kind(&mut step.kind);
-    }
-}
-
-/// Single-kind half of [`rewrite_isolated_inherit`]: rewrite the node
-/// itself, then recurse through whatever it contains (`WITH_IO` wraps and
-/// `LET`-capture nest one boxed command; every other body is a step
-/// slice with the same treatment). `FUNC` and `REMOTE` bodies are
-/// deliberately skipped: function bodies execute at call time (possibly
-/// after the block exits and its snapshot is gone) and remote bodies ship
-/// to guests under their own bridging, so a nested `INHERIT_ENV` there
-/// keeps the standard prelude-nesting rejection instead of silently
-/// changing read rules.
-fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
-    if let StepKind::InheritEnv { keys } = kind {
-        *kind = StepKind::IsolatedInheritEnv { keys: keys.clone() };
-    }
-    match kind {
-        StepKind::For { body, .. }
-        | StepKind::While { body, .. }
-        | StepKind::Timeout { body, .. }
-        | StepKind::Isolated { body }
-        | StepKind::AssignAsync { body, .. }
-        | StepKind::AsyncBlock { body } => rewrite_isolated_inherit(body),
-        StepKind::If {
-            then_body,
-            else_ifs,
-            else_body,
-            ..
-        } => {
-            rewrite_isolated_inherit(then_body);
-            for (_, branch) in else_ifs {
-                rewrite_isolated_inherit(branch);
-            }
-            if let Some(else_body) = else_body {
-                rewrite_isolated_inherit(else_body);
-            }
-        }
-        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
-            rewrite_isolated_inherit_kind(cmd);
-        }
-        _ => {}
-    }
-}
-
-fn contains_remote_kind(kind: &StepKind) -> bool {
-    if matches!(kind, StepKind::RemoteBlock { .. }) {
-        return true;
-    }
-    let mut found = false;
-    kind.walk_child_kinds(&mut |child| {
-        found = found || contains_remote_kind(child);
-    });
-    found
-}
-
-/// Collect transitively defined `FUNC` names and invoked call names from a
-/// `REMOTE` body. Statement calls, expression calls (including compiled
-/// math ops and inline blocks), and calls nested in any sub-body are all
-/// covered through the uniform [`StepKind`] walkers. Only user-defined
-/// `SCRIPT` symbols matter downstream: qualified module calls pass through.
-fn collect_remote_body_symbols(
-    steps: &[Step],
-    defs: &mut HashSet<String>,
-    calls: &mut Vec<String>,
-) {
-    for step in steps {
-        collect_remote_kind_symbols(&step.kind, defs, calls);
-    }
-}
-
-fn collect_remote_kind_symbols(
-    kind: &StepKind,
-    defs: &mut HashSet<String>,
-    calls: &mut Vec<String>,
-) {
-    if let StepKind::FuncDef { name, .. } = kind {
-        defs.insert(name.clone());
-    }
-    if let StepKind::Call { name, .. } = kind {
-        calls.push(name.clone());
-    }
-    kind.walk_step_exprs(&mut |expr| match expr {
-        Expr::Call { name, .. } => calls.push(name.clone()),
-        Expr::CompiledMath(ops) => {
-            for op in ops {
-                if let MathOp::Call { name, .. } = op {
-                    calls.push(name.clone());
-                }
-            }
-        }
-        Expr::Block(steps) => collect_remote_body_symbols(steps, defs, calls),
-        _ => {}
-    });
-}
-
-fn parse_remote_statement_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut target: Option<String> = None;
-    let mut vars: Vec<String> = Vec::new();
-    let mut env: Vec<String> = Vec::new();
-    let mut body: Option<Vec<Step>> = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::remote_target => {
-                target = Some(inner.as_str().to_string());
-            }
-            Rule::remote_bindings => {
-                for binding in inner.into_inner() {
-                    // Direct children are `remote_binding` wrappers (commas
-                    // and gaps are silent); unwrap one level leniently.
-                    let entry = if binding.as_rule() == Rule::remote_binding {
-                        binding.into_inner().next()
-                    } else {
-                        Some(binding)
-                    };
-                    let Some(entry) = entry else {
-                        continue;
-                    };
-                    match entry.as_rule() {
-                        Rule::remote_var_binding => {
-                            let mut name = None;
-                            for part in entry.into_inner() {
-                                if part.as_rule() == Rule::ident {
-                                    name = Some(part.as_str().to_string());
-                                }
-                            }
-                            vars.push(name.ok_or_else(|| {
-                                ParseError::validation(
-                                    "REMOTE",
-                                    "REMOTE header entries must be `$var` or `env:NAME`"
-                                        .to_string(),
-                                    &span,
-                                )
-                            })?);
-                        }
-                        Rule::remote_env_binding => {
-                            let mut name = None;
-                            for part in entry.into_inner() {
-                                if part.as_rule() == Rule::env_read_key {
-                                    name = Some(part.as_str().to_string());
-                                }
-                            }
-                            env.push(name.ok_or_else(|| {
-                                ParseError::validation(
-                                    "REMOTE",
-                                    "REMOTE header entries must be `$var` or `env:NAME`"
-                                        .to_string(),
-                                    &span,
-                                )
-                            })?);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Rule::block => {
-                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
-            }
-            _ => {}
-        }
-    }
-    let target = target.ok_or_else(|| {
-        ParseError::validation("REMOTE", "REMOTE requires a target".to_string(), &span)
-    })?;
-    if !crate::commands::is_valid_remote_target(&target) {
-        return Err(ParseError::validation(
-            "REMOTE",
-            format!(
-                "invalid REMOTE target `{target}`: start alphanumeric, then alphanumeric, `_`, or `-`, max 64 chars, never SNAPSHOT, LOCAL, CACHE, SYSTEM, or REMOTE"
-            ),
-            &span,
-        ));
-    }
-    let body = body.ok_or_else(|| {
-        ParseError::validation(
-            "REMOTE",
-            "REMOTE requires a braced block, e.g. `REMOTE prod [$version] { ... }`".to_string(),
-            &span,
-        )
-    })?;
-    if body.is_empty() {
-        return Err(ParseError::validation(
-            "REMOTE",
-            "REMOTE requires a non-empty braced block".to_string(),
-            &span,
-        ));
-    }
-    if contains_remote_block(&body) {
-        return Err(ParseError::validation(
-            "REMOTE",
-            format!("REMOTE blocks cannot nest (target `{target}` contains another REMOTE block)"),
-            &span,
-        ));
-    }
-    if body.iter().any(|s| contains_inherit_env(&s.kind)) {
-        return Err(ParseError::validation(
-            "REMOTE",
-            "INHERIT_ENV cannot appear inside a REMOTE block: the guest inherits its own process environment".to_string(),
-            &span,
-        ));
-    }
-    let mut inner_defs = HashSet::new();
-    let mut calls = Vec::new();
-    collect_remote_body_symbols(&body, &mut inner_defs, &mut calls);
-    let outer_defs = lctx.visible_func_names();
-    for call in &calls {
-        let bare = crate::base_name(call);
-        let is_script_call = match crate::split_qualified(call) {
-            Some((module, _)) => module == crate::constants::SCRIPT_MODULE_NAME,
-            None => true,
-        };
-        if is_script_call && outer_defs.contains(bare) && !inner_defs.contains(bare) {
-            return Err(ParseError::validation(
-                "REMOTE",
-                format!(
-                    "REMOTE '{target}' calls outer function '{bare}' (functions must be defined inside the block)"
-                ),
-                &span,
-            ));
-        }
-    }
-    Ok(StepKind::RemoteBlock {
-        target,
-        vars,
-        env,
-        body,
-    })
-}
-
-fn parse_if_statement_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut cond = None;
-    let mut then_body = Vec::new();
-    let mut else_ifs = Vec::new();
-    let mut else_body = None;
-
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::expr => {
-                if cond.is_none() {
-                    cond = Some(parse_expr(ctx, lctx, inner)?);
-                }
-            }
-            Rule::block => {
-                if then_body.is_empty() {
-                    then_body = parse_block_elements_with_lower(ctx, inner, lctx)?;
-                }
-            }
-            Rule::else_if_clause => {
-                let (eif_cond, eif_body) = parse_else_if_clause(ctx, inner, lctx)?;
-                else_ifs.push((eif_cond, eif_body));
-            }
-            Rule::else_clause => {
-                else_body = Some(parse_else_clause(ctx, inner, lctx)?);
-            }
-            _ => {}
-        }
-    }
-    Ok(StepKind::If {
-        cond: Box::new(cond.ok_or_else(|| {
-            ParseError::structural("if", "IF requires a condition".to_string(), &span)
-        })?),
-        then_body,
-        else_ifs,
-        else_body,
-    })
-}
-
-fn parse_else_if_clause(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<(Box<Expr>, Vec<Step>)> {
-    let span = refine_span(ctx, &pair);
-    let mut cond = None;
-    let mut body = Vec::new();
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::expr => cond = Some(parse_expr(ctx, lctx, inner)?),
-            Rule::block => body = parse_block_elements_with_lower(ctx, inner, lctx)?,
-            _ => {}
-        }
-    }
-    Ok((
-        Box::new(cond.ok_or_else(|| {
-            ParseError::structural("if", "ELSE IF requires a condition".to_string(), &span)
-        })?),
-        body,
-    ))
-}
-
-fn parse_else_clause(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<Vec<Step>> {
-    for inner in pair.into_inner() {
-        if let Rule::block = inner.as_rule() {
-            return parse_block_elements_with_lower(ctx, inner, lctx);
-        }
-    }
-    Ok(Vec::new())
-}
-
-fn parse_async_statement_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut inner_cmd = None;
-    let mut block_body = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::command => {
-                // command is _{} = silent, so its children aren't visible as pairs
-                // when nested inside compound-atomic async_statement.
-                // Parse the command text directly, seeding the snippet with
-                // this point's visible scope so calls resolve identically.
-                let cmd_text = inner.as_str();
-                let (preseed_funcs, preseed_imports) = lctx.visible_snapshot();
-                let steps = parse_script_with_preseed(
-                    cmd_text,
-                    |name, args| (lctx.lower)(name, args),
-                    lctx.reserved_names.clone(),
-                    lctx.modules.clone(),
-                    preseed_funcs,
-                    preseed_imports,
-                )?;
-                if steps.len() == 1 {
-                    inner_cmd = Some(steps.into_iter().next().unwrap().kind);
-                } else {
-                    return Err(ParseError::structural(
-                        "async",
-                        "unexpected multiple steps in async inner command".to_string(),
-                        &span,
-                    ));
-                }
-            }
-            Rule::command_inner => {
-                // command_inner = { inherit_env_command | async_statement | async_statement_block | instruction }
-                let child = inner.into_inner().next().ok_or_else(|| {
-                    ParseError::structural("async", "empty command_inner".to_string(), &span)
-                })?;
-                match child.as_rule() {
-                    Rule::inherit_env_command => {
-                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
-                    }
-                    Rule::async_statement | Rule::async_statement_block => {
-                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
-                    }
-                    Rule::timeout_statement | Rule::cancel_statement => {
-                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
-                    }
-                    Rule::isolated_statement => {
-                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
-                    }
-                    Rule::remote_statement => {
-                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
-                    }
-                    Rule::call_statement | Rule::while_statement => {
-                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
-                    }
-                    Rule::func_def
-                    | Rule::return_statement
-                    | Rule::break_statement
-                    | Rule::continue_statement => {
-                        return Err(ParseError::structural(
-                            "async",
-                            format!(
-                                "{:?} cannot run as a lone ASYNC command; use ASYNC {{ ... }} block form if needed",
-                                child.as_rule()
-                            ),
-                            &span,
-                        ));
-                    }
-                    Rule::instruction => {
-                        inner_cmd = Some(lower_instruction_pair(ctx, child, lctx)?);
-                    }
-                    Rule::run_exec_statement | Rule::run_exec_inner => {
-                        inner_cmd = Some(lower_run_exec_pair(ctx, child, lctx)?);
-                    }
-                    other => {
-                        return Err(ParseError::structural(
-                            "async",
-                            format!("unexpected command_inner child: {:?}", other),
-                            &span,
-                        ));
-                    }
-                }
-            }
-            Rule::instruction | Rule::instruction_inner => {
-                inner_cmd = Some(lower_instruction_pair(ctx, inner, lctx)?);
-            }
-            Rule::run_exec_statement | Rule::run_exec_inner => {
-                inner_cmd = Some(lower_run_exec_pair(ctx, inner, lctx)?);
-            }
-            Rule::block => {
-                block_body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
-            }
-            _ => {}
-        }
-    }
-    if let Some(body) = block_body {
-        for step in &body {
-            if matches!(&step.kind, StepKind::WithIo { .. }) {
-                return Err(ParseError::structural("async", "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(), &span));
-            }
-        }
-        Ok(StepKind::AsyncBlock { body })
-    } else if let Some(cmd) = inner_cmd {
-        if matches!(&cmd, StepKind::WithIo { .. }) {
-            return Err(ParseError::structural("async", "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(), &span));
-        }
-        Ok(StepKind::AsyncBlock {
-            body: vec![Step {
-                guard: None,
-                kind: cmd,
-                scope_enter: 0,
-                scope_exit: 0,
-            }],
-        })
-    } else {
-        Err(ParseError::structural(
-            "async",
-            "ASYNC requires either a command or a block".to_string(),
-            &span,
-        ))
-    }
-}
-
-fn parse_async_statement_block_from_pair(
-    ctx: &SpanContext,
-    pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<StepKind> {
-    let span = refine_span(ctx, &pair);
-    let mut block_body = None;
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::block {
-            block_body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
-        }
-    }
-    let body = block_body.ok_or_else(|| {
-        ParseError::structural(
-            "async",
-            "async_statement_block requires a block".to_string(),
-            &span,
-        )
-    })?;
-    for step in &body {
-        if matches!(&step.kind, StepKind::WithIo { .. }) {
-            return Err(ParseError::structural("async", "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(), &span));
-        }
-    }
-    Ok(StepKind::AsyncBlock { body })
-}
-
-/// Lower an `IMPORT` statement: update the import frames, emit nothing.
-fn lower_import_statement(ctx: &SpanContext, pair: Pair<Rule>, lctx: &LowerCtx) -> ParseResult<()> {
-    let mut modules = Vec::new();
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::import_list => {
-                for module in inner.into_inner() {
-                    if module.as_rule() == Rule::import_module {
-                        modules.push(module.as_str().to_string());
-                    }
-                }
-            }
-            Rule::import_module => modules.push(inner.as_str().to_string()),
-            _ => {}
-        }
-    }
-    lctx.import_modules(ctx, &modules)
-}
-
-fn parse_block_elements_with_lower(
-    ctx: &SpanContext,
-    block_pair: Pair<Rule>,
-    lctx: &LowerCtx,
-) -> ParseResult<Vec<Step>> {
-    // One function scope per braced body, mirroring the runtime
-    // `push_scope`/`pop_scope` boundary: same-block `FUNC` redefinition
-    // errors, nested shadowing stays allowed.
-    lctx.enter_scope();
-    let mut steps = Vec::new();
-    // Bare guard lines inside blocks attach to the next step parsed here.
-    // Previously they fell into the catch-all and vanished, so inner
-    // guards never reached the engine; block bodies now honor them exactly
-    // like top-level lines (a dangling guard at `}` is a structural error).
-    let mut pending_guard: Option<GuardExpr> = None;
-    for elem in block_pair.into_inner() {
-        match elem.as_rule() {
-            Rule::guard_line => {
-                let guard = parse_guard_line(ctx, elem)?;
-                pending_guard = Some(match pending_guard.take() {
-                    Some(existing) => GuardExpr::all(vec![existing, guard]),
-                    None => guard,
-                });
-                continue;
-            }
-            Rule::for_statement
-            | Rule::while_statement
-            | Rule::func_def
-            | Rule::call_statement
-            | Rule::return_statement
-            | Rule::break_statement
-            | Rule::continue_statement
-            | Rule::let_statement
-            | Rule::mutate_statement
-            | Rule::let_async_statement
-            | Rule::let_capture_statement
-            | Rule::await_statement
-            | Rule::cancel_statement
-            | Rule::if_statement
-            | Rule::async_statement
-            | Rule::timeout_statement
-            | Rule::isolated_statement
-            | Rule::remote_statement
-            | Rule::async_statement_block => {
-                let step_kind = parse_structural_command_with_lower(ctx, elem, lctx)?;
-                steps.push(Step {
-                    guard: pending_guard.take(),
-                    kind: step_kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                });
-            }
-            Rule::type_statement => {
-                return Err(ParseError::structural(
-                    KEYWORD_TYPE,
-                    "TYPE must appear at top level".to_string(),
-                    ctx,
-                ));
-            }
-            Rule::guard_block => {
-                let mut guard_pair = None;
-                let mut inner_block = None;
-                for inner in elem.into_inner() {
-                    match inner.as_rule() {
-                        Rule::guard_line => guard_pair = Some(inner),
-                        Rule::block => inner_block = Some(inner),
-                        _ => {}
-                    }
-                }
-                if let (Some(gp), Some(bp)) = (guard_pair, inner_block) {
-                    let guard_expr = parse_guard_line(ctx, gp)?;
-                    let mut inner_steps = parse_block_elements_with_lower(ctx, bp, lctx)?;
-                    for step in &mut inner_steps {
-                        let inner = step.guard.take();
-                        step.guard = Some(match (pending_guard.clone(), inner) {
-                            (Some(pending), Some(existing)) => {
-                                GuardExpr::all(vec![pending, existing])
-                            }
-                            (Some(pending), None) => {
-                                GuardExpr::all(vec![pending, guard_expr.clone()])
-                            }
-                            (None, Some(existing)) => existing,
-                            (None, None) => guard_expr.clone(),
-                        });
-                    }
-                    // A bare guard line composes into the braced block that
-                    // follows it and is consumed, like an inline guard.
-                    pending_guard = None;
-                    steps.extend(inner_steps);
-                }
-            }
-            Rule::instruction | Rule::instruction_inner => {
-                let kind = lower_instruction_pair(ctx, elem, lctx)?;
-                steps.push(Step {
-                    guard: pending_guard.take(),
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                });
-            }
-            Rule::run_exec_statement | Rule::run_exec_inner => {
-                let kind = lower_run_exec_pair(ctx, elem, lctx)?;
-                steps.push(Step {
-                    guard: pending_guard.take(),
-                    kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                });
-            }
-            Rule::with_io_command => {
-                let step_kind = parse_structural_command_with_lower(ctx, elem, lctx)?;
-                steps.push(Step {
-                    guard: pending_guard.take(),
-                    kind: step_kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                });
-            }
-            Rule::inherit_env_command => {
-                let step_kind = parse_structural_command_with_lower(ctx, elem, lctx)?;
-                steps.push(Step {
-                    guard: pending_guard.take(),
-                    kind: step_kind,
-                    scope_enter: 0,
-                    scope_exit: 0,
-                });
-            }
-            Rule::import_statement => {
-                // Lowering directive: updates import frames, emits no step.
-                // A guard block wrapping only IMPORTs yields no steps, so
-                // its guard binds nothing; IMPORT itself stays static.
-                lower_import_statement(ctx, elem, lctx)?;
-            }
-            Rule::export_statement => {
-                return Err(ParseError::structural(
-                    KEYWORD_EXPORT,
-                    "EXPORT is only allowed at the top level".to_string(),
-                    ctx,
-                ));
-            }
-            _ => {} // blank, hash_comment, semicolon, etc.
-        }
-    }
-    if pending_guard.is_some() {
-        return Err(ParseError::structural(
-            "guard",
-            "guard declared immediately before '}' without a command".to_string(),
-            ctx,
-        ));
-    }
-    lctx.exit_scope();
-    Ok(steps)
-}
-
-fn parse_argument(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Vec<Arg>> {
-    let inners: Vec<_> = pair.into_inner().collect();
-    // An `expr` fragment can swallow its trailing separator through inner
-    // `gap` rules, gluing following text into one argument pair
-    // (`ECHO $x hello` lexes as `[expr("$x "), unquoted("hello")]`). Split
-    // groups there so expressions survive as typed `Arg::Expr`; every other
-    // fragment kind is whitespace-tight by construction.
-    let mut groups: Vec<Vec<Pair<Rule>>> = vec![Vec::new()];
-    for fragment in inners {
-        let glued = fragment.as_rule() == Rule::expr
-            && fragment.as_str().ends_with(|c: char| c.is_whitespace());
-        groups
-            .last_mut()
-            .expect("argument always holds a group")
-            .push(fragment);
-        if glued {
-            groups.push(Vec::new());
-        }
-    }
-    let mut args = Vec::new();
-    for group in groups {
-        if group.is_empty() {
-            continue;
-        }
-        // Single expression : preserve as Arg::Expr for runtime evaluation
-        if group.len() == 1 && group[0].as_rule() == Rule::expr {
-            args.push(Arg::Expr(parse_expr(
-                ctx,
-                lctx,
-                group.into_iter().next().expect("group holds one pair"),
-            )?));
-            continue;
-        }
-        // Single quoted string: preserve quote status and process escapes
-        if group.len() == 1 && group[0].as_rule() == Rule::string_literal {
-            args.push(Arg::String(parse_fragments(&group)?, true));
-            continue;
-        }
-        args.push(Arg::String(parse_fragments(&group)?, false));
-    }
-    Ok(args)
-}
-
-fn parse_quoted_string(pair: Pair<Rule>) -> ParseResult<String> {
-    let s = pair.as_str();
-    let content = &s[1..s.len() - 1];
-    // Pass contents verbatim : all escape processing deferred to runtime expand_string
-    Ok(content.to_string())
-}
-
-/// Concatenate fragment pairs (string_literal, templated_arg, unquoted_arg, expr)
-/// into a single String. Adjacent fragments without whitespace are joined directly;
-/// fragments separated by whitespace get a space inserted.
-fn parse_fragments(parts: &[Pair<Rule>]) -> ParseResult<String> {
-    // Single quoted string: unquote unconditionally
-    if parts.len() == 1 && parts[0].as_rule() == Rule::string_literal {
-        let s = parts[0].as_str();
-        return Ok(s[1..s.len() - 1].to_string());
-    }
-
-    let mut body = String::new();
-    let mut last_end = None;
-    for part in parts {
-        let span = part.as_span();
-        if let Some(end) = last_end
-            && span.start() > end
-        {
-            body.push(' ');
-        }
-        match part.as_rule() {
-            Rule::string_literal => {
-                let s = part.as_str();
-                let unquoted = &s[1..s.len() - 1];
-                body.push_str(unquoted);
-            }
-            Rule::templated_arg | Rule::unquoted_arg => {
-                body.push_str(part.as_str());
-            }
-            Rule::expr => body.push_str(part.as_str()),
-            _ => {}
-        }
-        last_end = Some(span.end());
-    }
-    Ok(body)
-}
-
-fn parse_guard_line(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExpr> {
-    let span = refine_span(ctx, &pair);
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::guard_expr {
-            return parse_guard_expr(ctx, inner);
-        }
-    }
-    Err(ParseError::structural(
-        "guard",
-        "guard line missing expression".to_string(),
-        &span,
-    ))
-}
-
-/// Direct-form `WITH_IO [tty]` validity, checked while the wrapped
-/// command is still in hand so misuse fails at parse with a span.
-/// Block-expanded bindings skip this (their steps never re-enter
-/// lowering); the runtime resolver repeats the same checks, so every
-/// construction fails with one story.
-fn check_tty_wrapping(
-    bindings: &[IoBinding],
-    cmd: Option<&StepKind>,
-    span: &SpanContext,
-) -> ParseResult<()> {
-    let has_tty = bindings.iter().any(|b| matches!(b.stream, IoStream::Tty));
-    let has_geometry = bindings
-        .iter()
-        .any(|b| matches!(b.stream, IoStream::Rows(_) | IoStream::Cols(_)));
-    if has_geometry && !has_tty {
-        return Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size".to_string(),
-            span,
-        ));
-    }
-    if !has_tty {
-        return Ok(());
-    }
-    if bindings
-        .iter()
-        .any(|b| matches!(b.stream, IoStream::Stderr))
-    {
-        return Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex".to_string(),
-            span,
-        ));
-    }
-    match cmd {
-        Some(StepKind::Run(_) | StepKind::RunExec { .. }) | None => Ok(()),
-        Some(_) => Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it".to_string(),
-            span,
-        )),
-    }
-}
-
-fn parse_io_binding(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<IoBinding> {
-    let span = refine_span(ctx, &pair);
-    let mut stream = None;
-    let mut pipe = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::io_stream => stream = Some(parse_io_stream(inner.as_str())),
-            Rule::io_size => stream = Some(parse_io_size(ctx, inner)?),
-            Rule::pipe_binding => pipe = Some(parse_pipe_binding(ctx, inner)?),
-            _ => {}
-        }
-    }
-    let stream = stream.ok_or_else(|| {
-        ParseError::structural("with_io", "missing IO stream in WITH_IO".to_string(), &span)
-    })?;
-    // `tty` is a bare flag: the name stays reserved so a future value
-    // shape cannot silently change what `tty = $x` means today.
-    if stream == IoStream::Tty && pipe.is_some() {
-        return Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [tty] takes no value: use bare `tty`, with `rows = <int>` / `cols = <int>` for geometry (e.g. `[tty, rows=40, cols=100]`)".to_string(),
-            &span,
-        ));
-    }
-    Ok(IoBinding { stream, pipe })
-}
-
-fn parse_io_size(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<IoStream> {
-    let span = refine_span(ctx, &pair);
-    let mut name = None;
-    let mut dim = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::io_dim_name => name = Some(inner.as_str()),
-            Rule::tty_dim => dim = Some(inner.as_str()),
-            _ => {}
-        }
-    }
-    let dim = dim
-        .and_then(|text| text.parse::<u64>().ok())
-        .filter(|value| (1..=u64::from(u16::MAX)).contains(value))
-        .ok_or_else(|| {
-            ParseError::structural(
-                "with_io",
-                "WITH_IO terminal geometry needs a positive integer 1-65535 (e.g. `rows=40`)"
-                    .to_string(),
-                &span,
-            )
-        })?;
-    let dim = dim as u16;
-    match name {
-        Some("rows") => Ok(IoStream::Rows(dim)),
-        Some("cols") => Ok(IoStream::Cols(dim)),
-        _ => Err(ParseError::structural(
-            "with_io",
-            "missing terminal dimension in WITH_IO".to_string(),
-            &span,
-        )),
-    }
-}
-
-fn parse_io_stream(text: &str) -> IoStream {
-    match text {
-        "stdin" => IoStream::Stdin,
-        "stdout" => IoStream::Stdout,
-        "stderr" => IoStream::Stderr,
-        "tty" => IoStream::Tty,
-        _ => unreachable!("parser produced invalid io_stream token"),
-    }
-}
-
-fn parse_pipe_binding(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<PipeTarget> {
-    let span = refine_span(ctx, &pair);
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::dollar_ident {
-            return Ok(PipeTarget::Var(parse_dollar_ident(inner)));
-        }
-    }
-    Err(ParseError::structural(
-        "with_io",
-        "missing pipe identifier in WITH_IO binding".to_string(),
-        &span,
-    ))
-}
-
-fn parse_guard_expr(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExpr> {
-    let span = refine_span(ctx, &pair);
-    match pair.as_rule() {
-        Rule::guard_expr => {
-            let next = pair.into_inner().next().ok_or_else(|| {
-                ParseError::structural("guard", "guard expression missing body".to_string(), &span)
-            })?;
-            parse_guard_expr(ctx, next)
-        }
-        Rule::guard_seq => parse_guard_seq(ctx, pair),
-        Rule::guard_factor => parse_guard_factor(ctx, pair),
-        Rule::guard_not => {
-            // guard_not is silent, so its inner pairs are the actual content
-            Err(ParseError::structural(
-                "guard",
-                "guard_not should not create a pair".to_string(),
-                &span,
-            ))
-        }
-        Rule::guard_primary => parse_guard_primary(ctx, pair),
-        Rule::guard_group => parse_guard_group(ctx, pair),
-        Rule::guard_any_call => parse_guard_any_call(ctx, pair),
-        Rule::guard_all_call => parse_guard_all_call(ctx, pair),
-        Rule::not_call => parse_not_call(ctx, pair),
-        Rule::guard_term => parse_guard_term(ctx, pair),
-        _ => Err(ParseError::structural(
-            "guard",
-            format!("unexpected guard expression rule: {:?}", pair.as_rule()),
-            &span,
-        )),
-    }
-}
-
-fn parse_guard_seq(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExpr> {
-    let span = refine_span(ctx, &pair);
-    let mut exprs = Vec::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::guard_factor {
-            exprs.push(parse_guard_factor(ctx, inner)?);
-        }
-    }
-    match exprs.len() {
-        0 => Err(ParseError::structural(
-            "guard",
-            "guard list requires at least one entry".to_string(),
-            &span,
-        )),
-        1 => Ok(exprs.pop().unwrap()),
-        _ => Ok(GuardExpr::all(exprs)),
-    }
-}
-
-fn parse_guard_factor(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExpr> {
-    let span = refine_span(ctx, &pair);
-    let inner = pair.into_inner().next().ok_or_else(|| {
-        ParseError::structural(
-            "guard",
-            "guard factor missing expression".to_string(),
-            &span,
-        )
-    })?;
-    parse_guard_expr(ctx, inner)
-}
-
-fn parse_not_call(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExpr> {
-    let span = refine_span(ctx, &pair);
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::guard_expr {
-            return parse_guard_expr(ctx, inner).map(|e| GuardExpr::Not(Box::new(e)));
-        }
-    }
-    Err(ParseError::structural(
-        "guard",
-        "not() missing expression".to_string(),
-        &span,
-    ))
-}
-
-fn parse_guard_primary(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExpr> {
-    let span = refine_span(ctx, &pair);
-    match pair.as_rule() {
-        Rule::guard_primary => {
-            let inner = pair.into_inner().next().ok_or_else(|| {
-                ParseError::structural("guard", "guard primary missing body".to_string(), &span)
-            })?;
-            parse_guard_primary(ctx, inner)
-        }
-        Rule::guard_group => parse_guard_group(ctx, pair),
-        Rule::guard_any_call => parse_guard_any_call(ctx, pair),
-        Rule::guard_all_call => parse_guard_all_call(ctx, pair),
-        Rule::not_call => parse_not_call(ctx, pair),
-        Rule::guard_term => parse_guard_term(ctx, pair),
-        _ => Err(ParseError::structural(
-            "guard",
-            format!("unexpected guard primary rule: {:?}", pair.as_rule()),
-            &span,
-        )),
-    }
-}
-
-fn parse_guard_group(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExpr> {
-    let span = refine_span(ctx, &pair);
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::guard_expr {
-            return parse_guard_expr(ctx, inner);
-        }
-    }
-    Err(ParseError::structural(
-        "guard",
-        "grouped guard missing expression".to_string(),
-        &span,
-    ))
-}
-
-fn parse_guard_any_call(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExpr> {
-    let span = refine_span(ctx, &pair);
-    let mut args = Vec::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::guard_expr_list {
-            args = parse_guard_expr_list(ctx, inner)?;
-        }
-    }
-    if args.len() < 2 {
-        return Err(ParseError::structural(
-            "guard",
-            "any(...) requires at least two guard expressions".to_string(),
-            &span,
-        ));
-    }
-    Ok(GuardExpr::or(args))
-}
-
-fn parse_guard_all_call(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExpr> {
-    let span = refine_span(ctx, &pair);
-    let mut args = Vec::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::guard_expr_list {
-            args = parse_guard_expr_list(ctx, inner)?;
-        }
-    }
-    if args.is_empty() {
-        return Err(ParseError::structural(
-            "guard",
-            "all(...) requires at least one guard expression".to_string(),
-            &span,
-        ));
-    }
-    Ok(GuardExpr::all(args))
-}
-
-fn parse_guard_expr_list(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Vec<GuardExpr>> {
-    let mut exprs = Vec::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::guard_expr {
-            push_guard_or_args_from_expr(ctx, inner, &mut exprs)?;
-        }
-    }
-    Ok(exprs)
-}
-
-fn push_guard_or_args_from_expr(
-    ctx: &SpanContext,
-    expr_pair: Pair<Rule>,
-    exprs: &mut Vec<GuardExpr>,
-) -> ParseResult<()> {
-    if let Some(seq_pair) = expr_pair
-        .clone()
-        .into_inner()
-        .find(|inner| inner.as_rule() == Rule::guard_seq)
-    {
-        let factors: Vec<Pair<Rule>> = seq_pair
-            .into_inner()
-            .filter(|inner| inner.as_rule() == Rule::guard_factor)
-            .collect();
-        if factors.len() > 1 {
-            for factor in factors {
-                exprs.push(parse_guard_factor(ctx, factor)?);
-            }
-            return Ok(());
-        }
-    }
-    exprs.push(parse_guard_expr(ctx, expr_pair)?);
-    Ok(())
-}
-
-fn parse_guard_term(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExpr> {
-    let span = refine_span(ctx, &pair);
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::inject_guard => {
-                return Ok(GuardExpr::Predicate(Guard::Attr {
-                    ns: Ns::Env,
-                    key: Some(inner.as_str().to_string()),
-                    val: None,
-                }));
-            }
-            Rule::eq_guard => {
-                return Ok(GuardExpr::Predicate(parse_func_guard(inner)?));
-            }
-            Rule::neq_guard => {
-                let guard = parse_func_guard(inner)?;
-                return Ok(GuardExpr::Not(Box::new(GuardExpr::Predicate(guard))));
-            }
-            Rule::bool_guard => {
-                let val = inner
-                    .into_inner()
-                    .find(|p| p.as_rule() == Rule::bool_value)
-                    .expect("grammar invariant violated: bool_guard missing bool_value")
-                    .as_str()
-                    .to_string();
-                return Ok(GuardExpr::Predicate(Guard::Attr {
-                    ns: Ns::Bool,
-                    key: None,
-                    val: Some(val),
-                }));
-            }
-            Rule::env_guard => {
-                return Ok(GuardExpr::Predicate(parse_env_guard(inner)?));
-            }
-            Rule::ns_guard => {
-                return parse_ns_guard(inner, &span);
-            }
-            _ => {}
-        }
-    }
-    Err(ParseError::structural(
-        "guard",
-        "missing guard predicate".to_string(),
-        &span,
-    ))
-}
-
-fn parse_func_guard(pair: Pair<Rule>) -> ParseResult<Guard> {
-    let mut key = String::new();
-    let mut value = String::new();
-    let mut saw_env_prefix = false;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::env_prefix => saw_env_prefix = true,
-            Rule::env_key if saw_env_prefix => {
-                key = inner.as_str().trim().to_string();
-            }
-            Rule::bare_guard_value | Rule::quoted_string => {
-                value = unquote(inner.as_str().trim()).to_string();
-            }
-            _ => {}
-        }
-    }
-    Ok(Guard::Attr {
-        ns: Ns::Env,
-        key: Some(key),
-        val: Some(value),
-    })
-}
-
-fn unquote(s: &str) -> &str {
-    s.strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .or_else(|| s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-        .unwrap_or(s)
-}
-
-fn parse_env_guard(pair: Pair<Rule>) -> ParseResult<Guard> {
-    let mut key = String::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::env_key {
-            key = inner.as_str().trim().to_string();
-        }
-    }
-    Ok(Guard::Attr {
-        ns: Ns::Env,
-        key: Some(key),
-        val: None,
-    })
-}
-
-/// Namespaced guard (`[family:unix]`, `[os:macos]`): namespace and
-/// values validated here with closed lists and custom errors.
-/// `family:unix` and `family:windows` are accepted aliases lowered
-/// immediately to `any(os:macos, os:linux)` and `os:windows`, so
-/// every platform check downstream executes uniformly under `os:`.
-/// Case-sensitive throughout, matching the language's uppercase
-/// keywords and tags.
-fn parse_ns_guard(pair: Pair<Rule>, span: &SpanContext) -> ParseResult<GuardExpr> {
-    fn os(value: &str) -> GuardExpr {
-        GuardExpr::Predicate(Guard::Attr {
-            ns: Ns::Os,
-            key: None,
-            val: Some(value.to_string()),
-        })
-    }
-    let mut ns = String::new();
-    let mut val = String::new();
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::ns_name => ns = inner.as_str().trim().to_string(),
-            Rule::ns_value => val = inner.as_str().trim().to_string(),
-            _ => {}
-        }
-    }
-    match ns.as_str() {
-        "family" => match val.as_str() {
-            "unix" => Ok(GuardExpr::or(vec![os("macos"), os("linux")])),
-            "windows" => Ok(os("windows")),
-            _ => Err(ParseError::structural(
-                "guard",
-                format!("unknown family '{val}'; known values: unix, windows"),
-                span,
-            )),
-        },
-        "os" => match val.as_str() {
-            "macos" | "linux" | "windows" => Ok(os(val.as_str())),
-            _ => Err(ParseError::structural(
-                "guard",
-                format!("unknown os '{val}'; known values: macos, linux, windows"),
-                span,
-            )),
-        },
-        "arch" => {
-            if ARCH_VALUES.contains(&val.as_str()) {
-                Ok(GuardExpr::Predicate(Guard::Attr {
-                    ns: Ns::Arch,
-                    key: None,
-                    val: Some(val),
-                }))
-            } else {
-                Err(ParseError::structural(
-                    "guard",
-                    format!(
-                        "unknown arch '{val}'; known values: {}",
-                        ARCH_VALUES.join(", ")
-                    ),
-                    span,
-                ))
-            }
-        }
-        _ => Err(ParseError::structural(
-            "guard",
-            format!(
-                "unknown guard namespace '{ns}'; known namespaces: family, os, arch, env, bool"
-            ),
-            span,
-        )),
-    }
-}
-
-fn parse_dollar_ident(pair: Pair<Rule>) -> String {
-    // Strip the leading '$' from the identifier
-    let s = pair.as_str();
-    s.strip_prefix('$').unwrap_or(s).to_string()
-}
-
-use crate::ast::{ArithOp, CompareOp, LogicalOp, Value};
-
-fn parse_expr(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let expr = parse_expr_inner(ctx, lctx, pair)?;
-    if matches!(expr, Expr::UnsignedIntBoundary(_)) {
-        return Err(ParseError::structural(
-            "expr",
-            "integer overflow: 9223372036854775808 exceeds i64::MAX".to_string(),
-            &span,
-        ));
-    }
-    Ok(expr)
-}
-
-fn parse_expr_inner(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let inner = pair.into_inner().next().unwrap();
-    match inner.as_rule() {
-        Rule::expr_logical_or => parse_expr_logical_or(ctx, lctx, inner),
-        _ => Err(ParseError::structural(
-            "expr",
-            format!("unexpected expr rule: {:?}", inner.as_rule()),
-            &span,
-        )),
-    }
-}
-
-fn parse_expr_logical_or(
-    ctx: &SpanContext,
-    lctx: &LowerCtx,
-    pair: Pair<Rule>,
-) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let mut inner = pair.into_inner();
-    let mut left = parse_expr_logical_and(ctx, lctx, inner.next().unwrap())?;
-    while let Some(op_pair) = inner.next() {
-        let op = match op_pair.as_rule() {
-            Rule::or_op => LogicalOp::Or,
-            _ => {
-                return Err(ParseError::structural(
-                    "expr",
-                    format!("unexpected operator in logical-or: {:?}", op_pair.as_rule()),
-                    &span,
-                ));
-            }
-        };
-        let right = parse_expr_logical_and(ctx, lctx, inner.next().unwrap())?;
-        left = Expr::Logical {
-            op,
-            left: Box::new(left),
-            right: Box::new(right),
-        };
-    }
-    Ok(left)
-}
-
-fn parse_expr_logical_and(
-    ctx: &SpanContext,
-    lctx: &LowerCtx,
-    pair: Pair<Rule>,
-) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let mut inner = pair.into_inner();
-    let mut left = parse_expr_comparison(ctx, lctx, inner.next().unwrap())?;
-    while let Some(op_pair) = inner.next() {
-        let op = match op_pair.as_rule() {
-            Rule::and_op => LogicalOp::And,
-            _ => {
-                return Err(ParseError::structural(
-                    "expr",
-                    format!(
-                        "unexpected operator in logical-and: {:?}",
-                        op_pair.as_rule()
-                    ),
-                    &span,
-                ));
-            }
-        };
-        let right = parse_expr_comparison(ctx, lctx, inner.next().unwrap())?;
-        reject_boundary(ctx, &left)?;
-        reject_boundary(ctx, &right)?;
-        left = Expr::Logical {
-            op,
-            left: Box::new(left),
-            right: Box::new(right),
-        };
-    }
-    Ok(left)
-}
-
-fn parse_expr_comparison(
-    ctx: &SpanContext,
-    lctx: &LowerCtx,
-    pair: Pair<Rule>,
-) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let mut inner = pair.into_inner();
-    let left = parse_expr_ordering(ctx, lctx, inner.next().unwrap())?;
-    if let Some(op_pair) = inner.next() {
-        let op = match op_pair.as_rule() {
-            Rule::eq_op => CompareOp::Eq,
-            Rule::neq_op => CompareOp::Ne,
-            _ => {
-                return Err(ParseError::structural(
-                    "expr",
-                    format!("unexpected comparison operator: {:?}", op_pair.as_rule()),
-                    &span,
-                ));
-            }
-        };
-        let right = parse_expr_ordering(ctx, lctx, inner.next().unwrap())?;
-        return make_compare(ctx, op, left, right);
-    }
-    Ok(left)
-}
-
-fn parse_expr_ordering(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let mut inner = pair.into_inner();
-    let left = parse_expr_add_sub(ctx, lctx, inner.next().unwrap())?;
-    if let Some(op_pair) = inner.next() {
-        let op = match op_pair.as_rule() {
-            Rule::lt_op => CompareOp::Lt,
-            Rule::le_op => CompareOp::Le,
-            Rule::gt_op => CompareOp::Gt,
-            Rule::ge_op => CompareOp::Ge,
-            _ => {
-                return Err(ParseError::structural(
-                    "expr",
-                    format!("unexpected ordering operator: {:?}", op_pair.as_rule()),
-                    &span,
-                ));
-            }
-        };
-        let right = parse_expr_add_sub(ctx, lctx, inner.next().unwrap())?;
-        return make_compare(ctx, op, left, right);
-    }
-    Ok(left)
-}
-
-fn parse_expr_add_sub(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let mut inner = pair.into_inner();
-    let mut left = parse_expr_mul_div(ctx, lctx, inner.next().unwrap())?;
-    while let Some(op_pair) = inner.next() {
-        let op = match op_pair.as_rule() {
-            Rule::plus_op => ArithOp::Add,
-            Rule::minus_op => ArithOp::Sub,
-            _ => {
-                return Err(ParseError::structural(
-                    "expr",
-                    format!("unexpected additive operator: {:?}", op_pair.as_rule()),
-                    &span,
-                ));
-            }
-        };
-        let right = parse_expr_mul_div(ctx, lctx, inner.next().unwrap())?;
-        left = make_arith(ctx, op, left, right)?;
-    }
-    Ok(left)
-}
-
-fn parse_expr_mul_div(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let mut inner = pair.into_inner();
-    let mut left = parse_expr_unary(ctx, lctx, inner.next().unwrap())?;
-    while let Some(op_pair) = inner.next() {
-        let op = match op_pair.as_rule() {
-            Rule::star_op => ArithOp::Mul,
-            Rule::slash_op => ArithOp::Div,
-            _ => {
-                return Err(ParseError::structural(
-                    "expr",
-                    format!(
-                        "unexpected multiplicative operator: {:?}",
-                        op_pair.as_rule()
-                    ),
-                    &span,
-                ));
-            }
-        };
-        let right = parse_expr_unary(ctx, lctx, inner.next().unwrap())?;
-        left = make_arith(ctx, op, left, right)?;
-    }
-    Ok(left)
-}
-
-fn parse_expr_unary(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let mut prefixes = Vec::new();
-    let mut atom = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::not_op => prefixes.push(false),
-            Rule::neg_op => prefixes.push(true),
-            Rule::expr_atom => atom = Some(parse_expr_atom(ctx, lctx, inner)?),
-            _ => {
-                return Err(ParseError::structural(
-                    "expr",
-                    format!("unexpected unary operand rule: {:?}", inner.as_rule()),
-                    &span,
-                ));
-            }
-        }
-    }
-    let mut expr = atom.ok_or_else(|| {
-        ParseError::structural(
-            "expr",
-            "'!'/'-' requires an expression operand".to_string(),
-            &span,
-        )
-    })?;
-    // Innermost prefix is closest to the atom: apply in reverse order.
-    for is_neg in prefixes.into_iter().rev() {
-        if is_neg {
-            expr = apply_unary_neg(ctx, expr)?;
-        } else {
-            reject_boundary(ctx, &expr)?;
-            expr = Expr::Not(Box::new(expr));
-        }
-    }
-    Ok(expr)
-}
-
-/// Reject a staged `UnsignedIntBoundary` in any position where unary `-`
-/// cannot consume it (every composite constructor calls this on children).
-fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {
-    if matches!(expr, Expr::UnsignedIntBoundary(_)) {
-        return Err(ParseError::structural(
-            "expr",
-            "integer overflow: 9223372036854775808 exceeds i64::MAX".to_string(),
-            ctx,
-        ));
-    }
-    Ok(())
-}
-
-/// Apply unary `-`: fold literals, consume the `i64::MIN` boundary, else
-/// compile to RPN `Neg` (or AST `0 - x` fallback for non-math operands).
-fn apply_unary_neg(ctx: &SpanContext, expr: Expr) -> ParseResult<Expr> {
-    match expr {
-        Expr::Literal(v) => match (v.as_i64(), v.as_f64()) {
-            (Some(n), _) => match n.checked_neg() {
-                Some(neg) => Ok(Expr::Literal(Value::int(neg))),
-                None => Ok(Expr::CompiledMath(vec![MathOp::PushConst(v), MathOp::Neg])),
-            },
-            (None, Some(f)) => Ok(Expr::Literal(Value::float(-f))),
-            (None, None) => {
-                let other = Expr::Literal(v);
-                if let Some(mut ops) = expr_to_rpn(&other) {
-                    ops.push(MathOp::Neg);
-                    Ok(Expr::CompiledMath(ops))
-                } else {
-                    // Non-math operand (list/map/logical): `0 - x` evaluates via
-                    // the shared arithmetic helper to a runtime Type Error.
-                    Ok(Expr::Arithmetic {
-                        op: ArithOp::Sub,
-                        left: Box::new(Expr::Literal(Value::int(0))),
-                        right: Box::new(other),
-                    })
-                }
-            }
-        },
-        Expr::UnsignedIntBoundary(n) => {
-            if n == i64::MAX as u64 + 1 {
-                Ok(Expr::Literal(Value::int(i64::MIN)))
-            } else {
-                Err(ParseError::structural(
-                    "expr",
-                    format!("integer overflow: {} exceeds i64::MAX", n),
-                    ctx,
-                ))
-            }
-        }
-        other => {
-            if let Some(mut ops) = expr_to_rpn(&other) {
-                ops.push(MathOp::Neg);
-                Ok(Expr::CompiledMath(ops))
-            } else {
-                // Non-math operand (list/map/logical): `0 - x` evaluates via
-                // the shared arithmetic helper to a runtime Type Error.
-                Ok(Expr::Arithmetic {
-                    op: ArithOp::Sub,
-                    left: Box::new(Expr::Literal(Value::int(0))),
-                    right: Box::new(other),
-                })
-            }
-        }
-    }
-}
-
-/// Try parse-time constant folding for binary arithmetic/comparison.
-/// Returns `Some(literal)` on success, `None` when not both literals or
-/// when the op would error at runtime (div-zero/overflow/non-finite:
-/// leave for the RPN evaluator so the error surfaces at runtime).
-fn try_fold_arith(op: ArithOp, left: &Expr, right: &Expr) -> Option<Expr> {
-    let (Expr::Literal(lv), Expr::Literal(rv)) = (left, right) else {
-        return None;
-    };
-    fold_arith_values(op, lv, rv).map(Expr::Literal)
-}
-
-fn fold_arith_values(op: ArithOp, left: &Value, right: &Value) -> Option<Value> {
-    match (left.as_i64(), right.as_i64()) {
-        (Some(a), Some(b)) => {
-            let v = match op {
-                ArithOp::Add => a.checked_add(b)?,
-                ArithOp::Sub => a.checked_sub(b)?,
-                ArithOp::Mul => a.checked_mul(b)?,
-                ArithOp::Div => a.checked_div(b)?,
-            };
-            Some(Value::int(v))
-        }
-        _ => {
-            let (af, bf) = (as_f64(left)?, as_f64(right)?);
-            fold_float(op, af, bf)
-        }
-    }
-}
-
-fn fold_float(op: ArithOp, a: f64, b: f64) -> Option<Value> {
-    if !a.is_finite() || !b.is_finite() {
-        return None;
-    }
-    let v = match op {
-        ArithOp::Add => a + b,
-        ArithOp::Sub => a - b,
-        ArithOp::Mul => a * b,
-        ArithOp::Div => {
-            if b == 0.0 {
-                return None;
-            }
-            a / b
-        }
-    };
-    if v.is_finite() {
-        Some(Value::float(v))
-    } else {
-        None
-    }
-}
-
-fn try_fold_compare(op: CompareOp, left: &Expr, right: &Expr) -> Option<Expr> {
-    let (Expr::Literal(lv), Expr::Literal(rv)) = (left, right) else {
-        return None;
-    };
-    match (lv.as_i64(), rv.as_i64()) {
-        (Some(a), Some(b)) => {
-            let r = match op {
-                CompareOp::Eq => a == b,
-                CompareOp::Ne => a != b,
-                CompareOp::Lt => a < b,
-                CompareOp::Le => a <= b,
-                CompareOp::Gt => a > b,
-                CompareOp::Ge => a >= b,
-            };
-            Some(Expr::Literal(Value::bool(r)))
-        }
-        _ => {
-            if let (Some(a), Some(b)) = (lv.as_bool(), rv.as_bool()) {
-                return match op {
-                    CompareOp::Eq => Some(Expr::Literal(Value::bool(a == b))),
-                    CompareOp::Ne => Some(Expr::Literal(Value::bool(a != b))),
-                    _ => None,
-                };
-            }
-            let (af, bf) = (as_f64(lv)?, as_f64(rv)?);
-            let r = match op {
-                CompareOp::Eq => af == bf,
-                CompareOp::Ne => af != bf,
-                CompareOp::Lt => af < bf,
-                CompareOp::Le => af <= bf,
-                CompareOp::Gt => af > bf,
-                CompareOp::Ge => af >= bf,
-            };
-            Some(Expr::Literal(Value::bool(r)))
-        }
-    }
-}
-
-fn as_f64(v: &Value) -> Option<f64> {
-    if let Some(n) = v.as_i64() {
-        return Some(n as f64);
-    }
-    match v.as_f64() {
-        Some(f) if f.is_finite() => Some(f),
-        _ => None,
-    }
-}
-
-fn make_arith(ctx: &SpanContext, op: ArithOp, left: Expr, right: Expr) -> ParseResult<Expr> {
-    reject_boundary(ctx, &left)?;
-    reject_boundary(ctx, &right)?;
-    if let Some(folded) = try_fold_arith(op, &left, &right) {
-        return Ok(folded);
-    }
-    if let (Some(mut lops), Some(mut rops)) = (expr_to_rpn(&left), expr_to_rpn(&right)) {
-        lops.append(&mut rops);
-        lops.push(match op {
-            ArithOp::Add => MathOp::Add,
-            ArithOp::Sub => MathOp::Sub,
-            ArithOp::Mul => MathOp::Mul,
-            ArithOp::Div => MathOp::Div,
-        });
-        return Ok(Expr::CompiledMath(lops));
-    }
-    Ok(Expr::Arithmetic {
-        op,
-        left: Box::new(left),
-        right: Box::new(right),
-    })
-}
-
-fn make_compare(ctx: &SpanContext, op: CompareOp, left: Expr, right: Expr) -> ParseResult<Expr> {
-    reject_boundary(ctx, &left)?;
-    reject_boundary(ctx, &right)?;
-    if let Some(folded) = try_fold_compare(op, &left, &right) {
-        return Ok(folded);
-    }
-    if let (Some(mut lops), Some(mut rops)) = (expr_to_rpn(&left), expr_to_rpn(&right)) {
-        lops.append(&mut rops);
-        lops.push(match op {
-            CompareOp::Eq => MathOp::Eq,
-            CompareOp::Ne => MathOp::Ne,
-            CompareOp::Lt => MathOp::Lt,
-            CompareOp::Le => MathOp::Le,
-            CompareOp::Gt => MathOp::Gt,
-            CompareOp::Ge => MathOp::Ge,
-        });
-        return Ok(Expr::CompiledMath(lops));
-    }
-    Ok(Expr::Compare {
-        op,
-        left: Box::new(left),
-        right: Box::new(right),
-    })
-}
-
-/// Convert an operand subtree to flat RPN. Returns `None` for shapes with
-/// no RPN encoding (`Not`/`Logical`/`List`/`Map`/`FreshPipe`/stray boundary): callers
-/// fall back to AST nodes evaluated recursively.
-fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
-    match expr {
-        Expr::Literal(v) => Some(vec![MathOp::PushConst(v.clone())]),
-        Expr::Var(name) => Some(vec![MathOp::LoadVar(name.clone())]),
-        Expr::Env(key) => Some(vec![MathOp::LoadEnv(key.clone())]),
-        Expr::KeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
-            base: base.clone(),
-            keys: keys.clone(),
-        }]),
-        Expr::Call { name, args } => {
-            let mut ops = Vec::new();
-            for arg in args {
-                ops.extend(expr_to_rpn(arg)?);
-            }
-            ops.push(MathOp::Call {
-                name: name.clone(),
-                arity: args.len(),
-            });
-            Some(ops)
-        }
-        Expr::Inspect(var) => Some(vec![MathOp::Inspect(var.clone())]),
-        Expr::Arithmetic { op, left, right } => {
-            let mut ops = expr_to_rpn(left)?;
-            ops.extend(expr_to_rpn(right)?);
-            ops.push(match op {
-                ArithOp::Add => MathOp::Add,
-                ArithOp::Sub => MathOp::Sub,
-                ArithOp::Mul => MathOp::Mul,
-                ArithOp::Div => MathOp::Div,
-            });
-            Some(ops)
-        }
-        Expr::Compare { op, left, right } => {
-            let mut ops = expr_to_rpn(left)?;
-            ops.extend(expr_to_rpn(right)?);
-            ops.push(match op {
-                CompareOp::Eq => MathOp::Eq,
-                CompareOp::Ne => MathOp::Ne,
-                CompareOp::Lt => MathOp::Lt,
-                CompareOp::Le => MathOp::Le,
-                CompareOp::Gt => MathOp::Gt,
-                CompareOp::Ge => MathOp::Ge,
-            });
-            Some(ops)
-        }
-        Expr::CompiledMath(ops) => Some(ops.clone()),
-        Expr::FreshPipe => None,
-        Expr::Not(_) | Expr::Logical { .. } | Expr::List(_) | Expr::Map(_) | Expr::Block(_) => None,
-        Expr::UnsignedIntBoundary(_) => None,
-    }
-}
-
-fn parse_expr_atom(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let inner = pair.into_inner().next().unwrap();
-    match inner.as_rule() {
-        Rule::parenthesized_expr => parse_expr_inner(ctx, lctx, inner.into_inner().next().unwrap()),
-        Rule::func_call => parse_func_call(ctx, lctx, inner),
-        Rule::key_path => parse_key_path(ctx, inner),
-        Rule::variable => {
-            let name = inner.as_str();
-            let name = name.strip_prefix('$').unwrap_or(name).to_string();
-            Ok(Expr::Var(name))
-        }
-        Rule::env_read => parse_env_read(ctx, inner).map(Expr::Env),
-        Rule::list_literal => parse_list_literal(ctx, lctx, inner),
-        Rule::map_literal => parse_map_literal(ctx, lctx, inner),
-        Rule::block => Ok(Expr::Block(parse_block_elements_with_lower(
-            ctx, inner, lctx,
-        )?)),
-        Rule::string_literal | Rule::quoted_string => {
-            let s = parse_quoted_string(inner)?;
-            Ok(Expr::Literal(Value::string(s)))
-        }
-        Rule::numeric_literal => parse_numeric_literal(ctx, inner),
-        Rule::bare_word => {
-            let s = inner.as_str().to_string();
-            match s.as_str() {
-                "true" => Ok(Expr::Literal(Value::bool(true))),
-                "false" => Ok(Expr::Literal(Value::bool(false))),
-                _ => Ok(Expr::Literal(Value::string(s))),
-            }
-        }
-        _ => Err(ParseError::structural(
-            "expr",
-            format!("unexpected expression atom rule: {:?}", inner.as_rule()),
-            &span,
-        )),
-    }
-}
-
-/// Lower an unsigned `numeric_literal` token. Floats (containing `.`) parse
-/// as `f64` (non-finite/overflow bails); integers parse as `u64` so the
-/// unsigned half of `i64::MIN` (`9223372036854775808`) stages as
-/// `UnsignedIntBoundary` for unary `-` to consume. Larger values bail.
-/// `_` separators strip first: the grammar only admits them between
-/// digits, so the cleaned text always parses when the shape is right.
-fn parse_numeric_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let text = pair.as_str();
-    let clean = text.replace('_', "");
-    if clean.contains('.') {
-        let parsed: f64 = clean.parse().map_err(|_| {
-            ParseError::structural("expr", format!("invalid float literal {text:?}"), &span)
-        })?;
-        if !parsed.is_finite() {
-            return Err(ParseError::structural(
-                "expr",
-                format!("invalid float literal {text:?}"),
-                &span,
-            ));
-        }
-        return Ok(Expr::Literal(Value::float(parsed)));
-    }
-    let digits: u64 = clean.parse().map_err(|_| {
-        ParseError::structural(
-            "expr",
-            format!("integer overflow: {text:?} exceeds i64::MAX"),
-            &span,
-        )
-    })?;
-    if digits <= i64::MAX as u64 {
-        Ok(Expr::Literal(Value::int(digits as i64)))
-    } else if digits == i64::MAX as u64 + 1 {
-        Ok(Expr::UnsignedIntBoundary(digits))
-    } else {
-        Err(ParseError::structural(
-            "expr",
-            format!("integer overflow: {text:?} exceeds i64::MAX"),
-            &span,
-        ))
-    }
-}
-
-fn parse_env_read(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<String> {
-    let span = refine_span(ctx, &pair);
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::env_read_key {
-            return Ok(inner.as_str().trim().to_string());
-        }
-    }
-    Err(ParseError::structural(
-        "expr",
-        "env read requires a key: env:KEY".to_string(),
-        &span,
-    ))
-}
-
-fn parse_key_path(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let mut base = None;
-    let mut keys = Vec::new();
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::ident => {
-                if base.is_none() {
-                    base = Some(inner.as_str().to_string());
-                }
-            }
-            Rule::key_path_segment => {
-                keys.push(inner.as_str().to_string());
-            }
-            _ => {}
-        }
-    }
-    Ok(Expr::KeyPath {
-        base: base.ok_or_else(|| {
-            ParseError::structural(
-                "expr",
-                "key path requires a base identifier".to_string(),
-                &span,
-            )
-        })?,
-        keys,
-    })
-}
-
-fn parse_func_call(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let mut name = None;
-    let mut args = Vec::new();
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::qualified_func_name => {
-                name = Some(inner.as_str().to_string());
-            }
-            Rule::expr => {
-                let arg = parse_expr_inner(ctx, lctx, inner)?;
-                reject_boundary(ctx, &arg)?;
-                args.push(arg);
-            }
-            _ => {}
-        }
-    }
-    let name = name.ok_or_else(|| {
-        ParseError::structural("expr", "function call requires a name".to_string(), &span)
-    })?;
-    // `INSPECT` lowers to its own node carrying the variable unevaluated:
-    // pre-evaluating to a `Value` would lose the binding name. Anything else
-    // resolves statically to `MODULE::NAME` against SCRIPT definitions and
-    // `IMPORT`ed modules; the runtime registry is keyed the same way.
-    if name == KEYWORD_INSPECT {
-        let [arg] = args.as_slice() else {
-            return Err(ParseError::structural(
-                "expr",
-                "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
-                &span,
-            ));
-        };
-        if let Expr::Var(var) = arg {
-            return Ok(Expr::Inspect(var.clone()));
-        }
-        return Err(ParseError::structural(
-            "expr",
-            format!("INSPECT requires a $variable argument, found {arg:?}"),
-            &span,
-        ));
-    }
-    let qualified = lctx.resolve_call(&span, &name)?;
-    Ok(Expr::Call {
-        name: qualified,
-        args,
-    })
-}
-
-fn parse_list_literal(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let mut items = Vec::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::expr {
-            let item = parse_expr_inner(ctx, lctx, inner)?;
-            reject_boundary(ctx, &item)?;
-            items.push(item);
-        }
-    }
-    Ok(Expr::List(items))
-}
-
-fn parse_map_literal(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
-    let span = refine_span(ctx, &pair);
-    let mut entries = Vec::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::map_entry {
-            let mut key = String::new();
-            let mut value = None;
-            for entry_inner in inner.into_inner() {
-                match entry_inner.as_rule() {
-                    Rule::quoted_string => {
-                        key = parse_quoted_string(entry_inner)?;
-                    }
-                    Rule::bare_word => {
-                        key = entry_inner.as_str().to_string();
-                    }
-                    Rule::expr => {
-                        let val = parse_expr_inner(ctx, lctx, entry_inner)?;
-                        reject_boundary(ctx, &val)?;
-                        value = Some(val);
-                    }
-                    _ => {}
-                }
-            }
-            let val = value.ok_or_else(|| {
-                ParseError::structural("expr", "map entry missing value".to_string(), &span)
-            })?;
-            entries.push((key, val));
-        }
-    }
-    Ok(Expr::Map(entries))
 }

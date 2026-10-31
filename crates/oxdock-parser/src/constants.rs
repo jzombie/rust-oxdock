@@ -1,12 +1,11 @@
 //! Language-level constants: the module separator, system module names,
 //! and reserved keywords.
 //!
-//! Single source of truth shared by the grammar lowerer (`parser.rs`), the
+//! Single source of truth shared by the parser (`parser`), the
 //! macro token walker (`macro_input.rs`), and the runtime registry
 //! (`oxdock-core`). Changing any of these must update exactly one
-//! definition here; `dsl.pest` carries the same spellings by necessity (a
-//! grammar file cannot reference Rust constants) and the bidirectional
-//! keyword conformance test locks the two together.
+//! definition here; the backend's structural dispatch carries the same
+//! spellings, and the keyword transparency test locks the two together.
 
 /// Separator between module and function name (`STD::GLOB`).
 pub const MODULE_SEPARATOR: &str = "::";

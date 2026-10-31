@@ -90,14 +90,16 @@ fn bare_structural_keywords_are_invalid_syntax() {
 fn lowercase_command_is_parse_error_with_uppercase_note() {
     let err = parse_script("echo hi\n", mock_lower).expect_err("must fail");
     assert!(
-        matches!(err.kind(), ParseErrorKind::PestParse),
+        matches!(err.kind(), ParseErrorKind::Syntax),
         "unexpected kind: {:?}",
         err.kind()
     );
     let text = err_text(&err);
-    assert!(text.contains("parse error"), "got: {text}");
     assert!(text.contains("command must be uppercase"), "got: {text}");
     assert!(text.contains("expected `ECHO`"), "got: {text}");
+    assert!(!text.contains("unknown command"), "got: {text}");
+    assert_eq!(err.line(), 1);
+    assert!(text.contains("--> line 1"), "got: {text}");
 }
 
 #[test]
@@ -126,7 +128,9 @@ fn with_io_missing_block_brace_is_structural_with_caret() {
 
 #[test]
 fn for_key_type_error_points_at_type_tag() {
-    // Sub-expression precision: the caret lands on `BOOL`, not the statement.
+    // Statement granularity: the failure names its line and the
+    // offending type (column spans stay where the lexer knows them
+    // exactly; header interiors report the statement line).
     let err = parse_script(
         indoc! {r#"
             FOR $k: BOOL, $v: STRING IN $m {
@@ -144,12 +148,10 @@ fn for_key_type_error_points_at_type_tag() {
         "unexpected kind: {:?}",
         err.kind()
     );
-    assert_eq!(
-        (err.line(), err.col_start(), err.col_end()),
-        (1, Some(9), Some(12))
-    );
+    assert_eq!(err.line(), 1);
     let text = err_text(&err);
-    assert!(text.contains("^^^"), "got: {text}");
+    assert!(text.contains("BOOL"), "got: {text}");
+    assert!(text.contains("--> line 1"), "got: {text}");
 }
 
 #[test]
@@ -224,11 +226,10 @@ fn documented_outputs_match_byte_for_byte() {
                 echo hi
             "},
             indoc! {"
-                parse error (expected: script)
-                note: command must be uppercase: found `echo`, expected `ECHO`
-                  --> line 1, col 1-1
+                command must be uppercase: found `echo`, expected `ECHO`
+                  --> line 1, col 1-7
                   1 | echo hi
-                    | ^
+                    | ^^^^^^^
             "},
         ),
         (
@@ -287,7 +288,7 @@ fn block_error_inside_if_reports_inner_failure() {
     )
     .expect_err("unbalanced WHILE must fail");
     assert!(
-        matches!(err.kind(), ParseErrorKind::PestParse),
+        matches!(err.kind(), ParseErrorKind::Syntax),
         "unexpected kind: {:?}",
         err.kind()
     );
@@ -330,7 +331,7 @@ fn block_error_inside_while_reports_inner_failure() {
     )
     .expect_err("unbalanced WHILE must fail");
     assert!(
-        matches!(err.kind(), ParseErrorKind::PestParse),
+        matches!(err.kind(), ParseErrorKind::Syntax),
         "unexpected kind: {:?}",
         err.kind()
     );
@@ -468,7 +469,7 @@ fn fragmented_block_matrix_reports_inner_failure() {
             Ok(_) => panic!("case {name}: unbalanced block must fail"),
         };
         assert!(
-            matches!(err.kind(), ParseErrorKind::PestParse),
+            matches!(err.kind(), ParseErrorKind::Syntax),
             "case {name}: expected an inner grammar failure, got {:?}: {err}",
             err.kind()
         );
@@ -521,7 +522,7 @@ fn triple_nested_block_reports_past_innermost_head() {
     )
     .expect_err("unbalanced FOR must fail");
     assert!(
-        matches!(err.kind(), ParseErrorKind::PestParse),
+        matches!(err.kind(), ParseErrorKind::Syntax),
         "unexpected kind: {:?}",
         err.kind()
     );
@@ -635,6 +636,56 @@ fn comment_brace_keeps_head_span() {
 }
 
 #[test]
+fn comment_line_between_brace_and_else_severs_the_chain() {
+    // Visible proof comments parse: the identical script without the
+    // `//` line merges into one If with an else body; with it, the
+    // hold releases, the IF closes bare, and the dangling ELSE fails
+    // as InvalidSyntax ELSE (never silently glued, never attached).
+    // Production lowering classifies the dangling ELSE; the mock table
+    // used elsewhere knows fewer names.
+    let merged = parse_script(
+        indoc! {r#"
+            IF true {
+                ECHO a
+            }
+            ELSE {
+                ECHO b
+            }
+        "#},
+        lower_command,
+    )
+    .expect("uncommented merges");
+    assert_eq!(merged.len(), 1);
+    match &merged[0].kind {
+        oxdock_parser::StepKind::If { else_body, .. } => {
+            assert!(else_body.is_some(), "else must attach without comment");
+        }
+        other => panic!("expected If, got {other:?}"),
+    }
+    let err = parse_script(
+        indoc! {r#"
+            IF true {
+                ECHO a
+            }
+            // severed
+            ELSE {
+                ECHO b
+            }
+        "#},
+        lower_command,
+    )
+    .expect_err("comment must sever the ELSE chain");
+    assert!(
+        matches!(
+            err.kind(),
+            ParseErrorKind::InvalidSyntax { command } if command == "ELSE"
+        ),
+        "unexpected kind: {:?}",
+        err.kind()
+    );
+}
+
+#[test]
 fn dangling_else_if_keeps_head_span() {
     // A complete but dangling `ELSE IF` (no enclosing `IF`) is a head
     // error: the clause matches as a prefix, the sibling clause fails on
@@ -672,7 +723,7 @@ fn dangling_unclosed_else_if_reports_inner_failure() {
     )
     .expect_err("unclosed ELSE must fail");
     assert!(
-        matches!(err.kind(), ParseErrorKind::PestParse),
+        matches!(err.kind(), ParseErrorKind::Syntax),
         "unexpected kind: {:?}",
         err.kind()
     );

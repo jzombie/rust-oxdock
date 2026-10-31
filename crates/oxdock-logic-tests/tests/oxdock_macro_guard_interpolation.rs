@@ -123,3 +123,46 @@ fn guard_static_bool_interpolation() {
         "file should not exist when bool guard is false"
     );
 }
+
+#[test]
+fn macro_block_string_dedents_and_runs() {
+    let steps = oxdock! {
+        LET $msg: STRING = """
+            hello
+            world
+            """
+        WRITE block.txt "{{ $msg }}"
+    };
+
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let io = ExecIo::new();
+    run_steps_with_context_result_with_io(&root, &root, &steps, io).unwrap();
+    let resolver = oxdock_fs::PathResolver::new(root.root(), root.root()).unwrap();
+    let text = resolver
+        .read_to_string(&root.join("block.txt").unwrap())
+        .unwrap();
+    assert_eq!(text, "hello\nworld");
+}
+
+#[test]
+fn macro_block_string_interpolates() {
+    let steps = oxdock! {
+        LET $name: STRING = "world"
+        LET $greeting: STRING = """
+            hello {{ $name }}
+            bye {{ $name }}
+            """
+        WRITE greet.txt "{{ $greeting }}"
+    };
+
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let io = ExecIo::new();
+    run_steps_with_context_result_with_io(&root, &root, &steps, io).unwrap();
+    let resolver = oxdock_fs::PathResolver::new(root.root(), root.root()).unwrap();
+    let text = resolver
+        .read_to_string(&root.join("greet.txt").unwrap())
+        .unwrap();
+    assert_eq!(text, "hello world\nbye world");
+}

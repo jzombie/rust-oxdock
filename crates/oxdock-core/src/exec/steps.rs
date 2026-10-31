@@ -643,7 +643,7 @@ pub(super) fn execute_steps<P: ProcessManager>(
     wait_at_end: bool,
 ) -> Result<Flow> {
     let generation = allocate_assert_generation();
-    let flow = match execute_steps_inner(
+    let flow = match execute_steps_inner(InnerArgs {
         state,
         process,
         generation,
@@ -655,7 +655,7 @@ pub(super) fn execute_steps<P: ProcessManager>(
         out_pipe,
         stdin_pipe,
         wait_at_end,
-    ) {
+    }) {
         Ok(flow) => flow,
         Err(e) => {
             // A step failed before end-of-pipeline reaping ran. Join
@@ -819,6 +819,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                     kind: cmd.clone(),
                     scope_enter: 0,
                     scope_exit: 0,
+                    line: 0,
+                    col: 0,
                 }],
                 generation,
             )?;
@@ -866,10 +868,6 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 &to_resolved,
                 *include_dirty,
             )
-        }
-        StepKind::HashSha256 { path } => {
-            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-            handlers::hash_sha256(&mut cx, idx, &path_resolved)
         }
         StepKind::Archive { src, dst, raw } => {
             let src_resolved = super::args::resolve_arg(src, &mut cx)?;
@@ -920,7 +918,6 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
             handlers::ls(&mut cx, idx, &resolved)
         }
-        StepKind::Cwd => handlers::cwd(&mut cx, idx),
         StepKind::Read(arg) => {
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
             handlers::read(&mut cx, idx, &resolved)
@@ -1044,11 +1041,30 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_steps_inner<P: ProcessManager>(
-    state: &mut ExecState<P>,
-    process: &mut P,
+/// Position context wrapping a failing step's error: `step N` plus
+/// `line L` / `col C` when the step carries coordinates (parsed
+/// scripts do; hand-built steps keep the historical bare rendering).
+/// Applied once per dispatch level, so nested bodies chain outer and
+/// inner positions like a call path.
+fn step_error(step: &Step, idx: usize, err: anyhow::Error) -> anyhow::Error {
+    let mut loc = format!("step {}", idx + 1);
+    if step.line > 0 {
+        loc.push_str(&format!(", line {}", step.line));
+        if step.col > 0 {
+            loc.push_str(&format!(", col {}", step.col));
+        }
+    }
+    err.context(loc)
+}
+
+/// Bundled inputs for [`execute_steps_inner`]. One struct parameter
+/// keeps the function under the argument-count lint without an
+/// override; call sites construct it from the same values.
+struct InnerArgs<'a, P: ProcessManager> {
+    state: &'a mut ExecState<P>,
+    process: &'a mut P,
     generation: usize,
-    steps: &[Step],
+    steps: &'a [Step],
     stdin: CommandStdin,
     expose_stdin: bool,
     out: Option<StreamHandle>,
@@ -1056,7 +1072,22 @@ fn execute_steps_inner<P: ProcessManager>(
     out_pipe: Option<Arc<PipeInner>>,
     stdin_pipe: Option<Arc<PipeInner>>,
     wait_at_end: bool,
-) -> Result<Flow> {
+}
+
+fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow> {
+    let InnerArgs {
+        state,
+        process,
+        generation,
+        steps,
+        stdin,
+        expose_stdin,
+        out,
+        err,
+        out_pipe,
+        stdin_pipe,
+        wait_at_end,
+    } = args;
     // Pre-register assertion windows for this generation
     pre_register_assertions(state, steps, generation)?;
 
@@ -1072,96 +1103,158 @@ fn execute_steps_inner<P: ProcessManager>(
         }
 
         let should_run = guard_option_allows(step.guard.as_ref(), &state.envs);
-        let flow_result: Result<Flow> = if !should_run {
-            Ok(Flow::Done)
-        } else {
-            let mut cx = StepCtx {
-                state,
-                process,
-                stdin: stdin.clone(),
-                expose_stdin,
-                out: out.clone(),
-                err: err.clone(),
-                out_pipe: out_pipe.clone(),
-                stdin_pipe: stdin_pipe.clone(),
-                tty: None,
-            };
-            // Function/loop control steps dispatch through the Flow path;
-            // every other variant runs the leaf pipeline and yields Done.
-            let flow_result: Result<Flow> = match &step.kind {
-                StepKind::FuncDef { .. }
-                | StepKind::Call { .. }
-                | StepKind::Return { .. }
-                | StepKind::While { .. }
-                | StepKind::Break
-                | StepKind::Continue
-                | StepKind::For { .. }
-                | StepKind::If { .. }
-                | StepKind::Timeout { .. }
-                | StepKind::Isolated { .. }
-                | StepKind::WithIo { .. }
-                | StepKind::AssignCapture { .. } => {
-                    dispatch_flow_step(&step.kind, &mut cx, generation, idx)
-                }
-                _ => {
-                    match &step.kind {
-                        StepKind::InheritEnv { keys } => {
-                            handlers::inherit_env(&mut cx, keys)?;
-                            sync_iteration_assert_needles(cx.state, steps, generation)?;
-                            Ok(())
-                        }
-                        StepKind::IsolatedInheritEnv { keys } => {
-                            handlers::isolated_inherit_env(&mut cx, keys)?;
-                            Ok(())
-                        }
-                        StepKind::Workdir(arg) => {
-                            let path = super::args::resolve_arg(arg, &mut cx)?;
-                            handlers::workdir(&mut cx, idx, &path)
-                        }
-                        StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
-                        StepKind::RemoteBlock {
-                            target,
-                            vars,
-                            env,
-                            body,
-                        } => super::remote::run_remote_block(&mut cx, target, vars, env, body, idx),
-                        StepKind::Env { key, value } => {
-                            let resolved = super::args::resolve_arg(value, &mut cx)?;
-                            handlers::env(&mut cx, key, &resolved)?;
-                            sync_iteration_assert_needles(cx.state, steps, generation)?;
-                            Ok(())
-                        }
-                        StepKind::Run(arg) => {
-                            let cmd = super::args::resolve_arg(arg, &mut cx)?;
-                            let cmd = super::args::expand_dsl_vars(&cmd, cx.state)?;
-                            handlers::run(&mut cx, idx, &cmd)
-                        }
-                        StepKind::RunExec { argv } => {
-                            let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
-                            handlers::run_argv(&mut cx, idx, &resolved)
-                        }
-                        StepKind::Echo(arg) => {
-                            let msg = super::args::resolve_arg(arg, &mut cx)?;
-                            handlers::echo(&mut cx, &msg)
-                        }
-                        StepKind::AsyncBlock { .. } => {
-                            handlers::dispatch_async_block(&step.kind, &mut cx)
-                        }
-                        StepKind::Copy {
-                            from_workspace,
-                            from_host,
-                            to_host,
-                            from,
-                            to,
-                        } => {
-                            if *from_host || *to_host {
-                                super::remote::copy_transfer(
-                                    &mut cx, *from_host, *to_host, from, to,
-                                )
-                            } else {
+        // One position wrap per iteration: the closure funnels every
+        // error path (including `?` inside match arms, which would
+        // otherwise return past a post-hoc wrap) through `step_error`.
+        let flow_result: Result<Flow> = (|| {
+            if !should_run {
+                Ok(Flow::Done)
+            } else {
+                let mut cx = StepCtx {
+                    state,
+                    process,
+                    stdin: stdin.clone(),
+                    expose_stdin,
+                    out: out.clone(),
+                    err: err.clone(),
+                    out_pipe: out_pipe.clone(),
+                    stdin_pipe: stdin_pipe.clone(),
+                    tty: None,
+                };
+                // Function/loop control steps dispatch through the Flow path;
+                // every other variant runs the leaf pipeline and yields Done.
+                let flow_result: Result<Flow> = match &step.kind {
+                    StepKind::FuncDef { .. }
+                    | StepKind::Call { .. }
+                    | StepKind::Return { .. }
+                    | StepKind::While { .. }
+                    | StepKind::Break
+                    | StepKind::Continue
+                    | StepKind::For { .. }
+                    | StepKind::If { .. }
+                    | StepKind::Timeout { .. }
+                    | StepKind::Isolated { .. }
+                    | StepKind::WithIo { .. }
+                    | StepKind::AssignCapture { .. } => {
+                        dispatch_flow_step(&step.kind, &mut cx, generation, idx)
+                    }
+                    _ => {
+                        match &step.kind {
+                            StepKind::InheritEnv { keys } => {
+                                handlers::inherit_env(&mut cx, keys)?;
+                                sync_iteration_assert_needles(cx.state, steps, generation)?;
+                                Ok(())
+                            }
+                            StepKind::IsolatedInheritEnv { keys } => {
+                                handlers::isolated_inherit_env(&mut cx, keys)?;
+                                Ok(())
+                            }
+                            StepKind::Workdir(arg) => {
+                                let path = super::args::resolve_arg(arg, &mut cx)?;
+                                handlers::workdir(&mut cx, idx, &path)
+                            }
+                            StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
+                            StepKind::RemoteBlock {
+                                target,
+                                vars,
+                                env,
+                                body,
+                            } => super::remote::run_remote_block(
+                                &mut cx, target, vars, env, body, idx,
+                            ),
+                            StepKind::Env { key, value } => {
+                                let resolved = super::args::resolve_arg(value, &mut cx)?;
+                                handlers::env(&mut cx, key, &resolved)?;
+                                sync_iteration_assert_needles(cx.state, steps, generation)?;
+                                Ok(())
+                            }
+                            StepKind::Run(arg) => {
+                                let cmd = super::args::resolve_arg(arg, &mut cx)?;
+                                let cmd = super::args::expand_dsl_vars(&cmd, cx.state)?;
+                                handlers::run(&mut cx, idx, &cmd)
+                            }
+                            StepKind::RunExec { argv } => {
+                                let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
+                                handlers::run_argv(&mut cx, idx, &resolved)
+                            }
+                            StepKind::Echo(arg) => {
+                                let msg = super::args::resolve_arg(arg, &mut cx)?;
+                                handlers::echo(&mut cx, &msg)
+                            }
+                            StepKind::AsyncBlock { .. } => {
+                                handlers::dispatch_async_block(&step.kind, &mut cx)
+                            }
+                            StepKind::Copy {
+                                from_workspace,
+                                from_host,
+                                to_host,
+                                from,
+                                to,
+                            } => {
+                                if *from_host || *to_host {
+                                    super::remote::copy_transfer(
+                                        &mut cx, *from_host, *to_host, from, to,
+                                    )
+                                } else {
+                                    let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+                                    let to_resolved = super::args::resolve_arg(to, &mut cx)?;
+                                    handlers::copy(
+                                        &mut cx,
+                                        idx,
+                                        from_workspace.clone(),
+                                        &from_resolved,
+                                        &to_resolved,
+                                    )
+                                }
+                            }
+                            StepKind::CopyGit {
+                                rev,
+                                from,
+                                to,
+                                include_dirty,
+                            } => {
+                                let rev_resolved = super::args::resolve_arg(rev, &mut cx)?;
                                 let from_resolved = super::args::resolve_arg(from, &mut cx)?;
                                 let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-                                handlers::copy(
+                                handlers::copy_git(
+                                    &mut cx,
+                                    idx,
+                                    &rev_resolved,
+                                    &from_resolved,
+                                    &to_resolved,
+                                    *include_dirty,
+                                )
+                            }
+                            StepKind::Archive { src, dst, raw } => {
+                                let src_resolved = super::args::resolve_arg(src, &mut cx)?;
+                                let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
+                                handlers::archive(&mut cx, idx, &src_resolved, &dst_resolved, *raw)
+                            }
+                            StepKind::Unarchive {
+                                src,
+                                dst,
+                                max_bytes,
+                            } => {
+                                let src_resolved = super::args::resolve_arg(src, &mut cx)?;
+                                let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
+                                let cap_resolved =
+                                    super::args::resolve_arg_opt(max_bytes, &mut cx)?;
+                                handlers::unarchive(
+                                    &mut cx,
+                                    idx,
+                                    &src_resolved,
+                                    &dst_resolved,
+                                    cap_resolved.as_deref(),
+                                )
+                            }
+                            StepKind::Symlink {
+                                from_workspace,
+                                from,
+                                to,
+                            } => {
+                                let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+                                let to_resolved = super::args::resolve_arg(to, &mut cx)?;
+                                handlers::symlink(
                                     &mut cx,
                                     idx,
                                     from_workspace.clone(),
@@ -1169,223 +1262,175 @@ fn execute_steps_inner<P: ProcessManager>(
                                     &to_resolved,
                                 )
                             }
-                        }
-                        StepKind::CopyGit {
-                            rev,
-                            from,
-                            to,
-                            include_dirty,
-                        } => {
-                            let rev_resolved = super::args::resolve_arg(rev, &mut cx)?;
-                            let from_resolved = super::args::resolve_arg(from, &mut cx)?;
-                            let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-                            handlers::copy_git(
-                                &mut cx,
-                                idx,
-                                &rev_resolved,
-                                &from_resolved,
-                                &to_resolved,
-                                *include_dirty,
-                            )
-                        }
-                        StepKind::HashSha256 { path } => {
-                            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-                            handlers::hash_sha256(&mut cx, idx, &path_resolved)
-                        }
-                        StepKind::Archive { src, dst, raw } => {
-                            let src_resolved = super::args::resolve_arg(src, &mut cx)?;
-                            let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
-                            handlers::archive(&mut cx, idx, &src_resolved, &dst_resolved, *raw)
-                        }
-                        StepKind::Unarchive {
-                            src,
-                            dst,
-                            max_bytes,
-                        } => {
-                            let src_resolved = super::args::resolve_arg(src, &mut cx)?;
-                            let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
-                            let cap_resolved = super::args::resolve_arg_opt(max_bytes, &mut cx)?;
-                            handlers::unarchive(
-                                &mut cx,
-                                idx,
-                                &src_resolved,
-                                &dst_resolved,
-                                cap_resolved.as_deref(),
-                            )
-                        }
-                        StepKind::Symlink {
-                            from_workspace,
-                            from,
-                            to,
-                        } => {
-                            let from_resolved = super::args::resolve_arg(from, &mut cx)?;
-                            let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-                            handlers::symlink(
-                                &mut cx,
-                                idx,
-                                from_workspace.clone(),
-                                &from_resolved,
-                                &to_resolved,
-                            )
-                        }
-                        StepKind::Mkdir(arg) => {
-                            let path = super::args::resolve_arg(arg, &mut cx)?;
-                            handlers::mkdir(&mut cx, idx, &path)
-                        }
-                        StepKind::Install { from, to } => {
-                            let from_resolved = super::args::resolve_arg(from, &mut cx)?;
-                            let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-                            handlers::install(&mut cx, idx, &from_resolved, &to_resolved)
-                        }
-                        StepKind::Ls(arg) => {
-                            let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
-                            handlers::ls(&mut cx, idx, &resolved)
-                        }
-                        StepKind::Cwd => handlers::cwd(&mut cx, idx),
-                        StepKind::Read(arg) => {
-                            let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
-                            handlers::read(&mut cx, idx, &resolved)
-                        }
-                        StepKind::ReadLine { var } => handlers::read_line(&mut cx, idx, var),
-                        StepKind::Prompt {
-                            var,
-                            message,
-                            default,
-                        } => {
-                            let message_resolved = super::args::resolve_arg(message, &mut cx)?;
-                            let default_resolved = match default {
-                                Some(d) => Some(super::args::resolve_arg(d, &mut cx)?),
-                                None => None,
-                            };
-                            handlers::prompt(
-                                &mut cx,
-                                idx,
+                            StepKind::Mkdir(arg) => {
+                                let path = super::args::resolve_arg(arg, &mut cx)?;
+                                handlers::mkdir(&mut cx, idx, &path)
+                            }
+                            StepKind::Install { from, to } => {
+                                let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+                                let to_resolved = super::args::resolve_arg(to, &mut cx)?;
+                                handlers::install(&mut cx, idx, &from_resolved, &to_resolved)
+                            }
+                            StepKind::Ls(arg) => {
+                                let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
+                                handlers::ls(&mut cx, idx, &resolved)
+                            }
+                            StepKind::Read(arg) => {
+                                let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
+                                handlers::read(&mut cx, idx, &resolved)
+                            }
+                            StepKind::ReadLine { var } => handlers::read_line(&mut cx, idx, var),
+                            StepKind::Prompt {
                                 var,
-                                &message_resolved,
-                                default_resolved.as_deref(),
-                            )
-                        }
-                        StepKind::ListAppend { list, item } => {
-                            let value = super::args::evaluate_assert_operand(item, &mut cx)?;
-                            handlers::push_into(&mut cx, idx, list, value)
-                        }
-                        StepKind::Write { path, contents } => {
-                            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-                            let contents_resolved =
-                                super::args::resolve_arg_opt(contents, &mut cx)?;
-                            handlers::write(
-                                &mut cx,
-                                idx,
-                                &path_resolved,
-                                contents_resolved.as_deref(),
-                            )
-                        }
-                        StepKind::Append { path, contents } => {
-                            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-                            let contents_resolved =
-                                super::args::resolve_arg_opt(contents, &mut cx)?;
-                            handlers::append(
-                                &mut cx,
-                                idx,
-                                &path_resolved,
-                                contents_resolved.as_deref(),
-                            )
-                        }
-                        StepKind::Remove { path, recursive } => {
-                            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-                            handlers::remove(&mut cx, idx, &path_resolved, *recursive)
-                        }
-                        StepKind::Expand { path, overrides } => {
-                            let path_resolved = super::args::resolve_arg_opt(path, &mut cx)?;
-                            let overrides_resolved =
-                                super::args::resolve_overrides(overrides, &mut cx)?;
-                            handlers::replace(&mut cx, idx, &path_resolved, &overrides_resolved)
-                        }
-                        StepKind::AssertEq {
-                            hash,
-                            actual,
-                            expected,
-                        } => {
-                            let target = resolve_assert_target(actual, &mut cx)?;
-                            let expected_resolved = match expected {
-                                Some(e) => Some(super::args::evaluate_assert_operand(e, &mut cx)?),
-                                None => None,
-                            };
-                            handlers::assert_eq(
-                                &mut cx,
-                                idx,
-                                generation,
-                                idx,
+                                message,
+                                default,
+                            } => {
+                                let message_resolved = super::args::resolve_arg(message, &mut cx)?;
+                                let default_resolved = match default {
+                                    Some(d) => Some(super::args::resolve_arg(d, &mut cx)?),
+                                    None => None,
+                                };
+                                handlers::prompt(
+                                    &mut cx,
+                                    idx,
+                                    var,
+                                    &message_resolved,
+                                    default_resolved.as_deref(),
+                                )
+                            }
+                            StepKind::ListAppend { list, item } => {
+                                let value = super::args::evaluate_assert_operand(item, &mut cx)?;
+                                handlers::push_into(&mut cx, idx, list, value)
+                            }
+                            StepKind::Write { path, contents } => {
+                                let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+                                let contents_resolved =
+                                    super::args::resolve_arg_opt(contents, &mut cx)?;
+                                handlers::write(
+                                    &mut cx,
+                                    idx,
+                                    &path_resolved,
+                                    contents_resolved.as_deref(),
+                                )
+                            }
+                            StepKind::Append { path, contents } => {
+                                let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+                                let contents_resolved =
+                                    super::args::resolve_arg_opt(contents, &mut cx)?;
+                                handlers::append(
+                                    &mut cx,
+                                    idx,
+                                    &path_resolved,
+                                    contents_resolved.as_deref(),
+                                )
+                            }
+                            StepKind::Remove { path, recursive } => {
+                                let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+                                handlers::remove(&mut cx, idx, &path_resolved, *recursive)
+                            }
+                            StepKind::Expand { path, overrides } => {
+                                let path_resolved = super::args::resolve_arg_opt(path, &mut cx)?;
+                                let overrides_resolved =
+                                    super::args::resolve_overrides(overrides, &mut cx)?;
+                                handlers::replace(&mut cx, idx, &path_resolved, &overrides_resolved)
+                            }
+                            StepKind::AssertEq {
                                 hash,
-                                &target,
-                                expected_resolved.as_ref(),
-                            )
-                        }
-                        StepKind::AssertContains { haystack, needle } => {
-                            let target = resolve_assert_target(haystack, &mut cx)?;
-                            handlers::assert_contains(
-                                &mut cx, idx, generation, idx, &target, needle,
-                            )
-                        }
-                        StepKind::WithIoBlock { .. } => {
-                            bail!("WITH_IO block should have been expanded during parsing")
-                        }
-                        StepKind::Exit(code) => {
-                            let code = super::args::resolve_arg_as_int(code, &mut cx)?;
-                            handlers::exit(&mut cx, code)
-                        }
-                        StepKind::Assign {
-                            var,
-                            decl_type,
-                            expr,
-                        } => handlers::assign(&mut cx, var, decl_type.clone(), expr),
-                        StepKind::Set { var, expr } => handlers::set_var_value(&mut cx, var, expr),
-                        StepKind::AssignAsync {
-                            var,
-                            decl_type,
-                            body,
-                        } => handlers::dispatch_assign_async(var, decl_type.clone(), body, &mut cx),
-                        StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
-                        StepKind::AwaitCapture {
-                            out_var,
-                            out_type,
-                            task_var,
-                        } => handlers::dispatch_await_capture(
-                            out_var,
-                            out_type.clone(),
-                            task_var,
-                            &mut cx,
-                        ),
-                        StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
-                        StepKind::Sleep { duration } => {
-                            let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
-                            handlers::sleep(&mut cx, idx, &duration)
-                        }
-                        StepKind::TypeAlias { .. } => {
-                            // Static declaration: collected before the run and
-                            // resolved at first coercion. Nothing to execute.
-                            Ok(())
-                        }
-                        StepKind::FuncDef { .. }
-                        | StepKind::Call { .. }
-                        | StepKind::Return { .. }
-                        | StepKind::While { .. }
-                        | StepKind::Break
-                        | StepKind::Continue
-                        | StepKind::For { .. }
-                        | StepKind::If { .. }
-                        | StepKind::Timeout { .. }
-                        | StepKind::Isolated { .. }
-                        | StepKind::WithIo { .. }
-                        | StepKind::AssignCapture { .. } => {
-                            unreachable!("compound steps dispatch in the outer match")
-                        }
-                    }?;
-                    Ok(Flow::Done)
-                }
-            };
-            flow_result
-        };
+                                actual,
+                                expected,
+                            } => {
+                                let target = resolve_assert_target(actual, &mut cx)?;
+                                let expected_resolved = match expected {
+                                    Some(e) => {
+                                        Some(super::args::evaluate_assert_operand(e, &mut cx)?)
+                                    }
+                                    None => None,
+                                };
+                                handlers::assert_eq(
+                                    &mut cx,
+                                    idx,
+                                    generation,
+                                    idx,
+                                    hash,
+                                    &target,
+                                    expected_resolved.as_ref(),
+                                )
+                            }
+                            StepKind::AssertContains { haystack, needle } => {
+                                let target = resolve_assert_target(haystack, &mut cx)?;
+                                handlers::assert_contains(
+                                    &mut cx, idx, generation, idx, &target, needle,
+                                )
+                            }
+                            StepKind::WithIoBlock { .. } => {
+                                bail!("WITH_IO block should have been expanded during parsing")
+                            }
+                            StepKind::Exit(code) => {
+                                let code = super::args::resolve_arg_as_int(code, &mut cx)?;
+                                handlers::exit(&mut cx, code)
+                            }
+                            StepKind::Assign {
+                                var,
+                                decl_type,
+                                expr,
+                            } => handlers::assign(&mut cx, var, decl_type.clone(), expr),
+                            StepKind::Set { var, expr } => {
+                                handlers::set_var_value(&mut cx, var, expr)
+                            }
+                            StepKind::AssignAsync {
+                                var,
+                                decl_type,
+                                body,
+                            } => handlers::dispatch_assign_async(
+                                var,
+                                decl_type.clone(),
+                                body,
+                                &mut cx,
+                            ),
+                            StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
+                            StepKind::AwaitCapture {
+                                out_var,
+                                out_type,
+                                task_var,
+                            } => handlers::dispatch_await_capture(
+                                out_var,
+                                out_type.clone(),
+                                task_var,
+                                &mut cx,
+                            ),
+                            StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
+                            StepKind::Sleep { duration } => {
+                                let duration =
+                                    super::args::resolve_arg_as_duration(duration, &mut cx)?;
+                                handlers::sleep(&mut cx, idx, &duration)
+                            }
+                            StepKind::TypeAlias { .. } => {
+                                // Static declaration: collected before the run and
+                                // resolved at first coercion. Nothing to execute.
+                                Ok(())
+                            }
+                            StepKind::FuncDef { .. }
+                            | StepKind::Call { .. }
+                            | StepKind::Return { .. }
+                            | StepKind::While { .. }
+                            | StepKind::Break
+                            | StepKind::Continue
+                            | StepKind::For { .. }
+                            | StepKind::If { .. }
+                            | StepKind::Timeout { .. }
+                            | StepKind::Isolated { .. }
+                            | StepKind::WithIo { .. }
+                            | StepKind::AssignCapture { .. } => {
+                                unreachable!("compound steps dispatch in the outer match")
+                            }
+                        }?;
+                        Ok(Flow::Done)
+                    }
+                };
+                flow_result
+            }
+        })()
+        .map_err(|err| step_error(step, idx, err));
 
         let restore_result = restore_scopes(state, step.scope_exit);
         // Keeper expiry: drop spawn-time pins whose final producer step
@@ -1727,7 +1772,9 @@ fn dispatch_flow_step<P: ProcessManager>(
     idx: usize,
 ) -> Result<Flow> {
     match cmd {
-        StepKind::FuncDef { name, params, body } => {
+        StepKind::FuncDef {
+            name, params, body, ..
+        } => {
             handlers::define_func(cx, name, params, body)?;
             Ok(Flow::Done)
         }

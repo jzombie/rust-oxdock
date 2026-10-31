@@ -10,9 +10,9 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.32.3-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.33.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.32.3-alpha`, or install the standalone runner with `cargo install oxdock@0.32.3-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.33.0-alpha`, or install the standalone runner with `cargo install oxdock@0.33.0-alpha`.
 
 ### Run a script with the CLI
 
@@ -112,8 +112,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.32.3-alpha"
-    ASSERT_EQ $b "beta OxDock 0.32.3-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.33.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.33.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -125,7 +125,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.32.3-alpha"
+    "alpha OxDock 0.33.0-alpha"
 );
 ```
 
@@ -442,7 +442,7 @@ One language for the whole build: farm steps out to npm, bundlers, or code gener
 
 > **Prototype status**: OxDock is still being prototyped. DSL syntax and Rust APIs may change without deprecation warnings until the first stable release.
 
-Scripts are sequences of instructions, one per line (`;` separates two; quoted separators stay literal). Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The authoritative grammar is [`crates/oxdock-parser/src/dsl.pest`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/dsl.pest), which is also embedded in the parser crate as the `LANGUAGE_SPEC` constant for tooling.
+Scripts are sequences of instructions, one per line (`;` separates two; quoted separators stay literal). Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The language is defined by the parser in [`crates/oxdock-parser/src/parser.rs`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/parser.rs), fed by the two context-free lexers in [`crates/oxdock-parser/src/tok.rs`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/tok.rs): one parser serves string scripts and braced-macro token streams alike.
 
 ## Lexical structure
 
@@ -556,6 +556,8 @@ ASSERT_CONTAINS stdout "quoted // kept"
 
 Comment markers inside quoted strings are always preserved.
 
+Two scope notes. Only `#` blocks count as `FUNC` documentation (collected into `func_docs` and served verbatim as MCP tool descriptions); `//` comments never feed docs. Script docs are provider content: only serve scripts you trust over MCP, since a script author controls the descriptions an MCP client shows its model, and served scripts must not print secrets, since tool stdout and stderr stream to the client as notifications. And inside braced `oxdock! { }` macros only `#` whole-line comments exist: `//` and `/* ... */` are stripped by Rust before the macro runs, so they neither parse, document, nor affect `ELSE` chains there.
+
 ### Command flags
 
 Commands that take flags accept the value either after a space or joined with `=`: `--from-workspace LOCAL` and `--from-workspace=LOCAL` mean the same thing. Boolean flags take no value. Quoted arguments are never treated as flags, even when they start with `--`.
@@ -585,6 +587,29 @@ ASSERT_CONTAINS stdout 'escaped " quote'
 // Quoted separators stay literal: no instruction splits here.
 ECHO 'semi;colon'
 ASSERT_CONTAINS stdout "semi;colon"
+```
+
+Triple-quoted blocks span source lines for prompts, configs, and templates. A newline right after the opening delimiter strips once, shared indentation dedents to the closing delimiter baseline, and the newline before a lone closing delimiter strips once. Interpolation and backslash escapes resolve at runtime like double-quoted strings, while single and double quotes need no escaping and `\"\"\"` embeds a delimiter:
+
+```oxdock
+# Block literals hold multi-line text without joins.
+LET $prompt: STRING = """
+    SELECT *
+    FROM users
+    """
+ASSERT_EQ $prompt "SELECT *\nFROM users"
+
+# Blocks round-trip through files byte identical.
+WRITE query.txt $prompt
+LET $back: STRING = READ query.txt
+ASSERT_EQ $back $prompt
+
+# Placeholders interpolate inside blocks like quoted strings.
+LET $table: STRING = "users"
+LET $filtered: STRING = """
+    SELECT * FROM {{ $table }}
+    """
+ASSERT_EQ $filtered "SELECT * FROM users"
 ```
 
 ## Guards and scoped blocks
@@ -834,7 +859,7 @@ Every variable the seed provides to spawned children is specified in [ENV_CONTRA
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.32.3-alpha
+cargo install oxdock@0.33.0-alpha
 ```
 
 Run a script file:
@@ -1213,7 +1238,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.32.3-alpha", default-features = false }
+oxdock = { version = "0.33.0-alpha", default-features = false }
 ```
 
 ## Glossary
