@@ -587,7 +587,19 @@ the detach pattern for long calls, and reload semantics live in
 Only serve scripts you trust. Exports and `#` docs become the MCP
 tool surface verbatim (names, descriptions, schemas), so a script
 author controls what an MCP client shows its model. Treat a served
-script like installed software, not data.
+script like installed software, not data. Script docs are untrusted
+model input when the script source is: prefer allowlisted scripts
+you curate, and sanitize or rewrite descriptions before exposing
+them to an LLM-facing client, since no filtering at this layer
+makes untrusted provider text safe to show one. A `tools/call`
+dispatches straight into the live session with no per-call
+confirmation here, so keep high-impact capabilities (`RUN`, `NET`,
+`SSH`, filesystem mutation) out of served scripts unless your
+client or host gates them behind an explicit approval policy.
+Default-routed stdout and stderr stream to the client as
+notifications while the call runs, so anything a tool prints can
+enter client and model context: do not print secrets, pass them via
+env or files, and redact or suppress logs.
 
 ## Extending OxDock from Rust
 
@@ -1149,7 +1161,7 @@ ASSERT_CONTAINS stdout "quoted // kept"
 
 Comment markers inside quoted strings are always preserved.
 
-Two scope notes. Only `#` blocks count as `FUNC` documentation (collected into `func_docs` and served verbatim as MCP tool descriptions); `//` comments never feed docs. Script docs are provider content: only serve scripts you trust over MCP, since a script author controls the descriptions an MCP client shows its model. And inside braced `oxdock! { }` macros only `#` whole-line comments exist: `//` and `/* ... */` are stripped by Rust before the macro runs, so they neither parse, document, nor affect `ELSE` chains there.
+Two scope notes. Only `#` blocks count as `FUNC` documentation (collected into `func_docs` and served verbatim as MCP tool descriptions); `//` comments never feed docs. Script docs are provider content: only serve scripts you trust over MCP, since a script author controls the descriptions an MCP client shows its model, and served scripts must not print secrets, since tool stdout and stderr stream to the client as notifications. And inside braced `oxdock! { }` macros only `#` whole-line comments exist: `//` and `/* ... */` are stripped by Rust before the macro runs, so they neither parse, document, nor affect `ELSE` chains there.
 
 ### Command flags
 
