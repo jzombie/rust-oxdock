@@ -246,11 +246,16 @@ fn scan_string(s: &str) -> Result<(TokKind, usize), String> {
         let rest = &s[end..];
         let c = rest.chars().next().unwrap();
         if c == '\\' {
+            // An escape pair is atomic: skip the backslash plus
+            // whatever follows (matching the block-string arm and
+            // `lex_word`). Skipping only before the quote char
+            // misreads `"a\\"` as unterminated: the second
+            // backslash would escape the closing quote.
             let mut it = rest.chars();
             it.next();
             match it.next() {
-                Some(n) if n == quote => end += 1 + n.len_utf8(),
-                _ => end += 1,
+                Some(n) => end += 1 + n.len_utf8(),
+                None => end += 1,
             }
             continue;
         }
@@ -493,6 +498,14 @@ impl<'a> StrLexer<'a> {
                     while k < rest.len() {
                         let ch = rest[k..].chars().next().unwrap();
                         if ch == '\n' || ch == '\r' {
+                            break;
+                        }
+                        // A closer at nesting depth zero ends the
+                        // comment copy: `//` runs to end of line,
+                        // and inside a group the closer is never
+                        // past a newline (`[a //c]` closes here,
+                        // like the grammar's literal reading).
+                        if ch == close && stack.is_empty() {
                             break;
                         }
                         inner_src.push(ch);
@@ -753,7 +766,8 @@ impl<'a> StrLexer<'a> {
                     let joint = !self.gapped;
                     match scan_string(rest) {
                         Ok((kind, used)) => {
-                            self.bump(used, 0);
+                            let newlines = rest[..used].matches('\n').count();
+                            self.bump(used, newlines);
                             self.gapped = false;
                             self.out
                                 .push(Tok::at(kind, joint, self.mark_line, self.mark_col));

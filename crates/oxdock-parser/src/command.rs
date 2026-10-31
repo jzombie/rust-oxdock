@@ -234,8 +234,8 @@ fn check_one(
 }
 
 /// Strip one layer of surrounding quotes (`"`, `'`, or `"""` block).
-/// Block delimiters strip without dedenting: pest-lowered paths dedent
-/// in [`lower_block_string`] before this fringe ever runs.
+/// Block delimiters strip without dedenting: callers holding a block
+/// spelling route through [`lower_block_string`] instead.
 pub fn strip_surrounding_quotes(value: &str) -> &str {
     if let Some(inner) = value
         .strip_prefix("\"\"\"")

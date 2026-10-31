@@ -1,5 +1,5 @@
 use crate::ast::Arg;
-use crate::command::{CommandMeta, FlagValueType, strip_surrounding_quotes};
+use crate::command::{CommandMeta, FlagValueType, lower_block_string, strip_surrounding_quotes};
 use crate::error::{ParseError, SpanContext};
 
 /// Result of flag stripping: (extracted_flags, remaining_positional_args).
@@ -46,10 +46,16 @@ pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs, P
                             // `--flag="v"` yields the same value as the
                             // two-token `--flag "v"` (the grammar delivers
                             // the token verbatim, quotes included).
-                            Arg::String(
-                                strip_surrounding_quotes(&s[eq_pos + 1..]).to_string(),
-                                false,
-                            )
+                            // Block spellings dedent through the same
+                            // lowering as spaced form, or spacing alone
+                            // would change the value.
+                            let raw = &s[eq_pos + 1..];
+                            let lowered = if raw.starts_with("\"\"\"") {
+                                lower_block_string(raw)
+                            } else {
+                                strip_surrounding_quotes(raw).to_string()
+                            };
+                            Arg::String(lowered, false)
                         } else if matches!(flag_meta.value_type, FlagValueType::Flag) {
                             Arg::String("true".into(), false)
                         } else {
@@ -244,5 +250,26 @@ mod tests {
         let args = vec![Arg::String("--hash".into(), false)];
         let result = strip_flags(args, &meta);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn equals_block_string_dedents_like_spaced_form() {
+        // `--flag="""..."""` lowers through the same dedent as the
+        // spaced form: spacing alone must never change the value.
+        let meta = test_meta(&[crate::command::FlagSpec {
+            name: "message",
+            long: "--message",
+            value_type: FlagValueType::String,
+            required: false,
+            description: "",
+        }]);
+        let raw = "\"\"\"\n    hello\n    world\n    \"\"\"";
+        let (flags, _) = strip_flags(
+            vec![Arg::String(format!("--message={raw}"), false)],
+            &meta,
+        )
+        .expect("equals form parses");
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].1.as_str(), "hello\nworld");
     }
 }

@@ -10,6 +10,11 @@
 //! The `oxdock_parser` self-alias lets `#[oxdock_type]`-generated code
 //! inside this crate resolve `::oxdock_parser::` paths exactly like
 //! downstream crates do.
+//!
+//! Token-frontend (`lex_tokens`, `macro_input`) tests need the
+//! `proc-macro-api` feature: bare `cargo test -p oxdock-parser` skips
+//! them silently. Workspace runs enable the feature through
+//! unification, so `cargo test --workspace` proves both frontends.
 #![allow(rustdoc::invalid_codeblock_attributes)]
 #![doc = include_str!("../docs/command_reference.md")]
 

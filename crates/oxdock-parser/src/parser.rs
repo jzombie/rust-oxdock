@@ -674,6 +674,17 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
                     });
                     stmt_idx += 1;
                 }
+                // A joint marker (`a//b`) is payload, not trivia: it
+                // rides into the body so arg assembly glues it
+                // literally, exactly like the grammar. Gapped and
+                // line-start markers drop.
+                if tok.joint && !body.is_empty() {
+                    line += text.matches('\n').count();
+                    body.push(tok.clone());
+                    detached = false;
+                    i += 1;
+                    continue;
+                }
                 // Block markers may span lines (`/*a\nb*/`).
                 line += text.matches('\n').count();
                 i += 1;
@@ -7533,6 +7544,69 @@ mod tests {
             old
         );
         assert!("ECHO a\\nb".parse::<proc_macro2::TokenStream>().is_err());
+    }
+
+    #[test]
+    fn escaped_backslash_pair_is_atomic() {
+        // `"a\\"` parses (one escape pair plus the closer): the pair
+        // scans atomically, like the block-string arm and `lex_word`.
+        // The value stays raw (`\\` verbatim for runtime
+        // `expand_string`), so this pins parsing, not unescaping.
+        assert_parity("ECHO \"a\\\\\"");
+        let steps =
+            crate::parse_script("ECHO \"a\\\\\"", lower).expect("escaped pair must parse");
+        match &steps[..] {
+            [s] => assert!(
+                matches!(&s.kind, StepKind::Echo(a) if a.as_str() == "a\\\\"),
+                "escaped pair must survive raw: {s:?}"
+            ),
+            _ => panic!("one step: {steps:?}"),
+        }
+    }
+
+    #[test]
+    fn joint_double_slash_stays_literal() {
+        // `rustc` strips `//` before the macro ever runs, so these are
+        // string-path-only by construction: joint `a//b` is one literal
+        // arg, and `[a //c]` closes its group (the in-group `//` copy
+        // stops at the closer).
+        for text in ["ECHO a//b", "ECHO [a //c]"] {
+            assert_parity_string_only(text);
+        }
+        let steps = crate::parse_script("ECHO a//b", lower).expect("joint slashes parse");
+        match &steps[..] {
+            [s] => assert!(
+                matches!(&s.kind, StepKind::Echo(a) if a.as_str() == "a//b"),
+                "joint `//` must glue literally: {s:?}"
+            ),
+            _ => panic!("one step: {steps:?}"),
+        }
+        let steps = crate::parse_script("ECHO [a //c]", lower).expect("group must close");
+        assert_eq!(steps.len(), 1, "one step: {steps:?}");
+        // Full content survives literally: the mock joins WRITE args
+        // with spaces, so the round trip is byte-exact here.
+        let steps =
+            crate::parse_script("WRITE f [a //c]", lower).expect("group must close");
+        match &steps[..] {
+            [s] => assert!(
+                matches!(&s.kind, StepKind::Write { contents: Some(c), .. } if c.as_str() == "[a //c]"),
+                "group content must survive literally: {s:?}"
+            ),
+            _ => panic!("one step: {steps:?}"),
+        }
+    }
+
+    #[test]
+    fn single_quoted_multiline_keeps_line_tracking() {
+        // The `'` arm counts embedded newlines like the `"` arm, so the
+        // statement after a multiline single-quoted string keeps its
+        // own lines (func-docs stamping keys off them).
+        let text = "ECHO 'a\nb'\nECHO c";
+        assert_parity_string_only(text);
+        let steps = crate::parse_script(text, lower).expect("must parse");
+        assert_eq!(steps.len(), 2, "two steps: {steps:?}");
+        assert_eq!((steps[0].line, steps[0].col), (1, 1));
+        assert_eq!((steps[1].line, steps[1].col), (3, 1), "{steps:?}");
     }
 
     #[test]
