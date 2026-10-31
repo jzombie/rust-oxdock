@@ -44,3 +44,8 @@ with `{"a": 2, "b": 3}` resolves `{"result": 5}`, and `ECHO`
 output streams live instead of landing in the result. Wire shapes,
 the detach pattern for long calls, and reload semantics live in
 [crates/oxdock-mcp/README.md](./crates/oxdock-mcp/README.md).
+
+Only serve scripts you trust. Exports and `#` docs become the MCP
+tool surface verbatim (names, descriptions, schemas), so a script
+author controls what an MCP client shows its model. Treat a served
+script like installed software, not data.

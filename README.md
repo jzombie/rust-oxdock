@@ -584,6 +584,11 @@ output streams live instead of landing in the result. Wire shapes,
 the detach pattern for long calls, and reload semantics live in
 [crates/oxdock-mcp/README.md](./crates/oxdock-mcp/README.md).
 
+Only serve scripts you trust. Exports and `#` docs become the MCP
+tool surface verbatim (names, descriptions, schemas), so a script
+author controls what an MCP client shows its model. Treat a served
+script like installed software, not data.
+
 ## Extending OxDock from Rust
 
 Scripts call host functions and custom types that Rust code registers
@@ -1144,7 +1149,7 @@ ASSERT_CONTAINS stdout "quoted // kept"
 
 Comment markers inside quoted strings are always preserved.
 
-Two scope notes. Only `#` blocks count as `FUNC` documentation (collected into `func_docs` and surfaced as MCP tool descriptions); `//` comments never feed docs. And inside braced `oxdock! { }` macros only `#` whole-line comments exist: `//` and `/* ... */` are stripped by Rust before the macro runs, so they neither parse, document, nor affect `ELSE` chains there.
+Two scope notes. Only `#` blocks count as `FUNC` documentation (collected into `func_docs` and served verbatim as MCP tool descriptions); `//` comments never feed docs. Script docs are provider content: only serve scripts you trust over MCP, since a script author controls the descriptions an MCP client shows its model. And inside braced `oxdock! { }` macros only `#` whole-line comments exist: `//` and `/* ... */` are stripped by Rust before the macro runs, so they neither parse, document, nor affect `ELSE` chains there.
 
 ### Command flags
 

@@ -875,7 +875,7 @@ ASSERT_CONTAINS stdout "quoted // kept"
 
 Comment markers inside quoted strings are always preserved.
 
-Two scope notes. Only `#` blocks count as `FUNC` documentation (collected into `func_docs` and surfaced as MCP tool descriptions); `//` comments never feed docs. And inside braced `oxdock! { }` macros only `#` whole-line comments exist: `//` and `/* ... */` are stripped by Rust before the macro runs, so they neither parse, document, nor affect `ELSE` chains there.
+Two scope notes. Only `#` blocks count as `FUNC` documentation (collected into `func_docs` and served verbatim as MCP tool descriptions); `//` comments never feed docs. Script docs are provider content: only serve scripts you trust over MCP, since a script author controls the descriptions an MCP client shows its model. And inside braced `oxdock! { }` macros only `#` whole-line comments exist: `//` and `/* ... */` are stripped by Rust before the macro runs, so they neither parse, document, nor affect `ELSE` chains there.
 
 ### Command flags
 
