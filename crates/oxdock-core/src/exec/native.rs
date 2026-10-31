@@ -371,6 +371,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Glob::registration(),
             LoadToml::registration(),
             LoadJson::registration(),
+            HashSha256::registration(),
+            Cwd::registration(),
             ParseToml::registration(),
             ParseJson::registration(),
             PathType::registration(),
@@ -1082,6 +1084,68 @@ fn load_json<P: ProcessManager>(
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
     super::args::load_json_from_value(&[Value::string(text)], cx)
+}
+
+/// Hash a workspace file or directory with SHA-256.
+///
+/// The argument is always a path: reads through the workspace guard
+/// like the file-loading builtins, so relative paths resolve against
+/// the script cwd. To hash a literal string's bytes instead, use
+/// `ASSERT_EQ --hash <digest> <string>`, which hashes the actual
+/// directly. Returns the 64 lowercase hex chars with no trailing
+/// newline.
+///
+#[oxdock_func(rpn, returns = TypeTag::String)]
+#[example(
+    name = "hash",
+    code = r###"
+    IMPORT [STD]
+    WRITE payload.txt hello
+    LET $digest: STRING = HASH_SHA256("payload.txt")
+    ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    "###
+)]
+fn hash_sha256<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Workspace file or directory path to hash.
+    #[union(String, Path)]
+    path: Value,
+) -> Result<Value> {
+    use sha2::Digest;
+
+    let text = super::args::string_or_path_text(&path)?;
+    let target = cx.state.fs.resolve_read(&cx.state.cwd, &text)?;
+    let mut hasher = sha2::Sha256::new();
+    super::fs_ops::hash_path(cx.state.fs.as_ref(), &target, "", &mut hasher)?;
+    let digest = hasher.finalize();
+    let bytes: &[u8] = digest.as_ref();
+    Ok(Value::string(
+        bytes.iter().map(|b| format!("{b:02x}")).collect(),
+    ))
+}
+
+/// Current working directory as a workspace-absolute path.
+///
+/// Reports the snapshot-pending sentinel when no concrete directory
+/// exists yet, so snapshot scripts keep working unchanged.
+///
+#[oxdock_func(rpn, returns = TypeTag::String)]
+#[example(
+    name = "cwd",
+    code = r###"
+    IMPORT [STD]
+    WORKDIR sub
+    LET $c: STRING = CWD()
+    ASSERT_CONTAINS $c "sub"
+    "###
+)]
+fn cwd<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
+    if cx.state.fs.is_snapshot_pending() {
+        return Ok(Value::string(super::SNAPSHOT_PENDING_DISPLAY.to_string()));
+    }
+    let concrete = cx.state.fs.concretize_cwd(&cx.state.cwd);
+    let real = super::fs_ops::canonical_cwd(cx.state.fs.as_ref(), &concrete)?;
+    Ok(Value::string(real))
 }
 
 /// Parse TOML text already held in memory.

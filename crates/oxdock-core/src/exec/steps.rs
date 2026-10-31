@@ -869,10 +869,6 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 *include_dirty,
             )
         }
-        StepKind::HashSha256 { path } => {
-            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-            handlers::hash_sha256(&mut cx, idx, &path_resolved)
-        }
         StepKind::Archive { src, dst, raw } => {
             let src_resolved = super::args::resolve_arg(src, &mut cx)?;
             let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
@@ -922,7 +918,6 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
             handlers::ls(&mut cx, idx, &resolved)
         }
-        StepKind::Cwd => handlers::cwd(&mut cx, idx),
         StepKind::Read(arg) => {
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
             handlers::read(&mut cx, idx, &resolved)
@@ -1230,10 +1225,6 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     *include_dirty,
                                 )
                             }
-                            StepKind::HashSha256 { path } => {
-                                let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-                                handlers::hash_sha256(&mut cx, idx, &path_resolved)
-                            }
                             StepKind::Archive { src, dst, raw } => {
                                 let src_resolved = super::args::resolve_arg(src, &mut cx)?;
                                 let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
@@ -1284,7 +1275,6 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
                                 handlers::ls(&mut cx, idx, &resolved)
                             }
-                            StepKind::Cwd => handlers::cwd(&mut cx, idx),
                             StepKind::Read(arg) => {
                                 let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
                                 handlers::read(&mut cx, idx, &resolved)

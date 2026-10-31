@@ -1142,7 +1142,6 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`ARCHIVE`](#archive) | `ARCHIVE [--raw] <src> <dst>` |
 | [`UNARCHIVE`](#unarchive) | `UNARCHIVE <src> <dst> [--max-bytes <bytes>]` |
 | [`LS`](#ls) | `LS [<path>]` |
-| [`CWD`](#cwd) | `CWD` |
 | [`READ`](#read) | `READ [<path>]` |
 | [`READ_LINE`](#read_line) | `READ_LINE $var` |
 | [`PROMPT`](#prompt) | `PROMPT $var <message> [<default>]` |
@@ -1152,7 +1151,6 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
 | [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ <actual> <expected> \| ASSERT_EQ --hash <sha256> <actual>` |
 | [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
-| [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
 | [`LIST_APPEND`](#list_append) | `LIST_APPEND $list <item>` |
@@ -3185,31 +3183,6 @@ ASSERT_CONTAINS stdout "a.txt"
 ```
 
 
-### CWD
-
-Print working directory.
-
-**Syntax:** `CWD`
-
-Outputs cwd.
-
-**Output:** Stdout
-
-**Examples:**
-
-**Example: cwd**
-
-```oxdock
-CWD
-
-# CWD tracks WORKDIR: the listing names the new directory.
-MKDIR sub
-WORKDIR sub
-LET $c: STRING = CWD
-ASSERT_CONTAINS $c "sub"
-```
-
-
 ### READ
 
 Read file to stdout.
@@ -3634,35 +3607,6 @@ ASSERT_CONTAINS stdout "build-complete"
 ```
 
 
-### HASH_SHA256
-
-Print SHA-256.
-
-**Syntax:** `HASH_SHA256 <path>`
-
-Computes digest.
-
-**Arguments:**
-
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `path` | [`PATH`](#value-type-path) | yes | File |
-
-**Output:** Stdout
-
-**Examples:**
-
-**Example: hash**
-
-```oxdock
-WRITE payload.txt hello
-HASH_SHA256 payload.txt
-
-LET $digest: STRING = HASH_SHA256 payload.txt
-ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
-```
-
-
 ### EXIT
 
 Exit pipeline.
@@ -3892,6 +3836,31 @@ standard decoder. Pairs with `BASE64_DECODE` for the round trip.
 IMPORT [STD]
 LET $encoded: STRING = BASE64_ENCODE("hello")
 ASSERT_EQ $encoded "aGVsbG8="
+```
+
+### STD::CWD
+
+Current working directory as a workspace-absolute path.
+
+Reports the snapshot-pending sentinel when no concrete directory
+exists yet, so snapshot scripts keep working unchanged.
+
+
+**Signature:** `STD::CWD() -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: cwd**
+
+```oxdock
+IMPORT [STD]
+WORKDIR sub
+LET $c: STRING = CWD()
+ASSERT_CONTAINS $c "sub"
 ```
 
 ### STD::DESCRIBE
@@ -4129,6 +4098,39 @@ WRITE "other.txt" "c"
 LET $found: LIST<STRING> = GLOB("notes-*.md")
 ASSERT_EQ $found.0 "notes-a.md"
 ASSERT_EQ $found.1 "notes-b.md"
+```
+
+### STD::HASH_SHA256
+
+Hash a workspace file or directory with SHA-256.
+
+The argument is always a path: reads through the workspace guard
+like the file-loading builtins, so relative paths resolve against
+the script cwd. To hash a literal string's bytes instead, use
+`ASSERT_EQ --hash <digest> <string>`, which hashes the actual
+directly. Returns the 64 lowercase hex chars with no trailing
+newline.
+
+
+**Signature:** `STD::HASH_SHA256($path: STRING|PATH) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$path` (`STRING|PATH`): Workspace file or directory path to hash.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: hash**
+
+```oxdock
+IMPORT [STD]
+WRITE payload.txt hello
+LET $digest: STRING = HASH_SHA256("payload.txt")
+ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 ```
 
 ### STD::HAS_KEY

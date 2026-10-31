@@ -13,12 +13,10 @@ oxdock_embed! {
         MKDIR data/inner
         WRITE data/inner/a.txt alpha
         WRITE data/b.txt beta
-        LET $cap_dir_hash: PIPE
-        LET $cap_file_hash: PIPE
-        WITH_IO [stdout=$cap_dir_hash] HASH_SHA256 data
-        WITH_IO [stdin=$cap_dir_hash] WRITE dir_hash.txt
-        WITH_IO [stdout=$cap_file_hash] HASH_SHA256 data/inner/a.txt
-        WITH_IO [stdin=$cap_file_hash] WRITE file_hash.txt
+        LET $dir_hash: STRING = STD::HASH_SHA256("data")
+        LET $file_hash: STRING = STD::HASH_SHA256("data/inner/a.txt")
+        WRITE dir_hash.txt $dir_hash
+        WRITE file_hash.txt $file_hash
 
         // Double-check the hash matches on Unix system
         // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/rust-oxdock/issues/55
@@ -35,12 +33,10 @@ oxdock_prepare! {
         MKDIR data/inner
         WRITE data/inner/a.txt alpha
         WRITE data/b.txt beta
-        LET $cap_dir_hash: PIPE
-        LET $cap_file_hash: PIPE
-        WITH_IO [stdout=$cap_dir_hash] HASH_SHA256 data
-        WITH_IO [stdin=$cap_dir_hash] WRITE dir_hash.txt
-        WITH_IO [stdout=$cap_file_hash] HASH_SHA256 data/inner/a.txt
-        WITH_IO [stdin=$cap_file_hash] WRITE file_hash.txt
+        LET $dir_hash: STRING = STD::HASH_SHA256("data")
+        LET $file_hash: STRING = STD::HASH_SHA256("data/inner/a.txt")
+        WRITE dir_hash.txt $dir_hash
+        WRITE file_hash.txt $file_hash
 
         // Double-check the hash matches on Unix system
         // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/rust-oxdock/issues/55
@@ -55,12 +51,10 @@ const SCRIPT: &str = r#"
     MKDIR data/inner
     WRITE data/inner/a.txt alpha
     WRITE data/b.txt beta
-    LET $cap_dir_hash: PIPE
-    LET $cap_file_hash: PIPE
-    WITH_IO [stdout=$cap_dir_hash] HASH_SHA256 data
-    WITH_IO [stdin=$cap_dir_hash] WRITE dir_hash.txt
-    WITH_IO [stdout=$cap_file_hash] HASH_SHA256 data/inner/a.txt
-    WITH_IO [stdin=$cap_file_hash] WRITE file_hash.txt
+    LET $dir_hash: STRING = STD::HASH_SHA256("data")
+    LET $file_hash: STRING = STD::HASH_SHA256("data/inner/a.txt")
+    WRITE dir_hash.txt $dir_hash
+    WRITE file_hash.txt $file_hash
 
     // Double-check the hash matches on Unix systems
     // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/rust-oxdock/issues/55

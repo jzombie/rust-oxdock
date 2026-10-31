@@ -1,2 +1,2 @@
 WORKDIR a/b
-CWD
+LET $c: STRING = STD::CWD()

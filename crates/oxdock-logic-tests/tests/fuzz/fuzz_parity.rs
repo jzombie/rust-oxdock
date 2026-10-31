@@ -614,7 +614,6 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                 max_bytes: cap.map(Into::into),
             }),
         prop::option::of(safe_string()).prop_map(|s| StepKind::Ls(s.map(Into::into))),
-        Just(StepKind::Cwd),
         prop::option::of(safe_string()).prop_map(|s| StepKind::Read(s.map(Into::into))),
         "[a-zA-Z_][a-zA-Z0-9_]*".prop_map(|v| StepKind::ReadLine { var: v }),
         (
@@ -643,7 +642,6 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                 include_dirty: false,
             }
         }),
-        safe_string().prop_map(|path| StepKind::HashSha256 { path: path.into() }),
         // The grammar defines ASSERT_EQ's hash form with a value actual,
         // so generators must preserve that shape for Display round-trips.
         ("[0-9a-f]{64}", safe_string()).prop_map(|(digest, actual)| {
@@ -1310,9 +1308,6 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 msg
             );
         }
-        (StepKind::HashSha256 { path: lp }, StepKind::HashSha256 { path: rp }) => {
-            assert!(arg_content_eq(lp, rp), "HashSha256 mismatch: {}", msg)
-        }
         (StepKind::ReadLine { var: lv }, StepKind::ReadLine { var: rv }) => {
             assert_eq!(lv, rv, "ReadLine mismatch: {}", msg)
         }
@@ -1826,7 +1821,6 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             max_bytes: None,
         },
         StepKind::Ls(Some("coverage".into())),
-        StepKind::Cwd,
         StepKind::Read(Some("coverage".into())),
         StepKind::ReadLine {
             var: "coverage".to_string(),
@@ -1849,9 +1843,6 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             from: "coverage-from".into(),
             to: "coverage-to".into(),
             include_dirty: false,
-        },
-        StepKind::HashSha256 {
-            path: "coverage".into(),
         },
         StepKind::AssertEq {
             hash: None,
@@ -2127,13 +2118,11 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         | StepKind::Archive { .. }
         | StepKind::Unarchive { .. }
         | StepKind::Ls(..)
-        | StepKind::Cwd
         | StepKind::Read(..)
         | StepKind::ReadLine { .. }
         | StepKind::Prompt { .. }
         | StepKind::Remove { .. }
         | StepKind::Write { .. }
-        | StepKind::HashSha256 { .. }
         | StepKind::AssertEq { .. }
         | StepKind::AssertContains { .. }
         | StepKind::Exit(..)
