@@ -86,11 +86,11 @@ New `crates/oxdock-core/src/exec/import.rs` (or extend `args.rs`):
 - `static_check.rs::validate_script_types`: walk import graph (comment 11); recursion guard across files.
 - Docs: structural metadata auto-flows; add `IMPORT` file-form fragments + preview + remote gating docs. `cargo run -p docs-gen`, never hand-edit READMEs.
 
-## 5. Phasing
+## 5. Phasing (in scope: phases 1+2; phase 3 deferred to #270)
 
-1. Phase 1 (this plan): local file `IMPORT ["..." AS ALIAS]` + isolation + pipe mangling + `LET`/`ASYNC` capture + cycles/depth/cache + dry-run listing + tests.
+1. Phase 1: local file `IMPORT ["..." AS ALIAS]` (any extension, especially `.oxdock`/`.oxfile`) + isolation + pipe mangling + `LET`/`ASYNC` capture + cycles/depth/cache + dry-run listing + tests.
 2. Phase 2: override map (`KEY=value` vs `WITH $map`, one form), re-export rule for MCP, `modules:` exemption enforcement + collision panics.
-3. Phase 3: remote URLs via `net` plugin + feature gate + `READ`-like stream command + hash pin.
+3. Phase 3 (deferred to #270 `net: Run scripts from a remote URL`): remote URL imports via `net` plugin + feature gate + `READ`-like stream command + hash pin. Remote entry composes with #115 rules once fetched; see #270 for allowlist + hash-pin gating, `net`-feature gate, and cached downloads.
 
 ## 6. Tests
 
