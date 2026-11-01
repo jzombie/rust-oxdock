@@ -6710,9 +6710,13 @@ fn file_import_same_file_sibling_sites_share_no_stack() {
         LET $a: STRING = A::F("a")
         LET $b: STRING = B::F("b")
     "#});
-    let (_, _, bindings) =
-        run_steps_with_manager(Box::new(fs), &steps, MockProcessManager::default(), ExecIo::new())
-            .expect("sibling imports of one file validate");
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("sibling imports of one file validate");
     assert_eq!(bindings.get("a").and_then(|v| v.as_str()), Some("a"));
     assert_eq!(bindings.get("b").and_then(|v| v.as_str()), Some("b"));
 }
@@ -6726,9 +6730,13 @@ fn file_import_harvest_and_full_of_same_file_share_no_stack() {
         LET $f: STRING = F("x")
         LET $a: STRING = A::F("y")
     "#});
-    let (_, _, bindings) =
-        run_steps_with_manager(Box::new(fs), &steps, MockProcessManager::default(), ExecIo::new())
-            .expect("harvest plus full import of one file validates");
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("harvest plus full import of one file validates");
     assert_eq!(bindings.get("f").and_then(|v| v.as_str()), Some("x"));
     assert_eq!(bindings.get("a").and_then(|v| v.as_str()), Some("y"));
 }
