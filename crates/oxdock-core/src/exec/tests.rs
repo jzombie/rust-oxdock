@@ -6865,6 +6865,7 @@ fn file_import_same_file_sibling_sites_share_no_stack() {
             "#},
     );
     let steps = parse_entry(indoc! {r#"
+        LET $before: STRING = "intact"
         IMPORT ["a.oxdock" AS A, "a.oxdock" AS B]
         LET $a: STRING = A::F("a")
         LET $b: STRING = B::F("b")
@@ -6878,6 +6879,12 @@ fn file_import_same_file_sibling_sites_share_no_stack() {
     .expect("sibling imports of one file validate");
     assert_eq!(bindings.get("a").and_then(|v| v.as_str()), Some("a"));
     assert_eq!(bindings.get("b").and_then(|v| v.as_str()), Some("b"));
+    // The cached second import pushes nothing and pops nothing: a
+    // caller binding from before both imports survives them intact.
+    assert_eq!(
+        bindings.get("before").and_then(|v| v.as_str()),
+        Some("intact")
+    );
 }
 
 #[test]
