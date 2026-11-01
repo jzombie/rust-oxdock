@@ -7418,3 +7418,47 @@ fn file_import_harvest_stateless_still_works() {
     .expect("stateless harvest works");
     assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("ok"));
 }
+
+#[test]
+fn file_import_transitive_syntax_error_fails_before_any_step() {
+    // A imports B, B imports C, C does not parse: expansion loads the
+    // whole closure before the first step, so nothing runs. The marker
+    // the entry would write first is absent from the snapshot.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+            FUNC BROKEN( {
+             RETURN 1
+            }
+            EXPORT BROKEN
+        "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+            IMPORT ["c.oxdock" AS C]
+            FUNC MID() {
+             RETURN C::BROKEN()
+            }
+            EXPORT MID
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        WRITE marker.txt side-effect
+        IMPORT ["b.oxdock" AS B]
+        LET $v: INT = B::MID()
+    "#});
+    let err = run_expect_err(
+        Box::new(fs.clone()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:#}").contains("failed to parse"),
+        "{err:#}"
+    );
+    assert!(!fs.snapshot().keys().any(|k| k.ends_with("marker.txt")));
+}
