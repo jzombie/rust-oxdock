@@ -1,8 +1,7 @@
 [expect.error]
 equals = """
-parse error (expected: script)
-note: command must be uppercase: found `run`, expected `RUN`
-  --> line 1, col 1-1
+command must be uppercase: found `run`, expected `RUN`
+  --> line 1, col 1-11
   1 | run echo hi
-    | ^
+    | ^^^^^^^^^^^
 """

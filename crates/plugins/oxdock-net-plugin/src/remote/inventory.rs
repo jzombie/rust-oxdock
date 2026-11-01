@@ -146,6 +146,8 @@ mod tests {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         }];
         let err = inventory().validate_script(&steps).expect_err("must fail");
         let text = format!("{err:#}");
@@ -170,10 +172,14 @@ mod tests {
                     },
                     scope_enter: 0,
                     scope_exit: 0,
+                    line: 0,
+                    col: 0,
                 }],
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         }];
         let targets = RemoteInventory::collect_targets(&steps);
         assert!(targets.contains("deep"));

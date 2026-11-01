@@ -73,6 +73,7 @@ fn returns_gate_covers_ssh_functions() {
         "doc-ssh-pty",
         "doc-ssh-run",
         "doc-ssh-exit-status",
+        "doc-ssh-gen-pass",
     ] {
         registry
             .add_cli_mapping(service, "127.0.0.1:0")
@@ -160,6 +161,11 @@ fn memory_registry(services: &[&str]) -> Arc<oxdock_net_plugin::EndpointRegistry
     }
     registry
 }
+
+/// Script marker stamped with the test's runtime password (minted per
+/// test with oxdock_ssh_plugin::generate_password, so the repo holds
+/// no usable secret).
+const PASSWORD_MARKER: &str = "__TEST_PASSWORD__";
 
 /// Real bound address of a mapped service, for the `TestClient` driver.
 fn service_addr(registry: &Arc<oxdock_net_plugin::EndpointRegistry>, service: &str) -> SocketAddr {
@@ -445,30 +451,32 @@ fn wrong_password_rejected() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-auth");
+    let right = oxdock_ssh_plugin::generate_password();
+    let wrong = format!("{right}-wrong");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-auth", {username: "guest", password: "right-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-auth", {username: "guest", password: "__TEST_PASSWORD__"})
         SLEEP 8s
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &right);
     // Pre-bound by the harness: the driver addr is known before spawning.
     let addr = service_addr(&registry, "test-ssh-auth");
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
     // Timed: russh pads every rejection to at least `auth_rejection_time`
     // (the client's opening `none` probe included), so a 1s padding
     // stalls each password prompt by a noticeable beat. The rejection
     // must land far under a second.
     let start = Instant::now();
-    let wrong = TestClient::connect(addr, "guest", "wrong-pass");
+    let wrong = TestClient::connect(addr, "guest", &wrong);
     let elapsed = start.elapsed();
     assert!(wrong.is_err(), "wrong password must be rejected");
     assert!(
         elapsed < Duration::from_millis(800),
         "wrong-password rejection took {elapsed:?}: auth padding regressed"
     );
-    let wrong_user = TestClient::connect(addr, "intruder", "right-pass");
+    let wrong_user = TestClient::connect(addr, "intruder", &right);
     assert!(wrong_user.is_err(), "wrong username must be rejected");
     handle
         .join()
@@ -482,10 +490,11 @@ fn accept_echo_roundtrip() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-echo");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-echo", {username: "guest", password: "echo-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-echo", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -493,11 +502,11 @@ fn accept_echo_roundtrip() {
         AWAIT $acc
         AWAIT $echo
         SSH_CLOSE($m.server)
-    "#};
+"#}.replace(PASSWORD_MARKER, &pass);
     let addr = service_addr(&registry, "test-ssh-echo");
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
-    let mut client = TestClient::connect(addr, "guest", "echo-pass").expect("client connects");
+    let mut client = TestClient::connect(addr, "guest", &pass).expect("client connects");
     client.send(b"hello-echo").expect("client sends");
     let echoed = client
         .read_until(b"hello-echo", Duration::from_secs(10))
@@ -522,10 +531,11 @@ fn pty_request_accepted_echo_roundtrip() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-pty");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty", {username: "guest", password: "pty-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -533,12 +543,12 @@ fn pty_request_accepted_echo_roundtrip() {
         AWAIT $acc
         AWAIT $echo
         SSH_CLOSE($m.server)
-    "#};
+"#}.replace(PASSWORD_MARKER, &pass);
     let addr = service_addr(&registry, "test-ssh-pty");
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
     let mut client =
-        TestClient::connect_with_pty(addr, "guest", "pty-pass").expect("pty client connects");
+        TestClient::connect_with_pty(addr, "guest", &pass).expect("pty client connects");
     client.send(b"hello-pty").expect("client sends");
     let echoed = client
         .read_until(b"hello-pty", Duration::from_secs(10))
@@ -557,9 +567,9 @@ fn pty_request_accepted_echo_roundtrip() {
 /// Drive an outer session that resizes mid-stream, then give the
 /// change time to flush through TCP and the poll loop before dropping:
 /// `block_on` returns after queueing, not after delivery.
-fn drive_outer_resize(addr: SocketAddr, cols: u16, rows: u16) {
+fn drive_outer_resize(addr: SocketAddr, pass: &str, cols: u16, rows: u16) {
     let mut client =
-        TestClient::connect_with_pty_dims(addr, "u", "p", 90, 30).expect("client connects");
+        TestClient::connect_with_pty_dims(addr, "u", pass, 90, 30).expect("client connects");
     std::thread::sleep(Duration::from_secs(1));
     client
         .window_change(u32::from(cols), u32::from(rows))
@@ -581,10 +591,11 @@ fn pty_explicit_size() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-pty-size");
     let probe = root.clone();
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-size", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-size", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $child: LIST<STRING> = ["sh", "-c", "stty size"]
         [family:windows] {
@@ -608,11 +619,11 @@ fn pty_explicit_size() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client = TestClient::connect(addr, "u", "p").expect("client connects");
+    let client = TestClient::connect(addr, "u", &pass).expect("client connects");
     handle
         .join()
         .expect("script thread joins")
@@ -635,10 +646,11 @@ fn outer_window_change_reaches_pty_child_unix() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-resize-unix");
     let probe = root.clone();
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-unix", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-unix", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -651,12 +663,12 @@ fn outer_window_change_reaches_pty_child_unix() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let mut client =
-        TestClient::connect_with_pty_dims(addr, "u", "p", 97, 37).expect("client connects");
+        TestClient::connect_with_pty_dims(addr, "u", &pass, 97, 37).expect("client connects");
     client.send(b"\n").expect("client prompts first report");
     client
         .read_until(b"37 97", Duration::from_secs(15))
@@ -698,10 +710,11 @@ fn outer_window_change_reaches_pty_child_windows() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-resize-windows");
     let probe = root.clone();
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-windows", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-windows", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -714,12 +727,12 @@ fn outer_window_change_reaches_pty_child_windows() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let mut client =
-        TestClient::connect_with_pty_dims(addr, "u", "p", 97, 37).expect("client connects");
+        TestClient::connect_with_pty_dims(addr, "u", &pass, 97, 37).expect("client connects");
     client.send(b"\n").expect("client prompts first report");
     // Same startup grace as the unit resize proof: PowerShell 5.1
     // cold-starts slowly on shared CI runners.
@@ -763,10 +776,11 @@ fn pty_child_sees_session_env() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-env");
     let probe = root.clone();
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         ENV PROBE_TOP="top"
         LET $child: LIST<STRING> = ["sh", "-c", "echo relay:$SSH_USER:$SSH_CLIENT:$SSH_SERVER:$SSH_COMMAND:$PROBE_TOP"]
@@ -790,12 +804,12 @@ fn pty_child_sees_session_env() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client =
-        TestClient::connect_exec(addr, "u", "p", "probe-command").expect("client connects");
+        TestClient::connect_exec(addr, "u", &pass, "probe-command").expect("client connects");
     handle
         .join()
         .expect("script thread joins")
@@ -817,10 +831,11 @@ fn argv_preserves_quote_backslash_unix() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-argv-unix");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-unix", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-unix", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -833,12 +848,12 @@ fn argv_preserves_quote_backslash_unix() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client = TestClient::connect_exec(addr, "u", "p", "a\"b\\c").expect("client connects");
+    let client = TestClient::connect_exec(addr, "u", &pass, "a\"b\\c").expect("client connects");
     client.close();
     handle
         .join()
@@ -882,10 +897,11 @@ fn run_cancel_with_orphan_stdout_returns_promptly() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-run-orphan");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-orphan", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-orphan", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -898,15 +914,15 @@ fn run_cancel_with_orphan_stdout_returns_promptly() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
     let session_workers = Arc::clone(&workers);
     let handle = std::thread::spawn(move || {
-        run_script_with_workers(registry, &root, script, session_workers)
+        run_script_with_workers(registry, &root, &script, session_workers)
     });
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let _client = TestClient::connect(addr, "u", "p").expect("client connects");
+    let _client = TestClient::connect(addr, "u", &pass).expect("client connects");
     let start = Instant::now();
     let err = handle
         .join()
@@ -914,7 +930,7 @@ fn run_cancel_with_orphan_stdout_returns_promptly() {
         .expect_err("cancelling past an orphan-held pipe must fail the TIMEOUT, fast");
     let elapsed = start.elapsed();
     assert!(
-        err.to_string().contains("TIMEOUT"),
+        format!("{err:#}").contains("TIMEOUT"),
         "TIMEOUT owns the failure, not the hang: {err:#}",
     );
     assert!(
@@ -950,10 +966,11 @@ fn pump_workers_drain_after_completion_and_cancel() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-drain-clean");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-drain-clean", {username: "guest", password: "echo-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-drain-clean", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -961,13 +978,14 @@ fn pump_workers_drain_after_completion_and_cancel() {
         AWAIT $acc
         AWAIT $echo
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let addr = service_addr(&registry, "test-ssh-drain-clean");
     let clean_workers = Arc::clone(&workers);
-    let handle =
-        std::thread::spawn(move || run_script_with_workers(registry, &root, script, clean_workers));
+    let handle = std::thread::spawn(move || {
+        run_script_with_workers(registry, &root, &script, clean_workers)
+    });
     std::thread::sleep(Duration::from_secs(2));
-    let mut client = TestClient::connect(addr, "guest", "echo-pass").expect("client connects");
+    let mut client = TestClient::connect(addr, "guest", &pass).expect("client connects");
     client.send(b"drain-me").expect("client sends");
     client
         .read_until(b"drain-me", Duration::from_secs(10))
@@ -988,21 +1006,21 @@ fn pump_workers_drain_after_completion_and_cancel() {
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-drain-cancel", {username: "guest", password: "echo-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-drain-cancel", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-drain-cancel", "guest", "echo-pass", $cin, $cout) }
+        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-drain-cancel", "guest", "__TEST_PASSWORD__", $cin, $cout) }
         WITH_IO [stdout=$in] ECHO "server-greeting"
         AWAIT $acc
         CANCEL $c
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let cancel_workers = Arc::clone(&workers);
     let handle = std::thread::spawn(move || {
-        run_script_with_workers(registry, &root, script, cancel_workers)
+        run_script_with_workers(registry, &root, &script, cancel_workers)
     });
     handle
         .join()
@@ -1027,10 +1045,11 @@ fn cmd_argv_preserves_backslashes_windows() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-argv-bs-win");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-bs-win", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-bs-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1043,12 +1062,13 @@ fn cmd_argv_preserves_backslashes_windows() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client = TestClient::connect_exec(addr, "u", "p", "echo AB\\CD").expect("client connects");
+    let client =
+        TestClient::connect_exec(addr, "u", &pass, "echo AB\\CD").expect("client connects");
     client.close();
     handle
         .join()
@@ -1070,10 +1090,11 @@ fn cmd_env_quote_behavior_windows() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-env-q-win");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-q-win", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-q-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1087,13 +1108,13 @@ fn cmd_env_quote_behavior_windows() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client =
-        TestClient::connect_exec(addr, "u", "p", "echo \"foo bar\"").expect("client connects");
+        TestClient::connect_exec(addr, "u", &pass, "echo \"foo bar\"").expect("client connects");
     client.close();
     handle
         .join()
@@ -1114,10 +1135,11 @@ fn cmd_argv_percent_verbatim_windows() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-argv-pct-win");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-pct-win", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-pct-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1130,13 +1152,13 @@ fn cmd_argv_percent_verbatim_windows() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client =
-        TestClient::connect_exec(addr, "u", "p", "echo 100%%done").expect("client connects");
+        TestClient::connect_exec(addr, "u", &pass, "echo 100%%done").expect("client connects");
     client.close();
     handle
         .join()
@@ -1159,10 +1181,11 @@ fn env_relay_preserves_backslashes_windows() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-env-bs-win");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-bs-win", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-bs-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1176,13 +1199,13 @@ fn env_relay_preserves_backslashes_windows() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client =
-        TestClient::connect_exec(addr, "u", "p", "echo AB\\CD\\\\EF").expect("client connects");
+        TestClient::connect_exec(addr, "u", &pass, "echo AB\\CD\\\\EF").expect("client connects");
     client.close();
     handle
         .join()
@@ -1204,10 +1227,11 @@ fn cmd_env_relay_quoted_reg_query_windows() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-env-reg-win");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-reg-win", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-reg-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1222,15 +1246,15 @@ fn cmd_env_relay_quoted_reg_query_windows() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client = TestClient::connect_exec(
         addr,
         "u",
-        "p",
+        &pass,
         "reg query \"HKLM\\SYSTEM\\Setup\" /v SetupType",
     )
     .expect("client connects");
@@ -1258,10 +1282,11 @@ fn cmd_env_relay_full_probe_windows() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-env-probe-win");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-probe-win", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-probe-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1280,9 +1305,9 @@ fn cmd_env_relay_full_probe_windows() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let command = [
@@ -1297,7 +1322,7 @@ fn cmd_env_relay_full_probe_windows() {
         "echo [END]",
     ]
     .join(" & ");
-    let client = TestClient::connect_exec(addr, "u", "p", &command).expect("client connects");
+    let client = TestClient::connect_exec(addr, "u", &pass, &command).expect("client connects");
     client.close();
     handle
         .join()
@@ -1319,10 +1344,11 @@ fn cmd_env_relay_quoted_powershell_windows() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-env-ps-win");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-ps-win", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-ps-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1337,15 +1363,15 @@ fn cmd_env_relay_quoted_powershell_windows() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client = TestClient::connect_exec(
         addr,
         "u",
-        "p",
+        &pass,
         "powershell -NoProfile -Command \"'qp-alpha','qp-beta' | ForEach-Object { $_.ToUpper() }\"",
     )
     .expect("client connects");
@@ -1371,10 +1397,11 @@ fn interactive_shell_first_bytes_survive_windows() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-shell-stress");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-shell-stress", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-shell-stress", {username: "guest", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $i: INT = 0
         WHILE $i < 10 {
@@ -1387,15 +1414,15 @@ fn interactive_shell_first_bytes_survive_windows() {
             $i = $i + 1
         }
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     for i in 0..10 {
         let marker = format!("first-byte-{i}");
         let mut client =
-            TestClient::connect_with_pty(addr, "guest", "pass").expect("client connects");
+            TestClient::connect_with_pty(addr, "guest", &pass).expect("client connects");
         client.send(marker.as_bytes()).expect("client sends");
         let echoed = client
             .read_until(marker.as_bytes(), Duration::from_secs(10))
@@ -1425,10 +1452,11 @@ fn semaphore_guards_the_accept_loop() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-sem");
     let probe = root.clone();
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-sem", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-sem", {username: "guest", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
         LET $w: HANDLE = ASYNC {
@@ -1455,15 +1483,15 @@ fn semaphore_guards_the_accept_loop() {
         LET $a3: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
         WRITE admitted.txt "{{ $a3.held }}"
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client_a = TestClient::connect(addr, "guest", "pass").expect("first client connects");
+    let client_a = TestClient::connect(addr, "guest", &pass).expect("first client connects");
     poll_file(&probe, "stage1.txt");
-    let client_b = TestClient::connect(addr, "guest", "pass").expect("second client connects");
+    let client_b = TestClient::connect(addr, "guest", &pass).expect("second client connects");
     assert_eq!(poll_file(&probe, "rejected.txt"), "false");
-    let client_c = TestClient::connect(addr, "guest", "pass").expect("third client connects");
+    let client_c = TestClient::connect(addr, "guest", &pass).expect("third client connects");
     handle
         .join()
         .expect("script thread joins")
@@ -1492,10 +1520,11 @@ fn pty_live_resize() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-resize");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $child: LIST<STRING> = ["sh", "-c", "sleep 4; stty size"]
         [family:windows] {
@@ -1519,8 +1548,8 @@ fn pty_live_resize() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
     let addr: SocketAddr = loop {
         std::thread::sleep(Duration::from_millis(100));
@@ -1529,7 +1558,7 @@ fn pty_live_resize() {
             break text.parse().expect("addr parses");
         }
     };
-    drive_outer_resize(addr, 120, 50);
+    drive_outer_resize(addr, &pass, 120, 50);
     handle
         .join()
         .expect("script thread joins")
@@ -1597,7 +1626,7 @@ fn cancel_mid_pump_terminates() {
     "#};
     let start = Instant::now();
     let err = run_script(&root, script).expect_err("silent pump must time out");
-    assert!(err.to_string().contains("TIMEOUT"), "{err}");
+    assert!(format!("{err:#}").contains("TIMEOUT"), "{err}");
     assert!(
         start.elapsed() < Duration::from_secs(10),
         "pump must not outlive its timeout"
@@ -1618,10 +1647,11 @@ fn inner_exit_closes_outer_session() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-inner-exit");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-inner-exit", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-inner-exit", {username: "test", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $c_in: PIPE
         LET $c_out: PIPE
@@ -1629,10 +1659,10 @@ fn inner_exit_closes_outer_session() {
         WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["sh", "-c", "echo canned-response"]
         AWAIT $acc
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
-        let result = run_script_with(registry, &root, script);
+        let result = run_script_with(registry, &root, &script);
         let _ = done_tx.send(());
         result
     });
@@ -1645,7 +1675,7 @@ fn inner_exit_closes_outer_session() {
         }
     };
     let start = Instant::now();
-    let mut client = TestClient::connect(addr, "test", "test123").expect("client connects");
+    let mut client = TestClient::connect(addr, "test", &pass).expect("client connects");
     client
         .read_until(b"canned-response", Duration::from_secs(10))
         .expect("inner output arrives");
@@ -1678,12 +1708,13 @@ fn real_openssh_client_echo_roundtrip() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-real-client");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r##"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        WRITE askpass.sh "#!/bin/sh\necho test123\n"
+        WRITE askpass.sh "#!/bin/sh\necho __TEST_PASSWORD__\n"
         RUN ["chmod", "+x", "askpass.sh"]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-real-client", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-real-client", {username: "test", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -1692,8 +1723,8 @@ fn real_openssh_client_echo_roundtrip() {
         AWAIT $acc
         AWAIT $echo
         SSH_CLOSE($m.server)
-    "##};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "##}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
     let addr = loop {
         std::thread::sleep(Duration::from_millis(100));
@@ -1741,11 +1772,13 @@ fn real_openssh_client_echo_roundtrip() {
 fn proxy_outer_to_inner_roundtrip() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let outer = oxdock_ssh_plugin::generate_password();
+    let inner = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $o: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-outer", {username: "outer", password: "outer-pass"})
-        LET $i: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-inner", {username: "inner", password: "inner-pass"})
+        LET $o: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-outer", {username: "outer", password: "__OUTER_PASSWORD__"})
+        LET $i: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-inner", {username: "inner", password: "__INNER_PASSWORD__"})
         LET $j_in: PIPE
         LET $j_out: PIPE
         LET $h_inner: HANDLE = ASYNC { SSH_ACCEPT($i.server, $j_in, $j_out) }
@@ -1754,7 +1787,7 @@ fn proxy_outer_to_inner_roundtrip() {
         LET $c_out: PIPE
         LET $i_in: PIPE
         LET $i_out: PIPE
-        LET $h_conn: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-inner", "inner", "inner-pass", $i_in, $i_out) }
+        LET $h_conn: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-inner", "inner", "__INNER_PASSWORD__", $i_in, $i_out) }
         LET $h_p1: HANDLE = ASYNC { SSH_PUMP($c_out, $i_in) }
         LET $h_p2: HANDLE = ASYNC { SSH_PUMP($i_out, $c_in) }
         LET $h_acc: HANDLE = ASYNC { SSH_ACCEPT($o.server, $c_in, $c_out) }
@@ -1766,7 +1799,7 @@ fn proxy_outer_to_inner_roundtrip() {
         AWAIT $h_iecho
         SSH_CLOSE($o.server)
         SSH_CLOSE($i.server)
-    "#};
+    "#}.replace("__OUTER_PASSWORD__", &outer).replace("__INNER_PASSWORD__", &inner);
     // One registry maps both legs; the inner CONNECT goes through the
     // mapped name, never a physical dial.
     let registry = mapped_registry("test-ssh-proxy-outer");
@@ -1775,10 +1808,9 @@ fn proxy_outer_to_inner_roundtrip() {
         .expect("map inner");
     registry.bind_all().expect("bind inner");
     let addr = service_addr(&registry, "test-ssh-proxy-outer");
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(3));
-    let mut client =
-        TestClient::connect(addr, "outer", "outer-pass").expect("outer client connects");
+    let mut client = TestClient::connect(addr, "outer", &outer).expect("outer client connects");
     client.send(b"proxy-ping").expect("client sends");
     let echoed = client
         .read_until(b"proxy-ping", Duration::from_secs(15))
@@ -1812,7 +1844,7 @@ fn unknown_serve_option_bails() {
     )
     .expect_err("unknown option must fail");
     assert!(
-        err.to_string().contains("unknown option 'frobnicate'"),
+        format!("{err:#}").contains("unknown option 'frobnicate'"),
         "{err:#}"
     );
 }
@@ -1858,7 +1890,7 @@ fn missing_username_bails() {
     )
     .expect_err("missing username must fail");
     assert!(
-        err.to_string().contains("option 'username' is required"),
+        format!("{err:#}").contains("option 'username' is required"),
         "{err:#}"
     );
 }
@@ -1883,8 +1915,7 @@ fn empty_password_bails() {
     )
     .expect_err("empty password must fail");
     assert!(
-        err.to_string()
-            .contains("option 'password' must not be empty"),
+        format!("{err:#}").contains("option 'password' must not be empty"),
         "{err:#}"
     );
 }
@@ -1907,7 +1938,7 @@ fn missing_password_bails() {
     )
     .expect_err("missing password must fail");
     assert!(
-        err.to_string().contains("option 'password' is required"),
+        format!("{err:#}").contains("option 'password' is required"),
         "{err:#}"
     );
 }
@@ -1930,8 +1961,7 @@ fn non_string_username_bails() {
     )
     .expect_err("non-string username must fail");
     assert!(
-        err.to_string()
-            .contains("option 'username': expected STRING, got INT"),
+        format!("{err:#}").contains("option 'username': expected STRING, got INT"),
         "{err:#}"
     );
 }
@@ -1954,8 +1984,7 @@ fn unknown_option_names_all_valid_keys() {
     )
     .expect_err("unknown option must fail");
     assert!(
-        err.to_string()
-            .contains("(expected: username, password, key_path, idle_timeout)"),
+        format!("{err:#}").contains("(expected: username, password, key_path, idle_timeout)"),
         "{err:#}"
     );
 }
@@ -1978,7 +2007,7 @@ fn non_string_key_path_bails() {
     )
     .expect_err("non-string key_path must fail");
     assert!(
-        err.to_string().contains("expected STRING, got INT"),
+        format!("{err:#}").contains("expected STRING, got INT"),
         "{err:#}"
     );
 }
@@ -2024,25 +2053,23 @@ fn loaded_host_key_serves_clients() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-key-first");
+    let pass = oxdock_ssh_plugin::generate_password();
     registry
         .add_cli_mapping("test-ssh-key-client", "127.0.0.1:0")
         .expect("map client service");
     registry.bind_all().expect("bind client service");
-    run_script_with(
-        registry.clone(),
-        &root,
-        indoc! {r#"
-            IMPORT [STD, SSH]
-            INHERIT_ENV [PATH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-first", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
-            SSH_CLOSE($m.server)
-        "#},
-    )
-    .expect("first boot creates the key");
+    let first_boot = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-first", {username: "guest", password: "__TEST_PASSWORD__", key_path: "ssh_host_key"})
+        SSH_CLOSE($m.server)
+    "#}
+    .replace(PASSWORD_MARKER, &pass);
+    run_script_with(registry.clone(), &root, &first_boot).expect("first boot creates the key");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-client", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-client", {username: "guest", password: "__TEST_PASSWORD__", key_path: "ssh_host_key"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -2050,11 +2077,11 @@ fn loaded_host_key_serves_clients() {
         AWAIT $acc
         AWAIT $echo
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let addr = service_addr(&registry, "test-ssh-key-client");
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
-    let mut client = TestClient::connect(addr, "guest", "key-pass").expect("client connects");
+    let mut client = TestClient::connect(addr, "guest", &pass).expect("client connects");
     client.send(b"stable-key-echo").expect("client sends");
     let echoed = client
         .read_until(b"stable-key-echo", Duration::from_secs(10))
@@ -2127,7 +2154,10 @@ fn invalid_host_key_file_bails() {
         "#},
     )
     .expect_err("invalid key must fail");
-    assert!(err.to_string().contains("cannot parse host key"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("cannot parse host key"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -2211,7 +2241,10 @@ fn escaping_key_path_bails() {
         "#},
     )
     .expect_err("escaping key_path must fail");
-    assert!(err.to_string().contains("escapes the workspace"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("escapes the workspace"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -2254,21 +2287,22 @@ fn dequeue_exposes_metadata_before_pump() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-dequeue");
     let addr = service_addr(&registry, "test-ssh-dequeue");
+    let pass = oxdock_ssh_plugin::generate_password();
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-dequeue", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-dequeue", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             WRITE meta.txt "{{ $sess.command }}|{{ $sess.username }}|{{ $sess.addr }}"
         }
         AWAIT $t
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
-    let client = TestClient::connect_exec(addr, "guest", "pass", "health-check")
+    let client = TestClient::connect_exec(addr, "guest", &pass, "health-check")
         .expect("client exec connects");
     client.close();
     handle
@@ -2299,11 +2333,12 @@ fn virtual_command_router() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-router");
     let addr = service_addr(&registry, "test-ssh-router");
+    let pass = oxdock_ssh_plugin::generate_password();
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-router", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-router", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             IF $sess.command == "health-check" {
@@ -2319,10 +2354,10 @@ fn virtual_command_router() {
         }
         AWAIT $t
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
-    let mut client = TestClient::connect_exec(addr, "guest", "pass", "health-check")
+    let mut client = TestClient::connect_exec(addr, "guest", &pass, "health-check")
         .expect("client exec connects");
     let reply = client
         .read_until(b"System Status: OK", Duration::from_secs(10))
@@ -2354,11 +2389,12 @@ fn unknown_virtual_command_rejected_cleanly() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-reject");
     let addr = service_addr(&registry, "test-ssh-reject");
+    let pass = oxdock_ssh_plugin::generate_password();
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-reject", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-reject", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             IF $sess.command == "health-check" {
@@ -2369,11 +2405,11 @@ fn unknown_virtual_command_rejected_cleanly() {
         }
         AWAIT $t
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
-    let client = TestClient::connect_exec(addr, "guest", "pass", "frobnicate")
-        .expect("client exec connects");
+    let client =
+        TestClient::connect_exec(addr, "guest", &pass, "frobnicate").expect("client exec connects");
     client.close();
     handle
         .join()
@@ -2395,11 +2431,12 @@ fn session_value_crosses_await_boundary() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-session");
     let addr = service_addr(&registry, "test-ssh-session");
+    let pass = oxdock_ssh_plugin::generate_password();
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-session", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-session", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             RETURN $sess.session
@@ -2407,11 +2444,10 @@ fn session_value_crosses_await_boundary() {
         LET $s: SSH_SESSION = AWAIT $t
         WRITE stage.txt "bound"
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
-    let client =
-        TestClient::connect_exec(addr, "guest", "pass", "x").expect("client exec connects");
+    let client = TestClient::connect_exec(addr, "guest", &pass, "x").expect("client exec connects");
     client.close();
     handle
         .join()
@@ -2433,10 +2469,11 @@ fn pump_channel_second_pump_bails() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-pump-twice");
     let addr = service_addr(&registry, "test-ssh-pump-twice");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pump-twice", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pump-twice", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             RETURN $sess.session
@@ -2450,17 +2487,16 @@ fn pump_channel_second_pump_bails() {
         AWAIT $p1
         LET $p2: HANDLE = ASYNC { SSH_PUMP_CHANNEL($s, $in, $out) }
         AWAIT $p2
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
-    let client =
-        TestClient::connect_exec(addr, "guest", "pass", "x").expect("client exec connects");
+    let client = TestClient::connect_exec(addr, "guest", &pass, "x").expect("client exec connects");
     client.close();
     let err = handle
         .join()
         .expect("script thread joins")
         .expect_err("second pump must fail");
-    assert!(err.to_string().contains("already pumped"), "{err:#}");
+    assert!(format!("{err:#}").contains("already pumped"), "{err:#}");
 }
 
 #[test]
@@ -2559,10 +2595,11 @@ fn pool_accept_round_robins_across_workers() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-pool");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pool", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pool", {username: "test", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $workers: LIST<ANY> = []
         LET $w: INT = 0
@@ -2580,8 +2617,8 @@ fn pool_accept_round_robins_across_workers() {
         }
         AWAIT $workers
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
     let addr_str = {
         use oxdock_fs::PathResolver;
@@ -2604,8 +2641,7 @@ fn pool_accept_round_robins_across_workers() {
     let addr: SocketAddr = addr_str.parse().expect("addr parses");
     for i in 0..4 {
         let needle = format!("echo4-ping-{i}");
-        let mut client =
-            TestClient::connect(addr, "test", "test123").expect("pool client connects");
+        let mut client = TestClient::connect(addr, "test", &pass).expect("pool client connects");
         client.send(needle.as_bytes()).expect("client sends");
         let echoed = client
             .read_until(needle.as_bytes(), Duration::from_secs(15))
@@ -2637,10 +2673,11 @@ fn pool_pty_run_companions_terminate() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-pty-pool");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-pool", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-pool", {username: "test", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $workers: LIST<ANY> = []
         LET $w: INT = 0
@@ -2659,8 +2696,8 @@ fn pool_pty_run_companions_terminate() {
         }
         AWAIT $workers
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
     let addr_str = {
         use oxdock_fs::PathResolver;
@@ -2683,8 +2720,7 @@ fn pool_pty_run_companions_terminate() {
     let addr: SocketAddr = addr_str.parse().expect("addr parses");
     for i in 0..2 {
         let needle = format!("pty-ping-{i}");
-        let mut client =
-            TestClient::connect(addr, "test", "test123").expect("pool client connects");
+        let mut client = TestClient::connect(addr, "test", &pass).expect("pool client connects");
         client.send(needle.as_bytes()).expect("client sends");
         let echoed = client
             .read_until(needle.as_bytes(), Duration::from_secs(15))
@@ -2932,7 +2968,7 @@ fn offline_connect_bails_before_sockets() {
         AWAIT $c
     "#};
     let err = run_script_with(registry, &root, script).expect_err("offline dial must fail");
-    assert!(err.to_string().contains("--offline mode"), "{err:#}");
+    assert!(format!("{err:#}").contains("--offline mode"), "{err:#}");
 }
 
 #[test]
@@ -2950,10 +2986,11 @@ fn concurrent_guests_keep_their_own_pty_size() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-two-guests");
     let probe = root.clone();
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-two-guests", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-two-guests", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $a: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -2971,15 +3008,15 @@ fn concurrent_guests_keep_their_own_pty_size() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client_a =
-        TestClient::connect_with_pty_dims(addr, "u", "p", 100, 40).expect("guest A connects");
+        TestClient::connect_with_pty_dims(addr, "u", &pass, 100, 40).expect("guest A connects");
     std::thread::sleep(Duration::from_secs(1));
     let client_b =
-        TestClient::connect_with_pty_dims(addr, "u", "p", 120, 50).expect("guest B connects");
+        TestClient::connect_with_pty_dims(addr, "u", &pass, 120, 50).expect("guest B connects");
     handle
         .join()
         .expect("script thread joins")
@@ -2998,16 +3035,17 @@ fn logical_port_connect_roundtrip() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-mapped-roundtrip");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-mapped-roundtrip", {username: "guest", password: "echo-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-mapped-roundtrip", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-mapped-roundtrip", "guest", "echo-pass", $cin, $cout) }
+        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-mapped-roundtrip", "guest", "__TEST_PASSWORD__", $cin, $cout) }
         WITH_IO [stdout=$in] ECHO "server-greeting"
         LET $info: MAP<ANY> = INSPECT($cout)
         LET $empty: BOOL = $info.buffer_bytes == 0
@@ -3025,8 +3063,8 @@ fn logical_port_connect_roundtrip() {
         AWAIT $acc
         CANCEL $c
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     handle
         .join()
         .expect("script thread joins")
@@ -3053,16 +3091,17 @@ fn mapped_name_connect_roundtrip() {
     registry.bind_all().expect("bind_all resolves ephemeral");
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-demo", {username: "guest", password: "echo-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-demo", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-demo", "guest", "echo-pass", $cin, $cout) }
+        LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-demo", "guest", "__TEST_PASSWORD__", $cin, $cout) }
         WITH_IO [stdout=$in] ECHO "server-greeting"
         LET $info: MAP<ANY> = INSPECT($cout)
         LET $empty: BOOL = $info.buffer_bytes == 0
@@ -3080,9 +3119,9 @@ fn mapped_name_connect_roundtrip() {
         AWAIT $acc
         CANCEL $c
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &probe, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &probe, &script));
     handle
         .join()
         .expect("script thread joins")
@@ -3105,10 +3144,11 @@ fn proxy_client_lingers_for_reply_and_status() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-proxy-linger");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-linger", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-linger", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $child: LIST<STRING> = ["cat"]
         [family:windows] {
             $child = ["cmd", "/v:on", "/c", "(set /p line= && echo got:!line!)"]
@@ -3125,7 +3165,7 @@ fn proxy_client_lingers_for_reply_and_status() {
         }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-linger", "guest", "pass", $cin, $cout) }
+        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-linger", "guest", "__TEST_PASSWORD__", $cin, $cout) }
         WITH_IO [stdout=$cin] ECHO "linger-ping"
         LET $cDone: MAP<ANY> = AWAIT $c
         ASSERT_EQ $cDone.closed true
@@ -3133,8 +3173,8 @@ fn proxy_client_lingers_for_reply_and_status() {
         ASSERT_CONTAINS $cout "linger-ping"
         AWAIT $srv
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     handle
         .join()
         .expect("script thread joins")
@@ -3155,10 +3195,11 @@ fn pty_session_opens_cleared() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-pty-clear");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-clear", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-clear", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $child: LIST<STRING> = ["sh", "-c", "exit 0"]
         [family:windows] {
@@ -3175,12 +3216,12 @@ fn pty_session_opens_cleared() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client = TestClient::connect(addr, "u", "p").expect("client connects");
+    let client = TestClient::connect(addr, "u", &pass).expect("client connects");
     handle
         .join()
         .expect("script thread joins")
@@ -3202,10 +3243,11 @@ fn conhost_setup_query_never_reaches_client_windows() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-no-dsr-leak");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-dsr-leak", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-dsr-leak", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -3218,12 +3260,12 @@ fn conhost_setup_query_never_reaches_client_windows() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let mut client = TestClient::connect_with_pty(addr, "u", "p").expect("client connects");
+    let mut client = TestClient::connect_with_pty(addr, "u", &pass).expect("client connects");
     let out = client
         .read_until(b"> ", Duration::from_secs(20))
         .expect("prompt renders");
@@ -3254,10 +3296,11 @@ fn run_exec_binary_roundtrip() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-run-bin");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-bin", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-bin", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $child: LIST<STRING> = ["sh", "-c", "cat"]
         [family:windows] {
@@ -3276,12 +3319,12 @@ fn run_exec_binary_roundtrip() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let mut client = TestClient::connect(addr, "u", "p").expect("client connects");
+    let mut client = TestClient::connect(addr, "u", &pass).expect("client connects");
     // NUL, high bytes, and a bare LF: any translation layer mangles one
     // of these, and the trailing marker bounds the read.
     let blob: Vec<u8> = b"bin\x00\xffary\nbare-lf\r\ncrlf\r\nEND\r\n".to_vec();
@@ -3319,10 +3362,11 @@ fn run_exec_reports_exit_code() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-run-code");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-code", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-code", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $child: LIST<STRING> = ["sh", "-c", "exit 3"]
         [family:windows] {
@@ -3341,12 +3385,12 @@ fn run_exec_reports_exit_code() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let mut client = TestClient::connect(addr, "u", "p").expect("client connects");
+    let mut client = TestClient::connect(addr, "u", &pass).expect("client connects");
     assert_eq!(
         client
             .wait_exit_status(Duration::from_secs(15))
@@ -3374,10 +3418,11 @@ fn run_exec_splits_stderr() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-run-err");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-err", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-err", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $child: LIST<STRING> = ["sh", "-c", "echo out; echo oops >&2"]
         [family:windows] {
@@ -3397,12 +3442,12 @@ fn run_exec_splits_stderr() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let mut client = TestClient::connect(addr, "u", "p").expect("client connects");
+    let mut client = TestClient::connect(addr, "u", &pass).expect("client connects");
     let out = client
         .read_until(b"out", Duration::from_secs(15))
         .expect("stdout arrives");
@@ -3434,20 +3479,21 @@ fn serve_accepts_idle_timeout_option() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-idle-opt");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-idle-opt", {username: "u", password: "p", idle_timeout: "5s"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-idle-opt", {username: "u", password: "__TEST_PASSWORD__", idle_timeout: "5s"})
         WRITE addr.txt "{{ $m.addr }}"
         SLEEP 5s
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let probe = root.clone();
     let thread_root = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &thread_root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &thread_root, &script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client = TestClient::connect(addr, "u", "p").expect("client connects");
+    let client = TestClient::connect(addr, "u", &pass).expect("client connects");
     client.close();
     handle
         .join()
@@ -3462,7 +3508,7 @@ fn serve_accepts_idle_timeout_option() {
     "#};
     let err = run_script_with(registry, &root, script).expect_err("bad duration must fail");
     assert!(
-        err.to_string().contains("idle_timeout"),
+        format!("{err:#}").contains("idle_timeout"),
         "failure names the option: {err:#}"
     );
 }
@@ -3478,10 +3524,11 @@ fn pump_channel_close_reaches_client_while_session_held() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-pump-close");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pump-close", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pump-close", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             RETURN $sess.session
@@ -3495,11 +3542,11 @@ fn pump_channel_close_reaches_client_while_session_held() {
         AWAIT $p
         AWAIT $e
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let addr = service_addr(&registry, "test-ssh-pump-close");
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
-    let mut client = TestClient::connect(addr, "guest", "pass").expect("client connects");
+    let mut client = TestClient::connect(addr, "guest", &pass).expect("client connects");
     client.send(b"close-me").expect("client sends");
     let echoed = client
         .read_until(b"close-me", Duration::from_secs(10))
@@ -3528,22 +3575,23 @@ fn send_exit_status_reaches_exec_client() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-exit-status-raw");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-raw", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-raw", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $h: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             SSH_SEND_EXIT_STATUS($sess.session, 42)
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let addr = service_addr(&registry, "test-ssh-exit-status-raw");
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
     let mut client =
-        TestClient::connect_exec(addr, "guest", "pass", "probe").expect("client exec connects");
+        TestClient::connect_exec(addr, "guest", &pass, "probe").expect("client exec connects");
     let code = client
         .wait_exit_status(Duration::from_secs(10))
         .expect("exit-status arrives");
@@ -3568,10 +3616,11 @@ fn pty_child_code_reaches_exec_client() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-exit-status-pty");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-pty", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-pty", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $child: LIST<STRING> = ["sh", "-c", "exit 7"]
         [family:windows] {
             $child = ["cmd", "/c", "exit 7"]
@@ -3588,12 +3637,12 @@ fn pty_child_code_reaches_exec_client() {
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
+    "#}.replace(PASSWORD_MARKER, &pass);
     let addr = service_addr(&registry, "test-ssh-exit-status-pty");
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
     let mut client =
-        TestClient::connect_exec(addr, "guest", "pass", "probe").expect("client exec connects");
+        TestClient::connect_exec(addr, "guest", &pass, "probe").expect("client exec connects");
     let code = client
         .wait_exit_status(Duration::from_secs(10))
         .expect("exit-status arrives");
@@ -3614,27 +3663,31 @@ fn send_exit_status_rejects_negative_code() {
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-exit-status-neg");
     let addr = service_addr(&registry, "test-ssh-exit-status-neg");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-neg", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-neg", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $h: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             SSH_SEND_EXIT_STATUS($sess.session, -1)
         }
         AWAIT $h
         SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    "#}.replace(PASSWORD_MARKER, &pass);
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
     std::thread::sleep(Duration::from_secs(2));
     let client =
-        TestClient::connect_exec(addr, "guest", "pass", "probe").expect("client exec connects");
+        TestClient::connect_exec(addr, "guest", &pass, "probe").expect("client exec connects");
     client.close();
     let err = handle
         .join()
         .expect("script thread joins")
         .expect_err("negative code must fail");
-    assert!(err.to_string().contains("must not be negative"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("must not be negative"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -3650,10 +3703,11 @@ fn exec_argv_round_trip_preserves_hostile_words() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-exec-quote");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exec-quote", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exec-quote", {username: "u", password: "__TEST_PASSWORD__"})
         LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
         LET $runner: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
@@ -3671,15 +3725,15 @@ fn exec_argv_round_trip_preserves_hostile_words() {
             ASSERT_EQ $code 0
         }
         LET $nasty: STRING = "it's $HOME \"quoted\" `ticked`"
-        LET $res: MAP<ANY> = SSH_EXEC("test-ssh-exec-quote", "u", "p", ["echo", $nasty], {})
+        LET $res: MAP<ANY> = SSH_EXEC("test-ssh-exec-quote", "u", "__TEST_PASSWORD__", ["echo", $nasty], {})
         ASSERT_EQ $res.timed_out false
         ASSERT_EQ $res.truncated false
         ASSERT_EQ $res.exit 0
         ASSERT_CONTAINS $res.stdout $nasty
         AWAIT $runner
         SSH_CLOSE($m.server)
-    "#};
-    run_script_with(registry, &root, script).expect("hostile argv round-trips byte-identical");
+    "#}.replace(PASSWORD_MARKER, &pass);
+    run_script_with(registry, &root, &script).expect("hostile argv round-trips byte-identical");
 }
 
 #[test]
@@ -3691,14 +3745,15 @@ fn exec_timeout_returns_partials() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-exec-timeout");
+    let pass = oxdock_ssh_plugin::generate_password();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exec-timeout", {username: "u", password: "p"})
-        LET $res: MAP<ANY> = SSH_EXEC("test-ssh-exec-timeout", "u", "p", ["echo", "hi"], {timeout: "1s"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exec-timeout", {username: "u", password: "__TEST_PASSWORD__"})
+        LET $res: MAP<ANY> = SSH_EXEC("test-ssh-exec-timeout", "u", "__TEST_PASSWORD__", ["echo", "hi"], {timeout: "1s"})
         ASSERT_EQ $res.timed_out true
         LET $unknown: INT = 0 - 1
         ASSERT_EQ $res.exit $unknown
         SSH_CLOSE($m.server)
-    "#};
-    run_script_with(registry, &root, script).expect("exec timeout returns partials");
+    "#}.replace(PASSWORD_MARKER, &pass);
+    run_script_with(registry, &root, &script).expect("exec timeout returns partials");
 }

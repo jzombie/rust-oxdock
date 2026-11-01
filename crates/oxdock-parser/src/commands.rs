@@ -12,10 +12,12 @@
 //! `all_structural_metadata()`, and the `structural_metadata_covers_all_structural_kinds`
 //! tripwire below.
 
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::ast::{
-    Arg, ArgPart, Expr, IoBinding, IoStream, PipeTarget, Step, Value, WorkspaceTarget,
+    Arg, ArgPart, ArithOp, CompareOp, Expr, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable,
+    PipeTarget, Step, Value, WorkspaceTarget,
 };
 use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
@@ -163,7 +165,78 @@ fn quote_dsl_string(s: &str) -> String {
     // round-trips without them (unlike `escape_dsl_string` in `literal`,
     // which inverts runtime `expand_string` and must also
     // escape `{{` triples and controls).
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    // Multi-line values render as `"""` blocks on their own lines at
+    // column zero, so lowering recovers the bytes exactly: the leading
+    // newline strips once, the empty closing baseline contributes no
+    // common prefix, and the trailing newline strips once. Quote-holding
+    // values stay double-quoted with `\"` escapes: blocks admit raw
+    // quotes for the string grammar, but no Rust token stream can carry
+    // them (the lexer ends the literal at every raw `"`), so block
+    // rendering would shred on the token pathway while escaping keeps
+    // both pathways agreeing. Blank-only and carriage-return values
+    // keep the legacy raw double-quoted spelling instead: block
+    // lowering would normalize them away.
+    if s.contains('\n') && !s.contains('"') && !s.contains('\r') && !s.trim().is_empty() {
+        let escaped = escape_block_text(s);
+        return format!("\"\"\"\n{escaped}\n\"\"\"");
+    }
+    format!("\"{}\"", escape_inline_text(s))
+}
+
+/// Escape text for double-quoted rendering so a render cycle adds no
+/// layer: recognized escapes pass through verbatim (the parser keeps
+/// them verbatim and both lexers accept them), while the delimiter and
+/// anything neither lexer takes raw gets escaped.
+fn escape_inline_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => {
+                // Recognized pairs emit atomically: reprocessing the
+                // trailing quote through the `"` arm above would grow
+                // the pair a second backslash.
+                if matches!(
+                    chars.peek(),
+                    Some('n' | 't' | 'r' | '\\' | '"' | '\'' | '0')
+                ) {
+                    out.push('\\');
+                    out.push(chars.next().unwrap_or('\\'));
+                } else {
+                    out.push_str("\\\\");
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escape block payloads: the delimiter triple always escapes first,
+/// and a backslash survives raw only where both lexers take it
+/// (recognized escapes, including the ones just introduced; a real
+/// newline or `{` after it would break Rust lexing, so those double
+/// like everything else unrecognized).
+fn escape_block_text(s: &str) -> String {
+    let preescaped = s.replace("\"\"\"", "\\\"\\\"\\\"");
+    let mut out = String::with_capacity(preescaped.len());
+    let mut chars = preescaped.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let keep = matches!(
+            chars.peek(),
+            Some('n' | 't' | 'r' | '\\' | '"' | '\'' | '0')
+        );
+        out.push('\\');
+        if !keep {
+            out.push('\\');
+        }
+    }
+    out
 }
 
 fn quote_arg(s: &str) -> String {
@@ -612,7 +685,6 @@ impl StepKind {
             | StepKind::Echo(arg)
             | StepKind::Run(arg)
             | StepKind::Mkdir(arg)
-            | StepKind::HashSha256 { path: arg }
             | StepKind::Exit(arg) => walk_arg(arg, f),
             StepKind::Env { value, .. } => walk_arg(value, f),
             StepKind::Copy { from, to, .. }
@@ -679,7 +751,6 @@ impl StepKind {
             | StepKind::InheritEnv { .. }
             | StepKind::Isolated { .. }
             | StepKind::IsolatedInheritEnv { .. }
-            | StepKind::Cwd
             | StepKind::ReadLine { .. }
             | StepKind::AssignCapture { .. }
             | StepKind::AwaitCapture { .. }
@@ -745,7 +816,6 @@ impl StepKind {
             | StepKind::Install { .. }
             | StepKind::Mkdir(_)
             | StepKind::Ls(_)
-            | StepKind::Cwd
             | StepKind::Read(_)
             | StepKind::ReadLine { .. }
             | StepKind::Prompt { .. }
@@ -755,7 +825,6 @@ impl StepKind {
             | StepKind::Expand { .. }
             | StepKind::AssertEq { .. }
             | StepKind::AssertContains { .. }
-            | StepKind::HashSha256 { .. }
             | StepKind::Exit(_)
             | StepKind::WithIoBlock { .. }
             | StepKind::Assign { .. }
@@ -883,7 +952,7 @@ declare_commands! {
         IsolatedInheritEnv { keys: Vec<String> },
         RemoteBlock { target: String, vars: Vec<String>, env: Vec<String>, body: Vec<Step> },
         RunExec { argv: Vec<Arg> },
-        FuncDef { name: String, params: Vec<(String, String)>, body: Vec<Step> },
+        FuncDef { name: String, params: Vec<(String, String)>, body: Vec<Step>, docs: Option<(String, String)> },
         Call { name: String, args: Vec<Expr> },
         Return { expr: Box<Expr> },
         While { cond: Box<Expr>, body: Vec<Step> },
@@ -1528,27 +1597,6 @@ declare_commands! {
         lower: |_flags, args| Ok(StepKind::Ls(args.into_iter().next())),
     ],
 
-    Cwd => [
-        name: "CWD",
-        variant: Cwd,
-        syntax: "CWD",
-        summary: "Print working directory.",
-        description: "Outputs cwd.",
-        args: &[],
-        flags: &[],
-        default_output: Some(Stream::Stdout),
-        examples: &[ Example { name: "cwd", fence_meta: None, code: indoc! {r#"
-            CWD
-
-            # CWD tracks WORKDIR: the listing names the new directory.
-            MKDIR sub
-            WORKDIR sub
-            LET $c: STRING = CWD
-            ASSERT_CONTAINS $c "sub"
-        "#} } ],
-        lower: |_flags, _args| Ok(StepKind::Cwd),
-    ],
-
     Read => [
         name: "READ",
         variant: Read(Option<Arg>),
@@ -1961,25 +2009,6 @@ declare_commands! {
             let needle = join_value(remaining, "ASSERT_CONTAINS")?;
             Ok(StepKind::AssertContains { haystack, needle })
         },
-    ],
-
-    HashSha256 => [
-        name: "HASH_SHA256",
-        variant: HashSha256 { path: Arg },
-        syntax: "HASH_SHA256 <path>",
-        summary: "Print SHA-256.",
-        description: "Computes digest.",
-        args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "File", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
-        flags: &[],
-        default_output: Some(Stream::Stdout),
-        examples: &[ Example { name: "hash", fence_meta: None, code: indoc! {r#"
-            WRITE payload.txt hello
-            HASH_SHA256 payload.txt
-
-            LET $digest: STRING = HASH_SHA256 payload.txt
-            ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
-        "#} } ],
-        lower: |_flags, args| Ok(StepKind::HashSha256 { path: args.into_iter().next().ok_or_else(|| ParseError::validation("HASH_SHA256", "HASH_SHA256 requires a path".to_string(), &SpanContext::line_only(0)))? }),
     ],
 
     Exit => [
@@ -3566,7 +3595,6 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
-            StepKind::Cwd => write!(f, "CWD"),
             StepKind::Read(a) => {
                 write!(f, "READ")?;
                 if let Some(x) = a {
@@ -3677,9 +3705,6 @@ impl fmt::Display for StepKind {
                     )
                 }
             }
-            StepKind::HashSha256 { path } => {
-                write!(f, "HASH_SHA256 {}", fmt_value(path, quote_arg))
-            }
             StepKind::Exit(code) => write!(f, "EXIT {}", fmt_raw_arg(code)),
             StepKind::Sleep { duration } => write!(f, "SLEEP {}", fmt_raw_arg(duration)),
             StepKind::ListAppend { list, item } => {
@@ -3785,7 +3810,10 @@ impl fmt::Display for StepKind {
             StepKind::Cancel { var } => write!(f, "CANCEL ${}", var),
             StepKind::Timeout { duration, body } => {
                 let budget = fmt_raw_arg(duration);
-                if body.len() == 1 {
+                // Single-command form cannot carry an inner guard (the
+                // grammar has no guard slot there), so guarded singles
+                // take block form rather than silently dropping it.
+                if body.len() == 1 && body[0].guard.is_none() {
                     write!(f, "TIMEOUT {} {}", budget, body[0].kind)
                 } else {
                     write!(f, "TIMEOUT {} {{", budget)?;
@@ -3796,7 +3824,7 @@ impl fmt::Display for StepKind {
                 }
             }
             StepKind::Isolated { body } => {
-                if body.len() == 1 {
+                if body.len() == 1 && body[0].guard.is_none() {
                     write!(f, "ISOLATED {}", body[0].kind)
                 } else {
                     write!(f, "ISOLATED {{")?;
@@ -3830,7 +3858,20 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
-            StepKind::FuncDef { name, params, body } => {
+            StepKind::FuncDef {
+                name,
+                params,
+                body,
+                docs,
+            } => {
+                // Doc blocks render back as `#` lines so Display
+                // reparses to identical docs (first line is the
+                // summary, the rest follow verbatim).
+                if let Some((_, full)) = docs {
+                    for doc_line in full.split('\n') {
+                        writeln!(f, "# {doc_line}")?;
+                    }
+                }
                 let ps: Vec<String> = params
                     .iter()
                     .map(|(p, t)| format!("${}: {}", p, t))
@@ -3857,6 +3898,804 @@ impl fmt::Display for StepKind {
             StepKind::Break => write!(f, "BREAK"),
             StepKind::Continue => write!(f, "CONTINUE"),
         }
+    }
+}
+
+/// One lowered instruction token: a positional argument, or a pre-split
+/// `KEY=value` assignment from the unified grammar rule. Assignments reach
+/// ENV/EXPAND lowerings intact; every other command sees them collapsed to
+/// canonical `key=value` text (see `lower_instruction_pair`).
+pub(crate) enum InsToken {
+    Pos(Arg),
+    Assign(String, Arg),
+}
+
+pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<StepKind> {
+    if tokens.is_empty() {
+        return Err(ParseError::validation(
+            "ENV",
+            "ENV requires KEY=value".to_string(),
+            ctx,
+        ));
+    }
+    match tokens.as_slice() {
+        [InsToken::Assign(key, value)] => {
+            // Same KEY=value check the ENV lower applies on the
+            // `lower_command` path, over the joined assignment form.
+            if crate::command::split_assignment(&format!("{key}={}", value.render()))
+                .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
+                .is_none()
+            {
+                return Err(ParseError::validation(
+                    "ENV",
+                    "ENV requires KEY=value format".to_string(),
+                    ctx,
+                ));
+            }
+            Ok(StepKind::Env {
+                key: key.clone(),
+                value: value.clone(),
+            })
+        }
+        [InsToken::Pos(Arg::String(text, _))] => match crate::command::split_assignment(text)
+            .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
+        {
+            Some((key, value)) => Ok(StepKind::Env { key, value }),
+            None => Err(ParseError::validation(
+                "ENV",
+                "ENV requires KEY=value format".to_string(),
+                ctx,
+            )),
+        },
+        _ => Err(ParseError::validation(
+            "ENV",
+            "ENV requires KEY=value format".to_string(),
+            ctx,
+        )),
+    }
+}
+
+/// Parser-direct `EXPAND` lowering: positional tokens are the optional path,
+/// assignments are overrides. Split quoted values can never masquerade as
+/// extra paths : tokenize time already proved they are one value.
+pub(crate) fn lower_expand_tokens(
+    ctx: &SpanContext,
+    tokens: Vec<InsToken>,
+) -> ParseResult<StepKind> {
+    let mut path = None;
+    let mut overrides = Vec::new();
+    for token in tokens {
+        match token {
+            InsToken::Assign(key, value) => {
+                if key.is_empty() {
+                    return Err(ParseError::validation(
+                        "EXPAND",
+                        "EXPAND requires KEY=value format for overrides".to_string(),
+                        ctx,
+                    ));
+                }
+                overrides.push((key, value));
+            }
+            InsToken::Pos(arg) => match &arg {
+                Arg::String(text, quoted) if !quoted && text.contains('=') => {
+                    let Some((key, value)) = crate::command::split_assignment(text)
+                        .map_err(|e| ParseError::validation("EXPAND", e.to_string(), ctx))?
+                    else {
+                        return Err(ParseError::validation(
+                            "EXPAND",
+                            "EXPAND requires KEY=value format for overrides".to_string(),
+                            ctx,
+                        ));
+                    };
+                    overrides.push((key, value));
+                }
+                _ => {
+                    if path.is_none() {
+                        // Path-typed positional, checked like every other
+                        // `lower_command` path arg (literals always pass;
+                        // resolution stays runtime).
+                        ArgType::Path
+                            .check_arg(&arg)
+                            .map_err(|e| ParseError::validation("EXPAND", e.to_string(), ctx))?;
+                        path = Some(arg);
+                    } else {
+                        return Err(ParseError::validation(
+                            "EXPAND",
+                            "EXPAND accepts at most one path".to_string(),
+                            ctx,
+                        ));
+                    }
+                }
+            },
+        }
+    }
+    Ok(StepKind::Expand { path, overrides })
+}
+
+/// Wrapper-shared validators, promoted verbatim from the retired pest
+/// backend, so every parse entry point enforces identical bodies.
+/// Pure outcome logic over [`StepKind`]: contexts only feed error spans.
+#[derive(Default)]
+pub(crate) struct IoBindingSet {
+    stdin: Option<IoBinding>,
+    stdout: Option<IoBinding>,
+    stderr: Option<IoBinding>,
+    tty: Option<IoBinding>,
+    rows: Option<IoBinding>,
+    cols: Option<IoBinding>,
+}
+
+impl IoBindingSet {
+    pub(crate) fn insert(&mut self, binding: IoBinding) {
+        match binding.stream {
+            IoStream::Stdin => self.stdin = Some(binding),
+            IoStream::Stdout => self.stdout = Some(binding),
+            IoStream::Stderr => self.stderr = Some(binding),
+            IoStream::Tty => self.tty = Some(binding),
+            IoStream::Rows(_) => self.rows = Some(binding),
+            IoStream::Cols(_) => self.cols = Some(binding),
+        }
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<IoBinding> {
+        let mut out = Vec::new();
+        if let Some(binding) = self.stdin {
+            out.push(binding);
+        }
+        if let Some(binding) = self.stdout {
+            out.push(binding);
+        }
+        if let Some(binding) = self.stderr {
+            out.push(binding);
+        }
+        if let Some(binding) = self.tty {
+            out.push(binding);
+        }
+        if let Some(binding) = self.rows {
+            out.push(binding);
+        }
+        if let Some(binding) = self.cols {
+            out.push(binding);
+        }
+        out
+    }
+}
+
+pub(crate) fn merge_bindings(defaults: &[IoBinding], overrides: &[IoBinding]) -> Vec<IoBinding> {
+    let mut set = IoBindingSet::default();
+    for binding in defaults {
+        set.insert(binding.clone());
+    }
+    for binding in overrides {
+        set.insert(binding.clone());
+    }
+    set.into_vec()
+}
+
+pub(crate) fn and_guard_exprs(
+    left: Option<GuardExpr>,
+    right: Option<GuardExpr>,
+) -> Option<GuardExpr> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(expr), None) | (None, Some(expr)) => Some(expr),
+        (Some(lhs), Some(rhs)) => Some(GuardExpr::all(vec![lhs, rhs])),
+    }
+}
+
+pub(crate) fn has_stdout_pipe(bindings: &[IoBinding]) -> bool {
+    bindings
+        .iter()
+        .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
+}
+
+/// Reject async machinery inside a capture body: background tasks are
+/// captured via `LET $o: STRING = AWAIT $t`, never inline.
+pub(crate) fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
+    let bad = match kind {
+        StepKind::AsyncBlock { .. }
+        | StepKind::AssignAsync { .. }
+        | StepKind::Await { .. }
+        | StepKind::AwaitCapture { .. }
+        | StepKind::Cancel { .. } => true,
+        _ => {
+            let mut bad = false;
+            kind.walk_child_kinds(&mut |child| {
+                bad = bad || reject_async_in_capture(ctx, child).is_err();
+            });
+            bad
+        }
+    };
+    if bad {
+        return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
+    }
+    Ok(())
+}
+
+/// Reject `WITH_IO [stdout=$var]` anywhere inside a capture body: the
+/// capture sink owns stdout.
+pub(crate) fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
+    if let StepKind::WithIo { bindings, .. } = kind
+        && has_stdout_pipe(bindings)
+    {
+        return Err(ParseError::structural(
+            "let",
+            "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
+                .to_string(),
+            ctx,
+        ));
+    }
+    let mut result = Ok(());
+    kind.walk_child_kinds(&mut |child| {
+        if result.is_ok() {
+            result = reject_pipe_stdout_in_capture(ctx, child);
+        }
+    });
+    result
+}
+
+/// Rewrite prelude-shaped `INHERIT_ENV` nodes anywhere inside an `ISOLATED`
+/// body into `IsolatedInheritEnv`: the nested allowlist reads the isolated
+/// snapshot, never the host.
+pub(crate) fn rewrite_isolated_inherit(body: &mut [Step]) {
+    for step in body {
+        rewrite_isolated_inherit_kind(&mut step.kind);
+    }
+}
+
+/// Single-kind half of [`rewrite_isolated_inherit`]: rewrite the node
+/// itself, then recurse through whatever it contains (`WITH_IO` wraps and
+/// captures hold one kind; loop/if bodies hold steps).
+pub(crate) fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
+    if let StepKind::InheritEnv { keys } = kind {
+        *kind = StepKind::IsolatedInheritEnv { keys: keys.clone() };
+    }
+    match kind {
+        StepKind::For { body, .. }
+        | StepKind::While { body, .. }
+        | StepKind::Timeout { body, .. }
+        | StepKind::Isolated { body }
+        | StepKind::AssignAsync { body, .. }
+        | StepKind::AsyncBlock { body } => rewrite_isolated_inherit(body),
+        StepKind::If {
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            rewrite_isolated_inherit(then_body);
+            for (_, branch) in else_ifs {
+                rewrite_isolated_inherit(branch);
+            }
+            if let Some(else_body) = else_body {
+                rewrite_isolated_inherit(else_body);
+            }
+        }
+        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
+            rewrite_isolated_inherit_kind(cmd);
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn contains_inherit_env(kind: &StepKind) -> bool {
+    if matches!(kind, StepKind::InheritEnv { .. }) {
+        return true;
+    }
+    let mut found = false;
+    kind.walk_child_kinds(&mut |child| {
+        found = found || contains_inherit_env(child);
+    });
+    found
+}
+
+/// Reject an `INHERIT_ENV` nested anywhere inside another command: the
+/// prelude directive only reads at statement level (and, rewritten,
+/// inside `ISOLATED` bodies, which never reach here).
+pub(crate) fn reject_nested_inherit_env(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
+    if contains_inherit_env(kind) {
+        return Err(ParseError::structural(
+            "inherit_env",
+            "INHERIT_ENV cannot be nested inside other commands".to_string(),
+            ctx,
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_tty_wrapping(
+    bindings: &[IoBinding],
+    cmd: Option<&StepKind>,
+    span: &SpanContext,
+) -> ParseResult<()> {
+    let has_tty = bindings.iter().any(|b| matches!(b.stream, IoStream::Tty));
+    let has_geometry = bindings
+        .iter()
+        .any(|b| matches!(b.stream, IoStream::Rows(_) | IoStream::Cols(_)));
+    if has_geometry && !has_tty {
+        return Err(ParseError::structural(
+            "with_io",
+            "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size".to_string(),
+            span,
+        ));
+    }
+    if !has_tty {
+        return Ok(());
+    }
+    if bindings
+        .iter()
+        .any(|b| matches!(b.stream, IoStream::Stderr))
+    {
+        return Err(ParseError::structural(
+            "with_io",
+            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex".to_string(),
+            span,
+        ));
+    }
+    match cmd {
+        Some(StepKind::Run(_) | StepKind::RunExec { .. }) | None => Ok(()),
+        Some(_) => Err(ParseError::structural(
+            "with_io",
+            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it".to_string(),
+            span,
+        )),
+    }
+}
+
+/// Reject `WITH_IO` steps directly inside an `ASYNC` body: pipe wiring
+/// belongs outside the task (`WITH_IO [...] ASYNC ...`), never inside.
+pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> ParseResult<()> {
+    for step in body {
+        if matches!(&step.kind, StepKind::WithIo { .. }) {
+            return Err(ParseError::structural("async", "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(), ctx));
+        }
+    }
+    Ok(())
+}
+
+/// Validate `EXPORT` names at end of parse. Forward references are
+/// allowed (EXPORT may precede its FUNCs), so this runs against the
+/// completed top-level scope. Bare names must match a top-level
+/// `FUNC`; qualified `MOD::NAME` names must match a known module
+/// member (opaque modules skip the member check; the runtime registry
+/// resolves them or fails serving). Duplicates are rejected at the
+/// EXPORT site. Promoted verbatim (the pest finish pass delegates).
+pub(crate) fn validate_exports(
+    ctx: &SpanContext,
+    exports: &[String],
+    top: &HashSet<String>,
+    modules: &ModuleTable,
+) -> ParseResult<()> {
+    for name in exports {
+        let valid = match name.split_once("::") {
+            None => top.contains(name),
+            Some((module, base)) if module == crate::constants::SCRIPT_MODULE_NAME => {
+                top.contains(base)
+            }
+            Some((module, base)) => match modules.modules.get(module) {
+                None => false,
+                Some(None) => true,
+                Some(Some(funcs)) => funcs.functions.contains(base),
+            },
+        };
+        if !valid {
+            return Err(ParseError::validation(
+                crate::constants::KEYWORD_EXPORT,
+                format!("EXPORT `{name}` does not match any top-level FUNC or known module member"),
+                ctx,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// REMOTE whole-script validators and body-symbol collectors,
+/// promoted verbatim from the pest backend (which delegates) so both
+/// parse pathways enforce identical blocks.
+/// Reject `COPY --from-host` / `--to-host` outside `REMOTE` bodies.
+/// Transfer declarations only mean something where a session hoists them;
+/// anywhere else they would silently behave as local copies.
+pub(crate) fn validate_remote_copy_placement(steps: &[Step], ctx: &SpanContext) -> ParseResult<()> {
+    fn visit_kind(kind: &StepKind, in_remote: bool, ctx: &SpanContext) -> ParseResult<()> {
+        if let StepKind::Copy {
+            from_host, to_host, ..
+        } = kind
+            && (*from_host || *to_host)
+            && !in_remote
+        {
+            return Err(ParseError::structural(
+                "copy",
+                "COPY --from-host and --to-host are only valid inside a REMOTE block".to_string(),
+                ctx,
+            ));
+        }
+        let child_remote = in_remote || matches!(kind, StepKind::RemoteBlock { .. });
+        let mut result = Ok(());
+        kind.walk_child_kinds(&mut |child| {
+            if result.is_ok() {
+                result = visit_kind(child, child_remote, ctx);
+            }
+        });
+        result
+    }
+    for step in steps {
+        visit_kind(&step.kind, false, ctx)?;
+    }
+    Ok(())
+}
+
+/// True when any step in the slice (transitively, through nested bodies)
+/// is a `REMOTE` block. `REMOTE` blocks never nest: the inner block would
+/// have no session, no inventory, and no defined sync boundary.
+pub(crate) fn contains_remote_block(steps: &[Step]) -> bool {
+    steps.iter().any(|step| contains_remote_kind(&step.kind))
+}
+
+pub(crate) fn contains_remote_kind(kind: &StepKind) -> bool {
+    if matches!(kind, StepKind::RemoteBlock { .. }) {
+        return true;
+    }
+    let mut found = false;
+    kind.walk_child_kinds(&mut |child| {
+        found = found || contains_remote_kind(child);
+    });
+    found
+}
+
+/// Collect transitively defined `FUNC` names and invoked call names from a
+/// `REMOTE` body. Statement calls, expression calls (including compiled
+/// math ops and inline blocks), and calls nested in any sub-body are all
+/// covered through the uniform [`StepKind`] walkers. Only user-defined
+/// `SCRIPT` symbols matter downstream: qualified module calls pass through.
+pub(crate) fn collect_remote_body_symbols(
+    steps: &[Step],
+    defs: &mut HashSet<String>,
+    calls: &mut Vec<String>,
+) {
+    for step in steps {
+        collect_remote_kind_symbols(&step.kind, defs, calls);
+    }
+}
+
+pub(crate) fn collect_remote_kind_symbols(
+    kind: &StepKind,
+    defs: &mut HashSet<String>,
+    calls: &mut Vec<String>,
+) {
+    if let StepKind::FuncDef { name, .. } = kind {
+        defs.insert(name.clone());
+    }
+    if let StepKind::Call { name, .. } = kind {
+        calls.push(name.clone());
+    }
+    kind.walk_step_exprs(&mut |expr| match expr {
+        Expr::Call { name, .. } => calls.push(name.clone()),
+        Expr::CompiledMath(ops) => {
+            for op in ops {
+                if let MathOp::Call { name, .. } = op {
+                    calls.push(name.clone());
+                }
+            }
+        }
+        Expr::Block(steps) => collect_remote_body_symbols(steps, defs, calls),
+        _ => {}
+    });
+}
+
+/// Expression lowering core, promoted verbatim from the retired pest
+/// backend: folding constructors, RPN compilation, boundary rejection,
+/// and numeric classification. The parser calls
+/// these directly, so folding and overflow behavior are single-sourced.
+/// Reject a staged `UnsignedIntBoundary` in any position where unary `-`
+/// cannot consume it (every composite constructor calls this on children).
+/// Expression lowering core (promoted verbatim from the retired pest
+/// backend): operates on `Expr`, never on token pairs.
+pub(crate) fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {
+    if matches!(expr, Expr::UnsignedIntBoundary(_)) {
+        return Err(ParseError::structural(
+            "expr",
+            "integer overflow: 9223372036854775808 exceeds i64::MAX".to_string(),
+            ctx,
+        ));
+    }
+    Ok(())
+}
+
+/// Apply unary `-`: fold literals, consume the `i64::MIN` boundary, else
+/// compile to RPN `Neg` (or AST `0 - x` fallback for non-math operands).
+/// Shared with the v2 backend.
+pub(crate) fn apply_unary_neg(ctx: &SpanContext, expr: Expr) -> ParseResult<Expr> {
+    match expr {
+        Expr::Literal(v) => match (v.as_i64(), v.as_f64()) {
+            (Some(n), _) => match n.checked_neg() {
+                Some(neg) => Ok(Expr::Literal(Value::int(neg))),
+                None => Ok(Expr::CompiledMath(vec![MathOp::PushConst(v), MathOp::Neg])),
+            },
+            (None, Some(f)) => Ok(Expr::Literal(Value::float(-f))),
+            (None, None) => {
+                let other = Expr::Literal(v);
+                if let Some(mut ops) = expr_to_rpn(&other) {
+                    ops.push(MathOp::Neg);
+                    Ok(Expr::CompiledMath(ops))
+                } else {
+                    // Non-math operand (list/map/logical): `0 - x` evaluates via
+                    // the shared arithmetic helper to a runtime Type Error.
+                    Ok(Expr::Arithmetic {
+                        op: ArithOp::Sub,
+                        left: Box::new(Expr::Literal(Value::int(0))),
+                        right: Box::new(other),
+                    })
+                }
+            }
+        },
+        Expr::UnsignedIntBoundary(n) => {
+            if n == i64::MAX as u64 + 1 {
+                Ok(Expr::Literal(Value::int(i64::MIN)))
+            } else {
+                Err(ParseError::structural(
+                    "expr",
+                    format!("integer overflow: {} exceeds i64::MAX", n),
+                    ctx,
+                ))
+            }
+        }
+        other => {
+            if let Some(mut ops) = expr_to_rpn(&other) {
+                ops.push(MathOp::Neg);
+                Ok(Expr::CompiledMath(ops))
+            } else {
+                // Non-math operand (list/map/logical): `0 - x` evaluates via
+                // the shared arithmetic helper to a runtime Type Error.
+                Ok(Expr::Arithmetic {
+                    op: ArithOp::Sub,
+                    left: Box::new(Expr::Literal(Value::int(0))),
+                    right: Box::new(other),
+                })
+            }
+        }
+    }
+}
+
+/// Try parse-time constant folding for binary arithmetic/comparison.
+/// Returns `Some(literal)` on success, `None` when not both literals or
+/// when the op would error at runtime (div-zero/overflow/non-finite:
+/// leave for the RPN evaluator so the error surfaces at runtime).
+fn try_fold_arith(op: ArithOp, left: &Expr, right: &Expr) -> Option<Expr> {
+    let (Expr::Literal(lv), Expr::Literal(rv)) = (left, right) else {
+        return None;
+    };
+    fold_arith_values(op, lv, rv).map(Expr::Literal)
+}
+
+fn fold_arith_values(op: ArithOp, left: &Value, right: &Value) -> Option<Value> {
+    match (left.as_i64(), right.as_i64()) {
+        (Some(a), Some(b)) => {
+            let v = match op {
+                ArithOp::Add => a.checked_add(b)?,
+                ArithOp::Sub => a.checked_sub(b)?,
+                ArithOp::Mul => a.checked_mul(b)?,
+                ArithOp::Div => a.checked_div(b)?,
+            };
+            Some(Value::int(v))
+        }
+        _ => {
+            let (af, bf) = (as_f64(left)?, as_f64(right)?);
+            fold_float(op, af, bf)
+        }
+    }
+}
+
+fn fold_float(op: ArithOp, a: f64, b: f64) -> Option<Value> {
+    if !a.is_finite() || !b.is_finite() {
+        return None;
+    }
+    let v = match op {
+        ArithOp::Add => a + b,
+        ArithOp::Sub => a - b,
+        ArithOp::Mul => a * b,
+        ArithOp::Div => {
+            if b == 0.0 {
+                return None;
+            }
+            a / b
+        }
+    };
+    if v.is_finite() {
+        Some(Value::float(v))
+    } else {
+        None
+    }
+}
+
+fn try_fold_compare(op: CompareOp, left: &Expr, right: &Expr) -> Option<Expr> {
+    let (Expr::Literal(lv), Expr::Literal(rv)) = (left, right) else {
+        return None;
+    };
+    match (lv.as_i64(), rv.as_i64()) {
+        (Some(a), Some(b)) => {
+            let r = match op {
+                CompareOp::Eq => a == b,
+                CompareOp::Ne => a != b,
+                CompareOp::Lt => a < b,
+                CompareOp::Le => a <= b,
+                CompareOp::Gt => a > b,
+                CompareOp::Ge => a >= b,
+            };
+            Some(Expr::Literal(Value::bool(r)))
+        }
+        _ => {
+            if let (Some(a), Some(b)) = (lv.as_bool(), rv.as_bool()) {
+                return match op {
+                    CompareOp::Eq => Some(Expr::Literal(Value::bool(a == b))),
+                    CompareOp::Ne => Some(Expr::Literal(Value::bool(a != b))),
+                    _ => None,
+                };
+            }
+            let (af, bf) = (as_f64(lv)?, as_f64(rv)?);
+            let r = match op {
+                CompareOp::Eq => af == bf,
+                CompareOp::Ne => af != bf,
+                CompareOp::Lt => af < bf,
+                CompareOp::Le => af <= bf,
+                CompareOp::Gt => af > bf,
+                CompareOp::Ge => af >= bf,
+            };
+            Some(Expr::Literal(Value::bool(r)))
+        }
+    }
+}
+
+fn as_f64(v: &Value) -> Option<f64> {
+    if let Some(n) = v.as_i64() {
+        return Some(n as f64);
+    }
+    match v.as_f64() {
+        Some(f) if f.is_finite() => Some(f),
+        _ => None,
+    }
+}
+
+/// Shared with the v2 backend: fold, compile to RPN, or keep the AST node.
+pub(crate) fn make_arith(
+    ctx: &SpanContext,
+    op: ArithOp,
+    left: Expr,
+    right: Expr,
+) -> ParseResult<Expr> {
+    reject_boundary(ctx, &left)?;
+    reject_boundary(ctx, &right)?;
+    if let Some(folded) = try_fold_arith(op, &left, &right) {
+        return Ok(folded);
+    }
+    if let (Some(mut lops), Some(mut rops)) = (expr_to_rpn(&left), expr_to_rpn(&right)) {
+        lops.append(&mut rops);
+        lops.push(match op {
+            ArithOp::Add => MathOp::Add,
+            ArithOp::Sub => MathOp::Sub,
+            ArithOp::Mul => MathOp::Mul,
+            ArithOp::Div => MathOp::Div,
+        });
+        return Ok(Expr::CompiledMath(lops));
+    }
+    Ok(Expr::Arithmetic {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+    })
+}
+
+/// Shared with the v2 backend: fold, compile to RPN, or keep the AST node.
+pub(crate) fn make_compare(
+    ctx: &SpanContext,
+    op: CompareOp,
+    left: Expr,
+    right: Expr,
+) -> ParseResult<Expr> {
+    reject_boundary(ctx, &left)?;
+    reject_boundary(ctx, &right)?;
+    if let Some(folded) = try_fold_compare(op, &left, &right) {
+        return Ok(folded);
+    }
+    if let (Some(mut lops), Some(mut rops)) = (expr_to_rpn(&left), expr_to_rpn(&right)) {
+        lops.append(&mut rops);
+        lops.push(match op {
+            CompareOp::Eq => MathOp::Eq,
+            CompareOp::Ne => MathOp::Ne,
+            CompareOp::Lt => MathOp::Lt,
+            CompareOp::Le => MathOp::Le,
+            CompareOp::Gt => MathOp::Gt,
+            CompareOp::Ge => MathOp::Ge,
+        });
+        return Ok(Expr::CompiledMath(lops));
+    }
+    Ok(Expr::Compare {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+    })
+}
+
+/// Convert an operand subtree to flat RPN. Returns `None` for shapes with
+/// no RPN encoding (`Not`/`Logical`/`List`/`Map`/`FreshPipe`/stray boundary): callers
+/// fall back to AST nodes evaluated recursively.
+/// Shared with the v2 backend.
+///
+pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
+    match expr {
+        Expr::Literal(v) => Some(vec![MathOp::PushConst(v.clone())]),
+        Expr::Var(name) => Some(vec![MathOp::LoadVar(name.clone())]),
+        Expr::Env(key) => Some(vec![MathOp::LoadEnv(key.clone())]),
+        Expr::KeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
+            base: base.clone(),
+            keys: keys.clone(),
+        }]),
+        Expr::Call { name, args } => {
+            let mut ops = Vec::new();
+            for arg in args {
+                ops.extend(expr_to_rpn(arg)?);
+            }
+            ops.push(MathOp::Call {
+                name: name.clone(),
+                arity: args.len(),
+            });
+            Some(ops)
+        }
+        Expr::Inspect(var) => Some(vec![MathOp::Inspect(var.clone())]),
+        Expr::Arithmetic { op, left, right } => {
+            let mut ops = expr_to_rpn(left)?;
+            ops.extend(expr_to_rpn(right)?);
+            ops.push(match op {
+                ArithOp::Add => MathOp::Add,
+                ArithOp::Sub => MathOp::Sub,
+                ArithOp::Mul => MathOp::Mul,
+                ArithOp::Div => MathOp::Div,
+            });
+            Some(ops)
+        }
+        Expr::Compare { op, left, right } => {
+            let mut ops = expr_to_rpn(left)?;
+            ops.extend(expr_to_rpn(right)?);
+            ops.push(match op {
+                CompareOp::Eq => MathOp::Eq,
+                CompareOp::Ne => MathOp::Ne,
+                CompareOp::Lt => MathOp::Lt,
+                CompareOp::Le => MathOp::Le,
+                CompareOp::Gt => MathOp::Gt,
+                CompareOp::Ge => MathOp::Ge,
+            });
+            Some(ops)
+        }
+        Expr::CompiledMath(ops) => Some(ops.clone()),
+        Expr::FreshPipe => None,
+        Expr::Not(_) | Expr::Logical { .. } | Expr::List(_) | Expr::Map(_) | Expr::Block(_) => None,
+        Expr::UnsignedIntBoundary(_) => None,
+    }
+}
+
+/// Pure numeric classification (the token backend gates
+/// `_`-separator shape before calling: the classifier strips them, so
+/// `1__0` must never reach it as numeric). Returns the literal,
+/// `UnsignedIntBoundary` staging, or the exact pest error text.
+pub(crate) fn classify_numeric_text(text: &str) -> Result<Expr, String> {
+    let clean = text.replace('_', "");
+    if clean.contains('.') {
+        let parsed: f64 = clean
+            .parse()
+            .map_err(|_| format!("invalid float literal {text:?}"))?;
+        if !parsed.is_finite() {
+            return Err(format!("invalid float literal {text:?}"));
+        }
+        return Ok(Expr::Literal(Value::float(parsed)));
+    }
+    let digits: u64 = clean
+        .parse()
+        .map_err(|_| format!("integer overflow: {text:?} exceeds i64::MAX"))?;
+    if digits <= i64::MAX as u64 {
+        Ok(Expr::Literal(Value::int(digits as i64)))
+    } else if digits == i64::MAX as u64 + 1 {
+        Ok(Expr::UnsignedIntBoundary(digits))
+    } else {
+        Err(format!("integer overflow: {text:?} exceeds i64::MAX"))
     }
 }
 
@@ -4363,7 +5202,13 @@ mod tests {
             lower_command,
         )
         .expect("func def parses");
-        let StepKind::FuncDef { name, params, body } = &steps[0].kind else {
+        let StepKind::FuncDef {
+            name,
+            params,
+            body,
+            docs,
+        } = &steps[0].kind
+        else {
             panic!("expected FuncDef, got {:?}", steps[0].kind);
         };
         assert_eq!(name, "GREET");
@@ -4373,6 +5218,7 @@ mod tests {
             "{params:?}"
         );
         assert!(matches!(body[0].kind, StepKind::Return { .. }));
+        assert!(docs.is_none(), "undocumented FUNC carries no docs");
     }
 
     #[test]
@@ -4741,7 +5587,6 @@ mod tests {
                 | StepKind::Unarchive { .. }
                 | StepKind::Install { .. }
                 | StepKind::Ls(_)
-                | StepKind::Cwd
                 | StepKind::Read(_)
                 | StepKind::ReadLine { .. }
                 | StepKind::Prompt { .. }
@@ -4752,7 +5597,6 @@ mod tests {
                 | StepKind::AssertEq { .. }
                 | StepKind::AssertContains { .. }
                 | StepKind::CopyGit { .. }
-                | StepKind::HashSha256 { .. }
                 | StepKind::Exit(_)
                 | StepKind::Sleep { .. }
                 | StepKind::ListAppend { .. } => None,
@@ -4833,6 +5677,7 @@ mod tests {
                 name: "F".to_string(),
                 params: Vec::new(),
                 body: Vec::new(),
+                docs: None,
             },
             StepKind::Call {
                 name: "F".to_string(),

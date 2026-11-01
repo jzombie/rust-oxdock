@@ -619,9 +619,7 @@ pub(super) fn run_remote_block<P: ProcessManager>(
     vars: &[String],
     env_names: &[String],
     body: &[Step],
-    idx: usize,
 ) -> Result<()> {
-    let _ = idx;
     if cx.state.io.is_remote_guest() {
         return super::steps::execute_scoped_remote_body(
             cx.state,

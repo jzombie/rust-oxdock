@@ -408,6 +408,7 @@ fn execute_plugin_block(block: &FencedBlock, name: &str) -> Result<()> {
         "doc-ssh-run",
         "doc-ssh-exit-status",
         "doc-ssh-demo",
+        "doc-ssh-gen-pass",
     ] {
         ssh_registry
             .add_cli_mapping(service, "127.0.0.1:0")

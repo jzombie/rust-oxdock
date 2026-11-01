@@ -38,9 +38,14 @@ jobs:
         with:
           ref: main
 
+      # TODO (#269): unpin the nightly toolchain once upstream fixes the
+      # E0391 async-drop query cycle in ssh-key 0.7.0-rc.11 (via
+      # russh). Pinned to nightly-2026-10-29 (proven green); nightly
+      # 2026-10-31 breaks third-party builds.
       - name: Install nightly toolchain with Miri
         uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-10-29
           components: miri
 
       # Pinned engine, never `latest`: the badge must name a fixed
@@ -63,9 +68,7 @@ jobs:
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          LET $hp: PIPE
-          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
-          WITH_IO [stdin=$hp] READ_LINE $lock
+          LET $lock: STRING = HASH_SHA256("Cargo.lock")
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]

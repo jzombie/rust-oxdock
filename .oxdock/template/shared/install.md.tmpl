@@ -33,8 +33,16 @@ $env:VERSION = 'v{{ env:CRATE_VERSION }}'; {{ $docs_global.installer_cmd_ps1 }}
 **Build from source via Cargo** (same full module surface as the
 release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 
+From the registry:
+
 ```sh
 cargo install oxdock@{{ env:CRATE_VERSION }}
+```
+
+From a local checkout:
+
+```sh
+cargo install --path oxdock
 ```
 
 </details>

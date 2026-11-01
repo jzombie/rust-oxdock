@@ -41,6 +41,19 @@ LET $log: STRING = READ "CHANGELOG.md"
 LET $notes: STRING = MARKDOWN::SECTION($log, "[{{ $version }}]")
 WRITE "target/release-notes.md" $notes
 
+# Date gate: the shipping heading must carry a real ` - YYYY-MM-DD`
+# date (no TBD). The full gate (file-wide shape, ranges, calendar,
+# monotonicity) lives in gha-rust-validate.oxfile, which blocks the
+# matrix; this re-checks the heading being shipped so a bypassed or
+# hand-run release still fails closed.
+LET $note_lines: LIST<STRING> = TEXT_LINES($notes)
+LET $note_head: STRING = $note_lines.0
+LET $note_date_ok: BOOL = TEXT_MATCH($note_head, "\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$")
+IF $note_date_ok == false {
+    ECHO "CHANGELOG [{{ $version }}] heading must end with ' - YYYY-MM-DD' (no TBD): {{ $note_head }}"
+    EXIT 1
+}
+
 [env:GITHUB_ACTIONS] {
     ECHO "::group::Publish workspace (dry-run)"
 }

@@ -1610,7 +1610,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxdock"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-cli"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-doc-tests"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-embed"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1723,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "cache-manager",
@@ -1749,7 +1749,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-func-macro"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-logic-tests"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-markdown-plugin"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-mcp"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1836,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-net-plugin"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1863,16 +1863,13 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
  "line-ending",
  "oxdock-func-macro",
  "oxdock-pipe",
- "pest",
- "pest_derive",
- "pest_meta",
  "proc-macro2",
  "pulldown-cmark",
  "quote",
@@ -1881,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pipe"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1889,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-process"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1903,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pty"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "libc",
@@ -1915,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-remote-proto"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1928,10 +1925,12 @@ dependencies = [
 
 [[package]]
 name = "oxdock-ssh-plugin"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "bytes",
+ "hex",
  "indoc",
  "oxdock-core",
  "oxdock-fs",
@@ -1951,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.32.3-alpha"
+version = "0.33.0-alpha"
 
 [[package]]
 name = "p256"
@@ -2053,59 +2052,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "pest"
-version = "2.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8db75153506001cb36ed924f08cadc862eb3f8c4d0d534139f29074769d7660"
-dependencies = [
- "memchr",
- "pest_stack_guard",
- "ucd-trie",
-]
-
-[[package]]
-name = "pest_derive"
-version = "2.9.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "203e46697708f7519ab1608393cf89239cafb46b8e6d08a8ffe359359b11ef44"
-dependencies = [
- "pest",
- "pest_generator",
-]
-
-[[package]]
-name = "pest_generator"
-version = "2.9.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e84ae6340a458d3d6cfc73cf328cf3cfe90b2484cd0de25eb66aa954615ed4d5"
-dependencies = [
- "pest",
- "pest_meta",
- "proc-macro2",
- "quote",
- "syn 3.0.6",
-]
-
-[[package]]
-name = "pest_meta"
-version = "2.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3f45b6caa65c1b08186832745159c2529994146340a7bf44168095469720f5d"
-dependencies = [
- "pest",
-]
-
-[[package]]
-name = "pest_stack_guard"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97e6cd2217057fa86b6eaa512917e58089d875b957a31e35e7ab729977e0a5f2"
-dependencies = [
- "psm",
- "stacker",
-]
 
 [[package]]
 name = "phc"
@@ -2265,15 +2211,6 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
-]
-
-[[package]]
-name = "psm"
-version = "0.1.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "200b9ff220857e53e184257720a14553b2f4aa02577d2ed9842d45d4b9654810"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -2968,19 +2905,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stacker"
-version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "707f49d46706bacf8a2b00d51dace3f9de527c13eec3778f570c411f89e69967"
-dependencies = [
- "cc",
- "cfg-if",
- "libc",
- "psm",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3206,12 +3130,6 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
-
-[[package]]
-name = "ucd-trie"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
 name = "unarray"

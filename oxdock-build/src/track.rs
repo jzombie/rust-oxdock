@@ -95,10 +95,6 @@ pub fn plan_input_directives(steps: &[oxdock_parser::Step]) -> (Vec<String>, Vec
                 push_path_entry(&mut changed, from);
                 collect_env_keys(&mut env_changed, from.as_str(), &assigned);
             }
-            StepKind::HashSha256 { path } => {
-                push_path_entry(&mut changed, path);
-                collect_env_keys(&mut env_changed, path.as_str(), &assigned);
-            }
             StepKind::Read(Some(path)) => {
                 push_path_entry(&mut changed, path);
                 collect_env_keys(&mut env_changed, path.as_str(), &assigned);
@@ -258,7 +254,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
         }
         match &step.kind {
             StepKind::Workdir(t) => template_keys(&mut keys, t),
-            StepKind::Workspace(_) | StepKind::Cwd => {}
+            StepKind::Workspace(_) => {}
             // Type aliases bind no environment: the target spelling is
             // static text resolved through the type directory.
             StepKind::TypeAlias { .. } => {}
@@ -365,7 +361,6 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 template_keys(&mut keys, from);
                 template_keys(&mut keys, to);
             }
-            StepKind::HashSha256 { path } => template_keys(&mut keys, path),
             StepKind::For { in_expr, body, .. } => {
                 walk_expr(&mut keys, in_expr);
                 // Recursively collect env references from the loop body
@@ -470,6 +465,8 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             kind: kind.clone(),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         };
         for k in collect_env_references(std::slice::from_ref(&step_like)) {
             out.insert(k);
@@ -647,6 +644,8 @@ mod tests {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         };
         let refs = collect_env_references(std::slice::from_ref(&env_step));
         assert!(refs.contains("SEED"), "{refs:?}");

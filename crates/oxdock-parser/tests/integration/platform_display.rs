@@ -18,6 +18,8 @@ fn platform_guard_display_uses_namespaces() {
         kind: StepKind::Workdir("a".into()),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     };
 
     let rendered = step.to_string();
@@ -43,6 +45,8 @@ fn arch_guard_display_round_trips() {
         kind: StepKind::Workdir("a".into()),
         scope_enter: 0,
         scope_exit: 0,
+        line: 0,
+        col: 0,
     };
 
     let rendered = step.to_string();

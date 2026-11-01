@@ -24,9 +24,8 @@ use oxdock_pty::{PtyInput, PtyOutcome, PtyRequest, WatchSize, run_pty_session};
 use oxdock_remote_proto::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
 use sha2::{Digest, Sha256};
 
-use super::SNAPSHOT_PENDING_DISPLAY;
 use super::args::parse_bool_str;
-use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
+use super::fs_ops::copy_entry;
 use super::io::{StreamHandle, TaskTee, TeeStream, write_stdout};
 use super::native::FuncBody;
 use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
@@ -83,16 +82,12 @@ pub(super) fn inherit_env<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn workdir<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    path: &str,
-) -> Result<()> {
+pub(super) fn workdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
     cx.state.cwd = cx
         .state
         .fs
         .resolve_workdir(&cx.state.cwd, path)
-        .with_context(|| format!("step {}: WORKDIR {}", idx + 1, path))?;
+        .with_context(|| format!("WORKDIR {}", path))?;
     Ok(())
 }
 
@@ -138,11 +133,11 @@ pub(super) fn env<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &str) -> Result<()> {
+pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, cmd: &str) -> Result<()> {
     // Terminal steps spawn through the shared pty pump instead of the
     // process manager; everything else below stays hermetic pipes.
     if let Some(tty) = cx.tty {
-        return run_pty(cx, idx, &tty_shell_argv(cmd), tty, cmd, true);
+        return run_pty(cx, &tty_shell_argv(cmd), tty, cmd, true);
     }
     let ctx = cx.state.command_ctx()?;
     let step_stdin = if cx.expose_stdin {
@@ -200,7 +195,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
     {
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("step {}: RUN {} interrupted by cancellation", idx + 1, cmd);
+            bail!("RUN {} interrupted by cancellation", cmd);
         }
     }
 
@@ -208,12 +203,12 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
     let mut handle = match cx
         .process
         .spawn_command(&ctx, cmd, options)
-        .with_context(|| format!("step {}: RUN {}", idx + 1, cmd))?
+        .with_context(|| format!("RUN {}", cmd))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
         CommandResult::Captured(_) => {
-            bail!("step {}: RUN {} unexpectedly captured output", idx + 1, cmd)
+            bail!("RUN {} unexpectedly captured output", cmd)
         }
     };
 
@@ -235,7 +230,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
             let _ = handle.kill();
-            bail!("step {}: RUN {} interrupted by cancellation", idx + 1, cmd);
+            bail!("RUN {} interrupted by cancellation", cmd);
         }
     }
 
@@ -255,12 +250,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
 
     let status = status?;
     if !status.success() {
-        bail!(
-            "step {}: RUN {} exited with status {}",
-            idx + 1,
-            cmd,
-            status
-        );
+        bail!("RUN {} exited with status {}", cmd, status);
     }
     Ok(())
 }
@@ -270,16 +260,12 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
 /// `CommandOptions` (cwd/env, `WITH_IO` pipes, `ASYNC`/cancellable
 /// backgrounding, [`INHERIT_STDOUT_ENV_VAR`]) are built exactly like [`run`];
 /// only the spawn call differs (`spawn_argv`, no `shell_cmd`).
-pub(super) fn run_argv<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    argv: &[String],
-) -> Result<()> {
+pub(super) fn run_argv<P: ProcessManager>(cx: &mut StepCtx<'_, P>, argv: &[String]) -> Result<()> {
     // Terminal steps spawn through the shared pty pump instead of the
     // process manager; everything else below stays hermetic pipes.
     if let Some(tty) = cx.tty {
         let what = format!("{argv:?}");
-        return run_pty(cx, idx, argv, tty, &what, false);
+        return run_pty(cx, argv, tty, &what, false);
     }
     let ctx = cx.state.command_ctx()?;
     let step_stdin = if cx.expose_stdin {
@@ -335,7 +321,7 @@ pub(super) fn run_argv<P: ProcessManager>(
     {
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("step {}: RUN {argv:?} interrupted by cancellation", idx + 1);
+            bail!("RUN {argv:?} interrupted by cancellation");
         }
     }
 
@@ -343,15 +329,12 @@ pub(super) fn run_argv<P: ProcessManager>(
     let mut handle = match cx
         .process
         .spawn_argv(&ctx, argv, options)
-        .with_context(|| format!("step {}: RUN {argv:?}", idx + 1))?
+        .with_context(|| format!("RUN {argv:?}"))?
     {
         CommandResult::Background(h) => h,
         CommandResult::Completed => return Ok(()),
         CommandResult::Captured(_) => {
-            bail!(
-                "step {}: RUN {argv:?} unexpectedly captured output",
-                idx + 1
-            )
+            bail!("RUN {argv:?} unexpectedly captured output",)
         }
     };
 
@@ -370,7 +353,7 @@ pub(super) fn run_argv<P: ProcessManager>(
         use std::sync::atomic::Ordering;
         if cx.state.cancel_token.load(Ordering::SeqCst) {
             let _ = handle.kill();
-            bail!("step {}: RUN {argv:?} interrupted by cancellation", idx + 1);
+            bail!("RUN {argv:?} interrupted by cancellation");
         }
     }
 
@@ -390,11 +373,7 @@ pub(super) fn run_argv<P: ProcessManager>(
 
     let status = status?;
     if !status.success() {
-        bail!(
-            "step {}: RUN {argv:?} exited with status {}",
-            idx + 1,
-            status
-        );
+        bail!("RUN {argv:?} exited with status {}", status);
     }
     Ok(())
 }
@@ -419,7 +398,6 @@ pub(super) fn run_argv<P: ProcessManager>(
 #[allow(clippy::too_many_arguments)]
 fn run_pty<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     argv: &[String],
     tty: TtyRequest,
     what: &str,
@@ -427,11 +405,11 @@ fn run_pty<P: ProcessManager>(
 ) -> Result<()> {
     use std::sync::atomic::Ordering;
     if argv.is_empty() {
-        bail!("step {}: RUN {what} needs at least a program", idx + 1);
+        bail!("RUN {what} needs at least a program");
     }
     // Same pre-spawn cancellation refusal as [`run`].
     if cx.state.cancel_token.load(Ordering::SeqCst) {
-        bail!("step {}: RUN {what} interrupted by cancellation", idx + 1);
+        bail!("RUN {what} interrupted by cancellation");
     }
     if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
         eprintln!("DEBUG: step RUN {what} under tty {tty:?}");
@@ -476,8 +454,7 @@ fn run_pty<P: ProcessManager>(
         #[cfg(not(miri))]
         CommandStdin::OsPipe(_) => {
             bail!(
-                "step {}: WITH_IO [tty] stdin cannot arrive on a live OS pipe; bind a script pipe with stdin=$var",
-                idx + 1
+                "WITH_IO [tty] stdin cannot arrive on a live OS pipe; bind a script pipe with stdin=$var"
             )
         }
     };
@@ -491,8 +468,7 @@ fn run_pty<P: ProcessManager>(
         #[cfg(not(miri))]
         Some(StreamHandle::Os(_)) => {
             bail!(
-                "step {}: WITH_IO [tty] stdout cannot arrive on a live OS pipe; bind a script pipe with stdout=$var",
-                idx + 1
+                "WITH_IO [tty] stdout cannot arrive on a live OS pipe; bind a script pipe with stdout=$var"
             )
         }
     };
@@ -517,19 +493,19 @@ fn run_pty<P: ProcessManager>(
         on_output_drained: None,
         func: "RUN",
     })
-    .with_context(|| format!("step {}: RUN {what}", idx + 1))?;
+    .with_context(|| format!("RUN {what}"))?;
     // Pipe EOF rides the writer drops like any `RUN`: the supervisor
     // returns only after the output worker finished, so every byte is
     // already in the sink before the code below runs.
     match outcome {
         PtyOutcome::Completed(code) => {
             if code != 0 {
-                bail!("step {}: RUN {what} exited with status {code}", idx + 1);
+                bail!("RUN {what} exited with status {code}");
             }
             Ok(())
         }
         PtyOutcome::Cancelled => {
-            bail!("step {}: RUN {what} interrupted by cancellation", idx + 1);
+            bail!("RUN {what} interrupted by cancellation");
         }
     }
 }
@@ -664,7 +640,7 @@ pub(crate) fn dispatch_sleep_step<P: ProcessManager>(
         unreachable!()
     };
     let duration = super::args::resolve_arg_as_duration(duration, cx)?;
-    sleep(cx, 0, &duration)
+    sleep(cx, &duration)
 }
 
 /// Dispatch `SLEEP <duration>` : park the step without spawning a shell.
@@ -674,7 +650,6 @@ pub(crate) fn dispatch_sleep_step<P: ProcessManager>(
 /// interrupts the sleep promptly. Never blocks on the full duration at once.
 pub(crate) fn sleep<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     duration: &std::time::Duration,
 ) -> Result<()> {
     use std::sync::atomic::Ordering;
@@ -683,7 +658,7 @@ pub(crate) fn sleep<P: ProcessManager>(
     let start = Instant::now();
     loop {
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("step {}: SLEEP interrupted by cancellation", idx + 1);
+            bail!("SLEEP interrupted by cancellation");
         }
         let elapsed = start.elapsed();
         if elapsed >= *duration {
@@ -709,7 +684,6 @@ pub(super) fn copy_source_root(target: WorkspaceTarget) -> CopySourceRoot {
 
 pub(super) fn copy<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     from_workspace: Option<WorkspaceTarget>,
     from: &str,
     to: &str,
@@ -718,22 +692,22 @@ pub(super) fn copy<P: ProcessManager>(
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .with_context(|| format!("step {}: COPY {} {}", idx + 1, from, to))?
+            .with_context(|| format!("COPY {} {}", from, to))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .with_context(|| format!("step {}: COPY {} {}", idx + 1, from, to))?
+            .with_context(|| format!("COPY {} {}", from, to))?
     };
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("step {}: COPY {} {}", idx + 1, from, to))?;
+        .with_context(|| format!("COPY {} {}", from, to))?;
     let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
-        .with_context(|| format!("step {}: COPY {} {}", idx + 1, from, to))?;
+        .with_context(|| format!("COPY {} {}", from, to))?;
     copy_entry(cx.state.fs.as_ref(), &from_abs, &to_abs)
-        .with_context(|| format!("step {}: COPY {} {}", idx + 1, from, to))?;
+        .with_context(|| format!("COPY {} {}", from, to))?;
     Ok(())
 }
 
@@ -770,7 +744,6 @@ fn place_file_in_dir(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_git<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     rev: &str,
     from: &str,
     to: &str,
@@ -780,11 +753,11 @@ pub(super) fn copy_git<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("step {}: COPY_GIT {} {} {}", idx + 1, rev, from, to))?;
+        .with_context(|| format!("COPY_GIT {} {} {}", rev, from, to))?;
     cx.state
         .fs
         .copy_from_git(rev, from, &to_abs, include_dirty)
-        .with_context(|| format!("step {}: COPY_GIT {} {} {}", idx + 1, rev, from, to))?;
+        .with_context(|| format!("COPY_GIT {} {} {}", rev, from, to))?;
     Ok(())
 }
 
@@ -890,9 +863,8 @@ fn collect_archive_tree(
     src_abs: &GuardedPath,
     src: &str,
     dst: &str,
-    idx: usize,
 ) -> Result<ArchiveTree> {
-    let tag = format!("step {}: ARCHIVE {src} {dst}", idx + 1);
+    let tag = format!("ARCHIVE {src} {dst}");
     match fs.entry_kind(src_abs).with_context(|| tag.clone())? {
         EntryKind::File => {
             let base = src_abs
@@ -1001,12 +973,11 @@ fn append_archive_tree<W: std::io::Write>(
 
 pub(super) fn archive<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     src: &str,
     dst: &str,
     raw: bool,
 ) -> Result<()> {
-    let tag = format!("step {}: ARCHIVE {src} {dst}", idx + 1);
+    let tag = format!("ARCHIVE {src} {dst}");
     let src_abs = resolve_archive_src(cx, src, &tag)?;
     let dst_abs = cx
         .state
@@ -1026,7 +997,7 @@ pub(super) fn archive<P: ProcessManager>(
     if dst_abs.as_path().starts_with(src_abs.as_path()) && dst_abs.exists() {
         bail!("{tag}: destination {dst:?} cannot overwrite inside the packed tree");
     }
-    let (files, dirs) = collect_archive_tree(cx.state.fs.as_ref(), &src_abs, src, dst, idx)?;
+    let (files, dirs) = collect_archive_tree(cx.state.fs.as_ref(), &src_abs, src, dst)?;
     cx.state
         .fs
         .ensure_parent_dir(&dst_abs)
@@ -1070,12 +1041,11 @@ pub(super) fn archive<P: ProcessManager>(
 
 pub(super) fn unarchive<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     src: &str,
     dst: &str,
     max_bytes: Option<&str>,
 ) -> Result<()> {
-    let tag = format!("step {}: UNARCHIVE {src} {dst}", idx + 1);
+    let tag = format!("UNARCHIVE {src} {dst}");
     let cap = match max_bytes {
         Some(raw) => oxdock_parser::command::parse_byte_count(raw)
             .with_context(|| format!("{tag}: --max-bytes {raw:?}"))?,
@@ -1225,33 +1195,8 @@ fn restore_archive_mode(
     Ok(())
 }
 
-pub(super) fn hash_sha256<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    path: &str,
-) -> Result<()> {
-    let target = cx
-        .state
-        .fs
-        .resolve_read(&cx.state.cwd, path)
-        .with_context(|| format!("step {}: HASH_SHA256 {}", idx + 1, path))?;
-    let mut hasher = Sha256::new();
-    hash_path(cx.state.fs.as_ref(), &target, "", &mut hasher)?;
-    let digest = hasher.finalize();
-    let bytes: &[u8] = digest.as_ref();
-    write_stdout(cx.out.clone(), |writer| {
-        for b in bytes {
-            write!(writer, "{b:02x}")?;
-        }
-        writeln!(writer)?;
-        Ok(())
-    })?;
-    Ok(())
-}
-
 pub(super) fn symlink<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     from_workspace: Option<WorkspaceTarget>,
     from: &str,
     to: &str,
@@ -1260,17 +1205,17 @@ pub(super) fn symlink<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?;
+        .with_context(|| format!("SYMLINK {} {}", from, to))?;
     let from_abs = if let Some(target) = from_workspace {
         cx.state
             .fs
             .resolve_copy_source_from_target(copy_source_root(target), from)
-            .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?
+            .with_context(|| format!("SYMLINK {} {}", from, to))?
     } else {
         cx.state
             .fs
             .resolve_copy_source(from)
-            .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?
+            .with_context(|| format!("SYMLINK {} {}", from, to))?
     };
     // `ln -s` destination semantics: a directory destination (existing,
     // or named with a trailing slash) receives the link under the
@@ -1279,19 +1224,19 @@ pub(super) fn symlink<P: ProcessManager>(
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?
+            .with_context(|| format!("SYMLINK {} {}", from, to))?
     } else if matches!(cx.state.fs.entry_kind(&to_abs), Ok(EntryKind::Dir)) {
         let base = link_base_name(&from_abs, from)?;
         to_abs
             .join(&base)
-            .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?
+            .with_context(|| format!("SYMLINK {} {}", from, to))?
     } else {
         to_abs
     };
     cx.state
         .fs
         .symlink(&from_abs, &to_abs)
-        .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?;
+        .with_context(|| format!("SYMLINK {} {}", from, to))?;
     Ok(())
 }
 
@@ -1305,16 +1250,12 @@ fn link_base_name(from_abs: &GuardedPath, from: &str) -> Result<String> {
         .with_context(|| format!("SYMLINK source has no file name: {from}"))
 }
 
-pub(super) fn mkdir<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    path: &str,
-) -> Result<()> {
+pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("step {}: MKDIR {}", idx + 1, path))?;
+        .with_context(|| format!("MKDIR {}", path))?;
     cx.state
         .fs
         .create_dir_all(&target)
@@ -1322,16 +1263,12 @@ pub(super) fn mkdir<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn ls<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    arg: &Option<String>,
-) -> Result<()> {
+pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String>) -> Result<()> {
     let target_dir = if let Some(p) = arg {
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, p)
-            .with_context(|| format!("step {}: LS {}", idx + 1, p))?
+            .with_context(|| format!("LS {}", p))?
     } else {
         // Bare `LS` lists the current directory: ride the choke point so a
         // pending snapshot materializes (a snapshot read), matching the
@@ -1339,13 +1276,13 @@ pub(super) fn ls<P: ProcessManager>(
         cx.state
             .fs
             .resolve_read(&cx.state.cwd, ".")
-            .with_context(|| format!("step {}: LS", idx + 1))?
+            .with_context(|| "LS".to_string())?
     };
     let mut entries = cx
         .state
         .fs
         .read_dir_entries(&target_dir)
-        .with_context(|| format!("step {}: LS {}", idx + 1, target_dir.display()))?;
+        .with_context(|| format!("LS {}", target_dir.display()))?;
     entries.sort_by_key(|e| e.file_name());
     write_stdout(cx.out.clone(), |writer| {
         writeln!(writer, "{}:", target_dir.display())?;
@@ -1357,33 +1294,8 @@ pub(super) fn ls<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn cwd<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize) -> Result<()> {
-    // A pending snapshot has no concrete directory yet: report the stable
-    // sentinel instead of a local path or a fabricated location (issue #131).
-    if cx.state.fs.is_snapshot_pending() {
-        return write_stdout(cx.out.clone(), |writer| {
-            writeln!(writer, "{SNAPSHOT_PENDING_DISPLAY}")?;
-            Ok(())
-        });
-    }
-    let concrete = cx.state.fs.concretize_cwd(&cx.state.cwd);
-    let real = canonical_cwd(cx.state.fs.as_ref(), &concrete).with_context(|| {
-        format!(
-            "step {}: CWD failed to canonicalize {}",
-            idx + 1,
-            concrete.display()
-        )
-    })?;
-    write_stdout(cx.out.clone(), |writer| {
-        writeln!(writer, "{}", real)?;
-        Ok(())
-    })?;
-    Ok(())
-}
-
 pub(super) fn read<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     path_opt: &Option<String>,
 ) -> Result<()> {
     if let Some(path) = path_opt {
@@ -1391,7 +1303,7 @@ pub(super) fn read<P: ProcessManager>(
             .state
             .fs
             .resolve_read(&cx.state.cwd, path)
-            .with_context(|| format!("step {}: READ {}", idx + 1, path))?;
+            .with_context(|| format!("READ {}", path))?;
         let mut reader = cx
             .state
             .fs
@@ -1412,10 +1324,7 @@ pub(super) fn read<P: ProcessManager>(
         })?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            bail!(
-                "step {}: READ requires stdin (use WITH_IO [stdin=...] READ)",
-                idx + 1
-            );
+            bail!("READ requires stdin (use WITH_IO [stdin=...] READ)");
         };
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
@@ -1438,16 +1347,9 @@ pub(super) fn read<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn read_line<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    var: &str,
-) -> Result<()> {
+pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -> Result<()> {
     let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-        bail!(
-            "step {}: READ_LINE requires stdin (use WITH_IO [stdin=...] READ_LINE $var)",
-            idx + 1
-        );
+        bail!("READ_LINE requires stdin (use WITH_IO [stdin=...] READ_LINE $var)");
     };
     let clean_var = var.trim_start_matches('$').to_string();
     let mut buf = Vec::new();
@@ -1558,7 +1460,6 @@ pub(super) fn inspect_var_map<P: ProcessManager>(
 
 pub(super) fn write<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     path: &str,
     contents: Option<&str>,
 ) -> Result<()> {
@@ -1566,7 +1467,7 @@ pub(super) fn write<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("step {}: WRITE {}", idx + 1, path))?;
+        .with_context(|| format!("WRITE {}", path))?;
     cx.state
         .fs
         .ensure_parent_dir(&target)
@@ -1579,8 +1480,7 @@ pub(super) fn write<P: ProcessManager>(
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
             bail!(
-                "step {}: WRITE {} requires stdin (use WITH_IO [stdin=...] WRITE)",
-                idx + 1,
+                "WRITE {} requires stdin (use WITH_IO [stdin=...] WRITE)",
                 path
             );
         };
@@ -1611,7 +1511,6 @@ pub(super) fn write<P: ProcessManager>(
 
 pub(super) fn append<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     path: &str,
     contents: Option<&str>,
 ) -> Result<()> {
@@ -1619,7 +1518,7 @@ pub(super) fn append<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("step {}: APPEND {}", idx + 1, path))?;
+        .with_context(|| format!("APPEND {}", path))?;
     cx.state
         .fs
         .ensure_parent_dir(&target)
@@ -1632,8 +1531,7 @@ pub(super) fn append<P: ProcessManager>(
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
             bail!(
-                "step {}: APPEND {} requires stdin (use WITH_IO [stdin=...] APPEND)",
-                idx + 1,
+                "APPEND {} requires stdin (use WITH_IO [stdin=...] APPEND)",
                 path
             );
         };
@@ -1664,7 +1562,6 @@ pub(super) fn append<P: ProcessManager>(
 
 pub(super) fn replace<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     path_opt: &Option<String>,
     overrides: &[(String, String)],
 ) -> Result<()> {
@@ -1705,7 +1602,7 @@ pub(super) fn replace<P: ProcessManager>(
                 .state
                 .fs
                 .resolve_read(&cx.state.cwd, path)
-                .with_context(|| format!("step {}: EXPAND {}", idx + 1, path))?;
+                .with_context(|| format!("EXPAND {}", path))?;
             let mut reader = cx
                 .state
                 .fs
@@ -1726,9 +1623,8 @@ pub(super) fn replace<P: ProcessManager>(
         } else {
             let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
                 bail!(
-                    "step {}: EXPAND requires stdin when no file path is given \
-                     (use WITH_IO [stdin=...] EXPAND)",
-                    idx + 1
+                    "EXPAND requires stdin when no file path is given \
+                     (use WITH_IO [stdin=...] EXPAND)"
                 );
             };
             let mut guard = input_stream
@@ -1765,39 +1661,32 @@ pub(super) fn replace<P: ProcessManager>(
 /// raw bytes (`stderr` is unsupported).
 pub(super) fn assert_eq<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     generation: usize,
-    idx_step: usize,
     hash: &Option<String>,
     actual: &super::steps::ResolvedAssertTarget,
     expected: Option<&Value>,
 ) -> Result<()> {
     use super::steps::ResolvedAssertTarget;
-    // Exact stdout accumulators are generation-scoped (trial-cumulative),
-    // unlike per-step substring windows, so the step index is unused here.
-    let _ = idx_step;
     // Mode 1: exact stdout with piped stdin consumes the stream, mirroring
     // the legacy substring behavior, but compares exact bytes.
     if let ResolvedAssertTarget::Stdout = actual
         && let CommandStdin::Stream(input_stream) = cx.stdin.clone()
     {
-        let drained = drain_stdin_bounded(idx, input_stream, "ASSERT_EQ")?;
+        let drained = drain_stdin_bounded(input_stream, "ASSERT_EQ")?;
         super::io::write_stdout(cx.out.clone(), |w| {
             w.write_all(&drained)?;
             Ok(())
         })?;
         let Some(want) = expected.and_then(|v| v.as_str()) else {
             bail!(
-                "step {}: ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
-                idx + 1,
+                "ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
                 expected,
                 String::from_utf8_lossy(&drained)
             );
         };
         if drained != want.as_bytes() {
             bail!(
-                "step {}: ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
-                idx + 1,
+                "ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
                 want,
                 String::from_utf8_lossy(&drained)
             );
@@ -1809,20 +1698,13 @@ pub(super) fn assert_eq<P: ProcessManager>(
             ResolvedAssertTarget::Value(v) => match v.as_str() {
                 Some(s) => s.as_bytes().to_vec(),
                 None => {
-                    bail!(
-                        "step {}: ASSERT_EQ --hash needs a string actual, found {:?}",
-                        idx + 1,
-                        v
-                    );
+                    bail!("ASSERT_EQ --hash needs a string actual, found {:?}", v);
                 }
             },
             ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
-            ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, idx, generation)?,
+            ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation)?,
             ResolvedAssertTarget::Stderr => {
-                bail!(
-                    "step {}: ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...",
-                    idx + 1
-                );
+                bail!("ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...");
             }
         };
         let mut hasher = Sha256::new();
@@ -1832,8 +1714,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
         let computed: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         if !computed.eq_ignore_ascii_case(sha) {
             bail!(
-                "step {}: ASSERT_EQ --hash mismatch: expected {}, computed {}",
-                idx + 1,
+                "ASSERT_EQ --hash mismatch: expected {}, computed {}",
                 sha,
                 computed
             );
@@ -1843,33 +1724,30 @@ pub(super) fn assert_eq<P: ProcessManager>(
     match actual {
         ResolvedAssertTarget::Value(got) => {
             let Some(want) = expected else {
-                bail!("step {}: ASSERT_EQ requires an expected value", idx + 1);
+                bail!("ASSERT_EQ requires an expected value");
             };
             if got == want {
                 Ok(())
             } else {
                 bail!(
-                    "step {}: ASSERT_EQ mismatch\nexpected: {:?}\nactual:   {:?}",
-                    idx + 1,
+                    "ASSERT_EQ mismatch\nexpected: {:?}\nactual:   {:?}",
                     want,
                     got
                 );
             }
         }
         ResolvedAssertTarget::Stdout => {
-            let bytes = exact_stdout_bytes(cx, idx, generation)?;
+            let bytes = exact_stdout_bytes(cx, generation)?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
                 bail!(
-                    "step {}: ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
-                    idx + 1,
+                    "ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
                     expected,
                     String::from_utf8_lossy(&bytes)
                 );
             };
             if bytes != want.as_bytes() {
                 bail!(
-                    "step {}: ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
-                    idx + 1,
+                    "ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
                     want,
                     String::from_utf8_lossy(&bytes)
                 );
@@ -1877,27 +1755,21 @@ pub(super) fn assert_eq<P: ProcessManager>(
             Ok(())
         }
         ResolvedAssertTarget::Stderr => {
-            bail!(
-                "step {}: ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...",
-                idx + 1
-            );
+            bail!("ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...");
         }
         ResolvedAssertTarget::Pipe(bytes) => {
-            let actual_str = String::from_utf8(bytes.clone()).with_context(|| {
-                format!("step {}: ASSERT_EQ pipe content is not UTF-8", idx + 1)
-            })?;
+            let actual_str = String::from_utf8(bytes.clone())
+                .with_context(|| "ASSERT_EQ pipe content is not UTF-8".to_string())?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
                 bail!(
-                    "step {}: ASSERT_EQ pipe mismatch\nexpected: {:?}\nactual:   {:?}",
-                    idx + 1,
+                    "ASSERT_EQ pipe mismatch\nexpected: {:?}\nactual:   {:?}",
                     expected,
                     actual_str
                 );
             };
             if actual_str != want {
                 bail!(
-                    "step {}: ASSERT_EQ pipe mismatch\nexpected: {:?}\nactual:   {:?}",
-                    idx + 1,
+                    "ASSERT_EQ pipe mismatch\nexpected: {:?}\nactual:   {:?}",
                     want,
                     actual_str
                 );
@@ -1909,7 +1781,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
 
 /// Drain a piped stdin fully while enforcing the exact-match byte cap.
 /// Shared by `ASSERT_EQ stdout` Mode 1.
-fn drain_stdin_bounded(idx: usize, input_stream: SharedInput, verb: &str) -> Result<Vec<u8>> {
+fn drain_stdin_bounded(input_stream: SharedInput, verb: &str) -> Result<Vec<u8>> {
     let mut guard = input_stream
         .lock()
         .map_err(|_| anyhow!("failed to lock stdin for {verb}"))?;
@@ -1924,8 +1796,7 @@ fn drain_stdin_bounded(idx: usize, input_stream: SharedInput, verb: &str) -> Res
         }
         if out.len() + n > super::io::EXACT_STDOUT_CAP {
             bail!(
-                "step {}: {verb} stdin exceeded the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
-                idx + 1
+                "{verb} stdin exceeded the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout"
             );
         }
         out.extend_from_slice(&buf[..n]);
@@ -1937,7 +1808,6 @@ fn drain_stdin_bounded(idx: usize, input_stream: SharedInput, verb: &str) -> Res
 /// or bail with remediation guidance on overflow / missing capture.
 fn exact_stdout_bytes<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     generation: usize,
 ) -> Result<Vec<u8>> {
     let captures = cx
@@ -1947,14 +1817,10 @@ fn exact_stdout_bytes<P: ProcessManager>(
         .map_err(|_| anyhow!("exact_stdout poisoned"))?;
     match captures.get(&generation) {
         Some(entry) if entry.overflowed => bail!(
-            "step {}: ASSERT_EQ stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
-            idx + 1
+            "ASSERT_EQ stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
         ),
         Some(entry) => Ok(entry.bytes.clone()),
-        None => bail!(
-            "step {}: ASSERT_EQ stdout has no exact capture registered",
-            idx + 1
-        ),
+        None => bail!("ASSERT_EQ stdout has no exact capture registered"),
     }
 }
 
@@ -1964,7 +1830,6 @@ fn exact_stdout_bytes<P: ProcessManager>(
 /// appear here; read them into variables first.
 pub(super) fn assert_contains<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     generation: usize,
     idx_step: usize,
     haystack: &super::steps::ResolvedAssertTarget,
@@ -1979,8 +1844,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
                     return Ok(());
                 }
                 bail!(
-                    "step {}: ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
-                    idx + 1,
+                    "ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
                     needle_str,
                     hay
                 );
@@ -1993,8 +1857,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
                     return Ok(());
                 }
                 bail!(
-                    "step {}: ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
-                    idx + 1,
+                    "ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
                     needle_str,
                     v
                 );
@@ -2003,15 +1866,10 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 if map.contains_key(needle_str.as_str()) {
                     return Ok(());
                 }
-                bail!(
-                    "step {}: ASSERT_CONTAINS did not contain '{}'",
-                    idx + 1,
-                    needle_str
-                );
+                bail!("ASSERT_CONTAINS did not contain '{}'", needle_str);
             }
             bail!(
-                "step {}: ASSERT_CONTAINS needs a string, list, or map haystack, found {:?}",
-                idx + 1,
+                "ASSERT_CONTAINS needs a string, list, or map haystack, found {:?}",
                 v
             );
         }
@@ -2045,8 +1903,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
                     }
                     let emitted = String::from_utf8_lossy(&window.ring_buffer()).into_owned();
                     bail!(
-                        "step {}: ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
-                        idx + 1,
+                        "ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
                         needle_str,
                         emitted.trim_end()
                     );
@@ -2063,17 +1920,12 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
                     bail!(
-                        "step {}: ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
-                        idx + 1,
+                        "ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
                         needle_str,
                         emitted.trim_end()
                     )
                 }
-                _ => bail!(
-                    "step {}: ASSERT_CONTAINS did not contain '{}'",
-                    idx + 1,
-                    needle_str
-                ),
+                _ => bail!("ASSERT_CONTAINS did not contain '{}'", needle_str),
             }
         }
         ResolvedAssertTarget::Stderr => {
@@ -2089,32 +1941,22 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
                     bail!(
-                        "step {}: ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
-                        idx + 1,
+                        "ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
                         needle_str,
                         emitted.trim_end()
                     )
                 }
-                _ => bail!(
-                    "step {}: ASSERT_CONTAINS did not contain '{}'",
-                    idx + 1,
-                    needle_str
-                ),
+                _ => bail!("ASSERT_CONTAINS did not contain '{}'", needle_str),
             }
         }
         ResolvedAssertTarget::Pipe(bytes) => {
-            let hay = String::from_utf8(bytes.clone()).with_context(|| {
-                format!(
-                    "step {}: ASSERT_CONTAINS pipe content is not UTF-8",
-                    idx + 1
-                )
-            })?;
+            let hay = String::from_utf8(bytes.clone())
+                .with_context(|| "ASSERT_CONTAINS pipe content is not UTF-8".to_string())?;
             if hay.contains(needle_str.as_str()) {
                 Ok(())
             } else {
                 bail!(
-                    "step {}: ASSERT_CONTAINS did not contain '{}'; pipe held {:?}",
-                    idx + 1,
+                    "ASSERT_CONTAINS did not contain '{}'; pipe held {:?}",
                     needle_str,
                     hay
                 );
@@ -2166,8 +2008,8 @@ pub(crate) fn with_io<P: ProcessManager>(
     cmd: &StepKind,
 ) -> Result<Flow> {
     let (step_stdin, next_expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
-        resolve_io_streams(cx, idx, bindings, cmd)?;
-    let tty = tty_request(idx, bindings, cmd)?;
+        resolve_io_streams(cx, bindings, cmd)?;
+    let tty = tty_request(bindings, cmd)?;
 
     super::steps::execute_single_step_with_generation(
         cx.state,
@@ -2192,7 +2034,7 @@ pub(crate) fn with_io<P: ProcessManager>(
 /// Returns `None` for terminal-unaware steps, keeping hermetic pipes.
 /// Geometry stays unresolved here: the spawn reads the host terminal
 /// for unnamed sides, so a size change between steps is honored.
-fn tty_request(idx: usize, bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyRequest>> {
+fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyRequest>> {
     let mut tty = false;
     let mut rows = None;
     let mut cols = None;
@@ -2207,8 +2049,7 @@ fn tty_request(idx: usize, bindings: &[IoBinding], cmd: &StepKind) -> Result<Opt
     if !tty {
         if rows.is_some() || cols.is_some() {
             bail!(
-                "step {}: WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size",
-                idx + 1
+                "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"
             );
         }
         return Ok(None);
@@ -2218,15 +2059,13 @@ fn tty_request(idx: usize, bindings: &[IoBinding], cmd: &StepKind) -> Result<Opt
         .any(|b| matches!(b.stream, IoStream::Stderr))
     {
         bail!(
-            "step {}: WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex",
-            idx + 1
+            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"
         );
     }
     match cmd {
         StepKind::Run(_) | StepKind::RunExec { .. } => Ok(Some(TtyRequest { rows, cols })),
         _ => bail!(
-            "step {}: WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it",
-            idx + 1
+            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it",
         ),
     }
 }
@@ -2242,7 +2081,6 @@ fn tty_request(idx: usize, bindings: &[IoBinding], cmd: &StepKind) -> Result<Opt
 #[allow(clippy::type_complexity)]
 fn resolve_io_streams<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     bindings: &[IoBinding],
     cmd: &StepKind,
 ) -> Result<(
@@ -2288,7 +2126,7 @@ fn resolve_io_streams<P: ProcessManager>(
 
     for binding in bindings {
         if let Some(target) = &binding.pipe {
-            let handle = resolve_pipe_handle(cx, idx, target)?;
+            let handle = resolve_pipe_handle(cx, target)?;
             // Main-flow bindings materialize here; task-body bindings were
             // decided by the spawn-time pin walk, making this a no-op
             // there. Either way the scope check, not the command, rules.
@@ -2298,16 +2136,15 @@ fn resolve_io_streams<P: ProcessManager>(
         match binding.stream {
             IoStream::Stdin => {
                 if seen_stdin {
-                    bail!("step {}: WITH_IO declared stdin more than once", idx + 1);
+                    bail!("WITH_IO declared stdin more than once");
                 }
                 seen_stdin = true;
                 next_expose_stdin = true;
                 (step_stdin, stdin_pipe) = if let Some(target) = &binding.pipe {
-                    let handle = resolve_pipe_handle(cx, idx, target)?;
+                    let handle = resolve_pipe_handle(cx, target)?;
                     let promote =
                         allow_promote && !tty_present && cx.state.can_promote_to_os(&handle);
-                    let (stdin, backend) =
-                        cx.state.io.resolve_stdin(idx, &handle, direct, promote)?;
+                    let (stdin, backend) = cx.state.io.resolve_stdin(&handle, direct, promote)?;
                     (stdin, backend)
                 } else {
                     (cx.stdin.clone(), None)
@@ -2315,15 +2152,14 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Stdout => {
                 if seen_stdout {
-                    bail!("step {}: WITH_IO declared stdout more than once", idx + 1);
+                    bail!("WITH_IO declared stdout more than once");
                 }
                 seen_stdout = true;
                 (step_stdout, out_pipe) = if let Some(target) = &binding.pipe {
-                    let handle = resolve_pipe_handle(cx, idx, target)?;
+                    let handle = resolve_pipe_handle(cx, target)?;
                     let promote =
                         allow_promote && !tty_present && cx.state.can_promote_to_os(&handle);
-                    let (stdout, backend) =
-                        cx.state.io.resolve_stdout(idx, &handle, direct, promote)?;
+                    let (stdout, backend) = cx.state.io.resolve_stdout(&handle, direct, promote)?;
                     (Some(stdout), backend)
                 } else {
                     (cx.out.clone(), cx.out_pipe.clone())
@@ -2331,33 +2167,33 @@ fn resolve_io_streams<P: ProcessManager>(
             }
             IoStream::Stderr => {
                 if seen_stderr {
-                    bail!("step {}: WITH_IO declared stderr more than once", idx + 1);
+                    bail!("WITH_IO declared stderr more than once");
                 }
                 seen_stderr = true;
                 step_stderr = if let Some(target) = &binding.pipe {
-                    let handle = resolve_pipe_handle(cx, idx, target)?;
+                    let handle = resolve_pipe_handle(cx, target)?;
                     let promote =
                         allow_promote && !tty_present && cx.state.can_promote_to_os(&handle);
-                    Some(cx.state.io.resolve_stderr(idx, &handle, direct, promote)?)
+                    Some(cx.state.io.resolve_stderr(&handle, direct, promote)?)
                 } else {
                     cx.err.clone()
                 };
             }
             IoStream::Tty => {
                 if seen_tty {
-                    bail!("step {}: WITH_IO declared tty more than once", idx + 1);
+                    bail!("WITH_IO declared tty more than once");
                 }
                 seen_tty = true;
             }
             IoStream::Rows(_) => {
                 if seen_rows {
-                    bail!("step {}: WITH_IO declared rows more than once", idx + 1);
+                    bail!("WITH_IO declared rows more than once");
                 }
                 seen_rows = true;
             }
             IoStream::Cols(_) => {
                 if seen_cols {
-                    bail!("step {}: WITH_IO declared cols more than once", idx + 1);
+                    bail!("WITH_IO declared cols more than once");
                 }
                 seen_cols = true;
             }
@@ -2379,7 +2215,6 @@ fn resolve_io_streams<P: ProcessManager>(
 /// pre-registers anything, and materialization happens at binding sites.
 fn resolve_pipe_handle<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     target: &PipeTarget,
 ) -> Result<PipeHandle> {
     let PipeTarget::Var(var) = target;
@@ -2387,8 +2222,7 @@ fn resolve_pipe_handle<P: ProcessManager>(
         Some((kind, value)) if matches!(kind, TypeTag::Pipe) => {
             let Some(handle) = value.as_pipe_handle() else {
                 bail!(
-                    "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
-                    idx + 1,
+                    "TypeMismatch: expected PIPE, got {} ({:?})",
                     kind.name(),
                     value
                 );
@@ -2397,14 +2231,13 @@ fn resolve_pipe_handle<P: ProcessManager>(
         }
         Some((kind, value)) => {
             bail!(
-                "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
-                idx + 1,
+                "TypeMismatch: expected PIPE, got {} ({:?})",
                 kind.name(),
                 value
             );
         }
         None => {
-            bail!("step {}: undeclared variable ${var}", idx + 1);
+            bail!("undeclared variable ${var}");
         }
     }
 }
@@ -2611,19 +2444,17 @@ pub(crate) fn define_func<P: ProcessManager>(
 /// boundary errors (they must not reach a caller loop).
 pub(crate) fn call_func_value<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     name: &str,
     args: &[Expr],
 ) -> Result<Value> {
     // 1. Registry lookup: the single source for every callable.
     let Some(entry) = cx.state.functions.get(name) else {
-        bail!("step {}: unknown function `{name}`", idx + 1);
+        bail!("unknown function `{name}`");
     };
     // 2. Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {
         bail!(
-            "step {}: recursion depth limit exceeded in FUNC {}",
-            idx + 1,
+            "recursion depth limit exceeded in FUNC {}",
             super::base_name(name)
         );
     }
@@ -2635,16 +2466,14 @@ pub(crate) fn call_func_value<P: ProcessManager>(
         if args.len() < required || args.len() > params.len() {
             if required == params.len() {
                 bail!(
-                    "step {}: {}() expects {} argument(s), got {}",
-                    idx + 1,
+                    "{}() expects {} argument(s), got {}",
                     super::base_name(name),
                     params.len(),
                     args.len()
                 );
             }
             bail!(
-                "step {}: {}() expects {} to {} argument(s), got {}",
-                idx + 1,
+                "{}() expects {} to {} argument(s), got {}",
                 super::base_name(name),
                 required,
                 params.len(),
@@ -2704,28 +2533,18 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             }
         }
         FuncBody::Pure(func) => {
-            let value = func(arg_vals)
-                .with_context(|| format!("step {}: function `{name}` failed", idx + 1))?;
+            let value = func(arg_vals).with_context(|| format!("function `{name}` failed"))?;
             super::args::check_host_return_value(
-                &format!(
-                    "step {}: function `{}` returned",
-                    idx + 1,
-                    super::base_name(name)
-                ),
+                &format!("function `{}` returned", super::base_name(name)),
                 &entry.meta.returns,
                 &value,
             )?;
             Ok(value)
         }
         FuncBody::Ctx(func) | FuncBody::Both { ctx: func, .. } => {
-            let value = func(cx, arg_vals)
-                .with_context(|| format!("step {}: function `{name}` failed", idx + 1))?;
+            let value = func(cx, arg_vals).with_context(|| format!("function `{name}` failed"))?;
             super::args::check_host_return_value(
-                &format!(
-                    "step {}: function `{}` returned",
-                    idx + 1,
-                    super::base_name(name)
-                ),
+                &format!("function `{}` returned", super::base_name(name)),
                 &entry.meta.returns,
                 &value,
             )?;
@@ -2799,14 +2618,13 @@ pub(crate) fn handle_return<P: ProcessManager>(
 /// `call_func`; anything else yields Done.
 pub(crate) fn while_loop<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     cond: &Expr,
     body: &[Step],
 ) -> Result<Flow> {
     use std::sync::atomic::Ordering;
     loop {
         if cx.state.cancel_token.load(Ordering::SeqCst) {
-            bail!("step {}: ASYNC task cancelled", idx + 1);
+            bail!("ASYNC task cancelled");
         }
         let val = super::args::evaluate_expr(cond, cx)?;
         if !super::args::is_truthy(&val)? {
@@ -2893,19 +2711,18 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
         {
             bail!(
-                "step {}: LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value",
-                idx + 1
+                "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
             );
         }
         if bindings.is_empty() {
-            let value = call_func_value(cx, idx, name, args)?;
+            let value = call_func_value(cx, name, args)?;
             let clean_var = var.trim_start_matches('$').to_string();
             let tag = cx.state.resolve_tag(&decl_type)?;
             cx.state.declare_var(clean_var, tag, value)?;
             return Ok(Flow::Done);
         }
         let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
-            resolve_io_streams(cx, idx, &bindings, cmd)?;
+            resolve_io_streams(cx, &bindings, cmd)?;
         // Reborrow state/process for the sub-context; `cx` is unused below.
         let state = &mut *cx.state;
         let process = &mut *cx.process;
@@ -2922,7 +2739,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             // `tty` outside `RUN` before execution reaches them.
             tty: None,
         };
-        let value = call_func_value(&mut sub_cx, idx, name, args)?;
+        let value = call_func_value(&mut sub_cx, name, args)?;
         let tag = sub_cx.state.resolve_tag(&decl_type)?;
         sub_cx
             .state
@@ -3220,7 +3037,7 @@ pub(crate) fn dispatch_run<P: ProcessManager>(
     };
     let cmd = super::args::resolve_arg(arg, cx)?;
     let cmd = super::args::expand_dsl_vars(&cmd, cx.state)?;
-    run(cx, 0, &cmd)
+    run(cx, &cmd)
 }
 
 pub(crate) fn dispatch_run_exec<P: ProcessManager>(
@@ -3231,7 +3048,7 @@ pub(crate) fn dispatch_run_exec<P: ProcessManager>(
         unreachable!()
     };
     let resolved = resolve_run_exec_argv(argv, cx)?;
-    run_argv(cx, 0, &resolved)
+    run_argv(cx, &resolved)
 }
 
 pub(crate) fn dispatch_async_block<P: ProcessManager>(
@@ -3362,7 +3179,7 @@ pub(crate) fn dispatch_workdir<P: ProcessManager>(
         unreachable!()
     };
     let path = super::args::resolve_arg(arg, cx)?;
-    workdir(cx, 0, &path)
+    workdir(cx, &path)
 }
 
 pub(crate) fn dispatch_workspace<P: ProcessManager>(
@@ -3388,7 +3205,7 @@ pub(crate) fn dispatch_remote<P: ProcessManager>(
     else {
         unreachable!()
     };
-    super::remote::run_remote_block(cx, target, vars, env, body, 0)
+    super::remote::run_remote_block(cx, target, vars, env, body)
 }
 
 pub(crate) fn dispatch_env<P: ProcessManager>(
@@ -3421,7 +3238,7 @@ pub(crate) fn dispatch_copy<P: ProcessManager>(
     }
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    copy(cx, 0, from_workspace.clone(), &from_resolved, &to_resolved)
+    copy(cx, from_workspace.clone(), &from_resolved, &to_resolved)
 }
 
 pub(crate) fn dispatch_archive<P: ProcessManager>(
@@ -3433,7 +3250,7 @@ pub(crate) fn dispatch_archive<P: ProcessManager>(
     };
     let src_resolved = super::args::resolve_arg(src, cx)?;
     let dst_resolved = super::args::resolve_arg(dst, cx)?;
-    archive(cx, 0, &src_resolved, &dst_resolved, *raw)
+    archive(cx, &src_resolved, &dst_resolved, *raw)
 }
 
 pub(crate) fn dispatch_unarchive<P: ProcessManager>(
@@ -3451,7 +3268,7 @@ pub(crate) fn dispatch_unarchive<P: ProcessManager>(
     let src_resolved = super::args::resolve_arg(src, cx)?;
     let dst_resolved = super::args::resolve_arg(dst, cx)?;
     let cap_resolved = super::args::resolve_arg_opt(max_bytes, cx)?;
-    unarchive(cx, 0, &src_resolved, &dst_resolved, cap_resolved.as_deref())
+    unarchive(cx, &src_resolved, &dst_resolved, cap_resolved.as_deref())
 }
 
 pub(crate) fn dispatch_copy_git<P: ProcessManager>(
@@ -3472,7 +3289,6 @@ pub(crate) fn dispatch_copy_git<P: ProcessManager>(
     let to_resolved = super::args::resolve_arg(to, cx)?;
     copy_git(
         cx,
-        0,
         &rev_resolved,
         &from_resolved,
         &to_resolved,
@@ -3494,7 +3310,7 @@ pub(crate) fn dispatch_symlink<P: ProcessManager>(
     };
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    symlink(cx, 0, from_workspace.clone(), &from_resolved, &to_resolved)
+    symlink(cx, from_workspace.clone(), &from_resolved, &to_resolved)
 }
 
 pub(crate) fn dispatch_mkdir<P: ProcessManager>(
@@ -3505,12 +3321,11 @@ pub(crate) fn dispatch_mkdir<P: ProcessManager>(
         unreachable!()
     };
     let path = super::args::resolve_arg(arg, cx)?;
-    mkdir(cx, 0, &path)
+    mkdir(cx, &path)
 }
 
 pub(super) fn install<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     from: &str,
     to: &str,
 ) -> Result<()> {
@@ -3518,16 +3333,16 @@ pub(super) fn install<P: ProcessManager>(
         .state
         .fs
         .resolve_read(&cx.state.cwd, from)
-        .with_context(|| format!("step {}: INSTALL {from} {to}", idx + 1))?;
+        .with_context(|| format!("INSTALL {from} {to}"))?;
     let to_abs = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| format!("step {}: INSTALL {from} {to}", idx + 1))?;
+        .with_context(|| format!("INSTALL {from} {to}"))?;
     cx.state
         .fs
         .install_file_atomic(&from_abs, &to_abs, 0o755)
-        .with_context(|| format!("step {}: INSTALL {from} {to}", idx + 1))?;
+        .with_context(|| format!("INSTALL {from} {to}"))?;
     Ok(())
 }
 
@@ -3540,7 +3355,7 @@ pub(crate) fn dispatch_install<P: ProcessManager>(
     };
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    install(cx, 0, &from_resolved, &to_resolved)
+    install(cx, &from_resolved, &to_resolved)
 }
 
 pub(crate) fn dispatch_ls<P: ProcessManager>(
@@ -3551,14 +3366,7 @@ pub(crate) fn dispatch_ls<P: ProcessManager>(
         unreachable!()
     };
     let resolved = super::args::resolve_arg_opt(arg, cx)?;
-    ls(cx, 0, &resolved)
-}
-
-pub(crate) fn dispatch_cwd<P: ProcessManager>(
-    _step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    cwd(cx, 0)
+    ls(cx, &resolved)
 }
 
 pub(crate) fn dispatch_read<P: ProcessManager>(
@@ -3569,7 +3377,7 @@ pub(crate) fn dispatch_read<P: ProcessManager>(
         unreachable!()
     };
     let resolved = super::args::resolve_arg_opt(arg, cx)?;
-    read(cx, 0, &resolved)
+    read(cx, &resolved)
 }
 
 pub(crate) fn dispatch_read_line<P: ProcessManager>(
@@ -3579,7 +3387,7 @@ pub(crate) fn dispatch_read_line<P: ProcessManager>(
     let StepKind::ReadLine { var } = step else {
         unreachable!()
     };
-    read_line(cx, 0, var)
+    read_line(cx, var)
 }
 
 /// Render the terminal prompt: `{message} [{default}]: ` with a default,
@@ -3606,18 +3414,14 @@ pub(super) fn apply_prompt_answer(line: &str, default: Option<&str>) -> String {
 
 pub(super) fn prompt<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     var: &str,
     message: &str,
     default: Option<&str>,
 ) -> Result<()> {
     #[cfg(miri)]
     {
-        let _ = (cx, idx, var, message, default);
-        bail!(
-            "step {}: PROMPT unavailable under Miri (no terminal)",
-            idx + 1
-        );
+        let _ = (cx, var, message, default);
+        bail!("PROMPT unavailable under Miri (no terminal)");
     }
     #[cfg(not(miri))]
     {
@@ -3630,14 +3434,11 @@ pub(super) fn prompt<P: ProcessManager>(
                 Some(d) => {
                     eprintln!("non-interactive: using default for {message}");
                     let text = Value::string(d.to_string());
-                    bind_prompt_var(cx, idx, &clean_var, text)?;
+                    bind_prompt_var(cx, &clean_var, text)?;
                     return Ok(());
                 }
                 None => {
-                    bail!(
-                        "step {}: PROMPT {message}: non-TTY stdin has no answer and no default",
-                        idx + 1
-                    );
+                    bail!("PROMPT {message}: non-TTY stdin has no answer and no default",);
                 }
             }
         }
@@ -3645,29 +3446,24 @@ pub(super) fn prompt<P: ProcessManager>(
         {
             use std::io::Write;
             let mut err = std::io::stderr().lock();
-            err.write_all(rendered.as_bytes()).with_context(|| {
-                format!("step {}: PROMPT {message}: failed to write prompt", idx + 1)
-            })?;
-            err.flush().with_context(|| {
-                format!("step {}: PROMPT {message}: failed to flush prompt", idx + 1)
-            })?;
+            err.write_all(rendered.as_bytes())
+                .with_context(|| format!("PROMPT {message}: failed to write prompt"))?;
+            err.flush()
+                .with_context(|| format!("PROMPT {message}: failed to flush prompt"))?;
         }
         let mut line = String::new();
         let n = std::io::stdin()
             .read_line(&mut line)
-            .with_context(|| format!("step {}: PROMPT {message}: failed reading stdin", idx + 1))?;
+            .with_context(|| format!("PROMPT {message}: failed reading stdin"))?;
         if n == 0 && line.is_empty() {
-            bail!(
-                "step {}: PROMPT {message}: EOF on stdin before any input",
-                idx + 1
-            );
+            bail!("PROMPT {message}: EOF on stdin before any input",);
         }
         let trimmed = line
             .strip_suffix("\r\n")
             .or_else(|| line.strip_suffix('\n'))
             .unwrap_or(&line);
         let text = Value::string(apply_prompt_answer(trimmed, default));
-        bind_prompt_var(cx, idx, &clean_var, text)?;
+        bind_prompt_var(cx, &clean_var, text)?;
         Ok(())
     }
 }
@@ -3675,18 +3471,17 @@ pub(super) fn prompt<P: ProcessManager>(
 #[cfg_attr(miri, allow(dead_code))]
 fn bind_prompt_var<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     clean_var: &str,
     text: Value,
 ) -> Result<()> {
     if cx.state.get_var_typed(clean_var).is_some() {
         cx.state
             .mutate_var(clean_var, text)
-            .with_context(|| format!("step {}: PROMPT ${clean_var}", idx + 1))?;
+            .with_context(|| format!("PROMPT ${clean_var}"))?;
     } else {
         cx.state
             .declare_var(clean_var.to_string(), TypeTag::String, text)
-            .with_context(|| format!("step {}: PROMPT ${clean_var}", idx + 1))?;
+            .with_context(|| format!("PROMPT ${clean_var}"))?;
     }
     Ok(())
 }
@@ -3708,7 +3503,7 @@ pub(crate) fn dispatch_prompt<P: ProcessManager>(
         Some(d) => Some(super::args::resolve_arg(d, cx)?),
         None => None,
     };
-    prompt(cx, 0, var, &message_resolved, default_resolved.as_deref())
+    prompt(cx, var, &message_resolved, default_resolved.as_deref())
 }
 
 /// Dispatch `LIST_APPEND $list <item>` : append to a LIST binding in
@@ -3717,13 +3512,12 @@ pub(crate) fn dispatch_prompt<P: ProcessManager>(
 /// IO filter, so pipeline bindings resolve but carry no bytes.
 pub(super) fn push_into<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     var: &str,
     item: Value,
 ) -> Result<()> {
     cx.state
         .push_into_list(var, item)
-        .with_context(|| format!("step {}: LIST_APPEND ${var}", idx + 1))
+        .with_context(|| format!("LIST_APPEND ${var}"))
 }
 
 pub(crate) fn dispatch_push_into_step<P: ProcessManager>(
@@ -3734,7 +3528,7 @@ pub(crate) fn dispatch_push_into_step<P: ProcessManager>(
         unreachable!()
     };
     let value = super::args::evaluate_assert_operand(item, cx)?;
-    push_into(cx, 0, list, value)
+    push_into(cx, list, value)
 }
 
 pub(crate) fn dispatch_write<P: ProcessManager>(
@@ -3746,7 +3540,7 @@ pub(crate) fn dispatch_write<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
     let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
-    write(cx, 0, &path_resolved, contents_resolved.as_deref())
+    write(cx, &path_resolved, contents_resolved.as_deref())
 }
 
 pub(crate) fn dispatch_append<P: ProcessManager>(
@@ -3758,12 +3552,11 @@ pub(crate) fn dispatch_append<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
     let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
-    append(cx, 0, &path_resolved, contents_resolved.as_deref())
+    append(cx, &path_resolved, contents_resolved.as_deref())
 }
 
 pub(super) fn remove<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     path: &str,
     recursive: bool,
 ) -> Result<()> {
@@ -3772,7 +3565,7 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cwd, path)
-        .with_context(|| format!("step {}: REMOVE {path}", idx + 1))?;
+        .with_context(|| format!("REMOVE {path}"))?;
     // Root and working-directory deletion guard: removing the cwd (or any
     // of its ancestors), the workspace root, or the effective root (`/`
     // under `WORKSPACE SYSTEM`) would destroy the execution context or
@@ -3789,10 +3582,7 @@ pub(super) fn remove<P: ProcessManager>(
         || Some(&target) == cx.state.fs.workspace_root()
         || target == *cx.state.fs.root()
     {
-        bail!(
-            "step {}: REMOVE {path}: cannot remove working directory or workspace root",
-            idx + 1
-        );
+        bail!("REMOVE {path}: cannot remove working directory or workspace root",);
     }
     // Lexical link probe: canonical resolution routes through the
     // final link, so a link would otherwise read as its target and the
@@ -3801,38 +3591,32 @@ pub(super) fn remove<P: ProcessManager>(
         .state
         .fs
         .remove_link_if_symlink(&cwd, path)
-        .with_context(|| format!("step {}: REMOVE {path}", idx + 1))?
+        .with_context(|| format!("REMOVE {path}"))?
     {
         return Ok(());
     }
     match cx.state.fs.entry_kind_no_follow(&target) {
-        Err(_) => bail!("step {}: REMOVE {path}: no such file or directory", idx + 1),
+        Err(_) => bail!("REMOVE {path}: no such file or directory"),
         Ok(EntryKind::File) => {
             cx.state
                 .fs
                 .remove_file(&target)
-                .with_context(|| format!("step {}: REMOVE {path}", idx + 1))?;
+                .with_context(|| format!("REMOVE {path}"))?;
             Ok(())
         }
         // A link reaching here appeared between the probe and the
         // resolve: fail closed rather than touch its target.
-        Ok(EntryKind::Symlink) => bail!(
-            "step {}: REMOVE {path}: link changed during removal",
-            idx + 1
-        ),
+        Ok(EntryKind::Symlink) => bail!("REMOVE {path}: link changed during removal",),
         Ok(EntryKind::Dir) => {
             if recursive {
                 cx.state
                     .fs
                     .remove_dir_all(&target)
-                    .with_context(|| format!("step {}: REMOVE {path}", idx + 1))?;
+                    .with_context(|| format!("REMOVE {path}"))?;
                 Ok(())
             } else {
                 cx.state.fs.remove_empty_dir(&target).with_context(|| {
-                    format!(
-                        "step {}: REMOVE {path}: directory not empty (use --recursive)",
-                        idx + 1
-                    )
+                    format!("REMOVE {path}: directory not empty (use --recursive)",)
                 })?;
                 Ok(())
             }
@@ -3848,7 +3632,7 @@ pub(crate) fn dispatch_remove<P: ProcessManager>(
         unreachable!()
     };
     let path_resolved = super::args::resolve_arg(path, cx)?;
-    remove(cx, 0, &path_resolved, *recursive)
+    remove(cx, &path_resolved, *recursive)
 }
 
 pub(crate) fn dispatch_expand<P: ProcessManager>(
@@ -3860,7 +3644,7 @@ pub(crate) fn dispatch_expand<P: ProcessManager>(
     };
     let path_resolved = super::args::resolve_arg_opt(path, cx)?;
     let overrides_resolved = super::args::resolve_overrides(overrides, cx)?;
-    replace(cx, 0, &path_resolved, &overrides_resolved)
+    replace(cx, &path_resolved, &overrides_resolved)
 }
 
 pub(crate) fn dispatch_assert_eq<P: ProcessManager>(
@@ -3880,7 +3664,7 @@ pub(crate) fn dispatch_assert_eq<P: ProcessManager>(
         Some(e) => Some(super::args::evaluate_assert_operand(e, cx)?),
         None => None,
     };
-    assert_eq(cx, 0, 0, 0, hash, &target, expected_val.as_ref())
+    assert_eq(cx, 0, hash, &target, expected_val.as_ref())
 }
 
 pub(crate) fn dispatch_assert_contains<P: ProcessManager>(
@@ -3891,18 +3675,7 @@ pub(crate) fn dispatch_assert_contains<P: ProcessManager>(
         unreachable!()
     };
     let target = super::steps::resolve_assert_target(haystack, cx)?;
-    assert_contains(cx, 0, 0, 0, &target, needle)
-}
-
-pub(crate) fn dispatch_hash_sha256<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::HashSha256 { path } = step else {
-        unreachable!()
-    };
-    let path_resolved = super::args::resolve_arg(path, cx)?;
-    hash_sha256(cx, 0, &path_resolved)
+    assert_contains(cx, 0, 0, &target, needle)
 }
 
 pub(crate) fn dispatch_exit<P: ProcessManager>(
@@ -4029,7 +3802,10 @@ pub(crate) fn dispatch_func_def<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::FuncDef { name, params, body } = step else {
+    let StepKind::FuncDef {
+        name, params, body, ..
+    } = step
+    else {
         unreachable!()
     };
     define_func(cx, name, params, body)
@@ -4042,7 +3818,7 @@ pub(crate) fn dispatch_call<P: ProcessManager>(
     let StepKind::Call { name, args } = step else {
         unreachable!()
     };
-    call_func_value(cx, 0, name, args).map(|_| ())
+    call_func_value(cx, name, args).map(|_| ())
 }
 
 pub(crate) fn dispatch_return<P: ProcessManager>(
@@ -4062,7 +3838,7 @@ pub(crate) fn dispatch_while_loop<P: ProcessManager>(
     let StepKind::While { cond, body } = step else {
         unreachable!()
     };
-    top_level_flow(while_loop(cx, 0, cond, body)?)
+    top_level_flow(while_loop(cx, cond, body)?)
 }
 
 pub(crate) fn dispatch_break<P: ProcessManager>(
@@ -4229,10 +4005,10 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
             // Apply call-site bindings (e.g. stdin pipes) like the inline
             // path; stdout stays shared-live (parse rejects stdout pipes).
             let value = if bindings.is_empty() {
-                call_func_value(&mut child_cx, 0, &name, &args)?
+                call_func_value(&mut child_cx, &name, &args)?
             } else {
                 let (task_stdin, task_expose, task_out, task_err, task_out_pipe, task_stdin_pipe) =
-                    resolve_io_streams(&mut child_cx, 0, &bindings, &body[0].kind)?;
+                    resolve_io_streams(&mut child_cx, &bindings, &body[0].kind)?;
                 let state = &mut *child_cx.state;
                 let process = &mut *child_cx.process;
                 let mut sub_cx = super::steps::StepCtx {
@@ -4246,7 +4022,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                     stdin_pipe: task_stdin_pipe.or(child_cx.stdin_pipe.clone()),
                     tty: None,
                 };
-                call_func_value(&mut sub_cx, 0, &name, &args)?
+                call_func_value(&mut sub_cx, &name, &args)?
             };
             entry
                 .state
@@ -4711,7 +4487,7 @@ pub(crate) fn dispatch_timeout_step<P: ProcessManager>(
         unreachable!()
     };
     let duration = super::args::resolve_arg_as_duration(duration, cx)?;
-    top_level_flow(timeout(cx, 0, &duration, body)?)
+    top_level_flow(timeout(cx, &duration, body)?)
 }
 
 /// Pipeline dispatch wrapper for `Isolated`
@@ -4734,7 +4510,6 @@ pub(crate) fn dispatch_isolated_step<P: ProcessManager>(
 /// `idx` is the 0-based step index used for error attribution.
 pub(crate) fn timeout<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    idx: usize,
     duration: &std::time::Duration,
     body: &[Step],
 ) -> Result<Flow> {
@@ -4818,33 +4593,19 @@ pub(crate) fn timeout<P: ProcessManager>(
     match result {
         Ok(Flow::Done) => {
             if fired.load(Ordering::SeqCst) {
-                bail!(
-                    "step {}: TIMEOUT after {} — deadline exceeded",
-                    idx + 1,
-                    budget
-                );
+                bail!("TIMEOUT after {} — deadline exceeded", budget);
             }
             Ok(Flow::Done)
         }
         Ok(flow) => {
             if fired.load(Ordering::SeqCst) {
-                bail!(
-                    "step {}: TIMEOUT after {} — deadline exceeded",
-                    idx + 1,
-                    budget
-                );
+                bail!("TIMEOUT after {} — deadline exceeded", budget);
             }
             Ok(flow)
         }
         Err(err) => {
             if fired.load(Ordering::SeqCst) {
-                Err(err).with_context(|| {
-                    format!(
-                        "step {}: TIMEOUT after {} — deadline exceeded",
-                        idx + 1,
-                        budget
-                    )
-                })
+                Err(err).with_context(|| format!("TIMEOUT after {} — deadline exceeded", budget))
             } else {
                 Err(err)
             }

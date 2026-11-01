@@ -213,7 +213,7 @@ impl<P: ProcessManager> McpSession<P> {
                 out,
                 err,
             );
-            match call_func_value(&mut ctx, 0, &qualified, &exprs) {
+            match call_func_value(&mut ctx, &qualified, &exprs) {
                 Ok(value) => value,
                 Err(err) => {
                     // Drain on failure too: the next call must not see

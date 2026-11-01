@@ -495,7 +495,7 @@ fn listen_refuses_while_serving() {
         NET_CLOSE($b.listener)
     "#};
     let err = run_script_with(registry, &root, script).expect_err("second claim must fail");
-    assert!(err.to_string().contains("already claimed"), "{err:#}");
+    assert!(format!("{err:#}").contains("already claimed"), "{err:#}");
 }
 
 #[test]
@@ -539,7 +539,7 @@ fn close_during_accept_returns() {
         AWAIT $t
     "#};
     let err = run_script_with(registry, &root, script).expect_err("closed accept must fail");
-    assert!(err.to_string().contains("listener is closed"), "{err:#}");
+    assert!(format!("{err:#}").contains("listener is closed"), "{err:#}");
 }
 
 #[test]
@@ -592,7 +592,7 @@ fn unknown_options_bail() {
     let err =
         run_script_with(registry, &root, script).expect_err("unknown listen option must fail");
     assert!(
-        err.to_string().contains("unknown option 'backlog'"),
+        format!("{err:#}").contains("unknown option 'backlog'"),
         "{err:#}"
     );
 }
@@ -927,7 +927,7 @@ fn memory_queue_full_bails_through_connect() {
         AWAIT $c
     "#};
     let err = run_script_with(registry, &root, script).expect_err("full queue must fail");
-    assert!(err.to_string().contains("is full"), "{err:#}");
+    assert!(format!("{err:#}").contains("is full"), "{err:#}");
 }
 
 #[test]
@@ -977,7 +977,7 @@ fn offline_connect_bails_before_sockets() {
             target = target
         );
         let err = run_script_with(registry, &root, &script).expect_err("offline dial must fail");
-        assert!(err.to_string().contains("--offline mode"), "{err:#}");
+        assert!(format!("{err:#}").contains("--offline mode"), "{err:#}");
     }
 }
 
@@ -992,7 +992,7 @@ fn fetch_cleartext_to_real_host_refuses_without_dialing() {
         LET $body: STRING = NET_FETCH("http://example.com/doc.json")
     "#};
     let err = run_script(&root, script).expect_err("cleartext must fail");
-    assert!(err.to_string().contains("cleartext"), "{err:#}");
+    assert!(format!("{err:#}").contains("cleartext"), "{err:#}");
 }
 
 #[test]
@@ -1010,7 +1010,7 @@ fn fetch_in_placeholder_stays_unknown() {
     "#};
     let err = run_script(&root, script).expect_err("placeholder fetch must fail");
     assert!(
-        err.to_string().contains("unknown placeholder function"),
+        format!("{err:#}").contains("unknown placeholder function"),
         "{err:#}"
     );
     let known = err
@@ -1176,7 +1176,7 @@ fn fetch_rejects_unknown_options_without_dialing() {
         LET $body: STRING = NET_FETCH("http://example.com/doc.json", {bogus: 1})
     "#};
     let err = run_script(&root, script).expect_err("unknown option must fail");
-    assert!(err.to_string().contains("unknown option"), "{err:#}");
+    assert!(format!("{err:#}").contains("unknown option"), "{err:#}");
 }
 
 #[test]
@@ -1191,7 +1191,7 @@ fn fetch_rejects_non_string_header_values_without_dialing() {
     "#};
     let err = run_script(&root, script).expect_err("non-string header must fail");
     assert!(
-        err.to_string().contains("expected STRING, got INT"),
+        format!("{err:#}").contains("expected STRING, got INT"),
         "{err:#}"
     );
 }
@@ -1208,8 +1208,7 @@ fn fetch_rejects_int_timeout_without_dialing() {
     "#};
     let err = run_script(&root, script).expect_err("int timeout must fail");
     assert!(
-        err.to_string()
-            .contains("expected DURATION|STRING, got INT"),
+        format!("{err:#}").contains("expected DURATION|STRING, got INT"),
         "{err:#}"
     );
 }
@@ -1240,7 +1239,7 @@ fn offline_connect_reads_both_timeout_shapes() {
         );
         let err = run_script_with(registry, &root, &script).expect_err("offline dial must fail");
         assert!(
-            err.to_string().contains("--offline mode"),
+            format!("{err:#}").contains("--offline mode"),
             "{label} timeout reads past validation: {err:#}"
         );
     }
@@ -1292,7 +1291,7 @@ fn fetch_rejects_bad_timeout_without_dialing() {
         LET $body: STRING = NET_FETCH("http://example.com/doc.json", {timeout: "soon"})
     "#};
     let err = run_script(&root, script).expect_err("bad timeout must fail");
-    assert!(err.to_string().contains("must be a duration"), "{err:#}");
+    assert!(format!("{err:#}").contains("must be a duration"), "{err:#}");
 }
 
 #[test]
@@ -1305,7 +1304,7 @@ fn fetch_rejects_negative_counts_without_dialing() {
         LET $body: STRING = NET_FETCH("http://example.com/doc.json", {max_redirects: -1})
     "#};
     let err = run_script(&root, script).expect_err("negative count must fail");
-    assert!(err.to_string().contains("non-negative"), "{err:#}");
+    assert!(format!("{err:#}").contains("non-negative"), "{err:#}");
 }
 
 #[test]

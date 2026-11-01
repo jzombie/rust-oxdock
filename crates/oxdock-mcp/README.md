@@ -23,7 +23,10 @@ through the live state.
 Tool descriptions come from the `#` comment block directly above
 each `FUNC`; `//` and `/* */` comments are valid script but never
 feed descriptions, and an undocumented function serves with its
-registry summary or an empty description.
+registry summary or an empty description. Descriptions serve
+verbatim, so only serve scripts you trust: a script author controls
+what an MCP client shows its model, and no filtering at this layer
+makes untrusted provider text safe to show one.
 
 The script file is polled and the session hot-swaps on change, so
 edits take effect on the next call with no restart; broken edits

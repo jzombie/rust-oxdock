@@ -65,7 +65,7 @@ fn install_script_uses_atomic_install_with_interactive_branch() -> Result<()> {
         "OXDOCK_INTERACTIVE",
         "PATH_WRITABLE",
         "ASSERT_EQ $actual",
-        "installed oxdock",
+        "installed {{ $stem }}",
         "is on PATH",
     ] {
         assert!(

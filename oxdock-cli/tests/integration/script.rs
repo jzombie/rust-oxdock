@@ -32,24 +32,32 @@ fn script_runs_copy_and_symlink() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("client".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Run("echo ok".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -62,6 +70,8 @@ fn script_runs_copy_and_symlink() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
@@ -72,12 +82,16 @@ fn script_runs_copy_and_symlink() {
             },
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Run("echo ok".into()),
             scope_enter: 0,
             scope_exit: 0,
+            line: 0,
+            col: 0,
         },
     ];
 

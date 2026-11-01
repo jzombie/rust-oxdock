@@ -1049,6 +1049,33 @@ fn ssh_exec<P: ProcessManager>(
     Ok(Value::map(map))
 }
 
+/// Mint a random server password (256 bits, hex).
+///
+/// Each call draws fresh OS-RNG key material and renders 64
+/// lowercase hex chars, so committed scripts carry no usable
+/// credential: mint at runtime, hand the value to both sides, drop
+/// it after. Pure (no step context), so it runs anywhere a STRING
+/// binds, including option maps and placeholders.
+#[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "mint and serve",
+    code = r###"
+    IMPORT [STD, SSH]
+
+    # Fresh draws mint 64 hex chars with no committed secret.
+    LET $pass: STRING = SSH_GENERATE_PASSWORD()
+    LET $len: INT = TEXT_LENGTH($pass)
+    ASSERT_EQ $len 64
+
+    # The minted value serves directly as a server password.
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-gen-pass", {username: "u", password: $pass})
+    SSH_CLOSE($m.server)
+    "###
+)]
+fn ssh_generate_password() -> Result<Value> {
+    Ok(Value::string(crate::generate_password()))
+}
+
 /// Field table backing the `SSH_SERVE_INFO` schema and return tag.
 fn serve_result_fields() -> Arc<[Field]> {
     Arc::from(vec![
@@ -1143,6 +1170,7 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             SshPump::registration(),
             SshPtyRun::registration(),
             SshRun::registration(),
+            SshGeneratePassword::registration(),
         ],
         types: vec![SshServerTag::descriptor(), SshSessionTag::descriptor()],
         record_schemas: vec![

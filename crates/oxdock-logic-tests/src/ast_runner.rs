@@ -1021,7 +1021,7 @@ fn verify_expectations(
         let actual = read_trimmed_root(root, &cwd.file)?;
         if actual != expected {
             return Err(anyhow!(
-                "CWD output mismatch: expected {expected}, got {actual}"
+                "CWD() output mismatch: expected {expected}, got {actual}"
             ));
         }
     }
@@ -1039,7 +1039,7 @@ fn verify_expectations(
         let expected: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         if actual != expected {
             return Err(anyhow!(
-                "HASH_SHA256 output mismatch: expected {expected}, got {actual}"
+                "HASH_SHA256() output mismatch: expected {expected}, got {actual}"
             ));
         }
     }
@@ -1099,7 +1099,7 @@ fn verify_expectations_local(expect: &Expectations, local: &GuardedPath) -> Resu
         let actual = read_trimmed_root(local, &cwd.file)?;
         if actual != expected {
             return Err(anyhow!(
-                "CWD output mismatch: expected {expected}, got {actual}"
+                "CWD() output mismatch: expected {expected}, got {actual}"
             ));
         }
     }
@@ -1115,7 +1115,7 @@ fn verify_expectations_local(expect: &Expectations, local: &GuardedPath) -> Resu
         let expected: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         if actual != expected {
             return Err(anyhow!(
-                "HASH_SHA256 output mismatch: expected {expected}, got {actual}"
+                "HASH_SHA256() output mismatch: expected {expected}, got {actual}"
             ));
         }
     }
@@ -1482,7 +1482,6 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Archive { .. } => "Archive",
         StepKind::Unarchive { .. } => "Unarchive",
         StepKind::Ls(_) => "Ls",
-        StepKind::Cwd => "Cwd",
         StepKind::Read(_) => "Read",
         StepKind::ReadLine { .. } => "ReadLine",
         StepKind::Prompt { .. } => "Prompt",
@@ -1492,7 +1491,6 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::AssertEq { .. } => "AssertEq",
         StepKind::AssertContains { .. } => "AssertContains",
         StepKind::CopyGit { .. } => "CopyGit",
-        StepKind::HashSha256 { .. } => "HashSha256",
         StepKind::Exit(_) => "Exit",
         StepKind::WithIo { .. } => "WithIo",
         StepKind::WithIoBlock { .. } => "WithIoBlock",
