@@ -401,7 +401,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             // DSL-defined functions run through the call path so arity,
             // depth budget, and scoping apply uniformly.
             if cx.state.functions.contains_script(name.as_str()) {
-                return super::handlers::call_func_value(cx, 0, name, args);
+                return super::handlers::call_func_value(cx, name, args);
             }
             // Native entries gate before effects too: existence, the depth
             // budget, and the registry arity are all known without

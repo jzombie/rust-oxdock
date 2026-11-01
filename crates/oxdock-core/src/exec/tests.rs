@@ -571,7 +571,7 @@ fn symlink_errors_report_underlying_cause() {
     let err = run_steps(&root, &steps).unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("step 2: SYMLINK taken.txt taken.txt"),
+        msg.contains("step 2 (SYMLINK taken.txt taken.txt)"),
         "error should include step context: {msg}"
     );
     assert!(
@@ -1865,7 +1865,7 @@ fn with_io_async_outer_pipe_stays_script() {
     // decided script backend into an OS pair.
     assert!(
         matches!(
-            state.io.resolve_stdout(0, &handle, true, true),
+            state.io.resolve_stdout(&handle, true, true),
             Ok((StreamHandle::Stream(_), _))
         ),
         "outer pipe shared into an async RUN task must stay script"
@@ -1919,7 +1919,7 @@ fn with_io_async_guarded_and_exec_form_outer_pipe_stays_script() {
             .unwrap_or_else(|| panic!("pipe {var}"));
         assert!(
             matches!(
-                state.io.resolve_stdout(0, &handle, true, true),
+                state.io.resolve_stdout(&handle, true, true),
                 Ok((StreamHandle::Stream(_), _))
             ),
             "guarded and exec form outer pipes must stay script: {script}"
@@ -2160,17 +2160,17 @@ fn exec_io_pipe_endpoints_resolve_through_handles() {
 
     // Script resolution hands out live stream halves plus the backend.
     let (stdin, stdin_backend) = io
-        .resolve_stdin(0, &handle, false, false)
+        .resolve_stdin(&handle, false, false)
         .expect("resolve stdin");
     assert!(matches!(stdin, CommandStdin::Stream(_)));
     assert!(stdin_backend.is_some());
     let (stdout, stdout_backend) = io
-        .resolve_stdout(0, &handle, false, false)
+        .resolve_stdout(&handle, false, false)
         .expect("resolve stdout");
     assert!(matches!(stdout, StreamHandle::Stream(_)));
     assert!(stdout_backend.is_some());
     assert!(matches!(
-        io.resolve_stderr(0, &handle, false, false),
+        io.resolve_stderr(&handle, false, false),
         Ok(StreamHandle::Stream(_))
     ));
     // Repeat reads share the backend: same channel, first-binding-wins.
@@ -3371,7 +3371,7 @@ fn timeout_preserves_preexisting_cancellation() {
         stdin_pipe: None,
         tty: None,
     };
-    super::handlers::timeout(&mut cx, 0, &std::time::Duration::from_secs(30), &[])
+    super::handlers::timeout(&mut cx, &std::time::Duration::from_secs(30), &[])
         .expect("empty body must succeed");
     assert!(
         cx.state
@@ -5499,7 +5499,7 @@ fn stdin_resolve_carries_script_backend() {
     let io = ExecIo::new();
     let handle = Value::pipe_fresh().as_pipe_handle().expect("fresh handle");
     io.ensure_handle(&handle, false).expect("ensure");
-    let (stdin, backend) = io.resolve_stdin(0, &handle, false, false).expect("resolve");
+    let (stdin, backend) = io.resolve_stdin(&handle, false, false).expect("resolve");
     assert!(matches!(stdin, CommandStdin::Stream(_)));
     assert!(
         backend.is_some(),
@@ -5515,13 +5515,11 @@ fn force_close_eofs_despite_writer_and_keeper() {
     io.ensure_handle(&handle, false).expect("ensure");
     // Attach a live writer and pin a keeper: without force_close neither
     // lets readers observe EOF.
-    let (stdin, _) = io.resolve_stdin(0, &handle, false, false).expect("resolve");
+    let (stdin, _) = io.resolve_stdin(&handle, false, false).expect("resolve");
     let CommandStdin::Stream(reader) = stdin else {
         panic!("expected stream stdin");
     };
-    let (stdout, backend) = io
-        .resolve_stdout(0, &handle, false, false)
-        .expect("resolve");
+    let (stdout, backend) = io.resolve_stdout(&handle, false, false).expect("resolve");
     // The OS-writer variant is compiled out under Miri, making the
     // destructure irrefutable there (a match would trip single-match).
     #[cfg(not(miri))]

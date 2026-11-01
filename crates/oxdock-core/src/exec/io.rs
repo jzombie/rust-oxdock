@@ -85,10 +85,9 @@ pub(super) struct PipeRegistry;
 /// fresh declaration. No rebind rule exists by design: no rule can tell
 /// sequential loop reuse apart from concurrent fan-in sharing.
 #[cfg(not(miri))]
-fn spent_handle(idx: usize) -> anyhow::Error {
+fn spent_handle() -> anyhow::Error {
     anyhow::anyhow!(
-        "step {}: OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session",
-        idx + 1,
+        "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session",
     )
 }
 
@@ -135,14 +134,12 @@ impl PipeRegistry {
     /// on one end bails loudly with the fresh-declaration remedy instead
     /// of stealing the descriptor.
     pub(super) fn resolve_stdin(
-        idx: usize,
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
     ) -> Result<(CommandStdin, Option<Arc<PipeInner>>)> {
-        // `idx` and `direct` serve only the OS-pipe arms below, which are
+        // `direct` serves only the OS-pipe arms below, which are
         // compiled out under Miri.
-        let _ = idx;
         let _ = direct;
         match materialize(handle, promote)? {
             Materialized::Script(backend) => {
@@ -153,7 +150,7 @@ impl PipeRegistry {
                 if direct {
                     return Ok((CommandStdin::OsPipe(entry.reader.clone()), None));
                 }
-                let owned = entry.reader.take().map_err(|_| spent_handle(idx))?;
+                let owned = entry.reader.take().map_err(|_| spent_handle())?;
                 Ok((
                     CommandStdin::Stream(Arc::new(std::sync::Mutex::new(owned))),
                     None,
@@ -167,14 +164,12 @@ impl PipeRegistry {
     /// `RUN` keeps zero copy `Stdio` handoff, plus the script backend for
     /// the bridge's socket-EOF force-close.
     pub(super) fn resolve_stdout(
-        idx: usize,
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
     ) -> Result<(StreamHandle, Option<Arc<PipeInner>>)> {
-        // `idx` and `direct` serve only the OS-pipe arms below, which are
+        // `direct` serves only the OS-pipe arms below, which are
         // compiled out under Miri.
-        let _ = idx;
         let _ = direct;
         match materialize(handle, promote)? {
             Materialized::Script(backend) => {
@@ -185,7 +180,7 @@ impl PipeRegistry {
                 if direct {
                     return Ok((StreamHandle::Os(entry.writer.clone()), None));
                 }
-                let owned = entry.writer.take().map_err(|_| spent_handle(idx))?;
+                let owned = entry.writer.take().map_err(|_| spent_handle())?;
                 Ok((
                     StreamHandle::Stream(Arc::new(std::sync::Mutex::new(owned))),
                     None,
@@ -201,14 +196,12 @@ impl PipeRegistry {
     /// second take bails deterministically; merge in shell via `2>&1`
     /// instead.
     pub(super) fn resolve_stderr(
-        idx: usize,
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
     ) -> Result<StreamHandle> {
-        // `idx` and `direct` serve only the OS-pipe arms below, which are
+        // `direct` serves only the OS-pipe arms below, which are
         // compiled out under Miri.
-        let _ = idx;
         let _ = direct;
         match materialize(handle, promote)? {
             Materialized::Script(backend) => Ok(StreamHandle::Stream(backend.writer_handle())),
@@ -217,7 +210,7 @@ impl PipeRegistry {
                 if direct {
                     return Ok(StreamHandle::Os(entry.writer.clone()));
                 }
-                let owned = entry.writer.take().map_err(|_| spent_handle(idx))?;
+                let owned = entry.writer.take().map_err(|_| spent_handle())?;
                 Ok(StreamHandle::Stream(Arc::new(std::sync::Mutex::new(owned))))
             }
         }
@@ -782,35 +775,32 @@ impl ExecIo {
     /// backend (for timeout-bounded bridge reads; `None` for OS pairs).
     pub(super) fn resolve_stdin(
         &self,
-        idx: usize,
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
     ) -> Result<(CommandStdin, Option<Arc<PipeInner>>)> {
-        PipeRegistry::resolve_stdin(idx, handle, direct, promote)
+        PipeRegistry::resolve_stdin(handle, direct, promote)
     }
 
     /// Resolve a stdout binding to a runnable handle plus the script
     /// backend (for the bridge's socket-EOF force-close).
     pub(super) fn resolve_stdout(
         &self,
-        idx: usize,
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
     ) -> Result<(StreamHandle, Option<Arc<PipeInner>>)> {
-        PipeRegistry::resolve_stdout(idx, handle, direct, promote)
+        PipeRegistry::resolve_stdout(handle, direct, promote)
     }
 
     /// Resolve a stderr binding to a runnable handle.
     pub(super) fn resolve_stderr(
         &self,
-        idx: usize,
         handle: &PipeHandle,
         direct: bool,
         promote: bool,
     ) -> Result<StreamHandle> {
-        PipeRegistry::resolve_stderr(idx, handle, direct, promote)
+        PipeRegistry::resolve_stderr(handle, direct, promote)
     }
 
     pub fn stdin(&self) -> Option<SharedInput> {

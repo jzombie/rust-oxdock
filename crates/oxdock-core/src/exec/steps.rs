@@ -784,11 +784,11 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::Run(arg) => {
             let cmd = super::args::resolve_arg(arg, &mut cx)?;
             let cmd = super::args::expand_dsl_vars(&cmd, cx.state)?;
-            handlers::run(&mut cx, idx, &cmd)
+            handlers::run(&mut cx, &cmd)
         }
         StepKind::RunExec { argv } => {
             let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
-            handlers::run_argv(&mut cx, idx, &resolved)
+            handlers::run_argv(&mut cx, &resolved)
         }
         StepKind::Echo(arg) => {
             let msg = super::args::resolve_arg(arg, &mut cx)?;
@@ -797,7 +797,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::AsyncBlock { .. } => handlers::dispatch_async_block(cmd, &mut cx),
         StepKind::Workdir(arg) => {
             let path = super::args::resolve_arg(arg, &mut cx)?;
-            handlers::workdir(&mut cx, idx, &path)
+            handlers::workdir(&mut cx, &path)
         }
         StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
         StepKind::RemoteBlock {
@@ -844,7 +844,6 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 let to_resolved = super::args::resolve_arg(to, &mut cx)?;
                 handlers::copy(
                     &mut cx,
-                    idx,
                     from_workspace.clone(),
                     &from_resolved,
                     &to_resolved,
@@ -862,7 +861,6 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let to_resolved = super::args::resolve_arg(to, &mut cx)?;
             handlers::copy_git(
                 &mut cx,
-                idx,
                 &rev_resolved,
                 &from_resolved,
                 &to_resolved,
@@ -872,7 +870,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::Archive { src, dst, raw } => {
             let src_resolved = super::args::resolve_arg(src, &mut cx)?;
             let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
-            handlers::archive(&mut cx, idx, &src_resolved, &dst_resolved, *raw)
+            handlers::archive(&mut cx, &src_resolved, &dst_resolved, *raw)
         }
         StepKind::Unarchive {
             src,
@@ -884,7 +882,6 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let cap_resolved = super::args::resolve_arg_opt(max_bytes, &mut cx)?;
             handlers::unarchive(
                 &mut cx,
-                idx,
                 &src_resolved,
                 &dst_resolved,
                 cap_resolved.as_deref(),
@@ -899,7 +896,6 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let to_resolved = super::args::resolve_arg(to, &mut cx)?;
             handlers::symlink(
                 &mut cx,
-                idx,
                 from_workspace.clone(),
                 &from_resolved,
                 &to_resolved,
@@ -907,22 +903,22 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         }
         StepKind::Mkdir(arg) => {
             let path = super::args::resolve_arg(arg, &mut cx)?;
-            handlers::mkdir(&mut cx, idx, &path)
+            handlers::mkdir(&mut cx, &path)
         }
         StepKind::Install { from, to } => {
             let from_resolved = super::args::resolve_arg(from, &mut cx)?;
             let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-            handlers::install(&mut cx, idx, &from_resolved, &to_resolved)
+            handlers::install(&mut cx, &from_resolved, &to_resolved)
         }
         StepKind::Ls(arg) => {
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
-            handlers::ls(&mut cx, idx, &resolved)
+            handlers::ls(&mut cx, &resolved)
         }
         StepKind::Read(arg) => {
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
-            handlers::read(&mut cx, idx, &resolved)
+            handlers::read(&mut cx, &resolved)
         }
-        StepKind::ReadLine { var } => handlers::read_line(&mut cx, idx, var),
+        StepKind::ReadLine { var } => handlers::read_line(&mut cx, var),
         StepKind::Prompt {
             var,
             message,
@@ -933,36 +929,30 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 Some(d) => Some(super::args::resolve_arg(d, &mut cx)?),
                 None => None,
             };
-            handlers::prompt(
-                &mut cx,
-                idx,
-                var,
-                &message_resolved,
-                default_resolved.as_deref(),
-            )
+            handlers::prompt(&mut cx, var, &message_resolved, default_resolved.as_deref())
         }
         StepKind::ListAppend { list, item } => {
             let value = super::args::evaluate_assert_operand(item, &mut cx)?;
-            handlers::push_into(&mut cx, idx, list, value)
+            handlers::push_into(&mut cx, list, value)
         }
         StepKind::Write { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
-            handlers::write(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
+            handlers::write(&mut cx, &path_resolved, contents_resolved.as_deref())
         }
         StepKind::Append { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
-            handlers::append(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
+            handlers::append(&mut cx, &path_resolved, contents_resolved.as_deref())
         }
         StepKind::Remove { path, recursive } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-            handlers::remove(&mut cx, idx, &path_resolved, *recursive)
+            handlers::remove(&mut cx, &path_resolved, *recursive)
         }
         StepKind::Expand { path, overrides } => {
             let path_resolved = super::args::resolve_arg_opt(path, &mut cx)?;
             let overrides_resolved = super::args::resolve_overrides(overrides, &mut cx)?;
-            handlers::replace(&mut cx, idx, &path_resolved, &overrides_resolved)
+            handlers::replace(&mut cx, &path_resolved, &overrides_resolved)
         }
         StepKind::AssertEq {
             hash,
@@ -976,7 +966,6 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             };
             handlers::assert_eq(
                 &mut cx,
-                idx,
                 generation,
                 idx,
                 hash,
@@ -986,7 +975,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         }
         StepKind::AssertContains { haystack, needle } => {
             let target = resolve_assert_target(haystack, &mut cx)?;
-            handlers::assert_contains(&mut cx, idx, generation, idx, &target, needle)
+            handlers::assert_contains(&mut cx, generation, idx, &target, needle)
         }
         StepKind::WithIoBlock { .. } => {
             bail!("WITH_IO block should have been expanded during parsing")
@@ -1015,7 +1004,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
         StepKind::Sleep { duration } => {
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
-            handlers::sleep(&mut cx, idx, &duration)
+            handlers::sleep(&mut cx, &duration)
         }
         StepKind::TypeAlias { .. } => {
             // Static declaration: collected before the run and
@@ -1151,7 +1140,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                             }
                             StepKind::Workdir(arg) => {
                                 let path = super::args::resolve_arg(arg, &mut cx)?;
-                                handlers::workdir(&mut cx, idx, &path)
+                                handlers::workdir(&mut cx, &path)
                             }
                             StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
                             StepKind::RemoteBlock {
@@ -1171,11 +1160,11 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                             StepKind::Run(arg) => {
                                 let cmd = super::args::resolve_arg(arg, &mut cx)?;
                                 let cmd = super::args::expand_dsl_vars(&cmd, cx.state)?;
-                                handlers::run(&mut cx, idx, &cmd)
+                                handlers::run(&mut cx, &cmd)
                             }
                             StepKind::RunExec { argv } => {
                                 let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
-                                handlers::run_argv(&mut cx, idx, &resolved)
+                                handlers::run_argv(&mut cx, &resolved)
                             }
                             StepKind::Echo(arg) => {
                                 let msg = super::args::resolve_arg(arg, &mut cx)?;
@@ -1200,7 +1189,6 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     let to_resolved = super::args::resolve_arg(to, &mut cx)?;
                                     handlers::copy(
                                         &mut cx,
-                                        idx,
                                         from_workspace.clone(),
                                         &from_resolved,
                                         &to_resolved,
@@ -1218,7 +1206,6 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 let to_resolved = super::args::resolve_arg(to, &mut cx)?;
                                 handlers::copy_git(
                                     &mut cx,
-                                    idx,
                                     &rev_resolved,
                                     &from_resolved,
                                     &to_resolved,
@@ -1228,7 +1215,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                             StepKind::Archive { src, dst, raw } => {
                                 let src_resolved = super::args::resolve_arg(src, &mut cx)?;
                                 let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
-                                handlers::archive(&mut cx, idx, &src_resolved, &dst_resolved, *raw)
+                                handlers::archive(&mut cx, &src_resolved, &dst_resolved, *raw)
                             }
                             StepKind::Unarchive {
                                 src,
@@ -1241,7 +1228,6 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     super::args::resolve_arg_opt(max_bytes, &mut cx)?;
                                 handlers::unarchive(
                                     &mut cx,
-                                    idx,
                                     &src_resolved,
                                     &dst_resolved,
                                     cap_resolved.as_deref(),
@@ -1256,7 +1242,6 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 let to_resolved = super::args::resolve_arg(to, &mut cx)?;
                                 handlers::symlink(
                                     &mut cx,
-                                    idx,
                                     from_workspace.clone(),
                                     &from_resolved,
                                     &to_resolved,
@@ -1264,22 +1249,22 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                             }
                             StepKind::Mkdir(arg) => {
                                 let path = super::args::resolve_arg(arg, &mut cx)?;
-                                handlers::mkdir(&mut cx, idx, &path)
+                                handlers::mkdir(&mut cx, &path)
                             }
                             StepKind::Install { from, to } => {
                                 let from_resolved = super::args::resolve_arg(from, &mut cx)?;
                                 let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-                                handlers::install(&mut cx, idx, &from_resolved, &to_resolved)
+                                handlers::install(&mut cx, &from_resolved, &to_resolved)
                             }
                             StepKind::Ls(arg) => {
                                 let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
-                                handlers::ls(&mut cx, idx, &resolved)
+                                handlers::ls(&mut cx, &resolved)
                             }
                             StepKind::Read(arg) => {
                                 let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
-                                handlers::read(&mut cx, idx, &resolved)
+                                handlers::read(&mut cx, &resolved)
                             }
-                            StepKind::ReadLine { var } => handlers::read_line(&mut cx, idx, var),
+                            StepKind::ReadLine { var } => handlers::read_line(&mut cx, var),
                             StepKind::Prompt {
                                 var,
                                 message,
@@ -1292,7 +1277,6 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 };
                                 handlers::prompt(
                                     &mut cx,
-                                    idx,
                                     var,
                                     &message_resolved,
                                     default_resolved.as_deref(),
@@ -1300,7 +1284,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                             }
                             StepKind::ListAppend { list, item } => {
                                 let value = super::args::evaluate_assert_operand(item, &mut cx)?;
-                                handlers::push_into(&mut cx, idx, list, value)
+                                handlers::push_into(&mut cx, list, value)
                             }
                             StepKind::Write { path, contents } => {
                                 let path_resolved = super::args::resolve_arg(path, &mut cx)?;
@@ -1308,7 +1292,6 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     super::args::resolve_arg_opt(contents, &mut cx)?;
                                 handlers::write(
                                     &mut cx,
-                                    idx,
                                     &path_resolved,
                                     contents_resolved.as_deref(),
                                 )
@@ -1319,20 +1302,19 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     super::args::resolve_arg_opt(contents, &mut cx)?;
                                 handlers::append(
                                     &mut cx,
-                                    idx,
                                     &path_resolved,
                                     contents_resolved.as_deref(),
                                 )
                             }
                             StepKind::Remove { path, recursive } => {
                                 let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-                                handlers::remove(&mut cx, idx, &path_resolved, *recursive)
+                                handlers::remove(&mut cx, &path_resolved, *recursive)
                             }
                             StepKind::Expand { path, overrides } => {
                                 let path_resolved = super::args::resolve_arg_opt(path, &mut cx)?;
                                 let overrides_resolved =
                                     super::args::resolve_overrides(overrides, &mut cx)?;
-                                handlers::replace(&mut cx, idx, &path_resolved, &overrides_resolved)
+                                handlers::replace(&mut cx, &path_resolved, &overrides_resolved)
                             }
                             StepKind::AssertEq {
                                 hash,
@@ -1348,7 +1330,6 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 };
                                 handlers::assert_eq(
                                     &mut cx,
-                                    idx,
                                     generation,
                                     idx,
                                     hash,
@@ -1358,9 +1339,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                             }
                             StepKind::AssertContains { haystack, needle } => {
                                 let target = resolve_assert_target(haystack, &mut cx)?;
-                                handlers::assert_contains(
-                                    &mut cx, idx, generation, idx, &target, needle,
-                                )
+                                handlers::assert_contains(&mut cx, generation, idx, &target, needle)
                             }
                             StepKind::WithIoBlock { .. } => {
                                 bail!("WITH_IO block should have been expanded during parsing")
@@ -1402,7 +1381,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                             StepKind::Sleep { duration } => {
                                 let duration =
                                     super::args::resolve_arg_as_duration(duration, &mut cx)?;
-                                handlers::sleep(&mut cx, idx, &duration)
+                                handlers::sleep(&mut cx, &duration)
                             }
                             StepKind::TypeAlias { .. } => {
                                 // Static declaration: collected before the run and
@@ -1779,11 +1758,11 @@ fn dispatch_flow_step<P: ProcessManager>(
             Ok(Flow::Done)
         }
         StepKind::Call { name, args } => {
-            let _ = handlers::call_func_value(cx, idx, name, args)?;
+            let _ = handlers::call_func_value(cx, name, args)?;
             Ok(Flow::Done)
         }
         StepKind::Return { expr } => handlers::handle_return(cx, idx, expr),
-        StepKind::While { cond, body } => handlers::while_loop(cx, idx, cond, body),
+        StepKind::While { cond, body } => handlers::while_loop(cx, cond, body),
         StepKind::Break => Ok(Flow::Break { idx }),
         StepKind::Continue => Ok(Flow::Continue { idx }),
         StepKind::For {
@@ -1810,7 +1789,7 @@ fn dispatch_flow_step<P: ProcessManager>(
         } => handlers::if_then(cx, cond, then_body, else_ifs, else_body),
         StepKind::Timeout { duration, body } => {
             let duration = super::args::resolve_arg_as_duration(duration, cx)?;
-            handlers::timeout(cx, idx, &duration, body)
+            handlers::timeout(cx, &duration, body)
         }
         StepKind::Isolated { body } => handlers::isolated(cx, body),
         StepKind::WithIo { bindings, cmd } => handlers::with_io(cx, generation, idx, bindings, cmd),
