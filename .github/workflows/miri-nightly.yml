@@ -38,9 +38,14 @@ jobs:
         with:
           ref: main
 
+      # TODO (#269): unpin the nightly toolchain once upstream fixes the
+      # E0391 async-drop query cycle in ssh-key 0.7.0-rc.11 (via
+      # russh). Pinned to nightly-2026-10-29 (proven green); nightly
+      # 2026-10-31 breaks third-party builds.
       - name: Install nightly toolchain with Miri
         uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-10-29
           components: miri
 
       # Pinned engine, never `latest`: the badge must name a fixed

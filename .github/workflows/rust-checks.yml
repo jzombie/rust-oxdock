@@ -208,9 +208,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      # TODO (#269): unpin the nightly toolchain once upstream fixes the
+      # E0391 async-drop query cycle in ssh-key 0.7.0-rc.11 (via
+      # russh). Pinned to nightly-2026-10-29 (proven green); nightly
+      # 2026-10-31 breaks the build. Re-pin deliberately, never drift.
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-10-29
           components: rustfmt, clippy
 
       - name: Install OxDock engine
