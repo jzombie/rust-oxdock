@@ -19,7 +19,9 @@
 #
 # Conventions a calling repo follows (all OxDock defaults here): a
 # Cargo workspace whose binary package matches `binary`, a CHANGELOG.md
-# with `## [<version>]` sections, and a `release` environment with
+# with dated `## [<version>] - YYYY-MM-DD` sections (the validate gate
+# fails on TBD, misformatted, or impossible dates before the matrix),
+# and a `release` environment with
 # required reviewers (converge it with .github/scripts/gha-apply-settings.oxfile).
 # Callers hold no OxDock code. Asset names derive from `binary`; the
 # tag carries the product version.

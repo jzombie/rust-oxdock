@@ -1,13 +1,17 @@
 # Release version gate: fails the run in seconds on a mistyped
 # version, before the build matrix burns any time. Same confirmation
 # check the release script enforces in full; this one just runs first.
-# No publishing, tagging, or releasing lives here by design.
+# The changelog date gate lives here too: an undated (TBD),
+# misformatted, inconsistent, or impossible date fails here as well,
+# before anything publishes. No publishing, tagging, or releasing
+# lives here by design.
 
 IMPORT [STD]
 
 INHERIT_ENV [RELEASE_CONFIRM]
 
-# Pin to the live tree: the manifest read must hit the real repo.
+# Pin to the live tree: the manifest and changelog reads must hit the
+# real repo.
 WORKSPACE LOCAL
 
 # The manifest is the single source of truth for the version: unified
@@ -30,3 +34,137 @@ IF HAS_KEY($manifest, "workspace") {
 # A typo or stale input fails here with both sides named.
 LET $confirm: STRING = "{{ env:RELEASE_CONFIRM }}"
 ASSERT_EQ $confirm $version
+
+# Changelog date gate: every `## [<version>]` heading carries its
+# release date as ` - YYYY-MM-DD`, one shape for the whole file, so
+# the notes slice and the GitHub release never ship a TBD or a typo.
+LET $log: STRING = READ "CHANGELOG.md"
+LET $head_count: INT = TEXT_COUNT_MATCHES($log, "^## \\[")
+LET $dated_count: INT = TEXT_COUNT_MATCHES($log, "^## \\[.+\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$")
+IF $dated_count != $head_count {
+    LET $heads: LIST<STRING> = TEXT_GREP($log, "^## \\[")
+    LET $heads_text: STRING = TEXT_JOIN($heads, "\n")
+    LET $bad: LIST<STRING> = TEXT_GREP($heads_text, "[0-9]{4}-[0-9]{2}-[0-9]{2}$", {invert: true})
+    LET $bad_text: STRING = TEXT_JOIN($bad, "\n")
+    ECHO "CHANGELOG headings must all use '## [<version>] - YYYY-MM-DD' (no TBD):"
+    ECHO "{{ $bad_text }}"
+    EXIT 1
+}
+
+# The shipping section must exist: a version with no notes fails here
+# instead of after the build matrix.
+LET $section_hits: INT = TEXT_COUNT_MATCHES($log, "^## \\[{{ $version }}\\]")
+IF $section_hits == 0 {
+    ECHO "CHANGELOG has no '## [{{ $version }}]' section"
+    EXIT 1
+}
+
+# The shipping date must be a well-formed ` - YYYY-MM-DD` tail (this
+# is the check that rejects TBD), then a plausible calendar value.
+LET $want: LIST<STRING> = TEXT_GREP($log, "^## \\[{{ $version }}\\]")
+LET $hline: STRING = $want.0
+LET $date_ok: BOOL = TEXT_MATCH($hline, "\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$")
+IF $date_ok == false {
+    ECHO "CHANGELOG [{{ $version }}] heading must end with ' - YYYY-MM-DD' (no TBD): {{ $hline }}"
+    EXIT 1
+}
+LET $date_caps: LIST<STRING> = TEXT_EXTRACT($hline, "\\] - ([0-9]{4})-([0-9]{2})-([0-9]{2})$")
+LET $sy: STRING = $date_caps.1
+LET $sm: STRING = $date_caps.2
+LET $sd: STRING = $date_caps.3
+LET $stamp: STRING = "{{ $sy }}-{{ $sm }}-{{ $sd }}"
+LET $year: INT = INT($sy)
+LET $month: INT = INT($sm)
+LET $day: INT = INT($sd)
+IF $year < 2020 {
+    ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is obviously wrong (want a year 2020-2100)"
+    EXIT 1
+}
+IF $year > 2100 {
+    ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is obviously wrong (want a year 2020-2100)"
+    EXIT 1
+}
+IF $month < 1 {
+    ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is not a real calendar date (month 01-12)"
+    EXIT 1
+}
+IF $month > 12 {
+    ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is not a real calendar date (month 01-12)"
+    EXIT 1
+}
+IF $day < 1 {
+    ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is not a real calendar date (day 01-31)"
+    EXIT 1
+}
+IF $day > 31 {
+    ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is not a real calendar date (day 01-31)"
+    EXIT 1
+}
+IF $month == 2 {
+    IF $day > 29 {
+        ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is not a real calendar date"
+        EXIT 1
+    }
+}
+IF $month == 4 {
+    IF $day > 30 {
+        ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is not a real calendar date"
+        EXIT 1
+    }
+}
+IF $month == 6 {
+    IF $day > 30 {
+        ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is not a real calendar date"
+        EXIT 1
+    }
+}
+IF $month == 9 {
+    IF $day > 30 {
+        ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is not a real calendar date"
+        EXIT 1
+    }
+}
+IF $month == 11 {
+    IF $day > 30 {
+        ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is not a real calendar date"
+        EXIT 1
+    }
+}
+
+# File order is newest first, so dates must never step backwards: a
+# typo'd month fails here instead of shipping under it.
+LET $all_dated: LIST<STRING> = TEXT_GREP($log, "^## \\[.+\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$")
+LET $prev_n: INT = 99999999
+FOR $h: STRING IN $all_dated {
+    LET $hcaps: LIST<STRING> = TEXT_EXTRACT($h, "([0-9]{4})-([0-9]{2})-([0-9]{2})$")
+    LET $hflat: STRING = TEXT_REPLACE($hcaps.0, "-", "")
+    LET $hn: INT = INT($hflat)
+    IF $hn > $prev_n {
+        ECHO "CHANGELOG dates step backwards at: {{ $h }}"
+        EXIT 1
+    }
+    $prev_n = $hn
+}
+
+# GNU date owns the fine print this DSL cannot: Feb 29 on a non-leap
+# year, and dates in the future. Linux-only, since only GNU date has
+# `-d`. Other platforms keep every check above; the release job
+# itself runs Ubuntu, so release day always enforces this block.
+[os:linux] {
+    LET $roundtrip_raw: STRING = RUN 'date -d "{{ $stamp }}" +%F'
+    LET $roundtrip: STRING = TEXT_TRIM($roundtrip_raw)
+    IF $roundtrip != $stamp {
+        ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is not a real calendar date"
+        EXIT 1
+    }
+    LET $today_raw: STRING = RUN date +%F
+    LET $today: STRING = TEXT_TRIM($today_raw)
+    LET $today_flat: STRING = TEXT_REPLACE($today, "-", "")
+    LET $today_n: INT = INT($today_flat)
+    LET $mine_flat: STRING = TEXT_REPLACE($stamp, "-", "")
+    LET $mine_n: INT = INT($mine_flat)
+    IF $mine_n > $today_n {
+        ECHO "CHANGELOG [{{ $version }}] date {{ $stamp }} is in the future (today is {{ $today }})"
+        EXIT 1
+    }
+}

@@ -77,15 +77,11 @@ fn validate_script_parses_and_gates_on_version() -> Result<()> {
     Ok(())
 }
 
-/// The version fallback executes for real: the actual
-/// `.github/scripts/gha-rust-validate.oxfile` (side-effect-free: it only reads and
-/// asserts) runs to completion against synthetic roots of every
-/// manifest layout, with the confirmation bridged to match. No
-/// duplicated logic: the harness owns the root, the file owns the
-/// branching.
-#[test]
-#[cfg_attr(miri, ignore = "needs host tempdir for synthetic Cargo roots")]
-fn version_fallback_covers_all_manifest_layouts() -> Result<()> {
+/// Run the real `.github/scripts/gha-rust-validate.oxfile` against a
+/// synthetic root carrying the given manifest plus changelog, with the
+/// confirmation bridged in. The script owns every branch; the harness
+/// owns the root and the fixtures.
+fn run_validate(manifest: &str, changelog: &str, confirm: &str) -> Result<()> {
     let repo_root = repo_root()?;
     let root = GuardedPath::new_root_from_str(&repo_root)?;
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
@@ -96,6 +92,25 @@ fn version_fallback_covers_all_manifest_layouts() -> Result<()> {
     let steps = oxdock_core::parse_script(&text).map_err(|err| {
         anyhow::anyhow!(".github/scripts/gha-rust-validate.oxfile failed to parse: {err}")
     })?;
+    let temp = GuardedPath::tempdir().context("tempdir")?;
+    let fixture = temp.as_guarded_path().clone();
+    let setup = PathResolver::new_guarded(fixture.clone(), fixture.clone())?;
+    setup.write_file(&fixture.join("Cargo.toml")?, manifest.as_bytes())?;
+    setup.write_file(&fixture.join("CHANGELOG.md")?, changelog.as_bytes())?;
+    let mut io = ExecIo::new();
+    io.insert_inherit_env("RELEASE_CONFIRM", confirm);
+    run_steps_with_context_result_with_io(&fixture, &fixture, &steps, io).map(|_| ())
+}
+
+/// The version fallback executes for real: the actual
+/// `.github/scripts/gha-rust-validate.oxfile` (side-effect-free: it only reads and
+/// asserts) runs to completion against synthetic roots of every
+/// manifest layout, with the confirmation bridged to match. No
+/// duplicated logic: the harness owns the root, the file owns the
+/// branching.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for synthetic Cargo roots")]
+fn version_fallback_covers_all_manifest_layouts() -> Result<()> {
     for (manifest, expected) in [
         (
             "[workspace]\n[workspace.package]\nversion = \"1.2.3-ws\"\n",
@@ -110,16 +125,99 @@ fn version_fallback_covers_all_manifest_layouts() -> Result<()> {
             "7.8.9-trad",
         ),
     ] {
-        let temp = GuardedPath::tempdir().context("tempdir")?;
-        let fixture = temp.as_guarded_path().clone();
-        let fixture_resolver = PathResolver::new_guarded(fixture.clone(), fixture.clone())?;
-        let cargo_path = fixture.join("Cargo.toml")?;
-        fixture_resolver.write_file(&cargo_path, manifest.as_bytes())?;
-        let mut io = ExecIo::new();
-        io.insert_inherit_env("RELEASE_CONFIRM", expected);
-        run_steps_with_context_result_with_io(&fixture, &fixture, &steps, io)
+        // One shared changelog holds every layout version with valid
+        // descending dates, so each confirmation proves its own layout
+        // against the same date gate. Fixed past dates stay past, so
+        // the Linux future check holds on every run.
+        let changelog = "# Changelog\n\n## [1.2.3-ws] - 2026-10-09\n\n- Ws.\n\n## [4.5.6-solo] - 2026-10-08\n\n- Solo.\n\n## [7.8.9-trad] - 2026-10-07\n\n- Trad.\n";
+        run_validate(manifest, changelog, expected)
             .map_err(|err| anyhow::anyhow!("validate must pass for version {expected}: {err:#}"))?;
     }
+    Ok(())
+}
+
+/// An undated (TBD) shipping heading fails the date gate: the only
+/// difference from the passing control above is the date text, so the
+/// failure proves the gate tripped.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for synthetic Cargo roots")]
+fn validate_rejects_tbd_changelog_date() -> Result<()> {
+    let err = run_validate(
+        "[workspace]\n[workspace.package]\nversion = \"1.2.3-ws\"\n",
+        "# Changelog\n\n## [1.2.3-ws] - TBD\n\n- Ws.\n",
+        "1.2.3-ws",
+    )
+    .expect_err("TBD date must fail validation");
+    let rendered = format!("{err:#}");
+    assert!(
+        !rendered.contains("failed to parse"),
+        "failure is the gate tripping, not a broken script: {rendered}"
+    );
+    Ok(())
+}
+
+/// A heading in any other shape fails the file-wide consistency gate.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for synthetic Cargo roots")]
+fn validate_rejects_inconsistent_heading_shape() -> Result<()> {
+    run_validate(
+        "[workspace]\n[workspace.package]\nversion = \"1.2.3-ws\"\n",
+        "# Changelog\n\n## [1.2.3-ws] - 2026-10-09\n\n- Ws.\n\n## [0.0.0-old] (2026-01-01)\n\n- Old.\n",
+        "1.2.3-ws",
+    )
+    .expect_err("undated old heading must fail validation");
+    Ok(())
+}
+
+/// Impossible months, days, and years fail the range gate. Feb 30
+/// trips the portable month-day table (no GNU date needed).
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for synthetic Cargo roots")]
+fn validate_rejects_impossible_dates() -> Result<()> {
+    for bad in [
+        "2026-13-01",
+        "2026-00-10",
+        "2026-10-32",
+        "2026-02-30",
+        "2026-04-31",
+        "1999-10-09",
+        "2101-01-01",
+    ] {
+        let changelog = format!("# Changelog\n\n## [1.2.3-ws] - {bad}\n\n- Ws.\n");
+        run_validate(
+            "[workspace]\n[workspace.package]\nversion = \"1.2.3-ws\"\n",
+            &changelog,
+            "1.2.3-ws",
+        )
+        .map(|_| ())
+        .expect_err(&format!("{bad} must fail validation"));
+    }
+    Ok(())
+}
+
+/// Dates stepping backwards down the file fail the monotonicity gate.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for synthetic Cargo roots")]
+fn validate_rejects_backwards_dates() -> Result<()> {
+    run_validate(
+        "[workspace]\n[workspace.package]\nversion = \"1.2.3-ws\"\n",
+        "# Changelog\n\n## [1.2.3-ws] - 2026-01-01\n\n- Ws.\n\n## [0.0.0-old] - 2026-10-09\n\n- Old.\n",
+        "1.2.3-ws",
+    )
+    .expect_err("backwards dates must fail validation");
+    Ok(())
+}
+
+/// A version with no changelog section fails naming the version.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for synthetic Cargo roots")]
+fn validate_rejects_missing_section() -> Result<()> {
+    run_validate(
+        "[workspace]\n[workspace.package]\nversion = \"1.2.3-ws\"\n",
+        "# Changelog\n\n## [0.0.0-old] - 2026-01-01\n\n- Old.\n",
+        "1.2.3-ws",
+    )
+    .expect_err("missing section must fail validation");
     Ok(())
 }
 
@@ -166,7 +264,7 @@ fn release_notes_extract_for_tree_version() -> Result<()> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn release_gate_rejects_mismatched_confirmation() -> Result<()> {
-    let run = release_harness("0.0.0-nope", "true", "true")?;
+    let run = release_harness("0.0.0-nope", "true", "true", &fixture_changelog())?;
     let err = run
         .execute()
         .expect_err("mismatched confirmation must fail");
@@ -237,14 +335,19 @@ struct ReleaseRun {
 
 #[cfg(feature = "markdown")]
 #[cfg(feature = "markdown")]
-fn release_harness(confirm: &str, dry_run: &str, binaries: &str) -> Result<ReleaseRun> {
+fn release_harness(
+    confirm: &str,
+    dry_run: &str,
+    binaries: &str,
+    changelog: &str,
+) -> Result<ReleaseRun> {
     let text = load_release_script()?;
     let steps = parse_release_script(&text)?;
     let temp = GuardedPath::tempdir().context("tempdir")?;
     let root = temp.as_guarded_path().clone();
     let setup = PathResolver::new_guarded(root.clone(), root.clone())?;
     setup.write_file(&root.join("Cargo.toml")?, fixture_manifest().as_bytes())?;
-    setup.write_file(&root.join("CHANGELOG.md")?, fixture_changelog().as_bytes())?;
+    setup.write_file(&root.join("CHANGELOG.md")?, changelog.as_bytes())?;
     setup.create_dir_all(&root.join("target")?)?;
     let manager = RecordingManager::new();
     let mut io = ExecIo::new();
@@ -296,7 +399,7 @@ impl ReleaseRun {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn dry_run_runs_only_the_dry_publish() -> Result<()> {
-    let run = release_harness(FIXTURE_VERSION, "true", "true")?;
+    let run = release_harness(FIXTURE_VERSION, "true", "true", &fixture_changelog())?;
     run.execute()?;
     assert_eq!(
         run.calls(),
@@ -320,6 +423,24 @@ fn dry_run_runs_only_the_dry_publish() -> Result<()> {
     Ok(())
 }
 
+/// An undated (TBD) shipping heading fails the release date gate right
+/// after notes extraction, before the dry-run publish spawns.
+#[test]
+#[cfg(feature = "markdown")]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn tbd_section_date_fails_before_any_publish() -> Result<()> {
+    let tbd = "# Changelog\n\n## [9.9.9-t] - TBD\n\n### Added\n\n- Thing.\n";
+    let run = release_harness(FIXTURE_VERSION, "true", "true", tbd)?;
+    run.execute()
+        .expect_err("TBD shipping date must fail the release");
+    assert!(
+        run.calls().is_empty(),
+        "no process spawned before the date gate: {:?}",
+        run.calls()
+    );
+    Ok(())
+}
+
 /// Full run with binaries and a partial registry: `demo-a` landed so
 /// the publish excludes it, `demo-b` is missing so the round runs.
 /// Publishing stays workspace-scoped (one invocation, no per-crate
@@ -329,7 +450,7 @@ fn dry_run_runs_only_the_dry_publish() -> Result<()> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn real_run_with_binaries_runs_the_full_pipeline() -> Result<()> {
-    let run = release_harness(FIXTURE_VERSION, "false", "true")?;
+    let run = release_harness(FIXTURE_VERSION, "false", "true", &fixture_changelog())?;
     script_registry(&run, &["demo-a"]);
     run.manager.respond("cargo publish --workspace", "");
     run.execute()?;
@@ -416,7 +537,7 @@ fn real_run_with_binaries_runs_the_full_pipeline() -> Result<()> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn real_run_without_binaries_creates_notes_only() -> Result<()> {
-    let run = release_harness(FIXTURE_VERSION, "false", "false")?;
+    let run = release_harness(FIXTURE_VERSION, "false", "false", &fixture_changelog())?;
     script_registry(&run, &["demo-a", "demo-b"]);
     run.execute()?;
     let calls = run.calls();
@@ -463,7 +584,7 @@ fn real_run_without_binaries_creates_notes_only() -> Result<()> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn all_landed_with_binaries_skips_publish() -> Result<()> {
-    let run = release_harness(FIXTURE_VERSION, "false", "true")?;
+    let run = release_harness(FIXTURE_VERSION, "false", "true", &fixture_changelog())?;
     script_registry(&run, &["demo-a", "demo-b"]);
     run.execute()?;
     let calls = run.calls();
@@ -495,7 +616,7 @@ fn all_landed_with_binaries_skips_publish() -> Result<()> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn publish_retries_failed_round_then_converges() -> Result<()> {
-    let run = release_harness(FIXTURE_VERSION, "false", "true")?;
+    let run = release_harness(FIXTURE_VERSION, "false", "true", &fixture_changelog())?;
     script_registry(&run, &["demo-a"]);
     run.manager
         .respond_once("cargo publish --workspace", "OXDOCK_PUBLISH_ROUND_FAILED");
