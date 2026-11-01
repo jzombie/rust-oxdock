@@ -202,6 +202,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 site.alias.as_deref(),
                 site.names.as_deref(),
                 &file.steps,
+                &file.exports,
             )?;
         }
     }
@@ -697,10 +698,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         Ok(())
     }
 
-    /// Collect one import site (#115): every wanted top-level `FUNC`
-    /// registers under the site's namespace (bare `SCRIPT::` names for
-    /// alias-free harvests). Nested control-flow bodies collect like
-    /// entry functions. Shadowing follows the same last-wins rule as
+    /// Collect one import site (#115): every wanted *exported* top-level
+    /// `FUNC` registers under the site's namespace (bare `SCRIPT::` names
+    /// for alias-free harvests). Unexported means private: full imports
+    /// skip unexported functions, and harvesting one fails upfront.
+    /// Nested control-flow bodies collect like entry functions.
+    /// Shadowing follows the same last-wins rule as
     /// [`collect`](Self::collect); the runtime registry remains the
     /// enforcer for true duplicates.
     fn collect_site(
@@ -709,6 +712,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         alias: Option<&str>,
         names: Option<&[String]>,
         steps: &[Step],
+        exports: &[String],
     ) -> Result<()> {
         if let Some(names) = names {
             let defined: Vec<&str> = steps
@@ -722,8 +726,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 if !defined.iter().any(|d| d == name) {
                     bail!("IMPORT `{file}` has no such function `{name}`");
                 }
+                if !exports.iter().any(|e| e == name) {
+                    bail!("IMPORT `{file}` does not export `{name}`");
+                }
             }
         }
+        let exported: std::collections::HashSet<&str> =
+            exports.iter().map(|e| e.as_str()).collect();
         for step in steps {
             if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
                 continue;
@@ -732,6 +741,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 name, params, body, ..
             } = &step.kind
             {
+                if !exported.contains(name.as_str()) {
+                    continue;
+                }
                 if let Some(names) = names
                     && !names.iter().any(|n| n == name)
                 {

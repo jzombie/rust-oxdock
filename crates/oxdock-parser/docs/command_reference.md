@@ -1327,12 +1327,16 @@ extension) load another script as an isolated pipeline:
 the alias is mandatory and becomes the namespace
 (`LIB::FOO`), with no filename inference. Collisions with
 live module names fail explicitly, as do duplicate aliases.
-The import runs in function-call-like isolation (bindings
-do not leak, `WORKDIR` reverts) and its `RETURN` value is
-the only channel back (`LET $r = IMPORT [...]`). Nested
-imports register in the outermost import's caller frame,
-so libraries reuse helpers transitively; the same file
-under the same alias in the same frame loads once.
+Only `EXPORT`ed top-level `FUNC`s cross the boundary:
+unexported means private, so an imported file exposes
+exactly its export list and nothing else. Variables are
+never exportable (`EXPORT` names must match a top-level
+`FUNC`). The import runs in function-call-like isolation
+(bindings do not leak, `WORKDIR` reverts) and its `RETURN`
+value is the only channel back (`LET $r = IMPORT [...]`).
+Nested imports register in the outermost import's caller
+frame, so libraries reuse helpers transitively; the same
+file under the same alias in the same frame loads once.
 
 Brackets mix both kinds and hold several entries at once,
 across lines if needed
@@ -1345,14 +1349,21 @@ inners) take exactly one file entry and no modules.
 
 Selective harvests (`IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
 optionally `AS ALIAS`) define only the named top-level
-functions: bare into the current scope, or namespaced
-under the alias. The file body never executes, so
-harvesting is side-effect free; the file's own nested
-imports still load, keeping helpers working. Harvests
-produce no value and never appear in value positions.
+functions, which must be `EXPORT`ed (harvesting a
+defined-but-unexported name fails upfront): bare into the
+current scope, or namespaced under the alias. A single
+name needs no inner brackets (`IMPORT [FOO FROM
+"x.oxdock"]`); several keep `[[F, G FROM ...]]` so the
+comma stays grouped in its own scope. The file
+body never executes, so harvesting is side-effect free;
+the file's own nested imports still load, keeping helpers
+working. Harvests produce no value and never appear in
+value positions.
 
 Paths resolve workspace-side, against the importing
-file's directory (the entry file's parent at top level).
+file's directory (the entry file's parent at top level;
+an entry staged outside the workspace, e.g. a CI temp
+script, resolves like stdin against the workspace root).
 Files the script itself creates land in snapshot space by
 default, so generate-then-import scripts should select
 `WORKSPACE LOCAL` (or `COPY` sources into place) to align
@@ -1363,8 +1374,13 @@ cross-file calls typechecked at their call sites, before
 the first step runs.
 
 `EXPORT` marks top-level script `FUNC`s as externally
-callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`).
-Single-file scope; see the MCP host for consumption.
+callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`) and as
+the file's importable interface: only exported names
+cross a file-import boundary, and only an entry script's
+direct `EXPORT`s become MCP tools (imported `ALIAS::FOO`
+stays private unless the entry re-exports; re-exporting
+imports is not yet supported). Single-file scope; see the
+MCP host for consumption.
 
 
 **Examples:**

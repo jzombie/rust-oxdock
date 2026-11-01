@@ -63,18 +63,18 @@ jobs:
         id: hashes
         shell: oxdock --script {0}
         run: |
-          IMPORT [STD]
+          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          LET $lock: STRING = HASH_SHA256("Cargo.lock")
+          LET $lock: STRING = CI::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
-          ECHO "rustc: {{ $caps.1 }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
+          LET $rustc: STRING = CI::RUSTC_HASH($report)
+          ECHO "rustc: {{ $rustc }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
 
       - name: Cache Cargo dependencies for Miri
         uses: actions/cache@v4

@@ -5,15 +5,15 @@
 # WORKSPACE LOCAL first: the libs are written by this script, so they
 # must land where relative imports resolve (the workspace side).
 WORKSPACE LOCAL
-WRITE lib.oxdock 'FUNC DOUBLE($x: STRING) { RETURN $x }'
+WRITE lib.oxdock 'FUNC DOUBLE($x: STRING) { RETURN $x } EXPORT DOUBLE'
 WRITE lib_value.oxdock 'RETURN "lib-value"'
-WRITE helpers.oxdock 'FUNC HELPER($x: STRING) { RETURN $x }'
+WRITE helpers.oxdock 'FUNC HELPER($x: STRING) { RETURN $x } EXPORT HELPER'
 IMPORT [STD,
         "lib.oxdock" AS LIB]
 LET $d: STRING = LIB::DOUBLE("hi")
 ASSERT_EQ $d "hi"
 LET $r: STRING = IMPORT ["lib_value.oxdock" AS LIB2]
 ASSERT_EQ $r "lib-value"
-IMPORT [[HELPER FROM "helpers.oxdock"]]
+IMPORT [HELPER FROM "helpers.oxdock"]
 LET $h: STRING = HELPER("yo")
 ASSERT_EQ $h "yo"

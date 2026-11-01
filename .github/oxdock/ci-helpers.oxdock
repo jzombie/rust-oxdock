@@ -1,0 +1,15 @@
+// Shared CI helpers: pure FUNCs used by inline `oxdock --script`
+// legs across `.github/workflows`. Stays side-effect free on purpose:
+// the import boundary reverts ENV/WORKDIR/WORKSPACE/LET, so each leg
+// keeps its own sandbox header and calls in here only for repeated
+// logic (hash extraction), binding RETURNs itself.
+FUNC LOCKFILE_HASH() {
+  RETURN HASH_SHA256("Cargo.lock")
+}
+EXPORT LOCKFILE_HASH
+
+FUNC RUSTC_HASH($report: STRING) {
+  LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
+  RETURN $caps.1
+}
+EXPORT RUSTC_HASH

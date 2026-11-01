@@ -4415,6 +4415,18 @@ fn parse_import_statement(
                 raw.push(RawEntry::From { names, path, alias });
                 continue;
             }
+            // `[F FROM "path" (AS ALIAS)?]`: single harvest without
+            // inner brackets. The `FROM` keyword is the discriminant
+            // (module and file parts never contain a top-level one);
+            // multi-name harvests keep `[[F, G FROM ...]]` so the comma
+            // stays grouped inside its own scope.
+            if dense.len() >= 3 {
+                let owned: Vec<Tok> = dense.iter().map(|t| (*t).clone()).collect();
+                if let Some((names, path, alias)) = parse_from_entry(&owned) {
+                    raw.push(RawEntry::From { names, path, alias });
+                    continue;
+                }
+            }
             match dense.as_slice() {
                 [tok] => match &tok.kind {
                     TokKind::Word(w) if is_upper_ident(w) => {

@@ -907,3 +907,47 @@ fn file_import_mixed_entries_emit_in_source_order() {
     );
     assert!(matches!(&steps[2].kind, StepKind::ImportFile { alias, .. } if alias == "A"));
 }
+
+#[test]
+fn file_import_from_single_bracket_harvests() {
+    // Single harvests need no inner brackets: the FROM keyword scopes
+    // the entry. Multi-name harvests keep [[F, G FROM ...]] so the
+    // comma stays grouped.
+    let steps = parse("IMPORT [FOO FROM \"lib.oxdock\"]\n").expect("single FROM parses");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepKind::ImportFuncs { path, alias, names } = &steps[0].kind else {
+        panic!("expected ImportFuncs, got {:?}", steps[0].kind);
+    };
+    assert_eq!(path, "lib.oxdock");
+    assert_eq!(alias, &None);
+    assert_eq!(names, &["FOO".to_string()]);
+}
+
+#[test]
+fn file_import_from_single_bracket_aliased() {
+    let steps =
+        parse("IMPORT [FOO FROM \"lib.oxdock\" AS H]\n").expect("aliased single FROM parses");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepKind::ImportFuncs { path, alias, names } = &steps[0].kind else {
+        panic!("expected ImportFuncs, got {:?}", steps[0].kind);
+    };
+    assert_eq!(path, "lib.oxdock");
+    assert_eq!(alias, &Some("H".to_string()));
+    assert_eq!(names, &["FOO".to_string()]);
+}
+
+#[test]
+fn file_import_from_single_bracket_mixed() {
+    let steps = parse("IMPORT [ALPHA, FOO FROM \"lib.oxdock\", \"b.oxdock\" AS B]\n")
+        .expect("mixed single FROM parses");
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    assert!(matches!(&steps[0].kind, StepKind::ImportFuncs { .. }));
+    assert!(matches!(&steps[1].kind, StepKind::ImportFile { .. }));
+}
+
+#[test]
+fn file_import_from_single_bracket_value_position_rejected() {
+    let err = parse("LET $r: STRING = IMPORT [FOO FROM \"x.oxdock\"]\n")
+        .expect_err("harvest in value position must fail");
+    assert!(err.to_string().contains("single file import"), "{err}");
+}

@@ -190,9 +190,11 @@ pub struct ExecState<P: ProcessManager> {
     /// diamond imports (two files importing one helper under one name)
     /// share it instead of redefining it.
     pub(super) import_completed: HashSet<String>,
-    /// Parsed bodies per resolved import path (#115), so diamond imports
-    /// parse once per run. Keyed by display path.
-    pub(super) import_cache: HashMap<String, Vec<Step>>,
+    /// Parsed bodies plus `EXPORT` names per resolved import path (#115),
+    /// so diamond imports parse once per run. Keyed by display path.
+    /// The export list gates visibility: only `EXPORT`ed top-level
+    /// `FUNC`s register under the import alias.
+    pub(super) import_cache: HashMap<String, (Vec<Step>, Vec<String>)>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,

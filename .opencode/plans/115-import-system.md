@@ -48,6 +48,7 @@ IMPORT ["./a.oxdock" AS A, "./b.oxdock" AS B]
 IMPORT [STD,
         "./lib.oxdock" AS LIB, "./nested.oxdock" AS NEST]
 IMPORT [[FOO, BAR FROM "./lib.oxdock"]]
+IMPORT [FOO FROM "./lib.oxdock"]
 IMPORT [[FOO FROM "./lib.oxdock" AS H], STD]
 IMPORT ["./lib.oxdock" AS LIB] WITH_IO [stdin=$x, stdout=$y]
 LET $r = IMPORT ["./lib.oxdock" AS LIB]
@@ -64,7 +65,9 @@ LET $t = ASYNC IMPORT ["./lib.oxdock" AS LIB]
   anything else shaped like an import is a hard error there.
 - Selective harvest `[[F, G FROM "path" (AS ALIAS)?]]` defines only the
   named top-level `FUNC`s (bare, or namespaced) without executing the
-  file body; the file's own nested imports still load. Missing names
+  file body; a single name needs no inner brackets (`[F FROM "path"]`,
+  several keep `[[F, G FROM ...]]` so the comma stays grouped). The
+  file's own nested imports still load. Missing names
   fail at import time. Produces no value: never valid in value
   positions. Bare names declare into the parse scope (duplicate and
   reserved rules mirror `FUNC`); aliases follow file-import rules.
@@ -126,7 +129,8 @@ New `crates/oxdock-core/src/exec/import.rs` (or extend `args.rs`):
 ## 6. Tests
 
 - Parser: file form with `AS`, multi-entry and mixed brackets, multiline, `FROM` harvests (bare + aliased), missing `AS` errors, bad alias errors, `LET $r = IMPORT`, `LET $t = ASYNC IMPORT`, module form unaffected, guarded `IMPORT` where applicable.
-- Static closure: cross-file arity fails before any step with no side effects; nested file errors fail before any step; missing harvest names and cycles fail upfront.
+- Static closure: cross-file arity fails before any step with no side effects; nested file errors fail before any step; missing harvest names and cycles fail upfront. Only `EXPORT`ed names cross file boundaries (unexported is private); harvest of a defined-but-unexported name fails upfront with `does not export`.
+- Follow-up (not this branch): unknown `ALIAS::F` calls (typo or unexported) pass the closure as opaque and fail at runtime when reached. Failing those upfront is sound (an uncollected alias call can never succeed) but is a separate strictness change.
 - Core: isolation (`LET/ENV/WORKDIR/WORKSPACE` do not leak), `RETURN` capture vs bare discard, nested/transitive, cycle chain error, depth limit, diamond cache parses once, `BREAK/CONTINUE` cannot cross, `RETURN` outside import errors, `ASYNC IMPORT + AWAIT`.
 - Pipes: two imports with same internal pipe name isolated; explicit `WITH_IO` passing works; no cross-talk without directive.
 - FS/security: `..` escape + absolute-outside-root rejected; remote denied by default (phase 3); Miri ignores with reasons.
