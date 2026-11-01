@@ -967,7 +967,6 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             handlers::assert_eq(
                 &mut cx,
                 generation,
-                idx,
                 hash,
                 &target,
                 expected_resolved.as_ref(),
@@ -1331,7 +1330,6 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 handlers::assert_eq(
                                     &mut cx,
                                     generation,
-                                    idx,
                                     hash,
                                     &target,
                                     expected_resolved.as_ref(),

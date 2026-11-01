@@ -454,7 +454,7 @@ fn run_pty<P: ProcessManager>(
         #[cfg(not(miri))]
         CommandStdin::OsPipe(_) => {
             bail!(
-                "WITH_IO [tty] stdin cannot arrive on a live OS pipe; bind a script pipe with stdin=$var",
+                "WITH_IO [tty] stdin cannot arrive on a live OS pipe; bind a script pipe with stdin=$var"
             )
         }
     };
@@ -468,7 +468,7 @@ fn run_pty<P: ProcessManager>(
         #[cfg(not(miri))]
         Some(StreamHandle::Os(_)) => {
             bail!(
-                "WITH_IO [tty] stdout cannot arrive on a live OS pipe; bind a script pipe with stdout=$var",
+                "WITH_IO [tty] stdout cannot arrive on a live OS pipe; bind a script pipe with stdout=$var"
             )
         }
     };
@@ -1324,7 +1324,7 @@ pub(super) fn read<P: ProcessManager>(
         })?;
     } else {
         let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-            bail!("READ requires stdin (use WITH_IO [stdin=...] READ)",);
+            bail!("READ requires stdin (use WITH_IO [stdin=...] READ)");
         };
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
@@ -1349,7 +1349,7 @@ pub(super) fn read<P: ProcessManager>(
 
 pub(super) fn read_line<P: ProcessManager>(cx: &mut StepCtx<'_, P>, var: &str) -> Result<()> {
     let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
-        bail!("READ_LINE requires stdin (use WITH_IO [stdin=...] READ_LINE $var)",);
+        bail!("READ_LINE requires stdin (use WITH_IO [stdin=...] READ_LINE $var)");
     };
     let clean_var = var.trim_start_matches('$').to_string();
     let mut buf = Vec::new();
@@ -1624,7 +1624,7 @@ pub(super) fn replace<P: ProcessManager>(
             let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
                 bail!(
                     "EXPAND requires stdin when no file path is given \
-                     (use WITH_IO [stdin=...] EXPAND)",
+                     (use WITH_IO [stdin=...] EXPAND)"
                 );
             };
             let mut guard = input_stream
@@ -1662,15 +1662,11 @@ pub(super) fn replace<P: ProcessManager>(
 pub(super) fn assert_eq<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
-    idx_step: usize,
     hash: &Option<String>,
     actual: &super::steps::ResolvedAssertTarget,
     expected: Option<&Value>,
 ) -> Result<()> {
     use super::steps::ResolvedAssertTarget;
-    // Exact stdout accumulators are generation-scoped (trial-cumulative),
-    // unlike per-step substring windows, so the step index is unused here.
-    let _ = idx_step;
     // Mode 1: exact stdout with piped stdin consumes the stream, mirroring
     // the legacy substring behavior, but compares exact bytes.
     if let ResolvedAssertTarget::Stdout = actual
@@ -1708,7 +1704,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
             ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
             ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation)?,
             ResolvedAssertTarget::Stderr => {
-                bail!("ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...",);
+                bail!("ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...");
             }
         };
         let mut hasher = Sha256::new();
@@ -1759,7 +1755,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
             Ok(())
         }
         ResolvedAssertTarget::Stderr => {
-            bail!("ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...",);
+            bail!("ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...");
         }
         ResolvedAssertTarget::Pipe(bytes) => {
             let actual_str = String::from_utf8(bytes.clone())
@@ -1800,7 +1796,7 @@ fn drain_stdin_bounded(input_stream: SharedInput, verb: &str) -> Result<Vec<u8>>
         }
         if out.len() + n > super::io::EXACT_STDOUT_CAP {
             bail!(
-                "{verb} stdin exceeded the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
+                "{verb} stdin exceeded the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout"
             );
         }
         out.extend_from_slice(&buf[..n]);
@@ -1824,7 +1820,7 @@ fn exact_stdout_bytes<P: ProcessManager>(
             "ASSERT_EQ stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
         ),
         Some(entry) => Ok(entry.bytes.clone()),
-        None => bail!("ASSERT_EQ stdout has no exact capture registered",),
+        None => bail!("ASSERT_EQ stdout has no exact capture registered"),
     }
 }
 
@@ -2053,7 +2049,7 @@ fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyReque
     if !tty {
         if rows.is_some() || cols.is_some() {
             bail!(
-                "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size",
+                "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"
             );
         }
         return Ok(None);
@@ -2063,7 +2059,7 @@ fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyReque
         .any(|b| matches!(b.stream, IoStream::Stderr))
     {
         bail!(
-            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex",
+            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"
         );
     }
     match cmd {
@@ -2715,7 +2711,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
         {
             bail!(
-                "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value",
+                "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
             );
         }
         if bindings.is_empty() {
@@ -3425,7 +3421,7 @@ pub(super) fn prompt<P: ProcessManager>(
     #[cfg(miri)]
     {
         let _ = (cx, idx, var, message, default);
-        bail!("PROMPT unavailable under Miri (no terminal)",);
+        bail!("PROMPT unavailable under Miri (no terminal)");
     }
     #[cfg(not(miri))]
     {
@@ -3668,7 +3664,7 @@ pub(crate) fn dispatch_assert_eq<P: ProcessManager>(
         Some(e) => Some(super::args::evaluate_assert_operand(e, cx)?),
         None => None,
     };
-    assert_eq(cx, 0, 0, hash, &target, expected_val.as_ref())
+    assert_eq(cx, 0, hash, &target, expected_val.as_ref())
 }
 
 pub(crate) fn dispatch_assert_contains<P: ProcessManager>(
