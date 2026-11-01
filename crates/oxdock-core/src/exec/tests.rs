@@ -943,8 +943,8 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         entry_file: None,
         import_stack: Vec::new(),
         import_alias_frame: None,
-        import_completed: std::collections::HashSet::new(),
-        import_cache: std::collections::HashMap::new(),
+        modules: std::collections::HashMap::new(),
+        module_stack: Vec::new(),
         module_table: super::native::std_module_table(),
         types: super::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),
@@ -6403,7 +6403,10 @@ fn file_import_missing_file_fails() {
     let fs = MockFs::new();
     let steps = parse_entry("IMPORT [\"nope.oxdock\" AS LIB]\n");
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
-    assert!(format!("{err:#}").contains("cannot be read"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("must exist when the run starts"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -7258,4 +7261,153 @@ fn file_import_no_exports_body_still_runs() {
         bindings.get("r").and_then(|v| v.as_str()),
         Some("lib-value")
     );
+}
+
+#[test]
+fn file_import_state_shared_across_aliases() {
+    // One module, one global state: two aliases are views onto the
+    // same initialized store. The second import skips execution
+    // (init runs once) and observes the first import's mutations.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "counter.oxdock",
+        indoc! {r#"
+            LET $n: INT = 0
+            FUNC INCR() {
+                $n = $n + 1
+                RETURN $n
+            }
+            EXPORT INCR
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["counter.oxdock" AS A]
+        IMPORT ["counter.oxdock" AS B]
+        LET $a: INT = A::INCR()
+        LET $b: INT = B::INCR()
+        LET $c: INT = A::INCR()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("shared module state across aliases");
+    assert_eq!(bindings.get("a").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(bindings.get("b").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(bindings.get("c").and_then(|v| v.as_i64()), Some(3));
+}
+
+#[test]
+fn file_import_state_shared_through_nested_imports() {
+    // A nested import initializes the same shared module: the entry's
+    // view of the helper sees mutations made through the lib's view.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "state.oxdock",
+        indoc! {r#"
+            LET $n: INT = 0
+            FUNC BUMP() {
+                $n = $n + 10
+                RETURN $n
+            }
+            EXPORT BUMP
+        "#},
+    );
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+            IMPORT ["state.oxdock" AS S]
+            FUNC GO() {
+                RETURN S::BUMP()
+            }
+            EXPORT GO
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        IMPORT ["state.oxdock" AS S]
+        LET $a: INT = LIB::GO()
+        LET $b: INT = S::BUMP()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("nested import shares module state");
+    assert_eq!(bindings.get("a").and_then(|v| v.as_i64()), Some(10));
+    assert_eq!(bindings.get("b").and_then(|v| v.as_i64()), Some(20));
+}
+
+#[test]
+fn file_import_harvest_stateful_fails_upfront() {
+    // Harvests never execute the file body, so there is no initialized
+    // store for a state-touching function to read: reject before any
+    // step runs, naming the full import as the fix.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+            LET $n: INT = 0
+            FUNC PURE($x: STRING) {
+             RETURN $x
+            }
+            FUNC STATEFUL() {
+             $n = $n + 1
+             RETURN $n
+            }
+            EXPORT [PURE, STATEFUL]
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        WRITE marker.txt side-effect
+        IMPORT [[STATEFUL FROM "lib.oxdock"]]
+    "#});
+    let err = run_expect_err(Box::new(fs.clone()), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("cannot harvest stateful function"),
+        "{err:#}"
+    );
+    assert!(!fs.snapshot().keys().any(|k| k.ends_with("marker.txt")));
+}
+
+#[test]
+fn file_import_harvest_stateless_still_works() {
+    // The gate is precise: harvesting a pure function from a module
+    // that also holds state succeeds; only state-touching harvests fail.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+            LET $n: INT = 0
+            FUNC PURE($x: STRING) {
+             RETURN $x
+            }
+            FUNC STATEFUL() {
+             $n = $n + 1
+             RETURN $n
+            }
+            EXPORT [PURE, STATEFUL]
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[PURE FROM "lib.oxdock"]]
+        LET $v: STRING = PURE("ok")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("stateless harvest works");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("ok"));
 }

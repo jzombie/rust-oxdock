@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -185,16 +185,16 @@ pub struct ExecState<P: ProcessManager> {
     /// importer's `ALIAS::` bodies keep resolving nested aliases after
     /// the nested frame pops. `None` outside an import.
     pub(super) import_alias_frame: Option<usize>,
-    /// Completed file imports (#115), keyed `frame + alias + path`: the
-    /// same file under the same alias in the same frame loads once, so
-    /// diamond imports (two files importing one helper under one name)
-    /// share it instead of redefining it.
-    pub(super) import_completed: HashSet<String>,
-    /// Parsed bodies plus `EXPORT` names per resolved import path (#115),
-    /// so diamond imports parse once per run. Keyed by display path.
-    /// The export list gates visibility: only `EXPORT`ed top-level
-    /// `FUNC`s register under the import alias.
-    pub(super) import_cache: HashMap<String, (Vec<Step>, Vec<String>)>,
+    /// One file module per resolved import path (#115): parse once,
+    /// validate once, initialize once. Every alias is a view onto the
+    /// same record and the same shared state.
+    pub(super) modules: HashMap<String, ModuleRecord>,
+    /// Active module context (#115), innermost last: `Some(key)` while
+    /// module-owned code runs (init body or module-owned `FUNC`),
+    /// `None` past an entry-function boundary (entry `FUNC`s stay
+    /// params-only and never see module state). Reads and mutations
+    /// consult the topmost `Some` store after lexical frames miss.
+    pub(super) module_stack: Vec<Option<String>>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -220,6 +220,30 @@ pub(super) struct ScopeSnapshot {
     pub(super) cwd: GuardedPath,
     pub(super) root: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
+}
+
+/// One parsed file module (#115), keyed by resolved display path: parse
+/// once, validate once, initialize once. `init` is `None` until the
+/// first import executes the body; every alias is a view onto the
+/// same record and the same shared state.
+#[derive(Clone, Default)]
+pub(super) struct ModuleRecord {
+    pub(super) steps: Vec<Step>,
+    pub(super) exports: Vec<String>,
+    pub(super) init: Option<ModuleInit>,
+}
+
+/// Initialized module state (#115): the shared globals every alias of
+/// one file observes. `vars` holds the module body's top-level `LET`
+/// bindings, drained from the init frame when the first import runs;
+/// module-owned `FUNC`s resolve names against `vars` after lexical
+/// frames miss, so one file's functions share one global state instead
+/// of each alias getting a private copy. `return_value` caches the
+/// init body's `RETURN`, so repeated imports bind the same value.
+#[derive(Clone)]
+pub(super) struct ModuleInit {
+    pub(super) vars: HashMap<String, (TypeTag, Value)>,
+    pub(super) return_value: Value,
 }
 
 /// One anonymous background worker: the thread-join handle plus the
@@ -680,8 +704,8 @@ impl<P: ProcessManager> ExecState<P> {
             entry_file: self.entry_file.clone(),
             import_stack: self.import_stack.clone(),
             import_alias_frame: self.import_alias_frame,
-            import_completed: self.import_completed.clone(),
-            import_cache: self.import_cache.clone(),
+            modules: self.modules.clone(),
+            module_stack: self.module_stack.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
@@ -722,6 +746,13 @@ impl<P: ProcessManager> ExecState<P> {
         for scope in self.var_scopes.iter() {
             for (_, value) in scope.values() {
                 mark_value_pipes_escaped(value);
+            }
+        }
+        for record in self.modules.values() {
+            if let Some(init) = record.init.as_ref() {
+                for entry in init.vars.values() {
+                    mark_value_pipes_escaped(&entry.1);
+                }
             }
         }
     }
@@ -789,6 +820,16 @@ impl<P: ProcessManager> ExecState<P> {
             .iter()
             .rev()
             .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
+            .or_else(|| {
+                self.current_module().and_then(|module| {
+                    self.modules.get(&module).and_then(|record| {
+                        record
+                            .init
+                            .as_ref()
+                            .and_then(|init| init.vars.get(key).map(|(k, _)| k.clone()))
+                    })
+                })
+            })
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "undeclared variable ${key}: declare it first with LET ${key}: TYPE = ..."
@@ -800,6 +841,16 @@ impl<P: ProcessManager> ExecState<P> {
                 slot.1 = coerced;
                 return Ok(());
             }
+        }
+        // Not a lexical binding: update the owning module's shared
+        // store in place, so every alias observes the mutation.
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get_mut(&module)
+            && let Some(init) = record.init.as_mut()
+            && let Some(slot) = init.vars.get_mut(key)
+        {
+            slot.1 = coerced;
+            return Ok(());
         }
         anyhow::bail!("undeclared variable ${key}");
     }
@@ -854,6 +905,16 @@ impl<P: ProcessManager> ExecState<P> {
                 return Some(value.clone());
             }
         }
+        // Module-owned code falls back to the owning module's shared
+        // store (#115): one file's functions share one global state.
+        // Entry code never sees it (its boundary pushes `None`).
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get(&module)
+            && let Some(init) = record.init.as_ref()
+            && let Some((_, value)) = init.vars.get(key)
+        {
+            return Some(value.clone());
+        }
         None
     }
 
@@ -863,15 +924,44 @@ impl<P: ProcessManager> ExecState<P> {
                 return Some(entry.clone());
             }
         }
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get(&module)
+            && let Some(init) = record.init.as_ref()
+            && let Some(entry) = init.vars.get(key)
+        {
+            return Some(entry.clone());
+        }
         None
     }
 
+    /// Owning module of the executing code (#115): the top of the
+    /// module stack when it names a module, `None` past an entry
+    /// boundary or outside any module. Lookups stop at the first
+    /// entry from the top, so entry functions called from module
+    /// code stay params-only.
+    pub(super) fn current_module(&self) -> Option<String> {
+        match self.module_stack.last() {
+            Some(Some(key)) => Some(key.clone()),
+            _ => None,
+        }
+    }
+
     /// Get a flattened view of all variables across all scopes.
-    /// Inner scopes take precedence over outer scopes.
+    /// Inner scopes take precedence over outer scopes. Module-owned
+    /// code additionally sees the owning module's shared store beneath
+    /// every lexical frame; entry code never does.
     pub(super) fn all_vars(&self) -> HashMap<String, Value> {
         let mut result = HashMap::new();
         for scope in self.var_scopes.iter().rev() {
             for (k, (_, v)) in scope {
+                result.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get(&module)
+            && let Some(init) = record.init.as_ref()
+        {
+            for (k, (_, v)) in &init.vars {
                 result.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }

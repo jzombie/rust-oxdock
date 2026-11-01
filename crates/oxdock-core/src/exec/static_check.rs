@@ -86,11 +86,14 @@ enum StaticTy {
     Void,
 }
 
-/// One collected script function: resolved params plus body.
+/// One collected script function: resolved params, body, and owning
+/// file module (#115, `None` for entry/REPL functions). The owner
+/// decides whose shared store the body resolves against.
 #[derive(Clone)]
 struct FuncInfo {
     params: Vec<(String, TypeTag)>,
     body: Vec<Step>,
+    module: Option<String>,
 }
 
 /// Lexical environment: a stack of frames mirroring the runtime
@@ -114,6 +117,25 @@ struct Binding {
 #[derive(Clone, Default, Debug)]
 struct Env {
     frames: Vec<HashMap<String, Vec<Binding>>>,
+    /// Module-shared bindings visible to module-owned code (#115):
+    /// the owning file's top-level `LET`s with a touch flag shared
+    /// across forks (reads on any path mark the body state-dependent,
+    /// which is what the harvest gate probes). Reads consult these
+    /// after lexical frames miss; entry code never carries one.
+    module: Option<ModuleScope>,
+}
+
+/// Module-shared bindings plus a fork-shared touch flag. `Rc` (not
+/// `Arc`): the checker is single-threaded; forks clone the `Rc` so a
+/// touch on any conditional path is still observed after the fork is
+/// discarded.
+#[derive(Clone, Debug)]
+struct ModuleScope {
+    /// Owning module key, so nested checks re-seed from the checker's
+    /// module table instead of inheriting possibly-stale bindings.
+    key: String,
+    lets: HashMap<String, TypeTag>,
+    touched: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 /// Where a `RETURN`/`BREAK`/`CONTINUE` may legally land, mirroring
@@ -145,6 +167,10 @@ struct Scope<'x> {
 struct Checker<'a, P: ProcessManager> {
     exec: &'a ExecState<P>,
     funcs: HashMap<String, FuncInfo>,
+    /// Module-owned top-level `LET`s by module key (#115): seeded into
+    /// the environment when checking module-owned function bodies, so
+    /// static resolution sees the same store the runtime drains into.
+    module_lets: HashMap<String, Vec<(String, TypeTag)>>,
     hosts: HashMap<String, FuncMeta>,
     inferred: HashMap<String, StaticTy>,
     inferring: Vec<String>,
@@ -159,26 +185,92 @@ struct Checker<'a, P: ProcessManager> {
 /// imported top level is function-like: `RETURN` is the value channel
 /// back to the importer (allowed here, unlike entry scripts), and
 /// falling off the end yields `""` instead of failing. Nested `FUNC`
-/// bodies are fully checked like entry functions.
+/// bodies are fully checked like entry functions. `module` names the
+/// file's module record: top-level `LET`s seed the module environment
+/// that module-owned functions resolve against, mirroring the runtime
+/// store drain on first initialization.
 pub fn validate_import_body_types<P: ProcessManager>(
     steps: &[Step],
     exec: &ExecState<P>,
+    module: &str,
 ) -> Result<()> {
     let mut checker = Checker::new(exec);
-    checker.collect(steps)?;
-    let mut env = Env::one_frame(Vec::new());
-    let scope = Scope {
-        label: "import",
-        ret: RetCtx::Func("IMPORT".to_string()),
-        loops: 0,
-        site: None,
-    };
-    let out = checker.walk_body(steps, &mut env, &scope, 0)?;
-    let _ = out;
+    checker.module_lets.insert(
+        module.to_string(),
+        module_lets(steps, exec)?.into_iter().collect(),
+    );
+    checker.collect_owned(steps, Some(module))?;
+    checker.check_import_body("import", steps, Some(module))?;
     for key in checker.func_keys() {
         checker.func_return(&key, 0)?;
     }
     Ok(())
+}
+
+/// Probe whether harvesting `names` from a module body would observe
+/// module state (#115): returns the first state-touching name, if any.
+/// The file body never executes on harvest, so a stateful harvest has
+/// no initialized store to read; it must fail and direct the author to
+/// a full import. Pure helpers probe clean.
+pub(crate) fn harvest_touches_module<P: ProcessManager>(
+    exec: &ExecState<P>,
+    module: &str,
+    steps: &[Step],
+    names: &[String],
+) -> Result<Option<String>> {
+    let mut checker = Checker::new(exec);
+    checker.module_lets.insert(
+        module.to_string(),
+        module_lets(steps, exec)?.into_iter().collect(),
+    );
+    for name in names {
+        let Some((params, body)) = steps.iter().find_map(|step| match &step.kind {
+            StepKind::FuncDef {
+                name: def_name,
+                params,
+                body,
+                ..
+            } if def_name == name => Some((params.clone(), body.clone())),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let probe_key = format!("__probe__::{name}");
+        checker.define_collected(
+            &probe_key,
+            vec![probe_key.clone()],
+            &params,
+            &body,
+            Some(module),
+        )?;
+        if checker.func_touches_module(&probe_key)? {
+            return Ok(Some(name.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// Top-level `LET` bindings of a module body (#115): the declarations
+/// that drain into the shared store on first initialization. Names
+/// resolve through the same tags execution uses; dead-guarded steps
+/// are skipped exactly like collection skips them.
+fn module_lets<P: ProcessManager>(
+    steps: &[Step],
+    exec: &ExecState<P>,
+) -> Result<Vec<(String, TypeTag)>> {
+    let mut out = Vec::new();
+    for step in steps {
+        if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+            continue;
+        }
+        if let StepKind::Assign { var, decl_type, .. } = &step.kind {
+            let tag = exec
+                .resolve_tag(decl_type)
+                .map_err(|err| anyhow::anyhow!("module variable `${var}`: {err:#}"))?;
+            out.push((clean_var(var), tag));
+        }
+    }
+    Ok(out)
 }
 
 /// Run the static pass over the entry script plus the entire import
@@ -199,6 +291,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         for site in &file.sites {
             checker.collect_site(
                 &file.path,
+                &file.key,
                 site.alias.as_deref(),
                 site.names.as_deref(),
                 &file.steps,
@@ -208,7 +301,7 @@ pub fn validate_script_closure<P: ProcessManager>(
     }
     checker.check_top_level(entry)?;
     for file in files {
-        checker.check_import_body(&file.key, &file.steps)?;
+        checker.check_import_body(&file.key, &file.steps, Some(&file.key))?;
     }
     for key in checker.func_keys() {
         checker.func_return(&key, 0)?;
@@ -450,7 +543,10 @@ impl Env {
         for (name, tag) in bindings {
             top.insert(name, vec![Binding { tag, guard: None }]);
         }
-        Self { frames: vec![top] }
+        Self {
+            frames: vec![top],
+            module: None,
+        }
     }
 
     /// Fork for a scoped body: clone the stack and push a fresh frame,
@@ -536,6 +632,14 @@ impl Env {
                 return Ok((unified.expect("live never empty"), guard));
             }
         }
+        // Module-shared bindings sit beneath every lexical frame (#115):
+        // a hit marks the body as state-dependent for the harvest gate.
+        if let Some(scope) = &self.module
+            && let Some(tag) = scope.lets.get(key)
+        {
+            scope.touched.set(true);
+            return Ok((tag.clone(), None));
+        }
         bail!("undefined variable ${key}");
     }
 
@@ -544,6 +648,10 @@ impl Env {
             .iter()
             .rev()
             .any(|frame| frame.contains_key(key))
+            || self
+                .module
+                .as_ref()
+                .is_some_and(|scope| scope.lets.contains_key(key))
     }
 
     /// Declare in the top frame. A duplicate whose guard overlaps any
@@ -601,6 +709,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         Self {
             exec,
             funcs: HashMap::new(),
+            module_lets: HashMap::new(),
             hosts,
             inferred: HashMap::new(),
             inferring: Vec::new(),
@@ -619,14 +728,19 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// steps are skipped: unregistered code is never checked.
     /// Each function is keyed by bare and `SCRIPT::`-qualified name
     /// so calls resolve regardless of parser qualification.
-    fn collect(&mut self, steps: &[Step]) -> Result<()> {
+    fn collect_owned(&mut self, steps: &[Step], module: Option<&str>) -> Result<()> {
         for step in steps {
             if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
                 continue;
             }
-            self.collect_step(step)?;
+            self.collect_step(step, module)?;
         }
         Ok(())
+    }
+
+    /// Entry shorthand: ownerless collection for entry scripts.
+    fn collect(&mut self, steps: &[Step]) -> Result<()> {
+        self.collect_owned(steps, None)
     }
 
     /// Define one collected function under explicit keys: resolve the
@@ -638,6 +752,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         keys: Vec<String>,
         params: &[(String, String)],
         body: &[Step],
+        module: Option<&str>,
     ) -> Result<()> {
         let mut resolved = Vec::with_capacity(params.len());
         for (pname, ptype) in params {
@@ -653,17 +768,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 FuncInfo {
                     params: resolved.clone(),
                     body: body.to_vec(),
+                    module: module.map(|m| m.to_string()),
                 },
             );
         }
         // Nested definitions register if execution reaches them;
-        // collect their bodies too.
+        // collect their bodies too, under the same owner.
         let nested = body.to_vec();
-        self.collect(&nested)?;
+        self.collect_owned(&nested, module)?;
         Ok(())
     }
 
-    fn collect_step(&mut self, step: &Step) -> Result<()> {
+    fn collect_step(&mut self, step: &Step, module: Option<&str>) -> Result<()> {
         match &step.kind {
             StepKind::FuncDef {
                 name, params, body, ..
@@ -673,6 +789,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     vec![name.clone(), format!("SCRIPT::{name}")],
                     params,
                     body,
+                    module,
                 )?;
             }
             StepKind::If {
@@ -681,18 +798,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 else_body,
                 ..
             } => {
-                self.collect(then_body)?;
+                self.collect_owned(then_body, module)?;
                 for (_, arm) in else_ifs {
-                    self.collect(arm)?;
+                    self.collect_owned(arm, module)?;
                 }
                 if let Some(arm) = else_body {
-                    self.collect(arm)?;
+                    self.collect_owned(arm, module)?;
                 }
             }
             StepKind::For { body, .. } | StepKind::While { body, .. } => {
-                self.collect(body)?;
+                self.collect_owned(body, module)?;
             }
-            StepKind::AsyncBlock { body } => self.collect(body)?,
+            StepKind::AsyncBlock { body } => self.collect_owned(body, module)?,
             _ => {}
         }
         Ok(())
@@ -700,20 +817,28 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// Collect one import site (#115): every wanted *exported* top-level
     /// `FUNC` registers under the site's namespace (bare `SCRIPT::` names
-    /// for alias-free harvests). Unexported means private: full imports
-    /// skip unexported functions, and harvesting one fails upfront.
-    /// Nested control-flow bodies collect like entry functions.
-    /// Shadowing follows the same last-wins rule as
-    /// [`collect`](Self::collect); the runtime registry remains the
-    /// enforcer for true duplicates.
+    /// for alias-free harvests), owner-tagged with the module so static
+    /// resolution sees the same shared store as the runtime. Unexported
+    /// means private: full imports skip unexported functions, and
+    /// harvesting one fails upfront. Harvesting a state-touching
+    /// function fails too: the body never runs, so there is no
+    /// initialized state for it to observe. Nested control-flow bodies
+    /// collect under the same owner. Shadowing follows the same
+    /// last-wins rule as [`collect_owned`](Self::collect_owned); the
+    /// runtime registry remains the enforcer for true duplicates.
     fn collect_site(
         &mut self,
         file: &str,
+        module: &str,
         alias: Option<&str>,
         names: Option<&[String]>,
         steps: &[Step],
         exports: &[String],
     ) -> Result<()> {
+        if !self.module_lets.contains_key(module) {
+            let lets = module_lets(steps, self.exec)?;
+            self.module_lets.insert(module.to_string(), lets);
+        }
         if let Some(names) = names {
             let defined: Vec<&str> = steps
                 .iter()
@@ -756,6 +881,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             vec![format!("{alias}::{name}")],
                             params,
                             body,
+                            Some(module),
                         )?;
                     }
                     None => {
@@ -764,14 +890,30 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             vec![name.clone(), format!("SCRIPT::{name}")],
                             params,
                             body,
+                            Some(module),
                         )?;
                     }
                 }
             } else {
                 // Control-flow bodies can nest definitions; collect
-                // those exactly like entry code (their runtime names
-                // are `SCRIPT::`-scoped either way).
-                self.collect_step(step)?;
+                // those under the same module owner.
+                self.collect_step(step, Some(module))?;
+            }
+        }
+        // Harvests never execute the file body: any wanted function
+        // that observes module state has nothing to read, so fail the
+        // site with the fix attached.
+        if let Some(names) = names {
+            for name in names {
+                let key = match alias {
+                    Some(alias) => format!("{alias}::{name}"),
+                    None => name.clone(),
+                };
+                if self.func_touches_module(&key)? {
+                    bail!(
+                        "IMPORT `{file}` cannot harvest stateful function `{name}`: import the file"
+                    );
+                }
             }
         }
         Ok(())
@@ -780,9 +922,27 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Check an imported file's top-level steps (#115): function-like,
     /// so `RETURN` is the value channel back and falling off the end
     /// yields `""` instead of failing. The label names the file for
-    /// error attribution.
-    fn check_import_body(&mut self, label: &str, steps: &[Step]) -> Result<()> {
+    /// error attribution. The walk env carries the module's shared
+    /// bindings beneath the top frame, so nested definitions resolve
+    /// (and owner-tag) exactly like collected ones.
+    fn check_import_body(
+        &mut self,
+        label: &str,
+        steps: &[Step],
+        module: Option<&str>,
+    ) -> Result<()> {
         let mut env = Env::one_frame(Vec::new());
+        if let Some(module) = module {
+            let mut lets = HashMap::new();
+            for (name, tag) in self.module_lets.get(module).cloned().unwrap_or_default() {
+                lets.insert(name, tag);
+            }
+            env.module = Some(ModuleScope {
+                key: module.to_string(),
+                lets,
+                touched: std::rc::Rc::new(std::cell::Cell::new(false)),
+            });
+        }
         let scope = Scope {
             label,
             ret: RetCtx::Func("IMPORT".to_string()),
@@ -833,17 +993,46 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     }
 
     /// Check one function body: terminal unification, MissingReturn,
-    /// VOID classification.
+    /// VOID classification. Module-owned bodies resolve against the
+    /// owning file's top-level `LET`s beneath the params, mirroring
+    /// the runtime shared store.
     fn check_function_body(
         &mut self,
         key: &str,
         info: &FuncInfo,
         depth: usize,
     ) -> Result<StaticTy> {
+        self.check_function_body_probed(key, info, depth, None)
+    }
+
+    /// Same, with an optional touch probe: when present, any read of a
+    /// module-shared binding sets it, so harvest callers can reject
+    /// state-dependent functions. The probe `Rc` is shared across env
+    /// forks, so touches on discarded conditional paths still count.
+    fn check_function_body_probed(
+        &mut self,
+        key: &str,
+        info: &FuncInfo,
+        depth: usize,
+        probe: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    ) -> Result<StaticTy> {
         if depth > MAX_STATIC_DEPTH {
             bail!("static analysis depth exceeded in function `{key}`");
         }
         let mut env = Env::one_frame(info.params.clone());
+        if let Some(module) = info.module.as_deref() {
+            let lets = self.module_lets.get(module).cloned().unwrap_or_default();
+            let touched = probe.unwrap_or_default();
+            let mut module_lets = HashMap::new();
+            for (name, tag) in lets {
+                module_lets.insert(name, tag);
+            }
+            env.module = Some(ModuleScope {
+                key: module.to_string(),
+                lets: module_lets,
+                touched,
+            });
+        }
         let scope = Scope {
             label: key,
             ret: RetCtx::Func(key.to_string()),
@@ -1089,6 +1278,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let info = FuncInfo {
                     params: resolved,
                     body: body.clone(),
+                    module: env.module.as_ref().map(|scope| scope.key.clone()),
                 };
                 self.check_function_body(name, &info, depth + 1)?;
                 Ok(live)
@@ -1698,6 +1888,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             ret: StaticTy::Ty(TypeTag::Any),
             host_params: None,
         })
+    }
+
+    /// Whether checking this function observes module-shared state
+    /// (#115): runs the body check with an armed probe and reports the
+    /// flag. Used by the harvest gate, statically and at load time.
+    fn func_touches_module(&mut self, key: &str) -> Result<bool> {
+        let info = self.funcs.get(key).cloned();
+        let Some(info) = info else {
+            return Ok(false);
+        };
+        if info.module.is_none() {
+            return Ok(false);
+        }
+        let probe = std::rc::Rc::new(std::cell::Cell::new(false));
+        let _ = self.check_function_body_probed(key, &info, 0, Some(probe.clone()))?;
+        Ok(probe.get())
     }
 
     /// Memoized script return with recursion guard, keyed by the

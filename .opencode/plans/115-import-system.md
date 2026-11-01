@@ -120,6 +120,33 @@ New `crates/oxdock-core/src/exec/import.rs` (or extend `args.rs`):
 - `static_check.rs::validate_script_closure`: two-phase whole-closure validation (comment 11). Phase 1 expands the transitive closure (`expand_import_closure`: resolve + parse + cache, cycle/depth guarded, missing files skipped); phase 2 collects every site's signatures (alias-qualified, or bare for alias-free harvests) into one checker and checks the entry plus every file body, so cross-file calls typecheck at their call sites. Anything present fails before the first step runs. Generated-then-imported files (absent at expansion) validate when they load at execution.
 - Docs: structural metadata auto-flows; add `IMPORT` file-form fragments + preview + remote gating docs. `cargo run -p docs-gen`, never hand-edit READMEs.
 
+### 4.5 Module semantics: shared state, single loading path
+
+Files are modules with init-once semantics (Python shares this half:
+import executes once, every importer sees the same state). Visibility
+is deliberately stricter than Python: only `EXPORT`ed names cross the
+boundary (unexported means private, and only entry `EXPORT`s become
+MCP tools).
+
+- One registry keyed by resolved path: parse once, validate once,
+  initialize once. `import_completed` and alias+frame keys are gone;
+  every alias is a view onto the same module, with the same state.
+- Module top-level `LET`s drain into a persistent per-module store on
+  first initialization. Module-owned `FUNC`s (owner-tagged at define
+  time) resolve names as params, then call frame, then the owning
+  module's store; `LET` inside a call stays call-local. Entry `FUNC`s
+  stay params-only. Ambient run state (`ENV`/`WORKDIR`/`WORKSPACE`)
+  still reverts at every scope boundary, including module init.
+- Harvesting a function that touches module state fails explicitly
+  (static probe plus runtime probe): harvests stay side-effect free
+  by construction, and stateful helpers require a full import.
+- One loading path: `load_file` parses, validates, and initializes.
+  Expansion pre-warms it for files present at startup (fail fast
+  before step 1); files generated mid-run go through the identical
+  gate at first `IMPORT`. No separate "deferred" concept: same code,
+  same guarantees, two timings, stated plainly in the reference.
+- Cycles stay hard errors (no partial initialization).
+
 ## 5. Phasing (in scope: phases 1+2; phase 3 deferred to #270)
 
 1. Phase 1: local file `IMPORT ["..." AS ALIAS]` (any extension, especially `.oxdock`/`.oxfile`; multi-entry and mixed module+file brackets, multiline included) + isolation + pipe mangling + `LET`/`ASYNC` capture + cycles/depth/cache + dry-run listing + tests.

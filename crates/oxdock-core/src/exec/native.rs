@@ -227,6 +227,11 @@ impl<P: ProcessManager> HostRegistration<P> {
 pub(super) struct FuncDefData {
     pub(super) params: Vec<(String, TypeTag)>,
     pub(super) body: Vec<Step>,
+    /// Owning file module (#115, resolved display path): module-owned
+    /// `FUNC`s resolve names against the module's shared store after
+    /// lexical frames miss. `None` for entry/REPL definitions, which
+    /// stay params-only.
+    pub(super) module: Option<String>,
 }
 
 /// Executable body behind one registry entry: an interpreted script, a
@@ -534,6 +539,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         name: &str,
         params: &[(String, TypeTag)],
         body: &[Step],
+        module: Option<&str>,
     ) -> Result<()> {
         let qualified = qualify(SCRIPT_MODULE_NAME, name);
         let shadowable = matches!(
@@ -589,6 +595,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 body: FuncBody::Script(FuncDefData {
                     params: params.to_vec(),
                     body: body.to_vec(),
+                    module: module.map(|m| m.to_string()),
                 }),
             },
         );
@@ -615,6 +622,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         name: &str,
         params: &[(String, TypeTag)],
         body: &[Step],
+        module: Option<&str>,
     ) -> Result<()> {
         let qualified = qualify(alias, name);
         let shadowable = matches!(
@@ -676,6 +684,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 body: FuncBody::Script(FuncDefData {
                     params: params.to_vec(),
                     body: body.to_vec(),
+                    module: module.map(|m| m.to_string()),
                 }),
             },
         );

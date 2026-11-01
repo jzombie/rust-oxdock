@@ -1,0 +1,8 @@
+name = "import_generated_rejected"
+setup = "import_libs"
+
+[expect.error]
+contains = "must exist when the run starts"
+
+[expect]
+missing = ["marker.txt"]

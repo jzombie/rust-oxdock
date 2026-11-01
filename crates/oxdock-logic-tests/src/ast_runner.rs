@@ -1269,8 +1269,9 @@ fn run_setup(
         "read_escape" => setup_read_escape(snapshot, local),
         "symlink_escape" => setup_symlink_escape(snapshot, local),
         "workspace_symlink" => setup_workspace_symlink(snapshot, local),
+        "import_libs" => setup_import_libs(snapshot, local),
         _ => Err(anyhow!(
-            "unknown setup {name} (available: copy_inputs, symlink_inputs, copy_git, read_escape, symlink_escape, workspace_symlink). referenced by {case_name}",
+            "unknown setup {name} (available: copy_inputs, symlink_inputs, copy_git, read_escape, symlink_escape, workspace_symlink, import_libs). referenced by {case_name}",
         )),
     }
 }
@@ -1293,6 +1294,22 @@ fn cleanup_escape(snapshot: &GuardedPath, filename: &str) -> Result<()> {
 
 fn setup_copy_inputs(_snapshot: &GuardedPath, local: &GuardedPath) -> Result<()> {
     write_text(&local.join("source.txt")?, "from build")?;
+    Ok(())
+}
+
+/// Pre-existing import libraries (#115): files must exist when the run
+/// starts (generated-then-imported is rejected upfront), so cases that
+/// import seed their libs here instead of writing them mid-script.
+fn setup_import_libs(_snapshot: &GuardedPath, local: &GuardedPath) -> Result<()> {
+    write_text(
+        &local.join("lib.oxdock")?,
+        "FUNC DOUBLE($x: STRING) { RETURN $x } EXPORT DOUBLE",
+    )?;
+    write_text(&local.join("lib_value.oxdock")?, "RETURN \"lib-value\"")?;
+    write_text(
+        &local.join("helpers.oxdock")?,
+        "FUNC HELPER($x: STRING) { RETURN $x } EXPORT HELPER",
+    )?;
     Ok(())
 }
 

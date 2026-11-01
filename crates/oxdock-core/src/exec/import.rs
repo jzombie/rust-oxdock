@@ -233,22 +233,11 @@ pub(crate) fn import_funcs<P: ProcessManager>(
     names: &[String],
 ) -> Result<()> {
     let (resolved, steps, exports) = load_import(cx.state, path)?;
+    let key = resolved.display();
     let alias_frame = enter_alias_frame(cx.state);
-    // Module semantics: the same harvest in the same frame loads once.
-    // The key shares the file slot with full imports under a bare
-    // marker (no alias can be empty), so either form satisfies the other.
-    let completed_key = format!(
-        "{alias_frame}\0{}\0{}",
-        alias.unwrap_or(""),
-        resolved.display()
-    );
-    if cx.state.import_completed.contains(&completed_key) {
-        return Ok(());
-    }
     // Join the import stack like a full import: nested loads need this
     // file on the chain for cycle/depth detection and for
-    // importer-relative resolution. Skipped (completed) harvests never
-    // reach here, so the push/pop stays balanced.
+    // importer-relative resolution.
     cx.state.import_stack.push(resolved);
     let saved_aliases = cx.state.type_aliases.clone();
     let outcome: Result<()> = (|| {
@@ -256,8 +245,17 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         for (name, target) in aliases {
             cx.state.type_aliases.insert(name, target);
         }
-        super::static_check::validate_import_body_types(&steps, cx.state)
+        super::static_check::validate_import_body_types(&steps, cx.state, &key)
             .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+        // Stateful harvests are rejected: the file body never runs, so
+        // there is no initialized state for them to observe. Import the
+        // file to share its module instead.
+        if let Some(offender) =
+            super::static_check::harvest_touches_module(cx.state, &key, &steps, names)
+                .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?
+        {
+            bail!("IMPORT `{path}` cannot harvest stateful function `{offender}`: import the file");
+        }
         for name in names {
             // EXPORT gate (#115): unexported means private. Harvesting a
             // name the file does not export fails here, before anything
@@ -280,18 +278,33 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             for (pname, ptype) in &def.0 {
                 resolved_params.push((pname.clone(), cx.state.resolve_tag(ptype)?));
             }
+            // Owner-tagged with the module: calls resolve names against
+            // the shared store. Re-imports skip already-registered
+            // names, so shared views stay idempotent.
             match alias {
-                Some(alias) => cx.state.functions.define_aliased_in(
-                    alias_frame,
-                    alias,
-                    name,
-                    &resolved_params,
-                    &def.1,
-                )?,
-                None => cx
-                    .state
-                    .functions
-                    .define_script(name, &resolved_params, &def.1)?,
+                Some(alias) => {
+                    let qualified = oxdock_parser::qualify(alias, name);
+                    if cx.state.functions.get(&qualified).is_none() {
+                        cx.state.functions.define_aliased_in(
+                            alias_frame,
+                            alias,
+                            name,
+                            &resolved_params,
+                            &def.1,
+                            Some(&key),
+                        )?;
+                    }
+                }
+                None => {
+                    if cx.state.functions.get(name).is_none() {
+                        cx.state.functions.define_script(
+                            name,
+                            &resolved_params,
+                            &def.1,
+                            Some(&key),
+                        )?;
+                    }
+                }
             }
         }
         // Nested imports are the harvested functions' dependencies: run
@@ -317,13 +330,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         cx.state.import_alias_frame = None;
     }
     cx.state.type_aliases = saved_aliases;
-    match outcome {
-        Ok(()) => {
-            cx.state.import_completed.insert(completed_key);
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
+    outcome
 }
 /// Outermost-import alias frame (#115): the caller frame, shared by
 /// every nested import so `ALIAS::` bodies keep resolving nested
@@ -338,27 +345,28 @@ fn enter_alias_frame<P: ProcessManager>(state: &mut ExecState<P>) -> usize {
         .unwrap_or_else(|| state.functions.scope_depth().saturating_sub(1))
 }
 
-/// Execute `IMPORT ["<path>" AS <ALIAS>]`: load, parse, register, and run
-/// the imported file, returning its `RETURN` value (`""` on fallthrough).
+/// Execute `IMPORT ["<path>" AS <ALIAS>]`: initialize the module on
+/// first import (executing its body once and draining its top-level
+/// `LET`s into the shared store), then register its `EXPORT`ed
+/// `FUNC`s as views under the alias. Later imports of the same file
+/// skip execution and reuse the initialized module, binding the
+/// cached `RETURN` value for `LET`-capture. Returns the init body's
+/// `RETURN` value (`""` on fallthrough).
 pub(crate) fn import_file<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
     alias: &str,
 ) -> Result<Value> {
     let (resolved, steps, exports) = load_import(cx.state, path)?;
+    let key = resolved.display();
     let alias_frame = enter_alias_frame(cx.state);
-    // Module semantics: the same file under the same alias in the same
-    // frame loads once. Diamond imports share it instead of redefining
-    // it; a skipped `LET`-capture binds `""`.
-    let completed_key = format!("{alias_frame}\0{alias}\0{}", resolved.display());
-    if cx.state.import_completed.contains(&completed_key) {
-        return Ok(Value::string(String::new()));
-    }
     // Merge the imported file's type aliases for its own validation and
     // execution; restored after the import returns so aliases never leak
     // across the import boundary.
     let saved_aliases = cx.state.type_aliases.clone();
-    let outcome: Result<Value> = (|| {
+    // Phase 1 (no pushes): merge aliases, validate, register views.
+    // Runs on every import so new aliases attach and bodies re-check.
+    let phase_one: Result<Option<Value>> = (|| {
         let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
         for (name, target) in aliases {
             cx.state.type_aliases.insert(name, target);
@@ -366,12 +374,12 @@ pub(crate) fn import_file<P: ProcessManager>(
         // Entry parity: statically validate the imported body before its
         // first step runs. Nested imports validate when their own IMPORT
         // steps execute.
-        super::static_check::validate_import_body_types(&steps, cx.state)
+        super::static_check::validate_import_body_types(&steps, cx.state, &key)
             .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
         // Register the imported file's EXPORTed top-level FUNCs under
-        // the alias in the caller's scope: unexported means private, so
-        // only exported names persist after the import returns, while
-        // the body's own SCRIPT:: definitions scope to the pushed frame.
+        // the alias in the caller's scope: unexported means private.
+        // Owner-tagged with the module so calls share its state.
+        // Skips names already present: re-imports only add new views.
         let exported: std::collections::HashSet<&str> =
             exports.iter().map(|e| e.as_str()).collect();
         for step in &steps {
@@ -380,21 +388,54 @@ pub(crate) fn import_file<P: ProcessManager>(
             } = &step.kind
                 && exported.contains(name.as_str())
             {
-                let mut resolved_params = Vec::with_capacity(params.len());
-                for (pname, ptype) in params {
-                    resolved_params.push((pname.clone(), cx.state.resolve_tag(ptype)?));
+                let qualified = oxdock_parser::qualify(alias, name);
+                if cx.state.functions.get(&qualified).is_none() {
+                    let mut resolved_params = Vec::with_capacity(params.len());
+                    for (pname, ptype) in params {
+                        resolved_params.push((pname.clone(), cx.state.resolve_tag(ptype)?));
+                    }
+                    cx.state.functions.define_aliased_in(
+                        alias_frame,
+                        alias,
+                        name,
+                        &resolved_params,
+                        body,
+                        Some(&key),
+                    )?;
                 }
-                cx.state.functions.define_aliased_in(
-                    alias_frame,
-                    alias,
-                    name,
-                    &resolved_params,
-                    body,
-                )?;
             }
+        }
+        // Initialized modules skip execution: every alias shares the
+        // first init's state and `RETURN`. Nothing pushed below, so the
+        // outer unwinds stay balanced.
+        if let Some(init) = cx
+            .state
+            .modules
+            .get(&key)
+            .and_then(|record| record.init.as_ref())
+        {
+            return Ok(Some(init.return_value.clone()));
+        }
+        Ok(None)
+    })();
+    cx.state.type_aliases = saved_aliases.clone();
+    let cached = phase_one?;
+    if let Some(value) = cached {
+        return Ok(value);
+    }
+    // Phase 2 (init): runs once per file. Pushes unwind below.
+    let saved_aliases = cx.state.type_aliases.clone();
+    let outcome: Result<Value> = (|| {
+        let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
+        for (name, target) in aliases {
+            cx.state.type_aliases.insert(name, target);
         }
         cx.state.import_stack.push(resolved);
         cx.state.push_scope();
+        // The init body runs with its module on the context stack so
+        // nested definitions owner-tag correctly; lexical reads still
+        // resolve through the pushed frames first.
+        cx.state.module_stack.push(Some(key.clone()));
         let flow = execute_steps(
             cx.state,
             cx.process,
@@ -406,10 +447,24 @@ pub(crate) fn import_file<P: ProcessManager>(
             cx.out_pipe.clone(),
             cx.stdin_pipe.clone(),
             false,
-        )?;
-        match flow {
-            Flow::Done => Ok(Value::string(String::new())),
-            Flow::Return { value, .. } => Ok(value),
+        );
+        // Unwind the module context on every path: nested definitions
+        // below already owner-tagged while it was up.
+        let _ = cx.state.module_stack.pop();
+        let flow = flow?;
+        // Drain the init frame's top-level bindings into the shared
+        // store before the scope pops: this is the module's global
+        // state, visible to every module-owned function and alias.
+        // Ambient run state (cwd/envs/root) still reverts on pop.
+        let drained = std::mem::take(
+            cx.state
+                .var_scopes
+                .last_mut()
+                .expect("import pushed exactly one var scope"),
+        );
+        let value = match flow {
+            Flow::Done => Value::string(String::new()),
+            Flow::Return { value, .. } => value,
             Flow::Break { idx } => {
                 bail!(
                     "step {}: BREAK cannot cross import boundary (in IMPORT `{}`)",
@@ -424,7 +479,13 @@ pub(crate) fn import_file<P: ProcessManager>(
                     path
                 );
             }
-        }
+        };
+        let record = cx.state.modules.entry(key.clone()).or_default();
+        record.init = Some(super::state::ModuleInit {
+            vars: drained,
+            return_value: value.clone(),
+        });
+        Ok(value)
     })();
     let pop_res = cx.state.pop_scope();
     let _ = cx.state.import_stack.pop();
@@ -433,10 +494,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     }
     cx.state.type_aliases = saved_aliases;
     match (outcome, pop_res) {
-        (Ok(value), Ok(())) => {
-            cx.state.import_completed.insert(completed_key);
-            Ok(value)
-        }
+        (Ok(value), Ok(())) => Ok(value),
         (Err(e), _) => Err(e),
         (Ok(_), Err(e)) => Err(e),
     }
@@ -468,7 +526,7 @@ pub(super) struct ClosureFile {
 /// every file reachable from `steps` through `ImportFile`/`ImportFuncs`
 /// steps, including conditional ones (validation is conservative).
 /// Cycles and depth overflow fail here, before the first step runs.
-/// Parsed bodies land in the run's `import_cache`, so execution reuses
+/// Parsed bodies land in the run's module registry, so execution reuses
 /// them instead of re-reading.
 pub(crate) fn expand_import_closure<P: ProcessManager>(
     state: &mut ExecState<P>,
@@ -494,9 +552,7 @@ fn expand_walk<P: ProcessManager>(
     for step in steps {
         match &step.kind {
             StepKind::ImportFile { path, alias } => {
-                let Some(target) = expand_load(state, dir, stack, path)? else {
-                    continue;
-                };
+                let target = expand_load(state, dir, stack, path)?;
                 let key = target.resolved.display();
                 stack.push(target.resolved);
                 record_site(
@@ -514,9 +570,7 @@ fn expand_walk<P: ProcessManager>(
                 stack.pop();
             }
             StepKind::ImportFuncs { path, alias, names } => {
-                let Some(target) = expand_load(state, dir, stack, path)? else {
-                    continue;
-                };
+                let target = expand_load(state, dir, stack, path)?;
                 let key = target.resolved.display();
                 stack.push(target.resolved);
                 record_site(
@@ -553,9 +607,7 @@ fn expand_walk_top<P: ProcessManager>(
     for step in steps {
         match &step.kind {
             StepKind::ImportFile { path, alias } => {
-                let Some(target) = expand_load(state, dir, stack, path)? else {
-                    continue;
-                };
+                let target = expand_load(state, dir, stack, path)?;
                 let key = target.resolved.display();
                 stack.push(target.resolved);
                 record_site(
@@ -573,9 +625,7 @@ fn expand_walk_top<P: ProcessManager>(
                 stack.pop();
             }
             StepKind::ImportFuncs { path, alias, names } => {
-                let Some(target) = expand_load(state, dir, stack, path)? else {
-                    continue;
-                };
+                let target = expand_load(state, dir, stack, path)?;
                 let key = target.resolved.display();
                 stack.push(target.resolved);
                 record_site(
@@ -647,8 +697,9 @@ fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
     }
 }
 
-/// Record an import site, deduping identical sites (diamonds load once
-/// per alias shape, mirroring the runtime `import_completed` set).
+/// Record an import site, deduping identical sites (diamonds share one
+/// module record; each alias is a view onto it). `exports` rides with
+/// the first site; every site loads the same parsed body.
 fn record_site(
     files: &mut Vec<ClosureFile>,
     key: String,
@@ -686,17 +737,17 @@ struct ExpandedImport {
     nested: GuardedPath,
 }
 
-/// Load one import target during expansion, skipping files that do not
-/// exist yet: scripts that generate their own imports validate those
-/// files when they load at execution time. Anything present is parsed
-/// and validated before the first step runs. Guard, cycle, and depth
-/// failures stay hard: only absence defers.
+/// Load one import target during expansion. The file must exist when
+/// the run starts: there is no deferred path. A script cannot
+/// generate-then-import; analysis requires bytes, and bytes that do
+/// not exist yet cannot be checked. Guard, cycle, depth, and absence
+/// failures are all hard, before the first step runs.
 fn expand_load<P: ProcessManager>(
     state: &mut ExecState<P>,
     dir: &GuardedPath,
     stack: &[GuardedPath],
     path: &str,
-) -> Result<Option<ExpandedImport>> {
+) -> Result<ExpandedImport> {
     let resolved = dir
         .join(path)
         .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))?;
@@ -713,20 +764,23 @@ fn expand_load<P: ProcessManager>(
             path
         );
     }
-    // Absence defers to load time (script-generated imports): probe
-    // through the run filesystem so memory-backed test filesystems
-    // answer from their own state, not the host disk.
+    // The file must already exist: expansion is the analysis pass,
+    // and analysis needs bytes. Probing through the run filesystem so
+    // memory-backed test filesystems answer from their own state, not
+    // the host disk.
     if state.fs.entry_kind(&resolved).is_err() {
-        return Ok(None);
+        bail!(
+            "IMPORT `{path}` not found: the file must exist when the run starts (generated imports are not supported)"
+        );
     }
     let (_, body, exports) = load_file(state, dir, stack, path)?;
     let nested = resolved.parent().unwrap_or_else(|| dir.clone());
-    Ok(Some(ExpandedImport {
+    Ok(ExpandedImport {
         resolved,
         body,
         exports,
         nested,
-    }))
+    })
 }
 
 /// Load and parse an import target: resolve against the importer dir,
@@ -744,8 +798,9 @@ fn load_import<P: ProcessManager>(
 
 /// Shared loader core: `stack` is the active chain for cycle/depth
 /// checks (the runtime stack, or the expansion walk's local one).
-/// Parsed bodies and their `EXPORT` lists land in the run cache either
-/// way, so expansion and execution never read a file twice.
+/// Parsed bodies and their `EXPORT` lists land in the run's module
+/// registry either way, so expansion and execution never read a file
+/// twice; initialization state rides the same record.
 fn load_file<P: ProcessManager>(
     state: &mut ExecState<P>,
     base: &GuardedPath,
@@ -774,8 +829,8 @@ fn load_file<P: ProcessManager>(
             path
         );
     }
-    if let Some((steps, exports)) = state.import_cache.get(&key) {
-        return Ok((resolved, steps.clone(), exports.clone()));
+    if let Some(record) = state.modules.get(&key) {
+        return Ok((resolved, record.steps.clone(), record.exports.clone()));
     }
     let bytes = state
         .fs
@@ -793,9 +848,14 @@ fn load_file<P: ProcessManager>(
         table,
     )
     .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed to parse: {e}"))?;
-    state
-        .import_cache
-        .insert(key, (parsed.steps.clone(), parsed.exports.clone()));
+    state.modules.insert(
+        key,
+        super::state::ModuleRecord {
+            steps: parsed.steps.clone(),
+            exports: parsed.exports.clone(),
+            init: None,
+        },
+    );
     Ok((resolved, parsed.steps, parsed.exports))
 }
 

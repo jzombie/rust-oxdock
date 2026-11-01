@@ -3514,14 +3514,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 file's directory (the entry file's parent at top level;
                 an entry staged outside the workspace, e.g. a CI temp
                 script, resolves like stdin against the workspace root).
-                Files the script itself creates land in snapshot space by
-                default, so generate-then-import scripts should select
-                `WORKSPACE LOCAL` (or `COPY` sources into place) to align
-                the two sides. Files absent when the run starts (e.g.
-                generated later) skip upfront validation and are checked
-                when they load; everything present is validated, with
-                cross-file calls typechecked at their call sites, before
-                the first step runs.
+                The file must exist when the run starts: imports of
+                missing files fail before the first step runs, because
+                analysis requires bytes and generated-then-imported
+                files have none to check. Write-then-import in one
+                script is rejected; check libraries into the tree.
 
                 `EXPORT` marks top-level script `FUNC`s as externally
                 callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`) and as
@@ -3535,17 +3532,31 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             args: &[],
             flags: &[],
             default_output: None,
-            examples: &[Example {
-                name: "import",
-                fence_meta: None,
-                code: indoc! {r#"
+            examples: &[
+                Example {
+                    name: "import",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 # Calls name their module (STD::GLOB); IMPORT [STD] drops the prefix.
                 WRITE a.txt "hi \{{ env:WHO }}!"
                 IMPORT [STD]
                 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
                 ASSERT_CONTAINS stdout "hi World!"
             "#},
-            }],
+                },
+                Example {
+                    name: "import missing file fails upfront",
+                    fence_meta: Some("expect_error:\"must exist when the run starts\""),
+                    code: indoc! {r#"
+                # Generated imports are rejected: a file that does not
+                # exist when the run starts cannot be analyzed, so the
+                # import fails before the first step runs.
+                WORKSPACE LOCAL
+                WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
+                IMPORT ["lib.oxdock" AS LIB]
+            "#},
+                },
+            ],
         },
     ]
 }

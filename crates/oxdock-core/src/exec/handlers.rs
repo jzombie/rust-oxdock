@@ -2459,8 +2459,13 @@ pub(crate) fn define_func<P: ProcessManager>(
         resolved.push((pname.clone(), cx.state.resolve_tag(ptype)?));
     }
     // Runtime counterpart of the parse-time scope validation; the single
-    // registry owns the reserved, duplicate, and shadowing rules.
-    cx.state.functions.define_script(name, &resolved, body)
+    // registry owns the reserved, duplicate, and shadowing rules. The
+    // owner is the innermost module on the stack (lexically enclosing
+    // file), or `None` for entry definitions, which stay params-only.
+    let owner = cx.state.current_module();
+    cx.state
+        .functions
+        .define_script(name, &resolved, body, owner.as_deref())
 }
 
 /// Invoke a function by UPPERCASE name and return its value. One lookup
@@ -2520,6 +2525,12 @@ pub(crate) fn call_func_value<P: ProcessManager>(
         FuncBody::Script(def) => {
             cx.state.call_depth += 1;
             cx.state.push_scope();
+            // Module-owned bodies execute with their module on the
+            // context stack, so name resolution falls back to the
+            // module's shared store; entry bodies push `None`, keeping
+            // entry functions params-only even when called from module
+            // code. Balanced below on every exit path.
+            cx.state.module_stack.push(def.module.clone());
             let outcome: Result<Value> = (|| {
                 for ((pname, ptype), pval) in def.params.iter().zip(arg_vals) {
                     cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
@@ -2555,6 +2566,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             })();
             let pop_res = cx.state.pop_scope();
             cx.state.call_depth -= 1;
+            let _ = cx.state.module_stack.pop();
             match (outcome, pop_res) {
                 (Ok(value), Ok(())) => Ok(value),
                 (Err(e), _) => Err(e),
