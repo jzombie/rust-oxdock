@@ -270,9 +270,11 @@ jobs:
           IF !$has_udeps {
             RUN ["cargo", "install", "cargo-udeps", "--locked"]
           }
-          # Explicit +nightly: udeps needs nightly cargo, and the closed
-          # script env does not inherit the runner's RUSTUP_TOOLCHAIN.
-          RUN ["cargo", "+nightly", "udeps", "--workspace", "--all-targets", "--all-features"]
+          # Explicit +nightly-2026-10-29: udeps needs nightly cargo,
+          # and the closed script env does not inherit the runner's
+          # RUSTUP_TOOLCHAIN. TODO (#269): revert to +nightly when the
+          # toolchain pin goes away.
+          RUN ["cargo", "+nightly-2026-10-29", "udeps", "--workspace", "--all-targets", "--all-features"]
 
       - name: Run Clippy with cfg miri
         shell: oxdock --script {0}
@@ -284,7 +286,9 @@ jobs:
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           ENV RUSTFLAGS="--cfg miri"
-          RUN ["cargo", "+nightly", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+          # TODO (#269): revert to +nightly when the toolchain pin
+          # goes away.
+          RUN ["cargo", "+nightly-2026-10-29", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
 
   test:
     name: test (OS=${{ matrix.os }}, Flags=${{ matrix.flags }})
