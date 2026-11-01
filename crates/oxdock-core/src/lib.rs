@@ -48,6 +48,8 @@ define_pipeline! {
     StepKind::Sleep { .. } => exec::dispatch_sleep_step,
     StepKind::ListAppend { .. } => exec::dispatch_push_into_step,
     StepKind::FuncDef { .. } => exec::dispatch_func_def,
+    StepKind::ImportFile { .. } => exec::dispatch_import_file,
+    StepKind::ImportFuncs { .. } => exec::dispatch_import_funcs,
     StepKind::Call { .. } => exec::dispatch_call,
     StepKind::Return { .. } => exec::dispatch_return,
     StepKind::While { .. } => exec::dispatch_while_loop,

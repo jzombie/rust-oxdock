@@ -99,6 +99,20 @@ pub fn plan_input_directives(steps: &[oxdock_parser::Step]) -> (Vec<String>, Vec
                 push_path_entry(&mut changed, path);
                 collect_env_keys(&mut env_changed, path.as_str(), &assigned);
             }
+            StepKind::ImportFile { path, .. } => {
+                // Import paths are literal (templates rejected at parse);
+                // treat like a read-side input so edits rebuild. Only the
+                // direct path is tracked here; the transitive closure is a
+                // documented follow-up.
+                let arg = Arg::String(path.clone(), true);
+                push_path_entry(&mut changed, &arg);
+                collect_env_keys(&mut env_changed, path.as_str(), &assigned);
+            }
+            StepKind::ImportFuncs { path, .. } => {
+                let arg = Arg::String(path.clone(), true);
+                push_path_entry(&mut changed, &arg);
+                collect_env_keys(&mut env_changed, path.as_str(), &assigned);
+            }
             _ => {}
         }
     }
@@ -454,6 +468,9 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             StepKind::Return { expr } => {
                 walk_expr(&mut keys, expr);
             }
+            // Import paths are literal (templates rejected at parse), so
+            // they contribute no env keys.
+            StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => {}
             StepKind::Break | StepKind::Continue => {}
         }
     }

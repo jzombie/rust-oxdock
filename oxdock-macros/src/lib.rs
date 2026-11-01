@@ -1498,6 +1498,16 @@ fn emit_stepkind(
         }
         StepKind::Break => quote! { StepKind::Break },
         StepKind::Continue => quote! { StepKind::Continue },
+        StepKind::ImportFile { path, alias } => {
+            quote! { StepKind::ImportFile { path: #path.to_string(), alias: #alias.to_string() } }
+        }
+        StepKind::ImportFuncs { path, alias, names } => {
+            let alias = match alias {
+                Some(alias) => quote! { Some(#alias.to_string()) },
+                None => quote! { None },
+            };
+            quote! { StepKind::ImportFuncs { path: #path.to_string(), alias: #alias, names: vec![#(#names.to_string()),*] } }
+        }
     }
 }
 

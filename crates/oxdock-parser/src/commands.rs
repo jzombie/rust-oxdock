@@ -472,7 +472,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME, PATH]`; got {got}."
         )),
         name if name == KEYWORD_IMPORT => Some(format!(
-            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; got {got}."
+            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; file imports take a quoted path with a mandatory alias, e.g. `IMPORT [\"./lib.oxdock\" AS LIB]`, and brackets mix both across lines, e.g. `IMPORT [STD, \"a.oxdock\" AS A]`; got {got}."
         )),
         name if name == KEYWORD_EXPORT => Some(
             "EXPORT marks script FUNCs and qualified host functions as tools, e.g. `EXPORT FOO`, `EXPORT [FOO, STD::INT]`."
@@ -670,6 +670,7 @@ impl StepKind {
                     f(arg);
                 }
             }
+            StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => {}
             StepKind::For { in_expr, .. } => f(in_expr),
             StepKind::If { cond, else_ifs, .. } => {
                 f(cond);
@@ -835,6 +836,8 @@ impl StepKind {
             | StepKind::Sleep { .. }
             | StepKind::ListAppend { .. }
             | StepKind::Call { .. }
+            | StepKind::ImportFile { .. }
+            | StepKind::ImportFuncs { .. }
             | StepKind::Return { .. }
             | StepKind::Break
             | StepKind::Continue => {}
@@ -955,6 +958,12 @@ declare_commands! {
         FuncDef { name: String, params: Vec<(String, String)>, body: Vec<Step>, docs: Option<(String, String)> },
         Call { name: String, args: Vec<Expr> },
         Return { expr: Box<Expr> },
+        ImportFile { path: String, alias: String },
+        ImportFuncs {
+            path: String,
+            alias: Option<String>,
+            names: Vec<String>,
+        },
         While { cond: Box<Expr>, body: Vec<Step> },
         Break,
         Continue,
@@ -3446,8 +3455,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             name: KEYWORD_IMPORT,
-            syntax: "IMPORT [<module>, ...] | IMPORT <module>",
-            summary: "Bring module functions into bare-call scope.",
+            syntax: "IMPORT [<module>, ...] | IMPORT <module> | IMPORT [\"<path>\" AS <ALIAS>] | IMPORT [<module | \"<path>\" AS <ALIAS> | [F, ... FROM \"<path>\" (AS <ALIAS>)?]>, ...]",
+            summary: "Bring module functions into bare-call scope; import script files.",
             description: indoc! {r#"
                 Every function call names its module (`STD::GLOB(...)`,
                 `MOCK::READ_CSV(...)`) unless the module is imported:
@@ -3462,6 +3471,42 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 like `LET` scoping but with no runtime footprint. Guards do
                 not apply to it. Two imported modules exporting one name is
                 an ambiguity error: qualify the call instead.
+
+                File imports (`IMPORT ["./lib.oxdock" AS LIB]`, any file
+                extension) load another script as an isolated pipeline:
+                the alias is mandatory and becomes the namespace
+                (`LIB::FOO`), with no filename inference. Collisions with
+                live module names fail explicitly, as do duplicate aliases.
+                The import runs in function-call-like isolation (bindings
+                do not leak, `WORKDIR` reverts) and its `RETURN` value is
+                the only channel back (`LET $r = IMPORT [...]`). Nested
+                imports register in the outermost import's caller frame,
+                so libraries reuse helpers transitively; the same file
+                under the same alias in the same frame loads once.
+
+                Brackets mix both kinds and hold several entries at once,
+                across lines if needed
+                (`IMPORT [STD, "a.oxdock" AS A, "b.oxdock" AS B]`): each
+                module entry registers in order, each file entry runs in
+                order. Without an alias a file entry is a parse error, so
+                there is never ambiguity about what an import names.
+                Value positions (`LET`, `ASYNC`, `WITH_IO`/`TIMEOUT`
+                inners) take exactly one file entry and no modules.
+
+                Selective harvests (`IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
+                optionally `AS ALIAS`) define only the named top-level
+                functions: bare into the current scope, or namespaced
+                under the alias. The file body never executes, so
+                harvesting is side-effect free; the file's own nested
+                imports still load, keeping helpers working. Harvests
+                produce no value and never appear in value positions.
+
+                Paths resolve workspace-side, against the importing
+                file's directory (the entry file's parent at top level).
+                Files the script itself creates land in snapshot space by
+                default, so generate-then-import scripts should select
+                `WORKSPACE LOCAL` (or `COPY` sources into place) to align
+                the two sides.
 
                 `EXPORT` marks top-level script `FUNC`s as externally
                 callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`).
@@ -3886,6 +3931,19 @@ impl fmt::Display for StepKind {
                 let ps: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
                 write!(f, "{}({})", name, ps.join(", "))
             }
+            StepKind::ImportFile { path, alias } => {
+                write!(f, "IMPORT [\"{}\" AS {}]", path, alias)
+            }
+            StepKind::ImportFuncs { path, alias, names } => match alias {
+                Some(alias) => write!(
+                    f,
+                    "IMPORT [[{} FROM \"{}\" AS {}]]",
+                    names.join(", "),
+                    path,
+                    alias
+                ),
+                None => write!(f, "IMPORT [[{} FROM \"{}\"]]", names.join(", "), path),
+            },
             StepKind::Return { expr } => write!(f, "RETURN {}", expr),
             StepKind::TypeAlias { name, target } => write!(f, "TYPE {} = {}", name, target),
             StepKind::While { cond, body } => {
@@ -4265,6 +4323,7 @@ pub(crate) fn validate_exports(
     exports: &[String],
     top: &HashSet<String>,
     modules: &ModuleTable,
+    top_imports: &[String],
 ) -> ParseResult<()> {
     for name in exports {
         let valid = match name.split_once("::") {
@@ -4273,7 +4332,22 @@ pub(crate) fn validate_exports(
                 top.contains(base)
             }
             Some((module, base)) => match modules.modules.get(module) {
-                None => false,
+                None => {
+                    // File-import aliases (#115) never enter the module
+                    // table: re-exporting imported functions is not yet
+                    // supported (phase 2), so name that instead of the
+                    // generic mismatch.
+                    if top_imports.iter().any(|m| m == module) {
+                        return Err(ParseError::validation(
+                            crate::constants::KEYWORD_EXPORT,
+                            format!(
+                                "EXPORT `{name}` re-exports an imported function (not yet supported)"
+                            ),
+                            ctx,
+                        ));
+                    }
+                    false
+                }
                 Some(None) => true,
                 Some(Some(funcs)) => funcs.functions.contains(base),
             },
@@ -5565,6 +5639,8 @@ mod tests {
                 // Bare `NAME(...)` calls share the `FUNC` reference page;
                 // there is no call keyword to document on its own.
                 StepKind::Call { .. } => None,
+                // Both import forms are documented on the `IMPORT` page.
+                StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => Some("IMPORT"),
                 StepKind::Return { .. } => Some("RETURN"),
                 StepKind::While { .. } => Some("WHILE"),
                 StepKind::Break => Some("BREAK"),

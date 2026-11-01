@@ -6,6 +6,7 @@ mod engine;
 mod exit;
 mod fs_ops;
 mod handlers;
+mod import;
 mod io;
 pub mod mcp;
 mod native;
@@ -33,14 +34,15 @@ pub(crate) use self::handlers::{
     dispatch_async_block, dispatch_await_capture_step, dispatch_await_step, dispatch_break,
     dispatch_call, dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git,
     dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
-    dispatch_func_def, dispatch_if_then, dispatch_inherit_env, dispatch_install,
-    dispatch_isolated_inherit_env, dispatch_isolated_step, dispatch_ls, dispatch_mkdir,
-    dispatch_prompt, dispatch_push_into_step, dispatch_read, dispatch_read_line, dispatch_remote,
-    dispatch_remove, dispatch_return, dispatch_run, dispatch_run_exec, dispatch_set,
-    dispatch_sleep_step, dispatch_symlink, dispatch_timeout_step, dispatch_unarchive,
-    dispatch_while_loop, dispatch_with_io, dispatch_with_io_block, dispatch_workdir,
-    dispatch_workspace, dispatch_write,
+    dispatch_func_def, dispatch_if_then, dispatch_import_file, dispatch_import_funcs,
+    dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env, dispatch_isolated_step,
+    dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step, dispatch_read,
+    dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return, dispatch_run,
+    dispatch_run_exec, dispatch_set, dispatch_sleep_step, dispatch_symlink, dispatch_timeout_step,
+    dispatch_unarchive, dispatch_while_loop, dispatch_with_io, dispatch_with_io_block,
+    dispatch_workdir, dispatch_workspace, dispatch_write,
 };
+pub use self::import::{DryRunStep, dry_run_closure};
 pub use self::io::ExecIo;
 pub use self::io::PipeStream;
 pub use self::io::PushManifestSink;
@@ -222,17 +224,39 @@ pub fn run_steps_with_lazy_snapshot_and_modules(
     modules: Vec<HostModule<DefaultProcessManager>>,
     types: Vec<&'static TypeDescriptor>,
 ) -> Result<LazyRunOutput> {
+    run_steps_with_lazy_snapshot_and_modules_and_entry(
+        build_context,
+        steps,
+        io,
+        modules,
+        types,
+        None,
+    )
+}
+
+/// Same as [`run_steps_with_lazy_snapshot_and_modules`], plus the entry
+/// script file (#115): top-level relative `IMPORT` paths resolve against
+/// its parent directory.
+pub fn run_steps_with_lazy_snapshot_and_modules_and_entry(
+    build_context: &GuardedPath,
+    steps: &[Step],
+    io: ExecIo,
+    modules: Vec<HostModule<DefaultProcessManager>>,
+    types: Vec<&'static TypeDescriptor>,
+    entry_file: Option<GuardedPath>,
+) -> Result<LazyRunOutput> {
     let mut resolver = PathResolver::new_lazy(build_context.clone())?;
     resolver.set_workspace_root(build_context.clone());
     let snapshot = resolver.snapshot_handle();
     let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
-    match run_steps_with_manager_with_modules(
+    match run_steps_with_manager_with_modules_and_entry(
         fs,
         steps,
         default_process_manager(),
         io,
         modules,
         types,
+        entry_file,
     ) {
         Ok((final_cwd, fs, bindings)) => Ok(LazyRunOutput {
             final_cwd,
@@ -332,7 +356,26 @@ pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
     modules: Vec<HostModule<P>>,
     types: Vec<&'static self::typing::TypeDescriptor>,
 ) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+    run_steps_with_manager_with_modules_and_entry(fs, steps, process, io, modules, types, None)
+}
+
+/// Same as [`run_steps_with_manager_with_modules`], plus the entry script
+/// file (#115): top-level relative `IMPORT` paths resolve against its
+/// parent directory. `None` resolves imports against the workspace root.
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_steps_with_manager_with_modules_and_entry<P: ProcessManager>(
+    fs: Box<dyn WorkspaceFs>,
+    steps: &[Step],
+    process: P,
+    io: ExecIo,
+    modules: Vec<HostModule<P>>,
+    types: Vec<&'static self::typing::TypeDescriptor>,
+    entry_file: Option<GuardedPath>,
+) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     let mut state = new_state(fs, io)?;
+    state.entry_file = entry_file;
+    state.module_table = build_module_table(&modules);
     for module in &modules {
         // Pre-run checks first: unmapped services fail here, before the
         // first step executes and with zero side effects.
@@ -399,6 +442,12 @@ pub(crate) fn new_state<P: ProcessManager>(
         cancellable: false,
         reap_floor: None,
         functions: self::native::FunctionRegistry::with_builtins(),
+        entry_file: None,
+        import_stack: Vec::new(),
+        import_alias_frame: None,
+        import_completed: std::collections::HashSet::new(),
+        import_cache: std::collections::HashMap::new(),
+        module_table: self::native::std_module_table(),
         types: self::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),
         module_states: std::collections::HashMap::new(),
@@ -414,6 +463,32 @@ pub(crate) fn new_state<P: ProcessManager>(
     state.push_var_scope();
 
     Ok(state)
+}
+
+/// Parse-time module table for `state`: stock `STD` builtins plus every
+/// staged host module, mirroring [`Engine::module_table`]. Imported files
+/// (#115) parse with this table so their `IMPORT [STD]` and qualified
+/// calls resolve exactly like the entry script's.
+fn build_module_table<P: ProcessManager>(
+    modules: &[self::native::HostModule<P>],
+) -> oxdock_parser::ModuleTable {
+    let mut table = self::native::std_module_table();
+    for module in modules {
+        let mut functions = std::collections::HashSet::new();
+        for registration in &module.funcs {
+            let name = match registration {
+                self::native::HostRegistration::Stateful { name, .. } => name,
+                self::native::HostRegistration::Pure { name, .. } => name,
+                self::native::HostRegistration::Both { name, .. } => name,
+            };
+            functions.insert(name.clone());
+        }
+        table.modules.insert(
+            module.name.clone(),
+            Some(oxdock_parser::ModuleFuncs { functions }),
+        );
+    }
+    table
 }
 
 #[allow(clippy::type_complexity)]

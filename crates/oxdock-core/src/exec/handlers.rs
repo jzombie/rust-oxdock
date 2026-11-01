@@ -2273,6 +2273,35 @@ fn extract_call(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &[Expr])> {
     }
 }
 
+/// Peel `WITH_IO` layers off an `IMPORT ["path" AS ALIAS]` capture body
+/// (#115), mirroring [`extract_call`]: merged bindings plus path/alias.
+/// `None` for any other shape (the stdout-capture path owns those).
+fn extract_import(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &str)> {
+    let mut layers: Vec<&Vec<IoBinding>> = Vec::new();
+    let mut current = cmd;
+    loop {
+        match current {
+            StepKind::ImportFile { path, alias } => {
+                let mut merged: Vec<IoBinding> = Vec::new();
+                for layer in &layers {
+                    for binding in layer.iter() {
+                        match merged.iter_mut().find(|m| m.stream == binding.stream) {
+                            Some(slot) => *slot = binding.clone(),
+                            None => merged.push(binding.clone()),
+                        }
+                    }
+                }
+                return Some((merged, path, alias));
+            }
+            StepKind::WithIo { bindings, cmd } => {
+                layers.push(bindings);
+                current = cmd;
+            }
+            _ => return None,
+        }
+    }
+}
+
 pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i64) -> Result<()> {
     for child in cx.state.bg_children.iter_mut() {
         if let Ok(None) = child.handle.try_wait() {
@@ -2702,6 +2731,45 @@ pub(crate) fn assign_capture<P: ProcessManager>(
 ) -> Result<Flow> {
     use std::sync::Arc;
 
+    if let Some((bindings, path, alias)) = extract_import(cmd) {
+        // `IMPORT` (possibly under `WITH_IO` layers): no capture sink.
+        // The imported pipeline's stdout keeps its routed streams; the
+        // bound value is the `RETURN` payload, exactly like `CALL`.
+        if bindings
+            .iter()
+            .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
+        {
+            bail!(
+                "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+            );
+        }
+        let value = if bindings.is_empty() {
+            super::import::import_file(cx, path, alias)?
+        } else {
+            let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
+                resolve_io_streams(cx, &bindings, cmd)?;
+            let state = &mut *cx.state;
+            let process = &mut *cx.process;
+            let mut sub_cx = super::steps::StepCtx {
+                state,
+                process,
+                stdin: step_stdin,
+                expose_stdin,
+                out: step_stdout,
+                err: step_stderr,
+                out_pipe,
+                stdin_pipe,
+                // `IMPORT` layers never carry a terminal: lowering rejects
+                // `tty` outside `RUN` before execution reaches them.
+                tty: None,
+            };
+            super::import::import_file(&mut sub_cx, path, alias)?
+        };
+        let clean_var = var.trim_start_matches('$').to_string();
+        let tag = cx.state.resolve_tag(&decl_type)?;
+        cx.state.declare_var(clean_var, tag, value)?;
+        return Ok(Flow::Done);
+    }
     if let Some((bindings, name, args)) = extract_call(cmd) {
         // `CALL` (possibly under `WITH_IO` layers): no capture sink. The
         // callee's stdout keeps its routed streams (observable via
@@ -3811,6 +3879,26 @@ pub(crate) fn dispatch_func_def<P: ProcessManager>(
     define_func(cx, name, params, body)
 }
 
+pub(crate) fn dispatch_import_file<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::ImportFile { path, alias } = step else {
+        unreachable!()
+    };
+    super::import::import_file(cx, path, alias).map(|_| ())
+}
+
+pub(crate) fn dispatch_import_funcs<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::ImportFuncs { path, alias, names } = step else {
+        unreachable!()
+    };
+    super::import::import_funcs(cx, path, alias.as_deref(), names)
+}
+
 pub(crate) fn dispatch_call<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -3877,6 +3965,11 @@ fn body_returns_value(body: &[Step]) -> bool {
 fn step_returns_value(kind: &StepKind) -> bool {
     match kind {
         StepKind::Return { .. } => true,
+        // A bare `IMPORT` statement discards its pipeline value, but a
+        // single-import `ASYNC` body publishes it (the worker fast path
+        // above); claiming `true` routes that shape through the fast
+        // path, and any other placement falls off the end loudly.
+        StepKind::ImportFile { .. } => true,
         StepKind::WithIo { cmd, .. } => step_returns_value(cmd),
         StepKind::For { body, .. }
         | StepKind::While { body, .. }
@@ -3971,11 +4064,19 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
             .map(|(bindings, name, args)| (bindings, name.to_string(), args.to_vec())),
         _ => None,
     };
-    // Single-call bodies always yield their call value; block bodies yield
-    // one only when they can RETURN. Recorded on the entry so a later
-    // capture can tell "void task" (binds 0) from "fell off the end"
-    // (loud error).
-    let returns_value = call_task.is_some() || body_returns_value(&body);
+    // Single-`IMPORT` bodies (#115) publish the imported pipeline's
+    // `RETURN` value the same way single calls do; anything else runs
+    // the block path below.
+    let import_task: Option<(Vec<IoBinding>, String, String)> = match body.as_slice() {
+        [step] => extract_import(&step.kind)
+            .map(|(bindings, path, alias)| (bindings, path.to_string(), alias.to_string())),
+        _ => None,
+    };
+    // Single-call and single-import bodies always yield their value;
+    // block bodies yield one only when they can RETURN. Recorded on the
+    // entry so a later capture can tell "void task" (binds 0) from "fell
+    // off the end" (loud error).
+    let returns_value = call_task.is_some() || import_task.is_some() || body_returns_value(&body);
     let (entry_tx, entry_rx) = std::sync::mpsc::channel::<Arc<super::state::TaskEntry>>();
     let join = std::thread::spawn(move || {
         // Slot guard first: dropping on return or unwind releases the
@@ -4023,6 +4124,47 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                     tty: None,
                 };
                 call_func_value(&mut sub_cx, &name, &args)?
+            };
+            entry
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .return_value = Some(value);
+            return Ok(());
+        }
+        if let Some((bindings, path, alias)) = import_task {
+            let mut child_cx = super::steps::StepCtx {
+                state: &mut child_state,
+                process: &mut child_process,
+                stdin,
+                expose_stdin,
+                out,
+                err,
+                out_pipe,
+                stdin_pipe,
+                tty: None,
+            };
+            // Apply call-site bindings like the inline path; stdout stays
+            // shared-live (parse rejects stdout pipes).
+            let value = if bindings.is_empty() {
+                super::import::import_file(&mut child_cx, &path, &alias)?
+            } else {
+                let (task_stdin, task_expose, task_out, task_err, task_out_pipe, task_stdin_pipe) =
+                    resolve_io_streams(&mut child_cx, &bindings, &body[0].kind)?;
+                let state = &mut *child_cx.state;
+                let process = &mut *child_cx.process;
+                let mut sub_cx = super::steps::StepCtx {
+                    state,
+                    process,
+                    stdin: task_stdin,
+                    expose_stdin: task_expose,
+                    out: task_out,
+                    err: task_err,
+                    out_pipe: task_out_pipe.or(child_cx.out_pipe.clone()),
+                    stdin_pipe: task_stdin_pipe.or(child_cx.stdin_pipe.clone()),
+                    tty: None,
+                };
+                super::import::import_file(&mut sub_cx, &path, &alias)?
             };
             entry
                 .state

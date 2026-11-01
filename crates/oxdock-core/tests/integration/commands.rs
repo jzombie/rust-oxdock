@@ -2772,6 +2772,8 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::FuncDef { .. } => {}
         StepKind::Call { .. } => {}
         StepKind::Return { .. } => {}
+        StepKind::ImportFile { .. } => {}
+        StepKind::ImportFuncs { .. } => {}
         StepKind::While { .. } => {}
         StepKind::Break => {}
         StepKind::Continue => {}

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -173,6 +173,29 @@ pub struct ExecState<P: ProcessManager> {
     /// registry's own frames (managed by `push_scope`/`pop_scope`);
     /// native entries persist. Shared across `fork()` via clone.
     pub(super) functions: FunctionRegistry<P>,
+    /// Entry script file (#115), when the run started from a file: base
+    /// for top-level relative `IMPORT` paths. `None` for stdin and inline
+    /// runs (imports resolve against the workspace root).
+    pub(super) entry_file: Option<GuardedPath>,
+    /// Active file-import chain (#115), innermost last: cycle detection
+    /// names the full chain, and the importer dir is the top's parent.
+    pub(super) import_stack: Vec<GuardedPath>,
+    /// Registry frame where file-import aliases register (#115): the
+    /// outermost import's caller frame. Nested imports share it so the
+    /// importer's `ALIAS::` bodies keep resolving nested aliases after
+    /// the nested frame pops. `None` outside an import.
+    pub(super) import_alias_frame: Option<usize>,
+    /// Completed file imports (#115), keyed `frame + alias + path`: the
+    /// same file under the same alias in the same frame loads once, so
+    /// diamond imports (two files importing one helper under one name)
+    /// share it instead of redefining it.
+    pub(super) import_completed: HashSet<String>,
+    /// Parsed bodies per resolved import path (#115), so diamond imports
+    /// parse once per run. Keyed by display path.
+    pub(super) import_cache: HashMap<String, Vec<Step>>,
+    /// Parse-time module table (#115): imported files parse with the same
+    /// table as the entry script.
+    pub(super) module_table: oxdock_parser::ModuleTable,
     /// Current nested function-call depth on this thread. Enforced against
     /// `MAX_CALL_DEPTH`; cloned (not reset) by `fork()` so async children
     /// inherit the caller's depth budget.
@@ -652,6 +675,12 @@ impl<P: ProcessManager> ExecState<P> {
             cancellable: self.cancellable,
             reap_floor: self.reap_floor,
             functions: self.functions.clone(),
+            entry_file: self.entry_file.clone(),
+            import_stack: self.import_stack.clone(),
+            import_alias_frame: self.import_alias_frame,
+            import_completed: self.import_completed.clone(),
+            import_cache: self.import_cache.clone(),
+            module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
             module_states: self.module_states.clone(),

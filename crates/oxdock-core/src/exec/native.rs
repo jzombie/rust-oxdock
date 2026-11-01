@@ -541,11 +541,13 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Some(FuncBody::Script(_))
         );
         // Reserved spans every module: compare base names so the message
-        // keeps naming the bare script identifier.
-        let reserved = self
-            .entries
-            .keys()
-            .any(|key| split_qualified(key).is_some_and(|(_, base)| base == name));
+        // keeps naming the bare script identifier. Script-defined entries
+        // (including `ALIAS::NAME` file imports, #115) never reserve: only
+        // native/host bodies are unshadowable.
+        let reserved = self.entries.iter().any(|(key, entry)| {
+            split_qualified(key).is_some_and(|(_, base)| base == name)
+                && !matches!(entry.body, FuncBody::Script(_))
+        });
         if reserved && !shadowable {
             anyhow::bail!("cannot shadow reserved function `{name}`");
         }
@@ -597,6 +599,99 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             }
         }
         Ok(())
+    }
+
+    /// Define a file-imported DSL `FUNC` under its import alias (#115)
+    /// into an explicit scope frame: nested imports register their
+    /// aliases in the outermost import's caller frame, so the importer's
+    /// `ALIAS::` bodies keep resolving them after the nested frame pops.
+    /// Out-of-range depths fall back to the top frame; a missing frame
+    /// (never in practice: the registry always holds the global frame)
+    /// defines untracked, like top-level definitions.
+    pub(super) fn define_aliased_in(
+        &mut self,
+        depth: usize,
+        alias: &str,
+        name: &str,
+        params: &[(String, TypeTag)],
+        body: &[Step],
+    ) -> Result<()> {
+        let qualified = qualify(alias, name);
+        let shadowable = matches!(
+            self.entries.get(&qualified).map(|entry| &entry.body),
+            Some(FuncBody::Script(_))
+        );
+        // Reserved spans every module: compare base names so the message
+        // keeps naming the bare script identifier. Script-defined entries
+        // never reserve: only native/host bodies are unshadowable.
+        let reserved = self.entries.iter().any(|(key, entry)| {
+            split_qualified(key).is_some_and(|(_, base)| base == name)
+                && !matches!(entry.body, FuncBody::Script(_))
+        });
+        if reserved && !shadowable {
+            anyhow::bail!("cannot shadow reserved function `{name}`");
+        }
+        // Duplicate scope is the target frame: nested imports share the
+        // outermost import's caller frame, so a repeated alias there is
+        // explicit, never silent.
+        let depth_in_range = depth < self.scopes.len();
+        let frame_idx = if depth_in_range {
+            depth
+        } else {
+            self.scopes.len().saturating_sub(1)
+        };
+        if self
+            .scopes
+            .get(frame_idx)
+            .is_some_and(|frame| frame.defined.contains(&qualified))
+        {
+            anyhow::bail!("duplicate function `{name}` in same scope");
+        }
+        let old = self.entries.insert(
+            qualified.clone(),
+            FuncEntry {
+                meta: FuncMeta {
+                    name: qualified.clone(),
+                    module: alias.to_string(),
+                    kind: FuncKind::Script,
+                    params: Some(
+                        params
+                            .iter()
+                            .map(|(name, param_type)| FuncParam {
+                                name: name.clone(),
+                                param_type: Some(param_type.clone()),
+                                allowed: None,
+                                docs: "",
+                                options: None,
+                                optional: false,
+                            })
+                            .collect(),
+                    ),
+                    returns: None,
+                    rpn: false,
+                    summary: "DSL-defined function.",
+                    docs: "Defined via FUNC in an imported script.",
+                    examples: &[],
+                },
+                body: FuncBody::Script(FuncDefData {
+                    params: params.to_vec(),
+                    body: body.to_vec(),
+                }),
+            },
+        );
+        if let Some(frame) = self.scopes.get_mut(frame_idx) {
+            frame.defined.insert(qualified.clone());
+            if let Some(old) = old {
+                frame.shadowed.push((qualified, old));
+            }
+        }
+        Ok(())
+    }
+
+    /// Registry scope depth: the alias frame for an outermost import is
+    /// the frame below the top (#115).
+    pub(super) fn scope_depth(&self) -> usize {
+        self.scopes.len()
     }
 
     /// Open a lexical scope frame for script definitions. Native entries

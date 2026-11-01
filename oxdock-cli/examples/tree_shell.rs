@@ -41,6 +41,7 @@ fn main() -> anyhow::Result<()> {
         Options {
             script: ScriptSource::Path(script_path),
             shell,
+            dry_run: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
             mcp: false,

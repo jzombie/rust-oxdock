@@ -940,6 +940,12 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         cancellable: false,
         reap_floor: None,
         functions: super::native::FunctionRegistry::with_builtins(),
+        entry_file: None,
+        import_stack: Vec::new(),
+        import_alias_frame: None,
+        import_completed: std::collections::HashSet::new(),
+        import_cache: std::collections::HashMap::new(),
+        module_table: super::native::std_module_table(),
         types: super::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),
         module_states: std::collections::HashMap::new(),
@@ -6231,4 +6237,408 @@ fn observe_completion_reports_running_then_finished() {
     let again = done.observe_completion();
     assert!(!again.running, "repeat polls stay finished");
     assert_eq!(again.exit_code, snap.exit_code, "outcome is cached");
+}
+
+/// Seed a lib file into a fresh `MockFs` for file-import tests.
+fn seed_lib(fs: &MockFs, name: &str, contents: &[u8]) {
+    let path = fs.root().join(name).expect("join lib path");
+    fs.write_file(&path, contents).expect("seed lib file");
+}
+
+fn parse_entry(src: &str) -> Vec<Step> {
+    crate::parse_script(src).expect("entry parses")
+}
+
+#[test]
+fn file_import_registers_alias_and_calls() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        b"FUNC DOUBLE($x: STRING) {\n RETURN $x\n}\n",
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $d: STRING = LIB::DOUBLE("hi")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("import runs");
+    assert_eq!(bindings.get("d").and_then(|v| v.as_str()), Some("hi"));
+    assert!(!bindings.contains_key("inner"), "{bindings:?}");
+}
+
+#[test]
+fn file_import_let_capture_binds_top_level_return() {
+    let fs = MockFs::new();
+    seed_lib(&fs, "lib.oxdock", b"RETURN \"lib-value\"\n");
+    let steps = parse_entry("LET $r: STRING = IMPORT [\"lib.oxdock\" AS LIB]\n");
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("import capture runs");
+    assert_eq!(
+        bindings.get("r").and_then(|v| v.as_str()),
+        Some("lib-value")
+    );
+}
+
+#[test]
+fn file_import_isolates_bindings_and_env() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        b"LET $inner: STRING = \"leaked\"\nENV FOO=lib\n",
+    );
+    let steps = parse_entry(indoc! {r#"
+        ENV FOO=entry
+        LET $before: STRING = "x"
+        IMPORT ["lib.oxdock" AS LIB]
+    "#});
+    let mut state = create_exec_state(fs);
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .expect("import runs");
+    // Caller's bindings survive; the import's do not leak.
+    assert!(
+        state
+            .var_scopes
+            .first()
+            .is_some_and(|s| s.contains_key("before"))
+    );
+    assert!(!state.var_scopes.iter().any(|s| s.contains_key("inner")));
+    // Script env reverts to the caller's.
+    assert_eq!(state.get_env("FOO"), Some("entry"));
+}
+
+#[test]
+fn file_import_reverts_workdir() {
+    let fs = MockFs::new();
+    seed_lib(&fs, "lib.oxdock", b"MKDIR sub\nWORKDIR sub\n");
+    let steps = parse_entry("IMPORT [\"lib.oxdock\" AS LIB]\n");
+    let mut state = create_exec_state(fs);
+    let before = state.cwd.clone();
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .expect("import runs");
+    assert_eq!(state.cwd, before);
+}
+
+#[test]
+fn file_import_cycle_fails() {
+    let fs = MockFs::new();
+    seed_lib(&fs, "a.oxdock", b"IMPORT [\"b.oxdock\" AS B]\n");
+    seed_lib(&fs, "b.oxdock", b"IMPORT [\"a.oxdock\" AS A]\n");
+    let steps = parse_entry("IMPORT [\"a.oxdock\" AS A]\n");
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(format!("{err:#}").contains("cycle"), "{err:#}");
+}
+
+#[test]
+fn file_import_missing_file_fails() {
+    let fs = MockFs::new();
+    let steps = parse_entry("IMPORT [\"nope.oxdock\" AS LIB]\n");
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(format!("{err:#}").contains("cannot be read"), "{err:#}");
+}
+
+#[test]
+fn file_import_escape_stays_contained() {
+    // `GuardedPath::join` enforces the base root's containment for every
+    // backend; the `..` escape fails at resolution, before any read.
+    let fs = MockFs::new();
+    let steps = parse_entry("IMPORT [\"../evil.oxdock\" AS E]\n");
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(format!("{err:#}").contains("cannot be resolved"), "{err:#}");
+}
+
+#[test]
+fn file_import_nested_alias_is_transitive() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "nested.oxdock",
+        b"FUNC HIDDEN($x: STRING) {\n RETURN $x\n}\n",
+    );
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        b"IMPORT [\"nested.oxdock\" AS NEST]\nFUNC SHOWN($x: STRING) {\n RETURN NEST::HIDDEN($x)\n}\n",
+    );
+    // The entry names what it imports. LIB's bodies resolve NEST (shared
+    // alias frame); the entry's own direct NEST import is a load-once
+    // no-op returning "" instead of redefining it (diamond-safe).
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        IMPORT ["nested.oxdock" AS NEST]
+        LET $s: STRING = LIB::SHOWN("ok")
+        LET $n: STRING = NEST::HIDDEN("direct")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("nested import runs");
+    assert_eq!(bindings.get("s").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(bindings.get("n").and_then(|v| v.as_str()), Some("direct"));
+}
+
+#[test]
+fn file_import_pipe_names_do_not_cross_talk() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        b"LET $p: PIPE\nWITH_IO [stdout=$p] ECHO lib\nLET $got: STRING = \"done\"\n",
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $p: PIPE
+        IMPORT ["lib.oxdock" AS LIB]
+        WITH_IO [stdout=$p] ECHO entry
+    "#});
+    let mut state = create_exec_state(fs);
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .expect("same pipe names stay isolated");
+}
+
+#[test]
+fn file_import_multi_entry_statement_runs_in_order() {
+    let fs = MockFs::new();
+    seed_lib(&fs, "a.oxdock", b"FUNC FA($x: STRING) {\n RETURN $x\n}\n");
+    seed_lib(&fs, "b.oxdock", b"FUNC FB($x: STRING) {\n RETURN $x\n}\n");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["a.oxdock" AS A,
+                "b.oxdock" AS B]
+        LET $a: STRING = A::FA("a")
+        LET $b: STRING = B::FB("b")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("multi import runs");
+    assert_eq!(bindings.get("a").and_then(|v| v.as_str()), Some("a"));
+    assert_eq!(bindings.get("b").and_then(|v| v.as_str()), Some("b"));
+}
+
+#[test]
+fn file_import_from_bare_harvest_skips_body() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        b"FUNC FOO($x: STRING) {\n RETURN $x\n}\nFUNC BAR($x: STRING) {\n RETURN $x\n}\nWRITE side.txt \"effect\"\n",
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[FOO FROM "lib.oxdock"]]
+        LET $f: STRING = FOO("ok")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs.clone()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("harvest runs");
+    assert_eq!(bindings.get("f").and_then(|v| v.as_str()), Some("ok"));
+    // The harvest never executes the file body: no side effects, and the
+    // unlisted function stays undefined.
+    assert!(!fs.snapshot().keys().any(|k| k.ends_with("side.txt")));
+    // The unlisted function stays undefined: statically unknown at parse.
+    let err = crate::parse_script("BAR(\"x\")\n").expect_err("unlisted func unknown");
+    assert!(format!("{err:#}").contains("unknown function"), "{err:#}");
+}
+
+#[test]
+fn file_import_from_missing_func_fails() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        b"FUNC FOO($x: STRING) {\n RETURN $x\n}\n",
+    );
+    let steps = parse_entry("IMPORT [[NOPE FROM \"lib.oxdock\"]]\n");
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("has no such function `NOPE`"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn file_import_from_aliased_harvest() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        b"FUNC FOO($x: STRING) {\n RETURN $x\n}\n",
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[FOO FROM "lib.oxdock" AS H]]
+        LET $h: STRING = H::FOO("hi")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("aliased harvest runs");
+    assert_eq!(bindings.get("h").and_then(|v| v.as_str()), Some("hi"));
+}
+
+#[test]
+fn file_import_from_runs_nested_imports() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "nested.oxdock",
+        b"FUNC HIDDEN($x: STRING) {\n RETURN $x\n}\n",
+    );
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        b"IMPORT [\"nested.oxdock\" AS NEST]\nFUNC SHOWN($x: STRING) {\n RETURN NEST::HIDDEN($x)\n}\n",
+    );
+    // The harvest skips the lib body but runs its nested import, so the
+    // harvested function keeps its helper.
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[SHOWN FROM "lib.oxdock"]]
+        LET $s: STRING = SHOWN("ok")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("harvest with nested import runs");
+    assert_eq!(bindings.get("s").and_then(|v| v.as_str()), Some("ok"));
+}
+
+#[test]
+fn file_import_from_cycle_fails_instead_of_recursing() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        b"FUNC FA($x: STRING) {\n RETURN $x\n}\nIMPORT [[GB FROM \"b.oxdock\"]]\n",
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        b"FUNC GB($x: STRING) {\n RETURN $x\n}\nIMPORT [[FA FROM \"a.oxdock\"]]\n",
+    );
+    let steps = parse_entry("IMPORT [[FA FROM \"a.oxdock\"]]\n");
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(format!("{err:#}").contains("cycle"), "{err:#}");
+}
+
+#[test]
+fn file_import_from_nested_import_resolves_against_harvested_dir() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "sub/lib.oxdock",
+        b"IMPORT [\"sibling.oxdock\" AS SIB]\nFUNC F($x: STRING) {\n RETURN SIB::G($x)\n}\n",
+    );
+    seed_lib(
+        &fs,
+        "sub/sibling.oxdock",
+        b"FUNC G($x: STRING) {\n RETURN $x\n}\n",
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[F FROM "sub/lib.oxdock"]]
+        LET $v: STRING = F("deep")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("nested import resolves against harvested dir");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("deep"));
+}
+
+#[test]
+fn file_import_from_leaves_no_stack_or_frame_behind() {
+    let fs = MockFs::new();
+    seed_lib(&fs, "lib.oxdock", b"FUNC F($x: STRING) {\n RETURN $x\n}\n");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[F FROM "lib.oxdock"]]
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $v: STRING = LIB::F("ok")
+    "#});
+    let mut state = create_exec_state(fs);
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .expect("harvest then full import runs");
+    assert!(state.import_stack.is_empty());
+    assert_eq!(state.import_alias_frame, None);
+    assert_eq!(
+        state
+            .var_scopes
+            .first()
+            .and_then(|s| s.get("v"))
+            .and_then(|(_, v)| v.as_str()),
+        Some("ok")
+    );
 }

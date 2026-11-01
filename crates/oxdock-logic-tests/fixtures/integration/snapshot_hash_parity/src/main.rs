@@ -105,6 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let opts = Options {
         script: ScriptSource::Path(script_path),
         shell: false,
+        dry_run: false,
         endpoints: EndpointFlags::default(),
         remote_serve: false,
         mcp: false,

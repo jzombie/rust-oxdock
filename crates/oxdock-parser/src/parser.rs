@@ -2927,6 +2927,15 @@ fn parse_single_inner(
             Err(e) => return Err(e),
         }
     }
+    // File `IMPORT "path" AS ALIAS` (#115) rides every single-inner
+    // set (TIMEOUT/ISOLATED/WITH_IO/ASYNC, LET ASYNC): exactly one file
+    // entry and no modules, else a hard error; shape misses fall through
+    // to generic below, which fails them in lowering.
+    if head_word.as_deref() == Some("IMPORT")
+        && let Some((path, alias, used)) = parse_single_file_import(toks, pos, stmt, ctx)?
+    {
+        return Ok((StepKind::ImportFile { path, alias }, used));
+    }
     // Dedicated await/cancel first (await gated by parent); anything
     // they decline falls through to generic below.
     if head_word.as_deref() == Some("AWAIT")
@@ -4311,18 +4320,26 @@ fn parse_remote_bindings(
     Ok(Some((vars, env)))
 }
 
-/// `IMPORT [...]` or bare `IMPORT MOD` at `pos`: bracket rides
-/// gapped (`sep`), modules validate against the table with the exact
-/// backend message, and the innermost frame records them (deduped).
-/// Returns tokens consumed, or `None` on shape miss (generic fails
-/// it in lowering like the grammar). Emits no step; the caller
-/// owns guard handling (top-level guarded fails, in-block leaks).
-fn parse_import_at(
+/// `IMPORT` statement at `pos` (#115): module form (`IMPORT MOD`,
+/// `IMPORT [A, B]`), file form (`IMPORT "p" AS A`,
+/// `IMPORT ["p" AS A]`), mixed/multi forms
+/// (`IMPORT [STD, "p" AS A, "q" AS B]`, multi-line included), and
+/// selective harvests (`IMPORT [[F, G FROM "p" (AS A)?]]`).
+/// Returns module names plus `ImportFile`/`ImportFuncs` steps in source
+/// order, plus tokens consumed (relative to `pos`), or `None` on shape
+/// miss (generic lowering fails it like the grammar). Validation is
+/// hard: unknown modules, bad names, collisions, templates, and remote
+/// URLs fail here, and validated entries register immediately
+/// (modules, aliases, and bare harvest names share the innermost
+/// frames).
+type ImportEntries = (Vec<String>, Vec<StepKind>);
+
+fn parse_import_statement(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
     ctx: &ParseCtx,
-) -> Result<Option<usize>, TokenError> {
+) -> Result<Option<(ImportEntries, usize)>, TokenError> {
     let fail = |msg: String| TokenError {
         stmt,
         msg,
@@ -4337,7 +4354,21 @@ fn parse_import_at(
         Some(t) if !t.joint => t,
         _ => return Ok(None),
     };
-    let mut modules = Vec::new();
+    // Parse entries first, validate in source order after.
+    enum RawEntry {
+        Module(String),
+        File {
+            path: String,
+            alias: String,
+        },
+        From {
+            names: Vec<String>,
+            path: String,
+            alias: Option<String>,
+        },
+    }
+    let mut raw: Vec<RawEntry> = Vec::new();
+    let used;
     if matches!(
         &next.kind,
         TokKind::Group {
@@ -4353,8 +4384,8 @@ fn parse_import_at(
         ..
     } = &next.kind
     {
-        // `import_list`: comma-separated uppercase modules, `ws?`
-        // gaps (newlines ok, comments MISS — `ws` admits neither).
+        // Comma-separated entries, `ws` gaps (newlines ok inside and
+        // around entries, comments MISS — `ws` admits neither).
         let mut parts: Vec<&[Tok]> = Vec::new();
         let mut start = 0;
         for (i, tok) in inner.iter().enumerate() {
@@ -4365,47 +4396,156 @@ fn parse_import_at(
         }
         parts.push(&inner[start..]);
         for part in parts {
-            let mut part = part;
-            while matches!(part.first().map(|t| &t.kind), Some(TokKind::Newline)) {
-                part = &part[1..];
+            let dense: Vec<&Tok> = part
+                .iter()
+                .filter(|t| !matches!(&t.kind, TokKind::Newline))
+                .collect();
+            // `[[F, G FROM "path" (AS ALIAS)?]]`: selective function
+            // harvest. Anything else bracketed here misses.
+            if let [bracket] = dense.as_slice()
+                && let TokKind::Group {
+                    delim: GroupDelim::Bracket,
+                    inner,
+                    ..
+                } = &bracket.kind
+            {
+                let Some((names, path, alias)) = parse_from_entry(inner) else {
+                    return Ok(None);
+                };
+                raw.push(RawEntry::From { names, path, alias });
+                continue;
             }
-            while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
-                part = &part[..part.len() - 1];
-            }
-            match part {
+            match dense.as_slice() {
                 [tok] => match &tok.kind {
-                    TokKind::Word(w) if is_upper_ident(w) => modules.push(w.clone()),
+                    TokKind::Word(w) if is_upper_ident(w) => {
+                        raw.push(RawEntry::Module(w.clone()));
+                    }
                     _ => return Ok(None),
                 },
+                [path_tok, as_tok, alias_tok] if !as_tok.joint && !alias_tok.joint => {
+                    let (
+                        TokKind::Str { text, .. },
+                        TokKind::Word(as_word),
+                        TokKind::Word(alias_word),
+                    ) = (&path_tok.kind, &as_tok.kind, &alias_tok.kind)
+                    else {
+                        return Ok(None);
+                    };
+                    if as_word != "AS" {
+                        return Ok(None);
+                    }
+                    raw.push(RawEntry::File {
+                        path: text.clone(),
+                        alias: alias_word.clone(),
+                    });
+                }
                 _ => return Ok(None),
             }
         }
-        if modules.is_empty() {
+        if raw.is_empty() {
             return Ok(None);
         }
+        used = 2;
     } else if let TokKind::Word(w) = &next.kind {
         // Bare `IMPORT MOD` (single module, probed).
         if !is_upper_ident(w) {
             return Ok(None);
         }
-        modules.push(w.clone());
+        raw.push(RawEntry::Module(w.clone()));
+        used = 2;
+    } else if let TokKind::Str { text, .. } = &next.kind {
+        // Bare `IMPORT "path" AS ALIAS`.
+        let (Some(as_tok), Some(alias_tok)) = (toks.get(pos + 2), toks.get(pos + 3)) else {
+            return Ok(None);
+        };
+        if as_tok.joint || alias_tok.joint {
+            return Ok(None);
+        }
+        let (TokKind::Word(as_word), TokKind::Word(alias_word)) = (&as_tok.kind, &alias_tok.kind)
+        else {
+            return Ok(None);
+        };
+        if as_word != "AS" {
+            return Ok(None);
+        }
+        raw.push(RawEntry::File {
+            path: text.clone(),
+            alias: alias_word.clone(),
+        });
+        used = 4;
     } else {
         return Ok(None);
     }
-    // Unknown modules fail with the exact backend message (sorted
-    // known list (sorted, like the old backend)).
-    for module in &modules {
-        if !ctx.modules.modules.contains_key(module) {
-            let mut known: Vec<String> = ctx.modules.modules.keys().cloned().collect();
-            known.sort();
-            return Err(fail(format!(
-                "unknown module `{module}`; known modules: {}",
-                known.join(", ")
-            )));
+    // Validate in source order: unknown modules fail with the exact
+    // backend message (sorted known list); file and harvest entries
+    // validate hard (bad names, collisions, templates, remote URLs).
+    let mut modules = Vec::new();
+    let mut steps = Vec::new();
+    for entry in raw {
+        match entry {
+            RawEntry::Module(module) => {
+                if !ctx.modules.modules.contains_key(&module) {
+                    let mut known: Vec<String> = ctx.modules.modules.keys().cloned().collect();
+                    known.sort();
+                    return Err(fail(format!(
+                        "unknown module `{module}`; known modules: {}",
+                        known.join(", ")
+                    )));
+                }
+                ctx.import_into_frame(std::slice::from_ref(&module));
+                modules.push(module);
+            }
+            RawEntry::File { path, alias } => {
+                let (path, alias) = validate_file_import(&path, &alias, ctx).map_err(fail)?;
+                steps.push(StepKind::ImportFile { path, alias });
+            }
+            RawEntry::From { names, path, alias } => {
+                let (names, path, alias) =
+                    validate_from_import(&names, &path, alias.as_deref(), ctx).map_err(fail)?;
+                steps.push(StepKind::ImportFuncs { path, alias, names });
+            }
         }
     }
-    ctx.import_into_frame(&modules);
-    Ok(Some(2))
+    Ok(Some(((modules, steps), used)))
+}
+
+/// Single file import for value positions (#115): exactly one
+/// `"path" AS ALIAS` entry and no modules. Anything else shaped like an
+/// import is a hard error naming the restriction; shape misses return
+/// `None` for the generic path.
+fn parse_single_file_import(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(String, String, usize)>, TokenError> {
+    let Some(((modules, mut kinds), used)) = parse_import_statement(toks, pos, stmt, ctx)? else {
+        return Ok(None);
+    };
+    if !modules.is_empty() || !matches!(kinds.as_slice(), [StepKind::ImportFile { .. }]) {
+        return Err(TokenError {
+            stmt,
+            msg: if !modules.is_empty()
+                || kinds
+                    .iter()
+                    .any(|k| matches!(k, StepKind::ImportFuncs { .. }))
+            {
+                "IMPORT here takes a single file import (IMPORT [\"<path>\" AS <ALIAS>]); modules and function harvests stay at statement level".to_string()
+            } else {
+                "IMPORT here takes a single file import (IMPORT [\"<path>\" AS <ALIAS>])"
+                    .to_string()
+            },
+            line: 0,
+            col: 0,
+            kind: Some(ParseErrorKind::Validation {
+                command: "IMPORT".to_string(),
+            }),
+        });
+    }
+    let Some(StepKind::ImportFile { path, alias }) = kinds.pop() else {
+        unreachable!("length and variant checked above")
+    };
+    Ok(Some((path, alias, used)))
 }
 
 /// One `EXPORT` name: an uppercase word with an optional joint
@@ -4439,6 +4579,151 @@ fn parse_export_name(toks: &[Tok], pos: usize) -> Option<(String, usize)> {
         used = 4;
     }
     Some((name, used))
+}
+
+/// One `[[F, G FROM "path" (AS ALIAS)?]]` entry: selective function
+/// harvest. Returns names, path, and optional alias, or `None` on shape
+/// miss (generic lowering fails it). Name case is validated hard by the
+/// caller, like file aliases.
+fn parse_from_entry(inner: &[Tok]) -> Option<(Vec<String>, String, Option<String>)> {
+    let dense: Vec<&Tok> = inner
+        .iter()
+        .filter(|t| !matches!(&t.kind, TokKind::Newline))
+        .collect();
+    let from = dense
+        .iter()
+        .position(|t| matches!(&t.kind, TokKind::Word(w) if w == "FROM"))?;
+    if from == 0 {
+        return None;
+    }
+    // Names: comma-separated bare words.
+    let mut names = Vec::new();
+    let mut start = 0;
+    let head = &dense[..from];
+    for (i, tok) in head.iter().enumerate() {
+        if matches!(&tok.kind, TokKind::Punct(',')) {
+            let part = &head[start..i];
+            let [tok] = part else { return None };
+            let TokKind::Word(w) = &tok.kind else {
+                return None;
+            };
+            names.push(w.clone());
+            start = i + 1;
+        }
+    }
+    let part = &head[start..];
+    let [tok] = part else { return None };
+    let TokKind::Word(w) = &tok.kind else {
+        return None;
+    };
+    names.push(w.clone());
+    // Tail: `"path"` with an optional gapped `AS ALIAS`.
+    let tail = &dense[from + 1..];
+    match tail {
+        [path_tok] => {
+            let TokKind::Str { text, .. } = &path_tok.kind else {
+                return None;
+            };
+            Some((names, text.clone(), None))
+        }
+        [path_tok, as_tok, alias_tok] if !as_tok.joint && !alias_tok.joint => {
+            let (TokKind::Str { text, .. }, TokKind::Word(as_word), TokKind::Word(alias_word)) =
+                (&path_tok.kind, &as_tok.kind, &alias_tok.kind)
+            else {
+                return None;
+            };
+            if as_word != "AS" {
+                return None;
+            }
+            Some((names, text.clone(), Some(alias_word.clone())))
+        }
+        _ => None,
+    }
+}
+
+/// Validate an `IMPORT` alias: hard errors (never shape misses) plus
+/// registration into the innermost import frame.
+fn validate_import_alias(alias: &str, ctx: &ParseCtx) -> Result<String, String> {
+    if !is_upper_ident(alias) {
+        return Err(format!(
+            "IMPORT alias must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{alias}`"
+        ));
+    }
+    if ctx.modules.modules.contains_key(alias) {
+        return Err(format!(
+            "IMPORT alias `{alias}` collides with module `{alias}`"
+        ));
+    }
+    let (_, imports) = ctx.visible_snapshot();
+    if imports.contains(&alias.to_string()) {
+        return Err(format!("duplicate IMPORT alias `{alias}`"));
+    }
+    ctx.import_into_frame(std::slice::from_ref(&alias.to_string()));
+    Ok(alias.to_string())
+}
+
+/// Validate an `IMPORT` path: hard errors, never shape misses.
+fn validate_import_path(path: &str) -> Result<String, String> {
+    if path.is_empty() {
+        return Err("IMPORT path must not be empty".to_string());
+    }
+    if path.contains("{{") {
+        return Err("IMPORT path must be a literal string (no {{ }} templates)".to_string());
+    }
+    if path.contains("://") {
+        return Err(
+            "remote imports are deferred to #270 (net: Run scripts from a remote URL)".to_string(),
+        );
+    }
+    Ok(path.to_string())
+}
+
+/// Validate a file-import path/alias pair: hard errors (never shape
+/// misses) plus alias registration into the innermost import frame.
+fn validate_file_import(
+    path: &str,
+    alias: &str,
+    ctx: &ParseCtx,
+) -> Result<(String, String), String> {
+    let alias = validate_import_alias(alias, ctx)?;
+    let path = validate_import_path(path)?;
+    Ok((path, alias))
+}
+
+/// Validate a `[[F, G FROM "path" (AS ALIAS)?]]` entry: hard errors
+/// (never shape misses). Bare names declare into the innermost `FUNC`
+/// frame so calls resolve statically; the runtime defines them (and
+/// fails unknown names there). An alias registers like a file import.
+fn validate_from_import(
+    names: &[String],
+    path: &str,
+    alias: Option<&str>,
+    ctx: &ParseCtx,
+) -> Result<(Vec<String>, String, Option<String>), String> {
+    let path = validate_import_path(path)?;
+    let mut out_names = Vec::with_capacity(names.len());
+    for name in names {
+        if !is_upper_ident(name) {
+            return Err(format!(
+                "IMPORT function names must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{name}`"
+            ));
+        }
+        if ctx.reserved.contains(name) {
+            return Err(format!("cannot shadow reserved function `{name}`"));
+        }
+        out_names.push(name.clone());
+    }
+    if let Some(alias) = alias {
+        let alias = validate_import_alias(alias, ctx)?;
+        Ok((out_names, path, Some(alias)))
+    } else {
+        for name in &out_names {
+            if !ctx.declare_func(name) {
+                return Err(format!("duplicate function `{name}` in same scope"));
+            }
+        }
+        Ok((out_names, path, None))
+    }
 }
 
 /// `EXPORT ...` names at `pos`: bracket list (strict, `ws` gaps:
@@ -5649,6 +5934,23 @@ fn parse_let_rhs(
             ));
         }
     }
+    // File `IMPORT ["path" AS ALIAS]` (#115) captures the imported
+    // pipeline's `RETURN` value like a call (`LET $r = IMPORT ...`
+    // lowers to `AssignCapture`): exactly one file entry, no modules.
+    // Anything else shaped like an import is a hard error; shape misses
+    // fall through to generic below, which fails them in lowering.
+    if head_word.as_deref() == Some("IMPORT")
+        && let Some((path, alias, used)) = parse_single_file_import(rhs, 0, stmt, ctx)?
+    {
+        return Ok((
+            StepKind::AssignCapture {
+                var,
+                decl_type,
+                cmd: Box::new(StepKind::ImportFile { path, alias }),
+            },
+            skipped + used,
+        ));
+    }
     // Known-command leads capture through the generic parser
     // (lowering failures are fatal here, exactly like the committed
     // grammar alternative: probed wrapper-alone and `ISOLATED`-led
@@ -6283,26 +6585,54 @@ fn parse_elements(
                 }
             }
         }
-        // `IMPORT` directives update the import frames and emit no
-        // step; the guard leaks to the next element (probed) unless
-        // this is top level, where a guarded `IMPORT` fails. Shape
-        // misses fall through to generic (lowering fails them).
+        // `IMPORT` statements update the import frames; module entries
+        // emit no step (the guard leaks to the next element, probed,
+        // unless this is top level, where a guarded module import
+        // fails), while each file entry emits one `ImportFile` step
+        // carrying the guard. Shape misses fall through to generic
+        // (lowering fails them).
         if matches!(
             toks.get(pos).map(|t| &t.kind),
             Some(TokKind::Word(w)) if w == "IMPORT"
-        ) && let Some(used) = parse_import_at(toks, pos, stmt, ctx)?
-        {
-            if !in_block && pending_guard.is_some() {
-                return Err(TokenError {
-                    stmt,
-                    msg: "IMPORT cannot be guarded".to_string(),
-                    line: 0,
-                    col: 0,
-                    kind: None,
-                });
+        ) {
+            // Unified statement form (#115): each entry validates hard
+            // (unknown modules, bad aliases, templates, remote URLs);
+            // module entries update the frame and emit no step, file
+            // and harvest entries emit one step each, in source order.
+            // A top-level guard on a statement with module entries fails
+            // like the historical directive; file-only statements consume
+            // the guard like any other element.
+            if let Some(((modules, kinds), used)) = parse_import_statement(toks, pos, stmt, ctx)? {
+                if !modules.is_empty() && !in_block && pending_guard.is_some() {
+                    return Err(TokenError {
+                        stmt,
+                        msg: "IMPORT cannot be guarded".to_string(),
+                        line: 0,
+                        col: 0,
+                        kind: None,
+                    });
+                }
+                // Modules-only statements stay zero-step directives: the
+                // guard leaks to the next element (probed). Anything with
+                // file or harvest entries consumes it.
+                let guard = if kinds.is_empty() {
+                    None
+                } else {
+                    pending_guard.take()
+                };
+                for kind in kinds {
+                    steps.push(Step {
+                        guard: guard.clone(),
+                        kind,
+                        scope_enter: 0,
+                        scope_exit: 0,
+                        line: 0,
+                        col: 0,
+                    });
+                }
+                pos += used;
+                continue;
             }
-            pos += used;
-            continue;
         }
         let guard = pending_guard.take();
         let (mut got, used) = parse_element_at(toks, pos, stmt, ctx, guard, in_block)?;
@@ -6904,11 +7234,13 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
     )?;
     {
         let top: HashSet<String> = ctx.funcs.borrow().first().cloned().unwrap_or_default();
+        let top_imports: Vec<String> = ctx.imports.borrow().first().cloned().unwrap_or_default();
         crate::commands::validate_exports(
             &lowering_ctx(out.len()),
             &ctx.exports.borrow(),
             &top,
             ctx.modules,
+            &top_imports,
         )
         .map_err(|e| TokenError {
             stmt: out.len(),

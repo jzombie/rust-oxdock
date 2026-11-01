@@ -44,14 +44,45 @@ Out of scope (stays in #153 MCP track, per 2026-10-21 comments):
 
 ```
 IMPORT ["./lib.oxdock" AS LIB]
+IMPORT ["./a.oxdock" AS A, "./b.oxdock" AS B]
+IMPORT [STD,
+        "./lib.oxdock" AS LIB, "./nested.oxdock" AS NEST]
+IMPORT [[FOO, BAR FROM "./lib.oxdock"]]
+IMPORT [[FOO FROM "./lib.oxdock" AS H], STD]
 IMPORT ["./lib.oxdock" AS LIB] WITH_IO [stdin=$x, stdout=$y]
 LET $r = IMPORT ["./lib.oxdock" AS LIB]
 LET $t = ASYNC IMPORT ["./lib.oxdock" AS LIB]
 ```
 
 - `dsl.pest`: new `import_file_statement`; wire into `element` before generic `command`. `IMPORT` keyword with `~ !(ALNUM|_)` guard (same as existing).
-- Keep `IMPORT [STD]` module form untouched. Disambiguate by first token: `"` / string literal means file form; `WORD` / `[WORD...]` means module form.
-- `AS` mandatory in file form; missing `AS` or non-uppercase alias = parse error. Alias must satisfy existing module-name rules (uppercase, checked where `qualify` validates).
+- Brackets hold comma-separated entries of either kind, across lines:
+  each module word registers in order, each `"path" AS ALIAS` entry
+  emits one `ImportFile` step in order. Without an alias a file entry
+  is a parse error.
+- Value positions (`LET` RHS, `ASYNC` bodies, `TIMEOUT`/`ISOLATED`/
+  `WITH_IO` single inners) take exactly one file entry and no modules;
+  anything else shaped like an import is a hard error there.
+- Selective harvest `[[F, G FROM "path" (AS ALIAS)?]]` defines only the
+  named top-level `FUNC`s (bare, or namespaced) without executing the
+  file body; the file's own nested imports still load. Missing names
+  fail at import time. Produces no value: never valid in value
+  positions. Bare names declare into the parse scope (duplicate and
+  reserved rules mirror `FUNC`); aliases follow file-import rules.
+- Paths resolve workspace-side against the importer dir (entry parent
+  at top level, workspace root / build context for stdin). Script-made
+  files land snapshot-side by default: generate-then-import needs
+  `WORKSPACE LOCAL`.
+- Lifecycle: every import joins `import_stack` for its duration
+  (cycle/depth/base-dir correctness for nested loads, both forms) and
+  clears `import_alias_frame` when the stack empties. Harvests push no
+  scope (nothing executes), so only the stack unwinds there.
+- Keep `IMPORT [STD]` module form untouched. Disambiguate per entry:
+  `Word` means module, string literal means file form.
+- `AS` mandatory per file entry; missing `AS` or non-uppercase alias = parse error. Alias must satisfy existing module-name rules (uppercase, checked where `qualify` validates).
+- Guard rule: a top-level guard on a statement with module entries
+  fails (`IMPORT cannot be guarded`, historical); file-only statements
+  consume the guard like any other element; in-block mixed statements
+  attach it to the file steps while modules register unconditionally.
 - Optional trailing `KEY=value` overrides: defer per issue open decision; recommend single `Arg::Rest(KeyValue)` tail OR defer to phase 2. Phase 1: no overrides (isolation only), add overrides after isolation + pipes land.
 - `WITH_IO` bindings on `IMPORT` callsite: explicit pipe parameterization only (per comment 1). No implicit pipe inheritance beyond what `CALL` already does; internal `WITH_IO` names inside callee get mangled.
 - `LET $r = IMPORT ...` lowers to `AssignCapture{var, body: Import}` (same path as `LET $r = CALL`); `LET $t = ASYNC IMPORT ...` lowers to `AssignAsync`. Bare `IMPORT` discards return, keeps FS/pipe side effects.
@@ -88,7 +119,7 @@ New `crates/oxdock-core/src/exec/import.rs` (or extend `args.rs`):
 
 ## 5. Phasing (in scope: phases 1+2; phase 3 deferred to #270)
 
-1. Phase 1: local file `IMPORT ["..." AS ALIAS]` (any extension, especially `.oxdock`/`.oxfile`) + isolation + pipe mangling + `LET`/`ASYNC` capture + cycles/depth/cache + dry-run listing + tests.
+1. Phase 1: local file `IMPORT ["..." AS ALIAS]` (any extension, especially `.oxdock`/`.oxfile`; multi-entry and mixed module+file brackets, multiline included) + isolation + pipe mangling + `LET`/`ASYNC` capture + cycles/depth/cache + dry-run listing + tests.
 2. Phase 2: override map (`KEY=value` vs `WITH $map`, one form), re-export rule for MCP, `modules:` exemption enforcement + collision panics.
 3. Phase 3 (deferred to #270 `net: Run scripts from a remote URL`): remote URL imports via `net` plugin + feature gate + `READ`-like stream command + hash pin. Remote entry composes with #115 rules once fetched; see #270 for allowlist + hash-pin gating, `net`-feature gate, and cached downloads.
 

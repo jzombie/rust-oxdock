@@ -167,6 +167,32 @@ pub fn validate_script_types<P: ProcessManager>(steps: &[Step], exec: &ExecState
     Ok(())
 }
 
+/// Run the static pass over an imported file's body (#115). The
+/// imported top level is function-like: `RETURN` is the value channel
+/// back to the importer (allowed here, unlike entry scripts), and
+/// falling off the end yields `""` instead of failing. Nested `FUNC`
+/// bodies are fully checked like entry functions.
+pub fn validate_import_body_types<P: ProcessManager>(
+    steps: &[Step],
+    exec: &ExecState<P>,
+) -> Result<()> {
+    let mut checker = Checker::new(exec);
+    checker.collect(steps)?;
+    let mut env = Env::one_frame(Vec::new());
+    let scope = Scope {
+        label: "import",
+        ret: RetCtx::Func("IMPORT".to_string()),
+        loops: 0,
+        site: None,
+    };
+    let out = checker.walk_body(steps, &mut env, &scope, 0)?;
+    let _ = out;
+    for key in checker.func_keys() {
+        checker.func_return(&key, 0)?;
+    }
+    Ok(())
+}
+
 /// Same pass returning the visit count, for the linearity test: the
 /// count must stay proportional to input size on adversarial input.
 /// Test-only: production calls `validate_script_types`.

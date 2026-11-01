@@ -51,6 +51,12 @@ pub(crate) fn resolve_call_name(
         check_func_ident(ctx, base)?;
         match modules.modules.get(module) {
             None => {
+                // File-import aliases (`IMPORT ["path" AS ALIAS]`, #115)
+                // never enter the module table; an alias visible in the
+                // import frames is opaque and resolves at runtime.
+                if imports.iter().any(|m| m == module) {
+                    return Ok(name.to_string());
+                }
                 let mut known: Vec<String> = modules.modules.keys().cloned().collect();
                 known.sort();
                 Err(ParseError::validation(
@@ -101,6 +107,11 @@ pub(crate) fn resolve_call_name(
                     }
                 }
                 Some(None) if !opaque_matches.contains(module) => {
+                    opaque_matches.push(module.clone());
+                }
+                // File-import aliases (#115) never enter the module table;
+                // a visible alias is opaque and resolves at runtime.
+                None if !opaque_matches.contains(module) => {
                     opaque_matches.push(module.clone());
                 }
                 Some(None) | None => {}

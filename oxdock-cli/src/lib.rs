@@ -10,13 +10,15 @@ use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::sync::{Arc, Mutex};
 
+use oxdock_core::ExecIo;
 pub use oxdock_core::{
     Engine, EngineOutput, ExecState, ExitRequest, FuncKind, FuncMeta, FuncParam, HostModule,
     HostRegistration, NativeFn, OxDockFn, OxDockType, PureFn, PushManifestSink, StepCtx,
-    TypeDescriptor, Value, exit_code_of, parse_script, parse_script_with_modules, run_steps,
-    run_steps_with_context, run_steps_with_context_result, run_steps_with_manager_with_modules,
+    TypeDescriptor, Value, dry_run_closure, exit_code_of, parse_script, parse_script_with_modules,
+    run_steps, run_steps_with_context, run_steps_with_context_result,
+    run_steps_with_lazy_snapshot_and_modules_and_entry, run_steps_with_manager_with_modules,
+    run_steps_with_manager_with_modules_and_entry,
 };
-use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot_and_modules};
 pub use oxdock_parser::{Guard, Step, StepKind};
 pub use oxdock_process::shell_program;
 use std::collections::BTreeMap;
@@ -61,6 +63,7 @@ oxdock_embed! {
               SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
               --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
               --shell            run the script, then drop into an interactive shell (requires a TTY)
+              --dry-run          print the transitive import closure (file:line CMD) instead of running
               --mcp              serve EXPORTed FUNCs as MCP tools over stdio (requires the `mcp` feature)
             {{ $net_flags }}
               --help, -h         print this help and exit
@@ -173,16 +176,54 @@ fn cli_host_types() -> Vec<&'static TypeDescriptor> {
 /// extra modules this is exactly `parse_script`, so base-build behavior
 /// never changes.
 fn parse_cli_script(script: &str) -> Result<Vec<Step>> {
+    parse_script_with_modules(script, cli_module_table())
+}
+
+/// Module table for CLI parsing: STD plus bundled host modules.
+/// Imported files (#115) parse against this same table.
+fn cli_module_table() -> oxdock_parser::ModuleTable {
     let modules = cli_host_modules();
     if modules.is_empty() {
-        parse_script(script)
-    } else {
-        let mut engine = Engine::new();
-        for module in modules {
-            engine.register_module(module);
-        }
-        parse_script_with_modules(script, engine.module_table())
+        return oxdock_core::std_module_table();
     }
+    let mut engine = Engine::new();
+    for module in modules {
+        engine.register_module(module);
+    }
+    engine.module_table()
+}
+
+/// Entry script file for `#115` imports, if the run started from one:
+/// top-level relative `IMPORT` paths resolve against its parent.
+fn entry_file_of(script: &ScriptSource) -> Option<GuardedPath> {
+    match script {
+        ScriptSource::Path(path) => Some(path.clone()),
+        ScriptSource::Stdin => None,
+    }
+}
+
+/// Print the transitive import closure (`file:line CMD`, #115 preview)
+/// instead of executing. Pure parser + loader: no handlers run, no
+/// processes spawn, no FS writes.
+fn print_dry_run(
+    steps: &[Step],
+    script: &ScriptSource,
+    workspace_root: &GuardedPath,
+) -> Result<()> {
+    let table = cli_module_table();
+    let (label, base) = match script {
+        ScriptSource::Path(path) => (
+            path.display(),
+            path.parent().unwrap_or_else(|| workspace_root.clone()),
+        ),
+        ScriptSource::Stdin => ("<stdin>".to_string(), workspace_root.clone()),
+    };
+    let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+    let listing = dry_run_closure(steps, &label, &base, &resolver, &table)?;
+    for item in listing {
+        println!("{}:{} {}", item.file, item.step.line, item.step.kind);
+    }
+    Ok(())
 }
 
 pub fn run() -> Result<()> {
@@ -229,6 +270,9 @@ pub fn run() -> Result<()> {
             if !opts.endpoints.listens.is_empty() || !opts.endpoints.publishes.is_empty() {
                 bail!("--mcp runs alone (no --listen/-p)");
             }
+            if opts.dry_run {
+                bail!("--mcp runs alone (no --dry-run)");
+            }
             return mcp::serve_mcp(opts, workspace_root);
         }
         #[cfg(not(feature = "mcp"))]
@@ -268,6 +312,9 @@ fn reject_url_script(text: &str) -> Result<()> {
 pub struct Options {
     pub script: ScriptSource,
     pub shell: bool,
+    /// Print the transitive import closure (`file:line CMD`, #115) instead
+    /// of executing. No handlers run, no processes spawn, no FS writes.
+    pub dry_run: bool,
     pub endpoints: EndpointFlags,
     pub remote_serve: bool,
     /// Serve `EXPORT`ed FUNCs as MCP tools over stdio instead of running
@@ -287,6 +334,7 @@ impl Options {
 
         let mut script: Option<ScriptSource> = None;
         let mut shell = false;
+        let mut dry_run = false;
         let mut endpoints = EndpointFlags::default();
         let mut remote_serve = false;
         let mut mcp = false;
@@ -332,6 +380,9 @@ impl Options {
                 }
                 Long("shell") => {
                     shell = true;
+                }
+                Long("dry-run") => {
+                    dry_run = true;
                 }
                 Long("listen") => {
                     let raw = value_string(
@@ -431,6 +482,7 @@ impl Options {
         Ok(Self {
             script,
             shell,
+            dry_run,
             endpoints,
             remote_serve,
             mcp,
@@ -518,7 +570,18 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
     let mut final_cwd = workspace_root.clone();
     let snapshot = Arc::new(LazyGuardedTempDir::new());
     if !script.trim().is_empty() {
-        // Bind endpoint sockets before parsing: conflicts fail fast,
+        let steps = parse_cli_script(&script)?;
+        // Dry-run previews the import closure without binding sockets,
+        // remotes, or execution state.
+        if opts.dry_run {
+            print_dry_run(&steps, &opts.script, &workspace_root)?;
+            return Ok(ExecutionResult {
+                snapshot,
+                final_cwd,
+                bindings: BTreeMap::new(),
+            });
+        }
+        // Bind endpoint sockets before running: conflicts fail fast,
         // never parse-then-fail-on-bind.
         #[cfg(feature = "net")]
         let registry = build_registry(&opts.endpoints)?;
@@ -526,7 +589,6 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
         check_no_net_endpoints(&opts.endpoints)?;
         #[cfg(not(feature = "net"))]
         check_no_net_remotes(&opts.remotes)?;
-        let steps = parse_cli_script(&script)?;
         // Validate REMOTE targets against inventory after parsing (targets
         // live in AST nodes) and before execution: unknown targets fail
         // here, never mid-run.
@@ -538,25 +600,28 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
             inventory.validate_script(&steps)?;
             inventory
         };
+        let entry_file = entry_file_of(&opts.script);
         #[cfg(feature = "net")]
         let output = {
             let mut io_cfg = ExecIo::new();
             register_remote_runners(&mut io_cfg, &inventory);
-            run_steps_with_lazy_snapshot_and_modules(
+            run_steps_with_lazy_snapshot_and_modules_and_entry(
                 &workspace_root,
                 &steps,
                 io_cfg,
                 cli_host_modules_with(Some(&registry)),
                 cli_host_types(),
+                entry_file,
             )?
         };
         #[cfg(not(feature = "net"))]
-        let output = run_steps_with_lazy_snapshot_and_modules(
+        let output = run_steps_with_lazy_snapshot_and_modules_and_entry(
             &workspace_root,
             &steps,
             ExecIo::new(),
             cli_host_modules_with(None),
             cli_host_types(),
+            entry_file,
         )?;
         final_cwd = output.final_cwd;
         return Ok(ExecutionResult {
@@ -752,7 +817,14 @@ where
     let mut snapshot = Arc::new(LazyGuardedTempDir::new());
     let mut fs: Option<Box<dyn WorkspaceFs>> = None;
     if !script.trim().is_empty() {
-        // Bind endpoint sockets before parsing: conflicts fail fast,
+        let steps = parse_cli_script(&script)?;
+        // Dry-run previews the import closure without binding sockets,
+        // remotes, or execution state.
+        if opts.dry_run {
+            print_dry_run(&steps, &opts.script, &workspace_root)?;
+            return Ok(());
+        }
+        // Bind endpoint sockets before running: conflicts fail fast,
         // never parse-then-fail-on-bind.
         #[cfg(feature = "net")]
         let registry = build_registry(&opts.endpoints)?;
@@ -762,7 +834,6 @@ where
         check_no_net_remotes(&opts.remotes)?;
         #[cfg(feature = "net")]
         report_ephemeral_publishes(&opts.endpoints, &registry);
-        let steps = parse_cli_script(&script)?;
         // Validate REMOTE targets against inventory after parsing (targets
         // live in AST nodes) and before execution: unknown targets fail
         // here, never mid-run.
@@ -794,21 +865,24 @@ where
         io_cfg.set_stdin(stdin_handle);
         #[cfg(feature = "net")]
         register_remote_runners(&mut io_cfg, &inventory);
+        let entry_file = entry_file_of(&opts.script);
         #[cfg(feature = "net")]
-        let output = run_steps_with_lazy_snapshot_and_modules(
+        let output = run_steps_with_lazy_snapshot_and_modules_and_entry(
             &workspace_root,
             &steps,
             io_cfg,
             cli_host_modules_with(Some(&registry)),
             cli_host_types(),
+            entry_file,
         )?;
         #[cfg(not(feature = "net"))]
-        let output = run_steps_with_lazy_snapshot_and_modules(
+        let output = run_steps_with_lazy_snapshot_and_modules_and_entry(
             &workspace_root,
             &steps,
             io_cfg,
             cli_host_modules_with(None),
             cli_host_types(),
+            entry_file,
         )?;
         final_cwd = output.final_cwd;
         snapshot = output.snapshot;
@@ -990,6 +1064,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: true,
+            dry_run: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
             mcp: false,
@@ -1429,6 +1504,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            dry_run: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
             mcp: false,
@@ -1462,6 +1538,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            dry_run: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
             mcp: false,
@@ -1498,6 +1575,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            dry_run: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
             mcp: false,
@@ -1525,6 +1603,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: true,
+            dry_run: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
             mcp: false,
@@ -1570,6 +1649,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            dry_run: false,
             endpoints: EndpointFlags {
                 publishes: vec![(
                     std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -1608,6 +1688,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            dry_run: false,
             // The port key is only a registry name here: the outer bind
             // is ephemeral, so no fixed host port is ever touched.
             endpoints: EndpointFlags {
@@ -1650,6 +1731,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            dry_run: false,
             endpoints: EndpointFlags {
                 publishes: vec![(
                     std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -1704,6 +1786,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            dry_run: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
             mcp: false,
@@ -1769,6 +1852,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            dry_run: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
             mcp: false,

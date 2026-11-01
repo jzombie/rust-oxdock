@@ -1492,6 +1492,8 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::AssertContains { .. } => "AssertContains",
         StepKind::CopyGit { .. } => "CopyGit",
         StepKind::Exit(_) => "Exit",
+        StepKind::ImportFile { .. } => "ImportFile",
+        StepKind::ImportFuncs { .. } => "ImportFuncs",
         StepKind::WithIo { .. } => "WithIo",
         StepKind::WithIoBlock { .. } => "WithIoBlock",
         StepKind::Expand { .. } => "Expand",
