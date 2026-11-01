@@ -194,36 +194,7 @@ fn dry_run_walk_kind(
     cache: &mut HashMap<String, Vec<Step>>,
     out: &mut Vec<DryRunStep>,
 ) -> Result<()> {
-    fn bodies(kind: &StepKind) -> Vec<&[Step]> {
-        match kind {
-            StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => bodies(cmd),
-            StepKind::For { body, .. }
-            | StepKind::While { body, .. }
-            | StepKind::FuncDef { body, .. }
-            | StepKind::Timeout { body, .. }
-            | StepKind::Isolated { body, .. }
-            | StepKind::AssignAsync { body, .. }
-            | StepKind::AsyncBlock { body, .. }
-            | StepKind::RemoteBlock { body, .. } => vec![body],
-            StepKind::If {
-                then_body,
-                else_ifs,
-                else_body,
-                ..
-            } => {
-                let mut out = vec![then_body.as_slice()];
-                for (_, arm) in else_ifs {
-                    out.push(arm);
-                }
-                if let Some(arm) = else_body {
-                    out.push(arm);
-                }
-                out
-            }
-            _ => Vec::new(),
-        }
-    }
-    for body in bodies(kind) {
+    for body in child_bodies(kind) {
         dry_run_walk(body, file, dir, fs, table, stack, cache, out)?;
     }
     Ok(())
@@ -461,6 +432,271 @@ pub(crate) fn import_file<P: ProcessManager>(
     }
 }
 
+/// One site importing a file in the closure (#115): the alias it
+/// registers under (`None` for bare harvests) and the harvested names
+/// (`None` for whole-file imports, which register everything).
+#[derive(Debug, Clone)]
+pub(super) struct ClosureSite {
+    pub alias: Option<String>,
+    pub names: Option<Vec<String>>,
+}
+
+/// One file in the transitive import closure (#115): the resolved path
+/// plus the parsed body, with every site that loads it. Sites accumulate
+/// across the walk (diamonds), each validated once. `path` is the
+/// literal spelling from the first import statement, for error messages.
+#[derive(Debug, Clone)]
+pub(super) struct ClosureFile {
+    pub key: String,
+    pub path: String,
+    pub steps: Vec<Step>,
+    pub sites: Vec<ClosureSite>,
+}
+
+/// Expand the transitive import closure without executing anything:
+/// every file reachable from `steps` through `ImportFile`/`ImportFuncs`
+/// steps, including conditional ones (validation is conservative).
+/// Cycles and depth overflow fail here, before the first step runs.
+/// Parsed bodies land in the run's `import_cache`, so execution reuses
+/// them instead of re-reading.
+pub(crate) fn expand_import_closure<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    steps: &[Step],
+) -> Result<Vec<ClosureFile>> {
+    let base = import_base(state);
+    let mut stack: Vec<GuardedPath> = Vec::new();
+    let mut files: Vec<ClosureFile> = Vec::new();
+    expand_walk(state, steps, &base, &mut stack, &mut files)?;
+    Ok(files)
+}
+
+/// Walk steps collecting import sites. Full imports recurse into the
+/// whole body (conditional nested imports included); harvests recurse
+/// into top-level nested imports only, mirroring [`import_funcs`].
+fn expand_walk<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    steps: &[Step],
+    dir: &GuardedPath,
+    stack: &mut Vec<GuardedPath>,
+    files: &mut Vec<ClosureFile>,
+) -> Result<()> {
+    for step in steps {
+        match &step.kind {
+            StepKind::ImportFile { path, alias } => {
+                let Some((resolved, body, nested)) = expand_load(state, dir, stack, path)? else {
+                    continue;
+                };
+                let key = resolved.display();
+                stack.push(resolved);
+                record_site(
+                    files,
+                    key,
+                    path.clone(),
+                    body.clone(),
+                    ClosureSite {
+                        alias: Some(alias.clone()),
+                        names: None,
+                    },
+                );
+                expand_walk(state, &body, &nested, stack, files)?;
+                stack.pop();
+            }
+            StepKind::ImportFuncs { path, alias, names } => {
+                let Some((resolved, body, nested)) = expand_load(state, dir, stack, path)? else {
+                    continue;
+                };
+                let key = resolved.display();
+                stack.push(resolved);
+                record_site(
+                    files,
+                    key,
+                    path.clone(),
+                    body.clone(),
+                    ClosureSite {
+                        alias: alias.clone(),
+                        names: Some(names.clone()),
+                    },
+                );
+                expand_walk_top(state, &body, &nested, stack, files)?;
+                stack.pop();
+            }
+            _ => {}
+        }
+        expand_walk_kind(state, &step.kind, dir, stack, files)?;
+    }
+    Ok(())
+}
+
+/// Mirror of [`import_funcs`]' nested handling: only top-level nested
+/// imports load. Conditional bodies are skipped here exactly as they
+/// are at runtime.
+fn expand_walk_top<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    steps: &[Step],
+    dir: &GuardedPath,
+    stack: &mut Vec<GuardedPath>,
+    files: &mut Vec<ClosureFile>,
+) -> Result<()> {
+    for step in steps {
+        match &step.kind {
+            StepKind::ImportFile { path, alias } => {
+                let Some((resolved, body, nested)) = expand_load(state, dir, stack, path)? else {
+                    continue;
+                };
+                let key = resolved.display();
+                stack.push(resolved);
+                record_site(
+                    files,
+                    key,
+                    path.clone(),
+                    body.clone(),
+                    ClosureSite {
+                        alias: Some(alias.clone()),
+                        names: None,
+                    },
+                );
+                expand_walk(state, &body, &nested, stack, files)?;
+                stack.pop();
+            }
+            StepKind::ImportFuncs { path, alias, names } => {
+                let Some((resolved, body, nested)) = expand_load(state, dir, stack, path)? else {
+                    continue;
+                };
+                let key = resolved.display();
+                stack.push(resolved);
+                record_site(
+                    files,
+                    key,
+                    path.clone(),
+                    body.clone(),
+                    ClosureSite {
+                        alias: alias.clone(),
+                        names: Some(names.clone()),
+                    },
+                );
+                expand_walk_top(state, &body, &nested, stack, files)?;
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Recurse into a step's nested bodies so conditional imports join the
+/// closure too (validation is conservative: anything that might load
+/// gets checked).
+fn expand_walk_kind<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    kind: &StepKind,
+    dir: &GuardedPath,
+    stack: &mut Vec<GuardedPath>,
+    files: &mut Vec<ClosureFile>,
+) -> Result<()> {
+    for body in child_bodies(kind) {
+        expand_walk(state, body, dir, stack, files)?;
+    }
+    Ok(())
+}
+
+/// Immediate child bodies of a step, shared by expansion and dry-run.
+/// Boxed sub-kinds unwrap one level; block bodies recurse per step by
+/// the callers.
+fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
+    match kind {
+        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => child_bodies(cmd),
+        StepKind::For { body, .. }
+        | StepKind::While { body, .. }
+        | StepKind::FuncDef { body, .. }
+        | StepKind::Timeout { body, .. }
+        | StepKind::Isolated { body, .. }
+        | StepKind::AssignAsync { body, .. }
+        | StepKind::AsyncBlock { body, .. }
+        | StepKind::RemoteBlock { body, .. } => vec![body],
+        StepKind::If {
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            let mut out = vec![then_body.as_slice()];
+            for (_, arm) in else_ifs {
+                out.push(arm);
+            }
+            if let Some(arm) = else_body {
+                out.push(arm);
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Record an import site, deduping identical sites (diamonds load once
+/// per alias shape, mirroring the runtime `import_completed` set).
+fn record_site(
+    files: &mut Vec<ClosureFile>,
+    key: String,
+    path: String,
+    steps: Vec<Step>,
+    site: ClosureSite,
+) {
+    match files.iter_mut().find(|f| f.key == key) {
+        Some(found) => {
+            if !found
+                .sites
+                .iter()
+                .any(|s| s.alias == site.alias && s.names == site.names)
+            {
+                found.sites.push(site);
+            }
+        }
+        None => files.push(ClosureFile {
+            key,
+            path,
+            steps,
+            sites: vec![site],
+        }),
+    }
+}
+/// Load one import target during expansion, skipping files that do not
+/// exist yet: scripts that generate their own imports validate those
+/// files when they load at execution time. Anything present is parsed
+/// and validated before the first step runs. Guard, cycle, and depth
+/// failures stay hard: only absence defers.
+fn expand_load<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    dir: &GuardedPath,
+    stack: &[GuardedPath],
+    path: &str,
+) -> Result<Option<(GuardedPath, Vec<Step>, GuardedPath)>> {
+    let resolved = dir
+        .join(path)
+        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))?;
+    let key = resolved.display();
+    if stack.iter().any(|p| p == &resolved) {
+        let mut chain: Vec<String> = stack.iter().map(|p| p.display()).collect();
+        chain.push(key);
+        bail!("IMPORT cycle detected: {}", chain.join(" -> "));
+    }
+    if stack.len() >= MAX_IMPORT_DEPTH {
+        bail!(
+            "IMPORT depth limit exceeded ({}): `{}`",
+            MAX_IMPORT_DEPTH,
+            path
+        );
+    }
+    // Absence defers to load time (script-generated imports): probe
+    // through the run filesystem so memory-backed test filesystems
+    // answer from their own state, not the host disk.
+    if state.fs.entry_kind(&resolved).is_err() {
+        return Ok(None);
+    }
+    let (_, body) = load_file(state, dir, stack, path)?;
+    let nested = resolved.parent().unwrap_or_else(|| dir.clone());
+    Ok(Some((resolved, body, nested)))
+}
+
 /// Load and parse an import target: resolve against the importer dir,
 /// reject cycles and depth overflow, and reuse the per-run parse cache.
 /// Returns the resolved path plus the parsed body; the caller pushes the
@@ -469,23 +705,37 @@ fn load_import<P: ProcessManager>(
     state: &mut ExecState<P>,
     path: &str,
 ) -> Result<(GuardedPath, Vec<Step>)> {
+    let base = import_base(state);
+    let stack = state.import_stack.clone();
+    load_file(state, &base, &stack, path)
+}
+
+/// Shared loader core: `stack` is the active chain for cycle/depth
+/// checks (the runtime stack, or the expansion walk's local one).
+/// Parsed bodies land in the run cache either way, so expansion and
+/// execution never read a file twice.
+fn load_file<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    base: &GuardedPath,
+    stack: &[GuardedPath],
+    path: &str,
+) -> Result<(GuardedPath, Vec<Step>)> {
     // Workspace-side resolution: imported files live next to the
     // importing file in the source tree (not in the snapshot), so join
     // lexically under the importer's own guard instead of routing
     // through the run resolver's snapshot root. `join` enforces the
     // base root's containment (`..` escapes fail here); `read_file`
     // re-validates on the backend.
-    let base = import_base(state);
     let resolved = base
         .join(path)
         .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))?;
     let key = resolved.display();
-    if state.import_stack.iter().any(|p| p == &resolved) {
-        let mut chain: Vec<String> = state.import_stack.iter().map(|p| p.display()).collect();
+    if stack.iter().any(|p| p == &resolved) {
+        let mut chain: Vec<String> = stack.iter().map(|p| p.display()).collect();
         chain.push(key.clone());
         bail!("IMPORT cycle detected: {}", chain.join(" -> "));
     }
-    if state.import_stack.len() >= MAX_IMPORT_DEPTH {
+    if stack.len() >= MAX_IMPORT_DEPTH {
         bail!(
             "IMPORT depth limit exceeded ({}): `{}`",
             MAX_IMPORT_DEPTH,

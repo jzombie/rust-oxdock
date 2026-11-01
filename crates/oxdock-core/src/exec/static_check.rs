@@ -155,18 +155,6 @@ struct Checker<'a, P: ProcessManager> {
     isolated_depth: usize,
 }
 
-/// Run the static pass over top-level steps plus every collected
-/// script function. Fails before the first step executes.
-pub fn validate_script_types<P: ProcessManager>(steps: &[Step], exec: &ExecState<P>) -> Result<()> {
-    let mut checker = Checker::new(exec);
-    checker.collect(steps)?;
-    checker.check_top_level(steps)?;
-    for key in checker.func_keys() {
-        checker.func_return(&key, 0)?;
-    }
-    Ok(())
-}
-
 /// Run the static pass over an imported file's body (#115). The
 /// imported top level is function-like: `RETURN` is the value channel
 /// back to the importer (allowed here, unlike entry scripts), and
@@ -193,9 +181,43 @@ pub fn validate_import_body_types<P: ProcessManager>(
     Ok(())
 }
 
+/// Run the static pass over the entry script plus the entire import
+/// closure (#115). Every transitively imported file is collected and
+/// checked before the first step executes: cross-file calls resolve
+/// against the collected signatures (arity and argument types enforced
+/// at the call site), and nested files cannot smuggle type errors past
+/// the entry gate. Cycles, depth overflow, and parse failures surface
+/// during expansion, also before any step runs.
+pub fn validate_script_closure<P: ProcessManager>(
+    entry: &[Step],
+    files: &[super::import::ClosureFile],
+    exec: &ExecState<P>,
+) -> Result<()> {
+    let mut checker = Checker::new(exec);
+    checker.collect(entry)?;
+    for file in files {
+        for site in &file.sites {
+            checker.collect_site(
+                &file.path,
+                site.alias.as_deref(),
+                site.names.as_deref(),
+                &file.steps,
+            )?;
+        }
+    }
+    checker.check_top_level(entry)?;
+    for file in files {
+        checker.check_import_body(&file.key, &file.steps)?;
+    }
+    for key in checker.func_keys() {
+        checker.func_return(&key, 0)?;
+    }
+    Ok(())
+}
+
 /// Same pass returning the visit count, for the linearity test: the
 /// count must stay proportional to input size on adversarial input.
-/// Test-only: production calls `validate_script_types`.
+/// Test-only: production calls `validate_script_closure`.
 #[cfg(test)]
 pub fn validate_script_types_counted<P: ProcessManager>(
     steps: &[Step],
@@ -606,35 +628,51 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         Ok(())
     }
 
+    /// Define one collected function under explicit keys: resolve the
+    /// param tags now (the same error execution reports), store the
+    /// body for return inference, and collect nested definitions.
+    fn define_collected(
+        &mut self,
+        name: &str,
+        keys: Vec<String>,
+        params: &[(String, String)],
+        body: &[Step],
+    ) -> Result<()> {
+        let mut resolved = Vec::with_capacity(params.len());
+        for (pname, ptype) in params {
+            let tag = self
+                .exec
+                .resolve_tag(ptype)
+                .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+            resolved.push((clean_var(pname), tag));
+        }
+        for key in keys {
+            self.funcs.insert(
+                key,
+                FuncInfo {
+                    params: resolved.clone(),
+                    body: body.to_vec(),
+                },
+            );
+        }
+        // Nested definitions register if execution reaches them;
+        // collect their bodies too.
+        let nested = body.to_vec();
+        self.collect(&nested)?;
+        Ok(())
+    }
+
     fn collect_step(&mut self, step: &Step) -> Result<()> {
         match &step.kind {
             StepKind::FuncDef {
                 name, params, body, ..
             } => {
-                let mut resolved = Vec::with_capacity(params.len());
-                for (pname, ptype) in params {
-                    let tag = self
-                        .exec
-                        .resolve_tag(ptype)
-                        .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-                    resolved.push((clean_var(pname), tag));
-                }
-                let info = FuncInfo {
-                    params: resolved,
-                    body: body.clone(),
-                };
-                self.funcs.insert(name.clone(), info);
-                self.funcs.insert(
-                    format!("SCRIPT::{name}"),
-                    FuncInfo {
-                        params: self.funcs[name].params.clone(),
-                        body: self.funcs[name].body.clone(),
-                    },
-                );
-                // Nested definitions register if execution reaches
-                // them; collect their bodies too.
-                let nested = self.funcs[name].body.clone();
-                self.collect(&nested)?;
+                self.define_collected(
+                    name,
+                    vec![name.clone(), format!("SCRIPT::{name}")],
+                    params,
+                    body,
+                )?;
             }
             StepKind::If {
                 then_body,
@@ -656,6 +694,91 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             StepKind::AsyncBlock { body } => self.collect(body)?,
             _ => {}
         }
+        Ok(())
+    }
+
+    /// Collect one import site (#115): every wanted top-level `FUNC`
+    /// registers under the site's namespace (bare `SCRIPT::` names for
+    /// alias-free harvests). Nested control-flow bodies collect like
+    /// entry functions. Shadowing follows the same last-wins rule as
+    /// [`collect`](Self::collect); the runtime registry remains the
+    /// enforcer for true duplicates.
+    fn collect_site(
+        &mut self,
+        file: &str,
+        alias: Option<&str>,
+        names: Option<&[String]>,
+        steps: &[Step],
+    ) -> Result<()> {
+        if let Some(names) = names {
+            let defined: Vec<&str> = steps
+                .iter()
+                .filter_map(|step| match &step.kind {
+                    StepKind::FuncDef { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for name in names {
+                if !defined.iter().any(|d| d == name) {
+                    bail!("IMPORT `{file}` has no such function `{name}`");
+                }
+            }
+        }
+        for step in steps {
+            if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+                continue;
+            }
+            if let StepKind::FuncDef {
+                name, params, body, ..
+            } = &step.kind
+            {
+                if let Some(names) = names
+                    && !names.iter().any(|n| n == name)
+                {
+                    continue;
+                }
+                match alias {
+                    Some(alias) => {
+                        self.define_collected(
+                            name,
+                            vec![format!("{alias}::{name}")],
+                            params,
+                            body,
+                        )?;
+                    }
+                    None => {
+                        self.define_collected(
+                            name,
+                            vec![name.clone(), format!("SCRIPT::{name}")],
+                            params,
+                            body,
+                        )?;
+                    }
+                }
+            } else {
+                // Control-flow bodies can nest definitions; collect
+                // those exactly like entry code (their runtime names
+                // are `SCRIPT::`-scoped either way).
+                self.collect_step(step)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Check an imported file's top-level steps (#115): function-like,
+    /// so `RETURN` is the value channel back and falling off the end
+    /// yields `""` instead of failing. The label names the file for
+    /// error attribution.
+    fn check_import_body(&mut self, label: &str, steps: &[Step]) -> Result<()> {
+        let mut env = Env::one_frame(Vec::new());
+        let scope = Scope {
+            label,
+            ret: RetCtx::Func("IMPORT".to_string()),
+            loops: 0,
+            site: None,
+        };
+        let out = self.walk_body(steps, &mut env, &scope, 0)?;
+        let _ = out;
         Ok(())
     }
 

@@ -6642,3 +6642,93 @@ fn file_import_from_leaves_no_stack_or_frame_behind() {
         Some("ok")
     );
 }
+
+#[test]
+fn file_import_cross_file_arity_fails_before_any_step() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        b"WRITE marker.txt side-effect\nFUNC F($a: STRING, $b: STRING) {\n RETURN $a\n}\n",
+    );
+    let steps = parse_entry(indoc! {r#"
+        WRITE entry-marker.txt hi
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $r: STRING = LIB::F("only-one")
+    "#});
+    let err = run_expect_err(Box::new(fs.clone()), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("expects 2 argument(s), got 1"),
+        "{err:#}"
+    );
+    // Neither the entry's first step nor the imported body ran: the
+    // closure validated before the first step executed.
+    assert!(
+        !fs.snapshot()
+            .keys()
+            .any(|k| k.ends_with("entry-marker.txt"))
+    );
+    assert!(!fs.snapshot().keys().any(|k| k.ends_with("marker.txt")));
+}
+
+#[test]
+fn file_import_nested_static_error_fails_before_any_step() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "nested.oxdock",
+        b"FUNC H($x: STRING) {\n RETURN $x\n}\nLET $v: STRING = $undefined_var\n",
+    );
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        b"IMPORT [\"nested.oxdock\" AS NEST]\nFUNC L($x: STRING) {\n RETURN NEST::H($x)\n}\n",
+    );
+    let steps = parse_entry(indoc! {r#"
+        WRITE entry-marker.txt hi
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $v: STRING = LIB::L("x")
+    "#});
+    let err = run_expect_err(Box::new(fs.clone()), &steps, MockProcessManager::default());
+    assert!(format!("{err:#}").contains("undefined variable"), "{err:#}");
+    assert!(
+        !fs.snapshot()
+            .keys()
+            .any(|k| k.ends_with("entry-marker.txt"))
+    );
+}
+
+#[test]
+fn file_import_same_file_sibling_sites_share_no_stack() {
+    // Same file imported twice under different aliases in one statement:
+    // with balanced push/pop the sibling is a diamond, not a cycle.
+    // A leaked expansion stack would false-positive `cycle detected` here.
+    let fs = MockFs::new();
+    seed_lib(&fs, "a.oxdock", b"FUNC F($x: STRING) {\n RETURN $x\n}\n");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["a.oxdock" AS A, "a.oxdock" AS B]
+        LET $a: STRING = A::F("a")
+        LET $b: STRING = B::F("b")
+    "#});
+    let (_, _, bindings) =
+        run_steps_with_manager(Box::new(fs), &steps, MockProcessManager::default(), ExecIo::new())
+            .expect("sibling imports of one file validate");
+    assert_eq!(bindings.get("a").and_then(|v| v.as_str()), Some("a"));
+    assert_eq!(bindings.get("b").and_then(|v| v.as_str()), Some("b"));
+}
+
+#[test]
+fn file_import_harvest_and_full_of_same_file_share_no_stack() {
+    let fs = MockFs::new();
+    seed_lib(&fs, "a.oxdock", b"FUNC F($x: STRING) {\n RETURN $x\n}\n");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[F FROM "a.oxdock"], "a.oxdock" AS A]
+        LET $f: STRING = F("x")
+        LET $a: STRING = A::F("y")
+    "#});
+    let (_, _, bindings) =
+        run_steps_with_manager(Box::new(fs), &steps, MockProcessManager::default(), ExecIo::new())
+            .expect("harvest plus full import of one file validates");
+    assert_eq!(bindings.get("f").and_then(|v| v.as_str()), Some("x"));
+    assert_eq!(bindings.get("a").and_then(|v| v.as_str()), Some("y"));
+}

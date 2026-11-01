@@ -504,8 +504,19 @@ fn finish_run<P: ProcessManager>(
     state.validate_function_type_tags()?;
     // Script-side counterpart: terminal unification, MissingReturn,
     // undeclared variables, and ungated ANY flow fail here too,
-    // before any step runs.
-    static_check::validate_script_types(steps, &state)?;
+    // before any step runs. The closure pass covers the entry script
+    // plus every transitively imported file (#115): cross-file calls
+    // typecheck against the collected signatures, so no nested file
+    // can smuggle a type error past the entry gate.
+    let saved_aliases = state.type_aliases.clone();
+    let closure = self::import::expand_import_closure(&mut state, steps)?;
+    for file in &closure {
+        for (name, target) in self::typing::collect_type_aliases(&file.steps, &state)? {
+            state.type_aliases.insert(name, target);
+        }
+    }
+    static_check::validate_script_closure(steps, &closure, &state)?;
+    state.type_aliases = saved_aliases;
     let assert_windows = Arc::clone(&state.assert_windows);
     let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
     let exact_stdout = Arc::clone(&state.exact_stdout);

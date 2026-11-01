@@ -3506,7 +3506,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 Files the script itself creates land in snapshot space by
                 default, so generate-then-import scripts should select
                 `WORKSPACE LOCAL` (or `COPY` sources into place) to align
-                the two sides.
+                the two sides. Files absent when the run starts (e.g.
+                generated later) skip upfront validation and are checked
+                when they load; everything present is validated, with
+                cross-file calls typechecked at their call sites, before
+                the first step runs.
 
                 `EXPORT` marks top-level script `FUNC`s as externally
                 callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`).

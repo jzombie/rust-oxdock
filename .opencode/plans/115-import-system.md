@@ -114,7 +114,7 @@ New `crates/oxdock-core/src/exec/import.rs` (or extend `args.rs`):
 ### 4.4 MCP + static check + docs
 
 - MCP: only entry-file `EXPORT` list becomes tools (comment 10). Imported `ALIAS::FOO` stays private unless entry re-exports (re-export mechanism = phase 2 decision; default deny).
-- `static_check.rs::validate_script_types`: walk import graph (comment 11); recursion guard across files.
+- `static_check.rs::validate_script_closure`: two-phase whole-closure validation (comment 11). Phase 1 expands the transitive closure (`expand_import_closure`: resolve + parse + cache, cycle/depth guarded, missing files skipped); phase 2 collects every site's signatures (alias-qualified, or bare for alias-free harvests) into one checker and checks the entry plus every file body, so cross-file calls typecheck at their call sites. Anything present fails before the first step runs. Generated-then-imported files (absent at expansion) validate when they load at execution.
 - Docs: structural metadata auto-flows; add `IMPORT` file-form fragments + preview + remote gating docs. `cargo run -p docs-gen`, never hand-edit READMEs.
 
 ## 5. Phasing (in scope: phases 1+2; phase 3 deferred to #270)
@@ -125,7 +125,8 @@ New `crates/oxdock-core/src/exec/import.rs` (or extend `args.rs`):
 
 ## 6. Tests
 
-- Parser: file form with `AS`, missing `AS` errors, bad alias errors, `LET $r = IMPORT`, `LET $t = ASYNC IMPORT`, module form unaffected, guarded `IMPORT` where applicable.
+- Parser: file form with `AS`, multi-entry and mixed brackets, multiline, `FROM` harvests (bare + aliased), missing `AS` errors, bad alias errors, `LET $r = IMPORT`, `LET $t = ASYNC IMPORT`, module form unaffected, guarded `IMPORT` where applicable.
+- Static closure: cross-file arity fails before any step with no side effects; nested file errors fail before any step; missing harvest names and cycles fail upfront.
 - Core: isolation (`LET/ENV/WORKDIR/WORKSPACE` do not leak), `RETURN` capture vs bare discard, nested/transitive, cycle chain error, depth limit, diamond cache parses once, `BREAK/CONTINUE` cannot cross, `RETURN` outside import errors, `ASYNC IMPORT + AWAIT`.
 - Pipes: two imports with same internal pipe name isolated; explicit `WITH_IO` passing works; no cross-talk without directive.
 - FS/security: `..` escape + absolute-outside-root rejected; remote denied by default (phase 3); Miri ignores with reasons.

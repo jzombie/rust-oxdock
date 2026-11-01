@@ -90,7 +90,15 @@ impl<P: ProcessManager> McpSession<P> {
 
         state.type_aliases = super::typing::collect_type_aliases(&parsed.steps, &state)?;
         state.validate_function_type_tags()?;
-        super::static_check::validate_script_types(&parsed.steps, &state)?;
+        let saved_aliases = state.type_aliases.clone();
+        let closure = super::import::expand_import_closure(&mut state, &parsed.steps)?;
+        for file in &closure {
+            for (name, target) in super::typing::collect_type_aliases(&file.steps, &state)? {
+                state.type_aliases.insert(name, target);
+            }
+        }
+        super::static_check::validate_script_closure(&parsed.steps, &closure, &state)?;
+        state.type_aliases = saved_aliases;
 
         let assert_windows = Arc::clone(&state.assert_windows);
         let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
