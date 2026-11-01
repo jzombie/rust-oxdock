@@ -805,7 +805,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             vars,
             env,
             body,
-        } => super::remote::run_remote_block(&mut cx, target, vars, env, body, idx),
+        } => super::remote::run_remote_block(&mut cx, target, vars, env, body),
         StepKind::Env { key, value } => {
             let resolved = super::args::resolve_arg(value, &mut cx)?;
             handlers::env(&mut cx, key, &resolved)
@@ -1147,9 +1147,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 vars,
                                 env,
                                 body,
-                            } => super::remote::run_remote_block(
-                                &mut cx, target, vars, env, body, idx,
-                            ),
+                            } => super::remote::run_remote_block(&mut cx, target, vars, env, body),
                             StepKind::Env { key, value } => {
                                 let resolved = super::args::resolve_arg(value, &mut cx)?;
                                 handlers::env(&mut cx, key, &resolved)?;

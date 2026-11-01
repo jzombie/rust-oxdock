@@ -3205,7 +3205,7 @@ pub(crate) fn dispatch_remote<P: ProcessManager>(
     else {
         unreachable!()
     };
-    super::remote::run_remote_block(cx, target, vars, env, body, 0)
+    super::remote::run_remote_block(cx, target, vars, env, body)
 }
 
 pub(crate) fn dispatch_env<P: ProcessManager>(
@@ -3420,7 +3420,7 @@ pub(super) fn prompt<P: ProcessManager>(
 ) -> Result<()> {
     #[cfg(miri)]
     {
-        let _ = (cx, idx, var, message, default);
+        let _ = (cx, var, message, default);
         bail!("PROMPT unavailable under Miri (no terminal)");
     }
     #[cfg(not(miri))]
