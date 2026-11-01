@@ -80,8 +80,16 @@ $env:VERSION = 'v0.33.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/
 **Build from source via Cargo** (same full module surface as the
 release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 
+From the registry:
+
 ```sh
 cargo install oxdock@0.33.0-alpha
+```
+
+From a local checkout:
+
+```sh
+cargo install --path oxdock
 ```
 
 </details>
