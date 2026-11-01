@@ -940,6 +940,9 @@ pub fn script_from_braced_tokens(ts: &TokenStream2) -> Result<String> {
 
 /// Parse a braced token stream directly into DSL steps.
 /// Requires a lowering function : callers must provide it.
+/// Returns `anyhow::Error` rather than `ParseError` (unlike the
+/// string entry points) because macro-side failures carry the head
+/// token span enrichment, which has no `ParseError` channel.
 pub fn parse_braced_tokens(
     ts: &TokenStream2,
     lower: impl Fn(&str, Vec<crate::Arg>) -> crate::ParseResult<crate::StepKind>,
@@ -982,7 +985,8 @@ pub fn parse_braced_tokens_with_exports(
 /// Parse a braced token stream with an explicit module table, so
 /// qualified calls resolve exactly like the string pathway with the
 /// same table. `parse_braced_tokens` stays table-free for callers
-/// without host modules.
+/// without host modules. Same `anyhow::Error` carrier as the other
+/// braced entry points (macro-side span enrichment).
 pub fn parse_braced_tokens_with_modules(
     ts: &TokenStream2,
     lower: impl Fn(&str, Vec<crate::Arg>) -> crate::ParseResult<crate::StepKind>,

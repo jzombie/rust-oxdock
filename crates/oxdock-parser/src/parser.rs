@@ -155,7 +155,7 @@ fn lower_err(stmt: usize, e: ParseError) -> TokenError {
 /// body: in-body such statements are hard errors (a bare `{` is
 /// illegal inside blocks), while top level merges or parses guard
 /// blocks regardless.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct Stmt {
     guard: Vec<Tok>,
     body: Vec<Tok>,
@@ -168,6 +168,18 @@ struct Stmt {
     /// body token, which always has the statement's own start.
     col: usize,
 }
+
+impl PartialEq for Stmt {
+    fn eq(&self, other: &Self) -> bool {
+        // Coordinates are provenance (never rendered, never compared),
+        // like `Step`/`Tok`: two splits of one text compare equal.
+        self.guard == other.guard
+            && self.body == other.body
+            && self.brace_detached == other.brace_detached
+    }
+}
+
+impl Eq for Stmt {}
 
 /// Grammar-state boundary decision: does this `Newline`/`Semicolon`
 /// end the statement? Groups are atomic, so every statement fits one
@@ -1523,15 +1535,29 @@ fn build_arg_tokens(
 /// `expr` there (so `//c` types as a literal and `/*c*/` as math). A single
 /// fully-consuming expression stays typed; anything longer glues to
 /// verbatim text exactly like the grammar's mixed fragments (byte
-/// for byte, since joint runs admit no span gaps); an unparseable
-/// start fails loudly (the argument fails there too).
+/// for byte, since joint runs admit no span gaps). An unparseable
+/// unterminated block open (`/*` with no `*/` in the run) reads
+/// literally like the old backend (`ECHO /*`, `[a /* c]`); a
+/// terminated span keeps the loud failure.
 fn parse_slash_run(run: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Arg, TokenError> {
     let mut cur = Cursor::expr(run, stmt);
-    let expr = parse_expr_checked(&mut cur, ctx)?;
-    if cur.done() {
-        return Ok(Arg::Expr(expr));
+    match parse_expr_checked(&mut cur, ctx) {
+        Ok(expr) if cur.done() => Ok(Arg::Expr(expr)),
+        Ok(_) => Ok(Arg::String(render_raw_text(run, stmt)?, false)),
+        Err(_) if !run_has_block_close(run) => Ok(Arg::String(render_raw_text(run, stmt)?, false)),
+        Err(e) => Err(e),
     }
-    Ok(Arg::String(render_raw_text(run, stmt)?, false))
+}
+
+/// True when the run holds a `*/` close pair (`*` plus a joint `/`),
+/// mirroring [`skip_inline_comment`]'s terminator: only unterminated
+/// block opens read literally.
+fn run_has_block_close(run: &[Tok]) -> bool {
+    run.windows(2).any(|w| {
+        matches!(&w[0].kind, TokKind::Punct('*'))
+            && matches!(&w[1].kind, TokKind::Punct('/'))
+            && w[1].joint
+    })
 }
 
 /// True when a raw run opens with a slash-pair (`/` plus a joint
@@ -7553,8 +7579,7 @@ mod tests {
         // The value stays raw (`\\` verbatim for runtime
         // `expand_string`), so this pins parsing, not unescaping.
         assert_parity("ECHO \"a\\\\\"");
-        let steps =
-            crate::parse_script("ECHO \"a\\\\\"", lower).expect("escaped pair must parse");
+        let steps = crate::parse_script("ECHO \"a\\\\\"", lower).expect("escaped pair must parse");
         match &steps[..] {
             [s] => assert!(
                 matches!(&s.kind, StepKind::Echo(a) if a.as_str() == "a\\\\"),
@@ -7585,12 +7610,48 @@ mod tests {
         assert_eq!(steps.len(), 1, "one step: {steps:?}");
         // Full content survives literally: the mock joins WRITE args
         // with spaces, so the round trip is byte-exact here.
-        let steps =
-            crate::parse_script("WRITE f [a //c]", lower).expect("group must close");
+        let steps = crate::parse_script("WRITE f [a //c]", lower).expect("group must close");
         match &steps[..] {
             [s] => assert!(
                 matches!(&s.kind, StepKind::Write { contents: Some(c), .. } if c.as_str() == "[a //c]"),
                 "group content must survive literally: {s:?}"
+            ),
+            _ => panic!("one step: {steps:?}"),
+        }
+    }
+
+    #[test]
+    fn block_comment_in_group_closes_like_line_comment() {
+        // `[a /* c]` reads literally on the old backend (first arg
+        // `[a`, joined `[a /* c]`), so the in-group `/*` copy breaks
+        // at the depth-zero closer exactly like `//` does. The bare
+        // `/*` reads literally too.
+        for text in ["ECHO [a /* c]", "WRITE f [a /* c]", "ECHO /*"] {
+            assert_parity_string_only(text);
+        }
+        let steps = crate::parse_script("ECHO /*", lower).expect("bare block open parses");
+        match &steps[..] {
+            [s] => assert!(
+                matches!(&s.kind, StepKind::Echo(a) if a.as_str() == "/*"),
+                "bare `/*` must stay literal: {s:?}"
+            ),
+            _ => panic!("one step: {steps:?}"),
+        }
+        let steps = crate::parse_script("WRITE f [a /* c]", lower).expect("group must close");
+        match &steps[..] {
+            [s] => assert!(
+                matches!(&s.kind, StepKind::Write { contents: Some(c), .. } if c.as_str() == "[a /* c]"),
+                "group content must survive literally: {s:?}"
+            ),
+            _ => panic!("one step: {steps:?}"),
+        }
+        // Terminated spans keep working through the same path: the
+        // run carries its closer, so math still gets first refusal.
+        let steps = crate::parse_script("WRITE f [a /* c */ d]", lower).expect("group must close");
+        match &steps[..] {
+            [s] => assert!(
+                matches!(&s.kind, StepKind::Write { contents: Some(c), .. } if c.as_str() == "[a /* c */ d]"),
+                "terminated group content must survive: {s:?}"
             ),
             _ => panic!("one step: {steps:?}"),
         }

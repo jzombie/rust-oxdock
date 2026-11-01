@@ -264,11 +264,8 @@ mod tests {
             description: "",
         }]);
         let raw = "\"\"\"\n    hello\n    world\n    \"\"\"";
-        let (flags, _) = strip_flags(
-            vec![Arg::String(format!("--message={raw}"), false)],
-            &meta,
-        )
-        .expect("equals form parses");
+        let (flags, _) = strip_flags(vec![Arg::String(format!("--message={raw}"), false)], &meta)
+            .expect("equals form parses");
         assert_eq!(flags.len(), 1);
         assert_eq!(flags[0].1.as_str(), "hello\nworld");
     }

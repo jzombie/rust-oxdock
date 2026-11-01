@@ -531,6 +531,14 @@ impl<'a> StrLexer<'a> {
                         k += 2;
                     } else {
                         let ch = rest[k..].chars().next().unwrap();
+                        // A depth-zero closer ends the copy even when no
+                        // `*/` has closed the span (`[a /* c]` closes
+                        // here, the old literal reading; the splice
+                        // re-adds the closer downstream, so bytes stay
+                        // exact).
+                        if ch == close && stack.is_empty() {
+                            break;
+                        }
                         if ch == '\r' && rest[k..].starts_with("\r\n") {
                             inner_src.push('\n');
                             self.bump(2, 1);

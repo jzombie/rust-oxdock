@@ -720,19 +720,30 @@ fn collect_hash_idents_inner(
 }
 
 /// Remove `#` tokens and replace following ident tokens with placeholder idents,
-/// recursing into groups so nested #var references are handled.
+/// recursing into groups so nested #var references are handled. Runs on
+/// the original stream before any placeholder exists, so a user literal
+/// shaped like one (`__OXDOCK_INJECT_{n}__` as an ident or string
+/// value) is rejected here instead of silently substituting (or
+/// panicking on) an unrelated `#var` at emission.
 fn sanitize_hash_tokens(
     ts: proc_macro2::TokenStream,
     interp: &[(proc_macro2::Ident, usize)],
 ) -> syn::Result<proc_macro2::TokenStream> {
     let tokens: Vec<TokenTree> = ts.into_iter().collect();
-    Ok(sanitize_hash_tokens_inner(&tokens, interp))
+    sanitize_hash_tokens_inner(&tokens, interp)
+}
+
+fn reserved_placeholder_err(span: proc_macro2::Span) -> syn::Error {
+    syn::Error::new(
+        span,
+        "literal shaped like the reserved interpolation placeholder `__OXDOCK_INJECT_{n}__`: rename it",
+    )
 }
 
 fn sanitize_hash_tokens_inner(
     tokens: &[TokenTree],
     interp: &[(proc_macro2::Ident, usize)],
-) -> proc_macro2::TokenStream {
+) -> syn::Result<proc_macro2::TokenStream> {
     let mut output = proc_macro2::TokenStream::new();
     let mut i = 0;
     while i < tokens.len() {
@@ -755,17 +766,32 @@ fn sanitize_hash_tokens_inner(
         }
         if let TokenTree::Group(g) = &tokens[i] {
             let inner =
-                sanitize_hash_tokens_inner(&g.stream().into_iter().collect::<Vec<_>>(), interp);
+                sanitize_hash_tokens_inner(&g.stream().into_iter().collect::<Vec<_>>(), interp)?;
             let mut new_group = proc_macro2::Group::new(g.delimiter(), inner);
             new_group.set_span(g.span());
             output.extend(std::iter::once(TokenTree::Group(new_group)));
             i += 1;
             continue;
         }
-        output.extend(std::iter::once(tokens[i].clone()));
+        match &tokens[i] {
+            TokenTree::Ident(ident) if is_placeholder(&ident.to_string()).is_some() => {
+                return Err(reserved_placeholder_err(ident.span()));
+            }
+            TokenTree::Literal(lit) => {
+                let spelled = lit.to_string();
+                if spelled.starts_with('"')
+                    && let Ok(s) = syn::parse_str::<syn::LitStr>(&spelled)
+                    && is_placeholder(&s.value()).is_some()
+                {
+                    return Err(reserved_placeholder_err(lit.span()));
+                }
+                output.extend(std::iter::once(tokens[i].clone()));
+            }
+            _ => output.extend(std::iter::once(tokens[i].clone())),
+        }
         i += 1;
     }
-    output
+    Ok(output)
 }
 
 // ---------------------------------------------------------------------------
@@ -1987,6 +2013,29 @@ mod tests {
             rendered.contains("500"),
             "must embed duration arg: {rendered}"
         );
+    }
+
+    #[test]
+    fn user_shaped_placeholders_are_rejected() {
+        // A user literal shaped like an interpolation placeholder must
+        // fail at sanitize time, never substitute (or panic on) a `#var`
+        // at emission. Both the ident and quoted-string shapes are
+        // user-typeable, so both are gated.
+        let ident_ts: proc_macro2::TokenStream = "__OXDOCK_INJECT_0__".parse().unwrap();
+        let err = sanitize_hash_tokens(ident_ts, &[]).expect_err("ident placeholder must fail");
+        assert!(
+            err.to_string()
+                .contains("reserved interpolation placeholder")
+        );
+        let lit_ts: proc_macro2::TokenStream = "ECHO \"__OXDOCK_INJECT_0__\"".parse().unwrap();
+        let err = sanitize_hash_tokens(lit_ts, &[]).expect_err("string placeholder must fail");
+        assert!(
+            err.to_string()
+                .contains("reserved interpolation placeholder")
+        );
+        // Neighbors that merely resemble the shape still pass through.
+        let ok_ts: proc_macro2::TokenStream = "ECHO __OXDOCK_INJECT_X__".parse().unwrap();
+        sanitize_hash_tokens(ok_ts, &[]).expect("non-numeric shape must pass");
     }
 
     #[test]

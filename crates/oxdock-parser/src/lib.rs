@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn commands_are_case_sensitive() {
-        for bad in ["cwd hi", "Cwd hi", "cwd foo"] {
+        for bad in ["echo hi", "Echo hi", "eCHO hi"] {
             parse_script(bad, test_lower).expect_err("mixed/lowercase commands must fail");
         }
     }

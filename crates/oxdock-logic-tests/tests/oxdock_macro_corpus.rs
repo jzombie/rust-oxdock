@@ -515,11 +515,12 @@ fn macro_sleep_and_exit_code() {
 }
 
 #[test]
-fn macro_rust_comment_styles_are_invisible_to_the_parser() {
-    // `//` and `/* */` never reach the macro: rustc strips them from
-    // the TokenStream before expansion. `#` comments work because
-    // interpolation claims only gapless `#var`: a gapped `#` rebuilds
-    // as a `# ...` line, which the string grammar reads as a comment.
+fn macro_hash_comments_and_gapless_interpolation() {
+    // Only the `#` portions are load-bearing here: `//` and `/* */`
+    // never reach the macro (rustc strips them from the TokenStream
+    // before expansion). `#` comments work because interpolation
+    // claims only gapless `#var`: a gapped `#` rebuilds as a `# ...`
+    // line, which the string grammar reads as a comment.
     let word = "hi";
     let plain = oxdock! {
         ECHO #word
