@@ -75,7 +75,7 @@ jobs:
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
 
-          LET $lock: STRING = CI::LOCKFILE_HASH()
+          LET $lock: STRING = CI::LOCKFILE_HASH("{{ env:GITHUB_WORKSPACE }}")
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
 
@@ -234,7 +234,7 @@ jobs:
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $lock: STRING = CI::LOCKFILE_HASH()
+          LET $lock: STRING = CI::LOCKFILE_HASH("{{ env:GITHUB_WORKSPACE }}")
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
@@ -331,7 +331,7 @@ jobs:
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $lock: STRING = CI::LOCKFILE_HASH()
+          LET $lock: STRING = CI::LOCKFILE_HASH("{{ env:GITHUB_WORKSPACE }}")
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
@@ -417,7 +417,7 @@ jobs:
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $lock: STRING = CI::LOCKFILE_HASH()
+          LET $lock: STRING = CI::LOCKFILE_HASH("{{ env:GITHUB_WORKSPACE }}")
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]

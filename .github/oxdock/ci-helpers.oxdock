@@ -2,11 +2,14 @@
 // legs across `.github/workflows`. Stays side-effect free on purpose:
 // the import boundary reverts ENV/WORKDIR/WORKSPACE/LET, so each leg
 // keeps its own sandbox header and calls in here only for repeated
-// logic (hash extraction), binding RETURNs itself. Declares its own
-// STD dependency: every file resolves names against its own imports.
+// logic (hash extraction), binding RETURNs itself. Paths are explicit
+// parameters, never inherited cwd: the caller passes its workspace
+// root, so helpers cannot silently hash the wrong checkout.
+// Declares its own STD dependency: every file resolves names against
+// its own imports.
 IMPORT [STD]
-FUNC LOCKFILE_HASH() {
-  RETURN HASH_SHA256("Cargo.lock")
+FUNC LOCKFILE_HASH($ws: STRING) {
+  RETURN HASH_SHA256(PATH_JOIN($ws, "Cargo.lock"))
 }
 EXPORT LOCKFILE_HASH
 
