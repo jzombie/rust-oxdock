@@ -19,17 +19,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Vocabulary baseline for every leg below is 0.33.0-alpha: legs use
-# PATH_JOIN and fail to parse on anything older, which fails loudly at
-# step start by design. These legs prove branch behavior on branch
-# builds; no leg here installs or verifies a previous release, so no
-# product markers are needed. The pin below is only a version input,
-# never depended upon as a fallback engine.
+# Vocabulary is the branch itself: every leg below runs on a branch-built
+# engine, so legs may use unreleased syntax (file IMPORT, HASH_SHA256,
+# BOOL_OR) with no pin to satisfy. No leg here installs or verifies a
+# previous release, so no product markers are needed.
 env:
-  OXDOCK_PINNED_ENGINE: v0.33.0-alpha
-  # Legs assume the 0.33.0-alpha vocabulary, so the engine running them
-  # must provide it: local branch builds do, and the pin above now does
-  # too. Source stays local so legs keep proving branch behavior.
+  # Source stays local so legs keep proving branch behavior.
   OXDOCK_ENGINE_SOURCE: local
 
 jobs:
@@ -54,7 +49,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       # Native hashing: HASH_SHA256 digests Cargo.lock identically on
@@ -218,7 +212,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       - name: Hash lockfile and toolchain
@@ -312,7 +305,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       - name: Hash lockfile and toolchain
@@ -398,7 +390,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       - name: Hash lockfile and toolchain
@@ -513,7 +504,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       - name: Evaluate all results
