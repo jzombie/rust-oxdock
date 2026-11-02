@@ -19,8 +19,11 @@ concurrency:
 # Pinned interpreter for every OxDock step below. TEXT_* string surgery
 # needs 0.28.0-alpha minimum. Bump only after a newer tag proves green;
 # an older engine choking on new syntax fails loudly at step start.
+# Source stays local so the hash leg proves branch behavior: it uses
+# unreleased vocabulary (file IMPORT, HASH_SHA256) no tag provides yet.
 env:
-  OXDOCK_PINNED_ENGINE: v0.33.0-alpha
+  # OXDOCK_PINNED_ENGINE: v0.34.0-alpha
+  OXDOCK_ENGINE_SOURCE: local
 
 jobs:
   miri:
@@ -55,6 +58,16 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          source: ${{ env.OXDOCK_ENGINE_SOURCE }}
+
+      # Local source builds install stable as the default toolchain.
+      # Restore the pinned nightly default so cargo miri below keeps
+      # interpreting under nightly.
+      - name: Restore nightly toolchain default
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-10-29
+          components: miri
 
       # Native hashing: HASH_SHA256 digests Cargo.lock directly, and
       # TEXT_EXTRACT picks the rustc commit out of the version report.
