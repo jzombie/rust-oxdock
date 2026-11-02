@@ -7451,14 +7451,7 @@ fn file_import_transitive_syntax_error_fails_before_any_step() {
         IMPORT ["b.oxdock" AS B]
         LET $v: INT = B::MID()
     "#});
-    let err = run_expect_err(
-        Box::new(fs.clone()),
-        &steps,
-        MockProcessManager::default(),
-    );
-    assert!(
-        format!("{err:#}").contains("failed to parse"),
-        "{err:#}"
-    );
+    let err = run_expect_err(Box::new(fs.clone()), &steps, MockProcessManager::default());
+    assert!(format!("{err:#}").contains("failed to parse"), "{err:#}");
     assert!(!fs.snapshot().keys().any(|k| k.ends_with("marker.txt")));
 }
