@@ -1341,107 +1341,128 @@ Bring module functions into bare-call scope; import script files and types.
 
 **Syntax:** `IMPORT [<module>, ...] | IMPORT <module> | IMPORT ["<path>" AS <ALIAS>] | IMPORT [<module | "<path>" AS <ALIAS> | [F, ... FROM ("<path>" | <module>) (AS <ALIAS>)?]>, ...]`
 
-Every function call names its module (`STD::GLOB(...)`,
-`MOCK::READ_CSV(...)`) unless the module is imported:
-`IMPORT [STD]` lets the rest of the scope call `GLOB(...)`
-bare. Calls resolve at parse time against `SCRIPT`
-definitions first, then imported modules; unknown modules,
-unknown functions, and unimported bare calls are parse
-errors, never runtime surprises.
+Bare calls:
+- Every call names its module (`STD::GLOB(...)`)
+unless the module is imported. `IMPORT [STD]` lets
+the rest of the scope call `GLOB(...)` bare.
+- Calls resolve at parse time: `SCRIPT` definitions
+first, then imported modules. Unknown modules,
+unknown functions, and unimported bare calls are
+parse errors, never runtime surprises.
 
-IMPORT is a lowering directive, not a step: it applies from
-its line to the enclosing block exit, then reverts, exactly
-like `LET` scoping but with no runtime footprint. Guards do
-not apply to it. Two imported modules exporting one name is
-an ambiguity error: qualify the call instead.
+Scope:
+- `IMPORT` is a lowering directive, not a step. It
+applies from its line to the enclosing block exit,
+then reverts like `LET` scoping, with no runtime
+footprint. Guards do not apply to it.
+- Two imported modules exporting one name is an
+ambiguity error: qualify the call instead.
 
-File imports (`IMPORT ["./lib.oxdock" AS LIB]`, any file
-extension): the alias is mandatory and becomes the
+File imports:
+- Form: `IMPORT ["./lib.oxdock" AS LIB]` (any file
+extension). The alias is mandatory and becomes the
 namespace (`LIB::FOO`), with no filename inference.
-Only `EXPORT`ed top-level `FUNC`s cross the boundary:
-unexported means private, and variables are never
-exportable. `EXPORT TYPE` names cross the same way as bare
-globals (like host types): a whole-file import persists
-every exported alias, so `LET $p: PERSON` works after any
-import of its file. Concretely, a library file holding
-`TYPE PERSON = MAP<name: STRING>` plus
-`EXPORT TYPE PERSON` pairs with an importer holding
-`IMPORT ["lib.oxdock" AS LIB]` plus
-`LET $p: PERSON = {name: "Ada"}` (and selective harvests
-spell it `IMPORT [[TYPE PERSON FROM "lib.oxdock"]]`).
-Each file initializes once; every alias
-shares the module's top-level bindings. The file must
-exist when the run starts: generated imports are
-rejected before the first step.
+- Only `EXPORT`ed top-level `FUNC`s cross the
+boundary. Unexported means private; variables are
+never exportable.
+- Types cross as bare globals (like host types). A
+whole-file import persists every exported alias, so
+`LET $p: PERSON` works after any import of its file.
+- Each file initializes once; every alias shares the
+module's top-level bindings.
+- The file must exist when the run starts. Generated
+imports are rejected before the first step.
 
-Brackets mix both kinds and hold several entries at once,
-across lines if needed
-(`IMPORT [STD, "a.oxdock" AS A, "b.oxdock" AS B]`): each
-module entry registers in order, each file entry runs in
-order. Without an alias a file entry is a parse error, so
-there is never ambiguity about what an import names.
-Value positions (`LET`, `ASYNC`, `WITH_IO`/`TIMEOUT`
-inners) take exactly one file entry and no modules.
+Mixed brackets:
+- Brackets mix both kinds across lines if needed
+(`IMPORT [STD, "a.oxdock" AS A]`). Each module entry
+registers in order; each file entry runs in order.
+- Without an alias a file entry is a parse error.
+- Value positions (`LET`, `ASYNC`,
+`WITH_IO`/`TIMEOUT` inners) take exactly one file
+entry and no modules.
 
-Selective harvests (`IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
-optionally `AS ALIAS`) define only the named top-level
-functions, which must be `EXPORT`ed (harvesting a
-defined-but-unexported name fails upfront): bare into the
-current scope, or namespaced under the alias. Type
-and function harvests combine in one entry
-(`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`):
-harvested types must be `EXPORT TYPE`d and
-persist bare globally, so `FUNC` signatures using custom
-aliases keep working without a lobotomy. A single
-name needs no inner brackets (`IMPORT [FOO FROM
-"x.oxdock"]`); several keep `[[F, G FROM ...]]` so the
-comma stays grouped in its own scope. Several harvests
-group the same way (`IMPORT [[TYPE A FROM STD],
-[TYPE B FROM STD]]`, file or host alike). The file
-body never executes, so harvesting is side-effect free;
-the file's own nested imports still load, keeping helpers
-working. Harvests produce no value and never appear in
-value positions. Host library types take a bare module
-(`IMPORT [TYPE PIPE FROM STD]`): the import validates the
-type resolves globally and records no file, so scripts and
-plugins meet through one `TYPE` directory. Host types stay
-global with or without the harvest: the explicit form only
-documents the dependency and fails fast on typos. Quoted
-`FROM "STD"` still parses for backcompat, but bare is
-preferred: quoted means a file path, bare means a library.
+Selective harvests:
+- Form: `IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
+optionally `AS ALIAS`. Only the named top-level
+functions register, bare or namespaced under the
+alias. Harvested names must be `EXPORT`ed.
+- Single name needs no inner brackets
+(`IMPORT [FOO FROM "x.oxdock"]`); several keep
+`[[F, G FROM ...]]`. Several harvests group the
+same way (`IMPORT [[TYPE A FROM STD],
+[TYPE B FROM STD]]`), file or host alike.
+- Types and functions combine in one entry
+(`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`).
+Harvested types must be `EXPORT TYPE`d and persist
+bare globally, so `FUNC` signatures keep working.
+- The file body never executes, so harvesting is
+side-effect free. The file's own nested imports
+still load. Harvests produce no value and never
+appear in value positions.
 
-Paths resolve workspace-side, against the importing
-file's directory (the entry file's parent at top level;
-an entry staged outside the workspace, e.g. a CI temp
-script, resolves like stdin against the workspace root).
-Inside module-owned code, relative paths resolve
-against the module file's own directory instead of the
-caller's cwd, so a module behaves identically no matter
-who imports it; entry code keeps resolving against the
-run cwd. The file must exist when the run starts:
-imports of missing files fail before the first step
-runs, because analysis requires bytes and
-generated-then-imported files have none to check.
+Host library types:
+- Form: `IMPORT [TYPE PIPE FROM STD]`. The import
+validates the type resolves globally and records no
+file. Host types stay global with or without the
+harvest; the explicit form only documents the
+dependency and fails fast on typos.
+- Bare `FROM` names a library; quoted `FROM`
+names a file path. Quoted `FROM "STD"` still parses
+for backcompat, but bare is preferred.
+
+Paths:
+- Workspace-side, against the importing file's
+directory (entry parent at top level; off-workspace
+entries resolve like stdin against the root).
+- Module-owned relative paths resolve against the
+module file's own directory, not the caller cwd.
+Entry code keeps resolving against the run cwd.
+- Missing files fail before the first step runs.
 Write-then-import in one script is rejected; check
 libraries into the tree.
 
-`EXPORT` marks top-level script `FUNC`s as externally
-callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`) and as
-the file's importable interface: only exported names
-cross a file-import boundary, and an entry can re-export
+Module rules (every file import is a module):
+- Context: never inherits the caller. Env resets to
+the seed plus the module init's own contributions
+(declared `INHERIT_ENV` names re-read from the host
+on every call), cwd to the defining file's
+directory, workspace to the run-initial root.
+- Determinism: the same file behaves identically no
+matter who imports it.
+- State: one init per file, shared by every alias.
+Top-level `LET` bindings drain into a single store
+visible to all of the module's functions.
+- Workspace: declare `WORKSPACE` or `WORKDIR`
+in-function to read outside the module directory.
+Without it the reset leaves the module on the
+run-initial root (snapshot by default), even when
+the caller switched away.
+- Exports: only `EXPORT`ed top-level `FUNC`s and
+`EXPORT TYPE` aliases cross. Variables never cross.
+- Imports: whole-file or harvest, only exported
+functions and types cross. Stateful harvests are
+rejected (import the file to share its module).
+Nested imports load automatically.
+- Cycles: circular imports and depth over 32 fail
+before the first step runs.
+
+Exports and tools:
+- `EXPORT` marks top-level `FUNC`s as externally
+callable (`EXPORT FOO`, `EXPORT [FOO, BAR]`) and as
+the file importable interface. Re-exports promote
 an import (`IMPORT ["x.oxdock" AS A]` then `EXPORT
-A::FOO`) to promote it to its own tool surface. `EXPORT
-TYPE` marks top-level aliases the same way (`EXPORT TYPE
-PERSON`, `EXPORT TYPE [A, B]`, mixed `EXPORT [TYPE A,
-FUNC B]`): only exported aliases cross, so `FUNC`
-signatures using custom types survive imports instead of
-losing their spelling. Serving resolves re-exports through
-the registry, so a name the file never exported fails tool
-setup instead of serving a dead tool. The MCP server skips
-`TYPE` exports when building tools (no confusion between a
-type and a function) while still resolving imported types
-for signatures. Single-file scope otherwise; see the MCP
-host for consumption.
+A::FOO`).
+- `EXPORT TYPE` marks aliases the same way
+(`EXPORT TYPE PERSON`, `EXPORT TYPE [A, B]`, mixed
+`EXPORT [TYPE A, FUNC B]`). Only exported aliases
+cross, so `FUNC` signatures survive imports.
+- Serving resolves re-exports through the registry;
+unexported names fail tool setup instead of serving
+a dead tool. The MCP server skips `TYPE` exports
+when building tools while still resolving imported
+types for signatures. Single-file scope otherwise;
+see the MCP host for consumption.
 
 
 **Examples:**
