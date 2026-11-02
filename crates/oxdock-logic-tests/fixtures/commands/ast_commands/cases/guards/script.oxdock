@@ -1,3 +1,4 @@
+INHERIT_ENV [BAZ]
 ENV FOO="bar"
 [env:FOO] WRITE guarded.txt "yes"
 [not(env:BAZ)] WRITE guarded_not.txt "yes"

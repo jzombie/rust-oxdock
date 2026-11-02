@@ -933,7 +933,7 @@ jobs:
           OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, GITHUB_PATH, GITHUB_ENV]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, OXDOCK_CACHE_DIR, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, GITHUB_PATH, GITHUB_ENV]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must

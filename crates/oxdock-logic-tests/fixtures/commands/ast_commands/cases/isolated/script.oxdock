@@ -1,8 +1,12 @@
 ENV OUTER_CUSTOM=outer-val
 ENV OUTER_SECRET=top-secret
+FUNC READ_SECRET() {
+    RETURN "{{ env:OUTER_SECRET }}"
+}
 ISOLATED {
     INHERIT_ENV [OUTER_CUSTOM]
     ECHO "inner:{{ env:OUTER_CUSTOM }}"
-    ECHO "secret:{{ env:OUTER_SECRET }}"
+    LET $s: STRING = READ_SECRET()
+    ECHO "secret:{{ $s }}"
 }
 ECHO "top:{{ env:OUTER_CUSTOM }}"
