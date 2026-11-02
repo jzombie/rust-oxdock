@@ -534,9 +534,10 @@ pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> Resul
             "The STD standard library: built-in functions available to every script. \
              Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` \
              with the module imported via `IMPORT`). Plugin modules \
-             ([`NET`, `SSH`, `MARKDOWN`](#plugin-references)) add more functions \
-             the same way, and hosts can extend the language with their own \
-             modules ([Extending OxDock from Rust](#extending-oxdock-from-rust)). \
+             ([`NET`, `SSH`, `MARKDOWN`]({{ $docs_global.workspace_url }}#plugin-references)) \
+             add more functions the same way, and hosts can extend the language \
+             with their own modules \
+             ([Extending OxDock from Rust]({{ $docs_global.workspace_url }}#extending-oxdock-from-rust)). \
              Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.\n\n",
         );
     } else {
