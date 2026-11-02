@@ -766,6 +766,134 @@ impl StepKind {
         }
     }
 
+    /// Visit every immediate raw string fragment (literal argument text
+    /// and mixed-value text fragments). Typed expressions are NOT
+    /// visited here. Boxed sub-kinds and bodies are NOT descended, same
+    /// as [`walk_exprs`](Self::walk_exprs): the caller recurses through
+    /// [`walk_child_kinds`](Self::walk_child_kinds) or the checker's own
+    /// body walk. Exhaustive for the same reason: a new string-carrying
+    /// variant must appear here or env-template checking misses it.
+    pub fn walk_raw_strings(&self, f: &mut impl FnMut(&str)) {
+        fn walk_arg(arg: &Arg, f: &mut impl FnMut(&str)) {
+            match arg {
+                Arg::String(text, _) => f(text),
+                Arg::Expr(_) => {}
+                Arg::Parts(parts) => {
+                    for part in parts {
+                        if let ArgPart::Text(text, _) = part {
+                            f(text);
+                        }
+                    }
+                }
+            }
+        }
+        fn walk_opt(arg: &Option<Arg>, f: &mut impl FnMut(&str)) {
+            if let Some(arg) = arg {
+                walk_arg(arg, f);
+            }
+        }
+        fn walk_target(target: &AssertTarget, f: &mut impl FnMut(&str)) {
+            if let AssertTarget::Value(arg) = target {
+                walk_arg(arg, f);
+            }
+        }
+        match self {
+            StepKind::Assign { .. }
+            | StepKind::Set { .. }
+            | StepKind::Call { .. }
+            | StepKind::Return { .. }
+            | StepKind::For { .. }
+            | StepKind::If { .. }
+            | StepKind::While { .. } => {}
+            StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
+                walk_arg(duration, f);
+            }
+            StepKind::Workdir(arg)
+            | StepKind::Echo(arg)
+            | StepKind::Run(arg)
+            | StepKind::Mkdir(arg)
+            | StepKind::Exit(arg) => walk_arg(arg, f),
+            StepKind::Env { value, .. } => walk_arg(value, f),
+            StepKind::Copy { from, to, .. }
+            | StepKind::Symlink { from, to, .. }
+            | StepKind::Archive {
+                src: from, dst: to, ..
+            }
+            | StepKind::Install { from, to } => {
+                walk_arg(from, f);
+                walk_arg(to, f);
+            }
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                walk_arg(src, f);
+                walk_arg(dst, f);
+                walk_opt(max_bytes, f);
+            }
+            StepKind::CopyGit { rev, from, to, .. } => {
+                walk_arg(rev, f);
+                walk_arg(from, f);
+                walk_arg(to, f);
+            }
+            StepKind::Ls(arg) | StepKind::Read(arg) => walk_opt(arg, f),
+            StepKind::Remove { path, .. } => walk_arg(path, f),
+            StepKind::Prompt {
+                message, default, ..
+            } => {
+                walk_arg(message, f);
+                walk_opt(default, f);
+            }
+            StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
+                walk_arg(path, f);
+                walk_opt(contents, f);
+            }
+            StepKind::Expand { path, overrides } => {
+                walk_opt(path, f);
+                for (_, value) in overrides {
+                    walk_arg(value, f);
+                }
+            }
+            StepKind::AssertEq {
+                actual, expected, ..
+            } => {
+                walk_target(actual, f);
+                walk_opt(expected, f);
+            }
+            StepKind::AssertContains { haystack, needle } => {
+                walk_target(haystack, f);
+                walk_arg(needle, f);
+            }
+            StepKind::ListAppend { item, .. } => walk_arg(item, f),
+            StepKind::RunExec { argv } => {
+                for arg in argv {
+                    walk_arg(arg, f);
+                }
+            }
+            StepKind::WithIo { .. }
+            | StepKind::WithIoBlock { .. }
+            | StepKind::TypeAlias { .. }
+            | StepKind::Workspace(_)
+            | StepKind::ImportFile { .. }
+            | StepKind::ImportFuncs { .. }
+            | StepKind::InheritEnv { .. }
+            | StepKind::Isolated { .. }
+            | StepKind::IsolatedInheritEnv { .. }
+            | StepKind::ReadLine { .. }
+            | StepKind::AssignCapture { .. }
+            | StepKind::AwaitCapture { .. }
+            | StepKind::AsyncBlock { .. }
+            | StepKind::AssignAsync { .. }
+            | StepKind::Await { .. }
+            | StepKind::Cancel { .. }
+            | StepKind::RemoteBlock { .. }
+            | StepKind::FuncDef { .. }
+            | StepKind::Break
+            | StepKind::Continue => {}
+        }
+    }
+
     /// Visit every immediate child kind: boxed sub-commands and the kinds
     /// of every body step. Exhaustive like [`walk_exprs`](Self::walk_exprs):
     /// new block shapes fail compilation here.
@@ -1214,12 +1342,19 @@ declare_commands! {
             "#} },
             Example { name: "interpolation", fence_meta: None, code: indoc! {r#"
                 # `{{ env:KEY }}` reads the script environment; a bare name
-                # resolves a DSL variable instead. Unknown keys expand to
-                # empty with no host fallback.
+                # resolves a DSL variable instead. Every `env:` read must
+                # be declared first: KEY here comes from the ENV below.
                 ENV USER=OxDock
                 LET $WHO: STRING = "Ada"
-                ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!{{ env:OXDOCK_DOC_NO_SUCH_KEY }}"
+                ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!"
                 ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada!"
+            "#} },
+            Example { name: "undeclared env read fails", fence_meta: Some("expect_error:\"env:OXDOCK_DOC_NO_SUCH_KEY\""), code: indoc! {r#"
+                # No declaration anywhere: the whole-closure static gate
+                # rejects the read before the first step runs. (The
+                # error names the variable: undeclared environment
+                # variable `env:OXDOCK_DOC_NO_SUCH_KEY`.)
+                ECHO "Hello {{ env:OXDOCK_DOC_NO_SUCH_KEY }}!"
             "#} },
         ],
         lower: |_flags, args| Ok(StepKind::Echo(join_value(args, "ECHO")?)),
@@ -3037,21 +3172,30 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                     # The block resets to the session seed: plain steps and
-                    # spawns run with zero prelude, while outer customs
-                    # stay out.
-                    ENV OUTER_CUSTOM=outer-val
+                    # spawns run with zero prelude. PATH needs no
+                    # declaration: contract seed rows are always admitted.
                     WRITE top-path.txt "{{ env:PATH }}"
                     ISOLATED {
                         WRITE inner-path.txt "{{ env:PATH }}"
-                        WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
                         RUN "echo seed-ok"
                     }
                     LET $top: STRING = READ top-path.txt
                     LET $inner: STRING = READ inner-path.txt
                     ASSERT_EQ $inner $top
-                    LET $custom: STRING = READ inner-custom.txt
-                    ASSERT_EQ $custom ""
                     ASSERT_CONTAINS stdout "seed-ok"
+                "#},
+                },
+                Example {
+                    name: "outer customs stay out",
+                    fence_meta: Some("expect_error:\"env:OUTER_CUSTOM\""),
+                    code: indoc! {r#"
+                    # Outer customs never enter the block: without an
+                    # allowlist entry the static gate rejects the read
+                    # before the first step runs.
+                    ENV OUTER_CUSTOM=outer-val
+                    ISOLATED {
+                        WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
+                    }
                 "#},
                 },
                 Example {

@@ -3,12 +3,19 @@
 // the import boundary reverts ENV/WORKDIR/WORKSPACE/LET, so each leg
 // keeps its own sandbox header and calls in here only for repeated
 // logic (hash extraction), binding RETURNs itself. Configuration
-// rides the inherited environment (`env:GITHUB_WORKSPACE`), not call
-// arguments: every leg inherits the same vars, so every call resolves
-// the same checkout. Declares its own STD dependency: every file
-// resolves its names against its own imports.
+// rides the inherited environment (`env:GITHUB_WORKSPACE`),
+// declared below: every file stands alone, so this module declares
+// what its functions read. Module calls never inherit caller context:
+// the declared name re-reads from the host on every call, and the
+// workspace below reaches the checkout explicitly. Declares its own
+// STD dependency: every file resolves its names against its own
+// imports. Prelude order matters: INHERIT leads, IMPORT follows.
+INHERIT_ENV [GITHUB_WORKSPACE]
 IMPORT [STD]
 FUNC LOCKFILE_HASH() {
+  # Module calls never inherit caller context: the workspace resets
+  # to the run-initial root, so reach the checkout explicitly.
+  WORKSPACE SYSTEM
   RETURN HASH_SHA256(PATH_JOIN(env:GITHUB_WORKSPACE, "Cargo.lock"))
 }
 EXPORT LOCKFILE_HASH

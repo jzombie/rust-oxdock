@@ -590,6 +590,16 @@ fn guarded_run_waits_for_env_to_be_set() {
     };
     let steps = vec![
         Step {
+            guard: None,
+            kind: StepKind::InheritEnv {
+                keys: vec!["READY".into()],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 0,
+            col: 0,
+        },
+        Step {
             guard: Some(guard.clone().into()),
             kind: StepKind::Run("echo first".into()),
             scope_enter: 0,
@@ -920,6 +930,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         cargo_scratch: oxdock_fs::reserve_cargo_scratch().unwrap(),
         seed: Arc::new(HashMap::new()),
         cwd: fs.root().clone(),
+        initial_root: fs.root().clone(),
         envs: Arc::new(HashMap::new()),
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
@@ -5943,8 +5954,10 @@ fn seeded_host_path_runs_shell_without_prelude() {
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
 fn seeded_path_visible_to_expansion() {
-    // No INHERIT_ENV at all: the mirrored host PATH is visible to
-    // expansion when the host defines it, empty otherwise.
+    // Contract-admitted, no declaration needed: the mirrored host
+    // PATH is visible to expansion when the host defines it, empty
+    // otherwise. Proves `ENV_CONTRACTS.md` baseline reads pass the
+    // static gate.
     let temp = run_seeded_case(indoc! {r#"
         WRITE path.txt "{{ env:PATH }}"
     "#});
@@ -6003,6 +6016,11 @@ fn isolated_reseeds_factory_defaults() {
     // identical seed, and outer customs stay out of the block. The
     // script spawns nothing (WRITE/ENV only), so the proof runs on
     // every platform; the PATH expectation mirrors the host or absents.
+    // Every read is declared: top-level names via the header, block
+    // names via the in-block allowlist. Outer customs never enter the
+    // block: without an allowlist entry the static gate rejects the
+    // read before the first step (proven by the negative test below),
+    // so no `inner-custom.txt` exists to assert on.
     let temp = run_seeded_case(indoc! {r#"
         ENV OUTER_CUSTOM=outer-val
         WRITE top-path.txt "{{ env:PATH }}"
@@ -6010,7 +6028,6 @@ fn isolated_reseeds_factory_defaults() {
         ISOLATED {
             WRITE inner-path.txt "{{ env:PATH }}"
             WRITE inner-tmp.txt "{{ env:TMPDIR }}"
-            WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
         }
     "#});
     let expected_path = std::env::var(oxdock_fs::env::os::PATH).unwrap_or_default();
@@ -6025,10 +6042,32 @@ fn isolated_reseeds_factory_defaults() {
         read_case_file(&temp, "top-tmp.txt"),
         "seeded temp matches across the block boundary"
     );
-    assert_eq!(
-        read_case_file(&temp, "inner-custom.txt"),
-        "",
-        "outer customs stay out of ISOLATED"
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns real OS processes, which die under Miri isolation"
+)]
+fn isolated_undeclared_outer_custom_fails_statically() {
+    // Companion to the reseed proof: an outer custom read inside
+    // ISOLATED without an allowlist entry fails before the first step,
+    // so customs can never leak into the block at runtime.
+    let steps = crate::parse_script(indoc! {r#"
+        ENV OUTER_CUSTOM=outer-val
+        ISOLATED {
+            WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
+        }
+    "#})
+    .expect("isolated negative case parses");
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:#}").contains("undeclared environment variable `env:OUTER_CUSTOM`"),
+        "{err:#}"
     );
 }
 
@@ -7095,7 +7134,10 @@ fn file_import_body_env_does_not_leak() {
     // Isolation boundary (`state.rs::push_scope` snapshots envs): ENV
     // set in an imported body reverts on return, so run-state
     // boilerplate cannot live in a shared import; only FUNCs and the
-    // RETURN value cross. The Actions dedupe respects this.
+    // RETURN value cross. The Actions dedupe respects this. The entry
+    // read below is undeclared in the entry file, so the whole-closure
+    // static gate rejects it before the first step — the same proof
+    // the LET mirror below makes for variables.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -7108,14 +7150,344 @@ fn file_import_body_env_does_not_leak() {
         IMPORT ["setup.oxdock" AS SETUP]
         LET $v: STRING = "{{ env:FROM_LIB }}"
     "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("undeclared environment variable `env:FROM_LIB`"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn file_import_module_env_without_inherit_fails_statically() {
+    // Each file stands alone: a module function reading a
+    // non-contract variable must declare it in its own file. The
+    // entry declaring it is not enough. (Real-world shape: an entry
+    // INHERIT_ENVs a name and calls a helper whose file never does.)
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "helper.oxdock",
+        indoc! {r#"
+            FUNC WHERE() {
+                RETURN "{{ env:MOD_TOKEN }}"
+            }
+            EXPORT WHERE
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        INHERIT_ENV [MOD_TOKEN]
+        IMPORT ["helper.oxdock" AS H]
+        LET $w: STRING = H::WHERE()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("undeclared environment variable `env:MOD_TOKEN`"),
+        "{msg}"
+    );
+    // Attribution names the offending file position: the read sits on
+    // line 2 of the helper, inside the qualified function.
+    assert!(msg.contains("line 2"), "{msg}");
+    assert!(msg.contains("H::WHERE"), "{msg}");
+}
+
+#[test]
+fn file_import_module_env_with_inherit_runs() {
+    // Mirror image: the same module declaring INHERIT_ENV in its own
+    // prelude passes the gate and reads the host value at call time,
+    // with no entry declaration at all. Module calls never inherit
+    // caller context: declared names re-read from the host.
+    let _host = TestEnvGuard::set("MOD_TOKEN", "mod-value");
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "helper.oxdock",
+        indoc! {r#"
+            INHERIT_ENV [MOD_TOKEN]
+            FUNC WHERE() {
+                RETURN "{{ env:MOD_TOKEN }}"
+            }
+            EXPORT WHERE
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["helper.oxdock" AS H]
+        LET $w: STRING = H::WHERE()
+    "#});
     let (_, _, bindings) = run_steps_with_manager(
         Box::new(fs),
         &steps,
         MockProcessManager::default(),
         ExecIo::new(),
     )
-    .expect("import runs");
+    .expect("declared module import runs");
+    assert_eq!(
+        bindings.get("w").and_then(|v| v.as_str()),
+        Some("mod-value")
+    );
+}
+
+#[test]
+fn file_import_module_env_ignores_caller_values() {
+    // The no-inherit guarantee, positively: a module function observes
+    // its own init's `ENV`, never a caller-established value under the
+    // same name. The entry overwrites the global after import; the call
+    // still resolves the module's own contribution.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "helper.oxdock",
+        indoc! {r#"
+            ENV SHARED=module-val
+            FUNC WHICH() {
+                RETURN "{{ env:SHARED }}"
+            }
+            EXPORT WHICH
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["helper.oxdock" AS H]
+        ENV SHARED=caller-val
+        LET $w: STRING = H::WHICH()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("isolated module call runs");
+    assert_eq!(
+        bindings.get("w").and_then(|v| v.as_str()),
+        Some("module-val")
+    );
+}
+
+#[test]
+fn file_import_module_capture_let_resolves() {
+    // Module top-level capture initializers drain into the shared store
+    // like plain `LET`, so module functions resolve them: the static
+    // gate must seed every binding form, not just `Assign`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "cap.oxdock",
+        indoc! {r#"
+            LET $out: STRING = RUN "echo hi"
+            FUNC GET() {
+                RETURN $out
+            }
+            EXPORT GET
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["cap.oxdock" AS CAP]
+        LET $v: STRING = CAP::GET()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("capture-initialized module import runs");
     assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some(""));
+}
+
+#[test]
+fn undeclared_env_use_fails_before_first_step() {
+    // Flow-sensitive and loud: a read preceding its declaration fails
+    // before anything runs, naming the source line.
+    let steps = crate::parse_script(indoc! {r#"
+        ECHO "{{ env:LATE_TOKEN }}"
+        ENV LATE_TOKEN=1
+    "#})
+    .expect("parses");
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("undeclared environment variable `env:LATE_TOKEN`"),
+        "{msg}"
+    );
+    assert!(msg.contains("line 1"), "{msg}");
+}
+
+#[test]
+fn undeclared_env_guard_fails_statically() {
+    // Adversarial: a guard testing an undeclared name must fail the
+    // static gate, even though the runtime would evaluate it false.
+    // Absence-testing stays legal, but only for declared names.
+    let steps = vec![Step {
+        guard: Some(
+            Guard::Attr {
+                ns: oxdock_parser::Ns::Env,
+                key: Some("NEVER_DECL".into()),
+                val: None,
+            }
+            .into(),
+        ),
+        kind: StepKind::Run("echo hi".into()),
+        scope_enter: 0,
+        scope_exit: 0,
+        line: 0,
+        col: 0,
+    }];
+    use oxdock_fs::PathResolver;
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("undeclared environment variable `env:NEVER_DECL`"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn undeclared_env_guard_fails_with_line() {
+    // Parse-level shape of the same adversarial case: the error names
+    // the source line of the guarded step.
+    let steps = crate::parse_script(indoc! {r#"
+        [env:MISSING_GUARD_TOKEN] ECHO hi
+    "#})
+    .expect("parses");
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("undeclared environment variable `env:MISSING_GUARD_TOKEN`"),
+        "{msg}"
+    );
+    assert!(msg.contains("line 1"), "{msg}");
+}
+
+#[test]
+fn declared_name_does_not_admit_sibling() {
+    // Near-miss adversarial: declaring one name admits nothing else.
+    // The error names the undeclared sibling, not the declared one.
+    let steps = crate::parse_script(indoc! {r#"
+        INHERIT_ENV [DECLARED_ONE]
+        ECHO "{{ env:DECLARED_ONE }} {{ env:UNDECLARED_TWO }}"
+    "#})
+    .expect("parses");
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("undeclared environment variable `env:UNDECLARED_TWO`"),
+        "{msg}"
+    );
+    assert!(!msg.contains("DECLARED_ONE"), "{msg}");
+}
+
+#[test]
+fn script_env_undeclared_fails_naming_prefix() {
+    // The `script_env:` spelling gates identically, and the error
+    // quotes the spelling the author wrote.
+    let steps = crate::parse_script(indoc! {r#"
+        ECHO "{{ script_env:NOPE }}"
+    "#})
+    .expect("parses");
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("undeclared environment variable `script_env:NOPE`"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn block_scoped_env_does_not_leak() {
+    // Adversarial: a declaration inside a braced block is scope-local.
+    // Reading it after the block fails, exactly like the runtime
+    // scope pop.
+    let steps = crate::parse_script(indoc! {r#"
+        [bool:true] {
+            ENV BLOCK_LOCAL=1
+        }
+        ECHO "{{ env:BLOCK_LOCAL }}"
+    "#})
+    .expect("parses");
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("undeclared environment variable `env:BLOCK_LOCAL`"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn branch_scoped_env_does_not_leak() {
+    // Adversarial: a declaration inside an IF arm never reaches code
+    // after the branch (fork and discard, mirroring execution).
+    let steps = crate::parse_script(indoc! {r#"
+        LET $c: BOOL = true
+        IF $c {
+            ENV ARM_LOCAL=1
+        }
+        ECHO "{{ env:ARM_LOCAL }}"
+    "#})
+    .expect("parses");
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("undeclared environment variable `env:ARM_LOCAL`"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn math_env_read_without_declaration_fails() {
+    // Adversarial: `env:` inside arithmetic gates like any other read.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $n: INT = env:ARITH_TOKEN + 1
+    "#})
+    .expect("parses");
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("undeclared environment variable `env:ARITH_TOKEN`"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn padded_env_template_resolves_trimmed() {
+    // `{{ env: NAME }}` with inner padding resolves the trimmed name:
+    // exactly what the static gate admitted, so expansion and checking
+    // can never disagree on the spelling.
+    let _host = TestEnvGuard::set("PADDED_TOKEN", "padded-ok");
+    let temp = run_seeded_case(indoc! {r#"
+        INHERIT_ENV [PADDED_TOKEN]
+        WRITE padded.txt "{{ env: PADDED_TOKEN }}"
+    "#});
+    assert_eq!(read_case_file(&temp, "padded.txt"), "padded-ok");
 }
 
 #[test]

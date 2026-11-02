@@ -432,6 +432,11 @@ pub(crate) fn import_file<P: ProcessManager>(
         }
         cx.state.import_stack.push(resolved);
         cx.state.push_scope();
+        // Snapshot the pre-init env: the module's call-time env is the
+        // seed plus only what this init body contributes. Values the
+        // importer established stay out by construction (the delta
+        // below is taken against this map, not the seed).
+        let env_before: std::collections::HashMap<String, String> = (*cx.state.envs).clone();
         // The init body runs with its module on the context stack so
         // nested definitions owner-tag correctly; lexical reads still
         // resolve through the pushed frames first.
@@ -481,9 +486,37 @@ pub(crate) fn import_file<P: ProcessManager>(
             }
         };
         let record = cx.state.modules.entry(key.clone()).or_default();
+        // Module call-time env (#115): the session seed plus this
+        // init's own contributions. Comparing against the pre-init
+        // map (not the seed) keeps importer-established values out,
+        // so module functions never inherit caller context. Removals
+        // (e.g. `INHERIT_ENV` of a removed name) drop seed rows too.
+        // A re-inherit of an already-present value leaves no delta, so
+        // `INHERIT_ENV` names are additionally recorded for
+        // per-call re-establishment from the host.
+        let after = cx.state.envs.clone();
+        let mut module_env = (*cx.state.seed).clone();
+        for (name, value) in after.iter() {
+            if env_before.get(name) != Some(value) {
+                module_env.insert(name.clone(), value.clone());
+            }
+        }
+        for name in env_before.keys() {
+            if !after.contains_key(name) {
+                module_env.remove(name);
+            }
+        }
+        let mut inherit_names = Vec::new();
+        for step in &steps {
+            if let StepKind::InheritEnv { keys } = &step.kind {
+                inherit_names.extend(keys.iter().cloned());
+            }
+        }
         record.init = Some(super::state::ModuleInit {
             vars: drained,
             return_value: value.clone(),
+            envs: module_env,
+            inherit_names,
         });
         Ok(value)
     })();

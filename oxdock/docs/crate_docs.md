@@ -1030,6 +1030,11 @@ ASSERT_CONTAINS stdout "arch-detected"
 // Bring the runner-injected value into the script environment.
 INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
 
+// Absence is testable, but every guard reference must still be
+// declared: inheriting a host-absent name stays absent, it only
+// satisfies the static gate.
+INHERIT_ENV [OXDOCK_DOC_UNDEFINED_VAR, OXDOCK_DOC_FEATURE_B]
+
 // not(...) inverts the predicate: passes because the variable does NOT exist.
 [not(env:OXDOCK_DOC_UNDEFINED_VAR)] ECHO negation-passes-for-undefined
 ASSERT_CONTAINS stdout "negation-passes-for-undefined"
@@ -1045,10 +1050,14 @@ ASSERT_CONTAINS stdout "composed-and-or-guard"
 
 ### Multi-line guards
 
-Bracket expressions may span lines. Chained guard lines apply conjunctively to the next instruction; here neither variable is defined, so the gated instruction is skipped:
+Bracket expressions may span lines. Chained guard lines apply conjunctively to the next instruction; here both variables are declared but host-absent, so the gated instruction is skipped:
 
 ```oxdock
 IMPORT [STD]
+
+// Declare both names: inheriting host-absent names stays absent,
+// satisfying the static gate while keeping the runtime skip.
+INHERIT_ENV [OXDOCK_DOC_CHAIN_ONE, OXDOCK_DOC_CHAIN_TWO]
 
 // Brackets may span lines; chained lines AND together and gate
 // the next command.
@@ -1057,7 +1066,7 @@ IMPORT [STD]
   env:OXDOCK_DOC_CHAIN_TWO
 ]
 
-// Neither variable exists, so this WRITE is skipped entirely.
+// Neither variable is defined, so this WRITE is skipped entirely.
 WRITE chained.txt applied
 
 // The artifact was never created.
@@ -2020,22 +2029,32 @@ ASSERT_EQ $body "inner"
 
 ```oxdock
 # The block resets to the session seed: plain steps and
-# spawns run with zero prelude, while outer customs
-# stay out.
-ENV OUTER_CUSTOM=outer-val
+# spawns run with zero prelude. PATH needs no
+# declaration: contract seed rows are always admitted.
 WRITE top-path.txt "{{ env:PATH }}"
 ISOLATED {
     WRITE inner-path.txt "{{ env:PATH }}"
-    WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
     RUN "echo seed-ok"
 }
 LET $top: STRING = READ top-path.txt
 LET $inner: STRING = READ inner-path.txt
 ASSERT_EQ $inner $top
-LET $custom: STRING = READ inner-custom.txt
-ASSERT_EQ $custom ""
 ASSERT_CONTAINS stdout "seed-ok"
 ```
+
+**Example: outer customs stay out**
+
+```oxdock expect_error:"env:OUTER_CUSTOM"
+# Outer customs never enter the block: without an
+# allowlist entry the static gate rejects the read
+# before the first step runs.
+ENV OUTER_CUSTOM=outer-val
+ISOLATED {
+    WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
+}
+```
+
+**Expected error:** `env:OUTER_CUSTOM`
 
 **Example: absent names stay absent**
 
@@ -2858,13 +2877,25 @@ ASSERT_EQ stdout "braced:World\nWorld\n"
 
 ```oxdock
 # `{{ env:KEY }}` reads the script environment; a bare name
-# resolves a DSL variable instead. Unknown keys expand to
-# empty with no host fallback.
+# resolves a DSL variable instead. Every `env:` read must
+# be declared first: KEY here comes from the ENV below.
 ENV USER=OxDock
 LET $WHO: STRING = "Ada"
-ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!{{ env:OXDOCK_DOC_NO_SUCH_KEY }}"
+ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!"
 ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada!"
 ```
+
+**Example: undeclared env read fails**
+
+```oxdock expect_error:"env:OXDOCK_DOC_NO_SUCH_KEY"
+# No declaration anywhere: the whole-closure static gate
+# rejects the read before the first step runs. (The
+# error names the variable: undeclared environment
+# variable `env:OXDOCK_DOC_NO_SUCH_KEY`.)
+ECHO "Hello {{ env:OXDOCK_DOC_NO_SUCH_KEY }}!"
+```
+
+**Expected error:** `env:OXDOCK_DOC_NO_SUCH_KEY`
 
 
 ### RUN

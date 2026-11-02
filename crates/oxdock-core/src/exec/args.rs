@@ -1546,24 +1546,12 @@ pub fn json_to_value(v: serde_json::Value) -> Value {
     }
 }
 
-/// Single-pass string expansion: handles escapes and `{{ }}` template tags.
-///
-/// `{{ $var }}` : interpolates script variable (supports key-paths: `{{ $d.name.0 }}`).
-/// `{{ env:KEY }}` : interpolates environment variable.
-/// Bare `$` is literal text : `{{ }}` is the ONLY interpolation trigger.
-///
-/// Escape rules:
-/// - `\\` → literal `\`
-/// - `\{{` → literal `{{` (skip template expansion)
-/// - `\n`, `\t`, `\r`, `\"` → control characters
-/// - Unrecognized `\X` → literal `\X`
-pub(crate) fn expand_string<P: ProcessManager>(
-    input: &str,
-    env: &std::collections::HashMap<String, String>,
-    state: &ExecState<P>,
-) -> Result<String> {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+/// Emit literal template text with the historical backslash escapes.
+/// Braces are always literal here because the shared template splitter
+/// already pulled every live placeholder out. See
+/// [`TemplateSegments`](oxdock_parser::template::TemplateSegments).
+fn push_escaped_text(output: &mut String, text: &str) {
+    let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\\' => match chars.peek() {
@@ -1603,88 +1591,116 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     output.push('\\');
                 }
             },
-            '{' if chars.peek() == Some(&'{') => {
-                chars.next(); // consume second {
-                let mut template_key = String::new();
-                let mut found_close = false;
-                while let Some(ch) = chars.next() {
-                    if ch == '}' && chars.peek() == Some(&'}') {
-                        chars.next(); // consume second }
-                        found_close = true;
-                        break;
-                    }
-                    template_key.push(ch);
-                }
-                if found_close {
-                    let key = template_key.trim();
-                    if let Some(var_expr) = key.strip_prefix('$') {
-                        // {{ $var }} or {{ $var.path.0 }} : look up in scope chain.
-                        // Parse key-path from the extracted string, NOT from chars.
-                        // Trim whitespace from segments to tolerate spaces around dots.
-                        // Bare $var never reads the environment; use {{ env:KEY }}.
-                        let mut parts = var_expr.split('.');
-                        if let Some(base_var) = parts.next() {
-                            let base_trim = base_var.trim();
-                            let mut current = state.get_var(base_trim);
-                            for part in parts {
-                                let part_trim = part.trim();
-                                current = match current {
-                                    Some(v) => {
-                                        if let Some(map) = v.as_map() {
-                                            map.get(part_trim).cloned()
-                                        } else if let Some(list) = v.as_list() {
-                                            part_trim
-                                                .parse::<usize>()
-                                                .ok()
-                                                .and_then(|idx| list.get(idx).cloned())
-                                        } else {
-                                            None
-                                        }
+            _ => {
+                output.push(c);
+            }
+        }
+    }
+}
+
+/// Single-pass string expansion: handles escapes and `{{ }}`
+/// template tags, split by the shared template scanner.
+///
+/// `{{ $var }}` : interpolates script variable (supports key-paths:
+/// `{{ $d.name.0 }}`).
+/// `{{ env:KEY }}` : interpolates environment variable.
+/// Bare `$` is literal text : `{{ }}` is the ONLY interpolation trigger.
+///
+/// Escape rules:
+/// - `\\` is a literal backslash
+/// - `\{{` is a literal opener (skip template expansion)
+/// - `\n`, `\t`, `\r`, `\"` are control characters
+/// - Unrecognized escapes keep the backslash
+pub(crate) fn expand_string<P: ProcessManager>(
+    input: &str,
+    env: &std::collections::HashMap<String, String>,
+    state: &ExecState<P>,
+) -> Result<String> {
+    use oxdock_parser::template::{TemplateSegment, TemplateSegments};
+    let mut output = String::with_capacity(input.len());
+    for segment in TemplateSegments::new(input) {
+        match segment {
+            TemplateSegment::Text(text) => push_escaped_text(&mut output, text),
+            TemplateSegment::Placeholder { key } => {
+                if let Some(var_expr) = key.strip_prefix('$') {
+                    // {{ $var }} or {{ $var.path.0 }} : look up in scope chain.
+                    // Parse key-path from the extracted string, NOT from chars.
+                    // Trim whitespace from segments to tolerate spaces around dots.
+                    // Bare $var never reads the environment; use {{ env:KEY }}.
+                    let mut parts = var_expr.split('.');
+                    if let Some(base_var) = parts.next() {
+                        let base_trim = base_var.trim();
+                        let mut current = state.get_var(base_trim);
+                        for part in parts {
+                            let part_trim = part.trim();
+                            current = match current {
+                                Some(v) => {
+                                    if let Some(map) = v.as_map() {
+                                        map.get(part_trim).cloned()
+                                    } else if let Some(list) = v.as_list() {
+                                        part_trim
+                                            .parse::<usize>()
+                                            .ok()
+                                            .and_then(|idx| list.get(idx).cloned())
+                                    } else {
+                                        None
                                     }
-                                    None => None,
-                                };
-                                if current.is_none() {
-                                    break;
                                 }
+                                None => None,
+                            };
+                            if current.is_none() {
+                                break;
                             }
-                            if let Some(v) = current {
-                                output.push_str(&format_value_for_string(&v)?);
-                            }
-                            // Missing → emit empty
                         }
-                    } else {
-                        // {{ env:KEY }} : seeded script env map
-                        // {{ script_env:KEY }} : explicit script env only
-                        // {{ bare_key }} : DSL variable only, NOT env
-                        if let Some(env_key) = key.strip_prefix("env:") {
-                            if let Some(val) = env
-                                .get(env_key)
-                                .map(String::as_str)
-                                .or_else(|| state.get_env(env_key))
-                            {
-                                output.push_str(val);
-                            }
-                            // Missing → emit empty
-                        } else if let Some(env_key) = key.strip_prefix("script_env:") {
-                            if let Some(val) = env.get(env_key) {
-                                output.push_str(val);
-                            }
-                            // Missing → emit empty
-                        } else if let Some(val) = state.get_var(key) {
-                            output.push_str(&format_value_for_string(&val)?);
-                        } else if let Some((module, func, args_src)) =
-                            oxdock_process::parse_placeholder_call(key)
-                        {
-                            // `{{ MODULE::FUNC(args) }}` through the shared
-                            // pure table: the same registry EXPAND
-                            // templates resolve, so ordinary strings and
-                            // file templates agree. Unknown functions and
-                            // bad args fail here instead of rendering
-                            // empty; keys that are not call shaped keep
-                            // the empty below (no variable can spell
-                            // `::` plus parens).
-                            let table = state.pure_function_table();
-                            let callee = table
+                        if let Some(v) = current {
+                            output.push_str(&format_value_for_string(&v)?);
+                        }
+                        // Missing → emit empty
+                    }
+                } else {
+                    // `{{ env:KEY }}` reads the script env: missing
+                    // names fail loudly, exactly like `env:KEY`
+                    // expressions and file templates. Undeclared use
+                    // is a static error before the run; this is the
+                    // runtime backstop for dynamic paths.
+                    // `{{ script_env:KEY }}` reads the explicit
+                    // script env only. `{{ bare_key }}` reads DSL
+                    // variables only, never env.
+                    if let Some(env_key) = key.strip_prefix("env:") {
+                        // Whitespace-tolerant like the static gate: the
+                        // shared splitter trims the whole key, and the
+                        // name trims here, so `{{ env: FOO }}` resolves
+                        // exactly what the checker admitted.
+                        let env_key = env_key.trim();
+                        let Some(val) = env
+                            .get(env_key)
+                            .map(String::as_str)
+                            .or_else(|| state.get_env(env_key))
+                        else {
+                            anyhow::bail!("undefined environment variable `env:{env_key}`");
+                        };
+                        output.push_str(val);
+                    } else if let Some(env_key) = key.strip_prefix("script_env:") {
+                        let env_key = env_key.trim();
+                        let Some(val) = env.get(env_key) else {
+                            anyhow::bail!("undefined environment variable `script_env:{env_key}`");
+                        };
+                        output.push_str(val);
+                    } else if let Some(val) = state.get_var(key) {
+                        output.push_str(&format_value_for_string(&val)?);
+                    } else if let Some((module, func, args_src)) =
+                        oxdock_process::parse_placeholder_call(key)
+                    {
+                        // `{{ MODULE::FUNC(args) }}` through the shared
+                        // pure table: the same registry EXPAND
+                        // templates resolve, so ordinary strings and
+                        // file templates agree. Unknown functions and
+                        // bad args fail here instead of rendering
+                        // empty; keys that are not call shaped keep
+                        // the empty below (no variable can spell
+                        // `::` plus parens).
+                        let table = state.pure_function_table();
+                        let callee = table
                                 .get(module.as_str())
                                 .and_then(|entries| entries.get(func.as_str()))
                                 .ok_or_else(|| {
@@ -1700,24 +1716,16 @@ pub(crate) fn expand_string<P: ProcessManager>(
                                         known.join(", ")
                                     )
                                 })?;
-                            let vars = state.all_vars();
-                            let mut args = Vec::with_capacity(args_src.len());
-                            for src in args_src {
-                                args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
-                            }
-                            let result = callee(args)?;
-                            output.push_str(&format_value_for_string(&result)?);
+                        let vars = state.all_vars();
+                        let mut args = Vec::with_capacity(args_src.len());
+                        for src in args_src {
+                            args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
                         }
-                        // Bare key not in DSL vars → emit empty
+                        let result = callee(args)?;
+                        output.push_str(&format_value_for_string(&result)?);
                     }
-                } else {
-                    // Unclosed template : preserve verbatim
-                    output.push_str("{{");
-                    output.push_str(&template_key);
+                    // Bare key not in DSL vars → emit empty
                 }
-            }
-            _ => {
-                output.push(c);
             }
         }
     }

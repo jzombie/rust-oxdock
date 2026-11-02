@@ -70,6 +70,13 @@ pub struct ExecState<P: ProcessManager> {
     /// state stability.
     pub(super) seed: Arc<HashMap<String, String>>,
     pub(super) cwd: GuardedPath,
+    /// Workspace root the run started with, before any script
+    /// `WORKSPACE` statement. Module-owned function calls reset to it
+    /// (#115): a module must not inherit its caller's workspace, so a
+    /// module that reads outside the default (e.g. the host checkout)
+    /// declares its own `WORKSPACE` in-function. Scope pop restores
+    /// the caller afterwards.
+    pub(super) initial_root: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
     /// Outer-scope env snapshots for `ISOLATED` blocks, innermost last.
     /// Each entry is the script env as it stood at that block's entry, so
@@ -249,6 +256,20 @@ pub(super) struct ModuleRecord {
 pub(super) struct ModuleInit {
     pub(super) vars: HashMap<String, (TypeTag, Value)>,
     pub(super) return_value: Value,
+    /// Script env the module's functions execute with (#115): the
+    /// session seed plus the init body's own `ENV` contributions
+    /// (captured as a delta against the pre-init map, so
+    /// caller-established values stay out). `INHERIT_ENV` names are
+    /// re-read from the host at each call (see `inherit_names`),
+    /// since a re-inherit of an already-present value leaves no delta
+    /// yet must still admit the name.
+    pub(super) envs: HashMap<String, String>,
+    /// Top-level `INHERIT_ENV` names of the module file, re-established
+    /// from the host on every module-owned call. A module never
+    /// inherits its caller's environment; each file declares what it
+    /// reads, and the values flow from the host (or literals) at
+    /// init/call time.
+    pub(super) inherit_names: Vec<String>,
 }
 
 /// One anonymous background worker: the thread-join handle plus the
@@ -682,6 +703,7 @@ impl<P: ProcessManager> ExecState<P> {
             cargo_scratch: self.cargo_scratch.clone(),
             seed: Arc::clone(&self.seed),
             cwd: self.cwd.clone(),
+            initial_root: self.initial_root.clone(),
             envs: Arc::clone(&self.envs),
             bg_children: Vec::new(),
             scope_stack: Vec::new(),
@@ -768,6 +790,26 @@ impl<P: ProcessManager> ExecState<P> {
 
     pub(super) fn pop_var_scope(&mut self) {
         self.var_scopes.pop();
+    }
+
+    /// Reset to a module-owned call context (#115): env to the
+    /// module init's stored map, cwd to the defining file's directory,
+    /// workspace root to the run-initial root. A module never inherits
+    /// its caller's context; the surrounding `push_scope` restores the
+    /// caller afterwards. Root switching lives here (not in handlers)
+    /// so workspace demand keeps routing through the resolve choke
+    /// points.
+    pub(super) fn reset_module_context(
+        &mut self,
+        dir: Option<GuardedPath>,
+        envs: HashMap<String, String>,
+    ) {
+        self.envs = Arc::new(envs);
+        if let Some(dir) = dir {
+            self.cwd = dir;
+        }
+        let initial = self.initial_root.clone();
+        self.fs.set_root(&initial);
     }
 
     /// Enter a lexical scope: snapshot cwd/root/envs and open a fresh

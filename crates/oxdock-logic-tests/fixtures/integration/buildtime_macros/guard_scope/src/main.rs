@@ -4,6 +4,12 @@ oxdock_embed! {
     name: GuardedAssets,
     script: {
         INHERIT_ENV [TEST_SCOPE]
+        // Sentinel declarations: the guards below reference these
+        // outside the blocks that set them. Empty here means the
+        // block-scoped sets below must not leak outward: any leak
+        // would flip its guard and create the file the asserts deny.
+        ENV SCOPE_FLAG=""
+        ENV INNER_ONLY=""
 
         [env:TEST_SCOPE] {
             WORKDIR scoped

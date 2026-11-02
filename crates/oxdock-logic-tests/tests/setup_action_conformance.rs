@@ -132,6 +132,11 @@ fn ci_tail_harness() -> Result<CiTailRun> {
     io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "v0.0.0-test");
     io.insert_inherit_env("GITHUB_PATH", gh_path.as_path().display().to_string());
     io.insert_inherit_env("GITHUB_ENV", gh_env.as_path().display().to_string());
+    // The action always bridges these (possibly empty); declared reads
+    // need defined values to resolve.
+    io.insert_inherit_env("OXDOCK_PIPED_SCRIPT", "");
+    io.insert_inherit_env("OXDOCK_INTERPRETER", "");
+    io.insert_inherit_env("OXDOCK_INTERACTIVE", "");
     Ok(CiTailRun {
         _temp: temp,
         root,

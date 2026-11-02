@@ -25,7 +25,7 @@ pub use contract::{
 pub use contract::{OsPipeReader, OsPipeWriter, create_os_pipe};
 pub use env_policy::{
     check_spawn_anchors, has_var, is_sanctioned_seed, names_eq, needs_path_lookup, seed_defaults,
-    seed_differs, seed_transport,
+    seed_differs, seed_transport, seeded_env_names,
 };
 pub use expand::{
     PlaceholderCall, StreamingExpand, expand_command_env, expand_script_env,

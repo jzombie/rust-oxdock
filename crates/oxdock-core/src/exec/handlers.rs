@@ -2523,6 +2523,21 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     // 5. Execution by body kind.
     match entry.body {
         FuncBody::Script(def) => {
+            // Snapshot the caller's context first; module-owned bodies
+            // then reset to their own below, and the pop restores the
+            // caller on every path.
+            let module_key = def.module.clone();
+            let module_ctx = module_key.as_deref().and_then(|key| {
+                cx.state.modules.get(key).map(|record| {
+                    (
+                        record.dir.clone(),
+                        record
+                            .init
+                            .as_ref()
+                            .map(|init| (init.envs.clone(), init.inherit_names.clone())),
+                    )
+                })
+            });
             cx.state.call_depth += 1;
             cx.state.push_scope();
             // Module-owned bodies execute with their module on the
@@ -2530,7 +2545,25 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // module's shared store; entry bodies push `None`, keeping
             // entry functions params-only even when called from module
             // code. Balanced below on every exit path.
-            cx.state.module_stack.push(def.module.clone());
+            cx.state.module_stack.push(module_key);
+            // A module must not inherit its caller's context (#115):
+            // env resets to the seed plus the module init's own
+            // contributions, cwd to the defining file's directory, and
+            // the workspace to the run-initial root. Declared
+            // `INHERIT_ENV` names re-read from the host here (a
+            // re-inherit of an already-present value leaves no init
+            // delta, yet must still admit the name). A module that
+            // reads outside that (e.g. the host checkout) declares its
+            // own `WORKSPACE`/`WORKDIR` in-function. When the module is
+            // still initializing (reentrant init-time self-call) there
+            // is no stored env yet: the init scope stays as-is, since
+            // it is the module's own in-progress context.
+            if let Some((dir, Some((envs, inherit_names)))) = module_ctx {
+                cx.state.reset_module_context(dir, envs);
+                if !inherit_names.is_empty() {
+                    inherit_env(cx, &inherit_names)?;
+                }
+            }
             let outcome: Result<Value> = (|| {
                 for ((pname, ptype), pval) in def.params.iter().zip(arg_vals) {
                     cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
