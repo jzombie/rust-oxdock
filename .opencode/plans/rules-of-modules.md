@@ -6,3 +6,4 @@
 - Must define their own WORKSPACE, else will ALWAYS default to SNAPSHOT, just like any other file
 - Only export functions
 - Can only import functions (and custom types)
+- No circular imports
