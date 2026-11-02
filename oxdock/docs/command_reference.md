@@ -433,6 +433,20 @@ LET $count: INT = 42
 ASSERT_EQ $count 42
 ```
 
+**Example: bool coercion**
+
+```oxdock
+# BOOL spellings coerce case-insensitively; empty reads
+# false instead of failing, so declared flags stay total.
+ENV EMPTY_FLAG=""
+LET $e: BOOL = "{{ env:EMPTY_FLAG }}"
+ASSERT_EQ $e false
+LET $t: BOOL = "TRUE"
+ASSERT_EQ $t true
+LET $f: BOOL = "no"
+ASSERT_EQ $f false
+```
+
 **Example: no hoisting**
 
 ```oxdock expect_error:"undefined variable"

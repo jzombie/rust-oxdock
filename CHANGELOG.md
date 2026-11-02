@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Changed
+
+- Empty strings coerce to `false` for `BOOL` instead of failing: `LET $dry: BOOL = "{{ env:RELEASE_DRY_RUN }}"` reads a declared-but-absent flag as false, so `BOOL` flags stay total under absent-means-empty. `gha-rust-release.oxfile` now branches on `IF !$dry` / `IF !$bins` directly instead of comparing against the `"false"` string, and the `IF $x == "false"` string-compare shape is retired in favor of the coercion (note the flip side of totality: an unbridged name now takes the publish branch, so CI keeps bridging `RELEASE_DRY_RUN` explicitly).
+
 ## [0.33.0-alpha] - 2026-11-01
 
 ### Added
