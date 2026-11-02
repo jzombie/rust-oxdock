@@ -1192,15 +1192,92 @@ fn declared_bool_vs_string_treatment_differs() {
 }
 
 #[test]
-fn bool_coercion_treats_empty_as_false() {
-    // Declared-but-absent env names read empty, and empty coerces to
-    // false instead of failing: BOOL flags stay total, so scripts can
-    // declare a flag once and branch on it directly.
+fn bool_coercion_rejects_empty() {
+    // Declared-but-absent env names read empty, and empty is not a
+    // boolean: coercion fails instead of silently picking a polarity.
+    // Flag sites state their absent-default via STD::BOOL_OR.
     let steps = crate::parse_script(indoc! {r#"
         INHERIT_ENV [OXDOCK_TEST_ABSENT_FLAG]
-        LET $e: BOOL = ""
         LET $h: BOOL = "{{ env:OXDOCK_TEST_ABSENT_FLAG }}"
+    "#})
+    .expect("parses");
+    let mut io = ExecIo::new();
+    io.remove_inherit_env("OXDOCK_TEST_ABSENT_FLAG");
+    let err = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        io,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("BOOL"),
+        "unexpected error: {err:#}"
+    );
+    // Non-empty spellings still coerce (case-insensitive, trimmed).
+    let steps = crate::parse_script(indoc! {r#"
         LET $t: BOOL = "  TRUE  "
+        LET $f: BOOL = "no"
+    "#})
+    .expect("parses");
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("spellings coerce");
+    assert_eq!(bindings.get("t").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(bindings.get("f").and_then(|v| v.as_bool()), Some(false));
+}
+
+#[test]
+fn bool_converter_is_strict() {
+    // The BOOL converter coerces strict spellings and passes Bool
+    // through; empty and garbage fail instead of picking a polarity.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $t: BOOL = BOOL("yes")
+        LET $f: BOOL = BOOL("0")
+        LET $same: BOOL = BOOL($t)
+    "#})
+    .expect("parses");
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("spellings convert");
+    assert_eq!(bindings.get("t").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(bindings.get("f").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(bindings.get("same").and_then(|v| v.as_bool()), Some(true));
+    for raw in [r#"BOOL("")"#, r#"BOOL("maybe")"#] {
+        let steps =
+            crate::parse_script(&format!("IMPORT [STD]\nLET $b: BOOL = {raw}")).expect("parses");
+        let err = run_expect_err(
+            Box::new(MockFs::new()),
+            &steps,
+            MockProcessManager::default(),
+        );
+        assert!(
+            format!("{err:#}").contains("BOOL"),
+            "{raw}: unexpected error: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn bool_or_substitutes_default_for_blank() {
+    // Blank input resolves to the stated default; present values
+    // coerce strictly and garbage fails.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        INHERIT_ENV [OXDOCK_TEST_ABSENT_FLAG]
+        LET $dry: BOOL = BOOL_OR("{{ env:OXDOCK_TEST_ABSENT_FLAG }}", true)
+        LET $off: BOOL = BOOL_OR("false", true)
+        LET $on: BOOL = BOOL_OR("yes", false)
     "#})
     .expect("parses");
     let mut io = ExecIo::new();
@@ -1211,10 +1288,24 @@ fn bool_coercion_treats_empty_as_false() {
         MockProcessManager::default(),
         io,
     )
-    .expect("empty coerces to false");
-    assert_eq!(bindings.get("e").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(bindings.get("h").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(bindings.get("t").and_then(|v| v.as_bool()), Some(true));
+    .expect("defaults substitute");
+    assert_eq!(bindings.get("dry").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(bindings.get("off").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(bindings.get("on").and_then(|v| v.as_bool()), Some(true));
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $bad: BOOL = BOOL_OR("maybe", true)
+    "#})
+    .expect("parses");
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:#}").contains("BOOL_OR"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[cfg_attr(

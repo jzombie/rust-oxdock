@@ -23,14 +23,15 @@ pub(crate) fn type_mismatch(ctx: &str, expected: &TypeTag, value: &Value) -> any
 
 /// Single BOOL spelling for the whole runtime: trim, case-insensitive
 /// `true`/`false`, plus `1`/`0`, plus `yes`/`no`/`on`/`off`. Empty is
-/// `false`, so a declared-but-absent name reads false instead of
-/// failing: BOOL flags stay total under absent-means-empty. Anything
-/// else is `None` (coercion fails, flag checks default false). One
-/// rule, no piecemeal.
+/// `None`: an empty string is not a boolean, so declared-but-absent
+/// names (which read empty) fail here instead of silently picking a
+/// polarity. Flag sites state their own absent-default explicitly
+/// through `STD::BOOL_OR`. Anything else is `None` too. One rule,
+/// no piecemeal.
 pub(crate) fn parse_bool_str(s: &str) -> Option<bool> {
     let t = s.trim();
     if t.is_empty() {
-        return Some(false);
+        return None;
     }
     if t.eq_ignore_ascii_case("true")
         || t.eq_ignore_ascii_case("yes")

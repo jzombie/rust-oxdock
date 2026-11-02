@@ -367,6 +367,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         vec![
             Int::registration(),
             Float::registration(),
+            BoolConvert::registration(),
+            BoolOr::registration(),
             FormatByteCount::registration(),
             ParseByteCount::registration(),
             FormatDuration::registration(),
@@ -2847,6 +2849,83 @@ fn text_match(
 ) -> Result<Value> {
     let re = super::args::text_compile_pattern("TEXT_MATCH", &pattern)?;
     Ok(Value::bool(re.is_match(&text)))
+}
+
+/// Convert a value to BOOL.
+///
+/// Trims ASCII whitespace; accepts `true`/`false`, `1`/`0`,
+/// `yes`/`no`, `on`/`off` in any case. Passes Bool through. Empty
+/// and anything else fail: an empty string is not a boolean, so
+/// absent env names (which read empty) must go through `BOOL_OR`
+/// with a stated default instead of converting here.
+///
+#[oxdock_func(pure, name = "BOOL", returns = TypeTag::Bool)]
+#[example(
+    name = "convert",
+    code = r###"
+    IMPORT [STD]
+    LET $n: BOOL = BOOL("yes")
+    ASSERT_EQ $n true
+    LET $f: BOOL = BOOL("0")
+    ASSERT_EQ $f false
+    "###
+)]
+fn bool_convert(
+    /// Value to convert to `BOOL`.
+    #[union(Bool, String)]
+    val: Value,
+) -> Result<Value> {
+    if let Some(b) = val.as_bool() {
+        return Ok(Value::bool(b));
+    }
+    let Some(s) = val.as_str() else {
+        return Err(anyhow::anyhow!(
+            "BOOL needs a Bool or String, found {val:?}"
+        ));
+    };
+    match super::args::parse_bool_str(s) {
+        Some(b) => Ok(Value::bool(b)),
+        None => anyhow::bail!("BOOL cannot coerce {s:?} to BOOL"),
+    }
+}
+
+/// Coerce text to `BOOL`, substituting a default for empty.
+///
+/// Returns `BOOL`. Blank input (a declared-but-absent env name, which
+/// reads empty) resolves to `default` instead of failing, so each flag
+/// site states its own absent polarity explicitly: negative-polarity
+/// flags (`dry_run`) default true, positive ones default false. No
+/// implicit polarity lives in the coercion. Non-blank garbage still
+/// fails naming the input, exactly like `LET $x: BOOL` coercion.
+///
+#[oxdock_func(pure, returns = TypeTag::Bool)]
+#[example(
+    name = "absent-default",
+    code = r###"
+    # Absent names read empty; the default settles the polarity.
+    IMPORT [STD]
+    INHERIT_ENV [OXDOCK_TEST_ABSENT_FLAG]
+    LET $dry: BOOL = BOOL_OR("{{ env:OXDOCK_TEST_ABSENT_FLAG }}", true)
+    ASSERT_EQ $dry true
+
+    # Present values coerce strictly, ignoring the default.
+    LET $off: BOOL = BOOL_OR("false", true)
+    ASSERT_EQ $off false
+    "###
+)]
+fn bool_or(
+    /// Text to coerce (`true`/`false`, `1`/`0`, `yes`/`no`/`on`/`off`, any case).
+    text: String,
+    /// Absent-value default, used when the text is blank.
+    default: bool,
+) -> Result<Value> {
+    if text.trim().is_empty() {
+        return Ok(Value::bool(default));
+    }
+    match super::args::parse_bool_str(&text) {
+        Some(b) => Ok(Value::bool(b)),
+        None => anyhow::bail!("BOOL_OR cannot coerce {text:?} to BOOL"),
+    }
 }
 
 /// Extract capture groups for the first regex match.

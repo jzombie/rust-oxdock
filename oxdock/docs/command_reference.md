@@ -436,16 +436,25 @@ ASSERT_EQ $count 42
 **Example: bool coercion**
 
 ```oxdock
-# BOOL spellings coerce case-insensitively; empty reads
-# false instead of failing, so declared flags stay total.
-ENV EMPTY_FLAG=""
-LET $e: BOOL = "{{ env:EMPTY_FLAG }}"
-ASSERT_EQ $e false
+# BOOL spellings coerce case-insensitively. Empty is
+# not a boolean: absent flags state a default through
+# BOOL_OR instead of converting here.
 LET $t: BOOL = "TRUE"
 ASSERT_EQ $t true
 LET $f: BOOL = "no"
 ASSERT_EQ $f false
 ```
+
+**Example: bool coercion rejects empty**
+
+```oxdock expect_error:"expected BOOL"
+# Empty never reads as false: an empty string fails
+# BOOL coercion instead of picking a polarity.
+ENV EMPTY_FLAG=""
+LET $e: BOOL = "{{ env:EMPTY_FLAG }}"
+```
+
+**Expected error:** `expected BOOL`
 
 **Example: no hoisting**
 
@@ -2931,6 +2940,78 @@ standard decoder. Pairs with `BASE64_DECODE` for the round trip.
 IMPORT [STD]
 LET $encoded: STRING = BASE64_ENCODE("hello")
 ASSERT_EQ $encoded "aGVsbG8="
+```
+
+### STD::BOOL
+
+Convert a value to BOOL.
+
+Trims ASCII whitespace; accepts `true`/`false`, `1`/`0`,
+`yes`/`no`, `on`/`off` in any case. Passes Bool through. Empty
+and anything else fail: an empty string is not a boolean, so
+absent env names (which read empty) must go through `BOOL_OR`
+with a stated default instead of converting here.
+
+
+**Signature:** `STD::BOOL($val: BOOL|STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$val` (`BOOL|STRING`): Value to convert to `BOOL`.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: convert**
+
+```oxdock
+IMPORT [STD]
+LET $n: BOOL = BOOL("yes")
+ASSERT_EQ $n true
+LET $f: BOOL = BOOL("0")
+ASSERT_EQ $f false
+```
+
+### STD::BOOL_OR
+
+Coerce text to `BOOL`, substituting a default for empty.
+
+Returns `BOOL`. Blank input (a declared-but-absent env name, which
+reads empty) resolves to `default` instead of failing, so each flag
+site states its own absent polarity explicitly: negative-polarity
+flags (`dry_run`) default true, positive ones default false. No
+implicit polarity lives in the coercion. Non-blank garbage still
+fails naming the input, exactly like `LET $x: BOOL` coercion.
+
+
+**Signature:** `STD::BOOL_OR($text: STRING, $default: BOOL) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to coerce (`true`/`false`, `1`/`0`, `yes`/`no`/`on`/`off`, any case).
+- `$default` (`BOOL`): Absent-value default, used when the text is blank.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: absent-default**
+
+```oxdock
+# Absent names read empty; the default settles the polarity.
+IMPORT [STD]
+INHERIT_ENV [OXDOCK_TEST_ABSENT_FLAG]
+LET $dry: BOOL = BOOL_OR("{{ env:OXDOCK_TEST_ABSENT_FLAG }}", true)
+ASSERT_EQ $dry true
+
+# Present values coerce strictly, ignoring the default.
+LET $off: BOOL = BOOL_OR("false", true)
+ASSERT_EQ $off false
 ```
 
 ### STD::CWD

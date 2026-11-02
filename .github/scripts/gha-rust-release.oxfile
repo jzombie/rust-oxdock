@@ -1,9 +1,10 @@
 # Release pipeline for OxDock itself: version gate, workspace publish,
 # tag, and GitHub release. Dispatch is manual only via the release
 # workflow, which bridges CONFIRM_VERSION and DRY_RUN from its inputs.
-# RELEASE_DRY_RUN is a BOOL flag: "false" (or unset) publishes, anything
-# else dry-runs. CI always bridges inputs.dry_run explicitly, and the
-# harness pins explicit values, so the unset case only fires on hand-runs.
+# RELEASE_DRY_RUN is a BOOL flag: "false" publishes, anything else
+# (including unset, which defaults true) dry-runs. CI always bridges
+# inputs.dry_run explicitly; the unset case only fires on hand-runs,
+# which stay dry-run by construction.
 # The workflow builds this commit's binary and runs this commit's script,
 # so language and script stay mutually consistent by construction.
 
@@ -49,7 +50,7 @@ RUN ["cargo", "publish", "--workspace", "--dry-run"]
     ECHO "::endgroup::"
 }
 
-LET $dry: BOOL = "{{ env:RELEASE_DRY_RUN }}"
+LET $dry: BOOL = BOOL_OR("{{ env:RELEASE_DRY_RUN }}", true)
 IF !$dry {
     [env:GITHUB_ACTIONS] {
         ECHO "::group::Publish workspace"
@@ -137,7 +138,7 @@ IF !$dry {
     # installer files ride along so bootstraps can run logic matching
     # their engine version instead of the checkout's copy.
     LET $bin: STRING = "{{ env:RELEASE_BINARY }}"
-    LET $bins: BOOL = "{{ env:RELEASE_BINARIES }}"
+    LET $bins: BOOL = BOOL_OR("{{ env:RELEASE_BINARIES }}", false)
     IF !$bins {
         RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md"]
     } ELSE {

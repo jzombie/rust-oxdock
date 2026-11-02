@@ -2688,15 +2688,23 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "bool coercion",
                     fence_meta: None,
                     code: indoc! {r#"
-                # BOOL spellings coerce case-insensitively; empty reads
-                # false instead of failing, so declared flags stay total.
-                ENV EMPTY_FLAG=""
-                LET $e: BOOL = "{{ env:EMPTY_FLAG }}"
-                ASSERT_EQ $e false
+                # BOOL spellings coerce case-insensitively. Empty is
+                # not a boolean: absent flags state a default through
+                # BOOL_OR instead of converting here.
                 LET $t: BOOL = "TRUE"
                 ASSERT_EQ $t true
                 LET $f: BOOL = "no"
                 ASSERT_EQ $f false
+            "#},
+                },
+                Example {
+                    name: "bool coercion rejects empty",
+                    fence_meta: Some("expect_error:\"expected BOOL\""),
+                    code: indoc! {r#"
+                # Empty never reads as false: an empty string fails
+                # BOOL coercion instead of picking a polarity.
+                ENV EMPTY_FLAG=""
+                LET $e: BOOL = "{{ env:EMPTY_FLAG }}"
             "#},
                 },
                 Example {
