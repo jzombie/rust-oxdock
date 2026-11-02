@@ -236,7 +236,7 @@ pub(super) struct ScopeSnapshot {
 #[derive(Clone, Default)]
 pub(super) struct ModuleRecord {
     pub(super) steps: Vec<Step>,
-    pub(super) exports: Vec<String>,
+    pub(super) func_exports: Vec<String>,
     /// `EXPORT TYPE` names in source order. Separate from func exports
     /// so the MCP server never confuses a type for a tool.
     pub(super) type_exports: Vec<String>,

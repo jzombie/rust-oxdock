@@ -70,7 +70,11 @@ use oxdock_parser::{
 };
 use oxdock_process::ProcessManager;
 
-use super::{ExecState, FuncMeta, FuncParam, required_arity};
+use super::{
+    ExecState, FuncMeta, FuncParam,
+    import::{ClosureFile, ClosureSite},
+    required_arity,
+};
 
 /// Maximum expression nesting and nested-body descent. Parser-bounded
 /// scripts never approach it; hand-built ASTs cannot wedge the pass.
@@ -386,16 +390,7 @@ pub fn validate_script_closure<P: ProcessManager>(
     checker.collect(entry)?;
     for file in files {
         for site in &file.sites {
-            checker.collect_site(
-                &file.path,
-                &file.key,
-                site.alias.as_deref(),
-                site.func_names.as_deref(),
-                site.type_names.as_deref(),
-                &file.steps,
-                &file.exports,
-                &file.type_exports,
-            )?;
+            checker.collect_site(site, file)?;
         }
     }
     checker.check_top_level(entry)?;
@@ -1062,19 +1057,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// last-wins rule as [`collect_owned`](Self::collect_owned); the
     /// runtime registry remains the enforcer for true duplicates.
     /// Type harvests gate against `EXPORT TYPE` the same way; types
-    /// persist bare plus qualified (mirroring func views) for later
-    /// `resolve_tag` calls, which read the global alias map.
-    fn collect_site(
-        &mut self,
-        file: &str,
-        module: &str,
-        alias: Option<&str>,
-        func_names: Option<&[String]>,
-        type_names: Option<&[String]>,
-        steps: &[Step],
-        exports: &[String],
-        type_exports: &[String],
-    ) -> Result<()> {
+    /// persist bare globally for later `resolve_tag` calls, which read
+    /// the global alias map.
+    fn collect_site(&mut self, site: &ClosureSite, file: &ClosureFile) -> Result<()> {
+        let module = file.key.as_str();
+        let steps = file.steps.as_slice();
+        let alias = site.alias.as_deref();
+        let func_names = site.func_names.as_deref();
+        let type_names = site.type_names.as_deref();
+        let func_exports = &file.func_exports;
+        let type_exports = &file.type_exports;
+        let file_path = file.path.as_str();
         if !self.module_lets.contains_key(module) {
             let lets = module_lets(steps, self.exec)?;
             self.module_lets.insert(module.to_string(), lets);
@@ -1089,10 +1082,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 .collect();
             for name in names {
                 if !defined.iter().any(|d| d == name) {
-                    bail!("IMPORT `{file}` has no such function `{name}`");
+                    bail!("IMPORT `{file_path}` has no such function `{name}`");
                 }
-                if !exports.iter().any(|e| e == name) {
-                    bail!("IMPORT `{file}` does not export `{name}`");
+                if !func_exports.iter().any(|e| e == name) {
+                    bail!("IMPORT `{file_path}` does not export `{name}`");
                 }
             }
         }
@@ -1106,15 +1099,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 .collect();
             for name in type_names {
                 if !defined_types.iter().any(|d| d == name) {
-                    bail!("IMPORT `{file}` has no such TYPE `{name}`");
+                    bail!("IMPORT `{file_path}` has no such TYPE `{name}`");
                 }
                 if !type_exports.iter().any(|e| e == name) {
-                    bail!("IMPORT `{file}` does not export TYPE `{name}`");
+                    bail!("IMPORT `{file_path}` does not export TYPE `{name}`");
                 }
             }
         }
-        let exported: std::collections::HashSet<&str> =
-            exports.iter().map(|e| e.as_str()).collect();
+        let func_exported: std::collections::HashSet<&str> =
+            func_exports.iter().map(|e| e.as_str()).collect();
         for step in steps {
             if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
                 continue;
@@ -1123,7 +1116,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 name, params, body, ..
             } = &step.kind
             {
-                if !exported.contains(name.as_str()) {
+                if !func_exported.contains(name.as_str()) {
                     continue;
                 }
                 if let Some(names) = func_names
@@ -1168,7 +1161,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 };
                 if self.func_touches_module(&key)? {
                     bail!(
-                        "IMPORT `{file}` cannot harvest stateful function `{name}`: import the file"
+                        "IMPORT `{file_path}` cannot harvest stateful function `{name}`: import the file"
                     );
                 }
             }

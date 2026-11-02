@@ -41,7 +41,7 @@ pub struct McpCallOutput {
 pub struct McpSession<P: ProcessManager> {
     state: ExecState<P>,
     process: P,
-    exports: Vec<String>,
+    func_exports: Vec<String>,
     stdout_buf: Arc<Mutex<TailRing>>,
     stderr_buf: Arc<Mutex<TailRing>>,
     /// Live-stream tap installed by the host per call. `None` outside a
@@ -169,23 +169,23 @@ impl<P: ProcessManager> McpSession<P> {
             }
         }
 
-        state.functions.exported_metas(&parsed.exports)?;
+        state.functions.exported_metas(&parsed.func_exports)?;
         drain_buf(&stdout_buf);
         drain_buf(&stderr_buf);
 
         Ok(Self {
             state,
             process,
-            exports: parsed.exports.clone(),
+            func_exports: parsed.func_exports.clone(),
             stdout_buf,
             stderr_buf,
             stream_hook: None,
         })
     }
 
-    /// Export list in source order.
-    pub fn exports(&self) -> &[String] {
-        &self.exports
+    /// Func export list in source order.
+    pub fn func_exports(&self) -> &[String] {
+        &self.func_exports
     }
 
     /// Install (or clear with `None`) the live-stream tap for the next
@@ -198,7 +198,7 @@ impl<P: ProcessManager> McpSession<P> {
     /// Tool metadata for the export list, in source order. Fails fast
     /// naming the first missing export.
     pub fn tool_metas(&self) -> Result<Vec<FuncMeta>> {
-        self.state.functions.exported_metas(&self.exports)
+        self.state.functions.exported_metas(&self.func_exports)
     }
 
     /// Script `#` docs for a qualified name, if collected at parse.
@@ -214,11 +214,11 @@ impl<P: ProcessManager> McpSession<P> {
     /// Qualified exports (`STD::INT`) answer under their base name;
     /// tool-name duplicates fail at table build, so the match is unique.
     pub fn call(&mut self, base: &str, args: Vec<Value>) -> Result<McpCallOutput> {
-        let qualified = if self.exports.iter().any(|e| e == base) {
+        let qualified = if self.func_exports.iter().any(|e| e == base) {
             oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, base)
         } else {
             match self
-                .exports
+                .func_exports
                 .iter()
                 .find(|e| e.rsplit("::").next() == Some(base))
             {

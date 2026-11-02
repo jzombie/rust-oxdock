@@ -475,18 +475,18 @@ fn build_module_table<P: ProcessManager>(
 ) -> oxdock_parser::ModuleTable {
     let mut table = self::native::std_module_table();
     for module in modules {
-        let mut functions = std::collections::HashSet::new();
+        let mut func_names = std::collections::HashSet::new();
         for registration in &module.funcs {
             let name = match registration {
                 self::native::HostRegistration::Stateful { name, .. } => name,
                 self::native::HostRegistration::Pure { name, .. } => name,
                 self::native::HostRegistration::Both { name, .. } => name,
             };
-            functions.insert(name.clone());
+            func_names.insert(name.clone());
         }
         table.modules.insert(
             module.name.clone(),
-            Some(oxdock_parser::ModuleFuncs { functions }),
+            Some(oxdock_parser::ModuleFuncs { func_names }),
         );
     }
     table

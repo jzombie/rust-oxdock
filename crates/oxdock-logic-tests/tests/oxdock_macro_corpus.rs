@@ -1000,12 +1000,14 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
             StepKind::ImportFuncs {
                 path: px,
                 alias: ax,
-                names: nx,
+                func_names: nx,
+                ..
             },
             StepKind::ImportFuncs {
                 path: py,
                 alias: ay,
-                names: ny,
+                func_names: ny,
+                ..
             },
         ) => px == py && ax == ay && nx == ny,
         (StepKind::While { cond: cx, body: bx }, StepKind::While { cond: cy, body: by }) => {

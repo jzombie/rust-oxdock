@@ -290,12 +290,12 @@ mod tests {
         )
         .expect("braced path parses");
         assert_eq!(braced.func_docs, string.func_docs);
-        assert_eq!(braced.exports, string.exports);
+        assert_eq!(braced.func_exports, string.func_exports);
         assert_eq!(braced.steps, string.steps);
         let (summary, docs) = braced.func_docs.get("FOO").expect("docs captured");
         assert_eq!(summary, "Adds one.");
         assert!(docs.contains("Second line"), "{docs}");
-        assert_eq!(braced.exports, vec!["FOO".to_string()]);
+        assert_eq!(braced.func_exports, vec!["FOO".to_string()]);
     }
 
     #[test]
@@ -351,7 +351,7 @@ mod tests {
         let (summary, docs) = parsed.func_docs.get("FOO").expect("docs collected");
         assert_eq!(summary, "Adds one.");
         assert!(docs.contains("Second line"), "{docs}");
-        assert_eq!(parsed.exports, vec!["FOO".to_string()]);
+        assert_eq!(parsed.func_exports, vec!["FOO".to_string()]);
         // The comment describes the function inside the product, not
         // just the sidecar: step-level docs match the map.
         let func_docs = parsed.steps.iter().find_map(|s| match &s.kind {

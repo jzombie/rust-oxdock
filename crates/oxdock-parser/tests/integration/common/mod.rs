@@ -13,12 +13,12 @@ pub fn mock_lower(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
 /// Resolution logic itself is covered in `import.rs`; real builtin
 /// membership lives in `oxdock-core` (`reference_examples` test).
 pub fn math_table() -> ModuleTable {
-    let functions: HashSet<String> = ["INT", "FLOAT", "FOO", "GLOB"]
+    let func_names: HashSet<String> = ["INT", "FLOAT", "FOO", "GLOB"]
         .iter()
         .map(|s| s.to_string())
         .collect();
     ModuleTable {
-        modules: HashMap::from([("MATH".to_string(), Some(ModuleFuncs { functions }))]),
+        modules: HashMap::from([("MATH".to_string(), Some(ModuleFuncs { func_names }))]),
     }
 }
 

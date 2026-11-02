@@ -1090,7 +1090,7 @@ declare_commands! {
         ImportFuncs {
             path: String,
             alias: Option<String>,
-            names: Vec<String>,
+            func_names: Vec<String>,
             type_names: Vec<String>,
         },
         While { cond: Box<Expr>, body: Vec<Step> },
@@ -4160,14 +4160,14 @@ impl fmt::Display for StepKind {
             StepKind::ImportFuncs {
                 path,
                 alias,
-                names,
+                func_names,
                 type_names,
             } => {
                 let mut parts: Vec<String> = Vec::new();
                 for t in type_names {
                     parts.push(format!("TYPE {t}"));
                 }
-                for n in names {
+                for n in func_names {
                     parts.push(n.clone());
                 }
                 match alias {
@@ -4557,14 +4557,14 @@ pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> Parse
 /// EXPORT site. Promoted verbatim (the pest finish pass delegates).
 pub(crate) fn validate_exports(
     ctx: &SpanContext,
-    exports: &[String],
+    func_exports: &[String],
     type_exports: &[String],
     top: &HashSet<String>,
     top_types: &HashSet<String>,
     modules: &ModuleTable,
     top_imports: &[String],
 ) -> ParseResult<()> {
-    for name in exports {
+    for name in func_exports {
         let valid = match name.split_once("::") {
             None => top.contains(name),
             Some((module, base)) if module == crate::constants::SCRIPT_MODULE_NAME => {
@@ -4582,7 +4582,7 @@ pub(crate) fn validate_exports(
                     top_imports.iter().any(|m| m == module)
                 }
                 Some(None) => true,
-                Some(Some(funcs)) => funcs.functions.contains(_base),
+                Some(Some(funcs)) => funcs.func_names.contains(_base),
             },
         };
         if !valid {

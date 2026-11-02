@@ -21,13 +21,13 @@ fn table() -> ModuleTable {
             (
                 "ALPHA".to_string(),
                 Some(ModuleFuncs {
-                    functions: std_functions,
+                    func_names: std_functions,
                 }),
             ),
             (
                 "BETA".to_string(),
                 Some(ModuleFuncs {
-                    functions: docs_functions,
+                    func_names: docs_functions,
                 }),
             ),
             ("OPAQ".to_string(), None),
@@ -203,7 +203,7 @@ fn export_single_and_list_forms() {
         table(),
     )
     .expect("single export parses");
-    assert_eq!(parsed.exports, vec!["FOO".to_string()]);
+    assert_eq!(parsed.func_exports, vec!["FOO".to_string()]);
     assert_eq!(parsed.steps.len(), 1);
 
     let parsed = parse_script_with_modules_and_exports(
@@ -221,7 +221,10 @@ fn export_single_and_list_forms() {
         table(),
     )
     .expect("list export parses");
-    assert_eq!(parsed.exports, vec!["FOO".to_string(), "BAR".to_string()]);
+    assert_eq!(
+        parsed.func_exports,
+        vec!["FOO".to_string(), "BAR".to_string()]
+    );
 }
 
 #[test]
@@ -239,7 +242,7 @@ fn export_forward_reference_allowed() {
         table(),
     )
     .expect("forward export parses");
-    assert_eq!(parsed.exports, vec!["FOO".to_string()]);
+    assert_eq!(parsed.func_exports, vec!["FOO".to_string()]);
 }
 
 #[test]
@@ -275,7 +278,7 @@ fn export_qualified_host_name_passes() {
     )
     .expect("qualified export parses");
     assert_eq!(
-        parsed.exports,
+        parsed.func_exports,
         vec!["FOO".to_string(), "ALPHA::GLOB".to_string()]
     );
 }
@@ -295,7 +298,7 @@ fn export_qualified_script_name_passes() {
         table(),
     )
     .expect("SCRIPT-qualified export parses");
-    assert_eq!(parsed.exports, vec!["SCRIPT::FOO".to_string()]);
+    assert_eq!(parsed.func_exports, vec!["SCRIPT::FOO".to_string()]);
 }
 
 #[test]
@@ -334,7 +337,7 @@ fn export_qualified_opaque_module_passes() {
         table(),
     )
     .expect("opaque module export parses; the registry resolves it or fails serving");
-    assert_eq!(parsed.exports, vec!["OPAQ::ANYTHING".to_string()]);
+    assert_eq!(parsed.func_exports, vec!["OPAQ::ANYTHING".to_string()]);
 }
 
 #[test]
@@ -368,7 +371,7 @@ fn export_type_single_and_list_forms() {
         table(),
     )
     .expect("single TYPE export parses");
-    assert!(parsed.exports.is_empty());
+    assert!(parsed.func_exports.is_empty());
     assert_eq!(parsed.type_exports, vec!["PERSON".to_string()]);
 
     let parsed = parse_script_with_modules_and_exports(
@@ -401,7 +404,7 @@ fn export_mixed_type_and_func_list_parses() {
         table(),
     )
     .expect("mixed TYPE/FUNC export parses");
-    assert_eq!(parsed.exports, vec!["MAKE".to_string()]);
+    assert_eq!(parsed.func_exports, vec!["MAKE".to_string()]);
     assert_eq!(parsed.type_exports, vec!["PERSON".to_string()]);
 }
 
@@ -784,7 +787,7 @@ fn file_import_reexport_parses_for_visible_alias() {
         table(),
     )
     .expect("re-export of visible alias parses");
-    assert_eq!(parsed.exports, vec!["LIB::FOO".to_string()]);
+    assert_eq!(parsed.func_exports, vec!["LIB::FOO".to_string()]);
 }
 
 #[test]
@@ -908,7 +911,7 @@ fn file_import_from_bare_form_harvests() {
     let StepKind::ImportFuncs {
         path,
         alias,
-        names,
+        func_names,
         type_names,
     } = &steps[0].kind
     else {
@@ -916,7 +919,7 @@ fn file_import_from_bare_form_harvests() {
     };
     assert_eq!(path, "lib.oxdock");
     assert_eq!(alias, &None);
-    assert_eq!(names, &["FOO".to_string(), "BAR".to_string()]);
+    assert_eq!(func_names, &["FOO".to_string(), "BAR".to_string()]);
     assert!(type_names.is_empty());
 }
 
@@ -927,7 +930,7 @@ fn file_import_type_harvest_parses() {
     let StepKind::ImportFuncs {
         path,
         alias,
-        names,
+        func_names,
         type_names,
     } = &steps[0].kind
     else {
@@ -935,7 +938,7 @@ fn file_import_type_harvest_parses() {
     };
     assert_eq!(path, "lib.oxdock");
     assert_eq!(alias, &None);
-    assert!(names.is_empty());
+    assert!(func_names.is_empty());
     assert_eq!(type_names, &["PERSON".to_string()]);
 }
 
@@ -947,7 +950,7 @@ fn file_import_mixed_type_func_harvest_parses() {
     let StepKind::ImportFuncs {
         path,
         alias,
-        names,
+        func_names,
         type_names,
     } = &steps[0].kind
     else {
@@ -955,7 +958,7 @@ fn file_import_mixed_type_func_harvest_parses() {
     };
     assert_eq!(path, "lib.oxdock");
     assert_eq!(alias, &None);
-    assert_eq!(names, &["FOO".to_string()]);
+    assert_eq!(func_names, &["FOO".to_string()]);
     assert_eq!(type_names, &["PERSON".to_string()]);
 }
 
@@ -966,7 +969,7 @@ fn file_import_from_aliased_form() {
     let StepKind::ImportFuncs {
         path,
         alias,
-        names,
+        func_names,
         type_names,
     } = &steps[0].kind
     else {
@@ -974,7 +977,7 @@ fn file_import_from_aliased_form() {
     };
     assert_eq!(path, "lib.oxdock");
     assert_eq!(alias, &Some("H".to_string()));
-    assert_eq!(names, &["FOO".to_string()]);
+    assert_eq!(func_names, &["FOO".to_string()]);
     assert!(type_names.is_empty());
 }
 
@@ -1000,10 +1003,10 @@ fn file_import_from_multiline() {
     "#})
     .expect("multiline FROM parses");
     assert_eq!(steps.len(), 1, "{steps:?}");
-    let StepKind::ImportFuncs { names, .. } = &steps[0].kind else {
+    let StepKind::ImportFuncs { func_names, .. } = &steps[0].kind else {
         panic!("expected ImportFuncs, got {:?}", steps[0].kind);
     };
-    assert_eq!(names, &["FUNC_A".to_string(), "FUNC_B".to_string()]);
+    assert_eq!(func_names, &["FUNC_A".to_string(), "FUNC_B".to_string()]);
 }
 
 #[test]
@@ -1078,7 +1081,7 @@ fn file_import_from_reexport_allowed_like_alias() {
         table(),
     )
     .expect("re-export of harvest alias parses");
-    assert_eq!(parsed.exports, vec!["LIB::FOO".to_string()]);
+    assert_eq!(parsed.func_exports, vec!["LIB::FOO".to_string()]);
 }
 
 #[test]
@@ -1088,7 +1091,7 @@ fn file_import_mixed_entries_emit_in_source_order() {
     assert_eq!(steps.len(), 3, "{steps:?}");
     assert!(matches!(&steps[0].kind, StepKind::ImportFile { alias, .. } if alias == "B"));
     assert!(
-        matches!(&steps[1].kind, StepKind::ImportFuncs { names, .. } if names == &["F".to_string()])
+        matches!(&steps[1].kind, StepKind::ImportFuncs { func_names, .. } if func_names == &["F".to_string()])
     );
     assert!(matches!(&steps[2].kind, StepKind::ImportFile { alias, .. } if alias == "A"));
 }
@@ -1103,7 +1106,7 @@ fn file_import_from_single_bracket_harvests() {
     let StepKind::ImportFuncs {
         path,
         alias,
-        names,
+        func_names,
         type_names,
     } = &steps[0].kind
     else {
@@ -1111,7 +1114,7 @@ fn file_import_from_single_bracket_harvests() {
     };
     assert_eq!(path, "lib.oxdock");
     assert_eq!(alias, &None);
-    assert_eq!(names, &["FOO".to_string()]);
+    assert_eq!(func_names, &["FOO".to_string()]);
     assert!(type_names.is_empty());
 }
 
@@ -1123,7 +1126,7 @@ fn file_import_from_single_bracket_aliased() {
     let StepKind::ImportFuncs {
         path,
         alias,
-        names,
+        func_names,
         type_names,
     } = &steps[0].kind
     else {
@@ -1131,7 +1134,7 @@ fn file_import_from_single_bracket_aliased() {
     };
     assert_eq!(path, "lib.oxdock");
     assert_eq!(alias, &Some("H".to_string()));
-    assert_eq!(names, &["FOO".to_string()]);
+    assert_eq!(func_names, &["FOO".to_string()]);
     assert!(type_names.is_empty());
 }
 

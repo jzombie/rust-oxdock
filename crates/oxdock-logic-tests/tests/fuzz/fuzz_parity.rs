@@ -850,7 +850,8 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         Just(StepKind::ImportFuncs {
             path: "coverage.oxdock".to_string(),
             alias: None,
-            names: vec!["COVERAGE".to_string()],
+            func_names: vec!["COVERAGE".to_string()],
+            type_names: vec![],
         }),
         Just(StepKind::Isolated {
             body: vec![Step {
@@ -1695,11 +1696,11 @@ proptest! {
             if let StepKind::ImportFile { alias, .. } = &mut step.kind {
                 *alias = format!("COVERAGE{i}");
             }
-            if let StepKind::ImportFuncs { alias, names, .. } = &mut step.kind {
+            if let StepKind::ImportFuncs { alias, func_names, .. } = &mut step.kind {
                 if let Some(alias) = alias {
                     *alias = format!("COVERAGE{i}");
                 }
-                for name in names.iter_mut() {
+                for name in func_names.iter_mut() {
                     *name = format!("{name}{i}");
                 }
             }
@@ -1904,7 +1905,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         StepKind::ImportFuncs {
             path: "coverage.oxdock".to_string(),
             alias: None,
-            names: vec!["COVERAGE".to_string()],
+            func_names: vec!["COVERAGE".to_string()],
+            type_names: vec![],
         },
         StepKind::Break,
         StepKind::Continue,

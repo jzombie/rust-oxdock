@@ -286,7 +286,7 @@ fn qualified_opaque_export_still_registers() {
     let engine = Engine::new();
     let parsed = parse_script_with_modules_and_exports(script, engine.module_table())
         .expect("export must parse");
-    assert!(parsed.exports.contains(&"STD::TEXT_TRIM".to_string()));
+    assert!(parsed.func_exports.contains(&"STD::TEXT_TRIM".to_string()));
     // Stage 2 (oxdock-core): linear session init accepts the export.
     // McpSession is core session machinery (state + registry); despite
     // the name it performs no JSON projection and opens no transport.
@@ -299,7 +299,11 @@ fn qualified_opaque_export_still_registers() {
         &parsed,
     )
     .expect("session init must accept the export");
-    assert!(session.exports().contains(&"STD::TEXT_TRIM".to_string()));
+    assert!(
+        session
+            .func_exports()
+            .contains(&"STD::TEXT_TRIM".to_string())
+    );
     // Stage 3 (oxdock-core registry): the qualified name resolves to
     // real function metadata. Registry lookup succeeds; only the
     // MCP-layer JSON projection (tested below) refuses it.

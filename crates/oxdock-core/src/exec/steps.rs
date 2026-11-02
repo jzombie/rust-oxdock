@@ -1773,10 +1773,10 @@ fn dispatch_flow_step<P: ProcessManager>(
         StepKind::ImportFuncs {
             path,
             alias,
-            names,
+            func_names,
             type_names,
         } => {
-            super::import::import_funcs(cx, path, alias.as_deref(), names, type_names)?;
+            super::import::import_funcs(cx, path, alias.as_deref(), func_names, type_names)?;
             Ok(Flow::Done)
         }
         StepKind::While { cond, body } => handlers::while_loop(cx, cond, body),

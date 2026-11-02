@@ -89,7 +89,7 @@ fn dry_run_walk(
         }
         if let StepKind::ImportFuncs {
             path,
-            names,
+            func_names,
             type_names,
             ..
         } = &step.kind
@@ -115,7 +115,7 @@ fn dry_run_walk(
                     stack.pop();
                 }
                 Err(e) => {
-                    let is_host_type_only = names.is_empty()
+                    let is_host_type_only = func_names.is_empty()
                         && !type_names.is_empty()
                         && table.modules.contains_key(path);
                     if !is_host_type_only {
@@ -202,7 +202,7 @@ fn dry_run_walk_top_imports(
         }
         if let StepKind::ImportFuncs {
             path,
-            names,
+            func_names,
             type_names,
             ..
         } = &step.kind
@@ -223,7 +223,7 @@ fn dry_run_walk_top_imports(
                     stack.pop();
                 }
                 Err(e) => {
-                    let is_host_type_only = names.is_empty()
+                    let is_host_type_only = func_names.is_empty()
                         && !type_names.is_empty()
                         && table.modules.contains_key(path);
                     if !is_host_type_only {
@@ -317,7 +317,12 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             return Ok(());
         }
     }
-    let (resolved, steps, exports, type_exports) = load_import(cx.state, path)?;
+    let LoadedFile {
+        resolved,
+        steps,
+        func_exports,
+        type_exports,
+    } = load_import(cx.state, path)?;
     let key = resolved.display();
     let alias_frame = enter_alias_frame(cx.state);
     // Join the import stack like a full import: nested loads need this
@@ -345,7 +350,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             // EXPORT gate (#115): unexported means private. Harvesting a
             // name the file does not export fails here, before anything
             // registers or runs.
-            if !exports.iter().any(|e| e == name) {
+            if !func_exports.iter().any(|e| e == name) {
                 bail!("IMPORT `{path}` does not export `{name}`");
             }
             let Some(def) = steps.iter().find_map(|step| match &step.kind {
@@ -418,10 +423,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 StepKind::ImportFuncs {
                     path,
                     alias,
-                    names,
+                    func_names,
                     type_names: nested_types,
                 } => {
-                    import_funcs(cx, path, alias.as_deref(), names, nested_types)?;
+                    import_funcs(cx, path, alias.as_deref(), func_names, nested_types)?;
                 }
                 _ => {}
             }
@@ -517,7 +522,12 @@ pub(crate) fn import_file<P: ProcessManager>(
     path: &str,
     alias: &str,
 ) -> Result<Value> {
-    let (resolved, steps, exports, type_exports) = load_import(cx.state, path)?;
+    let LoadedFile {
+        resolved,
+        steps,
+        func_exports,
+        type_exports,
+    } = load_import(cx.state, path)?;
     let key = resolved.display();
     let alias_frame = enter_alias_frame(cx.state);
     // Merge the imported file's type aliases for its own validation and
@@ -540,13 +550,13 @@ pub(crate) fn import_file<P: ProcessManager>(
         // the alias in the caller's scope: unexported means private.
         // Owner-tagged with the module so calls share its state.
         // Skips names already present: re-imports only add new views.
-        let exported: std::collections::HashSet<&str> =
-            exports.iter().map(|e| e.as_str()).collect();
+        let func_exported: std::collections::HashSet<&str> =
+            func_exports.iter().map(|e| e.as_str()).collect();
         for step in &steps {
             if let StepKind::FuncDef {
                 name, params, body, ..
             } = &step.kind
-                && exported.contains(name.as_str())
+                && func_exported.contains(name.as_str())
             {
                 let qualified = oxdock_parser::qualify(alias, name);
                 if cx.state.functions.get(&qualified).is_none() {
@@ -570,10 +580,10 @@ pub(crate) fn import_file<P: ProcessManager>(
         // unexported aliases never leak. Same-target re-imports are
         // idempotent; differing targets fail.
         {
-            let exported_types: std::collections::HashSet<&str> =
+            let type_exported: std::collections::HashSet<&str> =
                 type_exports.iter().map(|e| e.as_str()).collect();
             for (name, target) in &aliases {
-                if !exported_types.contains(name.as_str()) {
+                if !type_exported.contains(name.as_str()) {
                     continue;
                 }
                 insert_imported_type(cx.state, name, target, Some(alias), path)?;
@@ -604,13 +614,13 @@ pub(crate) fn import_file<P: ProcessManager>(
             for (name, target) in &aliases {
                 cx.state.type_aliases.insert(name.clone(), target.clone());
             }
-            let exported_set: std::collections::HashSet<&str> =
+            let type_exported: std::collections::HashSet<&str> =
                 type_exports.iter().map(|e| e.as_str()).collect();
             // Capture first to avoid borrow issues, then restore and
             // re-insert only exported.
             let mut to_persist: Vec<(String, String)> = Vec::new();
             for (name, target) in &aliases {
-                if exported_set.contains(name.as_str()) {
+                if type_exported.contains(name.as_str()) {
                     to_persist.push((name.clone(), target.clone()));
                 }
             }
@@ -756,7 +766,7 @@ pub(super) struct ClosureFile {
     pub key: String,
     pub path: String,
     pub steps: Vec<Step>,
-    pub exports: Vec<String>,
+    pub func_exports: Vec<String>,
     pub type_exports: Vec<String>,
     pub sites: Vec<ClosureSite>,
 }
@@ -799,7 +809,7 @@ fn expand_walk<P: ProcessManager>(
                     key,
                     path.clone(),
                     target.body.clone(),
-                    target.exports.clone(),
+                    target.func_exports.clone(),
                     target.type_exports.clone(),
                     ClosureSite {
                         alias: Some(alias.clone()),
@@ -813,7 +823,7 @@ fn expand_walk<P: ProcessManager>(
             StepKind::ImportFuncs {
                 path,
                 alias,
-                names,
+                func_names,
                 type_names,
             } => {
                 // Host plugin types share the harvest syntax: a type-only
@@ -821,7 +831,7 @@ fn expand_walk<P: ProcessManager>(
                 // resolve globally and records no file. Mixed func+type
                 // harvests from host modules stay unsupported (use
                 // `IMPORT [MOD]` for host funcs).
-                if names.is_empty() && !type_names.is_empty() {
+                if func_names.is_empty() && !type_names.is_empty() {
                     let resolved_opt = dir.join(path).ok();
                     let file_exists = resolved_opt
                         .as_ref()
@@ -846,11 +856,11 @@ fn expand_walk<P: ProcessManager>(
                     key,
                     path.clone(),
                     target.body.clone(),
-                    target.exports.clone(),
+                    target.func_exports.clone(),
                     target.type_exports.clone(),
                     ClosureSite {
                         alias: alias.clone(),
-                        func_names: Some(names.clone()),
+                        func_names: Some(func_names.clone()),
                         type_names: Some(type_names.clone()),
                     },
                 );
@@ -885,7 +895,7 @@ fn expand_walk_top<P: ProcessManager>(
                     key,
                     path.clone(),
                     target.body.clone(),
-                    target.exports.clone(),
+                    target.func_exports.clone(),
                     target.type_exports.clone(),
                     ClosureSite {
                         alias: Some(alias.clone()),
@@ -899,12 +909,12 @@ fn expand_walk_top<P: ProcessManager>(
             StepKind::ImportFuncs {
                 path,
                 alias,
-                names,
+                func_names,
                 type_names,
             } => {
                 // Host type-only harvests record no file (same rule as
                 // `expand_walk` above).
-                if names.is_empty() && !type_names.is_empty() {
+                if func_names.is_empty() && !type_names.is_empty() {
                     let resolved_opt = dir.join(path).ok();
                     let file_exists = resolved_opt
                         .as_ref()
@@ -926,11 +936,11 @@ fn expand_walk_top<P: ProcessManager>(
                     key,
                     path.clone(),
                     target.body.clone(),
-                    target.exports.clone(),
+                    target.func_exports.clone(),
                     target.type_exports.clone(),
                     ClosureSite {
                         alias: alias.clone(),
-                        func_names: Some(names.clone()),
+                        func_names: Some(func_names.clone()),
                         type_names: Some(type_names.clone()),
                     },
                 );
@@ -993,14 +1003,14 @@ fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
 }
 
 /// Record an import site, deduping identical sites (diamonds share one
-/// module record; each alias is a view onto it). `exports` rides with
-/// the first site; every site loads the same parsed body.
+/// module record; each alias is a view onto it). `func_exports` rides
+/// with the first site; every site loads the same parsed body.
 fn record_site(
     files: &mut Vec<ClosureFile>,
     key: String,
     path: String,
     steps: Vec<Step>,
-    exports: Vec<String>,
+    func_exports: Vec<String>,
     type_exports: Vec<String>,
     site: ClosureSite,
 ) {
@@ -1018,7 +1028,7 @@ fn record_site(
             key,
             path,
             steps,
-            exports,
+            func_exports,
             type_exports,
             sites: vec![site],
         }),
@@ -1030,7 +1040,7 @@ fn record_site(
 struct ExpandedImport {
     resolved: GuardedPath,
     body: Vec<Step>,
-    exports: Vec<String>,
+    func_exports: Vec<String>,
     type_exports: Vec<String>,
     nested: GuardedPath,
 }
@@ -1071,12 +1081,17 @@ fn expand_load<P: ProcessManager>(
             "IMPORT `{path}` not found: the file must exist when the run starts (generated imports are not supported)"
         );
     }
-    let (_, body, exports, type_exports) = load_file(state, dir, stack, path)?;
+    let LoadedFile {
+        resolved,
+        steps: body,
+        func_exports,
+        type_exports,
+    } = load_file(state, dir, stack, path)?;
     let nested = resolved.parent().unwrap_or_else(|| dir.clone());
     Ok(ExpandedImport {
         resolved,
         body,
-        exports,
+        func_exports,
         type_exports,
         nested,
     })
@@ -1084,15 +1099,21 @@ fn expand_load<P: ProcessManager>(
 
 /// Load and parse an import target: resolve against the importer dir,
 /// reject cycles and depth overflow, and reuse the per-run parse cache.
-/// Returns the resolved path plus the parsed body; the caller pushes the
+/// Returns the resolved file; the caller pushes the
 /// scope frame and the import-stack entry around execution.
-fn load_import<P: ProcessManager>(
-    state: &mut ExecState<P>,
-    path: &str,
-) -> Result<(GuardedPath, Vec<Step>, Vec<String>, Vec<String>)> {
+fn load_import<P: ProcessManager>(state: &mut ExecState<P>, path: &str) -> Result<LoadedFile> {
     let base = import_base(state);
     let stack = state.import_stack.clone();
     load_file(state, &base, &stack, path)
+}
+
+/// One resolved import target: the file, its parsed body, and its
+/// `EXPORT` / `EXPORT TYPE` visibility gates.
+struct LoadedFile {
+    resolved: GuardedPath,
+    steps: Vec<Step>,
+    func_exports: Vec<String>,
+    type_exports: Vec<String>,
 }
 
 /// Shared loader core: `stack` is the active chain for cycle/depth
@@ -1105,7 +1126,7 @@ fn load_file<P: ProcessManager>(
     base: &GuardedPath,
     stack: &[GuardedPath],
     path: &str,
-) -> Result<(GuardedPath, Vec<Step>, Vec<String>, Vec<String>)> {
+) -> Result<LoadedFile> {
     // Workspace-side resolution: imported files live next to the
     // importing file in the source tree (not in the snapshot), so join
     // lexically under the importer's own guard instead of routing
@@ -1129,12 +1150,12 @@ fn load_file<P: ProcessManager>(
         );
     }
     if let Some(record) = state.modules.get(&key) {
-        return Ok((
+        return Ok(LoadedFile {
             resolved,
-            record.steps.clone(),
-            record.exports.clone(),
-            record.type_exports.clone(),
-        ));
+            steps: record.steps.clone(),
+            func_exports: record.func_exports.clone(),
+            type_exports: record.type_exports.clone(),
+        });
     }
     let bytes = state
         .fs
@@ -1157,13 +1178,18 @@ fn load_file<P: ProcessManager>(
         key,
         super::state::ModuleRecord {
             steps: parsed.steps.clone(),
-            exports: parsed.exports.clone(),
+            func_exports: parsed.func_exports.clone(),
             type_exports: parsed.type_exports.clone(),
             dir,
             init: None,
         },
     );
-    Ok((resolved, parsed.steps, parsed.exports, parsed.type_exports))
+    Ok(LoadedFile {
+        resolved,
+        steps: parsed.steps,
+        func_exports: parsed.func_exports,
+        type_exports: parsed.type_exports,
+    })
 }
 
 /// Directory relative `IMPORT` paths resolve against, workspace-side:

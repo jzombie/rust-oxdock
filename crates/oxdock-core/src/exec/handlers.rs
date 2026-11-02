@@ -3947,13 +3947,13 @@ pub(crate) fn dispatch_import_funcs<P: ProcessManager>(
     let StepKind::ImportFuncs {
         path,
         alias,
-        names,
+        func_names,
         type_names,
     } = step
     else {
         unreachable!()
     };
-    super::import::import_funcs(cx, path, alias.as_deref(), names, type_names)
+    super::import::import_funcs(cx, path, alias.as_deref(), func_names, type_names)
 }
 
 pub(crate) fn dispatch_call<P: ProcessManager>(

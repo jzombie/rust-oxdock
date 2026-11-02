@@ -227,7 +227,7 @@ fn run_example<P: ProcessManager + Clone + Send + 'static>(
         modules: HashMap::from([(
             "STD".to_string(),
             Some(ModuleFuncs {
-                functions: builtin_function_metas()
+                func_names: builtin_function_metas()
                     .iter()
                     .map(|meta| base_name(&meta.name).to_string())
                     .collect::<HashSet<_>>(),
@@ -237,7 +237,7 @@ fn run_example<P: ProcessManager + Clone + Send + 'static>(
     table.modules.insert(
         module_name.to_string(),
         Some(ModuleFuncs {
-            functions: funcs
+            func_names: funcs
                 .iter()
                 .map(|registration| base_name(&registration.meta().name).to_string())
                 .collect::<HashSet<_>>(),

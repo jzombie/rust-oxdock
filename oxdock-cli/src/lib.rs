@@ -677,12 +677,12 @@ fn surface_entries() -> Vec<(String, Vec<String>)> {
     let mut entries: Vec<(String, Vec<String>)> = table
         .modules
         .into_iter()
-        .map(|(name, funcs)| {
-            let mut functions: Vec<String> = funcs
-                .map(|surface| surface.functions.into_iter().collect())
+        .map(|(name, module_funcs)| {
+            let mut func_names: Vec<String> = module_funcs
+                .map(|surface| surface.func_names.into_iter().collect())
                 .unwrap_or_default();
-            functions.sort();
-            (name, functions)
+            func_names.sort();
+            (name, func_names)
         })
         .collect();
     entries.sort();

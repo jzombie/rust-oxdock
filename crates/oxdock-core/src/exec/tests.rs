@@ -4267,7 +4267,7 @@ fn host_round_trip_through_adapters() {
         modules: std::collections::HashMap::from([(
             "T".to_string(),
             Some(oxdock_parser::ModuleFuncs {
-                functions: std::collections::HashSet::from(["RELAY".to_string()]),
+                func_names: std::collections::HashSet::from(["RELAY".to_string()]),
             }),
         )]),
     };
@@ -4346,7 +4346,7 @@ fn expand_placeholder_calls_pure_host_function() {
         modules: std::collections::HashMap::from([(
             "T".to_string(),
             Some(oxdock_parser::ModuleFuncs {
-                functions: std::collections::HashSet::from(["SHOUT".to_string()]),
+                func_names: std::collections::HashSet::from(["SHOUT".to_string()]),
             }),
         )]),
     };
@@ -5412,7 +5412,7 @@ fn host_take_twice_on_os_bails() {
         modules: std::collections::HashMap::from([(
             "T".to_string(),
             Some(oxdock_parser::ModuleFuncs {
-                functions: std::collections::HashSet::from(["TAKE_TWICE".to_string()]),
+                func_names: std::collections::HashSet::from(["TAKE_TWICE".to_string()]),
             }),
         )]),
     };

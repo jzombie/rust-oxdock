@@ -15,7 +15,7 @@ use crate::constants::{
 #[derive(Debug, Clone, Default)]
 pub struct ModuleFuncs {
     /// Base function names exported by the module.
-    pub functions: HashSet<String>,
+    pub func_names: HashSet<String>,
 }
 
 /// Parse-time function provenance: module name to surface. A `None` entry
@@ -34,7 +34,7 @@ impl ModuleTable {
     pub fn reserved_base_names(&self) -> HashSet<String> {
         let mut out = HashSet::new();
         for funcs in self.modules.values().flatten() {
-            out.extend(funcs.functions.iter().cloned());
+            out.extend(funcs.func_names.iter().cloned());
         }
         out
     }

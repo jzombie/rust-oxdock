@@ -815,9 +815,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     /// Metadata for single-file `EXPORT` names in source order. Errors
     /// name the first missing export; callers fail fast before serving.
-    pub fn exported_metas(&self, exports: &[String]) -> anyhow::Result<Vec<FuncMeta>> {
-        let mut out = Vec::with_capacity(exports.len());
-        for name in exports {
+    pub fn exported_metas(&self, func_exports: &[String]) -> anyhow::Result<Vec<FuncMeta>> {
+        let mut out = Vec::with_capacity(func_exports.len());
+        for name in func_exports {
             // Bare names are script FUNCs; qualified names address the
             // registry directly, so host functions export with their
             // own metadata and docs.
@@ -872,14 +872,14 @@ pub fn builtin_function_metas() -> Vec<FuncMeta> {
 /// compile-time knowledge of builtin names.
 pub fn std_module_table() -> oxdock_parser::ModuleTable {
     // Registry names are qualified (`STD::GLOB`); the table holds bases.
-    let functions: HashSet<String> = builtin_function_metas()
+    let func_names: HashSet<String> = builtin_function_metas()
         .into_iter()
         .map(|meta| base_name(&meta.name).to_string())
         .collect();
     oxdock_parser::ModuleTable {
         modules: HashMap::from([(
             STD_MODULE_NAME.to_string(),
-            Some(oxdock_parser::ModuleFuncs { functions }),
+            Some(oxdock_parser::ModuleFuncs { func_names }),
         )]),
     }
 }
