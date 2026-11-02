@@ -27,6 +27,19 @@ fn load_release_script() -> Result<String> {
     resolver.read_to_string(&script_path)
 }
 
+/// Shared helpers backing the release scripts above: read from the
+/// repo checkout and staged into each synthetic fixture root so the
+/// scripts' IMPORT resolves exactly like CI's checkout layout.
+fn load_helpers_module() -> Result<String> {
+    let repo_root = repo_root()?;
+    let root = GuardedPath::new_root_from_str(&repo_root)?;
+    let resolver = PathResolver::new_guarded(root.clone(), root)?;
+    let helper_path = resolver
+        .root()
+        .join(".github/scripts/helpers/ci-helpers.oxfile")?;
+    resolver.read_to_string(&helper_path)
+}
+
 /// The release script imports MARKDOWN, so it parses against a module
 /// table carrying the plugin, mirroring the CLI `--features markdown`
 /// build the release workflow runs.
@@ -97,8 +110,17 @@ fn run_validate(manifest: &str, changelog: &str, confirm: &str) -> Result<()> {
     let setup = PathResolver::new_guarded(fixture.clone(), fixture.clone())?;
     setup.write_file(&fixture.join("Cargo.toml")?, manifest.as_bytes())?;
     setup.write_file(&fixture.join("CHANGELOG.md")?, changelog.as_bytes())?;
+    // The script imports the shared helpers module: stage the real file
+    // so the import resolves, mirroring the checkout layout.
+    let helpers = load_helpers_module()?;
+    setup.create_dir_all(&fixture.join("helpers")?)?;
+    setup.write_file(
+        &fixture.join("helpers/ci-helpers.oxfile")?,
+        helpers.as_bytes(),
+    )?;
     let mut io = ExecIo::new();
     io.insert_inherit_env("RELEASE_CONFIRM", confirm);
+    io.insert_inherit_env("GITHUB_WORKSPACE", fixture.as_path().display().to_string());
     run_steps_with_context_result_with_io(&fixture, &fixture, &steps, io).map(|_| ())
 }
 
@@ -349,12 +371,18 @@ fn release_harness(
     setup.write_file(&root.join("Cargo.toml")?, fixture_manifest().as_bytes())?;
     setup.write_file(&root.join("CHANGELOG.md")?, changelog.as_bytes())?;
     setup.create_dir_all(&root.join("target")?)?;
+    // The script imports the shared helpers module: stage the real file
+    // so the import resolves, mirroring the checkout layout.
+    let helpers = load_helpers_module()?;
+    setup.create_dir_all(&root.join("helpers")?)?;
+    setup.write_file(&root.join("helpers/ci-helpers.oxfile")?, helpers.as_bytes())?;
     let manager = RecordingManager::new();
     let mut io = ExecIo::new();
     io.insert_inherit_env("RELEASE_CONFIRM", confirm);
     io.insert_inherit_env("RELEASE_DRY_RUN", dry_run);
     io.insert_inherit_env("RELEASE_BINARY", "demo");
     io.insert_inherit_env("RELEASE_BINARIES", binaries);
+    io.insert_inherit_env("GITHUB_WORKSPACE", root.as_path().display().to_string());
     // Declared-but-absent reads as empty: the script falls back to
     // /tmp for an empty RUNNER_TEMP, so the harness leaves it absent.
     Ok(ReleaseRun {
@@ -660,12 +688,18 @@ fn missing_section_fails_naming_the_needle() -> Result<()> {
         "# Changelog\n\n## [0.0.0-old] - 2026-01-01\n\n- Decoy.\n".as_bytes(),
     )?;
     setup.create_dir_all(&root.join("target")?)?;
+    // The script imports the shared helpers module: stage the real file
+    // so the import resolves, mirroring the checkout layout.
+    let helpers = load_helpers_module()?;
+    setup.create_dir_all(&root.join("helpers")?)?;
+    setup.write_file(&root.join("helpers/ci-helpers.oxfile")?, helpers.as_bytes())?;
     let manager = RecordingManager::new();
     let mut io = ExecIo::new();
     io.insert_inherit_env("RELEASE_CONFIRM", FIXTURE_VERSION);
     io.insert_inherit_env("RELEASE_DRY_RUN", "true");
     io.insert_inherit_env("RELEASE_BINARY", "demo");
     io.insert_inherit_env("RELEASE_BINARIES", "true");
+    io.insert_inherit_env("GITHUB_WORKSPACE", root.as_path().display().to_string());
     let modules = vec![oxdock_markdown_plugin::module_with::<RecordingManager>()];
     let fs: Box<dyn oxdock_fs::WorkspaceFs> =
         Box::new(PathResolver::new_guarded(root.clone(), root.clone())?);

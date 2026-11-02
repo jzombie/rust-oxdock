@@ -65,7 +65,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
-          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
+          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
 
@@ -75,12 +75,12 @@ jobs:
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
 
-          LET $lock: STRING = CI::LOCKFILE_HASH()
+          LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
 
           LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $rustc: STRING = CI::RUSTC_HASH($report)
+          LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
           ECHO "rustc: {{ $rustc }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
 
@@ -229,16 +229,16 @@ jobs:
         shell: oxdock --script {0}
         run: |
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
-          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
+          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $lock: STRING = CI::LOCKFILE_HASH()
+          LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $rustc: STRING = CI::RUSTC_HASH($report)
+          LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
           ECHO "rustc: {{ $rustc }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
 
@@ -326,16 +326,16 @@ jobs:
         shell: oxdock --script {0}
         run: |
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
-          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
+          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $lock: STRING = CI::LOCKFILE_HASH()
+          LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $rustc: STRING = CI::RUSTC_HASH($report)
+          LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
           ECHO "rustc: {{ $rustc }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
 
@@ -412,16 +412,16 @@ jobs:
         shell: oxdock --script {0}
         run: |
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
-          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
+          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $lock: STRING = CI::LOCKFILE_HASH()
+          LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $rustc: STRING = CI::RUSTC_HASH($report)
+          LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
           ECHO "rustc: {{ $rustc }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
 

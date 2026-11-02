@@ -8175,3 +8175,144 @@ fn file_import_module_run_uses_module_dir() {
         runs[0].cwd
     );
 }
+
+/// Every inline `oxdock` step in the CI workflows must pass the real
+/// static gate: CI runs these blocks with the branch engine, so an
+/// undeclared env read fails the run instead of the PR that added it.
+/// Only declarations matter here, never values, so no env is bridged.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads the repository checkout layout; needs real host tempdirs"
+)]
+fn workflow_inline_scripts_pass_static_gate() {
+    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR).expect("manifest dir");
+    let repo = manifest_dir
+        .replace('\\', "/")
+        .strip_suffix("crates/oxdock-core")
+        .expect("test must live under crates/oxdock-core")
+        .trim_end_matches('/')
+        .to_string();
+    let repo_root = GuardedPath::new_root_from_str(&repo).expect("repo root");
+    let repo_fs =
+        oxdock_fs::PathResolver::new_guarded(repo_root.clone(), repo_root.clone()).expect("fs");
+    for workflow in ["rust-checks.yml", "miri-nightly.yml"] {
+        let workflow_path = repo_fs
+            .root()
+            .join(".github/workflows")
+            .and_then(|dir| dir.join(workflow))
+            .expect("workflow path");
+        let text = repo_fs.read_to_string(&workflow_path).expect("workflow");
+        let mut blocks: Vec<(String, String)> = Vec::new();
+        let mut name = "<unnamed>".to_string();
+        let mut shell_oxdock = false;
+        let mut lines = text.lines().peekable();
+        while let Some(line) = lines.next() {
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+            if indent == 6 && trimmed.starts_with("- name:") {
+                name = trimmed["- name:".len()..].trim().to_string();
+                shell_oxdock = false;
+                continue;
+            }
+            if indent == 8 && trimmed.starts_with("shell:") {
+                shell_oxdock = trimmed["shell:".len()..].trim().starts_with("oxdock");
+                continue;
+            }
+            if indent == 8 && trimmed.starts_with("run:") && shell_oxdock {
+                assert_eq!(
+                    trimmed["run:".len()..].trim(),
+                    "|",
+                    "non-literal run in {name}"
+                );
+                let mut body = Vec::new();
+                while let Some(next) = lines.peek() {
+                    if next.trim().is_empty() {
+                        body.push(String::new());
+                        lines.next();
+                    } else if next.len() - next.trim_start().len() >= 10 {
+                        body.push(next[10..].to_string());
+                        lines.next();
+                    } else {
+                        break;
+                    }
+                }
+                blocks.push((format!("{workflow}::{name}"), body.join("\n")));
+            }
+        }
+        assert!(!blocks.is_empty(), "no blocks in {workflow}");
+        for (label, body) in &blocks {
+            // GitHub expressions are interpolated before the engine
+            // runs; stand in a dummy value so parsing sees the shape.
+            let mut script = body.clone();
+            while let Some(start) = script.find("${{") {
+                let end = script[start..].find("}}").expect("balanced");
+                script.replace_range(start..start + end + 2, "x");
+            }
+            let steps = match crate::parse_script(&script) {
+                Ok(steps) => steps,
+                Err(err) => panic!("{label} failed to parse: {err:#}"),
+            };
+            let root = repo_root.clone();
+            let fs = oxdock_fs::PathResolver::new_guarded(root.clone(), root.clone()).expect("fs");
+            let mut state: ExecState<MockProcessManager> = ExecState {
+                fs: Box::new(fs),
+                cargo_scratch: oxdock_fs::reserve_cargo_scratch().unwrap(),
+                seed: Arc::new(HashMap::new()),
+                cwd: root.clone(),
+                initial_root: root.clone(),
+                envs: Arc::new(HashMap::new()),
+                bg_children: Vec::new(),
+                scope_stack: Vec::new(),
+                isolated_stack: Vec::new(),
+                io: ExecIo::new(),
+                assert_windows: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                assert_windows_stderr: Arc::new(std::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
+                exact_stdout: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                var_scopes: Vec::new(),
+                cancel_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                cancel_hub: Arc::new(oxdock_process::CancelHub::new()),
+                active_process: Arc::new(std::sync::Mutex::new(None)),
+                named_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                live_tasks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                inside_async: false,
+                keeper_expiry: None,
+                cancellable: false,
+                reap_floor: None,
+                functions: super::native::FunctionRegistry::with_builtins(),
+                entry_file: None,
+                import_stack: Vec::new(),
+                import_alias_frame: None,
+                modules: std::collections::HashMap::new(),
+                module_stack: Vec::new(),
+                module_table: super::native::std_module_table(),
+                types: super::typing::startup_type_map(),
+                record_schemas: std::collections::HashMap::new(),
+                module_states: std::collections::HashMap::new(),
+                type_aliases: std::collections::HashMap::new(),
+                call_depth: 0,
+                task_id: 0,
+                push_manifest: Vec::new(),
+                _marker: std::marker::PhantomData,
+            };
+            state.push_var_scope();
+            state.type_aliases =
+                super::typing::collect_type_aliases(&steps, &state).expect("aliases");
+            state.validate_function_type_tags().expect("tags");
+            let closure =
+                super::import::expand_import_closure(&mut state, &steps).expect("closure");
+            for file in &closure {
+                for (n, t) in
+                    super::typing::collect_type_aliases(&file.steps, &state).expect("aliases")
+                {
+                    state.type_aliases.insert(n, t);
+                }
+            }
+            super::static_check::validate_script_closure(&steps, &closure, &state)
+                .unwrap_or_else(|err| panic!("{label} static gate: {err:#}"));
+        }
+    }
+}

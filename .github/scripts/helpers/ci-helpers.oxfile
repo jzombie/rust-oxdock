@@ -1,5 +1,6 @@
 // Shared CI helpers: pure FUNCs used by inline `oxdock --script`
-// legs across `.github/workflows`. Stays side-effect free on purpose:
+// legs and by the `gha-*.oxfile` file scripts across
+// `.github/workflows`. Stays side-effect free on purpose:
 // the import boundary reverts ENV/WORKDIR/WORKSPACE/LET, so each leg
 // keeps its own sandbox header and calls in here only for repeated
 // logic (hash extraction), binding RETURNs itself. Configuration
@@ -12,10 +13,12 @@
 // imports. Prelude order matters: INHERIT leads, IMPORT follows.
 INHERIT_ENV [GITHUB_WORKSPACE]
 IMPORT [STD]
+
 FUNC LOCKFILE_HASH() {
   # Module calls never inherit caller context: the workspace resets
   # to the run-initial root, so reach the checkout explicitly.
   WORKSPACE SYSTEM
+
   RETURN HASH_SHA256(PATH_JOIN(env:GITHUB_WORKSPACE, "Cargo.lock"))
 }
 EXPORT LOCKFILE_HASH
@@ -25,3 +28,23 @@ FUNC RUSTC_HASH($report: STRING) {
   RETURN $caps.1
 }
 EXPORT RUSTC_HASH
+
+FUNC MANIFEST_VERSION() {
+  # Same workspace discipline as LOCKFILE_HASH above: reach the
+  # checkout explicitly so file scripts importing this module resolve
+  # the manifest from the checkout, not the module directory.
+  WORKSPACE SYSTEM
+
+  LET $manifest: MAP<ANY> = LOAD_TOML(PATH_JOIN(env:GITHUB_WORKSPACE, "Cargo.toml"))
+  IF HAS_KEY($manifest, "workspace") {
+    LET $ws: MAP<ANY> = $manifest.workspace
+    IF HAS_KEY($ws, "package") {
+      RETURN $manifest.workspace.package.version
+    } ELSE {
+      RETURN $manifest.package.version
+    }
+  } ELSE {
+    RETURN $manifest.package.version
+  }
+}
+EXPORT MANIFEST_VERSION

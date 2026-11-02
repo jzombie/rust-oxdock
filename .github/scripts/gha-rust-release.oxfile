@@ -7,29 +7,14 @@
 # The workflow builds this commit's binary and runs this commit's script,
 # so language and script stay mutually consistent by construction.
 
-IMPORT [STD, MARKDOWN]
-
-INHERIT_ENV [GH_TOKEN, RELEASE_CONFIRM, RELEASE_DRY_RUN, RELEASE_BINARY, RELEASE_BINARIES, GITHUB_ACTIONS, CARGO_REGISTRY_TOKEN, RUNNER_TEMP]
+INHERIT_ENV [GH_TOKEN, RELEASE_CONFIRM, RELEASE_DRY_RUN, RELEASE_BINARY, RELEASE_BINARIES, GITHUB_ACTIONS, CARGO_REGISTRY_TOKEN, RUNNER_TEMP, GITHUB_WORKSPACE]
+IMPORT [STD, MARKDOWN, "helpers/ci-helpers.oxfile" AS CI_HELPERS]
 
 # Pin to the live tree: scripts start in an isolated snapshot, and every
 # release step (manifest read, publish, tag) must hit the real repo.
 WORKSPACE LOCAL
 
-# The manifest is the single source of truth for the version: unified
-# workspaces read `workspace.package`, single-crate repos fall back to
-# bare `package`. Cargo guarantees one of them exists.
-LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
-LET $version: STRING = ""
-IF HAS_KEY($manifest, "workspace") {
-    LET $ws: MAP<ANY> = $manifest.workspace
-    IF HAS_KEY($ws, "package") {
-        $version = $manifest.workspace.package.version
-    } ELSE {
-        $version = $manifest.package.version
-    }
-} ELSE {
-    $version = $manifest.package.version
-}
+LET $version: STRING = CI_HELPERS::MANIFEST_VERSION()
 
 # Typed confirmation gate: the dispatched version must equal the tree.
 # A typo or stale input fails here, before anything publishes.
@@ -121,6 +106,7 @@ IF !$dry {
     }
     RUN ["git", "tag", "v{{ $version }}"]
     RUN ["git", "push", "origin", "v{{ $version }}"]
+
     # Release notes live under target/ (gitignored) so the notes file
     # itself never trips cargo's clean-tree publish guard.
     # Tag identity gate: the tag must point at HEAD before anything
@@ -133,12 +119,14 @@ IF !$dry {
     LET $head: STRING = RUN git rev-parse HEAD
     LET $tagged: STRING = RUN git rev-list -n 1 "v{{ $version }}"
     ASSERT_EQ $head $tagged
+
     # Resume safety: a run that dies mid-release must converge on
     # re-dispatch. Deleting any existing release first makes creation
     # unconditional: first runs delete nothing, resumed runs replace the
     # partial release with a fresh one from current notes. `|| cd .`
     # swallows the delete when nothing exists (cmd has no `true`).
     RUN 'gh release delete "v{{ $version }}" --yes || cd .'
+
     # The archives are the build matrix output, downloaded by the
     # workflow into target/artifacts/ (see the asset contract in
     # release.yml): the tag carries the product version and the binary
