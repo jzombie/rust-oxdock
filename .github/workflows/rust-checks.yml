@@ -64,8 +64,8 @@ jobs:
         id: hashes
         shell: oxdock --script {0}
         run: |
-          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
 
@@ -228,8 +228,8 @@ jobs:
         id: hashes
         shell: oxdock --script {0}
         run: |
-          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
@@ -325,8 +325,8 @@ jobs:
         id: hashes
         shell: oxdock --script {0}
         run: |
-          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
@@ -411,8 +411,8 @@ jobs:
         id: hashes
         shell: oxdock --script {0}
         run: |
-          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          IMPORT [STD, ".github/oxdock/ci-helpers.oxdock" AS CI]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
