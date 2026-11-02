@@ -597,6 +597,7 @@ macro_rules! declare_commands {
                             name: $name, syntax: $syntax, summary: $summary,
                             description: $desc, args: $args, flags: $flags,
                             default_output: $out, examples: $examples,
+                            in_index: true,
                         };
                         let (flags, positional) = crate::strip_flags(raw_args, &meta)?;
                         crate::command::validate_positionals_against_meta(
@@ -620,6 +621,7 @@ macro_rules! declare_commands {
                     name: $name, syntax: $syntax, summary: $summary,
                     description: $desc, args: $args, flags: $flags,
                     default_output: $out, examples: $examples,
+                    in_index: true,
                 }, )*
             ];
             // Structural statements are registered separately (see
@@ -2290,6 +2292,7 @@ declare_commands! {
 pub fn all_structural_metadata() -> Vec<CommandMeta> {
     vec![
         CommandMeta {
+            in_index: true,
             name: "WITH_IO",
             syntax: "WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> } | WITH_IO [tty[, stdin=$p][, rows=<int>][, cols=<int>]] RUN ...",
             summary: "Reroute standard streams.",
@@ -2405,6 +2408,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "FOR",
             syntax: "FOR $item: TYPE IN <expr> { <commands> } | FOR $key: STRING, $value: TYPE IN <expr> { <commands> }",
             summary: "Iterate over a list or map.",
@@ -2459,6 +2463,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "IF",
             syntax: "IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]",
             summary: "Conditional execution.",
@@ -2551,6 +2556,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "LET",
             syntax: "LET $var: TYPE = <expr> | LET $p: PIPE | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task | LET $var: TYPE = { <commands> }",
             summary: "Bind script-local variables.",
@@ -2858,6 +2864,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            // `MUTATION` is not an actual keyword, so don't index it as such.
+            in_index: false,
             name: "MUTATION",
             syntax: "$var = <expr>",
             summary: "Mutate a declared variable.",
@@ -2942,6 +2950,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "ASYNC",
             syntax: "ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }",
             summary: "Run steps in a background thread.",
@@ -2993,6 +3002,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "AWAIT",
             syntax: "AWAIT $var | LET $out: STRING = AWAIT $var",
             summary: "Join a background task.",
@@ -3035,6 +3045,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "CANCEL",
             syntax: "CANCEL $var",
             summary: "Synchronously cancel a background task.",
@@ -3070,6 +3081,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "TIMEOUT",
             syntax: "TIMEOUT <duration> <command...> | TIMEOUT <duration> { <commands> } | TIMEOUT <duration> AWAIT $var",
             summary: "Enforce an execution deadline.",
@@ -3147,6 +3159,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "ISOLATED",
             syntax: "ISOLATED { INHERIT_ENV [...] <commands> } | ISOLATED <command...>",
             summary: "Run steps with the seeded script environment.",
@@ -3258,6 +3271,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "REMOTE",
             syntax: "REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }",
             summary: "Run a sealed block on a remote target.",
@@ -3431,6 +3445,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "FUNC",
             syntax: "FUNC NAME([$param: TYPE, ...]) { <commands> }",
             summary: "Define a user function.",
@@ -3496,6 +3511,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "RETURN",
             syntax: "RETURN [<expr>]",
             summary: "Return a value from a function, task, or inline block.",
@@ -3533,6 +3549,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             }],
         },
         CommandMeta {
+            in_index: true,
             name: "WHILE",
             syntax: "WHILE <bool-expr> { <commands> }",
             summary: "Loop while a condition holds.",
@@ -3565,6 +3582,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             }],
         },
         CommandMeta {
+            in_index: true,
             name: "BREAK",
             syntax: "BREAK",
             summary: "Exit the innermost loop.",
@@ -3592,6 +3610,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             }],
         },
         CommandMeta {
+            in_index: true,
             name: "CONTINUE",
             syntax: "CONTINUE",
             summary: "Skip to the next loop iteration.",
@@ -3622,6 +3641,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             }],
         },
         CommandMeta {
+            in_index: true,
             name: KEYWORD_IMPORT,
             syntax: "IMPORT [<module>, ...] | IMPORT <module> | IMPORT [\"<path>\" AS <ALIAS>] | IMPORT [<module | \"<path>\" AS <ALIAS> | [F, ... FROM (\"<path>\" | <module>) (AS <ALIAS>)?]>, ...]",
             summary: "Bring module functions into bare-call scope; import script files and types.",

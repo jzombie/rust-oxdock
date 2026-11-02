@@ -177,6 +177,9 @@ pub(crate) fn render_index() -> String {
     out.push_str("| Command | Syntax |\n");
     out.push_str("| --- | --- |\n");
     for meta in all_metadata() {
+        if !meta.in_index {
+            continue;
+        }
         out.push_str(&format!(
             "| [`{}`](#{}) | `{}` |\n",
             meta.name,
@@ -878,15 +881,25 @@ mod tests {
     fn index_lists_every_command_exactly_once() {
         // The index table is the drift detector for the command list: a
         // removed command must disappear and a new one must appear, with no
-        // hand-maintained rows to forget.
+        // hand-maintained rows to forget. Entries with no typable keyword
+        // (MUTATION documents `$var = <expr>`) stay in the body but out
+        // of the index.
         let body = render_index();
         for meta in all_metadata() {
             let row = format!("| [`{}`](#{}) |", meta.name, index_anchor(meta.name));
-            assert!(
-                body.matches(&row).count() == 1,
-                "index must list {} exactly once",
-                meta.name
-            );
+            if meta.in_index {
+                assert!(
+                    body.matches(&row).count() == 1,
+                    "index must list {} exactly once",
+                    meta.name
+                );
+            } else {
+                assert!(
+                    !body.contains(&row),
+                    "index must not list non-keyword entry {}",
+                    meta.name
+                );
+            }
         }
         assert!(
             !body.contains("RUN_BG"),
