@@ -270,11 +270,6 @@ try {
 
   if (-not (Test-Path $Engine)) { throw "installer engine missing: $Engine" }
 
-  # Interactive consoles confirm the destination in the oxfile: export
-  # the flag only with a console behind stdin. Either condition alone
-  # misfires in CI-without-console, so both must hold.
-  $env:OXDOCK_INTERPRETER = $Engine
-
   Push-Location $tmp
   try {
 
