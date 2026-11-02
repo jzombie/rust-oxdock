@@ -208,14 +208,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      # TODO (#269): unpin the nightly toolchain once upstream fixes the
-      # E0391 async-drop query cycle in ssh-key 0.7.0-rc.11 (via
-      # russh). Pinned to nightly-2026-10-29 (proven green); nightly
-      # 2026-10-31 breaks the build. Re-pin deliberately, never drift.
+      # Latest nightly: the dated pin went away with the upstream
+      # ssh-key E0391 fix (#269, #272). Re-pin deliberately, never drift.
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-10-29
           components: rustfmt, clippy
 
       - name: Install OxDock engine
@@ -270,11 +267,10 @@ jobs:
           IF !$has_udeps {
             RUN ["cargo", "install", "cargo-udeps", "--locked"]
           }
-          # Explicit +nightly-2026-10-29: udeps needs nightly cargo,
-          # and the closed script env does not inherit the runner's
-          # RUSTUP_TOOLCHAIN. TODO (#269): revert to +nightly when the
-          # toolchain pin goes away.
-          RUN ["cargo", "+nightly-2026-10-29", "udeps", "--workspace", "--all-targets", "--all-features"]
+          # Explicit +nightly: udeps needs nightly cargo, and the
+          # closed script env does not inherit the runner's
+          # RUSTUP_TOOLCHAIN.
+          RUN ["cargo", "+nightly", "udeps", "--workspace", "--all-targets", "--all-features"]
 
       - name: Run Clippy with cfg miri
         shell: oxdock --script {0}
@@ -286,9 +282,7 @@ jobs:
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           ENV RUSTFLAGS="--cfg miri"
-          # TODO (#269): revert to +nightly when the toolchain pin
-          # goes away.
-          RUN ["cargo", "+nightly-2026-10-29", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+          RUN ["cargo", "+nightly", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
 
   test:
     name: test (OS=${{ matrix.os }}, Flags=${{ matrix.flags }})

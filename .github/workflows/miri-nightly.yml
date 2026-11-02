@@ -41,14 +41,12 @@ jobs:
         with:
           ref: main
 
-      # TODO (#269): unpin the nightly toolchain once upstream fixes the
-      # E0391 async-drop query cycle in ssh-key 0.7.0-rc.11 (via
-      # russh). Pinned to nightly-2026-10-29 (proven green); nightly
-      # 2026-10-31 breaks third-party builds.
+      # Latest nightly plus Miri: the dated pin went away with the
+      # upstream ssh-key E0391 fix (#269, #272). Re-pin a dated nightly
+      # deliberately if a new nightly breaks the build, never drift.
       - name: Install nightly toolchain with Miri
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-10-29
           components: miri
 
       # Pinned engine, never `latest`: the badge must name a fixed
@@ -61,12 +59,11 @@ jobs:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       # Local source builds install stable as the default toolchain.
-      # Restore the pinned nightly default so cargo miri below keeps
+      # Restore the nightly default so cargo miri below keeps
       # interpreting under nightly.
       - name: Restore nightly toolchain default
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-10-29
           components: miri
 
       # Native hashing: HASH_SHA256 digests Cargo.lock directly, and
