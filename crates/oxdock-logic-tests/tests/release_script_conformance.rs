@@ -355,11 +355,8 @@ fn release_harness(
     io.insert_inherit_env("RELEASE_DRY_RUN", dry_run);
     io.insert_inherit_env("RELEASE_BINARY", "demo");
     io.insert_inherit_env("RELEASE_BINARIES", binaries);
-    // The runner always sets RUNNER_TEMP in production; the harness
-    // mirrors that so the script's probe dir resolves. (The script's
-    // empty-string fallback stays for set-but-empty; absent now fails
-    // loudly by design.)
-    io.insert_inherit_env("RUNNER_TEMP", root.display());
+    // Declared-but-absent reads as empty: the script falls back to
+    // /tmp for an empty RUNNER_TEMP, so the harness leaves it absent.
     Ok(ReleaseRun {
         _temp: temp,
         root,

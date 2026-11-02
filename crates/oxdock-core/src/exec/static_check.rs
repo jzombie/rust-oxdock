@@ -1700,10 +1700,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             StepKind::InheritEnv { keys } => {
                 // Declaration, not a read: each key becomes readable
-                // from here on in this scope. Absent host names stay
-                // absent silently at runtime (matching execution), but
-                // the name is declared either way, so later uses pass
-                // here and fail loudly at execution when missing.
+                // from here on in this scope. Absent host names read as
+                // empty at runtime, but the name is declared either way,
+                // so later uses pass here and resolve empty when missing.
                 for key in keys {
                     env.declare_env(key.clone());
                 }

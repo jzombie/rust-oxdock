@@ -375,7 +375,11 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}")),
         Expr::Env(key) => match cx.state.get_env(key) {
             Some(v) => Ok(Value::string(v.to_string())),
-            None => anyhow::bail!("undefined environment variable `env:{key}`"),
+            // Declared-but-absent means empty: the static gate already
+            // rejected undeclared reads, so anything reaching here was
+            // explicitly inherited or set. No empty-value bridging is
+            // needed on the host side.
+            None => Ok(Value::string(String::new())),
         },
         Expr::KeyPath { base, keys } => resolve_key_path_value(cx, base, keys),
         Expr::List(items) => {
@@ -1240,7 +1244,8 @@ fn evaluate_compiled_math<P: ProcessManager>(
             }
             MathOp::LoadEnv(key) => match cx.state.get_env(key) {
                 Some(v) => stack.push(Value::string(v.to_string())),
-                None => anyhow::bail!("undefined environment variable `env:{key}`"),
+                // Same absent-means-empty rule as `Expr::Env` above.
+                None => stack.push(Value::string(String::new())),
             },
             MathOp::LoadKeyPath { base, keys } => {
                 stack.push(resolve_key_path_value(cx, base, keys)?);
@@ -1658,11 +1663,11 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         // Missing → emit empty
                     }
                 } else {
-                    // `{{ env:KEY }}` reads the script env: missing
-                    // names fail loudly, exactly like `env:KEY`
-                    // expressions and file templates. Undeclared use
-                    // is a static error before the run; this is the
-                    // runtime backstop for dynamic paths.
+                    // `{{ env:KEY }}` reads the script env: declared-but-
+                    // absent emits empty, exactly like `env:KEY`
+                    // expressions. Undeclared use is a static error
+                    // before the run; this empty is the runtime rule for
+                    // declared names the host did not provide.
                     // `{{ script_env:KEY }}` reads the explicit
                     // script env only. `{{ bare_key }}` reads DSL
                     // variables only, never env.
@@ -1672,20 +1677,15 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         // name trims here, so `{{ env: FOO }}` resolves
                         // exactly what the checker admitted.
                         let env_key = env_key.trim();
-                        let Some(val) = env
+                        let val = env
                             .get(env_key)
                             .map(String::as_str)
                             .or_else(|| state.get_env(env_key))
-                        else {
-                            anyhow::bail!("undefined environment variable `env:{env_key}`");
-                        };
+                            .unwrap_or_default();
                         output.push_str(val);
                     } else if let Some(env_key) = key.strip_prefix("script_env:") {
                         let env_key = env_key.trim();
-                        let Some(val) = env.get(env_key) else {
-                            anyhow::bail!("undefined environment variable `script_env:{env_key}`");
-                        };
-                        output.push_str(val);
+                        output.push_str(env.get(env_key).map(String::as_str).unwrap_or_default());
                     } else if let Some(val) = state.get_var(key) {
                         output.push_str(&format_value_for_string(&val)?);
                     } else if let Some((module, func, args_src)) =

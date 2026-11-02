@@ -7491,6 +7491,29 @@ fn padded_env_template_resolves_trimmed() {
 }
 
 #[test]
+fn declared_but_absent_env_reads_empty() {
+    // The CI shape: a declared name the host did not bridge reads as
+    // empty, with no empty-value bridging required. Covers template
+    // and expression spellings in one script.
+    let steps = parse_entry(indoc! {r#"
+        INHERIT_ENV [OXDOCK_TEST_ABSENT_TOKEN]
+        LET $t: STRING = "{{ env:OXDOCK_TEST_ABSENT_TOKEN }}"
+        LET $e: STRING = env:OXDOCK_TEST_ABSENT_TOKEN
+    "#});
+    let mut io = ExecIo::new();
+    io.remove_inherit_env("OXDOCK_TEST_ABSENT_TOKEN");
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        io,
+    )
+    .expect("declared-but-absent reads empty");
+    assert_eq!(bindings.get("t").and_then(|v| v.as_str()), Some(""));
+    assert_eq!(bindings.get("e").and_then(|v| v.as_str()), Some(""));
+}
+
+#[test]
 fn file_import_body_let_does_not_leak() {
     // Mirror image: LET in an imported body is scope-isolated, so the
     // entry cannot see it (static closure rejects the reference).

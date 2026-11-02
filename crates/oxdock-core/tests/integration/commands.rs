@@ -579,14 +579,11 @@ fn inherit_env_removal_blocks_host_env() {
     let mut io_cfg = ExecIo::new();
     io_cfg.remove_inherit_env("SPECIAL_TOKEN");
     io_cfg.set_stdout(Some(captured.clone()));
-    // Removal wins over the host value: the name stays absent, and the
-    // loud runtime backstop proves it (the old silent empty is gone).
-    let err = run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg)
-        .expect_err("removed name must fail loudly");
-    assert!(
-        format!("{err:#}").contains("undefined environment variable `env:SPECIAL_TOKEN`"),
-        "{err:#}"
-    );
+    // Removal wins over the host value: the name stays absent, which
+    // reads as empty (declared-but-absent needs no host bridging).
+    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
+    let out = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert_eq!(out, "\n");
 }
 
 #[test]

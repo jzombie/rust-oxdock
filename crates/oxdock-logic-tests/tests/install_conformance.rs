@@ -131,12 +131,9 @@ fn install_harness(payload: &[u8], digest: &str, dir: Option<&str>) -> Result<In
     io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
     io.insert_inherit_env("GITHUB_PATH", "");
     io.insert_inherit_env("GITHUB_ENV", "");
-    // install.sh always exports these (possibly empty); the harness
-    // mirrors that so declared reads resolve. Tests needing values
-    // overwrite them (e.g. the piped-script test below).
-    io.insert_inherit_env("OXDOCK_PIPED_SCRIPT", "");
-    io.insert_inherit_env("OXDOCK_INTERPRETER", "");
-    io.insert_inherit_env("OXDOCK_INTERACTIVE", "");
+    // Declared-but-absent reads as empty, so the harness bridges only
+    // what the test varies: OXDOCK_PIPED_SCRIPT, OXDOCK_INTERPRETER and
+    // OXDOCK_INTERACTIVE stay absent unless a test sets them.
     Ok(InstallRun {
         _temp: temp,
         root,
@@ -226,10 +223,8 @@ fn missing_dir_fails_naming_install_dir() -> Result<()> {
     run.io.remove_inherit_env(oxdock_env::os::unix::HOME);
     run.io
         .remove_inherit_env(oxdock_env::os::windows::USERPROFILE);
-    // Empty (not absent): the gate treats both the same, but only a
-    // defined-empty value reaches the home-directory probe. Absent
-    // would fail loudly at the read, before the gate runs.
-    run.io.insert_inherit_env("OXDOCK_DIR", "");
+    // OXDOCK_DIR stays absent here, which reads as empty: the gate
+    // fails naming the install dir without any host bridging.
     let err = run.execute().expect_err("no dir must fail");
     let rendered = format!("{err:#}");
     assert!(
@@ -272,9 +267,6 @@ fn missing_asset_fails_naming_the_file() -> Result<()> {
     io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
     io.insert_inherit_env("GITHUB_PATH", "");
     io.insert_inherit_env("GITHUB_ENV", "");
-    io.insert_inherit_env("OXDOCK_PIPED_SCRIPT", "");
-    io.insert_inherit_env("OXDOCK_INTERPRETER", "");
-    io.insert_inherit_env("OXDOCK_INTERACTIVE", "");
     let fs: Box<dyn oxdock_fs::WorkspaceFs> =
         Box::new(PathResolver::new_guarded(root.clone(), root.clone())?);
     let err = run_steps_with_manager_with_modules(
