@@ -29,11 +29,13 @@ IF $has_piped {
         $stem = "oxdock"
     }
 
-    # Skip flag for `local` builds.
-    LET $skip: BOOL = "{{ env:OXDOCK_SKIP_DOWNLOAD }}"
+    # Skip flag for `local` builds: absent means download normally.
+    LET $skip: BOOL = BOOL_OR("{{ env:OXDOCK_SKIP_DOWNLOAD }}", false)
 
-    # Interactive destination prompt.
-    IF "{{ env:OXDOCK_INTERACTIVE }}" != "" {
+    # Interactive destination prompt: strict flag, absent means
+    # non-interactive. An explicit "false" no longer prompts.
+    LET $interactive: BOOL = BOOL_OR("{{ env:OXDOCK_INTERACTIVE }}", false)
+    IF $interactive {
         PROMPT $dir "Install destination?" "{{ env:OXDOCK_DIR }}"
 
         WHILE true {
