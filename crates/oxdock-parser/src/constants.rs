@@ -33,6 +33,16 @@ pub const KEYWORD_BREAK: &str = "BREAK";
 pub const KEYWORD_CONTINUE: &str = "CONTINUE";
 pub const KEYWORD_REMOTE: &str = "REMOTE";
 pub const KEYWORD_TYPE: &str = "TYPE";
+pub const KEYWORD_WITH_IO: &str = "WITH_IO";
+pub const KEYWORD_TIMEOUT: &str = "TIMEOUT";
+pub const KEYWORD_ISOLATED: &str = "ISOLATED";
+pub const KEYWORD_RUN: &str = "RUN";
+pub const KEYWORD_INHERIT_ENV: &str = "INHERIT_ENV";
+pub const KEYWORD_ENV: &str = "ENV";
+pub const KEYWORD_EXPAND: &str = "EXPAND";
+pub const KEYWORD_IN: &str = "IN";
+pub const KEYWORD_AS: &str = "AS";
+pub const KEYWORD_FROM: &str = "FROM";
 
 /// Variable inspection: a dedicated AST node, never a registry entry, so it
 /// needs no import and accepts no qualifier.
@@ -43,6 +53,12 @@ pub const KEYWORD_IMPORT: &str = "IMPORT";
 
 /// Reserved for future script-module support; rejected at lowering.
 pub const KEYWORD_EXPORT: &str = "EXPORT";
+
+/// Interpolation placeholder prefix (`__OXDOCK_INJECT_<n>__`): guard
+/// keys carrying this shape read as env keys.
+pub const INJECT_PREFIX: &str = "__OXDOCK_INJECT_";
+/// Trailing marker closing an interpolation placeholder.
+pub const INJECT_SUFFIX: &str = "__";
 
 /// Canonical qualified form: `MODULE::BASE`.
 pub fn qualify(module: &str, base: &str) -> String {

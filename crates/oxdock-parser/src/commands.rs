@@ -4646,7 +4646,7 @@ pub(crate) fn validate_exports(
     top_imports: &[String],
 ) -> ParseResult<()> {
     for name in func_exports {
-        let valid = match name.split_once("::") {
+        let valid = match name.split_once(crate::constants::MODULE_SEPARATOR) {
             None => top.contains(name),
             Some((module, base)) if module == crate::constants::SCRIPT_MODULE_NAME => {
                 top.contains(base)
@@ -4681,7 +4681,7 @@ pub(crate) fn validate_exports(
         // Bare re-exports of imported types (whole-file types land
         // bare) defer when the file has imports, so `EXPORT PERSON`
         // after `IMPORT ["lib" AS LIB]` can promote the imported type.
-        let valid = match name.split_once("::") {
+        let valid = match name.split_once(crate::constants::MODULE_SEPARATOR) {
             None => top_types.contains(name) || !top_imports.is_empty(),
             Some((module, _base)) => {
                 if module == crate::constants::SCRIPT_MODULE_NAME {

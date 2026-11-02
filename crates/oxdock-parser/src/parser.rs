@@ -92,6 +92,14 @@ use crate::commands::{
     is_known_command, lower_env_tokens, lower_expand_tokens, make_arith, make_compare,
     reject_boundary,
 };
+use crate::constants::{
+    INJECT_PREFIX, INJECT_SUFFIX, KEYWORD_AS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
+    KEYWORD_CANCEL, KEYWORD_CONTINUE, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT,
+    KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN,
+    KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE,
+    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO,
+    MODULE_SEPARATOR,
+};
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 
 use crate::resolve::resolve_call_name;
@@ -211,7 +219,7 @@ fn boundary_ends_statement(body: &[Tok]) -> Result<bool, String> {
 /// io-block statement. Anything else (or EOF) fails exactly like the
 /// grammar's `must be followed by '{'`.
 fn is_bare_with_io(body: &[Tok]) -> bool {
-    matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == "WITH_IO")
+    matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_WITH_IO)
         && matches!(
             body.get(1).map(|t| (&t.kind, t.joint)),
             Some((
@@ -234,7 +242,7 @@ fn is_bare_with_io(body: &[Tok]) -> bool {
 /// non-`ELSE` follower releases, and a merged `ELSE` parses exactly
 /// where the grammar would.
 fn is_if_tail(body: &[Tok]) -> bool {
-    if !matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == "IF") {
+    if !matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_IF) {
         return false;
     }
     let mut end = body.len();
@@ -427,7 +435,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
             let else_start = guard.is_empty()
                 && matches!(
                     body.first().map(|t| &t.kind),
-                    Some(TokKind::Word(w)) if w == "ELSE"
+                    Some(TokKind::Word(w)) if w == KEYWORD_ELSE
                 );
             if !else_start {
                 stmts.push(Stmt {
@@ -1215,7 +1223,7 @@ fn try_lone_value_expr(
     {
         let inner = inner.clone();
         let args = parse_call_args(&inner, stmt, ctx)?;
-        if name == "INSPECT" {
+        if name == KEYWORD_INSPECT {
             let [arg] = args.as_slice() else {
                 return Err(TokenError {
                     stmt,
@@ -1580,7 +1588,7 @@ fn lower_generic_args(
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<StepKind, TokenError> {
-    if name == "ENV" {
+    if name == KEYWORD_ENV {
         return lower_env_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
@@ -1589,7 +1597,7 @@ fn lower_generic_args(
             kind: None,
         });
     }
-    if name == "EXPAND" {
+    if name == KEYWORD_EXPAND {
         return lower_expand_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
@@ -1975,10 +1983,10 @@ fn parse_guard_term(cur: &mut Cursor) -> Result<GuardExpr, TokenError> {
         _ => return Err(cur.err("missing guard predicate")),
     };
     // `__OXDOCK_INJECT_N__` interpolation placeholder: env-key shape.
-    if let Some(rest) = word.strip_prefix("__OXDOCK_INJECT_") {
+    if let Some(rest) = word.strip_prefix(INJECT_PREFIX) {
         if !rest.is_empty()
             && rest
-                .strip_suffix("__")
+                .strip_suffix(INJECT_SUFFIX)
                 .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
         {
             return Ok(GuardExpr::Predicate(Guard::Attr {
@@ -2430,7 +2438,7 @@ fn call_shape_at(toks: &[Tok], pos: usize, joint_paren: bool) -> Option<(String,
             break;
         }
         if let Some(TokKind::Word(seg)) = toks.get(p + 2).map(|t| &t.kind) {
-            name.push_str("::");
+            name.push_str(MODULE_SEPARATOR);
             name.push_str(seg);
         }
         p += 3;
@@ -2486,7 +2494,7 @@ fn parse_expr_call(
     ctx: &ParseCtx,
 ) -> Result<Expr, TokenError> {
     let args = parse_call_args(inner, stmt, ctx)?;
-    if name == "INSPECT" {
+    if name == KEYWORD_INSPECT {
         let [arg] = args.as_slice() else {
             return Err(TokenError {
                 stmt,
@@ -2848,7 +2856,7 @@ fn parse_await_cancel_at(
     var_joint: bool,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
     let head = match toks.get(pos).map(|t| &t.kind) {
-        Some(TokKind::Word(w)) if w == "AWAIT" || w == "CANCEL" => w.clone(),
+        Some(TokKind::Word(w)) if w == KEYWORD_AWAIT || w == KEYWORD_CANCEL => w.clone(),
         _ => return Ok(None),
     };
     if !matches!(
@@ -2878,7 +2886,7 @@ fn parse_await_cancel_at(
         }
     };
     Ok(Some((
-        if head == "AWAIT" {
+        if head == KEYWORD_AWAIT {
             StepKind::Await { var }
         } else {
             StepKind::Cancel { var }
@@ -2918,14 +2926,14 @@ fn parse_single_inner(
     // Nested `WHILE`/`REMOTE` recurse structurally (both ride every
     // inner-command set in the grammar); misses fall through to
     // generic below.
-    if head_word.as_deref() == Some("WHILE") {
+    if head_word.as_deref() == Some(KEYWORD_WHILE) {
         match parse_while_single(toks, pos, stmt, ctx) {
             Ok(Some((kind, used))) => return Ok((kind, used)),
             Ok(None) => {}
             Err(e) => return Err(e),
         }
     }
-    if head_word.as_deref() == Some("REMOTE") {
+    if head_word.as_deref() == Some(KEYWORD_REMOTE) {
         match parse_remote_single(toks, pos, stmt, ctx) {
             Ok(Some((kind, used))) => return Ok((kind, used)),
             Ok(None) => {}
@@ -2936,20 +2944,20 @@ fn parse_single_inner(
     // set (TIMEOUT/ISOLATED/WITH_IO/ASYNC, LET ASYNC): exactly one file
     // entry and no modules, else a hard error; shape misses fall through
     // to generic below, which fails them in lowering.
-    if head_word.as_deref() == Some("IMPORT")
+    if head_word.as_deref() == Some(KEYWORD_IMPORT)
         && let Some((path, alias, used)) = parse_single_file_import(toks, pos, stmt, ctx)?
     {
         return Ok((StepKind::ImportFile { path, alias }, used));
     }
     // Dedicated await/cancel first (await gated by parent); anything
     // they decline falls through to generic below.
-    if head_word.as_deref() == Some("AWAIT")
+    if head_word.as_deref() == Some(KEYWORD_AWAIT)
         && rules.allow_await
         && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true)?
     {
         return Ok(found);
     }
-    if head_word.as_deref() == Some("CANCEL")
+    if head_word.as_deref() == Some(KEYWORD_CANCEL)
         && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true)?
     {
         return Ok(found);
@@ -2961,7 +2969,7 @@ fn parse_single_inner(
             _ => unreachable!(),
         };
         let args = parse_call_args(&inner, stmt, ctx)?;
-        if !call_name.contains("::") {
+        if !call_name.contains(MODULE_SEPARATOR) {
             crate::resolve::check_func_ident(&lowering_ctx(stmt), &call_name)
                 .map_err(|e| lower_err(stmt, e))?;
         }
@@ -2974,7 +2982,7 @@ fn parse_single_inner(
             paren + 1 - pos,
         ));
     }
-    if head_word.as_deref() == Some("RUN")
+    if head_word.as_deref() == Some(KEYWORD_RUN)
         && matches!(
             toks.get(pos + 1).map(|t| &t.kind),
             Some(TokKind::Group {
@@ -3003,31 +3011,32 @@ fn parse_single_inner(
         // `block` alternative here); fall through to generic below,
         // which reads the shell path literally.
         if let Some(list) = exec_list {
-            let kind = (ctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
+            let kind =
+                (ctx.lower)(KEYWORD_RUN, vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
             return Ok((kind, 2));
         }
     }
     // Nested wrappers recurse structurally; a `WITH_IO` directly
     // under `ASYNC` goes generic instead (lowering fails it, probed).
     match head_word.as_deref() {
-        Some("WITH_IO") if rules.allow_with_io => {
+        Some(KEYWORD_WITH_IO) if rules.allow_with_io => {
             match parse_with_io_single(toks, pos, stmt, ctx) {
                 Ok(Some((kind, used))) => return Ok((kind, used)),
                 Ok(None) => {}
                 Err(e) => return Err(e),
             }
         }
-        Some("TIMEOUT") => match parse_timeout_single(toks, pos, stmt, ctx) {
+        Some(KEYWORD_TIMEOUT) => match parse_timeout_single(toks, pos, stmt, ctx) {
             Ok(Some((kind, used))) => return Ok((kind, used)),
             Ok(None) => {}
             Err(e) => return Err(e),
         },
-        Some("ISOLATED") => match parse_isolated_single(toks, pos, stmt, ctx) {
+        Some(KEYWORD_ISOLATED) => match parse_isolated_single(toks, pos, stmt, ctx) {
             Ok(Some((kind, used))) => return Ok((kind, used)),
             Ok(None) => {}
             Err(e) => return Err(e),
         },
-        Some("ASYNC") => match parse_async_single(toks, pos, stmt, ctx) {
+        Some(KEYWORD_ASYNC) => match parse_async_single(toks, pos, stmt, ctx) {
             Ok(Some((kind, used))) => return Ok((kind, used)),
             Ok(None) => {}
             Err(e) => return Err(e),
@@ -3037,7 +3046,7 @@ fn parse_single_inner(
         // rewrites it, same as the shared validator. Trailing
         // elements loop on outside (a bad follower fails there, like
         // the grammar's line end).
-        Some("INHERIT_ENV") => {
+        Some(KEYWORD_INHERIT_ENV) => {
             if let Some(found) = parse_inherit_env_at(toks, pos, stmt)? {
                 return Ok(found);
             }
@@ -3825,10 +3834,10 @@ fn parse_if_at(
         // `ELSE IF cond block`: any gaps (non-atomic chain).
         let is_else_if = matches!(
             toks.get(p).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "ELSE"
+            Some(TokKind::Word(w)) if w == KEYWORD_ELSE
         ) && matches!(
             toks.get(p + 1).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "IF"
+            Some(TokKind::Word(w)) if w == KEYWORD_IF
         );
         if is_else_if {
             let mut ecur = Cursor::expr(&toks[p + 2..], stmt);
@@ -3869,7 +3878,7 @@ fn parse_if_at(
         // the loop, failing in lowering like the grammar).
         let is_else = matches!(
             toks.get(p).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "ELSE"
+            Some(TokKind::Word(w)) if w == KEYWORD_ELSE
         ) && matches!(
             toks.get(p + 1).map(|t| &t.kind),
             Some(TokKind::Group {
@@ -3973,7 +3982,7 @@ fn parse_for_at(
         icur.skip_gap();
         if !matches!(
             icur.toks.get(icur.pos).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "IN"
+            Some(TokKind::Word(w)) if w == KEYWORD_IN
         ) {
             return Ok(None);
         }
@@ -4015,7 +4024,7 @@ fn parse_for_at(
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::Validation {
-                command: "FOR".to_string(),
+                command: KEYWORD_FOR.to_string(),
             }),
         });
     }
@@ -4043,14 +4052,14 @@ fn parse_for_at(
                 line: 0,
                 col: 0,
                 kind: Some(ParseErrorKind::Validation {
-                    command: "FOR".to_string(),
+                    command: KEYWORD_FOR.to_string(),
                 }),
             });
         }
     };
     if let Some(kt) = &key_type
-        && kt != "STRING"
-        && kt != "INT"
+        && kt != crate::TypeTag::String.name()
+        && kt != crate::TypeTag::Int.name()
     {
         return Err(TokenError {
             stmt,
@@ -4058,7 +4067,7 @@ fn parse_for_at(
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::Validation {
-                command: "FOR".to_string(),
+                command: KEYWORD_FOR.to_string(),
             }),
         });
     }
@@ -4133,7 +4142,7 @@ fn parse_func_at(
         line: 0,
         col: 0,
         kind: Some(ParseErrorKind::Validation {
-            command: "FUNC".to_string(),
+            command: KEYWORD_FUNC.to_string(),
         }),
     };
     // Phase 1 (pure shape): name, parens, params, block presence.
@@ -4351,7 +4360,7 @@ fn parse_import_statement(
         line: 0,
         col: 0,
         kind: Some(ParseErrorKind::Validation {
-            command: "IMPORT".to_string(),
+            command: KEYWORD_IMPORT.to_string(),
         }),
     };
     let next = match toks.get(pos + 1) {
@@ -4471,7 +4480,7 @@ fn parse_import_statement(
                     else {
                         return Ok(None);
                     };
-                    if as_word != "AS" {
+                    if as_word != KEYWORD_AS {
                         return Ok(None);
                     }
                     raw.push(RawEntry::File {
@@ -4505,7 +4514,7 @@ fn parse_import_statement(
         else {
             return Ok(None);
         };
-        if as_word != "AS" {
+        if as_word != KEYWORD_AS {
             return Ok(None);
         }
         raw.push(RawEntry::File {
@@ -4593,7 +4602,7 @@ fn parse_single_file_import(
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::Validation {
-                command: "IMPORT".to_string(),
+                command: KEYWORD_IMPORT.to_string(),
             }),
         });
     }
@@ -4629,7 +4638,7 @@ fn parse_export_name(toks: &[Tok], pos: usize) -> Option<(String, usize)> {
         && toks[pos + 3].joint
         && is_upper_ident(tail)
     {
-        name.push_str("::");
+        name.push_str(MODULE_SEPARATOR);
         name.push_str(tail);
         used = 4;
     }
@@ -4660,7 +4669,7 @@ fn parse_from_entry(inner: &[Tok]) -> Option<HarvestImport> {
         .collect();
     let from = dense
         .iter()
-        .position(|t| matches!(&t.kind, TokKind::Word(w) if w == "FROM"))?;
+        .position(|t| matches!(&t.kind, TokKind::Word(w) if w == KEYWORD_FROM))?;
     if from == 0 {
         return None;
     }
@@ -4688,9 +4697,9 @@ fn parse_from_entry(inner: &[Tok]) -> Option<HarvestImport> {
                 else {
                     return None;
                 };
-                if kind == "TYPE" {
+                if kind == KEYWORD_TYPE {
                     Some((true, name.clone()))
-                } else if kind == "FUNC" {
+                } else if kind == KEYWORD_FUNC {
                     Some((false, name.clone()))
                 } else {
                     None
@@ -4744,7 +4753,7 @@ fn parse_from_entry(inner: &[Tok]) -> Option<HarvestImport> {
             else {
                 return None;
             };
-            if as_word != "AS" {
+            if as_word != KEYWORD_AS {
                 return None;
             }
             Some(HarvestImport {
@@ -4897,9 +4906,9 @@ fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(ExportNames, usize)> {
     };
     // Explicit `EXPORT TYPE ...` or `EXPORT FUNC ...` prefix.
     if let TokKind::Word(w) = &next.kind
-        && (w == "TYPE" || w == "FUNC")
+        && (w == KEYWORD_TYPE || w == KEYWORD_FUNC)
     {
-        let is_type = w == "TYPE";
+        let is_type = w == KEYWORD_TYPE;
         let after = match toks.get(pos + 2) {
             Some(t) if !t.joint => t,
             _ => return None,
@@ -4985,10 +4994,10 @@ fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(ExportNames, usize)> {
             // flag matters.
             let (is_type, rest) = match part {
                 [first, second, ..]
-                    if matches!(&first.kind, TokKind::Word(w) if w == "TYPE" || w == "FUNC")
+                    if matches!(&first.kind, TokKind::Word(w) if w == KEYWORD_TYPE || w == KEYWORD_FUNC)
                         && !second.joint =>
                 {
-                    let is_t = matches!(&first.kind, TokKind::Word(w) if w == "TYPE");
+                    let is_t = matches!(&first.kind, TokKind::Word(w) if w == KEYWORD_TYPE);
                     (is_t, &part[1..])
                 }
                 _ => (false, part),
@@ -5098,7 +5107,7 @@ fn parse_remote_single(
         line: 0,
         col: 0,
         kind: Some(ParseErrorKind::Validation {
-            command: "REMOTE".to_string(),
+            command: KEYWORD_REMOTE.to_string(),
         }),
     };
     // Target: joint run in the superset charset (alnum/`_`/`-`/`.`/`:`).
@@ -6028,7 +6037,7 @@ fn parse_let_body(
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
     let mut cur = Cursor::expr(body, stmt);
     match cur.next() {
-        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == "LET") => {}
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == KEYWORD_LET) => {}
         _ => return Err(cur.err("unreachable")),
     }
     // No `$var`: no `LET` form can match (miss, never a hard fail).
@@ -6051,12 +6060,12 @@ fn parse_let_body(
         // bare type is a validation error, mirroring the grammar.
         if matches!(
             body.get(type_start).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "PIPE"
+            Some(TokKind::Word(w)) if w == crate::TypeTag::Pipe.name()
         ) {
             return Ok(Some((
                 StepKind::Assign {
                     var,
-                    decl_type: "PIPE".to_string(),
+                    decl_type: crate::TypeTag::Pipe.name().to_string(),
                     expr: Expr::FreshPipe,
                 },
                 type_start + 1,
@@ -6101,7 +6110,7 @@ fn parse_let_rhs(
     // `WITH_IO`-led lines share `let_async_statement` with the
     // `ASYNC` forms (the grammar claims every WITH_IO-led LET
     // there); shape misses fall through to generic below.
-    if head_word.as_deref() == Some("WITH_IO")
+    if head_word.as_deref() == Some(KEYWORD_WITH_IO)
         && let Some(found) = try_let_with_io_rhs(rhs, var.clone(), decl_type.clone(), stmt, ctx)?
     {
         let (kind, used) = found;
@@ -6111,13 +6120,13 @@ fn parse_let_rhs(
     // generic path like the grammar, failing in lowering) spawn
     // background tasks. No `WITH_IO` scan here (probed: the LET
     // path accepts what statement `ASYNC` rejects).
-    if head_word.as_deref() == Some("ASYNC") && rhs.len() > 1 {
+    if head_word.as_deref() == Some(KEYWORD_ASYNC) && rhs.len() > 1 {
         let (kind, used) = parse_let_async_rhs(&rhs[1..], var, decl_type, stmt, ctx)?;
         return Ok((kind, skipped + 1 + used));
     }
     // `TIMEOUT`-led lines capture through the wrapper (shape misses
     // fall through to generic, which fails in lowering).
-    if head_word.as_deref() == Some("TIMEOUT")
+    if head_word.as_deref() == Some(KEYWORD_TIMEOUT)
         && let Some((kind, used)) = parse_timeout_single(rhs, 0, stmt, ctx)?
     {
         let span = lowering_ctx(stmt);
@@ -6147,7 +6156,7 @@ fn parse_let_rhs(
     // `AWAIT $v` captures the task output (`$`+name ride gapless in
     // this atomic position, like the grammar); anything else
     // `AWAIT`-led goes generic below (lowering fails it, probed).
-    if head_word.as_deref() == Some("AWAIT")
+    if head_word.as_deref() == Some(KEYWORD_AWAIT)
         && rhs.len() == 3
         && let (Some(dollar), Some(task)) = (rhs.get(1), rhs.get(2))
         && matches!(&dollar.kind, TokKind::Punct('$'))
@@ -6167,7 +6176,7 @@ fn parse_let_rhs(
     // RUN exec form captures the structured argv (gapped bracket;
     // a joint bracket falls through to generic, which fails it in
     // lowering).
-    if head_word.as_deref() == Some("RUN")
+    if head_word.as_deref() == Some(KEYWORD_RUN)
         && matches!(
             rhs.get(1).map(|t| (&t.kind, t.joint)),
             Some((
@@ -6188,7 +6197,8 @@ fn parse_let_rhs(
         // (known-command capture, then expression), mirroring the
         // grammar's ordered alternatives.
         if let Some(list) = parse_run_exec_list(&inner, stmt, ctx)? {
-            let kind = (ctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
+            let kind =
+                (ctx.lower)(KEYWORD_RUN, vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
             return Ok((
                 StepKind::AssignCapture {
                     var,
@@ -6204,7 +6214,7 @@ fn parse_let_rhs(
     // lowers to `AssignCapture`): exactly one file entry, no modules.
     // Anything else shaped like an import is a hard error; shape misses
     // fall through to generic below, which fails them in lowering.
-    if head_word.as_deref() == Some("IMPORT")
+    if head_word.as_deref() == Some(KEYWORD_IMPORT)
         && let Some((path, alias, used)) = parse_single_file_import(rhs, 0, stmt, ctx)?
     {
         return Ok((
@@ -6333,7 +6343,7 @@ fn try_let_with_io_rhs(
                 .to_string(),
         ));
     }
-    if matches!(&first.kind, TokKind::Word(w) if w == "ASYNC") {
+    if matches!(&first.kind, TokKind::Word(w) if w == KEYWORD_ASYNC) {
         // `WITH_IO [..] ASYNC <single|block>`: the bindings apply
         // inside the task thread (same shape as a one-step body
         // holding one `WITH_IO` step, which the runtime supports).
@@ -6614,7 +6624,7 @@ fn parse_return_body(
 ) -> Result<(StepKind, usize), TokenError> {
     let mut cur = Cursor::expr(body, stmt);
     match cur.next() {
-        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == "RETURN") => {}
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == KEYWORD_RETURN) => {}
         _ => return Err(cur.err("unreachable")),
     }
     if cur.done() {
@@ -6858,7 +6868,7 @@ fn parse_elements(
         // (lowering fails them).
         if matches!(
             toks.get(pos).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "IMPORT"
+            Some(TokKind::Word(w)) if w == KEYWORD_IMPORT
         ) {
             // Unified statement form (#115): each entry validates hard
             // (unknown modules, bad aliases, templates, remote URLs);
@@ -6956,7 +6966,7 @@ fn parse_element_at(
     // elements loop on (probed `LET $x: INT = 1 ECHO bye`). LET shape
     // misses fall to generic (lowering fails them like a committed
     // `instruction` would, e.g. `LET foo`).
-    if head_word.as_deref() == Some("LET")
+    if head_word.as_deref() == Some(KEYWORD_LET)
         && let Some((kind, used)) = parse_let_body(&toks[pos..], stmt, ctx)?
     {
         return Ok((vec![step(kind)], used));
@@ -6965,7 +6975,7 @@ fn parse_element_at(
         let (kind, used) = parse_set_body(&toks[pos..], stmt, ctx)?;
         return Ok((vec![step(kind)], used));
     }
-    if head_word.as_deref() == Some("RETURN") {
+    if head_word.as_deref() == Some(KEYWORD_RETURN) {
         let (kind, used) = parse_return_body(&toks[pos..], stmt, ctx)?;
         return Ok((vec![step(kind)], used));
     }
@@ -6984,33 +6994,33 @@ fn parse_element_at(
     // `BREAK ECHO hi`); a lone trailing word fails downstream like
     // the grammar's committed mismatch.
     match head_word.as_deref() {
-        Some("BREAK") => {
+        Some(KEYWORD_BREAK) => {
             return Ok((vec![step(StepKind::Break)], 1));
         }
-        Some("CONTINUE") => {
+        Some(KEYWORD_CONTINUE) => {
             return Ok((vec![step(StepKind::Continue)], 1));
         }
-        Some("IF") => {
+        Some(KEYWORD_IF) => {
             if let Some((kind, used)) = parse_if_at(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("FOR") => {
+        Some(KEYWORD_FOR) => {
             if let Some((kind, used)) = parse_for_at(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("WHILE") => {
+        Some(KEYWORD_WHILE) => {
             if let Some((kind, used)) = parse_while_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("FUNC") => {
+        Some(KEYWORD_FUNC) => {
             if let Some((kind, used)) = parse_func_at(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("REMOTE") => {
+        Some(KEYWORD_REMOTE) => {
             if let Some((kind, used)) = parse_remote_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
@@ -7019,20 +7029,20 @@ fn parse_element_at(
     }
     // Wrappers (block or single); shape misses fall to generic.
     match head_word.as_deref() {
-        Some("WITH_IO") => {
+        Some(KEYWORD_WITH_IO) => {
             return parse_with_io_element(toks, pos, stmt, ctx, first_guard);
         }
-        Some("TIMEOUT") => {
+        Some(KEYWORD_TIMEOUT) => {
             if let Some((kind, used)) = parse_timeout_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("ISOLATED") => {
+        Some(KEYWORD_ISOLATED) => {
             if let Some((kind, used)) = parse_isolated_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("ASYNC") => {
+        Some(KEYWORD_ASYNC) => {
             if let Some((kind, used)) = parse_async_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
@@ -7041,22 +7051,24 @@ fn parse_element_at(
     }
     // AWAIT/CANCEL statements (element level admits the `$` gap,
     // probed); heads without `$` go generic (lowering fails them).
-    if matches!(head_word.as_deref(), Some("AWAIT") | Some("CANCEL"))
-        && let Some((kind, used)) = parse_await_cancel_at(toks, pos, stmt, false)?
+    if matches!(
+        head_word.as_deref(),
+        Some(KEYWORD_AWAIT) | Some(KEYWORD_CANCEL)
+    ) && let Some((kind, used)) = parse_await_cancel_at(toks, pos, stmt, false)?
     {
         return Ok((vec![step(kind)], used));
     }
     // `INHERIT_ENV [...]` parses strictly even at element level
     // (keys stay exact everywhere; slice 5 adds only the
     // prelude-order validation). Shape misses go generic.
-    if head_word.as_deref() == Some("INHERIT_ENV")
+    if head_word.as_deref() == Some(KEYWORD_INHERIT_ENV)
         && let Some((kind, used)) = parse_inherit_env_at(toks, pos, stmt)?
     {
         return Ok((vec![step(kind)], used));
     }
     // `EXPORT ...` records names (zero steps) or misses to generic;
     // level and guard violations fail loudly like the backend.
-    if head_word.as_deref() == Some("EXPORT") {
+    if head_word.as_deref() == Some(KEYWORD_EXPORT) {
         if in_block {
             return Err(TokenError {
                 stmt,
@@ -7084,7 +7096,7 @@ fn parse_element_at(
         )) = parse_export_at(toks, pos)
         {
             for name in &func_names {
-                for part in name.split("::") {
+                for part in name.split(MODULE_SEPARATOR) {
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
@@ -7097,14 +7109,14 @@ fn parse_element_at(
                         line: 0,
                         col: 0,
                         kind: Some(ParseErrorKind::Validation {
-                            command: "EXPORT".to_string(),
+                            command: KEYWORD_EXPORT.to_string(),
                         }),
                     });
                 }
                 ctx.func_exports.borrow_mut().push(name.clone());
             }
             for name in &type_names {
-                for part in name.split("::") {
+                for part in name.split(MODULE_SEPARATOR) {
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
@@ -7117,7 +7129,7 @@ fn parse_element_at(
                         line: 0,
                         col: 0,
                         kind: Some(ParseErrorKind::Validation {
-                            command: "EXPORT".to_string(),
+                            command: KEYWORD_EXPORT.to_string(),
                         }),
                     });
                 }
@@ -7128,7 +7140,7 @@ fn parse_element_at(
     }
     // `TYPE NAME = SHAPE` aliases (zero or one step); level and guard
     // violations fail loudly, shape misses fall to generic.
-    if head_word.as_deref() == Some("TYPE") {
+    if head_word.as_deref() == Some(KEYWORD_TYPE) {
         if in_block {
             return Err(TokenError {
                 stmt,
@@ -7397,7 +7409,7 @@ fn parse_inner_command(
         // Statement-level `INSPECT(...)` resolves like any other call
         // (only expression position mints the node); unknown functions
         // fail in the shared resolver with identical messages.
-        if !call_name.contains("::") {
+        if !call_name.contains(MODULE_SEPARATOR) {
             crate::resolve::check_func_ident(&lowering_ctx(stmt), &call_name)
                 .map_err(|e| lower_err(stmt, e))?;
         }
@@ -7427,7 +7439,7 @@ fn parse_inner_command(
     // caller continues past the list, like the grammar. The list
     // rides gapped (`sep`): a joint bracket is a hard error, never
     // a spliced arg (probed `RUN["a"]`).
-    if head == "RUN"
+    if head == KEYWORD_RUN
         && matches!(
             body.get(1).map(|t| &t.kind),
             Some(TokKind::Group {
@@ -7453,7 +7465,8 @@ fn parse_inner_command(
         // `block` alternative here); fall through to the shell path
         // below, which reads the bracket literally.
         if let Some(list) = parse_run_exec_list(&inner, stmt, ctx)? {
-            let kind = (ctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
+            let kind =
+                (ctx.lower)(KEYWORD_RUN, vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
             return Ok((kind, 2));
         }
     }
@@ -7895,7 +7908,7 @@ fn stamp_func_docs(input: &str, steps: &mut [Step]) {
 }
 
 fn strip_func_head(trimmed: &str) -> Option<String> {
-    let rest = trimmed.strip_prefix("FUNC")?;
+    let rest = trimmed.strip_prefix(KEYWORD_FUNC)?;
     let after = rest.strip_prefix([' ', '\t'])?;
     if after.is_empty() {
         return None;
@@ -8179,8 +8192,8 @@ mod tests {
             "TIMEOUT 10s { [os:linux] [os:windows] { ECHO hi } }",
             "TIMEOUT 10s { [os:linux] { ECHO hi } ECHO bye }",
             "LET $x: INT = 1 ECHO bye",
-            "BREAK",
-            "CONTINUE",
+            KEYWORD_BREAK,
+            KEYWORD_CONTINUE,
             "BREAK ECHO hi",
             "FOR $x: INT IN [1] { BREAK }",
             "LET $b: STRING = { RETURN \"hi\" }",
@@ -8373,7 +8386,7 @@ mod tests {
         use std::collections::{HashMap, HashSet};
         let std_table = || ModuleTable {
             modules: HashMap::from([(
-                "STD".to_string(),
+                crate::constants::STD_MODULE_NAME.to_string(),
                 Some(ModuleFuncs {
                     func_names: HashSet::from(["TEXT_LENGTH".to_string()]),
                 }),
@@ -8495,7 +8508,7 @@ mod tests {
             "$x = 1",
             "$x = $a + 1",
             "RETURN 1",
-            "RETURN",
+            KEYWORD_RETURN,
             "RETURN $x",
             "[env:X] LET $x: INT = 1",
             "[os:linux] $x = 2",
@@ -8566,7 +8579,7 @@ mod tests {
             "WITH_IO stdin=$p ECHO hi",
             "WITH_IO [STDIN=$p] ECHO hi",
             "WITH_IO [rows] RUN echo hi",
-            "WITH_IO",
+            KEYWORD_WITH_IO,
             "WITH_IO [stdout=$p]",
             "WITH_IO [stdin=$p]\n[os:linux] { ECHO hi }",
             "WITH_IO [stdin=$p] { }",
@@ -8584,7 +8597,7 @@ mod tests {
             "TIMEOUT 10 s ECHO hi",
             "TIMEOUT -5s ECHO hi",
             "TIMEOUT 0s ECHO hi",
-            "TIMEOUT",
+            KEYWORD_TIMEOUT,
             "TIMEOUT 10s",
             "TIMEOUT { ECHO hi }",
             "TIMEOUT \"10s\"",
@@ -8593,11 +8606,11 @@ mod tests {
             "TIMEOUT 10s {{ $d }}",
             "TIMEOUT 10s { $d }",
             "TIMEOUT { $d } ECHO hi",
-            "ASYNC",
-            "ISOLATED",
+            KEYWORD_ASYNC,
+            KEYWORD_ISOLATED,
             "ISOLATED{ECHO hi}",
-            "AWAIT",
-            "CANCEL",
+            KEYWORD_AWAIT,
+            KEYWORD_CANCEL,
             "AWAIT t",
             "AWAIT $",
             "AWAIT $t extra",
