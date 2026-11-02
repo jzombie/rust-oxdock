@@ -395,6 +395,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TypeOf::registration(),
             Functions::registration(),
             Describe::registration(),
+            IsMain::registration(),
             IsTerminal::registration(),
             Eof::registration(),
             TaskPoll::registration(),
@@ -1843,6 +1844,31 @@ fn type_describe<P: ProcessManager>(
         return Ok(Value::map(map));
     }
     Err(anyhow::anyhow!("unknown type {name}"))
+}
+
+/// Report whether the current context is the entry script.
+///
+/// True at entry top level and inside entry-owned functions; false
+/// inside module-owned functions and module init bodies. Lets a
+/// library file double as a runnable demo: guard the demo with
+/// `IF IS_MAIN()` so importing it stays side-effect free.
+///
+#[oxdock_func(returns = TypeTag::Bool)]
+#[example(
+    name = "main",
+    code = r###"
+    # Entry top level runs as main.
+    IMPORT [STD]
+    LET $m: BOOL = IS_MAIN()
+    ASSERT_EQ $m true
+    "###
+)]
+fn is_main<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
+    let main = match cx.state.module_stack.last() {
+        None | Some(None) => true,
+        Some(Some(_)) => false,
+    };
+    Ok(Value::bool(main))
 }
 
 /// Report whether a standard stream is a terminal.

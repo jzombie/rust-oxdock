@@ -537,6 +537,33 @@ LET $plain: BOOL = IS_EXEC("tool.txt")
 ASSERT_EQ $plain false
 ```
 
+### STD::IS_MAIN
+
+Report whether the current context is the entry script.
+
+True at entry top level and inside entry-owned functions; false
+inside module-owned functions and module init bodies. Lets a
+library file double as a runnable demo: guard the demo with
+`IF IS_MAIN()` so importing it stays side-effect free.
+
+
+**Signature:** `STD::IS_MAIN() -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: main**
+
+```oxdock
+# Entry top level runs as main.
+IMPORT [STD]
+LET $m: BOOL = IS_MAIN()
+ASSERT_EQ $m true
+```
+
 ### STD::IS_TERMINAL
 
 Report whether a standard stream is a terminal.

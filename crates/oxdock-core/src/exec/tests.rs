@@ -7966,6 +7966,53 @@ fn file_import_state_shared_across_aliases() {
 }
 
 #[test]
+fn is_main_distinguishes_entry_from_module() {
+    // A library doubling as a runnable demo guards the demo with
+    // `IF IS_MAIN()`: entry top level sees true, module init and
+    // module-owned functions see false.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+            IMPORT [STD]
+            LET $init_was_main: BOOL = IS_MAIN()
+            FUNC WHOAMI() {
+                RETURN IS_MAIN()
+            }
+            FUNC WAS_INIT_MAIN() {
+                RETURN $init_was_main
+            }
+            EXPORT WHOAMI
+            EXPORT WAS_INIT_MAIN
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD]
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $top: BOOL = IS_MAIN()
+        LET $from_mod: BOOL = LIB::WHOAMI()
+        LET $init_flag: BOOL = LIB::WAS_INIT_MAIN()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("IS_MAIN distinguishes entry from module");
+    assert_eq!(bindings.get("top").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        bindings.get("from_mod").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        bindings.get("init_flag").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+}
+
+#[test]
 fn file_import_state_shared_through_nested_imports() {
     // A nested import initializes the same shared module: the entry's
     // view of the helper sees mutations made through the lib's view.
