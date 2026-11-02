@@ -3,7 +3,7 @@ use super::*;
 use anyhow::bail;
 use indoc::indoc;
 use oxdock_fs::{EntryKind, GuardedPath, MockFs, WorkspaceFs, to_forward_slashes};
-use oxdock_parser::{Expr, Guard, GuardExpr, IoBinding, IoStream, StepKind};
+use oxdock_parser::{Expr, Guard, GuardExpr, IoBinding, IoStream, STD_MODULE_NAME, StepKind};
 use oxdock_process::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStdin,
     MockProcessManager, MockRunCall, ProcessManager,
@@ -5285,7 +5285,7 @@ fn returns_gate_covers_std_builtins() {
     // in generated docs.
     let proc = MockProcessManager::default();
     super::assert_module_returns_conformance(
-        "STD",
+        STD_MODULE_NAME,
         &super::native::FunctionRegistry::<MockProcessManager>::builtin_registrations(),
         Vec::new(),
         proc,

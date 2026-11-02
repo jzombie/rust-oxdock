@@ -4,7 +4,7 @@
 //! possible, so a passing test means expansion, lowering, and runtime
 //! all agreed; file-effect cases assert bytes on disk.
 
-use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
+use oxdock_core::{ExecIo, SCRIPT_MODULE_NAME, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_logic_tests::mock_remote::MockRemoteRunner;
 use oxdock_macros::oxdock;
@@ -37,7 +37,7 @@ fn assert_macro_string_roundtrip(steps: &[oxdock_parser::Step]) {
     // SCRIPT-opaque table: the macro resolves bare calls to `SCRIPT::`
     // at expansion, so the reparse admits the qualifier the same way.
     let mut table = oxdock_core::std_module_table();
-    table.modules.insert("SCRIPT".to_string(), None);
+    table.modules.insert(SCRIPT_MODULE_NAME.to_string(), None);
     let reparsed = oxdock_core::parse_script_with_modules(&text, table)
         .expect("macro output must reparse as string");
     assert_eq!(

@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::common::mock_lower;
 
 use indoc::indoc;
-use oxdock_parser::{Expr, ModuleFuncs, ModuleTable, StepKind, parse_script_with_modules};
+use oxdock_parser::{
+    Expr, ModuleFuncs, ModuleTable, STD_MODULE_NAME, StepKind, parse_script_with_modules,
+};
 
 /// Fictional modules exercising resolution logic: `ALPHA` (several
 /// functions), `BETA` (overlapping `GLOB`), and opaque `OPAQ` (membership
@@ -975,7 +977,7 @@ fn host_type_harvest_bare_module_parses() {
     else {
         panic!("expected ImportFuncs, got {:?}", steps[0].kind);
     };
-    assert_eq!(path, "STD");
+    assert_eq!(path, STD_MODULE_NAME);
     assert_eq!(alias, &None);
     assert!(func_names.is_empty());
     assert_eq!(type_names, &["PIPE".to_string()]);

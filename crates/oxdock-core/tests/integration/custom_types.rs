@@ -6,7 +6,8 @@
 
 use indoc::indoc;
 use oxdock_core::{
-    Engine, EngineOutput, Field, HostModule, OxDockFn, OxDockType, RecordSchema, TypeTag, Value,
+    Engine, EngineOutput, Field, HostModule, OxDockFn, OxDockType, RecordSchema, STD_MODULE_NAME,
+    TypeTag, Value,
 };
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_func_macro::{oxdock_func, oxdock_type};
@@ -416,7 +417,7 @@ fn host_module_cannot_reclaim_std_name() {
     use std::sync::Arc;
     let mut engine = Engine::new();
     engine.register_module(HostModule {
-        name: "STD".to_string(),
+        name: STD_MODULE_NAME.to_string(),
         funcs: vec![HostRegistration::Pure {
             name: "GLOB".to_string(),
             meta: FuncMeta {

@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use oxdock_fs::{GuardedPath, MockFs, PathResolver, WorkspaceFs};
-use oxdock_parser::{ModuleFuncs, ModuleTable};
+use oxdock_parser::{ModuleFuncs, ModuleTable, STD_MODULE_NAME};
 
 use super::args::check_host_return_value;
 use super::base_name;
@@ -225,7 +225,7 @@ fn run_example<P: ProcessManager + Clone + Send + 'static>(
 ) -> ExampleOutcome {
     let mut table = ModuleTable {
         modules: HashMap::from([(
-            "STD".to_string(),
+            STD_MODULE_NAME.to_string(),
             Some(ModuleFuncs {
                 func_names: builtin_function_metas()
                     .iter()
