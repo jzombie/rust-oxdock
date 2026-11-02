@@ -3909,10 +3909,9 @@ ASSERT_EQ $flag 1
 
 Path of the running interpreter binary.
 
-Returns the executing binary as a `STRING`, so one script can
-reinvoke the interpreter on another script without bridging an env
-var. The pattern is: compose the child script with `WRITE`, then
-run it under the interpreter with the exec form:
+Runtime script assembly: compose a child script dynamically, then
+execute it in a fresh interpreter run. Returns the executing
+binary as a `STRING`, so the parent needs no bridged env var:
 
 ```text
 # Assemble the child script dynamically: the parent interpolates
@@ -3928,6 +3927,14 @@ ASSERT_CONTAINS $out "hello Ada!"
 
 (Shown as `text`: fence runners execute against a harness binary,
 not a CLI, so reinvocation only runs under a real interpreter.)
+
+Eval-like, not macro-like: the child re-parses from bytes in a
+separate process, so no bindings cross back (only stdout and files),
+no static gate spans parent and child, and each run pays a spawn.
+Prefer modules for reuse (statically gated, in-process) and build
+macros for compile-time codegen. Reach for assembly when the child
+must run isolated, or under a different binary than the parent
+(version-skew runs, fresh-binary proofs).
 Unsupported under Miri isolation: the lookup itself fails there
 instead of returning a path.
 
