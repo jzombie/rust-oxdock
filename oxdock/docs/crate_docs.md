@@ -2446,20 +2446,14 @@ not apply to it. Two imported modules exporting one name is
 an ambiguity error: qualify the call instead.
 
 File imports (`IMPORT ["./lib.oxdock" AS LIB]`, any file
-extension) load another script as an isolated pipeline:
-the alias is mandatory and becomes the namespace
-(`LIB::FOO`), with no filename inference. Collisions with
-live module names fail explicitly, as do duplicate aliases.
+extension): the alias is mandatory and becomes the
+namespace (`LIB::FOO`), with no filename inference.
 Only `EXPORT`ed top-level `FUNC`s cross the boundary:
-unexported means private, so an imported file exposes
-exactly its export list and nothing else. Variables are
-never exportable (`EXPORT` names must match a top-level
-`FUNC`). The import runs in function-call-like isolation
-(bindings do not leak, `WORKDIR` reverts) and its `RETURN`
-value is the only channel back (`LET $r = IMPORT [...]`).
-Nested imports register in the outermost import's caller
-frame, so libraries reuse helpers transitively; the same
-file under the same alias in the same frame loads once.
+unexported means private, and variables are never
+exportable. Each file initializes once; every alias
+shares the module's top-level bindings. The file must
+exist when the run starts: generated imports are
+rejected before the first step.
 
 Brackets mix both kinds and hold several entries at once,
 across lines if needed
@@ -2487,20 +2481,27 @@ Paths resolve workspace-side, against the importing
 file's directory (the entry file's parent at top level;
 an entry staged outside the workspace, e.g. a CI temp
 script, resolves like stdin against the workspace root).
-The file must exist when the run starts: imports of
-missing files fail before the first step runs, because
-analysis requires bytes and generated-then-imported
-files have none to check. Write-then-import in one
-script is rejected; check libraries into the tree.
+Inside module-owned code, relative paths resolve
+against the module file's own directory instead of the
+caller's cwd, so a module behaves identically no matter
+who imports it; entry code keeps resolving against the
+run cwd. The file must exist when the run starts:
+imports of missing files fail before the first step
+runs, because analysis requires bytes and
+generated-then-imported files have none to check.
+Write-then-import in one script is rejected; check
+libraries into the tree.
 
 `EXPORT` marks top-level script `FUNC`s as externally
 callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`) and as
 the file's importable interface: only exported names
-cross a file-import boundary, and only an entry script's
-direct `EXPORT`s become MCP tools (imported `ALIAS::FOO`
-stays private unless the entry re-exports; re-exporting
-imports is not yet supported). Single-file scope; see the
-MCP host for consumption.
+cross a file-import boundary, and an entry can re-export
+an import (`IMPORT ["x.oxdock" AS A]` then `EXPORT
+A::FOO`) to promote it to its own tool surface. Serving
+resolves re-exports through the registry, so a name the
+file never exported fails tool setup instead of serving
+a dead tool. Single-file scope otherwise; see the MCP
+host for consumption.
 
 
 **Examples:**
@@ -2527,6 +2528,35 @@ IMPORT ["lib.oxdock" AS LIB]
 ```
 
 **Expected error:** `must exist when the run starts`
+
+**Example: import missing alias fails**
+
+```oxdock expect_error:"mandatory alias"
+# A file entry without AS is a parse error.
+IMPORT ["./lib.oxdock"]
+```
+
+**Expected error:** `mandatory alias`
+
+**Example: module cannot export a variable**
+
+```oxdock expect_error:"does not match any top-level FUNC"
+# Only top-level FUNCs are exportable, never variables.
+LET $FOO: STRING = "x"
+EXPORT FOO
+```
+
+**Expected error:** `does not match any top-level FUNC`
+
+**Example: import re-export unknown alias fails**
+
+```oxdock expect_error:"does not match any top-level FUNC"
+# Re-exports name a visible import alias.
+IMPORT ["x.oxdock" AS A]
+EXPORT NOSUCH::FOO
+```
+
+**Expected error:** `does not match any top-level FUNC`
 
 
 ### WORKDIR

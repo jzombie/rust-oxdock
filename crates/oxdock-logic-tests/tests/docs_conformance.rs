@@ -256,6 +256,13 @@ fn readme_snippets_parse_and_cover_every_command() -> Result<()> {
     );
 
     for block in &blocks {
+        // Negative examples declare their failure upfront and are
+        // executed (not just parsed) by the executor test, which
+        // asserts the expected message; here they are exempt from the
+        // must-parse rule by construction.
+        if block.metadata.expect_error.is_some() {
+            continue;
+        }
         oxdock_core::parse_script(&block.body).map_err(|e| {
             anyhow::anyhow!(
                 "{README_NAME}:{0}: snippet failed to parse: {e}",
@@ -610,8 +617,22 @@ fn pin_doc_cache_dir() -> Result<()> {
 }
 
 fn execute_block(block: &FencedBlock, name: &str) -> Result<()> {
-    let steps = oxdock_core::parse_script(&block.body)
-        .map_err(|e| anyhow::anyhow!("{name}: snippet failed to parse: {e}"))?;
+    // Parse errors match `expect_error` the same way runtime errors do:
+    // syntax rules are otherwise undemonstrable in fences, since every
+    // snippet parses before it runs.
+    let steps = match oxdock_core::parse_script(&block.body) {
+        Ok(steps) => steps,
+        Err(err) => match &block.metadata.expect_error {
+            Some(expected)
+                if LineEnding::normalize(&format!("{err:#}")).contains(expected.as_str()) =>
+            {
+                return Ok(());
+            }
+            _ => {
+                return Err(anyhow::anyhow!("{name}: snippet failed to parse: {err:#}"));
+            }
+        },
+    };
 
     // Tempdirs must outlive execution; dropping a GuardedTempDir removes it.
     let workspace_temp = GuardedPath::tempdir().context("failed to create workspace tempdir")?;

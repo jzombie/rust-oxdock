@@ -639,3 +639,44 @@ fn async_block_runs_child_processes() {
     assert_eq!(done["state"], "finished", "{done}");
     assert_eq!(done["result"], "bg-hi");
 }
+
+#[test]
+fn reexported_import_serves_as_tool() {
+    // An entry re-export promotes an imported function to the entry's
+    // own tool surface: the lib's EXPORT gates visibility, the entry's
+    // EXPORT LIB::FOO gates serving, and calls share module state.
+    let (fs, root) = test_fs();
+    let lib = root.join("lib.oxdock").expect("lib path");
+    fs.write_file(
+        &lib,
+        b"LET $n: INT = 0\nFUNC COUNT() {\n $n = $n + 1\n RETURN $n\n}\nEXPORT COUNT\n",
+    )
+    .expect("seed lib");
+    let engine = Engine::new();
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["lib.oxdock" AS LIB]
+            EXPORT LIB::COUNT
+        "#},
+        engine.module_table(),
+    )
+    .expect("parse");
+    let mut session = McpSession::init(
+        fs,
+        default_process_manager(),
+        Vec::new(),
+        Vec::new(),
+        &parsed,
+    )
+    .expect("session init");
+    let metas = session.tool_metas().expect("metas");
+    assert!(
+        metas.iter().any(|m| m.name == "LIB::COUNT"),
+        "re-export served: {:?}",
+        metas.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+    let one = session.call("COUNT", vec![]).expect("call");
+    assert_eq!(one.value.as_i64(), Some(1));
+    let two = session.call("COUNT", vec![]).expect("call");
+    assert_eq!(two.value.as_i64(), Some(2));
+}

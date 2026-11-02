@@ -230,6 +230,11 @@ pub(super) struct ScopeSnapshot {
 pub(super) struct ModuleRecord {
     pub(super) steps: Vec<Step>,
     pub(super) exports: Vec<String>,
+    /// Directory relative paths in module-owned code resolve against:
+    /// the module file's parent. `None` falls back to the run cwd.
+    /// Entry code always resolves ambiently, so an inline temp script
+    /// keeps operating on the workspace it was pointed at.
+    pub(super) dir: Option<GuardedPath>,
     pub(super) init: Option<ModuleInit>,
 }
 
@@ -592,7 +597,7 @@ impl<P: ProcessManager> ExecState<P> {
         // zero I/O. The seeded scratch materializes alongside: `HOME` and
         // `TMPDIR` point at it, so children writing temp or profile data
         // must observe real directories, never lexical candidates.
-        let cwd = self.fs.resolve_write(&self.cwd, ".")?;
+        let cwd = self.fs.resolve_write(&self.effective_cwd(), ".")?;
         self.cargo_scratch.ensure_materialized()?;
         Ok(CommandContext::new(
             &cwd.into(),
@@ -944,6 +949,24 @@ impl<P: ProcessManager> ExecState<P> {
             Some(Some(key)) => Some(key.clone()),
             _ => None,
         }
+    }
+
+    /// Base directory relative paths resolve against (#115): the
+    /// owning module file's parent directory when executing
+    /// module-owned code, so a module behaves the same no matter
+    /// which importer calls it. Entry code (and anything past an
+    /// entry boundary) resolves against the run cwd, so inline temp
+    /// scripts keep operating on the workspace they were pointed at.
+    pub(super) fn effective_cwd(&self) -> GuardedPath {
+        if let Some(module) = self.current_module()
+            && let Some(dir) = self
+                .modules
+                .get(&module)
+                .and_then(|record| record.dir.clone())
+        {
+            return dir;
+        }
+        self.cwd.clone()
     }
 
     /// Get a flattened view of all variables across all scopes.

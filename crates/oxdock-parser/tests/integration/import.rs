@@ -660,8 +660,12 @@ fn file_import_in_let_async_spawns_task() {
 }
 
 #[test]
-fn file_import_reexport_fails_explicitly() {
-    let err = oxdock_parser::parse_script_with_modules_and_exports(
+fn file_import_reexport_parses_for_visible_alias() {
+    // Re-exporting an import is how an entry promotes an imported
+    // function to its own tool surface: the alias must be a visible
+    // import (checked here); whether the file exports the name is
+    // checked where the import loads.
+    let parsed = oxdock_parser::parse_script_with_modules_and_exports(
         indoc! {r#"
             IMPORT ["./lib.oxdock" AS LIB]
             EXPORT LIB::FOO
@@ -670,8 +674,27 @@ fn file_import_reexport_fails_explicitly() {
         HashSet::new(),
         table(),
     )
-    .expect_err("re-export must fail");
-    assert!(err.to_string().contains("re-exports"), "{err}");
+    .expect("re-export of visible alias parses");
+    assert_eq!(parsed.exports, vec!["LIB::FOO".to_string()]);
+}
+
+#[test]
+fn file_import_reexport_unknown_alias_fails() {
+    let err = oxdock_parser::parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["./lib.oxdock" AS LIB]
+            EXPORT NOSUCH::FOO
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("re-export of unknown alias must fail");
+    assert!(
+        err.to_string()
+            .contains("does not match any top-level FUNC"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -881,9 +904,9 @@ fn file_import_from_bare_unbracketed_misses() {
 }
 
 #[test]
-fn file_import_from_reexport_denied_like_alias() {
+fn file_import_from_reexport_allowed_like_alias() {
     use oxdock_parser::parse_script_with_modules_and_exports;
-    let err = parse_script_with_modules_and_exports(
+    let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
             IMPORT [[FOO FROM "lib.oxdock" AS LIB]]
             EXPORT LIB::FOO
@@ -892,8 +915,8 @@ fn file_import_from_reexport_denied_like_alias() {
         HashSet::new(),
         table(),
     )
-    .expect_err("re-export must fail");
-    assert!(err.to_string().contains("re-exports"), "{err}");
+    .expect("re-export of harvest alias parses");
+    assert_eq!(parsed.exports, vec!["LIB::FOO".to_string()]);
 }
 
 #[test]

@@ -7455,3 +7455,156 @@ fn file_import_transitive_syntax_error_fails_before_any_step() {
     assert!(format!("{err:#}").contains("failed to parse"), "{err:#}");
     assert!(!fs.snapshot().keys().any(|k| k.ends_with("marker.txt")));
 }
+
+#[test]
+fn file_import_module_paths_ignore_caller_workdir() {
+    // The store is single and shared (the counter increments across
+    // aliases and across WORKDIR changes), while relative paths resolve
+    // against the module file's directory even when the caller has
+    // moved elsewhere: the decoy in the caller dir is never read.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+            LET $n: INT = 0
+            FUNC GET() {
+             $n = $n + 1
+             LET $out: STRING = READ "probe.txt"
+             RETURN $out
+            }
+            FUNC COUNT() {
+             RETURN $n
+            }
+            EXPORT [GET, COUNT]
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS A]
+        IMPORT ["lib.oxdock" AS B]
+        WRITE probe.txt "root"
+        MKDIR sub
+        WRITE sub/probe.txt "nested"
+        LET $r1: STRING = A::GET()
+        WORKDIR sub
+        LET $r2: STRING = B::GET()
+        LET $total: INT = A::COUNT()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("shared store with per-caller paths");
+    assert_eq!(bindings.get("r1").and_then(|v| v.as_str()), Some("root"));
+    assert_eq!(bindings.get("r2").and_then(|v| v.as_str()), Some("root"));
+    assert_eq!(bindings.get("total").and_then(|v| v.as_i64()), Some(2));
+}
+
+#[test]
+fn file_import_module_paths_anchor_to_defining_file() {
+    // A module behaves as if it were the only module: its relative
+    // file operations resolve against its own directory, never the
+    // importer's cwd. The entry WORKDIRs elsewhere and a decoy file
+    // with the same name sits in the entry dir; the module must still
+    // read and write next to itself.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "sub/data.txt",
+        indoc! {r#"
+            module-data
+        "#},
+    );
+    seed_lib(
+        &fs,
+        "sub/lib.oxdock",
+        indoc! {r#"
+            WRITE out.txt "from-lib"
+            FUNC READIT() {
+             LET $c: STRING = READ "data.txt"
+             RETURN $c
+            }
+            EXPORT READIT
+        "#},
+    );
+    seed_lib(&fs, "other/decoy.txt", "seeded\n");
+    seed_lib(
+        &fs,
+        "other/data.txt",
+        indoc! {r#"
+            decoy-data
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["sub/lib.oxdock" AS LIB]
+        MKDIR other
+        WORKDIR other
+        LET $v: STRING = LIB::READIT()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs.clone()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("module paths anchor to defining file");
+    // Call-time read hit the module's own directory, not the entry's.
+    assert_eq!(
+        bindings.get("v").and_then(|v| v.as_str()),
+        Some("module-data\n")
+    );
+    // Init-time write landed next to the module, not the caller.
+    let snap = fs.snapshot();
+    assert!(
+        snap.keys()
+            .any(|k| k == "sub/out.txt" || k.ends_with("/sub/out.txt")),
+        "lib wrote next to itself: {:?}",
+        snap.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !snap
+            .keys()
+            .any(|k| k == "out.txt" || k.ends_with("/out.txt") && !k.contains("sub")),
+        "nothing leaked into the caller dir: {:?}",
+        snap.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn file_import_module_run_uses_module_dir() {
+    // Child processes spawned by module-owned code start in the module
+    // directory, wherever the importer happens to be.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "sub/tool.oxdock",
+        indoc! {r#"
+            FUNC RUNIT() {
+             RUN ["echo", "hi"]
+             RETURN "done"
+            }
+            EXPORT RUNIT
+        "#},
+    );
+    seed_lib(&fs, "other/keep.txt", "seeded\n");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["sub/tool.oxdock" AS LIB]
+        MKDIR other
+        WORKDIR other
+        LET $r: STRING = LIB::RUNIT()
+    "#});
+    let mock = MockProcessManager::default();
+    let (_, _, bindings) =
+        run_steps_with_manager(Box::new(fs), &steps, mock.clone(), ExecIo::new())
+            .expect("module RUN anchors to module dir");
+    assert_eq!(bindings.get("r").and_then(|v| v.as_str()), Some("done"));
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert!(
+        runs[0].cwd.ends_with("sub"),
+        "module RUN cwd is the module dir: {:?}",
+        runs[0].cwd
+    );
+}

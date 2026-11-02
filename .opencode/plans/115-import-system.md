@@ -116,8 +116,11 @@ New `crates/oxdock-core/src/exec/import.rs` (or extend `args.rs`):
 
 ### 4.4 MCP + static check + docs
 
-- MCP: only entry-file `EXPORT` list becomes tools (comment 10). Imported `ALIAS::FOO` stays private unless entry re-exports (re-export mechanism = phase 2 decision; default deny).
-- `static_check.rs::validate_script_closure`: two-phase whole-closure validation (comment 11). Phase 1 expands the transitive closure (`expand_import_closure`: resolve + parse + cache, cycle/depth guarded, missing files skipped); phase 2 collects every site's signatures (alias-qualified, or bare for alias-free harvests) into one checker and checks the entry plus every file body, so cross-file calls typecheck at their call sites. Anything present fails before the first step runs. Generated-then-imported files (absent at expansion) validate when they load at execution.
+- MCP: only the entry `EXPORT` list becomes tools (comment 10).
+  Re-exports (`EXPORT ALIAS::FOO`) promote imports to the entry
+  surface and resolve through the registry at serve time; unknown
+  re-exports fail tool setup instead of serving dead tools.
+- `static_check.rs::validate_script_closure`: two-phase whole-closure validation (comment 11). Phase 1 expands the transitive import closure (`expand_import_closure`: resolve + parse + cache, cycle/depth guarded, missing files hard-fail); phase 2 collects every site's signatures (alias-qualified, or bare for alias-free harvests) into one checker and checks the entry plus every file body, so cross-file calls typecheck at their call sites. Everything present validates before the first step runs; nothing absent is skipped.
 - Docs: structural metadata auto-flows; add `IMPORT` file-form fragments + preview + remote gating docs. `cargo run -p docs-gen`, never hand-edit READMEs.
 
 ### 4.5 Module semantics: shared state, single loading path
@@ -150,7 +153,7 @@ MCP tools).
 ## 5. Phasing (in scope: phases 1+2; phase 3 deferred to #270)
 
 1. Phase 1: local file `IMPORT ["..." AS ALIAS]` (any extension, especially `.oxdock`/`.oxfile`; multi-entry and mixed module+file brackets, multiline included) + isolation + pipe mangling + `LET`/`ASYNC` capture + cycles/depth/cache + dry-run listing + tests.
-2. Phase 2: override map (`KEY=value` vs `WITH $map`, one form), re-export rule for MCP, `modules:` exemption enforcement + collision panics.
+2. Phase 2: override map (`KEY=value` vs `WITH $map`, one form), `modules:` exemption enforcement + collision panics. (Re-export rule for MCP: done — entry `EXPORT ALIAS::FOO` parses for visible aliases and resolves at serve time.)
 3. Phase 3 (deferred to #270 `net: Run scripts from a remote URL`): remote URL imports via `net` plugin + feature gate + `READ`-like stream command + hash pin. Remote entry composes with #115 rules once fetched; see #270 for allowlist + hash-pin gating, `net`-feature gate, and cached downloads.
 
 ## 6. Tests

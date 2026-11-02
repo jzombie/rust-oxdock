@@ -3473,20 +3473,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 an ambiguity error: qualify the call instead.
 
                 File imports (`IMPORT ["./lib.oxdock" AS LIB]`, any file
-                extension) load another script as an isolated pipeline:
-                the alias is mandatory and becomes the namespace
-                (`LIB::FOO`), with no filename inference. Collisions with
-                live module names fail explicitly, as do duplicate aliases.
+                extension): the alias is mandatory and becomes the
+                namespace (`LIB::FOO`), with no filename inference.
                 Only `EXPORT`ed top-level `FUNC`s cross the boundary:
-                unexported means private, so an imported file exposes
-                exactly its export list and nothing else. Variables are
-                never exportable (`EXPORT` names must match a top-level
-                `FUNC`). The import runs in function-call-like isolation
-                (bindings do not leak, `WORKDIR` reverts) and its `RETURN`
-                value is the only channel back (`LET $r = IMPORT [...]`).
-                Nested imports register in the outermost import's caller
-                frame, so libraries reuse helpers transitively; the same
-                file under the same alias in the same frame loads once.
+                unexported means private, and variables are never
+                exportable. Each file initializes once; every alias
+                shares the module's top-level bindings. The file must
+                exist when the run starts: generated imports are
+                rejected before the first step.
 
                 Brackets mix both kinds and hold several entries at once,
                 across lines if needed
@@ -3514,20 +3508,27 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 file's directory (the entry file's parent at top level;
                 an entry staged outside the workspace, e.g. a CI temp
                 script, resolves like stdin against the workspace root).
-                The file must exist when the run starts: imports of
-                missing files fail before the first step runs, because
-                analysis requires bytes and generated-then-imported
-                files have none to check. Write-then-import in one
-                script is rejected; check libraries into the tree.
+                Inside module-owned code, relative paths resolve
+                against the module file's own directory instead of the
+                caller's cwd, so a module behaves identically no matter
+                who imports it; entry code keeps resolving against the
+                run cwd. The file must exist when the run starts:
+                imports of missing files fail before the first step
+                runs, because analysis requires bytes and
+                generated-then-imported files have none to check.
+                Write-then-import in one script is rejected; check
+                libraries into the tree.
 
                 `EXPORT` marks top-level script `FUNC`s as externally
                 callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`) and as
                 the file's importable interface: only exported names
-                cross a file-import boundary, and only an entry script's
-                direct `EXPORT`s become MCP tools (imported `ALIAS::FOO`
-                stays private unless the entry re-exports; re-exporting
-                imports is not yet supported). Single-file scope; see the
-                MCP host for consumption.
+                cross a file-import boundary, and an entry can re-export
+                an import (`IMPORT ["x.oxdock" AS A]` then `EXPORT
+                A::FOO`) to promote it to its own tool surface. Serving
+                resolves re-exports through the registry, so a name the
+                file never exported fails tool setup instead of serving
+                a dead tool. Single-file scope otherwise; see the MCP
+                host for consumption.
             "#},
             args: &[],
             flags: &[],
@@ -3554,6 +3555,32 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 WORKSPACE LOCAL
                 WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
                 IMPORT ["lib.oxdock" AS LIB]
+            "#},
+                },
+                Example {
+                    name: "import missing alias fails",
+                    fence_meta: Some("expect_error:\"mandatory alias\""),
+                    code: indoc! {r#"
+                # A file entry without AS is a parse error.
+                IMPORT ["./lib.oxdock"]
+            "#},
+                },
+                Example {
+                    name: "module cannot export a variable",
+                    fence_meta: Some("expect_error:\"does not match any top-level FUNC\""),
+                    code: indoc! {r#"
+                # Only top-level FUNCs are exportable, never variables.
+                LET $FOO: STRING = "x"
+                EXPORT FOO
+            "#},
+                },
+                Example {
+                    name: "import re-export unknown alias fails",
+                    fence_meta: Some("expect_error:\"does not match any top-level FUNC\""),
+                    code: indoc! {r#"
+                # Re-exports name a visible import alias.
+                IMPORT ["x.oxdock" AS A]
+                EXPORT NOSUCH::FOO
             "#},
                 },
             ],
@@ -4365,19 +4392,13 @@ pub(crate) fn validate_exports(
             Some((module, base)) => match modules.modules.get(module) {
                 None => {
                     // File-import aliases (#115) never enter the module
-                    // table: re-exporting imported functions is not yet
-                    // supported (phase 2), so name that instead of the
-                    // generic mismatch.
-                    if top_imports.iter().any(|m| m == module) {
-                        return Err(ParseError::validation(
-                            crate::constants::KEYWORD_EXPORT,
-                            format!(
-                                "EXPORT `{name}` re-exports an imported function (not yet supported)"
-                            ),
-                            ctx,
-                        ));
-                    }
-                    false
+                    // table: a re-export names an imported function for
+                    // the entry's own tool surface. The alias must be a
+                    // visible import; whether the file actually exports
+                    // the name is checked where the import loads (closure
+                    // validation, then serving), since parse performs no
+                    // IO. Anything else is an unknown module.
+                    top_imports.iter().any(|m| m == module)
                 }
                 Some(None) => true,
                 Some(Some(funcs)) => funcs.functions.contains(base),

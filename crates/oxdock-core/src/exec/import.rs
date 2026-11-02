@@ -848,11 +848,13 @@ fn load_file<P: ProcessManager>(
         table,
     )
     .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed to parse: {e}"))?;
+    let dir = resolved.parent();
     state.modules.insert(
         key,
         super::state::ModuleRecord {
             steps: parsed.steps.clone(),
             exports: parsed.exports.clone(),
+            dir,
             init: None,
         },
     );

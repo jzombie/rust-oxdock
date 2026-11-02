@@ -86,7 +86,7 @@ pub(super) fn workdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) ->
     cx.state.cwd = cx
         .state
         .fs
-        .resolve_workdir(&cx.state.cwd, path)
+        .resolve_workdir(&cx.state.effective_cwd(), path)
         .with_context(|| format!("WORKDIR {}", path))?;
     Ok(())
 }
@@ -702,7 +702,7 @@ pub(super) fn copy<P: ProcessManager>(
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, to)
+        .resolve_write(&cx.state.effective_cwd(), to)
         .with_context(|| format!("COPY {} {}", from, to))?;
     let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
         .with_context(|| format!("COPY {} {}", from, to))?;
@@ -752,7 +752,7 @@ pub(super) fn copy_git<P: ProcessManager>(
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, to)
+        .resolve_write(&cx.state.effective_cwd(), to)
         .with_context(|| format!("COPY_GIT {} {} {}", rev, from, to))?;
     cx.state
         .fs
@@ -805,15 +805,15 @@ fn resolve_archive_src<P: ProcessManager>(
         return cx
             .state
             .fs
-            .resolve_read(&cx.state.cwd, src)
+            .resolve_read(&cx.state.effective_cwd(), src)
             .with_context(|| tag.to_string());
     }
     let parent_abs = if parent.is_empty() {
-        cx.state.cwd.clone()
+        cx.state.effective_cwd()
     } else {
         cx.state
             .fs
-            .resolve_read(&cx.state.cwd, &parent)
+            .resolve_read(&cx.state.effective_cwd(), &parent)
             .with_context(|| tag.to_string())?
     };
     let mut matched = false;
@@ -843,7 +843,7 @@ fn resolve_archive_src<P: ProcessManager>(
         return cx
             .state
             .fs
-            .resolve_read(&cx.state.cwd, src)
+            .resolve_read(&cx.state.effective_cwd(), src)
             .with_context(|| tag.to_string());
     }
     parent_abs.join(&name).with_context(|| tag.to_string())
@@ -982,7 +982,7 @@ pub(super) fn archive<P: ProcessManager>(
     let dst_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, dst)
+        .resolve_write(&cx.state.effective_cwd(), dst)
         .with_context(|| tag.clone())?;
     // Opening the destination truncates it: an archive landing on its
     // own source would destroy inputs before their bytes stream, so
@@ -1054,12 +1054,12 @@ pub(super) fn unarchive<P: ProcessManager>(
     let src_abs = cx
         .state
         .fs
-        .resolve_read(&cx.state.cwd, src)
+        .resolve_read(&cx.state.effective_cwd(), src)
         .with_context(|| tag.clone())?;
     let dst_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, dst)
+        .resolve_write(&cx.state.effective_cwd(), dst)
         .with_context(|| tag.clone())?;
     cx.state
         .fs
@@ -1204,7 +1204,7 @@ pub(super) fn symlink<P: ProcessManager>(
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, to)
+        .resolve_write(&cx.state.effective_cwd(), to)
         .with_context(|| format!("SYMLINK {} {}", from, to))?;
     let from_abs = if let Some(target) = from_workspace {
         cx.state
@@ -1254,7 +1254,7 @@ pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> R
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, path)
+        .resolve_write(&cx.state.effective_cwd(), path)
         .with_context(|| format!("MKDIR {}", path))?;
     cx.state
         .fs
@@ -1267,7 +1267,7 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
     let target_dir = if let Some(p) = arg {
         cx.state
             .fs
-            .resolve_read(&cx.state.cwd, p)
+            .resolve_read(&cx.state.effective_cwd(), p)
             .with_context(|| format!("LS {}", p))?
     } else {
         // Bare `LS` lists the current directory: ride the choke point so a
@@ -1275,7 +1275,7 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
         // explicit-path branch above. Local roots resolve with zero I/O.
         cx.state
             .fs
-            .resolve_read(&cx.state.cwd, ".")
+            .resolve_read(&cx.state.effective_cwd(), ".")
             .with_context(|| "LS".to_string())?
     };
     let mut entries = cx
@@ -1302,7 +1302,7 @@ pub(super) fn read<P: ProcessManager>(
         let target = cx
             .state
             .fs
-            .resolve_read(&cx.state.cwd, path)
+            .resolve_read(&cx.state.effective_cwd(), path)
             .with_context(|| format!("READ {}", path))?;
         let mut reader = cx
             .state
@@ -1466,7 +1466,7 @@ pub(super) fn write<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, path)
+        .resolve_write(&cx.state.effective_cwd(), path)
         .with_context(|| format!("WRITE {}", path))?;
     cx.state
         .fs
@@ -1517,7 +1517,7 @@ pub(super) fn append<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, path)
+        .resolve_write(&cx.state.effective_cwd(), path)
         .with_context(|| format!("APPEND {}", path))?;
     cx.state
         .fs
@@ -1601,7 +1601,7 @@ pub(super) fn replace<P: ProcessManager>(
             let target = cx
                 .state
                 .fs
-                .resolve_read(&cx.state.cwd, path)
+                .resolve_read(&cx.state.effective_cwd(), path)
                 .with_context(|| format!("EXPAND {}", path))?;
             let mut reader = cx
                 .state
@@ -3412,12 +3412,12 @@ pub(super) fn install<P: ProcessManager>(
     let from_abs = cx
         .state
         .fs
-        .resolve_read(&cx.state.cwd, from)
+        .resolve_read(&cx.state.effective_cwd(), from)
         .with_context(|| format!("INSTALL {from} {to}"))?;
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, to)
+        .resolve_write(&cx.state.effective_cwd(), to)
         .with_context(|| format!("INSTALL {from} {to}"))?;
     cx.state
         .fs
@@ -3640,7 +3640,11 @@ pub(super) fn remove<P: ProcessManager>(
     path: &str,
     recursive: bool,
 ) -> Result<()> {
-    let cwd = cx.state.cwd.clone();
+    // Removal resolves against the effective base (module-owned code
+    // anchors to its file). The deletion guard below compares against
+    // the real run cwd and roots, so a module can never remove the
+    // caller's working directory out from under it.
+    let cwd = cx.state.effective_cwd();
     let target = cx
         .state
         .fs
@@ -3651,12 +3655,14 @@ pub(super) fn remove<P: ProcessManager>(
     // under `WORKSPACE SYSTEM`) would destroy the execution context or
     // the host root, so fail closed before any filesystem driver runs.
     // Both sides compare canonicalized: symlinked prefixes would
-    // otherwise defeat a lexical equality check.
+    // otherwise defeat a lexical equality check. Guarded against the
+    // real run cwd, never the module-anchored base.
+    let guard_cwd = cx.state.cwd.clone();
     let cwd_canon = cx
         .state
         .fs
-        .canonicalize(&cwd)
-        .unwrap_or_else(|_| cwd.clone());
+        .canonicalize(&guard_cwd)
+        .unwrap_or_else(|_| guard_cwd.clone());
     if target == cwd_canon
         || cwd_canon.as_path().starts_with(target.as_path())
         || Some(&target) == cx.state.fs.workspace_root()
