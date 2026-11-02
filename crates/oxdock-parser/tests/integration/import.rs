@@ -963,6 +963,25 @@ fn file_import_mixed_type_func_harvest_parses() {
 }
 
 #[test]
+fn host_type_harvest_bare_module_parses() {
+    let steps = parse("IMPORT [TYPE PIPE FROM STD]\n").expect("bare host harvest parses");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepKind::ImportFuncs {
+        path,
+        alias,
+        func_names,
+        type_names,
+    } = &steps[0].kind
+    else {
+        panic!("expected ImportFuncs, got {:?}", steps[0].kind);
+    };
+    assert_eq!(path, "STD");
+    assert_eq!(alias, &None);
+    assert!(func_names.is_empty());
+    assert_eq!(type_names, &["PIPE".to_string()]);
+}
+
+#[test]
 fn file_import_from_aliased_form() {
     let steps = parse("IMPORT [[FOO FROM \"lib.oxdock\" AS H]]\n").expect("aliased FROM parses");
     assert_eq!(steps.len(), 1, "{steps:?}");

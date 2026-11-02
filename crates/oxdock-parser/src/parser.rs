@@ -4718,23 +4718,29 @@ fn parse_from_entry(inner: &[Tok]) -> Option<HarvestImport> {
     } else {
         func_names.push(name);
     }
-    // Tail: `"path"` with an optional gapped `AS ALIAS`.
+    // Tail: `"path"` or bare `MODULE` with an optional gapped `AS ALIAS`.
+    // Quoted is a file path (module fallback only when no file matches);
+    // bare is a host module (no file probe ambiguity).
     let tail = &dense[from + 1..];
+    let path_text = |tok: &Tok| match &tok.kind {
+        TokKind::Str { text, .. } => Some(text.clone()),
+        TokKind::Word(w) if is_upper_ident(w) => Some(w.clone()),
+        _ => None,
+    };
     match tail {
         [path_tok] => {
-            let TokKind::Str { text, .. } = &path_tok.kind else {
-                return None;
-            };
+            let text = path_text(path_tok)?;
             Some(HarvestImport {
                 func_names,
                 type_names,
-                path: text.clone(),
+                path: text,
                 alias: None,
             })
         }
         [path_tok, as_tok, alias_tok] if !as_tok.joint && !alias_tok.joint => {
-            let (TokKind::Str { text, .. }, TokKind::Word(as_word), TokKind::Word(alias_word)) =
-                (&path_tok.kind, &as_tok.kind, &alias_tok.kind)
+            let text = path_text(path_tok)?;
+            let (TokKind::Word(as_word), TokKind::Word(alias_word)) =
+                (&as_tok.kind, &alias_tok.kind)
             else {
                 return None;
             };
@@ -4744,7 +4750,7 @@ fn parse_from_entry(inner: &[Tok]) -> Option<HarvestImport> {
             Some(HarvestImport {
                 func_names,
                 type_names,
-                path: text.clone(),
+                path: text,
                 alias: Some(alias_word.clone()),
             })
         }

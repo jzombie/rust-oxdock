@@ -47,7 +47,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |
 | [`CONTINUE`](#continue) | `CONTINUE` |
-| [`IMPORT`](#import) | `IMPORT [<module>, ...] \| IMPORT <module> \| IMPORT ["<path>" AS <ALIAS>] \| IMPORT [<module \| "<path>" AS <ALIAS> \| [F, ... FROM "<path>" (AS <ALIAS>)?]>, ...]` |
+| [`IMPORT`](#import) | `IMPORT [<module>, ...] \| IMPORT <module> \| IMPORT ["<path>" AS <ALIAS>] \| IMPORT [<module \| "<path>" AS <ALIAS> \| [F, ... FROM ("<path>" \| <module>) (AS <ALIAS>)?]>, ...]` |
 
 ### WITH_IO
 
@@ -1330,7 +1330,7 @@ ASSERT_EQ $body "b"
 
 Bring module functions into bare-call scope; import script files and types.
 
-**Syntax:** `IMPORT [<module>, ...] | IMPORT <module> | IMPORT ["<path>" AS <ALIAS>] | IMPORT [<module | "<path>" AS <ALIAS> | [F, ... FROM "<path>" (AS <ALIAS>)?]>, ...]`
+**Syntax:** `IMPORT [<module>, ...] | IMPORT <module> | IMPORT ["<path>" AS <ALIAS>] | IMPORT [<module | "<path>" AS <ALIAS> | [F, ... FROM ("<path>" | <module>) (AS <ALIAS>)?]>, ...]`
 
 Every function call names its module (`STD::GLOB(...)`,
 `MOCK::READ_CSV(...)`) unless the module is imported:
@@ -1354,7 +1354,13 @@ unexported means private, and variables are never
 exportable. `EXPORT TYPE` names cross the same way as bare
 globals (like host types): a whole-file import persists
 every exported alias, so `LET $p: PERSON` works after any
-import of its file. Each file initializes once; every alias
+import of its file. Concretely, a library file holding
+`TYPE PERSON = MAP<name: STRING>` plus
+`EXPORT TYPE PERSON` pairs with an importer holding
+`IMPORT ["lib.oxdock" AS LIB]` plus
+`LET $p: PERSON = {name: "Ada"}` (and selective harvests
+spell it `IMPORT [[TYPE PERSON FROM "lib.oxdock"]]`).
+Each file initializes once; every alias
 shares the module's top-level bindings. The file must
 exist when the run starts: generated imports are
 rejected before the first step.
@@ -1373,23 +1379,27 @@ optionally `AS ALIAS`) define only the named top-level
 functions, which must be `EXPORT`ed (harvesting a
 defined-but-unexported name fails upfront): bare into the
 current scope, or namespaced under the alias. Type
-harvests use the same shape with an explicit kind
-(`IMPORT [[TYPE PERSON FROM "x.oxdock"]]`,
-`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`; bare
-stays func): harvested types must be `EXPORT TYPE`d and
+and function harvests combine in one entry
+(`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`):
+harvested types must be `EXPORT TYPE`d and
 persist bare globally, so `FUNC` signatures using custom
 aliases keep working without a lobotomy. A single
 name needs no inner brackets (`IMPORT [FOO FROM
 "x.oxdock"]`); several keep `[[F, G FROM ...]]` so the
-comma stays grouped in its own scope. The file
+comma stays grouped in its own scope. Several harvests
+group the same way (`IMPORT [[TYPE A FROM STD],
+[TYPE B FROM STD]]`, file or host alike). The file
 body never executes, so harvesting is side-effect free;
 the file's own nested imports still load, keeping helpers
 working. Harvests produce no value and never appear in
-value positions. Host plugin types share the same
-spelling (`IMPORT [[TYPE TAG FROM "TEST"]]` where TEST
-is a known host module): the import validates the type
-resolves globally and records no file, so scripts and
-plugins meet through one `TYPE` directory.
+value positions. Host library types take a bare module
+(`IMPORT [TYPE PIPE FROM STD]`): the import validates the
+type resolves globally and records no file, so scripts and
+plugins meet through one `TYPE` directory. Host types stay
+global with or without the harvest: the explicit form only
+documents the dependency and fails fast on typos. Quoted
+`FROM "STD"` still parses for backcompat, but bare is
+preferred: quoted means a file path, bare means a library.
 
 Paths resolve workspace-side, against the importing
 file's directory (the entry file's parent at top level;
@@ -1495,6 +1505,25 @@ EXPORT TYPE PERSON
 LET $p: PERSON = {name: "Ada"}
 LET $greeting: STRING = GREET($p)
 ASSERT_EQ $greeting "hi Ada"
+```
+
+**Example: import type from library**
+
+```oxdock
+# One bracket mixes entry kinds: STD brings functions bare,
+# each harvest names a type. Types resolve globally with
+# or without the harvests; the explicit form only documents
+# the dependency, so this grouping is example only. Bare
+# FROM names a library; quoted FROM names a file path.
+IMPORT [STD, [TYPE PIPE FROM STD], [TYPE DURATION FROM STD]]
+
+LET $p: PIPE
+WITH_IO [stdout=$p] ECHO hello
+WITH_IO [stdin=$p] READ_LINE $line
+ASSERT_EQ $line "hello"
+
+LET $d: DURATION = "5s"
+LET $files: LIST<STRING> = GLOB("*.oxdock")
 ```
 
 **Example: export unknown type fails**
