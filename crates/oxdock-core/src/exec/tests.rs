@@ -8013,6 +8013,33 @@ fn is_main_distinguishes_entry_from_module() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "current_exe is an unsupported isolation operation under Miri"
+)]
+fn interpreter_reports_running_binary() {
+    // The running binary resolves to a non-empty path: scripts use it
+    // to reinvoke the interpreter on another script.
+    let fs = MockFs::new();
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD]
+        LET $exe: STRING = INTERPRETER()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("INTERPRETER resolves the running binary");
+    let exe = bindings
+        .get("exe")
+        .and_then(|v| v.as_str())
+        .expect("INTERPRETER binds a string");
+    assert!(!exe.is_empty(), "interpreter path is non-empty");
+}
+
+#[test]
 fn file_import_state_shared_through_nested_imports() {
     // A nested import initializes the same shared module: the entry's
     // view of the helper sees mutations made through the lib's view.

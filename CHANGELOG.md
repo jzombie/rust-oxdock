@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - External script imports: files load as modules via `IMPORT ["lib.oxdock" AS LIB]` (whole-file namespace) or selective harvests (`IMPORT [FOO FROM "lib.oxdock"]`, `IMPORT [TYPE T, FUNC F FROM "lib.oxdock"]`, grouped `IMPORT [[A FROM "x"], [B FROM "y"]]`). Only `EXPORT`ed `FUNC`s and `EXPORT TYPE`d aliases cross the boundary; host library types harvest with a bare module (`IMPORT [TYPE T FROM STD]`).
 - `STD::IS_MAIN() -> BOOL`: true at entry top level and inside entry-owned functions, false inside module-owned functions and module init bodies. Lets a library double as a runnable demo (`IF IS_MAIN()`).
+- `STD::INTERPRETER() -> STRING`: path of the running interpreter binary, so one script can reinvoke the engine on another script (`RUN [$exe, "other.oxdock"]`). Unsupported under Miri isolation.
 
 ### Changed
 

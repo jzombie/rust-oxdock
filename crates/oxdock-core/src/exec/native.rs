@@ -400,6 +400,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Eof::registration(),
             TaskPoll::registration(),
             Version::registration(),
+            Interpreter::registration(),
             TextTrim::registration(),
             TextTrimPrefix::registration(),
             TextTrimSuffix::registration(),
@@ -1844,6 +1845,45 @@ fn type_describe<P: ProcessManager>(
         return Ok(Value::map(map));
     }
     Err(anyhow::anyhow!("unknown type {name}"))
+}
+
+/// Path of the running interpreter binary.
+///
+/// Returns the executing binary as a `STRING`, so one script can
+/// reinvoke the interpreter on another script without bridging an env
+/// var. The pattern is: compose the child script with `WRITE`, then
+/// run it under the interpreter with the exec form:
+///
+/// ```text
+/// # Assemble the child script dynamically: the parent interpolates
+/// # its own bindings into the child source, then runs it.
+/// LET $exe: STRING = INTERPRETER()
+/// LET $who: STRING = "Ada"
+/// WRITE child.oxfile """
+///     ECHO "hello {{ $who }}!"
+///     """
+/// LET $out: STRING = RUN [$exe, "child.oxfile"]
+/// ASSERT_CONTAINS $out "hello Ada!"
+/// ```
+///
+/// (Shown as `text`: fence runners execute against a harness binary,
+/// not a CLI, so reinvocation only runs under a real interpreter.)
+/// Unsupported under Miri isolation: the lookup itself fails there
+/// instead of returning a path.
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "self",
+    code = r###"
+    # The running interpreter resolves to a non-empty path.
+    IMPORT [STD]
+    LET $exe: STRING = INTERPRETER()
+    LET $nonempty: BOOL = $exe != ""
+    ASSERT_EQ $nonempty true
+    "###
+)]
+fn interpreter() -> Result<Value> {
+    Ok(Value::string(oxdock_process::interpreter_exe()?))
 }
 
 /// Report whether the current context is the entry script.

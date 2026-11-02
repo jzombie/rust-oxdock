@@ -4528,6 +4528,51 @@ LET $flag: INT = INT(true)
 ASSERT_EQ $flag 1
 ```
 
+### STD::INTERPRETER
+
+Path of the running interpreter binary.
+
+Returns the executing binary as a `STRING`, so one script can
+reinvoke the interpreter on another script without bridging an env
+var. The pattern is: compose the child script with `WRITE`, then
+run it under the interpreter with the exec form:
+
+```text
+# Assemble the child script dynamically: the parent interpolates
+# its own bindings into the child source, then runs it.
+LET $exe: STRING = INTERPRETER()
+LET $who: STRING = "Ada"
+WRITE child.oxfile """
+    ECHO "hello {{ $who }}!"
+    """
+LET $out: STRING = RUN [$exe, "child.oxfile"]
+ASSERT_CONTAINS $out "hello Ada!"
+```
+
+(Shown as `text`: fence runners execute against a harness binary,
+not a CLI, so reinvocation only runs under a real interpreter.)
+Unsupported under Miri isolation: the lookup itself fails there
+instead of returning a path.
+
+
+**Signature:** `STD::INTERPRETER() -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: self**
+
+```oxdock
+# The running interpreter resolves to a non-empty path.
+IMPORT [STD]
+LET $exe: STRING = INTERPRETER()
+LET $nonempty: BOOL = $exe != ""
+ASSERT_EQ $nonempty true
+```
+
 ### STD::IS_EXEC
 
 Report whether a name resolves to an executable file (#100).

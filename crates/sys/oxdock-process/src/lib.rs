@@ -33,7 +33,9 @@ pub use expand::{
 };
 pub use oxdock_sys_test_utils::TestEnvGuard;
 pub use pump::{CancelGuard, CancelHub, PUMP_CHUNK, read_pump_chunk, run_guarded};
-pub use shell::{ShellLauncher, batch_shell, shell_program, spawn_interactive_shell};
+pub use shell::{
+    ShellLauncher, batch_shell, interpreter_exe, shell_program, spawn_interactive_shell,
+};
 pub use shell_manager::ShellProcessManager;
 
 #[cfg(feature = "mock-process")]
