@@ -11,6 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - Empty strings coerce to `false` for `BOOL` instead of failing: `LET $dry: BOOL = "{{ env:RELEASE_DRY_RUN }}"` reads a declared-but-absent flag as false, so `BOOL` flags stay total under absent-means-empty. `gha-rust-release.oxfile` now branches on `IF !$dry` / `IF !$bins` directly instead of comparing against the `"false"` string, and the `IF $x == "false"` string-compare shape is retired in favor of the coercion (note the flip side of totality: an unbridged name now takes the publish branch, so CI keeps bridging `RELEASE_DRY_RUN` explicitly).
 
+### Dependencies
+
+- Bump `pulldown-cmark` 0.13.5 → 0.13.6 (RUSTSEC-2026-0433).
+
 ## [0.33.0-alpha] - 2026-11-01
 
 ### Added
