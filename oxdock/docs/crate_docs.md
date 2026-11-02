@@ -2446,7 +2446,7 @@ ASSERT_EQ $body "b"
 
 ### IMPORT
 
-Bring module functions into bare-call scope; import script files.
+Bring module functions into bare-call scope; import script files and types.
 
 **Syntax:** `IMPORT [<module>, ...] | IMPORT <module> | IMPORT ["<path>" AS <ALIAS>] | IMPORT [<module | "<path>" AS <ALIAS> | [F, ... FROM "<path>" (AS <ALIAS>)?]>, ...]`
 
@@ -2469,7 +2469,10 @@ extension): the alias is mandatory and becomes the
 namespace (`LIB::FOO`), with no filename inference.
 Only `EXPORT`ed top-level `FUNC`s cross the boundary:
 unexported means private, and variables are never
-exportable. Each file initializes once; every alias
+exportable. `EXPORT TYPE` names cross the same way as bare
+globals (like host types): a whole-file import persists
+every exported alias, so `LET $p: PERSON` works after any
+import of its file. Each file initializes once; every alias
 shares the module's top-level bindings. The file must
 exist when the run starts: generated imports are
 rejected before the first step.
@@ -2487,14 +2490,24 @@ Selective harvests (`IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
 optionally `AS ALIAS`) define only the named top-level
 functions, which must be `EXPORT`ed (harvesting a
 defined-but-unexported name fails upfront): bare into the
-current scope, or namespaced under the alias. A single
+current scope, or namespaced under the alias. Type
+harvests use the same shape with an explicit kind
+(`IMPORT [[TYPE PERSON FROM "x.oxdock"]]`,
+`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`; bare
+stays func): harvested types must be `EXPORT TYPE`d and
+persist bare globally, so `FUNC` signatures using custom
+aliases keep working without a lobotomy. A single
 name needs no inner brackets (`IMPORT [FOO FROM
 "x.oxdock"]`); several keep `[[F, G FROM ...]]` so the
 comma stays grouped in its own scope. The file
 body never executes, so harvesting is side-effect free;
 the file's own nested imports still load, keeping helpers
 working. Harvests produce no value and never appear in
-value positions.
+value positions. Host plugin types share the same
+spelling (`IMPORT [[TYPE TAG FROM "TEST"]]` where TEST
+is a known host module): the import validates the type
+resolves globally and records no file, so scripts and
+plugins meet through one `TYPE` directory.
 
 Paths resolve workspace-side, against the importing
 file's directory (the entry file's parent at top level;
@@ -2516,10 +2529,17 @@ callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`) and as
 the file's importable interface: only exported names
 cross a file-import boundary, and an entry can re-export
 an import (`IMPORT ["x.oxdock" AS A]` then `EXPORT
-A::FOO`) to promote it to its own tool surface. Serving
-resolves re-exports through the registry, so a name the
-file never exported fails tool setup instead of serving
-a dead tool. Single-file scope otherwise; see the MCP
+A::FOO`) to promote it to its own tool surface. `EXPORT
+TYPE` marks top-level aliases the same way (`EXPORT TYPE
+PERSON`, `EXPORT TYPE [A, B]`, mixed `EXPORT [TYPE A,
+FUNC B]`): only exported aliases cross, so `FUNC`
+signatures using custom types survive imports instead of
+losing their spelling. Serving resolves re-exports through
+the registry, so a name the file never exported fails tool
+setup instead of serving a dead tool. The MCP server skips
+`TYPE` exports when building tools (no confusion between a
+type and a function) while still resolving imported types
+for signatures. Single-file scope otherwise; see the MCP
 host for consumption.
 
 

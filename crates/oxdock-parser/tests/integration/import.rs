@@ -356,6 +356,115 @@ fn export_duplicate_fails() {
 }
 
 #[test]
+fn export_type_single_and_list_forms() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            TYPE PERSON = MAP<name: STRING>
+            EXPORT TYPE PERSON
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("single TYPE export parses");
+    assert!(parsed.exports.is_empty());
+    assert_eq!(parsed.type_exports, vec!["PERSON".to_string()]);
+
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            TYPE A = STRING
+            TYPE B = INT
+            EXPORT TYPE [A, B]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("TYPE list export parses");
+    assert_eq!(parsed.type_exports, vec!["A".to_string(), "B".to_string()]);
+}
+
+#[test]
+fn export_mixed_type_and_func_list_parses() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            TYPE PERSON = MAP<name: STRING>
+            FUNC MAKE() {
+                RETURN "x"
+            }
+            EXPORT [TYPE PERSON, MAKE]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("mixed TYPE/FUNC export parses");
+    assert_eq!(parsed.exports, vec!["MAKE".to_string()]);
+    assert_eq!(parsed.type_exports, vec!["PERSON".to_string()]);
+}
+
+#[test]
+fn export_type_unknown_name_fails() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        "EXPORT TYPE MISSING\n",
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("unknown TYPE export must fail");
+    assert!(
+        err.to_string()
+            .contains("does not match any top-level TYPE"),
+        "{err}"
+    );
+}
+
+#[test]
+fn export_type_duplicate_across_kinds_fails() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            TYPE PERSON = MAP<name: STRING>
+            FUNC PERSON() {
+                RETURN "x"
+            }
+            EXPORT PERSON
+            EXPORT TYPE PERSON
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("duplicate across kinds must fail");
+    assert!(err.to_string().contains("duplicate EXPORT"), "{err}");
+}
+
+#[test]
+fn export_type_reexport_with_local_func_same_name_passes() {
+    // Regression: bare `EXPORT TYPE F` must not be rejected merely
+    // because a local *function* shares the name. Func and type
+    // namespaces are disjoint; the re-export defers to import loading.
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["lib.oxdock" AS LIB]
+            FUNC FOO() {
+                RETURN "x"
+            }
+            EXPORT TYPE FOO
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("TYPE re-export with same-named local func parses");
+    assert_eq!(parsed.type_exports, vec!["FOO".to_string()]);
+}
+
+#[test]
 fn export_cannot_be_guarded() {
     let err = parse(indoc! {r#"
         [env:FOO]
@@ -796,24 +905,77 @@ fn file_import_duplicate_alias_in_one_statement_fails() {
 fn file_import_from_bare_form_harvests() {
     let steps = parse("IMPORT [[FOO, BAR FROM \"lib.oxdock\"]]\n").expect("FROM parses");
     assert_eq!(steps.len(), 1, "{steps:?}");
-    let StepKind::ImportFuncs { path, alias, names } = &steps[0].kind else {
+    let StepKind::ImportFuncs {
+        path,
+        alias,
+        names,
+        type_names,
+    } = &steps[0].kind
+    else {
         panic!("expected ImportFuncs, got {:?}", steps[0].kind);
     };
     assert_eq!(path, "lib.oxdock");
     assert_eq!(alias, &None);
     assert_eq!(names, &["FOO".to_string(), "BAR".to_string()]);
+    assert!(type_names.is_empty());
+}
+
+#[test]
+fn file_import_type_harvest_parses() {
+    let steps = parse("IMPORT [[TYPE PERSON FROM \"lib.oxdock\"]]\n").expect("TYPE harvest parses");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepKind::ImportFuncs {
+        path,
+        alias,
+        names,
+        type_names,
+    } = &steps[0].kind
+    else {
+        panic!("expected ImportFuncs, got {:?}", steps[0].kind);
+    };
+    assert_eq!(path, "lib.oxdock");
+    assert_eq!(alias, &None);
+    assert!(names.is_empty());
+    assert_eq!(type_names, &["PERSON".to_string()]);
+}
+
+#[test]
+fn file_import_mixed_type_func_harvest_parses() {
+    let steps =
+        parse("IMPORT [[TYPE PERSON, FOO FROM \"lib.oxdock\"]]\n").expect("mixed harvest parses");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepKind::ImportFuncs {
+        path,
+        alias,
+        names,
+        type_names,
+    } = &steps[0].kind
+    else {
+        panic!("expected ImportFuncs, got {:?}", steps[0].kind);
+    };
+    assert_eq!(path, "lib.oxdock");
+    assert_eq!(alias, &None);
+    assert_eq!(names, &["FOO".to_string()]);
+    assert_eq!(type_names, &["PERSON".to_string()]);
 }
 
 #[test]
 fn file_import_from_aliased_form() {
     let steps = parse("IMPORT [[FOO FROM \"lib.oxdock\" AS H]]\n").expect("aliased FROM parses");
     assert_eq!(steps.len(), 1, "{steps:?}");
-    let StepKind::ImportFuncs { path, alias, names } = &steps[0].kind else {
+    let StepKind::ImportFuncs {
+        path,
+        alias,
+        names,
+        type_names,
+    } = &steps[0].kind
+    else {
         panic!("expected ImportFuncs, got {:?}", steps[0].kind);
     };
     assert_eq!(path, "lib.oxdock");
     assert_eq!(alias, &Some("H".to_string()));
     assert_eq!(names, &["FOO".to_string()]);
+    assert!(type_names.is_empty());
 }
 
 #[test]
@@ -938,12 +1100,19 @@ fn file_import_from_single_bracket_harvests() {
     // comma stays grouped.
     let steps = parse("IMPORT [FOO FROM \"lib.oxdock\"]\n").expect("single FROM parses");
     assert_eq!(steps.len(), 1, "{steps:?}");
-    let StepKind::ImportFuncs { path, alias, names } = &steps[0].kind else {
+    let StepKind::ImportFuncs {
+        path,
+        alias,
+        names,
+        type_names,
+    } = &steps[0].kind
+    else {
         panic!("expected ImportFuncs, got {:?}", steps[0].kind);
     };
     assert_eq!(path, "lib.oxdock");
     assert_eq!(alias, &None);
     assert_eq!(names, &["FOO".to_string()]);
+    assert!(type_names.is_empty());
 }
 
 #[test]
@@ -951,12 +1120,19 @@ fn file_import_from_single_bracket_aliased() {
     let steps =
         parse("IMPORT [FOO FROM \"lib.oxdock\" AS H]\n").expect("aliased single FROM parses");
     assert_eq!(steps.len(), 1, "{steps:?}");
-    let StepKind::ImportFuncs { path, alias, names } = &steps[0].kind else {
+    let StepKind::ImportFuncs {
+        path,
+        alias,
+        names,
+        type_names,
+    } = &steps[0].kind
+    else {
         panic!("expected ImportFuncs, got {:?}", steps[0].kind);
     };
     assert_eq!(path, "lib.oxdock");
     assert_eq!(alias, &Some("H".to_string()));
     assert_eq!(names, &["FOO".to_string()]);
+    assert!(type_names.is_empty());
 }
 
 #[test]

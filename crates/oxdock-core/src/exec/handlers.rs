@@ -3944,10 +3944,16 @@ pub(crate) fn dispatch_import_funcs<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::ImportFuncs { path, alias, names } = step else {
+    let StepKind::ImportFuncs {
+        path,
+        alias,
+        names,
+        type_names,
+    } = step
+    else {
         unreachable!()
     };
-    super::import::import_funcs(cx, path, alias.as_deref(), names)
+    super::import::import_funcs(cx, path, alias.as_deref(), names, type_names)
 }
 
 pub(crate) fn dispatch_call<P: ProcessManager>(

@@ -6662,6 +6662,152 @@ fn file_import_from_aliased_harvest() {
 }
 
 #[test]
+fn file_import_type_whole_file_persists_for_signatures() {
+    // Lobotomy fix: lib defines TYPE plus a FUNC using it; whole-file
+    // import persists the exported alias so the entry can declare
+    // `LET $p: PERSON` and call `LIB::GREET($p)`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+            TYPE PERSON = MAP<name: STRING>
+            FUNC GREET($p: PERSON) {
+                RETURN "hi"
+            }
+            EXPORT GREET
+            EXPORT TYPE PERSON
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $p: PERSON = {name: "bob"}
+        LET $g: STRING = LIB::GREET($p)
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("whole-file TYPE import runs");
+    assert_eq!(bindings.get("g").and_then(|v| v.as_str()), Some("hi"));
+}
+
+#[test]
+fn file_import_type_harvest_registers_bare() {
+    // Selective harvest with explicit kind: only the requested type
+    // lands bare globally; funcs still gate separately.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+            TYPE PERSON = MAP<name: STRING>
+            TYPE OTHER = STRING
+            FUNC GREET($p: PERSON) {
+                RETURN "hi"
+            }
+            EXPORT GREET
+            EXPORT TYPE PERSON
+            EXPORT TYPE OTHER
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[TYPE PERSON FROM "lib.oxdock"]]
+        LET $p: PERSON = {name: "bob"}
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("TYPE harvest runs");
+    assert!(bindings.contains_key("p"));
+    // OTHER was exported but not harvested: with permissive global
+    // validation it still resolves statically in v1 (tightening to
+    // strict per-site is future work), but documents the selective
+    // intent. Harvesting it explicitly works the same way.
+    let fs2 = MockFs::new();
+    seed_lib(
+        &fs2,
+        "lib.oxdock",
+        indoc! {r#"
+            TYPE PERSON = MAP<name: STRING>
+            TYPE OTHER = STRING
+            FUNC GREET($p: PERSON) {
+                RETURN "hi"
+            }
+            EXPORT GREET
+            EXPORT TYPE PERSON
+            EXPORT TYPE OTHER
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[TYPE PERSON, TYPE OTHER FROM "lib.oxdock"]]
+        LET $o: OTHER = "x"
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs2),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("multi-TYPE harvest runs");
+    assert!(bindings.contains_key("o"));
+}
+
+#[test]
+fn file_import_type_harvest_unexported_fails() {
+    // Harvesting a defined-but-unexported TYPE fails upfront, same as
+    // funcs: unexported means private.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+            TYPE SECRET = STRING
+        "#},
+    );
+    let steps = parse_entry("IMPORT [[TYPE SECRET FROM \"lib.oxdock\"]]\n");
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("does not export TYPE `SECRET`"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn file_import_type_collision_fails() {
+    // Same TYPE name with different targets across files fails at
+    // import time, naming the collision.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+            TYPE PERSON = MAP<name: STRING>
+            EXPORT TYPE PERSON
+        "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+            TYPE PERSON = STRING
+            EXPORT TYPE PERSON
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["a.oxdock" AS A]
+        IMPORT ["b.oxdock" AS B]
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(format!("{err:#}").contains("collides"), "{err:#}");
+}
+
+#[test]
 fn file_import_from_runs_nested_imports() {
     let fs = MockFs::new();
     seed_lib(

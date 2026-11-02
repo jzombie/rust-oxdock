@@ -1501,12 +1501,17 @@ fn emit_stepkind(
         StepKind::ImportFile { path, alias } => {
             quote! { StepKind::ImportFile { path: #path.to_string(), alias: #alias.to_string() } }
         }
-        StepKind::ImportFuncs { path, alias, names } => {
+        StepKind::ImportFuncs {
+            path,
+            alias,
+            names,
+            type_names,
+        } => {
             let alias = match alias {
                 Some(alias) => quote! { Some(#alias.to_string()) },
                 None => quote! { None },
             };
-            quote! { StepKind::ImportFuncs { path: #path.to_string(), alias: #alias, names: vec![#(#names.to_string()),*] } }
+            quote! { StepKind::ImportFuncs { path: #path.to_string(), alias: #alias, names: vec![#(#names.to_string()),*], type_names: vec![#(#type_names.to_string()),*] } }
         }
     }
 }

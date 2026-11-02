@@ -361,6 +361,26 @@ pub fn validate_script_closure<P: ProcessManager>(
     files: &[super::import::ClosureFile],
     exec: &ExecState<P>,
 ) -> Result<()> {
+    // Every file's `EXPORT TYPE` list must name a locally defined alias
+    // in v1 (no lib-level re-exports): entry re-exports are validated
+    // by the MCP host against the closure, since `finish_run` drops
+    // entry export metadata (steps only).
+    for file in files {
+        let mut local = std::collections::HashSet::new();
+        for step in &file.steps {
+            if let StepKind::TypeAlias { name, .. } = &step.kind {
+                local.insert(name.clone());
+            }
+        }
+        for name in &file.type_exports {
+            if !local.contains(name) {
+                anyhow::bail!(
+                    "IMPORT `{}` EXPORT TYPE `{name}` does not match any top-level TYPE in that file",
+                    file.path
+                );
+            }
+        }
+    }
     let mut checker = Checker::new(exec);
     checker.build_env_unions(entry, files);
     checker.collect(entry)?;
@@ -370,9 +390,11 @@ pub fn validate_script_closure<P: ProcessManager>(
                 &file.path,
                 &file.key,
                 site.alias.as_deref(),
-                site.names.as_deref(),
+                site.func_names.as_deref(),
+                site.type_names.as_deref(),
                 &file.steps,
                 &file.exports,
+                &file.type_exports,
             )?;
         }
     }
@@ -1039,20 +1061,25 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// collect under the same owner. Shadowing follows the same
     /// last-wins rule as [`collect_owned`](Self::collect_owned); the
     /// runtime registry remains the enforcer for true duplicates.
+    /// Type harvests gate against `EXPORT TYPE` the same way; types
+    /// persist bare plus qualified (mirroring func views) for later
+    /// `resolve_tag` calls, which read the global alias map.
     fn collect_site(
         &mut self,
         file: &str,
         module: &str,
         alias: Option<&str>,
-        names: Option<&[String]>,
+        func_names: Option<&[String]>,
+        type_names: Option<&[String]>,
         steps: &[Step],
         exports: &[String],
+        type_exports: &[String],
     ) -> Result<()> {
         if !self.module_lets.contains_key(module) {
             let lets = module_lets(steps, self.exec)?;
             self.module_lets.insert(module.to_string(), lets);
         }
-        if let Some(names) = names {
+        if let Some(names) = func_names {
             let defined: Vec<&str> = steps
                 .iter()
                 .filter_map(|step| match &step.kind {
@@ -1069,6 +1096,23 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
             }
         }
+        if let Some(type_names) = type_names {
+            let defined_types: Vec<&str> = steps
+                .iter()
+                .filter_map(|step| match &step.kind {
+                    StepKind::TypeAlias { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for name in type_names {
+                if !defined_types.iter().any(|d| d == name) {
+                    bail!("IMPORT `{file}` has no such TYPE `{name}`");
+                }
+                if !type_exports.iter().any(|e| e == name) {
+                    bail!("IMPORT `{file}` does not export TYPE `{name}`");
+                }
+            }
+        }
         let exported: std::collections::HashSet<&str> =
             exports.iter().map(|e| e.as_str()).collect();
         for step in steps {
@@ -1082,7 +1126,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 if !exported.contains(name.as_str()) {
                     continue;
                 }
-                if let Some(names) = names
+                if let Some(names) = func_names
                     && !names.iter().any(|n| n == name)
                 {
                     continue;
@@ -1116,7 +1160,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // Harvests never execute the file body: any wanted function
         // that observes module state has nothing to read, so fail the
         // site with the fix attached.
-        if let Some(names) = names {
+        if let Some(names) = func_names {
             for name in names {
                 let key = match alias {
                     Some(alias) => format!("{alias}::{name}"),

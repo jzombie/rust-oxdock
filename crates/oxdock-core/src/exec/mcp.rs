@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use oxdock_parser::{Expr, ParsedScript};
+use oxdock_parser::{Expr, ParsedScript, StepKind};
 use oxdock_process::{CommandStdin, ProcessManager, SharedOutput};
 
 use super::handlers::call_func_value;
@@ -93,11 +93,41 @@ impl<P: ProcessManager> McpSession<P> {
         let saved_aliases = state.type_aliases.clone();
         let closure = super::import::expand_import_closure(&mut state, &parsed.steps)?;
         for file in &closure {
-            for (name, target) in super::typing::collect_type_aliases(&file.steps, &state)? {
-                state.type_aliases.insert(name, target);
+            let aliases = super::typing::collect_type_aliases(&file.steps, &state)?;
+            for (name, target) in &aliases {
+                state.type_aliases.insert(name.clone(), target.clone());
             }
         }
         super::static_check::validate_script_closure(&parsed.steps, &closure, &state)?;
+        // Entry `EXPORT TYPE` names must be locally defined or re-exported
+        // from the closure (bare re-exports only in v1; qualified stays
+        // future). MCP skips types for tools, but typos still fail here.
+        {
+            let mut local = std::collections::HashSet::new();
+            for step in &parsed.steps {
+                if let StepKind::TypeAlias { name, .. } = &step.kind {
+                    local.insert(name.clone());
+                }
+            }
+            let mut exported_available = std::collections::HashSet::new();
+            for file in &closure {
+                for name in &file.type_exports {
+                    exported_available.insert(name.clone());
+                }
+            }
+            for name in &parsed.type_exports {
+                if name.contains("::") {
+                    anyhow::bail!(
+                        "EXPORT TYPE `{name}` must be bare in v1 (qualified ALIAS::TYPE stays future work)"
+                    );
+                }
+                if !local.contains(name) && !exported_available.contains(name) {
+                    anyhow::bail!(
+                        "EXPORT TYPE `{name}` matches no local TYPE and no imported file exports it"
+                    );
+                }
+            }
+        }
         state.type_aliases = saved_aliases;
 
         let assert_windows = Arc::clone(&state.assert_windows);

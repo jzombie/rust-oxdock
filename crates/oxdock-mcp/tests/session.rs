@@ -35,6 +35,28 @@ fn init_session(script: &str) -> McpSession<oxdock_process::DefaultProcessManage
     .expect("session init")
 }
 
+#[test]
+fn type_exports_skip_tools_but_resolve_signatures() {
+    // MCP never confuses a type for a function: `EXPORT TYPE` skips the
+    // tool table, while `FUNC` signatures using the alias still resolve
+    // (no lobotomy) and serve.
+    let session = init_session(indoc! {r#"
+        TYPE PERSON = MAP<name: STRING>
+        FUNC GREET($p: PERSON) {
+            RETURN "hi"
+        }
+        EXPORT GREET
+        EXPORT TYPE PERSON
+    "#});
+    let metas = session.tool_metas().expect("metas");
+    assert_eq!(
+        metas.len(),
+        1,
+        "only FUNCs serve as tools, not TYPEs: {metas:?}"
+    );
+    assert_eq!(metas[0].name, "SCRIPT::GREET");
+}
+
 fn handler_config(script: &str) -> (McpServerConfig, GuardedPath) {
     let (_fs, root) = test_fs();
     let script_path = root.join("tools.oxdock").expect("script path");

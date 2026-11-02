@@ -512,8 +512,13 @@ fn finish_run<P: ProcessManager>(
     let saved_aliases = state.type_aliases.clone();
     let closure = self::import::expand_import_closure(&mut state, steps)?;
     for file in &closure {
-        for (name, target) in self::typing::collect_type_aliases(&file.steps, &state)? {
-            state.type_aliases.insert(name, target);
+        let aliases = self::typing::collect_type_aliases(&file.steps, &state)?;
+        // Validation is permissive (global) for v1: all file aliases
+        // merge bare, like host types. Runtime persistence stays strict
+        // (only exported + imported persist); static gating for
+        // harvests (unexported fails) lives in `collect_site`.
+        for (name, target) in &aliases {
+            state.type_aliases.insert(name.clone(), target.clone());
         }
     }
     static_check::validate_script_closure(steps, &closure, &state)?;

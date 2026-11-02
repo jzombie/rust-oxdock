@@ -1770,8 +1770,13 @@ fn dispatch_flow_step<P: ProcessManager>(
             let _ = super::import::import_file(cx, path, alias)?;
             Ok(Flow::Done)
         }
-        StepKind::ImportFuncs { path, alias, names } => {
-            super::import::import_funcs(cx, path, alias.as_deref(), names)?;
+        StepKind::ImportFuncs {
+            path,
+            alias,
+            names,
+            type_names,
+        } => {
+            super::import::import_funcs(cx, path, alias.as_deref(), names, type_names)?;
             Ok(Flow::Done)
         }
         StepKind::While { cond, body } => handlers::while_loop(cx, cond, body),

@@ -237,6 +237,9 @@ pub(super) struct ScopeSnapshot {
 pub(super) struct ModuleRecord {
     pub(super) steps: Vec<Step>,
     pub(super) exports: Vec<String>,
+    /// `EXPORT TYPE` names in source order. Separate from func exports
+    /// so the MCP server never confuses a type for a tool.
+    pub(super) type_exports: Vec<String>,
     /// Directory relative paths in module-owned code resolve against:
     /// the module file's parent. `None` falls back to the run cwd.
     /// Entry code always resolves ambiently, so an inline temp script

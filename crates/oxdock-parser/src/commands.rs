@@ -1091,6 +1091,7 @@ declare_commands! {
             path: String,
             alias: Option<String>,
             names: Vec<String>,
+            type_names: Vec<String>,
         },
         While { cond: Box<Expr>, body: Vec<Step> },
         Break,
@@ -3600,7 +3601,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         CommandMeta {
             name: KEYWORD_IMPORT,
             syntax: "IMPORT [<module>, ...] | IMPORT <module> | IMPORT [\"<path>\" AS <ALIAS>] | IMPORT [<module | \"<path>\" AS <ALIAS> | [F, ... FROM \"<path>\" (AS <ALIAS>)?]>, ...]",
-            summary: "Bring module functions into bare-call scope; import script files.",
+            summary: "Bring module functions into bare-call scope; import script files and types.",
             description: indoc! {r#"
                 Every function call names its module (`STD::GLOB(...)`,
                 `MOCK::READ_CSV(...)`) unless the module is imported:
@@ -3621,7 +3622,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 namespace (`LIB::FOO`), with no filename inference.
                 Only `EXPORT`ed top-level `FUNC`s cross the boundary:
                 unexported means private, and variables are never
-                exportable. Each file initializes once; every alias
+                exportable. `EXPORT TYPE` names cross the same way as bare
+                globals (like host types): a whole-file import persists
+                every exported alias, so `LET $p: PERSON` works after any
+                import of its file. Each file initializes once; every alias
                 shares the module's top-level bindings. The file must
                 exist when the run starts: generated imports are
                 rejected before the first step.
@@ -3639,14 +3643,24 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 optionally `AS ALIAS`) define only the named top-level
                 functions, which must be `EXPORT`ed (harvesting a
                 defined-but-unexported name fails upfront): bare into the
-                current scope, or namespaced under the alias. A single
+                current scope, or namespaced under the alias. Type
+                harvests use the same shape with an explicit kind
+                (`IMPORT [[TYPE PERSON FROM "x.oxdock"]]`,
+                `IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`; bare
+                stays func): harvested types must be `EXPORT TYPE`d and
+                persist bare globally, so `FUNC` signatures using custom
+                aliases keep working without a lobotomy. A single
                 name needs no inner brackets (`IMPORT [FOO FROM
                 "x.oxdock"]`); several keep `[[F, G FROM ...]]` so the
                 comma stays grouped in its own scope. The file
                 body never executes, so harvesting is side-effect free;
                 the file's own nested imports still load, keeping helpers
                 working. Harvests produce no value and never appear in
-                value positions.
+                value positions. Host plugin types share the same
+                spelling (`IMPORT [[TYPE TAG FROM "TEST"]]` where TEST
+                is a known host module): the import validates the type
+                resolves globally and records no file, so scripts and
+                plugins meet through one `TYPE` directory.
 
                 Paths resolve workspace-side, against the importing
                 file's directory (the entry file's parent at top level;
@@ -3668,10 +3682,17 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 the file's importable interface: only exported names
                 cross a file-import boundary, and an entry can re-export
                 an import (`IMPORT ["x.oxdock" AS A]` then `EXPORT
-                A::FOO`) to promote it to its own tool surface. Serving
-                resolves re-exports through the registry, so a name the
-                file never exported fails tool setup instead of serving
-                a dead tool. Single-file scope otherwise; see the MCP
+                A::FOO`) to promote it to its own tool surface. `EXPORT
+                TYPE` marks top-level aliases the same way (`EXPORT TYPE
+                PERSON`, `EXPORT TYPE [A, B]`, mixed `EXPORT [TYPE A,
+                FUNC B]`): only exported aliases cross, so `FUNC`
+                signatures using custom types survive imports instead of
+                losing their spelling. Serving resolves re-exports through
+                the registry, so a name the file never exported fails tool
+                setup instead of serving a dead tool. The MCP server skips
+                `TYPE` exports when building tools (no confusion between a
+                type and a function) while still resolving imported types
+                for signatures. Single-file scope otherwise; see the MCP
                 host for consumption.
             "#},
             args: &[],
@@ -4136,16 +4157,30 @@ impl fmt::Display for StepKind {
             StepKind::ImportFile { path, alias } => {
                 write!(f, "IMPORT [\"{}\" AS {}]", path, alias)
             }
-            StepKind::ImportFuncs { path, alias, names } => match alias {
-                Some(alias) => write!(
-                    f,
-                    "IMPORT [[{} FROM \"{}\" AS {}]]",
-                    names.join(", "),
-                    path,
-                    alias
-                ),
-                None => write!(f, "IMPORT [[{} FROM \"{}\"]]", names.join(", "), path),
-            },
+            StepKind::ImportFuncs {
+                path,
+                alias,
+                names,
+                type_names,
+            } => {
+                let mut parts: Vec<String> = Vec::new();
+                for t in type_names {
+                    parts.push(format!("TYPE {t}"));
+                }
+                for n in names {
+                    parts.push(n.clone());
+                }
+                match alias {
+                    Some(alias) => write!(
+                        f,
+                        "IMPORT [[{} FROM \"{}\" AS {}]]",
+                        parts.join(", "),
+                        path,
+                        alias
+                    ),
+                    None => write!(f, "IMPORT [[{} FROM \"{}\"]]", parts.join(", "), path),
+                }
+            }
             StepKind::Return { expr } => write!(f, "RETURN {}", expr),
             StepKind::TypeAlias { name, target } => write!(f, "TYPE {} = {}", name, target),
             StepKind::While { cond, body } => {
@@ -4523,7 +4558,9 @@ pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> Parse
 pub(crate) fn validate_exports(
     ctx: &SpanContext,
     exports: &[String],
+    type_exports: &[String],
     top: &HashSet<String>,
+    top_types: &HashSet<String>,
     modules: &ModuleTable,
     top_imports: &[String],
 ) -> ParseResult<()> {
@@ -4533,7 +4570,7 @@ pub(crate) fn validate_exports(
             Some((module, base)) if module == crate::constants::SCRIPT_MODULE_NAME => {
                 top.contains(base)
             }
-            Some((module, base)) => match modules.modules.get(module) {
+            Some((module, _base)) => match modules.modules.get(module) {
                 None => {
                     // File-import aliases (#115) never enter the module
                     // table: a re-export names an imported function for
@@ -4545,13 +4582,46 @@ pub(crate) fn validate_exports(
                     top_imports.iter().any(|m| m == module)
                 }
                 Some(None) => true,
-                Some(Some(funcs)) => funcs.functions.contains(base),
+                Some(Some(funcs)) => funcs.functions.contains(_base),
             },
         };
         if !valid {
             return Err(ParseError::validation(
                 crate::constants::KEYWORD_EXPORT,
                 format!("EXPORT `{name}` does not match any top-level FUNC or known module member"),
+                ctx,
+            ));
+        }
+    }
+    for name in type_exports {
+        // Local TYPE aliases export bare; qualified `ALIAS::TYPE`
+        // re-exports defer existence to import loading (same as func
+        // re-exports), requiring only a visible import alias here.
+        // Bare re-exports of imported types (whole-file types land
+        // bare) defer when the file has imports, so `EXPORT PERSON`
+        // after `IMPORT ["lib" AS LIB]` can promote the imported type.
+        let valid = match name.split_once("::") {
+            None => top_types.contains(name) || !top_imports.is_empty(),
+            Some((module, _base)) => {
+                if module == crate::constants::SCRIPT_MODULE_NAME {
+                    top_types.contains(_base)
+                } else {
+                    match modules.modules.get(module) {
+                        None => top_imports.iter().any(|m| m == module),
+                        // Host modules: types live in the global type
+                        // directory, not the func table. Parse cannot
+                        // know host type membership (descriptors register
+                        // at runtime), so a known module passes here and
+                        // import loading validates the member.
+                        Some(_) => true,
+                    }
+                }
+            }
+        };
+        if !valid {
+            return Err(ParseError::validation(
+                crate::constants::KEYWORD_EXPORT,
+                format!("EXPORT TYPE `{name}` does not match any top-level TYPE"),
                 ctx,
             ));
         }

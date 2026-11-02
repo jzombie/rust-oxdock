@@ -55,6 +55,36 @@ fn run_with_tag_hosts(root: &GuardedPath, script: &str) -> Result<(), anyhow::Er
     engine.run_script(root, script).map(|_| ())
 }
 
+/// Explicit `IMPORT [TYPE TAG FROM "TEST"]` documents the host
+/// dependency the same way script harvests do: the import validates the
+/// type resolves globally and records no file. Bare `LET $t: TAG` keeps
+/// working with or without the explicit line (host types stay global),
+/// but the explicit form fails fast on typos.
+#[test]
+fn host_type_explicit_import_validates_globally() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, TEST]
+        IMPORT [[TYPE TAG FROM "TEST"]]
+        LET $t: TAG = MAKE_TAG()
+        LET $s: STRING = READ_TAG($t)
+        WRITE tag.txt "{{ $s }}"
+    "#};
+    run_with_tag_hosts(&root, script).expect("host TYPE harvest runs");
+    assert_eq!(read_trimmed(&root.join("tag.txt").unwrap()), "demo");
+
+    let err = run_with_tag_hosts(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, TEST]
+            IMPORT [[TYPE NOPE FROM "TEST"]]
+        "#},
+    )
+    .expect_err("unknown host TYPE must fail");
+    assert!(err.to_string().contains("has no such TYPE `NOPE`"), "{err}");
+}
+
 fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
     temp.as_guarded_path().clone()
 }
