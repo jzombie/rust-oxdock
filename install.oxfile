@@ -75,6 +75,14 @@ IF $has_piped {
     [family:windows] $filename = "{{ $stem }}.exe"
     LET $dest: STRING = PATH_JOIN($dir, $filename)
 
+    # One summary block: shared indent dedents to the closing
+    # baseline, the deeper detail lines keep their offset.
+    LET $summary: STRING = """
+        installed {{ $stem }} {{ env:OXDOCK_VERSION }} to {{ $dir }}
+          binary: {{ $dest }}
+          ensure {{ $dir }} is on PATH
+        """
+
     # Verify and place. The CI tail runs only on the fresh pass
     # below, never here: the old engine must not touch CI files.
     IF $skip {
@@ -84,13 +92,6 @@ IF $has_piped {
             INSTALL $bin $dest
         }
 
-        # One summary block: shared indent dedents to the closing
-        # baseline, the deeper detail lines keep their offset.
-        LET $summary: STRING = """
-            installed {{ $stem }} {{ env:OXDOCK_VERSION }} to {{ $dir }}
-              binary: {{ $dest }}
-              ensure {{ $dir }} is on PATH
-            """
         ECHO $summary
 
         # CI smoke and PATH publish, fresh engine only. Strict nest:
@@ -153,11 +154,6 @@ IF $has_piped {
 
         INSTALL $bin $dest
 
-        LET $summary: STRING = """
-            installed {{ $stem }} {{ env:OXDOCK_VERSION }} to {{ $dir }}
-              binary: {{ $dest }}
-              ensure {{ $dir }} is on PATH
-            """
         ECHO $summary
     }
 }
