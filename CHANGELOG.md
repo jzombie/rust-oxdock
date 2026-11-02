@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [UNRELEASED]
 
+### Added
+
+- External script imports: files load as modules via `IMPORT ["lib.oxdock" AS LIB]` (whole-file namespace) or selective harvests (`IMPORT [FOO FROM "lib.oxdock"]`, `IMPORT [TYPE T, FUNC F FROM "lib.oxdock"]`, grouped `IMPORT [[A FROM "x"], [B FROM "y"]]`). Only `EXPORT`ed `FUNC`s and `EXPORT TYPE`d aliases cross the boundary; host library types harvest with a bare module (`IMPORT [TYPE T FROM STD]`).
+
 ### Changed
 
 - Empty strings coerce to `false` for `BOOL` instead of failing: `LET $dry: BOOL = "{{ env:RELEASE_DRY_RUN }}"` reads a declared-but-absent flag as false, so `BOOL` flags stay total under absent-means-empty. `gha-rust-release.oxfile` now branches on `IF !$dry` / `IF !$bins` directly instead of comparing against the `"false"` string, and the `IF $x == "false"` string-compare shape is retired in favor of the coercion (note the flip side of totality: an unbridged name now takes the publish branch, so CI keeps bridging `RELEASE_DRY_RUN` explicitly).
