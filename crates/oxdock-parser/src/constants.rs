@@ -51,7 +51,9 @@ pub const KEYWORD_INSPECT: &str = "INSPECT";
 /// Bare-call scope directive (a lowering directive, not a runtime step).
 pub const KEYWORD_IMPORT: &str = "IMPORT";
 
-/// Reserved for future script-module support; rejected at lowering.
+/// Tool-surface directive: marks script `FUNC`s, qualified host
+/// functions, and `TYPE` aliases for export; membership is validated
+/// against top-level items and imports at lowering.
 pub const KEYWORD_EXPORT: &str = "EXPORT";
 
 /// Interpolation placeholder prefix (`__OXDOCK_INJECT_<n>__`): guard
