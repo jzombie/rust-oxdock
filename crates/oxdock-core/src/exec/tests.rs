@@ -1191,6 +1191,32 @@ fn declared_bool_vs_string_treatment_differs() {
     );
 }
 
+#[test]
+fn bool_coercion_treats_empty_as_false() {
+    // Declared-but-absent env names read empty, and empty coerces to
+    // false instead of failing: BOOL flags stay total, so scripts can
+    // declare a flag once and branch on it directly.
+    let steps = crate::parse_script(indoc! {r#"
+        INHERIT_ENV [OXDOCK_TEST_ABSENT_FLAG]
+        LET $e: BOOL = ""
+        LET $h: BOOL = "{{ env:OXDOCK_TEST_ABSENT_FLAG }}"
+        LET $t: BOOL = "  TRUE  "
+    "#})
+    .expect("parses");
+    let mut io = ExecIo::new();
+    io.remove_inherit_env("OXDOCK_TEST_ABSENT_FLAG");
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        io,
+    )
+    .expect("empty coerces to false");
+    assert_eq!(bindings.get("e").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(bindings.get("h").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(bindings.get("t").and_then(|v| v.as_bool()), Some(true));
+}
+
 #[cfg_attr(
     miri,
     ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"

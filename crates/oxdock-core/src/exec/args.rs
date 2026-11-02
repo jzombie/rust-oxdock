@@ -22,10 +22,16 @@ pub(crate) fn type_mismatch(ctx: &str, expected: &TypeTag, value: &Value) -> any
 }
 
 /// Single BOOL spelling for the whole runtime: trim, case-insensitive
-/// `true`/`false`, plus `1`/`0`. Empty and anything else is `None`
-/// (coercion fails, flag checks default false). One rule, no piecemeal.
+/// `true`/`false`, plus `1`/`0`, plus `yes`/`no`/`on`/`off`. Empty is
+/// `false`, so a declared-but-absent name reads false instead of
+/// failing: BOOL flags stay total under absent-means-empty. Anything
+/// else is `None` (coercion fails, flag checks default false). One
+/// rule, no piecemeal.
 pub(crate) fn parse_bool_str(s: &str) -> Option<bool> {
     let t = s.trim();
+    if t.is_empty() {
+        return Some(false);
+    }
     if t.eq_ignore_ascii_case("true")
         || t.eq_ignore_ascii_case("yes")
         || t.eq_ignore_ascii_case("on")
