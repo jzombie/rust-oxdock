@@ -2787,7 +2787,13 @@ unexported means private, and variables are never
 exportable. `EXPORT TYPE` names cross the same way as bare
 globals (like host types): a whole-file import persists
 every exported alias, so `LET $p: PERSON` works after any
-import of its file. Each file initializes once; every alias
+import of its file. Concretely, a library file holding
+`TYPE PERSON = MAP<name: STRING>` plus
+`EXPORT TYPE PERSON` pairs with an importer holding
+`IMPORT ["lib.oxdock" AS LIB]` plus
+`LET $p: PERSON = {name: "Ada"}` (and selective harvests
+spell it `IMPORT [[TYPE PERSON FROM "lib.oxdock"]]`).
+Each file initializes once; every alias
 shares the module's top-level bindings. The file must
 exist when the run starts: generated imports are
 rejected before the first step.
@@ -2911,6 +2917,43 @@ EXPORT NOSUCH::FOO
 ```
 
 **Expected error:** `does not match any top-level FUNC`
+
+**Example: export type aliases**
+
+```oxdock
+# TYPE aliases declare shapes once; EXPORT TYPE shares
+# them so importing files can use the same spelling.
+TYPE PERSON = MAP<name: STRING>
+
+FUNC GREET($p: PERSON) {
+    RETURN "hi {{ $p.name }}"
+}
+EXPORT GREET
+EXPORT TYPE PERSON
+
+LET $p: PERSON = {name: "Ada"}
+LET $greeting: STRING = GREET($p)
+ASSERT_EQ $greeting "hi Ada"
+```
+
+**Example: export unknown type fails**
+
+```oxdock expect_error:"does not match any top-level TYPE"
+# Only declared TYPE aliases are exportable.
+TYPE PERSON = MAP<name: STRING>
+EXPORT TYPE ANIMAL
+```
+
+**Expected error:** `does not match any top-level TYPE`
+
+**Example: undeclared type fails**
+
+```oxdock expect_error:"unknown type"
+# TYPE names must be declared before use.
+LET $p: PERSON = {name: "Ada"}
+```
+
+**Expected error:** `unknown type`
 
 
 ### WORKDIR

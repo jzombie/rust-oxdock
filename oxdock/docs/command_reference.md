@@ -1479,6 +1479,43 @@ EXPORT NOSUCH::FOO
 
 **Expected error:** `does not match any top-level FUNC`
 
+**Example: export type aliases**
+
+```oxdock
+# TYPE aliases declare shapes once; EXPORT TYPE shares
+# them so importing files can use the same spelling.
+TYPE PERSON = MAP<name: STRING>
+
+FUNC GREET($p: PERSON) {
+    RETURN "hi {{ $p.name }}"
+}
+EXPORT GREET
+EXPORT TYPE PERSON
+
+LET $p: PERSON = {name: "Ada"}
+LET $greeting: STRING = GREET($p)
+ASSERT_EQ $greeting "hi Ada"
+```
+
+**Example: export unknown type fails**
+
+```oxdock expect_error:"does not match any top-level TYPE"
+# Only declared TYPE aliases are exportable.
+TYPE PERSON = MAP<name: STRING>
+EXPORT TYPE ANIMAL
+```
+
+**Expected error:** `does not match any top-level TYPE`
+
+**Example: undeclared type fails**
+
+```oxdock expect_error:"unknown type"
+# TYPE names must be declared before use.
+LET $p: PERSON = {name: "Ada"}
+```
+
+**Expected error:** `unknown type`
+
 
 ### WORKDIR
 
