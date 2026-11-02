@@ -202,8 +202,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      # Latest nightly: the dated pin went away with the upstream
-      # ssh-key E0391 fix (#269, #272). Re-pin deliberately, never drift.
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
