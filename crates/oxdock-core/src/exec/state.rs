@@ -70,6 +70,13 @@ pub struct ExecState<P: ProcessManager> {
     /// state stability.
     pub(super) seed: Arc<HashMap<String, String>>,
     pub(super) cwd: GuardedPath,
+    /// Workspace root the run started with, before any script
+    /// `WORKSPACE` statement. Module-owned function calls reset to it
+    /// (#115): a module must not inherit its caller's workspace, so a
+    /// module that reads outside the default (e.g. the host checkout)
+    /// declares its own `WORKSPACE` in-function. Scope pop restores
+    /// the caller afterwards.
+    pub(super) initial_root: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
     /// Outer-scope env snapshots for `ISOLATED` blocks, innermost last.
     /// Each entry is the script env as it stood at that block's entry, so
@@ -173,6 +180,31 @@ pub struct ExecState<P: ProcessManager> {
     /// registry's own frames (managed by `push_scope`/`pop_scope`);
     /// native entries persist. Shared across `fork()` via clone.
     pub(super) functions: FunctionRegistry<P>,
+    /// Entry script file (#115), when the run started from a file: base
+    /// for top-level relative `IMPORT` paths. `None` for stdin and inline
+    /// runs (imports resolve against the workspace root).
+    pub(super) entry_file: Option<GuardedPath>,
+    /// Active file-import chain (#115), innermost last: cycle detection
+    /// names the full chain, and the importer dir is the top's parent.
+    pub(super) import_stack: Vec<GuardedPath>,
+    /// Registry frame where file-import aliases register (#115): the
+    /// outermost import's caller frame. Nested imports share it so the
+    /// importer's `ALIAS::` bodies keep resolving nested aliases after
+    /// the nested frame pops. `None` outside an import.
+    pub(super) import_alias_frame: Option<usize>,
+    /// One file module per resolved import path (#115): parse once,
+    /// validate once, initialize once. Every alias is a view onto the
+    /// same record and the same shared state.
+    pub(super) modules: HashMap<String, ModuleRecord>,
+    /// Active module context (#115), innermost last: `Some(key)` while
+    /// module-owned code runs (init body or module-owned `FUNC`),
+    /// `None` past an entry-function boundary (entry `FUNC`s stay
+    /// params-only and never see module state). Reads and mutations
+    /// consult the topmost `Some` store after lexical frames miss.
+    pub(super) module_stack: Vec<Option<String>>,
+    /// Parse-time module table (#115): imported files parse with the same
+    /// table as the entry script.
+    pub(super) module_table: oxdock_parser::ModuleTable,
     /// Current nested function-call depth on this thread. Enforced against
     /// `MAX_CALL_DEPTH`; cloned (not reset) by `fork()` so async children
     /// inherit the caller's depth budget.
@@ -195,6 +227,52 @@ pub(super) struct ScopeSnapshot {
     pub(super) cwd: GuardedPath,
     pub(super) root: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
+}
+
+/// One parsed file module (#115), keyed by resolved display path: parse
+/// once, validate once, initialize once. `init` is `None` until the
+/// first import executes the body; every alias is a view onto the
+/// same record and the same shared state.
+#[derive(Clone, Default)]
+pub(super) struct ModuleRecord {
+    pub(super) steps: Vec<Step>,
+    pub(super) func_exports: Vec<String>,
+    /// `EXPORT TYPE` names in source order. Separate from func exports
+    /// so the MCP server never confuses a type for a tool.
+    pub(super) type_exports: Vec<String>,
+    /// Directory relative paths in module-owned code resolve against:
+    /// the module file's parent. `None` falls back to the run cwd.
+    /// Entry code always resolves ambiently, so an inline temp script
+    /// keeps operating on the workspace it was pointed at.
+    pub(super) dir: Option<GuardedPath>,
+    pub(super) init: Option<ModuleInit>,
+}
+
+/// Initialized module state (#115): the shared globals every alias of
+/// one file observes. `vars` holds the module body's top-level `LET`
+/// bindings, drained from the init frame when the first import runs;
+/// module-owned `FUNC`s resolve names against `vars` after lexical
+/// frames miss, so one file's functions share one global state instead
+/// of each alias getting a private copy. `return_value` caches the
+/// init body's `RETURN`, so repeated imports bind the same value.
+#[derive(Clone)]
+pub(super) struct ModuleInit {
+    pub(super) vars: HashMap<String, (TypeTag, Value)>,
+    pub(super) return_value: Value,
+    /// Script env the module's functions execute with (#115): the
+    /// session seed plus the init body's own `ENV` contributions
+    /// (captured as a delta against the pre-init map, so
+    /// caller-established values stay out). `INHERIT_ENV` names are
+    /// re-read from the host at each call (see `inherit_names`),
+    /// since a re-inherit of an already-present value leaves no delta
+    /// yet must still admit the name.
+    pub(super) envs: HashMap<String, String>,
+    /// Top-level `INHERIT_ENV` names of the module file, re-established
+    /// from the host on every module-owned call. A module never
+    /// inherits its caller's environment; each file declares what it
+    /// reads, and the values flow from the host (or literals) at
+    /// init/call time.
+    pub(super) inherit_names: Vec<String>,
 }
 
 /// One anonymous background worker: the thread-join handle plus the
@@ -543,7 +621,7 @@ impl<P: ProcessManager> ExecState<P> {
         // zero I/O. The seeded scratch materializes alongside: `HOME` and
         // `TMPDIR` point at it, so children writing temp or profile data
         // must observe real directories, never lexical candidates.
-        let cwd = self.fs.resolve_write(&self.cwd, ".")?;
+        let cwd = self.fs.resolve_write(&self.effective_cwd(), ".")?;
         self.cargo_scratch.ensure_materialized()?;
         Ok(CommandContext::new(
             &cwd.into(),
@@ -628,6 +706,7 @@ impl<P: ProcessManager> ExecState<P> {
             cargo_scratch: self.cargo_scratch.clone(),
             seed: Arc::clone(&self.seed),
             cwd: self.cwd.clone(),
+            initial_root: self.initial_root.clone(),
             envs: Arc::clone(&self.envs),
             bg_children: Vec::new(),
             scope_stack: Vec::new(),
@@ -652,6 +731,12 @@ impl<P: ProcessManager> ExecState<P> {
             cancellable: self.cancellable,
             reap_floor: self.reap_floor,
             functions: self.functions.clone(),
+            entry_file: self.entry_file.clone(),
+            import_stack: self.import_stack.clone(),
+            import_alias_frame: self.import_alias_frame,
+            modules: self.modules.clone(),
+            module_stack: self.module_stack.clone(),
+            module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
             module_states: self.module_states.clone(),
@@ -693,6 +778,13 @@ impl<P: ProcessManager> ExecState<P> {
                 mark_value_pipes_escaped(value);
             }
         }
+        for record in self.modules.values() {
+            if let Some(init) = record.init.as_ref() {
+                for entry in init.vars.values() {
+                    mark_value_pipes_escaped(&entry.1);
+                }
+            }
+        }
     }
 
     pub(super) fn push_var_scope(&mut self) {
@@ -701,6 +793,26 @@ impl<P: ProcessManager> ExecState<P> {
 
     pub(super) fn pop_var_scope(&mut self) {
         self.var_scopes.pop();
+    }
+
+    /// Reset to a module-owned call context (#115): env to the
+    /// module init's stored map, cwd to the defining file's directory,
+    /// workspace root to the run-initial root. A module never inherits
+    /// its caller's context; the surrounding `push_scope` restores the
+    /// caller afterwards. Root switching lives here (not in handlers)
+    /// so workspace demand keeps routing through the resolve choke
+    /// points.
+    pub(super) fn reset_module_context(
+        &mut self,
+        dir: Option<GuardedPath>,
+        envs: HashMap<String, String>,
+    ) {
+        self.envs = Arc::new(envs);
+        if let Some(dir) = dir {
+            self.cwd = dir;
+        }
+        let initial = self.initial_root.clone();
+        self.fs.set_root(&initial);
     }
 
     /// Enter a lexical scope: snapshot cwd/root/envs and open a fresh
@@ -758,6 +870,16 @@ impl<P: ProcessManager> ExecState<P> {
             .iter()
             .rev()
             .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
+            .or_else(|| {
+                self.current_module().and_then(|module| {
+                    self.modules.get(&module).and_then(|record| {
+                        record
+                            .init
+                            .as_ref()
+                            .and_then(|init| init.vars.get(key).map(|(k, _)| k.clone()))
+                    })
+                })
+            })
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "undeclared variable ${key}: declare it first with LET ${key}: TYPE = ..."
@@ -769,6 +891,16 @@ impl<P: ProcessManager> ExecState<P> {
                 slot.1 = coerced;
                 return Ok(());
             }
+        }
+        // Not a lexical binding: update the owning module's shared
+        // store in place, so every alias observes the mutation.
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get_mut(&module)
+            && let Some(init) = record.init.as_mut()
+            && let Some(slot) = init.vars.get_mut(key)
+        {
+            slot.1 = coerced;
+            return Ok(());
         }
         anyhow::bail!("undeclared variable ${key}");
     }
@@ -823,6 +955,16 @@ impl<P: ProcessManager> ExecState<P> {
                 return Some(value.clone());
             }
         }
+        // Module-owned code falls back to the owning module's shared
+        // store (#115): one file's functions share one global state.
+        // Entry code never sees it (its boundary pushes `None`).
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get(&module)
+            && let Some(init) = record.init.as_ref()
+            && let Some((_, value)) = init.vars.get(key)
+        {
+            return Some(value.clone());
+        }
         None
     }
 
@@ -832,15 +974,62 @@ impl<P: ProcessManager> ExecState<P> {
                 return Some(entry.clone());
             }
         }
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get(&module)
+            && let Some(init) = record.init.as_ref()
+            && let Some(entry) = init.vars.get(key)
+        {
+            return Some(entry.clone());
+        }
         None
     }
 
+    /// Owning module of the executing code (#115): the top of the
+    /// module stack when it names a module, `None` past an entry
+    /// boundary or outside any module. Lookups stop at the first
+    /// entry from the top, so entry functions called from module
+    /// code stay params-only.
+    pub(super) fn current_module(&self) -> Option<String> {
+        match self.module_stack.last() {
+            Some(Some(key)) => Some(key.clone()),
+            _ => None,
+        }
+    }
+
+    /// Base directory relative paths resolve against (#115): the
+    /// owning module file's parent directory when executing
+    /// module-owned code, so a module behaves the same no matter
+    /// which importer calls it. Entry code (and anything past an
+    /// entry boundary) resolves against the run cwd, so inline temp
+    /// scripts keep operating on the workspace they were pointed at.
+    pub(super) fn effective_cwd(&self) -> GuardedPath {
+        if let Some(module) = self.current_module()
+            && let Some(dir) = self
+                .modules
+                .get(&module)
+                .and_then(|record| record.dir.clone())
+        {
+            return dir;
+        }
+        self.cwd.clone()
+    }
+
     /// Get a flattened view of all variables across all scopes.
-    /// Inner scopes take precedence over outer scopes.
+    /// Inner scopes take precedence over outer scopes. Module-owned
+    /// code additionally sees the owning module's shared store beneath
+    /// every lexical frame; entry code never does.
     pub(super) fn all_vars(&self) -> HashMap<String, Value> {
         let mut result = HashMap::new();
         for scope in self.var_scopes.iter().rev() {
             for (k, (_, v)) in scope {
+                result.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get(&module)
+            && let Some(init) = record.init.as_ref()
+        {
+            for (k, (_, v)) in &init.vars {
                 result.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }

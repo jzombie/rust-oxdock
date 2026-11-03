@@ -767,6 +767,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::FuncDef { .. }
         | StepKind::Call { .. }
         | StepKind::Return { .. }
+        | StepKind::ImportFile { .. }
+        | StepKind::ImportFuncs { .. }
         | StepKind::While { .. }
         | StepKind::Break
         | StepKind::Continue
@@ -1013,6 +1015,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::FuncDef { .. }
         | StepKind::Call { .. }
         | StepKind::Return { .. }
+        | StepKind::ImportFile { .. }
+        | StepKind::ImportFuncs { .. }
         | StepKind::While { .. }
         | StepKind::Break
         | StepKind::Continue
@@ -1115,6 +1119,8 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                     StepKind::FuncDef { .. }
                     | StepKind::Call { .. }
                     | StepKind::Return { .. }
+                    | StepKind::ImportFile { .. }
+                    | StepKind::ImportFuncs { .. }
                     | StepKind::While { .. }
                     | StepKind::Break
                     | StepKind::Continue
@@ -1387,6 +1393,8 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                             StepKind::FuncDef { .. }
                             | StepKind::Call { .. }
                             | StepKind::Return { .. }
+                            | StepKind::ImportFile { .. }
+                            | StepKind::ImportFuncs { .. }
                             | StepKind::While { .. }
                             | StepKind::Break
                             | StepKind::Continue
@@ -1758,6 +1766,19 @@ fn dispatch_flow_step<P: ProcessManager>(
             Ok(Flow::Done)
         }
         StepKind::Return { expr } => handlers::handle_return(cx, idx, expr),
+        StepKind::ImportFile { path, alias } => {
+            let _ = super::import::import_file(cx, path, alias)?;
+            Ok(Flow::Done)
+        }
+        StepKind::ImportFuncs {
+            path,
+            alias,
+            func_names,
+            type_names,
+        } => {
+            super::import::import_funcs(cx, path, alias.as_deref(), func_names, type_names)?;
+            Ok(Flow::Done)
+        }
         StepKind::While { cond, body } => handlers::while_loop(cx, cond, body),
         StepKind::Break => Ok(Flow::Break { idx }),
         StepKind::Continue => Ok(Flow::Continue { idx }),

@@ -187,14 +187,14 @@ fn probe_table() -> ModuleTable {
         oxdock_net_plugin::module_with_endpoints(Arc::new(EndpointRegistry::new(false))),
         oxdock_ssh_plugin::module_with_endpoints(Arc::new(EndpointRegistry::new(false))),
     ] {
-        let functions: HashSet<String> = module
+        let func_names: HashSet<String> = module
             .funcs
             .iter()
             .map(|registration| registration_base(registration).to_string())
             .collect();
         table
             .modules
-            .insert(module.name.clone(), Some(ModuleFuncs { functions }));
+            .insert(module.name.clone(), Some(ModuleFuncs { func_names }));
     }
     table
 }

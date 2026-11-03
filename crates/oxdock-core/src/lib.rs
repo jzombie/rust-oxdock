@@ -4,8 +4,8 @@ pub mod exec;
 pub mod pipeline;
 pub use exec::*;
 pub use oxdock_parser::{
-    Arg, ArgType, CommandMeta, CommandSpec, Example, StepKind, all_metadata,
-    all_structural_metadata, lower_command,
+    Arg, ArgType, CommandMeta, CommandSpec, Example, SCRIPT_MODULE_NAME, STD_MODULE_NAME, StepKind,
+    all_metadata, all_structural_metadata, lower_command,
 };
 pub use oxdock_process::ProcessManager;
 
@@ -48,6 +48,8 @@ define_pipeline! {
     StepKind::Sleep { .. } => exec::dispatch_sleep_step,
     StepKind::ListAppend { .. } => exec::dispatch_push_into_step,
     StepKind::FuncDef { .. } => exec::dispatch_func_def,
+    StepKind::ImportFile { .. } => exec::dispatch_import_file,
+    StepKind::ImportFuncs { .. } => exec::dispatch_import_funcs,
     StepKind::Call { .. } => exec::dispatch_call,
     StepKind::Return { .. } => exec::dispatch_return,
     StepKind::While { .. } => exec::dispatch_while_loop,
@@ -328,10 +330,14 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
+        // Declared but host-absent: INHERIT_ENV of a missing name stays
+        // absent silently, so the guard still evaluates false and skips
+        // without error. The declaration only satisfies the static gate.
         let guard_var = oxdock_env::oxdock::GUARD_TEST_TOKEN_UNSET;
         let script = format!(
             indoc!(
                 r#"
+                INHERIT_ENV [{guard}]
                 [env:{guard}] WRITE "skipped.txt" "hi"
                 WRITE "kept.txt" "ok"
                 "#
@@ -444,9 +450,14 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
+        // INNER starts empty outside the block: the guarded block sets
+        // it to "1" in a scope that restores on exit, so the outer
+        // guard still sees empty and skips. If the block leaked, the
+        // outer guard would fire and the test would fail.
         let script = indoc!(
             r#"
             ENV RUN="1"
+            ENV INNER=""
             [env:RUN] {
                 ENV INNER="1"
                 WRITE "scoped.txt" "hit"

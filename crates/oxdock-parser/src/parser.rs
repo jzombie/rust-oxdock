@@ -92,6 +92,14 @@ use crate::commands::{
     is_known_command, lower_env_tokens, lower_expand_tokens, make_arith, make_compare,
     reject_boundary,
 };
+use crate::constants::{
+    INJECT_PREFIX, INJECT_SUFFIX, KEYWORD_AS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
+    KEYWORD_CANCEL, KEYWORD_CONTINUE, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT,
+    KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN,
+    KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE,
+    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO,
+    MODULE_SEPARATOR,
+};
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 
 use crate::resolve::resolve_call_name;
@@ -211,7 +219,7 @@ fn boundary_ends_statement(body: &[Tok]) -> Result<bool, String> {
 /// io-block statement. Anything else (or EOF) fails exactly like the
 /// grammar's `must be followed by '{'`.
 fn is_bare_with_io(body: &[Tok]) -> bool {
-    matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == "WITH_IO")
+    matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_WITH_IO)
         && matches!(
             body.get(1).map(|t| (&t.kind, t.joint)),
             Some((
@@ -234,7 +242,7 @@ fn is_bare_with_io(body: &[Tok]) -> bool {
 /// non-`ELSE` follower releases, and a merged `ELSE` parses exactly
 /// where the grammar would.
 fn is_if_tail(body: &[Tok]) -> bool {
-    if !matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == "IF") {
+    if !matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_IF) {
         return false;
     }
     let mut end = body.len();
@@ -427,7 +435,7 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
             let else_start = guard.is_empty()
                 && matches!(
                     body.first().map(|t| &t.kind),
-                    Some(TokKind::Word(w)) if w == "ELSE"
+                    Some(TokKind::Word(w)) if w == KEYWORD_ELSE
                 );
             if !else_start {
                 stmts.push(Stmt {
@@ -1215,7 +1223,7 @@ fn try_lone_value_expr(
     {
         let inner = inner.clone();
         let args = parse_call_args(&inner, stmt, ctx)?;
-        if name == "INSPECT" {
+        if name == KEYWORD_INSPECT {
             let [arg] = args.as_slice() else {
                 return Err(TokenError {
                     stmt,
@@ -1580,7 +1588,7 @@ fn lower_generic_args(
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<StepKind, TokenError> {
-    if name == "ENV" {
+    if name == KEYWORD_ENV {
         return lower_env_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
@@ -1589,7 +1597,7 @@ fn lower_generic_args(
             kind: None,
         });
     }
-    if name == "EXPAND" {
+    if name == KEYWORD_EXPAND {
         return lower_expand_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
             stmt,
             msg: e.to_string(),
@@ -1975,10 +1983,10 @@ fn parse_guard_term(cur: &mut Cursor) -> Result<GuardExpr, TokenError> {
         _ => return Err(cur.err("missing guard predicate")),
     };
     // `__OXDOCK_INJECT_N__` interpolation placeholder: env-key shape.
-    if let Some(rest) = word.strip_prefix("__OXDOCK_INJECT_") {
+    if let Some(rest) = word.strip_prefix(INJECT_PREFIX) {
         if !rest.is_empty()
             && rest
-                .strip_suffix("__")
+                .strip_suffix(INJECT_SUFFIX)
                 .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
         {
             return Ok(GuardExpr::Predicate(Guard::Attr {
@@ -2312,9 +2320,13 @@ pub struct ParseCtx<'a> {
     /// never held across recursive parses.
     pub funcs: RefCell<Vec<HashSet<String>>>,
     pub imports: RefCell<Vec<Vec<String>>>,
-    /// `EXPORT` names in source order, validated at end of parse
+    /// `EXPORT` func names in source order, validated at end of parse
     /// (forward references allowed).
-    pub exports: RefCell<Vec<String>>,
+    pub func_exports: RefCell<Vec<String>>,
+    /// `EXPORT TYPE` names in source order, validated at end of parse
+    /// (forward references allowed). Separate from func exports so the
+    /// MCP server never confuses a type for a tool.
+    pub type_exports: RefCell<Vec<String>>,
     /// 1-based source line of the statement currently lowering (the
     /// innermost split statement; updated per statement by the body
     /// loops, read as the base for nested splits). Lets every error
@@ -2336,7 +2348,8 @@ impl<'a> ParseCtx<'a> {
             reserved,
             funcs: RefCell::new(vec![HashSet::new()]),
             imports: RefCell::new(vec![Vec::new()]),
-            exports: RefCell::new(Vec::new()),
+            func_exports: RefCell::new(Vec::new()),
+            type_exports: RefCell::new(Vec::new()),
             current_line: RefCell::new(0),
         }
     }
@@ -2425,7 +2438,7 @@ fn call_shape_at(toks: &[Tok], pos: usize, joint_paren: bool) -> Option<(String,
             break;
         }
         if let Some(TokKind::Word(seg)) = toks.get(p + 2).map(|t| &t.kind) {
-            name.push_str("::");
+            name.push_str(MODULE_SEPARATOR);
             name.push_str(seg);
         }
         p += 3;
@@ -2481,7 +2494,7 @@ fn parse_expr_call(
     ctx: &ParseCtx,
 ) -> Result<Expr, TokenError> {
     let args = parse_call_args(inner, stmt, ctx)?;
-    if name == "INSPECT" {
+    if name == KEYWORD_INSPECT {
         let [arg] = args.as_slice() else {
             return Err(TokenError {
                 stmt,
@@ -2843,7 +2856,7 @@ fn parse_await_cancel_at(
     var_joint: bool,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
     let head = match toks.get(pos).map(|t| &t.kind) {
-        Some(TokKind::Word(w)) if w == "AWAIT" || w == "CANCEL" => w.clone(),
+        Some(TokKind::Word(w)) if w == KEYWORD_AWAIT || w == KEYWORD_CANCEL => w.clone(),
         _ => return Ok(None),
     };
     if !matches!(
@@ -2873,7 +2886,7 @@ fn parse_await_cancel_at(
         }
     };
     Ok(Some((
-        if head == "AWAIT" {
+        if head == KEYWORD_AWAIT {
             StepKind::Await { var }
         } else {
             StepKind::Cancel { var }
@@ -2913,29 +2926,38 @@ fn parse_single_inner(
     // Nested `WHILE`/`REMOTE` recurse structurally (both ride every
     // inner-command set in the grammar); misses fall through to
     // generic below.
-    if head_word.as_deref() == Some("WHILE") {
+    if head_word.as_deref() == Some(KEYWORD_WHILE) {
         match parse_while_single(toks, pos, stmt, ctx) {
             Ok(Some((kind, used))) => return Ok((kind, used)),
             Ok(None) => {}
             Err(e) => return Err(e),
         }
     }
-    if head_word.as_deref() == Some("REMOTE") {
+    if head_word.as_deref() == Some(KEYWORD_REMOTE) {
         match parse_remote_single(toks, pos, stmt, ctx) {
             Ok(Some((kind, used))) => return Ok((kind, used)),
             Ok(None) => {}
             Err(e) => return Err(e),
         }
     }
+    // File `IMPORT "path" AS ALIAS` (#115) rides every single-inner
+    // set (TIMEOUT/ISOLATED/WITH_IO/ASYNC, LET ASYNC): exactly one file
+    // entry and no modules, else a hard error; shape misses fall through
+    // to generic below, which fails them in lowering.
+    if head_word.as_deref() == Some(KEYWORD_IMPORT)
+        && let Some((path, alias, used)) = parse_single_file_import(toks, pos, stmt, ctx)?
+    {
+        return Ok((StepKind::ImportFile { path, alias }, used));
+    }
     // Dedicated await/cancel first (await gated by parent); anything
     // they decline falls through to generic below.
-    if head_word.as_deref() == Some("AWAIT")
+    if head_word.as_deref() == Some(KEYWORD_AWAIT)
         && rules.allow_await
         && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true)?
     {
         return Ok(found);
     }
-    if head_word.as_deref() == Some("CANCEL")
+    if head_word.as_deref() == Some(KEYWORD_CANCEL)
         && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true)?
     {
         return Ok(found);
@@ -2947,7 +2969,7 @@ fn parse_single_inner(
             _ => unreachable!(),
         };
         let args = parse_call_args(&inner, stmt, ctx)?;
-        if !call_name.contains("::") {
+        if !call_name.contains(MODULE_SEPARATOR) {
             crate::resolve::check_func_ident(&lowering_ctx(stmt), &call_name)
                 .map_err(|e| lower_err(stmt, e))?;
         }
@@ -2960,7 +2982,7 @@ fn parse_single_inner(
             paren + 1 - pos,
         ));
     }
-    if head_word.as_deref() == Some("RUN")
+    if head_word.as_deref() == Some(KEYWORD_RUN)
         && matches!(
             toks.get(pos + 1).map(|t| &t.kind),
             Some(TokKind::Group {
@@ -2989,31 +3011,32 @@ fn parse_single_inner(
         // `block` alternative here); fall through to generic below,
         // which reads the shell path literally.
         if let Some(list) = exec_list {
-            let kind = (ctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
+            let kind =
+                (ctx.lower)(KEYWORD_RUN, vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
             return Ok((kind, 2));
         }
     }
     // Nested wrappers recurse structurally; a `WITH_IO` directly
     // under `ASYNC` goes generic instead (lowering fails it, probed).
     match head_word.as_deref() {
-        Some("WITH_IO") if rules.allow_with_io => {
+        Some(KEYWORD_WITH_IO) if rules.allow_with_io => {
             match parse_with_io_single(toks, pos, stmt, ctx) {
                 Ok(Some((kind, used))) => return Ok((kind, used)),
                 Ok(None) => {}
                 Err(e) => return Err(e),
             }
         }
-        Some("TIMEOUT") => match parse_timeout_single(toks, pos, stmt, ctx) {
+        Some(KEYWORD_TIMEOUT) => match parse_timeout_single(toks, pos, stmt, ctx) {
             Ok(Some((kind, used))) => return Ok((kind, used)),
             Ok(None) => {}
             Err(e) => return Err(e),
         },
-        Some("ISOLATED") => match parse_isolated_single(toks, pos, stmt, ctx) {
+        Some(KEYWORD_ISOLATED) => match parse_isolated_single(toks, pos, stmt, ctx) {
             Ok(Some((kind, used))) => return Ok((kind, used)),
             Ok(None) => {}
             Err(e) => return Err(e),
         },
-        Some("ASYNC") => match parse_async_single(toks, pos, stmt, ctx) {
+        Some(KEYWORD_ASYNC) => match parse_async_single(toks, pos, stmt, ctx) {
             Ok(Some((kind, used))) => return Ok((kind, used)),
             Ok(None) => {}
             Err(e) => return Err(e),
@@ -3023,7 +3046,7 @@ fn parse_single_inner(
         // rewrites it, same as the shared validator. Trailing
         // elements loop on outside (a bad follower fails there, like
         // the grammar's line end).
-        Some("INHERIT_ENV") => {
+        Some(KEYWORD_INHERIT_ENV) => {
             if let Some(found) = parse_inherit_env_at(toks, pos, stmt)? {
                 return Ok(found);
             }
@@ -3811,10 +3834,10 @@ fn parse_if_at(
         // `ELSE IF cond block`: any gaps (non-atomic chain).
         let is_else_if = matches!(
             toks.get(p).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "ELSE"
+            Some(TokKind::Word(w)) if w == KEYWORD_ELSE
         ) && matches!(
             toks.get(p + 1).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "IF"
+            Some(TokKind::Word(w)) if w == KEYWORD_IF
         );
         if is_else_if {
             let mut ecur = Cursor::expr(&toks[p + 2..], stmt);
@@ -3855,7 +3878,7 @@ fn parse_if_at(
         // the loop, failing in lowering like the grammar).
         let is_else = matches!(
             toks.get(p).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "ELSE"
+            Some(TokKind::Word(w)) if w == KEYWORD_ELSE
         ) && matches!(
             toks.get(p + 1).map(|t| &t.kind),
             Some(TokKind::Group {
@@ -3959,7 +3982,7 @@ fn parse_for_at(
         icur.skip_gap();
         if !matches!(
             icur.toks.get(icur.pos).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "IN"
+            Some(TokKind::Word(w)) if w == KEYWORD_IN
         ) {
             return Ok(None);
         }
@@ -4001,7 +4024,7 @@ fn parse_for_at(
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::Validation {
-                command: "FOR".to_string(),
+                command: KEYWORD_FOR.to_string(),
             }),
         });
     }
@@ -4029,14 +4052,14 @@ fn parse_for_at(
                 line: 0,
                 col: 0,
                 kind: Some(ParseErrorKind::Validation {
-                    command: "FOR".to_string(),
+                    command: KEYWORD_FOR.to_string(),
                 }),
             });
         }
     };
     if let Some(kt) = &key_type
-        && kt != "STRING"
-        && kt != "INT"
+        && kt != crate::TypeTag::String.name()
+        && kt != crate::TypeTag::Int.name()
     {
         return Err(TokenError {
             stmt,
@@ -4044,7 +4067,7 @@ fn parse_for_at(
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::Validation {
-                command: "FOR".to_string(),
+                command: KEYWORD_FOR.to_string(),
             }),
         });
     }
@@ -4119,7 +4142,7 @@ fn parse_func_at(
         line: 0,
         col: 0,
         kind: Some(ParseErrorKind::Validation {
-            command: "FUNC".to_string(),
+            command: KEYWORD_FUNC.to_string(),
         }),
     };
     // Phase 1 (pure shape): name, parens, params, block presence.
@@ -4311,25 +4334,33 @@ fn parse_remote_bindings(
     Ok(Some((vars, env)))
 }
 
-/// `IMPORT [...]` or bare `IMPORT MOD` at `pos`: bracket rides
-/// gapped (`sep`), modules validate against the table with the exact
-/// backend message, and the innermost frame records them (deduped).
-/// Returns tokens consumed, or `None` on shape miss (generic fails
-/// it in lowering like the grammar). Emits no step; the caller
-/// owns guard handling (top-level guarded fails, in-block leaks).
-fn parse_import_at(
+/// `IMPORT` statement at `pos` (#115): module form (`IMPORT MOD`,
+/// `IMPORT [A, B]`), file form (`IMPORT "p" AS A`,
+/// `IMPORT ["p" AS A]`), mixed/multi forms
+/// (`IMPORT [STD, "p" AS A, "q" AS B]`, multi-line included), and
+/// selective harvests (`IMPORT [[F, G FROM "p" (AS A)?]]`).
+/// Returns module names plus `ImportFile`/`ImportFuncs` steps in source
+/// order, plus tokens consumed (relative to `pos`), or `None` on shape
+/// miss (generic lowering fails it like the grammar). Validation is
+/// hard: unknown modules, bad names, collisions, templates, and remote
+/// URLs fail here, and validated entries register immediately
+/// (modules, aliases, and bare harvest names share the innermost
+/// frames).
+type ImportEntries = (Vec<String>, Vec<StepKind>);
+
+fn parse_import_statement(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
     ctx: &ParseCtx,
-) -> Result<Option<usize>, TokenError> {
+) -> Result<Option<(ImportEntries, usize)>, TokenError> {
     let fail = |msg: String| TokenError {
         stmt,
         msg,
         line: 0,
         col: 0,
         kind: Some(ParseErrorKind::Validation {
-            command: "IMPORT".to_string(),
+            command: KEYWORD_IMPORT.to_string(),
         }),
     };
     let next = match toks.get(pos + 1) {
@@ -4337,7 +4368,22 @@ fn parse_import_at(
         Some(t) if !t.joint => t,
         _ => return Ok(None),
     };
-    let mut modules = Vec::new();
+    // Parse entries first, validate in source order after.
+    enum RawEntry {
+        Module(String),
+        File {
+            path: String,
+            alias: String,
+        },
+        From {
+            func_names: Vec<String>,
+            type_names: Vec<String>,
+            path: String,
+            alias: Option<String>,
+        },
+    }
+    let mut raw: Vec<RawEntry> = Vec::new();
+    let used;
     if matches!(
         &next.kind,
         TokKind::Group {
@@ -4353,8 +4399,8 @@ fn parse_import_at(
         ..
     } = &next.kind
     {
-        // `import_list`: comma-separated uppercase modules, `ws?`
-        // gaps (newlines ok, comments MISS — `ws` admits neither).
+        // Comma-separated entries, `ws` gaps (newlines ok inside and
+        // around entries, comments MISS — `ws` admits neither).
         let mut parts: Vec<&[Tok]> = Vec::new();
         let mut start = 0;
         for (i, tok) in inner.iter().enumerate() {
@@ -4365,47 +4411,205 @@ fn parse_import_at(
         }
         parts.push(&inner[start..]);
         for part in parts {
-            let mut part = part;
-            while matches!(part.first().map(|t| &t.kind), Some(TokKind::Newline)) {
-                part = &part[1..];
+            let dense: Vec<&Tok> = part
+                .iter()
+                .filter(|t| !matches!(&t.kind, TokKind::Newline))
+                .collect();
+            // `[[F, G FROM "path" (AS ALIAS)?]]`: selective function
+            // harvest. Anything else bracketed here misses.
+            if let [bracket] = dense.as_slice()
+                && let TokKind::Group {
+                    delim: GroupDelim::Bracket,
+                    inner,
+                    ..
+                } = &bracket.kind
+            {
+                let Some(HarvestImport {
+                    func_names,
+                    type_names,
+                    path,
+                    alias,
+                }) = parse_from_entry(inner)
+                else {
+                    return Ok(None);
+                };
+                raw.push(RawEntry::From {
+                    func_names,
+                    type_names,
+                    path,
+                    alias,
+                });
+                continue;
             }
-            while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
-                part = &part[..part.len() - 1];
+            // `[F FROM "path" (AS ALIAS)?]`: single harvest without
+            // inner brackets. The `FROM` keyword is the discriminant
+            // (module and file parts never contain a top-level one);
+            // multi-name harvests keep `[[F, G FROM ...]]` so the comma
+            // stays grouped inside its own scope.
+            if dense.len() >= 3 {
+                let owned: Vec<Tok> = dense.iter().map(|t| (*t).clone()).collect();
+                if let Some(HarvestImport {
+                    func_names,
+                    type_names,
+                    path,
+                    alias,
+                }) = parse_from_entry(&owned)
+                {
+                    raw.push(RawEntry::From {
+                        func_names,
+                        type_names,
+                        path,
+                        alias,
+                    });
+                    continue;
+                }
             }
-            match part {
+            match dense.as_slice() {
                 [tok] => match &tok.kind {
-                    TokKind::Word(w) if is_upper_ident(w) => modules.push(w.clone()),
+                    TokKind::Word(w) if is_upper_ident(w) => {
+                        raw.push(RawEntry::Module(w.clone()));
+                    }
                     _ => return Ok(None),
                 },
+                [path_tok, as_tok, alias_tok] if !as_tok.joint && !alias_tok.joint => {
+                    let (
+                        TokKind::Str { text, .. },
+                        TokKind::Word(as_word),
+                        TokKind::Word(alias_word),
+                    ) = (&path_tok.kind, &as_tok.kind, &alias_tok.kind)
+                    else {
+                        return Ok(None);
+                    };
+                    if as_word != KEYWORD_AS {
+                        return Ok(None);
+                    }
+                    raw.push(RawEntry::File {
+                        path: text.clone(),
+                        alias: alias_word.clone(),
+                    });
+                }
                 _ => return Ok(None),
             }
         }
-        if modules.is_empty() {
+        if raw.is_empty() {
             return Ok(None);
         }
+        used = 2;
     } else if let TokKind::Word(w) = &next.kind {
         // Bare `IMPORT MOD` (single module, probed).
         if !is_upper_ident(w) {
             return Ok(None);
         }
-        modules.push(w.clone());
+        raw.push(RawEntry::Module(w.clone()));
+        used = 2;
+    } else if let TokKind::Str { text, .. } = &next.kind {
+        // Bare `IMPORT "path" AS ALIAS`.
+        let (Some(as_tok), Some(alias_tok)) = (toks.get(pos + 2), toks.get(pos + 3)) else {
+            return Ok(None);
+        };
+        if as_tok.joint || alias_tok.joint {
+            return Ok(None);
+        }
+        let (TokKind::Word(as_word), TokKind::Word(alias_word)) = (&as_tok.kind, &alias_tok.kind)
+        else {
+            return Ok(None);
+        };
+        if as_word != KEYWORD_AS {
+            return Ok(None);
+        }
+        raw.push(RawEntry::File {
+            path: text.clone(),
+            alias: alias_word.clone(),
+        });
+        used = 4;
     } else {
         return Ok(None);
     }
-    // Unknown modules fail with the exact backend message (sorted
-    // known list (sorted, like the old backend)).
-    for module in &modules {
-        if !ctx.modules.modules.contains_key(module) {
-            let mut known: Vec<String> = ctx.modules.modules.keys().cloned().collect();
-            known.sort();
-            return Err(fail(format!(
-                "unknown module `{module}`; known modules: {}",
-                known.join(", ")
-            )));
+    // Validate in source order: unknown modules fail with the exact
+    // backend message (sorted known list); file and harvest entries
+    // validate hard (bad names, collisions, templates, remote URLs).
+    let mut modules = Vec::new();
+    let mut steps = Vec::new();
+    for entry in raw {
+        match entry {
+            RawEntry::Module(module) => {
+                if !ctx.modules.modules.contains_key(&module) {
+                    let mut known: Vec<String> = ctx.modules.modules.keys().cloned().collect();
+                    known.sort();
+                    return Err(fail(format!(
+                        "unknown module `{module}`; known modules: {}",
+                        known.join(", ")
+                    )));
+                }
+                ctx.import_into_frame(std::slice::from_ref(&module));
+                modules.push(module);
+            }
+            RawEntry::File { path, alias } => {
+                let (path, alias) = validate_file_import(&path, &alias, ctx).map_err(fail)?;
+                steps.push(StepKind::ImportFile { path, alias });
+            }
+            RawEntry::From {
+                func_names,
+                type_names,
+                path,
+                alias,
+            } => {
+                let HarvestImport {
+                    func_names,
+                    type_names,
+                    path,
+                    alias,
+                } = validate_from_import(&func_names, &type_names, &path, alias.as_deref(), ctx)
+                    .map_err(fail)?;
+                steps.push(StepKind::ImportFuncs {
+                    path,
+                    alias,
+                    func_names,
+                    type_names,
+                });
+            }
         }
     }
-    ctx.import_into_frame(&modules);
-    Ok(Some(2))
+    Ok(Some(((modules, steps), used)))
+}
+
+/// Single file import for value positions (#115): exactly one
+/// `"path" AS ALIAS` entry and no modules. Anything else shaped like an
+/// import is a hard error naming the restriction; shape misses return
+/// `None` for the generic path.
+fn parse_single_file_import(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(String, String, usize)>, TokenError> {
+    let Some(((modules, mut kinds), used)) = parse_import_statement(toks, pos, stmt, ctx)? else {
+        return Ok(None);
+    };
+    if !modules.is_empty() || !matches!(kinds.as_slice(), [StepKind::ImportFile { .. }]) {
+        return Err(TokenError {
+            stmt,
+            msg: if !modules.is_empty()
+                || kinds
+                    .iter()
+                    .any(|k| matches!(k, StepKind::ImportFuncs { .. }))
+            {
+                "IMPORT here takes a single file import (IMPORT [\"<path>\" AS <ALIAS>]); modules and function harvests stay at statement level".to_string()
+            } else {
+                "IMPORT here takes a single file import (IMPORT [\"<path>\" AS <ALIAS>])"
+                    .to_string()
+            },
+            line: 0,
+            col: 0,
+            kind: Some(ParseErrorKind::Validation {
+                command: KEYWORD_IMPORT.to_string(),
+            }),
+        });
+    }
+    let Some(StepKind::ImportFile { path, alias }) = kinds.pop() else {
+        unreachable!("length and variant checked above")
+    };
+    Ok(Some((path, alias, used)))
 }
 
 /// One `EXPORT` name: an uppercase word with an optional joint
@@ -4434,42 +4638,348 @@ fn parse_export_name(toks: &[Tok], pos: usize) -> Option<(String, usize)> {
         && toks[pos + 3].joint
         && is_upper_ident(tail)
     {
-        name.push_str("::");
+        name.push_str(MODULE_SEPARATOR);
         name.push_str(tail);
         used = 4;
     }
     Some((name, used))
 }
 
+/// One selective harvest (`[[F, G FROM "path" (AS ALIAS)?]]`): the
+/// wanted function and type names plus the path and optional alias.
+/// Bare names are functions; `TYPE`/`FUNC` prefixes select the kind
+/// explicitly (`[[TYPE PERSON, FUNC FOO, BAR FROM "path"]]`).
+struct HarvestImport {
+    func_names: Vec<String>,
+    type_names: Vec<String>,
+    path: String,
+    alias: Option<String>,
+}
+
+/// One `[[F, G FROM "path" (AS ALIAS)?]]` entry: selective function
+/// harvest with optional `TYPE`/`FUNC` qualifiers per name:
+/// `[[TYPE PERSON, FUNC FOO, BAR FROM "path"]]`
+/// (bare stays func for back-compat).
+/// Returns the harvest, or `None` on shape miss (generic lowering fails
+/// it). Name case is validated hard by the caller, like file aliases.
+fn parse_from_entry(inner: &[Tok]) -> Option<HarvestImport> {
+    let dense: Vec<&Tok> = inner
+        .iter()
+        .filter(|t| !matches!(&t.kind, TokKind::Newline))
+        .collect();
+    let from = dense
+        .iter()
+        .position(|t| matches!(&t.kind, TokKind::Word(w) if w == KEYWORD_FROM))?;
+    if from == 0 {
+        return None;
+    }
+    // Names: comma-separated entries, each `NAME` (func) or
+    // `TYPE NAME` / `FUNC NAME` (explicit kind for clarity).
+    let mut func_names = Vec::new();
+    let mut type_names = Vec::new();
+    let mut start = 0;
+    let head = &dense[..from];
+    // Local helper: classify one comma-separated part.
+    fn classify_part(part: &[&Tok]) -> Option<(bool, String)> {
+        match part {
+            [tok] => {
+                let TokKind::Word(w) = &tok.kind else {
+                    return None;
+                };
+                Some((false, w.clone()))
+            }
+            // `TYPE NAME` / `FUNC NAME`: the name must be `sep` (gapped
+            // from the kind); the kind may be joint to a preceding `[`
+            // or `,` (no space required there), so only the name's joint
+            // flag matters.
+            [kind_tok, name_tok] if !name_tok.joint => {
+                let (TokKind::Word(kind), TokKind::Word(name)) = (&kind_tok.kind, &name_tok.kind)
+                else {
+                    return None;
+                };
+                if kind == KEYWORD_TYPE {
+                    Some((true, name.clone()))
+                } else if kind == KEYWORD_FUNC {
+                    Some((false, name.clone()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+    for (i, tok) in head.iter().enumerate() {
+        if matches!(&tok.kind, TokKind::Punct(',')) {
+            let part = &head[start..i];
+            let (is_type, name) = classify_part(part)?;
+            if is_type {
+                type_names.push(name);
+            } else {
+                func_names.push(name);
+            }
+            start = i + 1;
+        }
+    }
+    let part = &head[start..];
+    let (is_type, name) = classify_part(part)?;
+    if is_type {
+        type_names.push(name);
+    } else {
+        func_names.push(name);
+    }
+    // Tail: `"path"` or bare `MODULE` with an optional gapped `AS ALIAS`.
+    // Quoted is a file path (module fallback only when no file matches);
+    // bare is a host module (no file probe ambiguity).
+    let tail = &dense[from + 1..];
+    let path_text = |tok: &Tok| match &tok.kind {
+        TokKind::Str { text, .. } => Some(text.clone()),
+        TokKind::Word(w) if is_upper_ident(w) => Some(w.clone()),
+        _ => None,
+    };
+    match tail {
+        [path_tok] => {
+            let text = path_text(path_tok)?;
+            Some(HarvestImport {
+                func_names,
+                type_names,
+                path: text,
+                alias: None,
+            })
+        }
+        [path_tok, as_tok, alias_tok] if !as_tok.joint && !alias_tok.joint => {
+            let text = path_text(path_tok)?;
+            let (TokKind::Word(as_word), TokKind::Word(alias_word)) =
+                (&as_tok.kind, &alias_tok.kind)
+            else {
+                return None;
+            };
+            if as_word != KEYWORD_AS {
+                return None;
+            }
+            Some(HarvestImport {
+                func_names,
+                type_names,
+                path: text,
+                alias: Some(alias_word.clone()),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Validate an `IMPORT` alias: hard errors (never shape misses) plus
+/// registration into the innermost import frame.
+fn validate_import_alias(alias: &str, ctx: &ParseCtx) -> Result<String, String> {
+    if !is_upper_ident(alias) {
+        return Err(format!(
+            "IMPORT alias must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{alias}`"
+        ));
+    }
+    if ctx.modules.modules.contains_key(alias) {
+        return Err(format!(
+            "IMPORT alias `{alias}` collides with module `{alias}`"
+        ));
+    }
+    let (_, imports) = ctx.visible_snapshot();
+    if imports.contains(&alias.to_string()) {
+        return Err(format!("duplicate IMPORT alias `{alias}`"));
+    }
+    ctx.import_into_frame(std::slice::from_ref(&alias.to_string()));
+    Ok(alias.to_string())
+}
+
+/// Validate an `IMPORT` path: hard errors, never shape misses.
+fn validate_import_path(path: &str) -> Result<String, String> {
+    if path.is_empty() {
+        return Err("IMPORT path must not be empty".to_string());
+    }
+    if path.contains("{{") {
+        return Err("IMPORT path must be a literal string (no {{ }} templates)".to_string());
+    }
+    if path.contains("://") {
+        return Err(
+            "remote imports are deferred to #270 (net: Run scripts from a remote URL)".to_string(),
+        );
+    }
+    Ok(path.to_string())
+}
+
+/// Validate a file-import path/alias pair: hard errors (never shape
+/// misses) plus alias registration into the innermost import frame.
+fn validate_file_import(
+    path: &str,
+    alias: &str,
+    ctx: &ParseCtx,
+) -> Result<(String, String), String> {
+    let alias = validate_import_alias(alias, ctx)?;
+    let path = validate_import_path(path)?;
+    Ok((path, alias))
+}
+
+/// Validate a `[[F, G FROM "path" (AS ALIAS)?]]` entry: hard errors
+/// (never shape misses). Bare func names declare into the innermost
+/// `FUNC` frame so calls resolve statically; the runtime defines them
+/// (and fails unknown names there). Type names need no func-frame
+/// declaration (types resolve through the global type directory);
+/// the runtime validates them against the file's `EXPORT TYPE` list.
+/// An alias registers like a file import.
+fn validate_from_import(
+    func_names: &[String],
+    type_names: &[String],
+    path: &str,
+    alias: Option<&str>,
+    ctx: &ParseCtx,
+) -> Result<HarvestImport, String> {
+    let path = validate_import_path(path)?;
+    let mut out_func_names = Vec::with_capacity(func_names.len());
+    for name in func_names {
+        if !is_upper_ident(name) {
+            return Err(format!(
+                "IMPORT function names must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{name}`"
+            ));
+        }
+        if ctx.reserved.contains(name) {
+            return Err(format!("cannot shadow reserved function `{name}`"));
+        }
+        out_func_names.push(name.clone());
+    }
+    let mut out_type_names = Vec::with_capacity(type_names.len());
+    for name in type_names {
+        if !is_upper_ident(name) {
+            return Err(format!(
+                "IMPORT type names must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{name}`"
+            ));
+        }
+        out_type_names.push(name.clone());
+    }
+    if out_func_names.is_empty() && out_type_names.is_empty() {
+        return Err("IMPORT harvest needs at least one function or type name".to_string());
+    }
+    if let Some(alias) = alias {
+        let alias = validate_import_alias(alias, ctx)?;
+        Ok(HarvestImport {
+            func_names: out_func_names,
+            type_names: out_type_names,
+            path,
+            alias: Some(alias),
+        })
+    } else {
+        for name in &out_func_names {
+            if !ctx.declare_func(name) {
+                return Err(format!("duplicate function `{name}` in same scope"));
+            }
+        }
+        // Type harvests without alias land bare in the global type
+        // directory: duplicates across files fail at import time
+        // (different targets), not at parse time (targets need IO).
+        Ok(HarvestImport {
+            func_names: out_func_names,
+            type_names: out_type_names,
+            path,
+            alias: None,
+        })
+    }
+}
+
+/// One `EXPORT ...` name list: function names plus type names in
+/// source order. Bare names are functions; explicit `TYPE`/`FUNC`
+/// prefixes select the kind.
+struct ExportNames {
+    func_names: Vec<String>,
+    type_names: Vec<String>,
+}
+
 /// `EXPORT ...` names at `pos`: bracket list (strict, `ws` gaps:
 /// newlines ok, comments miss) or a bare greedy-prefix name.
-/// Returns names plus tokens consumed, or `None` on shape miss
-/// (generic fails it in lowering like the grammar). Recording and
+/// Supports explicit `TYPE`/`FUNC` qualifiers for clarity:
+/// `EXPORT TYPE FOO`, `EXPORT TYPE [A, B]`, `EXPORT FUNC FOO`,
+/// plus mixed `EXPORT [TYPE A, FUNC B, C]` (bare stays func).
+/// Returns the name lists plus tokens consumed, or `None` on shape
+/// miss (generic fails it in lowering like the grammar). Recording and
 /// duplicate checks live with the caller (they need the guard and
 /// level context).
-fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(Vec<String>, usize)> {
+fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(ExportNames, usize)> {
     let next = match toks.get(pos + 1) {
         // `sep` after `EXPORT`: joint followers miss.
         Some(t) if !t.joint => t,
         _ => return None,
     };
+    // Explicit `EXPORT TYPE ...` or `EXPORT FUNC ...` prefix.
+    if let TokKind::Word(w) = &next.kind
+        && (w == KEYWORD_TYPE || w == KEYWORD_FUNC)
+    {
+        let is_type = w == KEYWORD_TYPE;
+        let after = match toks.get(pos + 2) {
+            Some(t) if !t.joint => t,
+            _ => return None,
+        };
+        if let TokKind::Group {
+            delim: GroupDelim::Bracket,
+            inner,
+            ..
+        } = &after.kind
+        {
+            let mut func_names = Vec::new();
+            let mut type_names = Vec::new();
+            for part in split_bracket_entries(inner) {
+                let (name, used) = parse_export_name(part, 0)?;
+                if used != part.len() {
+                    return None;
+                }
+                if is_type {
+                    type_names.push(name);
+                } else {
+                    func_names.push(name);
+                }
+            }
+            if func_names.is_empty() && type_names.is_empty() {
+                return None;
+            }
+            return Some((
+                ExportNames {
+                    func_names,
+                    type_names,
+                },
+                3,
+            ));
+        }
+        if matches!(&after.kind, TokKind::Group { .. }) {
+            return None;
+        }
+        let (name, used) = parse_export_name(toks, pos + 2)?;
+        // Bare name after TYPE/FUNC prefix must consume exactly one
+        // name; trailing loops stay outside like the unprefixed case.
+        // `used` counts from pos+2, so 1 name is valid.
+        if used == 0 {
+            return None;
+        }
+        if is_type {
+            return Some((
+                ExportNames {
+                    func_names: Vec::new(),
+                    type_names: vec![name],
+                },
+                2 + used,
+            ));
+        } else {
+            return Some((
+                ExportNames {
+                    func_names: vec![name],
+                    type_names: Vec::new(),
+                },
+                2 + used,
+            ));
+        }
+    }
     if let TokKind::Group {
         delim: GroupDelim::Bracket,
         inner,
         ..
     } = &next.kind
     {
-        let mut parts: Vec<&[Tok]> = Vec::new();
-        let mut start = 0;
-        for (i, tok) in inner.iter().enumerate() {
-            if matches!(&tok.kind, TokKind::Punct(',')) {
-                parts.push(&inner[start..i]);
-                start = i + 1;
-            }
-        }
-        parts.push(&inner[start..]);
-        let mut names = Vec::new();
-        for part in parts {
+        let mut func_names = Vec::new();
+        let mut type_names = Vec::new();
+        for part in split_bracket_entries(inner) {
             let mut part = part;
             while matches!(part.first().map(|t| &t.kind), Some(TokKind::Newline)) {
                 part = &part[1..];
@@ -4477,23 +4987,72 @@ fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(Vec<String>, usize)> {
             while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
                 part = &part[..part.len() - 1];
             }
+            // Optional per-entry `TYPE`/`FUNC` prefix for mixed lists:
+            // `EXPORT [TYPE A, FUNC B, C]` (bare stays func). The name
+            // must be `sep` from the prefix; the prefix itself may be
+            // joint to a preceding `[` or `,`, so only the name's joint
+            // flag matters.
+            let (is_type, rest) = match part {
+                [first, second, ..]
+                    if matches!(&first.kind, TokKind::Word(w) if w == KEYWORD_TYPE || w == KEYWORD_FUNC)
+                        && !second.joint =>
+                {
+                    let is_t = matches!(&first.kind, TokKind::Word(w) if w == KEYWORD_TYPE);
+                    (is_t, &part[1..])
+                }
+                _ => (false, part),
+            };
             // Exactly one name per entry (entries never trail).
-            let (name, used) = parse_export_name(part, 0)?;
-            if used != part.len() {
+            let (name, used) = parse_export_name(rest, 0)?;
+            if used != rest.len() {
                 return None;
             }
-            names.push(name);
+            if is_type {
+                type_names.push(name);
+            } else {
+                func_names.push(name);
+            }
         }
-        if names.is_empty() {
+        if func_names.is_empty() && type_names.is_empty() {
             return None;
         }
-        return Some((names, 2));
+        return Some((
+            ExportNames {
+                func_names,
+                type_names,
+            },
+            2,
+        ));
     }
     if matches!(&next.kind, TokKind::Group { .. }) {
         return None;
     }
-    // Bare name (greedy `::` prefix; trailing loops outside).
-    parse_export_name(toks, pos + 1).map(|(name, used)| (vec![name], 1 + used))
+    // Bare name (greedy `::` prefix; trailing loops outside). Bare
+    // stays func for back-compat; `TYPE`/`FUNC` prefix selects above.
+    parse_export_name(toks, pos + 1).map(|(name, used)| {
+        (
+            ExportNames {
+                func_names: vec![name],
+                type_names: Vec::new(),
+            },
+            1 + used,
+        )
+    })
+}
+
+/// Split bracket inner tokens on top-level commas, preserving entries
+/// for per-entry `TYPE`/`FUNC` handling. Newlines trim at the caller.
+fn split_bracket_entries(inner: &[Tok]) -> Vec<&[Tok]> {
+    let mut parts: Vec<&[Tok]> = Vec::new();
+    let mut start = 0;
+    for (i, tok) in inner.iter().enumerate() {
+        if matches!(&tok.kind, TokKind::Punct(',')) {
+            parts.push(&inner[start..i]);
+            start = i + 1;
+        }
+    }
+    parts.push(&inner[start..]);
+    parts
 }
 
 /// `TYPE NAME = SHAPE` at `pos`: uppercase name, single `=`, maximal
@@ -4548,7 +5107,7 @@ fn parse_remote_single(
         line: 0,
         col: 0,
         kind: Some(ParseErrorKind::Validation {
-            command: "REMOTE".to_string(),
+            command: KEYWORD_REMOTE.to_string(),
         }),
     };
     // Target: joint run in the superset charset (alnum/`_`/`-`/`.`/`:`).
@@ -5478,7 +6037,7 @@ fn parse_let_body(
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
     let mut cur = Cursor::expr(body, stmt);
     match cur.next() {
-        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == "LET") => {}
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == KEYWORD_LET) => {}
         _ => return Err(cur.err("unreachable")),
     }
     // No `$var`: no `LET` form can match (miss, never a hard fail).
@@ -5501,12 +6060,12 @@ fn parse_let_body(
         // bare type is a validation error, mirroring the grammar.
         if matches!(
             body.get(type_start).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "PIPE"
+            Some(TokKind::Word(w)) if w == crate::TypeTag::Pipe.name()
         ) {
             return Ok(Some((
                 StepKind::Assign {
                     var,
-                    decl_type: "PIPE".to_string(),
+                    decl_type: crate::TypeTag::Pipe.name().to_string(),
                     expr: Expr::FreshPipe,
                 },
                 type_start + 1,
@@ -5551,7 +6110,7 @@ fn parse_let_rhs(
     // `WITH_IO`-led lines share `let_async_statement` with the
     // `ASYNC` forms (the grammar claims every WITH_IO-led LET
     // there); shape misses fall through to generic below.
-    if head_word.as_deref() == Some("WITH_IO")
+    if head_word.as_deref() == Some(KEYWORD_WITH_IO)
         && let Some(found) = try_let_with_io_rhs(rhs, var.clone(), decl_type.clone(), stmt, ctx)?
     {
         let (kind, used) = found;
@@ -5561,13 +6120,13 @@ fn parse_let_rhs(
     // generic path like the grammar, failing in lowering) spawn
     // background tasks. No `WITH_IO` scan here (probed: the LET
     // path accepts what statement `ASYNC` rejects).
-    if head_word.as_deref() == Some("ASYNC") && rhs.len() > 1 {
+    if head_word.as_deref() == Some(KEYWORD_ASYNC) && rhs.len() > 1 {
         let (kind, used) = parse_let_async_rhs(&rhs[1..], var, decl_type, stmt, ctx)?;
         return Ok((kind, skipped + 1 + used));
     }
     // `TIMEOUT`-led lines capture through the wrapper (shape misses
     // fall through to generic, which fails in lowering).
-    if head_word.as_deref() == Some("TIMEOUT")
+    if head_word.as_deref() == Some(KEYWORD_TIMEOUT)
         && let Some((kind, used)) = parse_timeout_single(rhs, 0, stmt, ctx)?
     {
         let span = lowering_ctx(stmt);
@@ -5597,7 +6156,7 @@ fn parse_let_rhs(
     // `AWAIT $v` captures the task output (`$`+name ride gapless in
     // this atomic position, like the grammar); anything else
     // `AWAIT`-led goes generic below (lowering fails it, probed).
-    if head_word.as_deref() == Some("AWAIT")
+    if head_word.as_deref() == Some(KEYWORD_AWAIT)
         && rhs.len() == 3
         && let (Some(dollar), Some(task)) = (rhs.get(1), rhs.get(2))
         && matches!(&dollar.kind, TokKind::Punct('$'))
@@ -5617,7 +6176,7 @@ fn parse_let_rhs(
     // RUN exec form captures the structured argv (gapped bracket;
     // a joint bracket falls through to generic, which fails it in
     // lowering).
-    if head_word.as_deref() == Some("RUN")
+    if head_word.as_deref() == Some(KEYWORD_RUN)
         && matches!(
             rhs.get(1).map(|t| (&t.kind, t.joint)),
             Some((
@@ -5638,7 +6197,8 @@ fn parse_let_rhs(
         // (known-command capture, then expression), mirroring the
         // grammar's ordered alternatives.
         if let Some(list) = parse_run_exec_list(&inner, stmt, ctx)? {
-            let kind = (ctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
+            let kind =
+                (ctx.lower)(KEYWORD_RUN, vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
             return Ok((
                 StepKind::AssignCapture {
                     var,
@@ -5648,6 +6208,23 @@ fn parse_let_rhs(
                 skipped + 2,
             ));
         }
+    }
+    // File `IMPORT ["path" AS ALIAS]` (#115) captures the imported
+    // pipeline's `RETURN` value like a call (`LET $r = IMPORT ...`
+    // lowers to `AssignCapture`): exactly one file entry, no modules.
+    // Anything else shaped like an import is a hard error; shape misses
+    // fall through to generic below, which fails them in lowering.
+    if head_word.as_deref() == Some(KEYWORD_IMPORT)
+        && let Some((path, alias, used)) = parse_single_file_import(rhs, 0, stmt, ctx)?
+    {
+        return Ok((
+            StepKind::AssignCapture {
+                var,
+                decl_type,
+                cmd: Box::new(StepKind::ImportFile { path, alias }),
+            },
+            skipped + used,
+        ));
     }
     // Known-command leads capture through the generic parser
     // (lowering failures are fatal here, exactly like the committed
@@ -5766,7 +6343,7 @@ fn try_let_with_io_rhs(
                 .to_string(),
         ));
     }
-    if matches!(&first.kind, TokKind::Word(w) if w == "ASYNC") {
+    if matches!(&first.kind, TokKind::Word(w) if w == KEYWORD_ASYNC) {
         // `WITH_IO [..] ASYNC <single|block>`: the bindings apply
         // inside the task thread (same shape as a one-step body
         // holding one `WITH_IO` step, which the runtime supports).
@@ -6047,7 +6624,7 @@ fn parse_return_body(
 ) -> Result<(StepKind, usize), TokenError> {
     let mut cur = Cursor::expr(body, stmt);
     match cur.next() {
-        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == "RETURN") => {}
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == KEYWORD_RETURN) => {}
         _ => return Err(cur.err("unreachable")),
     }
     if cur.done() {
@@ -6283,26 +6860,54 @@ fn parse_elements(
                 }
             }
         }
-        // `IMPORT` directives update the import frames and emit no
-        // step; the guard leaks to the next element (probed) unless
-        // this is top level, where a guarded `IMPORT` fails. Shape
-        // misses fall through to generic (lowering fails them).
+        // `IMPORT` statements update the import frames; module entries
+        // emit no step (the guard leaks to the next element, probed,
+        // unless this is top level, where a guarded module import
+        // fails), while each file entry emits one `ImportFile` step
+        // carrying the guard. Shape misses fall through to generic
+        // (lowering fails them).
         if matches!(
             toks.get(pos).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == "IMPORT"
-        ) && let Some(used) = parse_import_at(toks, pos, stmt, ctx)?
-        {
-            if !in_block && pending_guard.is_some() {
-                return Err(TokenError {
-                    stmt,
-                    msg: "IMPORT cannot be guarded".to_string(),
-                    line: 0,
-                    col: 0,
-                    kind: None,
-                });
+            Some(TokKind::Word(w)) if w == KEYWORD_IMPORT
+        ) {
+            // Unified statement form (#115): each entry validates hard
+            // (unknown modules, bad aliases, templates, remote URLs);
+            // module entries update the frame and emit no step, file
+            // and harvest entries emit one step each, in source order.
+            // A top-level guard on a statement with module entries fails
+            // like the historical directive; file-only statements consume
+            // the guard like any other element.
+            if let Some(((modules, kinds), used)) = parse_import_statement(toks, pos, stmt, ctx)? {
+                if !modules.is_empty() && !in_block && pending_guard.is_some() {
+                    return Err(TokenError {
+                        stmt,
+                        msg: "IMPORT cannot be guarded".to_string(),
+                        line: 0,
+                        col: 0,
+                        kind: None,
+                    });
+                }
+                // Modules-only statements stay zero-step directives: the
+                // guard leaks to the next element (probed). Anything with
+                // file or harvest entries consumes it.
+                let guard = if kinds.is_empty() {
+                    None
+                } else {
+                    pending_guard.take()
+                };
+                for kind in kinds {
+                    steps.push(Step {
+                        guard: guard.clone(),
+                        kind,
+                        scope_enter: 0,
+                        scope_exit: 0,
+                        line: 0,
+                        col: 0,
+                    });
+                }
+                pos += used;
+                continue;
             }
-            pos += used;
-            continue;
         }
         let guard = pending_guard.take();
         let (mut got, used) = parse_element_at(toks, pos, stmt, ctx, guard, in_block)?;
@@ -6361,7 +6966,7 @@ fn parse_element_at(
     // elements loop on (probed `LET $x: INT = 1 ECHO bye`). LET shape
     // misses fall to generic (lowering fails them like a committed
     // `instruction` would, e.g. `LET foo`).
-    if head_word.as_deref() == Some("LET")
+    if head_word.as_deref() == Some(KEYWORD_LET)
         && let Some((kind, used)) = parse_let_body(&toks[pos..], stmt, ctx)?
     {
         return Ok((vec![step(kind)], used));
@@ -6370,7 +6975,7 @@ fn parse_element_at(
         let (kind, used) = parse_set_body(&toks[pos..], stmt, ctx)?;
         return Ok((vec![step(kind)], used));
     }
-    if head_word.as_deref() == Some("RETURN") {
+    if head_word.as_deref() == Some(KEYWORD_RETURN) {
         let (kind, used) = parse_return_body(&toks[pos..], stmt, ctx)?;
         return Ok((vec![step(kind)], used));
     }
@@ -6389,33 +6994,33 @@ fn parse_element_at(
     // `BREAK ECHO hi`); a lone trailing word fails downstream like
     // the grammar's committed mismatch.
     match head_word.as_deref() {
-        Some("BREAK") => {
+        Some(KEYWORD_BREAK) => {
             return Ok((vec![step(StepKind::Break)], 1));
         }
-        Some("CONTINUE") => {
+        Some(KEYWORD_CONTINUE) => {
             return Ok((vec![step(StepKind::Continue)], 1));
         }
-        Some("IF") => {
+        Some(KEYWORD_IF) => {
             if let Some((kind, used)) = parse_if_at(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("FOR") => {
+        Some(KEYWORD_FOR) => {
             if let Some((kind, used)) = parse_for_at(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("WHILE") => {
+        Some(KEYWORD_WHILE) => {
             if let Some((kind, used)) = parse_while_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("FUNC") => {
+        Some(KEYWORD_FUNC) => {
             if let Some((kind, used)) = parse_func_at(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("REMOTE") => {
+        Some(KEYWORD_REMOTE) => {
             if let Some((kind, used)) = parse_remote_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
@@ -6424,20 +7029,20 @@ fn parse_element_at(
     }
     // Wrappers (block or single); shape misses fall to generic.
     match head_word.as_deref() {
-        Some("WITH_IO") => {
+        Some(KEYWORD_WITH_IO) => {
             return parse_with_io_element(toks, pos, stmt, ctx, first_guard);
         }
-        Some("TIMEOUT") => {
+        Some(KEYWORD_TIMEOUT) => {
             if let Some((kind, used)) = parse_timeout_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("ISOLATED") => {
+        Some(KEYWORD_ISOLATED) => {
             if let Some((kind, used)) = parse_isolated_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }
-        Some("ASYNC") => {
+        Some(KEYWORD_ASYNC) => {
             if let Some((kind, used)) = parse_async_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
@@ -6446,22 +7051,24 @@ fn parse_element_at(
     }
     // AWAIT/CANCEL statements (element level admits the `$` gap,
     // probed); heads without `$` go generic (lowering fails them).
-    if matches!(head_word.as_deref(), Some("AWAIT") | Some("CANCEL"))
-        && let Some((kind, used)) = parse_await_cancel_at(toks, pos, stmt, false)?
+    if matches!(
+        head_word.as_deref(),
+        Some(KEYWORD_AWAIT) | Some(KEYWORD_CANCEL)
+    ) && let Some((kind, used)) = parse_await_cancel_at(toks, pos, stmt, false)?
     {
         return Ok((vec![step(kind)], used));
     }
     // `INHERIT_ENV [...]` parses strictly even at element level
     // (keys stay exact everywhere; slice 5 adds only the
     // prelude-order validation). Shape misses go generic.
-    if head_word.as_deref() == Some("INHERIT_ENV")
+    if head_word.as_deref() == Some(KEYWORD_INHERIT_ENV)
         && let Some((kind, used)) = parse_inherit_env_at(toks, pos, stmt)?
     {
         return Ok((vec![step(kind)], used));
     }
     // `EXPORT ...` records names (zero steps) or misses to generic;
     // level and guard violations fail loudly like the backend.
-    if head_word.as_deref() == Some("EXPORT") {
+    if head_word.as_deref() == Some(KEYWORD_EXPORT) {
         if in_block {
             return Err(TokenError {
                 stmt,
@@ -6480,31 +7087,60 @@ fn parse_element_at(
                 kind: None,
             });
         }
-        if let Some((names, used)) = parse_export_at(toks, pos) {
-            for name in &names {
-                for part in name.split("::") {
+        if let Some((
+            ExportNames {
+                func_names,
+                type_names,
+            },
+            used,
+        )) = parse_export_at(toks, pos)
+        {
+            for name in &func_names {
+                for part in name.split(MODULE_SEPARATOR) {
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
-                if ctx.exports.borrow().contains(name) {
+                if ctx.func_exports.borrow().contains(name)
+                    || ctx.type_exports.borrow().contains(name)
+                {
                     return Err(TokenError {
                         stmt,
                         msg: format!("duplicate EXPORT `{name}`"),
                         line: 0,
                         col: 0,
                         kind: Some(ParseErrorKind::Validation {
-                            command: "EXPORT".to_string(),
+                            command: KEYWORD_EXPORT.to_string(),
                         }),
                     });
                 }
-                ctx.exports.borrow_mut().push(name.clone());
+                ctx.func_exports.borrow_mut().push(name.clone());
+            }
+            for name in &type_names {
+                for part in name.split(MODULE_SEPARATOR) {
+                    crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
+                        .map_err(|e| lower_err(stmt, e))?;
+                }
+                if ctx.func_exports.borrow().contains(name)
+                    || ctx.type_exports.borrow().contains(name)
+                {
+                    return Err(TokenError {
+                        stmt,
+                        msg: format!("duplicate EXPORT `{name}`"),
+                        line: 0,
+                        col: 0,
+                        kind: Some(ParseErrorKind::Validation {
+                            command: KEYWORD_EXPORT.to_string(),
+                        }),
+                    });
+                }
+                ctx.type_exports.borrow_mut().push(name.clone());
             }
             return Ok((Vec::new(), used));
         }
     }
     // `TYPE NAME = SHAPE` aliases (zero or one step); level and guard
     // violations fail loudly, shape misses fall to generic.
-    if head_word.as_deref() == Some("TYPE") {
+    if head_word.as_deref() == Some(KEYWORD_TYPE) {
         if in_block {
             return Err(TokenError {
                 stmt,
@@ -6773,7 +7409,7 @@ fn parse_inner_command(
         // Statement-level `INSPECT(...)` resolves like any other call
         // (only expression position mints the node); unknown functions
         // fail in the shared resolver with identical messages.
-        if !call_name.contains("::") {
+        if !call_name.contains(MODULE_SEPARATOR) {
             crate::resolve::check_func_ident(&lowering_ctx(stmt), &call_name)
                 .map_err(|e| lower_err(stmt, e))?;
         }
@@ -6803,7 +7439,7 @@ fn parse_inner_command(
     // caller continues past the list, like the grammar. The list
     // rides gapped (`sep`): a joint bracket is a hard error, never
     // a spliced arg (probed `RUN["a"]`).
-    if head == "RUN"
+    if head == KEYWORD_RUN
         && matches!(
             body.get(1).map(|t| &t.kind),
             Some(TokKind::Group {
@@ -6829,7 +7465,8 @@ fn parse_inner_command(
         // `block` alternative here); fall through to the shell path
         // below, which reads the bracket literally.
         if let Some(list) = parse_run_exec_list(&inner, stmt, ctx)? {
-            let kind = (ctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
+            let kind =
+                (ctx.lower)(KEYWORD_RUN, vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
             return Ok((kind, 2));
         }
     }
@@ -6904,11 +7541,21 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
     )?;
     {
         let top: HashSet<String> = ctx.funcs.borrow().first().cloned().unwrap_or_default();
+        let top_imports: Vec<String> = ctx.imports.borrow().first().cloned().unwrap_or_default();
+        let mut top_types = HashSet::new();
+        for step in &out {
+            if let StepKind::TypeAlias { name, .. } = &step.kind {
+                top_types.insert(name.clone());
+            }
+        }
         crate::commands::validate_exports(
             &lowering_ctx(out.len()),
-            &ctx.exports.borrow(),
+            &ctx.func_exports.borrow(),
+            &ctx.type_exports.borrow(),
             &top,
+            &top_types,
             ctx.modules,
+            &top_imports,
         )
         .map_err(|e| TokenError {
             stmt: out.len(),
@@ -7024,7 +7671,7 @@ fn parse_with_ctx(
     modules: ModuleTable,
     preseed_funcs: HashSet<String>,
     preseed_imports: Vec<String>,
-) -> ParseResult<(Vec<Step>, Vec<String>)> {
+) -> ParseResult<ScriptWithExports> {
     let toks = lex_str(input).map_err(|e| lex_error(input, e))?;
     let ctx = ParseCtx::empty(&lower, &modules, &reserved_names);
     // Snippet re-parses seed their base frames so lookup behaves
@@ -7034,7 +7681,19 @@ fn parse_with_ctx(
     let steps = parse_tokens_with_ctx(&toks, &ctx).map_err(|e| token_error(input, e))?;
     let mut steps = steps;
     stamp_func_docs(input, &mut steps);
-    Ok((steps, ctx.exports.borrow().clone()))
+    Ok(ScriptWithExports {
+        steps,
+        func_exports: ctx.func_exports.borrow().clone(),
+        type_exports: ctx.type_exports.borrow().clone(),
+    })
+}
+
+/// Steps plus single-file `EXPORT` metadata, before `#` doc stamping.
+/// Callers needing docs build a [`ParsedScript`] from this.
+struct ScriptWithExports {
+    steps: Vec<Step>,
+    func_exports: Vec<String>,
+    type_exports: Vec<String>,
 }
 
 /// Parse a script with an unknown host environment.
@@ -7050,7 +7709,7 @@ pub fn parse_script(
         HashSet::new(),
         Vec::new(),
     )?
-    .0)
+    .steps)
 }
 
 /// Parse a snippet with an enclosing parse's visible scope state, so
@@ -7072,7 +7731,7 @@ pub fn parse_script_with_preseed(
         preseed_funcs,
         preseed_imports,
     )?
-    .0)
+    .steps)
 }
 
 /// Parse with a module provenance table so calls resolve statically:
@@ -7097,7 +7756,11 @@ pub fn parse_script_with_modules_and_exports(
     reserved_names: HashSet<String>,
     modules: ModuleTable,
 ) -> ParseResult<ParsedScript> {
-    let (steps, exports) = parse_with_ctx(
+    let ScriptWithExports {
+        steps,
+        func_exports,
+        type_exports,
+    } = parse_with_ctx(
         input,
         lower,
         reserved_names,
@@ -7108,7 +7771,8 @@ pub fn parse_script_with_modules_and_exports(
     Ok(ParsedScript {
         func_docs: collect_func_docs(input, &steps),
         steps,
-        exports,
+        func_exports,
+        type_exports,
     })
 }
 
@@ -7118,7 +7782,11 @@ pub fn parse_script_with_exports(
     input: &str,
     lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
 ) -> ParseResult<ParsedScript> {
-    let (steps, exports) = parse_with_ctx(
+    let ScriptWithExports {
+        steps,
+        func_exports,
+        type_exports,
+    } = parse_with_ctx(
         input,
         lower,
         HashSet::new(),
@@ -7129,7 +7797,8 @@ pub fn parse_script_with_exports(
     Ok(ParsedScript {
         func_docs: collect_func_docs(input, &steps),
         steps,
-        exports,
+        func_exports,
+        type_exports,
     })
 }
 
@@ -7160,13 +7829,15 @@ pub fn parse_guard_expr_str(input: &str) -> ParseResult<GuardExpr> {
 }
 
 /// Parsed script with single-file `EXPORT` metadata. `steps` is the
-/// linear execution plan, `exports` the `EXPORT` names in source order,
+/// linear execution plan, `func_exports` the `EXPORT` func names in
+/// source order, `type_exports` the `EXPORT TYPE` names in source order,
 /// and `func_docs` maps top-level `FUNC` base names to (summary, docs)
 /// collected from the immediately preceding `#` comment block.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedScript {
     pub steps: Vec<Step>,
-    pub exports: Vec<String>,
+    pub func_exports: Vec<String>,
+    pub type_exports: Vec<String>,
     pub func_docs: std::collections::HashMap<String, (String, String)>,
 }
 
@@ -7237,7 +7908,7 @@ fn stamp_func_docs(input: &str, steps: &mut [Step]) {
 }
 
 fn strip_func_head(trimmed: &str) -> Option<String> {
-    let rest = trimmed.strip_prefix("FUNC")?;
+    let rest = trimmed.strip_prefix(KEYWORD_FUNC)?;
     let after = rest.strip_prefix([' ', '\t'])?;
     if after.is_empty() {
         return None;
@@ -7521,8 +8192,8 @@ mod tests {
             "TIMEOUT 10s { [os:linux] [os:windows] { ECHO hi } }",
             "TIMEOUT 10s { [os:linux] { ECHO hi } ECHO bye }",
             "LET $x: INT = 1 ECHO bye",
-            "BREAK",
-            "CONTINUE",
+            KEYWORD_BREAK,
+            KEYWORD_CONTINUE,
             "BREAK ECHO hi",
             "FOR $x: INT IN [1] { BREAK }",
             "LET $b: STRING = { RETURN \"hi\" }",
@@ -7715,9 +8386,9 @@ mod tests {
         use std::collections::{HashMap, HashSet};
         let std_table = || ModuleTable {
             modules: HashMap::from([(
-                "STD".to_string(),
+                crate::constants::STD_MODULE_NAME.to_string(),
                 Some(ModuleFuncs {
-                    functions: HashSet::from(["TEXT_LENGTH".to_string()]),
+                    func_names: HashSet::from(["TEXT_LENGTH".to_string()]),
                 }),
             )]),
         };
@@ -7837,7 +8508,7 @@ mod tests {
             "$x = 1",
             "$x = $a + 1",
             "RETURN 1",
-            "RETURN",
+            KEYWORD_RETURN,
             "RETURN $x",
             "[env:X] LET $x: INT = 1",
             "[os:linux] $x = 2",
@@ -7908,7 +8579,7 @@ mod tests {
             "WITH_IO stdin=$p ECHO hi",
             "WITH_IO [STDIN=$p] ECHO hi",
             "WITH_IO [rows] RUN echo hi",
-            "WITH_IO",
+            KEYWORD_WITH_IO,
             "WITH_IO [stdout=$p]",
             "WITH_IO [stdin=$p]\n[os:linux] { ECHO hi }",
             "WITH_IO [stdin=$p] { }",
@@ -7926,7 +8597,7 @@ mod tests {
             "TIMEOUT 10 s ECHO hi",
             "TIMEOUT -5s ECHO hi",
             "TIMEOUT 0s ECHO hi",
-            "TIMEOUT",
+            KEYWORD_TIMEOUT,
             "TIMEOUT 10s",
             "TIMEOUT { ECHO hi }",
             "TIMEOUT \"10s\"",
@@ -7935,11 +8606,11 @@ mod tests {
             "TIMEOUT 10s {{ $d }}",
             "TIMEOUT 10s { $d }",
             "TIMEOUT { $d } ECHO hi",
-            "ASYNC",
-            "ISOLATED",
+            KEYWORD_ASYNC,
+            KEYWORD_ISOLATED,
             "ISOLATED{ECHO hi}",
-            "AWAIT",
-            "CANCEL",
+            KEYWORD_AWAIT,
+            KEYWORD_CANCEL,
             "AWAIT t",
             "AWAIT $",
             "AWAIT $t extra",

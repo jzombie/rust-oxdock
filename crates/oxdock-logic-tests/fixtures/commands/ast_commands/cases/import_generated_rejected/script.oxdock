@@ -1,0 +1,5 @@
+# Generated-then-imported files are rejected: the library does not
+# exist when the run starts, so there is nothing to analyze. The
+# failure lands before the first step, so the marker is never written.
+WRITE marker.txt "side-effect"
+IMPORT ["generated.oxdock" AS GEN]

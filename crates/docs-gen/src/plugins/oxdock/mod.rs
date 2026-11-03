@@ -430,7 +430,7 @@ mod tests {
                 .expect("functions")
                 .as_str()
                 .expect("string")
-                .contains("## Functions")
+                .contains("## Built-in functions")
         );
         assert!(
             context_reference()

@@ -579,8 +579,9 @@ fn inherit_env_removal_blocks_host_env() {
     let mut io_cfg = ExecIo::new();
     io_cfg.remove_inherit_env("SPECIAL_TOKEN");
     io_cfg.set_stdout(Some(captured.clone()));
+    // Removal wins over the host value: the name stays absent, which
+    // reads as empty (declared-but-absent needs no host bridging).
     run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
-
     let out = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
     assert_eq!(out, "\n");
 }
@@ -2772,6 +2773,8 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::FuncDef { .. } => {}
         StepKind::Call { .. } => {}
         StepKind::Return { .. } => {}
+        StepKind::ImportFile { .. } => {}
+        StepKind::ImportFuncs { .. } => {}
         StepKind::While { .. } => {}
         StepKind::Break => {}
         StepKind::Continue => {}
@@ -3779,6 +3782,7 @@ fn guard_scope_env_does_not_leak() {
     let script = indoc! {r#"
         LET $cap_env_txt: PIPE
         ENV FOO="bar"
+        ENV SCOPE=""
         [env:FOO]
         {
           WORKDIR scoped
@@ -4757,6 +4761,7 @@ fn func_guarded_return_without_fallback_fails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        ENV STATIC_CHECK_DEMO_GUARD=1
         FUNC MAYBE() {
             [env:STATIC_CHECK_DEMO_GUARD] RETURN "yes"
         }
@@ -4973,6 +4978,7 @@ fn static_read_outside_coverage_is_undeclared() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        INHERIT_ENV [STATIC_CHECK_COVERAGE_A]
         [eq(env:STATIC_CHECK_COVERAGE_A, "1")] LET $o: STRING = "covered"
         [eq(env:STATIC_CHECK_COVERAGE_A, "2")] LET $s: STRING = $o
     "#};

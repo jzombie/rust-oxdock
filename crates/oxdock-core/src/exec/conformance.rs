@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use oxdock_fs::{GuardedPath, MockFs, PathResolver, WorkspaceFs};
-use oxdock_parser::{ModuleFuncs, ModuleTable};
+use oxdock_parser::{ModuleFuncs, ModuleTable, STD_MODULE_NAME};
 
 use super::args::check_host_return_value;
 use super::base_name;
@@ -116,7 +116,7 @@ pub fn assert_module_returns_conformance<P: ProcessManager + Clone + Send + 'sta
                 ExampleOutcome::Failed(reason) => {
                     failures.push(format!("{qualified} example '{}': {reason}", example.name))
                 }
-                ExampleOutcome::TimedOut => {}
+                ExampleOutcome::TimedOut | ExampleOutcome::Skipped => {}
             }
         }
         if ok == 0 {
@@ -210,6 +210,14 @@ enum ExampleOutcome {
     ExpectedError,
     Failed(String),
     TimedOut,
+    /// Reinvocation examples (calling `INTERPRETER()` and spawning the
+    /// result via `RUN [$exe ...]`) never run here: the mock manager
+    /// records argv runs without spawning, so a child interpreter
+    /// cannot execute in-gate. Hermetic slot coverage comes from
+    /// sibling examples; docs_conformance owns the reinvocation
+    /// verdict with a staged interpreter binary. Inconclusive, like
+    /// `TimedOut`: never counts for or against coverage.
+    Skipped,
 }
 
 /// Execute one example end to end with `exec_modules` registered, on
@@ -225,9 +233,9 @@ fn run_example<P: ProcessManager + Clone + Send + 'static>(
 ) -> ExampleOutcome {
     let mut table = ModuleTable {
         modules: HashMap::from([(
-            "STD".to_string(),
+            STD_MODULE_NAME.to_string(),
             Some(ModuleFuncs {
-                functions: builtin_function_metas()
+                func_names: builtin_function_metas()
                     .iter()
                     .map(|meta| base_name(&meta.name).to_string())
                     .collect::<HashSet<_>>(),
@@ -237,7 +245,7 @@ fn run_example<P: ProcessManager + Clone + Send + 'static>(
     table.modules.insert(
         module_name.to_string(),
         Some(ModuleFuncs {
-            functions: funcs
+            func_names: funcs
                 .iter()
                 .map(|registration| base_name(&registration.meta().name).to_string())
                 .collect::<HashSet<_>>(),
@@ -254,6 +262,16 @@ fn run_example<P: ProcessManager + Clone + Send + 'static>(
         },
         None => None,
     };
+    // Reinvocation examples call INTERPRETER() and spawn the result
+    // (`RUN [$exe ...]`). The gate runs under the caller's process
+    // manager (a recording mock in core's own suite), which never
+    // spawns: the child could not execute here. Parsing above still
+    // validates the script; execution belongs to docs_conformance
+    // with its staged binary. Hermetic examples without a child run
+    // (like INTERPRETER's own `self`) still execute below.
+    if example.code.contains("INTERPRETER()") && example.code.contains("RUN [$exe") {
+        return ExampleOutcome::Skipped;
+    }
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let modules: Vec<HostModule<P>> = exec_modules.to_vec();
     std::thread::spawn(move || {
@@ -331,6 +349,7 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         cargo_scratch: oxdock_fs::reserve_cargo_scratch().expect("cargo scratch"),
         seed: Arc::new(HashMap::new()),
         cwd: fs.root().clone(),
+        initial_root: fs.root().clone(),
         envs: Arc::new(HashMap::new()),
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
@@ -351,6 +370,12 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         cancellable: false,
         reap_floor: None,
         functions: super::native::FunctionRegistry::with_builtins(),
+        entry_file: None,
+        import_stack: Vec::new(),
+        import_alias_frame: None,
+        modules: HashMap::new(),
+        module_stack: Vec::new(),
+        module_table: super::native::std_module_table(),
         types: super::typing::startup_type_map(),
         record_schemas: HashMap::new(),
         module_states: HashMap::new(),

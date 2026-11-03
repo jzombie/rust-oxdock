@@ -131,6 +131,10 @@ fn install_harness(payload: &[u8], digest: &str, dir: Option<&str>) -> Result<In
     io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
     io.insert_inherit_env("GITHUB_PATH", "");
     io.insert_inherit_env("GITHUB_ENV", "");
+    // Declared-but-absent reads as empty, so the harness bridges only
+    // what the test varies: OXDOCK_PIPED_SCRIPT and OXDOCK_INTERACTIVE
+    // stay absent unless a test sets them. The reinvoked interpreter
+    // needs no bridging: the oxfile reads it via INTERPRETER().
     Ok(InstallRun {
         _temp: temp,
         root,
@@ -220,6 +224,8 @@ fn missing_dir_fails_naming_install_dir() -> Result<()> {
     run.io.remove_inherit_env(oxdock_env::os::unix::HOME);
     run.io
         .remove_inherit_env(oxdock_env::os::windows::USERPROFILE);
+    // OXDOCK_DIR stays absent here, which reads as empty: the gate
+    // fails naming the install dir without any host bridging.
     let err = run.execute().expect_err("no dir must fail");
     let rendered = format!("{err:#}");
     assert!(
@@ -287,9 +293,9 @@ fn missing_asset_fails_naming_the_file() -> Result<()> {
 }
 
 /// A piped script runs instead of installing: with OXDOCK_PIPED_SCRIPT
-/// bridged, the oxfile reinvokes OXDOCK_INTERPRETER on it and places
-/// nothing, even with a destination bridged. The run-vs-install
-/// decision lives here in the script, never in the stub.
+/// bridged, the oxfile reinvokes its own interpreter (via INTERPRETER())
+/// on it and places nothing, even with a destination bridged. The
+/// run-vs-install decision lives here in the script, never in the stub.
 #[test]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn piped_script_reinvokes_interpreter_without_placing() -> Result<()> {
@@ -297,20 +303,15 @@ fn piped_script_reinvokes_interpreter_without_placing() -> Result<()> {
     let piped_path = run.root.join("piped.oxfile")?;
     let setup = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
     setup.write_file(&piped_path, b"ECHO piped\n")?;
-    let interpreter = run.root.join("x/oxdock")?;
     run.io.insert_inherit_env(
         "OXDOCK_PIPED_SCRIPT",
         piped_path.as_path().display().to_string(),
     );
-    run.io.insert_inherit_env(
-        "OXDOCK_INTERPRETER",
-        interpreter.as_path().display().to_string(),
-    );
     run.execute()?;
-    let expected = vec![
-        interpreter.as_path().display().to_string(),
-        piped_path.as_path().display().to_string(),
-    ];
+    let interpreter = std::env::current_exe()
+        .map(|exe| exe.display().to_string())
+        .map_err(|err| anyhow::anyhow!("current exe unavailable: {err:#}"))?;
+    let expected = vec![interpreter, piped_path.as_path().display().to_string()];
     assert!(
         argv_calls(&run.calls()).contains(&expected),
         "reinvoke recorded: {:?}",

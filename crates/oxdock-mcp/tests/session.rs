@@ -35,6 +35,28 @@ fn init_session(script: &str) -> McpSession<oxdock_process::DefaultProcessManage
     .expect("session init")
 }
 
+#[test]
+fn type_exports_skip_tools_but_resolve_signatures() {
+    // MCP never confuses a type for a function: `EXPORT TYPE` skips the
+    // tool table, while `FUNC` signatures using the alias still resolve
+    // (no lobotomy) and serve.
+    let session = init_session(indoc! {r#"
+        TYPE PERSON = MAP<name: STRING>
+        FUNC GREET($p: PERSON) {
+            RETURN "hi"
+        }
+        EXPORT GREET
+        EXPORT TYPE PERSON
+    "#});
+    let metas = session.tool_metas().expect("metas");
+    assert_eq!(
+        metas.len(),
+        1,
+        "only FUNCs serve as tools, not TYPEs: {metas:?}"
+    );
+    assert_eq!(metas[0].name, "SCRIPT::GREET");
+}
+
 fn handler_config(script: &str) -> (McpServerConfig, GuardedPath) {
     let (_fs, root) = test_fs();
     let script_path = root.join("tools.oxdock").expect("script path");
@@ -264,7 +286,7 @@ fn qualified_opaque_export_still_registers() {
     let engine = Engine::new();
     let parsed = parse_script_with_modules_and_exports(script, engine.module_table())
         .expect("export must parse");
-    assert!(parsed.exports.contains(&"STD::TEXT_TRIM".to_string()));
+    assert!(parsed.func_exports.contains(&"STD::TEXT_TRIM".to_string()));
     // Stage 2 (oxdock-core): linear session init accepts the export.
     // McpSession is core session machinery (state + registry); despite
     // the name it performs no JSON projection and opens no transport.
@@ -277,7 +299,11 @@ fn qualified_opaque_export_still_registers() {
         &parsed,
     )
     .expect("session init must accept the export");
-    assert!(session.exports().contains(&"STD::TEXT_TRIM".to_string()));
+    assert!(
+        session
+            .func_exports()
+            .contains(&"STD::TEXT_TRIM".to_string())
+    );
     // Stage 3 (oxdock-core registry): the qualified name resolves to
     // real function metadata. Registry lookup succeeds; only the
     // MCP-layer JSON projection (tested below) refuses it.
@@ -638,4 +664,45 @@ fn async_block_runs_child_processes() {
     }
     assert_eq!(done["state"], "finished", "{done}");
     assert_eq!(done["result"], "bg-hi");
+}
+
+#[test]
+fn reexported_import_serves_as_tool() {
+    // An entry re-export promotes an imported function to the entry's
+    // own tool surface: the lib's EXPORT gates visibility, the entry's
+    // EXPORT LIB::FOO gates serving, and calls share module state.
+    let (fs, root) = test_fs();
+    let lib = root.join("lib.oxdock").expect("lib path");
+    fs.write_file(
+        &lib,
+        b"LET $n: INT = 0\nFUNC COUNT() {\n $n = $n + 1\n RETURN $n\n}\nEXPORT COUNT\n",
+    )
+    .expect("seed lib");
+    let engine = Engine::new();
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["lib.oxdock" AS LIB]
+            EXPORT LIB::COUNT
+        "#},
+        engine.module_table(),
+    )
+    .expect("parse");
+    let mut session = McpSession::init(
+        fs,
+        default_process_manager(),
+        Vec::new(),
+        Vec::new(),
+        &parsed,
+    )
+    .expect("session init");
+    let metas = session.tool_metas().expect("metas");
+    assert!(
+        metas.iter().any(|m| m.name == "LIB::COUNT"),
+        "re-export served: {:?}",
+        metas.iter().map(|m| &m.name).collect::<Vec<_>>()
+    );
+    let one = session.call("COUNT", vec![]).expect("call");
+    assert_eq!(one.value.as_i64(), Some(1));
+    let two = session.call("COUNT", vec![]).expect("call");
+    assert_eq!(two.value.as_i64(), Some(2));
 }

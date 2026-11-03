@@ -16,11 +16,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-# Pinned interpreter for every OxDock step below. TEXT_* string surgery
-# needs 0.28.0-alpha minimum. Bump only after a newer tag proves green;
-# an older engine choking on new syntax fails loudly at step start.
+# OxDock steps below run on a branch-built engine: source stays local
+# so the hash leg proves branch behavior (unreleased vocabulary like
+# file IMPORT and HASH_SHA256 no tag provides yet). No pin here.
 env:
-  OXDOCK_PINNED_ENGINE: v0.32.0-alpha
+  OXDOCK_ENGINE_SOURCE: local
 
 jobs:
   miri:
@@ -38,23 +38,28 @@ jobs:
         with:
           ref: main
 
-      # TODO (#269): unpin the nightly toolchain once upstream fixes the
-      # E0391 async-drop query cycle in ssh-key 0.7.0-rc.11 (via
-      # russh). Pinned to nightly-2026-10-29 (proven green); nightly
-      # 2026-10-31 breaks third-party builds.
+      # Latest nightly plus Miri: the dated pin went away with the
+      # upstream ssh-key E0391 fix (#269, #272). Re-pin a dated nightly
+      # deliberately if a new nightly breaks the build, never drift.
       - name: Install nightly toolchain with Miri
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-10-29
           components: miri
 
-      # Pinned engine, never `latest`: the badge must name a fixed
-      # release, and a moving default would change CI with no repo
-      # diff. The pin lives in top-level `env`, not here.
+      # Branch-built engine, never `latest`: a moving default would
+      # change CI with no repo diff.
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          source: ${{ env.OXDOCK_ENGINE_SOURCE }}
+
+      # Local source builds install stable as the default toolchain.
+      # Restore the nightly default so cargo miri below keeps
+      # interpreting under nightly.
+      - name: Restore nightly toolchain default
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
 
       # Native hashing: HASH_SHA256 digests Cargo.lock directly, and
       # TEXT_EXTRACT picks the rustc commit out of the version report.
@@ -63,18 +68,18 @@ jobs:
         id: hashes
         shell: oxdock --script {0}
         run: |
-          IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          LET $lock: STRING = HASH_SHA256("Cargo.lock")
+          LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
-          ECHO "rustc: {{ $caps.1 }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
+          LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
+          ECHO "rustc: {{ $rustc }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
 
       - name: Cache Cargo dependencies for Miri
         uses: actions/cache@v4

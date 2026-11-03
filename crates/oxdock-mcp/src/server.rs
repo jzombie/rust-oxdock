@@ -817,10 +817,14 @@ impl OxDockHandler {
         }
         let parsed =
             oxdock_core::parse_script_with_modules_and_exports(script_text, engine.module_table())?;
-        if parsed.exports.is_empty() {
+        if parsed.func_exports.is_empty() {
             anyhow::bail!("no EXPORT entries: add `EXPORT [NAME, ...]` to expose MCP tools");
         }
-        if parsed.exports.iter().any(|name| name == STATUS_TOOL_NAME) {
+        if parsed
+            .func_exports
+            .iter()
+            .any(|name| name == STATUS_TOOL_NAME)
+        {
             anyhow::bail!("{STATUS_TOOL_NAME} is reserved for the host status tool");
         }
         let (fs, hold) = session_fs(workspace_root)?;

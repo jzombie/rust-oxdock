@@ -105,6 +105,7 @@ mod tests {
             flags,
             default_output: None,
             examples: &[],
+            in_index: true,
         }
     }
 

@@ -13,11 +13,12 @@ on:
     - cron: "0 7 * * 1"
   workflow_dispatch:
 
-# Pinned interpreter for every leg below: legs run branch DSL on a
-# stable release while the branch engine is still compiling, and the
-# action's `latest` default would move under us with no repo diff. Bump
-# to a newer tag only after it proves green; an older engine choking on
-# new syntax fails loudly at step start, which is the point.
+# Two roles, kept separate: the engine running every leg below is a
+# branch build (source: local, no version input — legs may use
+# unreleased vocabulary and still prove branch behavior). The pin is
+# test data only: previous-release artifacts the legs download and
+# verify (prev.tar.gz, SHA256SUMS, newest-release install). Bump it to
+# a newer tag only after it proves green.
 env:
   # Previous releases are test data, never the running engine: the build
   # job verifies a pinned artifact unpacks and runs, and the newest leg
@@ -27,11 +28,7 @@ env:
   # (proves a published release installs and runs).
   # TODO (future): enforce marker coverage in smoke_script_conformance,
   # so a leg selecting its product some new way cannot land unmarked.
-  OXDOCK_PINNED_ENGINE: v0.32.0-alpha
-  # Leg scripts assume the 0.32.0-alpha vocabulary (PATH_JOIN,
-  # WITH_IO [tty]), so the engine running them must provide it: local
-  # branch builds do, and the pin above now does too. Source stays local
-  # so legs keep proving branch behavior, not the release.
+  OXDOCK_PINNED_ENGINE: v0.33.0-alpha
   OXDOCK_ENGINE_SOURCE: local
 
 jobs:
@@ -91,7 +88,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       # The binary under test is this branch, never a published tag:
@@ -322,7 +318,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
 
@@ -422,7 +417,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
 
@@ -538,7 +532,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
 
@@ -630,7 +623,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
 
@@ -722,7 +714,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
 
@@ -809,7 +800,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
 
@@ -913,7 +903,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
 
@@ -933,7 +922,7 @@ jobs:
           OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, GITHUB_PATH, GITHUB_ENV]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, OXDOCK_CACHE_DIR, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, GITHUB_PATH, GITHUB_ENV]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -1028,7 +1017,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
 
@@ -1125,7 +1113,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
 
@@ -1256,7 +1243,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
 

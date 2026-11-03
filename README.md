@@ -33,15 +33,15 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.33.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.34.0-alpha/oxdock/)
 
 Jump to the [Command Reference](#command-reference) below for the full
-command list with runnable examples, or view the growing list of standard
-library [Functions](#functions).
+command list with runnable examples, or view the standard library
+[Built-in functions](#built-in-functions).
 
 **Browse by section:**
 
-[Quick start](#quick-start) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Runtime architecture](#runtime-architecture) | [Why this shape](#why-this-shape) | [MCP hosting](#mcp-hosting) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [Machine model](#machine-model) | [Variants](#variants) | [Goals](#goals) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Functions](#functions) | [Contexts](#contexts) | [Plugin references](#plugin-references) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
+[Quick start](#quick-start) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Built-in functions](#built-in-functions) | [Contexts](#contexts) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Plugin references](#plugin-references) | [Runtime architecture](#runtime-architecture) | [Machine model](#machine-model) | [Why this shape](#why-this-shape) | [Variants](#variants) | [Goals](#goals) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [MCP hosting](#mcp-hosting) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
 
 ## Quick start
 
@@ -65,11 +65,11 @@ Installs to `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH. Set `$env:I
 For a reproducible install, pin an explicit release:
 
 ```sh
-(export VERSION=v0.33.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
+(export VERSION=v0.34.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
 ```
 
 ```powershell
-$env:VERSION = 'v0.33.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
+$env:VERSION = 'v0.34.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 ```
 
 </details>
@@ -83,7 +83,7 @@ release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 From the registry:
 
 ```sh
-cargo install oxdock@0.33.0-alpha
+cargo install oxdock@0.34.0-alpha
 ```
 
 From a local checkout:
@@ -97,7 +97,7 @@ cargo install --path oxdock
 ### Add to Rust project
 
 ```sh
-cargo add oxdock@0.33.0-alpha
+cargo add oxdock@0.34.0-alpha
 ```
 
 ### Run a script with the CLI
@@ -106,240 +106,7 @@ cargo add oxdock@0.33.0-alpha
 oxdock <PATH>
 ```
 
-## Dynamically embed assets at compile time
-
-Embed build-time dependencies from any language: scripts run inline during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
-
-```rust
-use oxdock_macros::oxdock_embed;
-
-oxdock_embed! {
-    // Generated struct for resource lookups via `SiteAssets::get(path)`.
-    name: SiteAssets,
-
-    // Manifest-relative staging directory. Run `cargo build` locally to generate
-    // the files and `.oxdock_hash` fingerprint, then commit `prebuilt/` to git.
-    // `cargo publish` vendors these files so downstream crates embed them
-    // directly without re-running the script on read-only registry paths.
-    // Set OXDOCK_EMBED_FORCE_REBUILD=1 to force re-execution.
-    out_dir: "prebuilt",
-
-    script: {
-        // Executes in an isolated temporary workspace (`WORKSPACE SNAPSHOT`),
-        // keeping the source tree clean unless `WORKSPACE LOCAL` is requested.
-        ENV PROJECT=OxDock
-        MKDIR dist
-
-        // Exec form spawns cargo portably without a shell. Asserting the version string
-        // in memory verifies the toolchain without baking volatile output into staged assets.
-        LET $cargo: STRING = RUN ["cargo", "--version"]
-        ASSERT_CONTAINS $cargo "cargo"
-
-        // Assets stage under subdirectories relative to `out_dir` (e.g., prebuilt/dist/os.txt)
-        WRITE dist/hello.txt "hello from {{ env:PROJECT }}"
-        WRITE dist/project.txt "the-project"
-        WRITE dist/manifest.txt "the-manifest"
-    }
-}
-
-fn main() {
-    // Verify we can read the resources we just created
-    let hello = SiteAssets::get("dist/hello.txt").expect("hello must be embedded");
-    assert_eq!(hello.data.as_ref(), b"hello from OxDock");
-
-    let project = SiteAssets::get("dist/project.txt").expect("project must be embedded");
-    assert_eq!(project.data.as_ref(), b"the-project");
-
-    let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
-    assert_eq!(manifest.data.as_ref(), b"the-manifest");
-}
-```
-
-> You can find an example of this workspace dogfooding this very design in its own CLI binary by searching for: [usage-prebuilt](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+usage-prebuilt&type=code).
-
-For each artifact the macro emits a constant backed by `include_bytes!`, which bakes the file bytes into read-only binary data during compilation. At runtime `get()` scans a static table and returns a borrowed slice, so there are no file reads and no heap allocation. The support types only need `alloc::borrow::Cow` and core iterators, which is why it works in `no_std`.
-
-Asset scripts resolve `STD` (via `IMPORT [STD]`) and `SCRIPT` functions only. There is no `modules:` prefix here, and that is structural, not missing: opaque modules defer membership to runtime, but asset scripts execute at compile time with no `Engine` to resolve against. Scripts needing host functions belong in `build.rs` through the `Engine` facade instead.
-
-## Run scripts inline
-
-The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
-
-```rust
-use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
-use oxdock_fs::{GuardedPath, PathResolver};
-
-// A version stamping pipeline: variables, a function, a loop over a list,
-// a conditional call, templates, and native assertions. The version comes
-// from Cargo at compile time, never a literal.
-let crate_version = env!("CARGO_PKG_VERSION");
-let steps: Vec<oxdock_parser::Step> = oxdock! {
-    ENV PROJECT=OxDock
-    LET $version: STRING = #crate_version
-    MKDIR dist
-
-    FUNC STAMP($name: STRING) {
-        WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
-        RETURN $name
-    }
-    FOR $name: STRING IN ["alpha", "beta"] {
-        STAMP($name)
-    }
-
-    FUNC PICK($flag: BOOL) {
-        IF $flag {
-            RETURN "alpha"
-        }
-        RETURN "beta"
-    }
-    LET $picked: STRING = PICK(true)
-    WRITE dist/picked.txt {{ $picked }}
-
-    LET $a: STRING = READ dist/alpha.txt
-    LET $b: STRING = READ dist/beta.txt
-    LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.33.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.33.0-alpha"
-    ASSERT_EQ $p "alpha"
-};
-
-let temp = GuardedPath::tempdir().expect("tempdir");
-let root = temp.as_guarded_path().clone();
-run_steps_with_context(&root, &root, &steps).expect("run script");
-
-let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
-let out = root.join("dist/alpha.txt").expect("out path");
-assert_eq!(
-    resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.33.0-alpha"
-);
-```
-
-Use `#var` to inject Rust values into the script (any value that implements `Display`). DSL variables keep their `$var` form and are unaffected. Guards accept injected values too, so Rust flags can gate steps. The script below wires a pipe between steps, reads one line back into a variable, and expands every generated file.
-
-```rust
-use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
-use oxdock_fs::{GuardedPath, PathResolver};
-
-let project = "OxDock";
-let verbose = true;
-let steps: Vec<oxdock_parser::Step> = oxdock! {
-    ENV PROJECT=#project
-    MKDIR dist
-    [bool:#verbose] WRITE dist/verbose.log "verbose on"
-
-    LET $log: PIPE
-    WITH_IO [stdout=$log] ECHO "built {{ env:PROJECT }}"
-    WITH_IO [stdin=$log] READ_LINE $line
-    WRITE dist/build.txt "{{ $line }}"
-
-    IMPORT [STD]
-    FOR $f: STRING IN GLOB("dist/*.txt") {
-        EXPAND $f
-    }
-
-    ASSERT_CONTAINS stdout "built OxDock"
-    LET $build: STRING = READ dist/build.txt
-    LET $verbose: STRING = READ dist/verbose.log
-    ASSERT_EQ $build "built OxDock"
-    ASSERT_EQ $verbose "verbose on"
-};
-
-let temp = GuardedPath::tempdir().expect("tempdir");
-let root = temp.as_guarded_path().clone();
-run_steps_with_context(&root, &root, &steps).expect("run script");
-
-let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
-let out = root.join("dist/build.txt").expect("out path");
-assert_eq!(
-    resolver.read_to_string(&out).expect("read out"),
-    "built OxDock"
-);
-```
-
-The top level runners need the default `cli` feature. With `--no-default-features`, run the same steps through `oxdock::oxdock_core::run_steps_*` instead.
-
-Scripts that call host functions declare their modules up front: the macro parses at compile time with only `STD` known, so `modules: [DEMO],` as the first line makes `IMPORT [DEMO]` and `DEMO::...` calls resolve (membership is checked at runtime). Scripts using only `STD` and `SCRIPT` functions omit it. See [Extending OxDock from Rust](#extending-oxdock-from-rust) for the complete example.
-
-## Extend the language
-
-New types and functions take two attributes, a type registration, and a function module. Small
-`Copy` scalars can ride inline on the stack with zero allocation
-instead of heap boxing; both forms, with stateful functions, live under
-[Extending OxDock from Rust](#extending-oxdock-from-rust) below.
-
-```rust
-use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
-use oxdock::oxdock_core::TypeTag;
-use std::fmt;
-
-/// Word count summary: computed in Rust, carried as one script value.
-#[oxdock_type(name = "STATS")]
-#[derive(Debug, Clone, PartialEq)]
-struct Stats {
-    words: usize,
-    chars: usize,
-}
-
-impl fmt::Display for Stats {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} words, {} chars", self.words, self.chars)
-    }
-}
-
-/// Summarize a string: `STATS("hello brave world")` carries its counts.
-#[oxdock_func(pure, name = "STATS")]
-fn summarize(text: String) -> anyhow::Result<Value> {
-    let words = text.split_whitespace().count();
-    let chars = text.chars().count();
-    Ok(Value::mint_heap(
-        Stats::descriptor(),
-        Stats { words, chars },
-    ))
-}
-
-/// Read the word count back out: `WORD_COUNT($s)` is an `INT`.
-#[oxdock_func(pure, returns = TypeTag::Int)]
-fn word_count(summary: Value) -> anyhow::Result<Value> {
-    let Some(stats) = summary.read_heap::<Stats>(Stats::descriptor()) else {
-        anyhow::bail!("WORD_COUNT() expects a STATS value");
-    };
-    Ok(Value::int(stats.words as i64))
-}
-
-fn main() -> anyhow::Result<()> {
-    let mut engine = Engine::new();
-    engine.register_type::<Stats>();
-    engine.register_module(HostModule {
-        name: "DEMO".to_string(),
-        funcs: vec![Summarize::registration(), WordCount::registration()],
-        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
-        // functions mint or accept. Empty: the examples register types on
-        // the engine directly, or use none.
-        types: vec![],
-        // Named MAP shapes for functions returning structured bundles
-        // (field tables like `NET_LISTEN_INFO`). These return scalars and
-        // opaque tags only, so none.
-        record_schemas: vec![],
-        // Shared state for function bodies, read with
-        // `cx.module_state::<T>("MODULE")` and attached with
-        // `.with_state(...)`. These are stateless, so none.
-        states: vec![],
-    });
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
-    let root = temp.as_guarded_path().clone();
-    let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
-        modules: [DEMO],
-        IMPORT [DEMO]
-        LET $s: STATS = STATS("hello brave world")
-        LET $n: INT = WORD_COUNT($s)
-        ASSERT_EQ $n 3
-    };
-    let run = engine.run_steps(&root, &steps)?;
-    assert_eq!(format!("{}", run.bindings["s"]), "3 words, 17 chars");
-    Ok(())
-}
-```
+New here? [`hello.oxfile`](https://github.com/jzombie/rust-oxdock/blob/main/hello.oxfile) demonstrates guards, `ENV`, and native commands, and verifies itself with assertions: `oxdock hello.oxfile` from a checkout runs it green.
 
 The same script also runs standalone through the CLI. It builds artifacts **and verifies them** with native assertions. Every fenced `oxdock` example in this README is executed against the implementation by [`crates/oxdock-logic-tests/tests/docs_conformance.rs`](./crates/oxdock-logic-tests/tests/docs_conformance.rs), so what you read here is guaranteed to match what the DSL actually does:
 
@@ -368,695 +135,6 @@ Save the script above as `./build.oxfile` and run it by path (install once, see 
 ```sh
 oxdock ./build.oxfile
 ```
-
-## Runtime architecture
-
-Four mechanisms keep script execution predictable: how values are stored, how bytes move between commands, how state stays isolated, and how the host stays sandboxed. Each one is shown running below.
-
-### Values: words, not objects
-
-Every script value is a fixed 128 bit word that lives on the stack: a static type descriptor pointer plus a 64 bit payload. Only payload contents may live on the heap, never the word itself.
-
-Scalars that fit (`INT`, `FLOAT`, `BOOL`, handles) ride inline, copied into the payload byte for byte with zero allocation, so arithmetic and loop counters run at register speed and never touch the allocator. Strings and host types ride behind a thin pointer to a single owned box holding the concrete Rust type, while containers (`LIST`, `MAP`) ride behind a thin pointer to a shared reference counted buffer. The pointer stays thin because every payload type is sized, so there are no fat pointers and no trait objects anywhere in the path.
-
-A naive tagged enum needs 32 bytes per value (a 24 byte payload plus tag and padding), so the word form holds four values per 64 byte cache line instead of two.
-
-Type checks compare one descriptor address, and operations (`clone`, `drop`, equality, formatting) call the descriptor directly, with no registry lookup and no lock. Each type owns one compile time descriptor singleton, so identity is pointer equality that fails closed. Host types extend the same path: `#[oxdock_type]` derives a static descriptor for the payload struct, and `inline` selects the zero allocation form for small `Copy` scalars.
-
-There is no garbage collector because values form trees, not graphs. Each exclusive heap word owns its box exactly once: cloning allocates a fresh box with a deep copy, dropping frees it. Each container word co-owns its buffer instead: cloning a `LIST` or `MAP` bumps a reference count in constant time with no allocation, dropping releases one count. A `LIST` owns its items and a `MAP` owns its entries. Mutating a shared container detaches first, so clones never observe each other's writes: assignment behaves as a copy.
-
-Nothing is mutably borrowed from two places, so cycles cannot form and plain deterministic cleanup suffices. Pointer casts always round trip through the same concrete box or buffer type, and inline words never enter the pointer domain, which keeps provenance intact. The lifecycle is checked under Miri.
-
-No pauses, no write barriers, no background collector. Python, JavaScript, and Lua permit aliasing and cycles and need tracing collectors to reclaim them; here there is nothing to trace.
-
-| Design | Stack word | Scalar allocs | Cache density | Host extensibility |
-| --- | --- | --- | --- | --- |
-| Tagged Rust enum | 32 bytes | 0 | 2 values per line | Closed |
-| Boxed trait objects | 16 byte fat pointer | 1 per scalar | Medium | Open |
-| 16 byte word (this design) | 16 bytes | 0 | 4 values per line | Open, static descriptors |
-| NaN boxing (LuaJIT, V8) | 8 bytes | 0 | 8 values per line | Constrained |
-
-Two trade offs come with the form. Cloning a string still deep copies it, since only containers share buffers. And 16 bytes is roomier than 8 byte NaN boxing, which buys clean 64 bit integer and float storage plus safe abstraction boundaries without pointer masking.
-
-### Transport: pipes
-
-A command's standard streams can be rerouted through pipes declared with `LET $p: PIPE`, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
-
-```oxdock
-LET $log: PIPE
-WITH_IO [stdout=$log] ECHO hello
-WITH_IO [stdin=$log] READ_LINE $line
-ASSERT_EQ $line "hello"
-```
-
-### Scope isolation
-
-State mutations stay where the script puts them. Entering a braced block or a function call snapshots variables and settings, and exiting restores all of them, so nothing leaks outward. Background tasks fork the same way, so concurrent workers cannot observe each other's half finished mutations. Only pipes and filesystem effects cross these boundaries, by design.
-
-```oxdock
-# Calls snapshot caller state: the parameter shadows without clobbering.
-LET $v: STRING = "outer"
-FUNC SHADOW($v: STRING) {
-    LET $inner: STRING = "inner"
-    RETURN $v
-}
-
-LET $out: STRING = SHADOW("param")
-ASSERT_EQ $out "param"
-ASSERT_EQ $v "outer"
-
-# Background tasks fork the same way: worker mutations never escape.
-LET $w: STRING = "outer"
-LET $t: HANDLE = ASYNC {
-    $w = "inner"
-    ECHO "task-ran"
-}
-AWAIT $t
-ASSERT_EQ $w "outer"
-ASSERT_CONTAINS stdout "task-ran"
-```
-
-### Sandboxing
-
-Every path resolves inside a guarded workspace root, and escapes are rejected before any filesystem call. Scripts start with only builtin keys (Cargo feature/cfg entries, `WORKSPACE_GIT_COMMIT`) and opt into host variables explicitly.
-
-```oxdock expect_error:"escapes allowed root"
-WRITE ../escape.txt "nope"
-```
-
-OxDock sandboxes by plumbing, not virtualization: scrubbed child
-environments, workspace-scoped paths, and typed verbs instead of raw
-shell let scripts communicate across trust barriers with no hypervisor.
-That same plumbing is what lets an agent talk to other environments in
-a controlled fashion: pipes, guarded paths, scrubbed environments, and
-the `REMOTE` and SSH transports are all declared channels, so every
-crossing goes through the boundary, never around it.
-
-That is a competence boundary, not a security boundary. It keeps a
-clumsy agent from wandering; it does not contain a hostile payload.
-For untrusted code, run OxDock itself inside a container or VM.
-
-### Prepare during the build
-
-`oxdock_embed!` ships artifacts inside the binary. `oxdock_prepare!` runs the same script but emits no runtime module. Use it when assets only need to exist during the build, for codegen or `include!` workflows.
-
-```rust
-use oxdock_macros::oxdock_prepare;
-
-oxdock_prepare! {
-    name: PreparedAssets,
-    script: {
-        MKDIR gen
-        WRITE gen/out.txt generated
-        LET $o: STRING = READ gen/out.txt
-        ASSERT_EQ $o "generated"
-    },
-    out_dir: "target/prebuilt_prepare",
-}
-
-fn main() {}
-```
-
-### Stream bytes between steps
-
-`WITH_IO` routes a step's stdout into a script pipe and back into another step's stdin. Run the producer under `ASYNC` so both ends stay live while bytes flow.
-
-```oxdock
-LET $msg: PIPE
-WITH_IO [stdout=$msg] ASYNC ECHO piped-bytes
-WITH_IO [stdin=$msg] WRITE piped.txt
-READ piped.txt
-ASSERT_CONTAINS stdout "piped-bytes"
-```
-
-### Scripts start in SNAPSHOT
-
-Scripts start in the SNAPSHOT workspace, an ephemeral isolated temp dir that leaves the source tree untouched. It is the only ephemeral root. Pull inputs with `COPY` or `COPY_GIT`. Each root below is entered inside a scoped block, which reverts to the previous root on exit.
-
-```oxdock
-IMPORT [STD]
-
-# SNAPSHOT is the starting root.
-WRITE snap.txt from-snapshot
-LET $s: STRING = READ snap.txt
-ASSERT_EQ $s "from-snapshot"
-
-# LOCAL is a separate directory: snapshot files are absent there.
-[bool:true] {
-    WORKSPACE LOCAL
-    LET $t: STRING = PATH_TYPE("snap.txt")
-    ASSERT_EQ $t "absent"
-    WRITE local.txt from-local
-}
-
-# The block reverted to SNAPSHOT: the local file is absent here.
-LET $u: STRING = PATH_TYPE("local.txt")
-ASSERT_EQ $u "absent"
-
-# CACHE persists outside the snapshot and reads back through its own root.
-[bool:true] {
-    WORKSPACE CACHE
-    WRITE cached.txt from-cache
-}
-COPY --from-workspace CACHE cached.txt restored.txt
-LET $w: STRING = READ restored.txt
-ASSERT_EQ $w "from-cache"
-
-# CACHE --local is a different directory from the OS cache.
-[bool:true] {
-    WORKSPACE CACHE --local
-    LET $x: STRING = PATH_TYPE("cached.txt")
-    ASSERT_EQ $x "absent"
-}
-
-# SYSTEM keeps the current directory: relative paths keep working.
-# Scripts using it are not hermetic.
-[bool:true] {
-    WORKSPACE SYSTEM
-    WRITE sys.txt from-system
-}
-LET $y: STRING = READ sys.txt
-ASSERT_EQ $y "from-system"
-```
-
-## Why this shape
-
-- Effects arrive confined: reads resolve inside the workspace, env vars read empty unless declared, endpoints bind only when the runner maps them.
-- Declared dependencies make runs reproducible; the conformance suites pin the contract.
-- The engine stays fixed while process lives in editable text; only the vocabulary needs recompiling.
-
-## MCP hosting
-
-A script serves its `EXPORT`ed functions as MCP tools instead of
-running linear steps. One function, one tool:
-
-```oxdock
-# Adds two integers. Returns the sum.
-FUNC ADD($a: INT, $b: INT) {
-  RETURN $a + $b
-}
-
-# The export marks the tool without changing linear calls.
-EXPORT [ADD]
-LET $sum: INT = ADD(2, 3)
-ASSERT_EQ $sum 5
-```
-
-Pass the script to the flag (`--mcp` hosting ships in default
-builds; only `--no-default-features` builds drop it):
-
-```sh
-cargo build -p oxdock
-./target/debug/oxdock --mcp tools.oxdock
-```
-
-Register the server in OpenCode with an `opencode.jsonc` entry.
-Any key under `mcp` becomes the tool prefix:
-
-```jsonc
-{
-  "mcp": {
-    "oxdock-demo": {
-      "type": "local",
-      "command": ["/path/to/oxdock", "--mcp", "/path/to/tools.oxdock"],
-      "enabled": true
-    }
-  }
-}
-```
-
-Each entry serves over stdio JSON-RPC with live reload on file
-change. The function above appears as `oxdock-demo_ADD`: a call
-with `{"a": 2, "b": 3}` resolves `{"result": 5}`, and `ECHO`
-output streams live instead of landing in the result. Wire shapes,
-the detach pattern for long calls, and reload semantics live in
-[crates/oxdock-mcp/README.md](./crates/oxdock-mcp/README.md).
-
-Only serve scripts you trust. Exports and `#` docs become the MCP
-tool surface verbatim (names, descriptions, schemas), so a script
-author controls what an MCP client shows its model. Treat a served
-script like installed software, not data. Script docs are untrusted
-model input when the script source is: prefer allowlisted scripts
-you curate, and sanitize or rewrite descriptions before exposing
-them to an LLM-facing client, since no filtering at this layer
-makes untrusted provider text safe to show one. A `tools/call`
-dispatches straight into the live session with no per-call
-confirmation here, so keep high-impact capabilities (`RUN`, `NET`,
-`SSH`, filesystem mutation) out of served scripts unless your
-client or host gates them behind an explicit approval policy.
-Default-routed stdout and stderr stream to the client as
-notifications while the call runs, so anything a tool prints can
-enter client and model context: do not print secrets, pass them via
-env or files, and redact or suppress logs. Failures report the
-captured output tails inside the error text, and return values cross
-as result blocks, so a secret-bearing result (for example a minted
-`SSH_GENERATE_PASSWORD()` password) reaches the client by design
-when a tool returns one: assume anything a tool prints or returns
-may be exposed to connected clients and retained in logs or
-transcripts, and only serve secret-bearing tools where the
-deployment accounts for that egress.
-
-## Extending OxDock from Rust
-
-Scripts call host functions and custom types that Rust code registers
-under a module. Registration is a type plus a module on one facade, and
-scripts name the module: `IMPORT [DEMO]` lets the rest call
-`MAKE_TAG()` bare, or qualify as `DEMO::MAKE_TAG()`. This example runs as
-written: the shape first, the definitions it names right below it.
-
-### Complete example: define a type, define functions, run a script
-
-```rust
-use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
-use oxdock::oxdock_core::TypeTag;
-use std::fmt;
-
-// The script below is the DSL itself, not a string: the `oxdock!` macro
-// builds it into steps at compile time.
-
-fn main() -> anyhow::Result<()> {
-    let mut engine = Engine::new();
-    engine.register_type::<Tag>();
-    engine.register_module(HostModule {
-        name: "DEMO".to_string(),
-        funcs: vec![MakeTag::registration(), ReadTag::registration()],
-        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
-        // functions mint or accept. Empty: the examples register types on
-        // the engine directly, or use none.
-        types: vec![],
-        // Named MAP shapes for functions returning structured bundles
-        // (field tables like `NET_LISTEN_INFO`). These return scalars and
-        // opaque tags only, so none.
-        record_schemas: vec![],
-        // Shared state for function bodies, read with
-        // `cx.module_state::<T>("MODULE")` and attached with
-        // `.with_state(...)`. These are stateless, so none.
-        states: vec![],
-    });
-
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
-    let root_path = temp.as_guarded_path().clone();
-    let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
-        modules: [DEMO],
-        IMPORT [DEMO]
-        LET $t: TAG = MAKE_TAG()
-        LET $s: STRING = READ_TAG($t)
-        ASSERT_EQ $s "demo"
-        WRITE tag.txt "{{ $s }}::{{ $t }}"
-    };
-    let run = engine.run_steps(&root_path, &steps)?;
-    assert!(run.bindings.contains_key("s"));
-
-    let reader = oxdock_fs::PathResolver::new(root_path.root(), root_path.root()).unwrap();
-    let written = reader
-        .read_to_string(&root_path.join("tag.txt").unwrap())
-        .expect("script writes tag.txt");
-    assert_eq!(written.trim(), "demo::tag:demo");
-    Ok(())
-}
-
-// The type. `#[oxdock_type]` implements `OxDockType` on the payload struct
-// itself. The default is the heap path: the word holds a thin pointer to
-// an owned box. Heap payloads require `Clone + PartialEq + Display +
-// Debug + Send + Sync`.
-
-/// Opaque label type.
-#[oxdock_type(name = "TAG")]
-#[derive(Debug, Clone, PartialEq)]
-struct Tag(String);
-
-impl fmt::Display for Tag {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "tag:{}", self.0)
-    }
-}
-
-// The functions. `#[oxdock_func(pure)]` implements `OxDockFn` on a
-// registration marker named after the function (`make_tag` becomes
-// `MakeTag`). The DSL name defaults to the uppercased Rust name.
-// `Value::mint_heap` with the payload type's own descriptor mints a word
-// of the registered type, and `read_heap` with that descriptor reads it
-// back. No name lookup runs anywhere on this path.
-
-/// Mint one opaque label.
-#[oxdock_func(pure)]
-fn make_tag() -> anyhow::Result<oxdock::Value> {
-    Ok(oxdock::Value::mint_heap(Tag::descriptor(), Tag("demo".into())))
-}
-
-/// Read the payload back out through a descriptor-checked typed read.
-#[oxdock_func(pure, returns = TypeTag::String)]
-fn read_tag(val: oxdock::Value) -> anyhow::Result<oxdock::Value> {
-    let Some(tag) = val.read_heap::<Tag>(Tag::descriptor()) else {
-        anyhow::bail!("READ_TAG() expects a TAG value");
-    };
-    Ok(oxdock::Value::string(tag.0.clone()))
-}
-```
-
-The shape is always the same. `LET $t: TAG = MAKE_TAG()` calls a host
-function like any native one: arity, depth budget, and the declared `TAG`
-coercion apply uniformly. `READ_TAG($t)` reclaims the payload through an
-id checked read. `{{ $t }}` renders the custom value through its
-`Display`, so interpolation, `WRITE`, and equality treat host values like
-native ones. `TYPES()` lists every registered name and
-`TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
-host surface exactly like native surface. Script `TYPE` aliases ride the
-same listing: `TYPES()` includes alias names and `TYPE_DESCRIBE("PERSON")`
-reports the canonical target spelling.
-
-Host types stay opaque:
-literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
-and `MAP` only, so queryable containers expose host accessor functions
-(`MATRIX_GET($m, $row, $col)`) instead of new syntax.
-
-### Reference: stateful functions
-
-Without `pure`, the first parameter must be `cx: &mut StepCtx<P>`, which
-exposes variables, environment, pipes, and IO. Override the DSL name and
-the declared return type explicitly when the defaults do not fit:
-
-```rust
-use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
-use oxdock::oxdock_core::TypeTag;
-use oxdock::oxdock_core::ProcessManager;
-
-/// Read an environment variable, defaulting to empty.
-#[oxdock_func(name = "ENV_OR", returns = TypeTag::String)]
-fn env_or<P: ProcessManager>(
-    cx: &mut StepCtx<P>,
-    key: String,
-) -> anyhow::Result<oxdock::Value> {
-    Ok(oxdock::Value::string(cx.get_env(&key).unwrap_or_default()))
-}
-
-fn main() {
-    let mut engine = oxdock::Engine::new();
-    engine.register_module(HostModule {
-        name: "DEMO".to_string(),
-        funcs: vec![EnvOr::registration()],
-        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
-        // functions mint or accept. Empty: the examples register types on
-        // the engine directly, or use none.
-        types: vec![],
-        // Named MAP shapes for functions returning structured bundles
-        // (field tables like `NET_LISTEN_INFO`). These return scalars and
-        // opaque tags only, so none.
-        record_schemas: vec![],
-        // Shared state for function bodies, read with
-        // `cx.module_state::<T>("MODULE")` and attached with
-        // `.with_state(...)`. These are stateless, so none.
-        states: vec![],
-    });
-}
-```
-
-Parameters accept `Value`, `String`, `i64`, `f64`, and `bool`, in either
-form. Stateful markers register exactly like pure ones. Pure functions run
-on the compiled math path too; stateful ones stay on the AST path unless
-they opt in with `#[oxdock_func(rpn)]` (as `GLOB` does).
-
-### Reference: inline types
-
-`#[oxdock_type(inline)]` selects the zero allocation path for `Copy`
-scalars that fit in 64 bits: the word holds the value bytes directly. This
-is the same derivation the startup integer, float, boolean, and handle
-types use:
-
-```rust
-use oxdock::{OxDockType, oxdock_type};
-use std::fmt;
-
-/// Entity handle.
-#[oxdock_type(name = "ENTITY", inline)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct EntityId(u64);
-
-impl fmt::Display for EntityId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "entity#{}", self.0)
-    }
-}
-
-fn main() {
-    let mut engine = oxdock::Engine::new();
-    engine.register_type::<EntityId>();
-    let val = oxdock::Value::mint_inline(EntityId::descriptor(), EntityId(7));
-    assert_eq!(val.inline_bits(), 7);
-    assert_eq!(format!("{val}"), "entity#7");
-    assert_eq!(val.clone(), val);
-}
-```
-
-Four limits decide what can ride inline:
-
-1. **Fixed 64 bit slot.** Anything larger panics at mint time (a runtime
-   check, not a compile time one).
-2. **`Copy` payloads only.** Inline clones copy bits and drops do
-   nothing, which resource owning types cannot satisfy.
-3. **No variable length data.** `STRING`, `LIST`, and `MAP` can never fit
-   a fixed slot and stay behind the pointer.
-4. **Widening punishes everything.** A bigger slot means fewer words per
-   cache line and costlier moves for the scalars that dominate scripts.
-
-One boundary to keep straight: words stored inside a `LIST` or `MAP`
-live in that container's heap buffer, so inline describes the payload
-encoding, not a promise that every word sits on the stack.
-
-### Reference: queryable containers
-
-Opaque types can still answer queries: pair the payload with host
-accessor functions and scripts read cells, lengths, and keys through
-ordinary calls, with no new syntax. The example below mints a grid and
-reads one cell through its accessor; from a script the same call spells
-`LET $c: INT = MATRIX_GET($m, 0, 1)`. Key paths and `FOR` iteration stay
-unavailable by the boundary above.
-
-```rust
-use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
-use oxdock::oxdock_core::TypeTag;
-use std::fmt;
-
-/// Integer grid with no literal syntax: scripts query it through functions.
-#[oxdock_type(name = "MATRIX")]
-#[derive(Debug, Clone, PartialEq)]
-struct Matrix(Vec<Vec<i64>>);
-
-impl fmt::Display for Matrix {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "matrix[{}x{}]", self.0.len(), self.0.first().map_or(0, Vec::len))
-    }
-}
-
-/// Mint a fixed 1x2 grid.
-#[oxdock_func(pure)]
-fn make_matrix() -> anyhow::Result<Value> {
-    Ok(Value::mint_heap(
-        Matrix::descriptor(),
-        Matrix(vec![vec![1, 2]]),
-    ))
-}
-
-/// Read one cell by row and column.
-#[oxdock_func(pure, returns = TypeTag::Int)]
-fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
-    let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
-        anyhow::bail!("MATRIX_GET() expects a MATRIX value");
-    };
-    let cell = usize::try_from(row)
-        .ok()
-        .and_then(|r| grid.0.get(r))
-        .and_then(|r| usize::try_from(col).ok().and_then(|c| r.get(c)))
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("index out of bounds"))?;
-    Ok(Value::int(cell))
-}
-
-fn main() -> anyhow::Result<()> {
-    let word = Value::mint_heap(Matrix::descriptor(), Matrix(vec![vec![1, 2]]));
-    let cell = matrix_get(word, 0, 1).unwrap();
-    assert_eq!(cell.as_i64(), Some(2));
-
-    let mut engine = oxdock::Engine::new();
-    engine.register_type::<Matrix>();
-    engine.register_module(HostModule {
-        name: "DEMO".to_string(),
-        funcs: vec![
-            MakeMatrix::registration(),
-            MatrixGet::registration(),
-        ],
-        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
-        // functions mint or accept. Empty: the examples register types on
-        // the engine directly, or use none.
-        types: vec![],
-        // Named MAP shapes for functions returning structured bundles
-        // (field tables like `NET_LISTEN_INFO`). These return scalars and
-        // opaque tags only, so none.
-        record_schemas: vec![],
-        // Shared state for function bodies, read with
-        // `cx.module_state::<T>("MODULE")` and attached with
-        // `.with_state(...)`. These are stateless, so none.
-        states: vec![],
-    });
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
-    let root = temp.as_guarded_path().clone();
-    let run = engine.run_script(
-        &root,
-        "IMPORT [DEMO]\nLET $m: MATRIX = MAKE_MATRIX()\nLET $c: INT = MATRIX_GET($m, 0, 1)\n",
-    )?;
-    assert_eq!(run.bindings["c"].as_i64(), Some(2));
-    Ok(())
-}
-```
-
-### Reference: evaluation paths and the `rpn` flag
-
-Two evaluators run scripts, and the distinction decides where a host
-function may run. The AST evaluator walks the parsed tree one step at a
-time. Every step knows its line number, so failures name it (`step 1:
-INT() expects 1 argument(s), got 2`). Scopes, pipes, declarations, and
-every statement form live here. The RPN evaluator runs arithmetic and
-comparison expressions compiled to a flat stack-machine program
-(`PushConst`, `LoadVar`, `Call`, `Add`, ...). A stack program carries
-values only: no statements, no scopes, no pipes, and no step numbers, so
-a failing call inside math reports the bare error (`INT() expects 1
-argument(s), got 2`).
-
-The tradeoff is expressiveness against compactness, not speed. The tree
-can say anything the language can say, with errors that point at the
-script. The stack program can only compute values, which is exactly what
-math needs and nothing more. That is why not everything runs on RPN:
-statements, declarations, scoping, and IO orchestration have no stack
-encoding, and step-numbered errors require the tree.
-
-For host functions the rule follows from that split. Pure functions take
-only values and touch nothing, so they run on both paths with no flag.
-Stateful functions default to AST-only. Opt in with
-`#[oxdock_func(rpn)]` only for read-only queries that stay meaningful
-inside math (`GLOB`, `LOAD_TOML`, `LOAD_JSON` do this): the function
-still receives full step context, but its failures lose their step
-numbers. Side-effecting stateful functions stay out, since stack-order
-execution with step-less errors is the worst place for an effect to go
-wrong.
-
-### Why embedding Rust here stays simple
-
-Compared against embedding Rust in Python, there are three structural
-reasons the host boundary stays small, and none of them are API polish.
-
-#### No foreign runtime to host
-
-Embedding Rust in Python means linking an interpreter, managing the
-GIL, and marshaling across two object models with different lifetimes.
-OxDock functions are plain Rust functions returning `Result<Value>`:
-the VM is just the calling convention, and values are fixed size words
-with deterministic lifetimes, so there is nothing to pin, nothing
-reference counted, and nothing kept alive across the boundary.
-
-#### No binding layer
-
-The Python path needs module registration plus type conversions
-negotiated with dynamic types. `#[oxdock_func]` derives the
-registration marker, the arity gate, and the `String`, `i64`, `f64`,
-`bool`, and `Value` extraction from the signature, and doc comments
-become introspectable metadata for free.
-
-#### No build system dance
-
-No maturin, no ABI tags, and no wheels built per interpreter. The host
-crate depends on `oxdock-core` and calls `Engine::register_module`.
-The one thing Python still wins is its C ABI as a stable interop target
-for other languages. The OxDock boundary is Rust only, which is exactly
-what keeps it cheap.
-
-## Machine model
-
-How the machinery operates, for the curious. Behavior contracts live in
-the command and function reference. This section maps those contracts
-onto the moving parts: words, evaluators, and the stack program that
-runs math.
-
-### Words
-
-Every script value is one 128 bit word: a descriptor pointer plus a 64
-bit payload. The descriptor names the type and carries the vtable that
-clones, drops, compares, and renders the value. The payload is either
-inline bytes (for `Copy` scalars that fit in 64 bits, with zero
-allocation) or a pointer to one owned heap box (for containers and
-everything else). Words are fixed size and deterministic to move, which
-is what keeps the host boundary cheap: plain Rust functions returning
-`Result<Value>`, nothing to pin and nothing reference counted. The
-glossary defines each of these terms precisely.
-
-### Two evaluators
-
-Scripts run under two evaluators. The AST evaluator walks the parsed
-tree one step at a time, with line numbers on every failure. The RPN
-evaluator runs arithmetic and comparison as a flat stack program with
-values only and no step numbers. Which functions may run where is the
-[Contexts](#contexts) rule: everything runs on the tree, and only pure
-functions plus explicit `rpn` opt ins run on the stack program.
-
-### The stack program
-
-Parsing lowers each arithmetic or comparison subtree in three passes.
-First, literal only subtrees fold to their value and vanish. Then the
-survivors flatten to postfix ops with resolved arities: loads for
-variables, env reads, and keypaths; prebuilt constants; calls; and one
-op per arithmetic or comparison operator. Anything without a stack
-encoding (`!`, `&&` and `||`, list and map literals, pipes) stays a
-tree node and runs on the AST path. The static pre-pass type checks the
-same program abstractly before the first step runs, so math shape errors
-surface early with the same step free wording the runtime reports. The
-program is built once per parse and runs again on every evaluation, so a
-`WHILE` condition pays lowering once no matter how many iterations it
-runs.
-
-The demos below are computed, not copied: each placeholder lowers its
-expression through the real parser on every docs run, so the shown ops
-cannot drift from the implementation.
-
-`$a + 2 * $b` is the classic shape: loads and one constant feeding two
-operators.
-
-```text
-`$a + 2 * $b` lowers to 5 ops:
-1. LoadVar($a)
-2. PushConst(2)
-3. LoadVar($b)
-4. Mul
-5. Add
-```
-
-`1 + 2 * 3` never reaches the stack machine: both subtrees fold at parse
-time.
-
-```text
-`1 + 2 * 3` folds to the literal `7` at parse time: no ops are emitted
-```
-
-`!$ready` has no stack encoding and stays on the tree path.
-
-```text
-`!$ready` has no RPN encoding and stays a tree node: `!$ready`
-```
-
-One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps (buffered in memory to 8 MiB, then spilled to a temp file), fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
-
-## Variants
-
-OxDock comes in two variants, each of which is independent of the other, but share the same core:
-
-- [oxdock-macros](./oxdock-macros/): Provides a Rust build-time dependency which runs OxDock scripts during the compilation of a Rust program.
-- [oxdock-cli](./oxdock-cli/): Command-line interface for running OxDock scripts from the command line.
-
-## Goals
-
-OxDock has a simple goal to provide a simple DSL that works the same across macOS, Linux, and Windows, including support for background processes, symlinks, and boolean conditionals (such as env and platform-based command filtering), which runs the same whether it's used as a preprocessing step in a build-time Rust macro, or as a CLI program, regardless of platform it is building on.
-
-Every internal command is engineered to run the same way across platforms, except for the `RUN` command, which calls native programs.
-
-**OxDock adds no additional runtime dependencies if used as a macro preprocessor.**
 
 # DSL Reference
 
@@ -1331,6 +409,11 @@ ASSERT_CONTAINS stdout "arch-detected"
 // Bring the runner-injected value into the script environment.
 INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
 
+// Absence is testable, but every guard reference must still be
+// declared: inheriting a host-absent name stays absent, it only
+// satisfies the static gate.
+INHERIT_ENV [OXDOCK_DOC_UNDEFINED_VAR, OXDOCK_DOC_FEATURE_B]
+
 // not(...) inverts the predicate: passes because the variable does NOT exist.
 [not(env:OXDOCK_DOC_UNDEFINED_VAR)] ECHO negation-passes-for-undefined
 ASSERT_CONTAINS stdout "negation-passes-for-undefined"
@@ -1346,10 +429,14 @@ ASSERT_CONTAINS stdout "composed-and-or-guard"
 
 ### Multi-line guards
 
-Bracket expressions may span lines. Chained guard lines apply conjunctively to the next instruction; here neither variable is defined, so the gated instruction is skipped:
+Bracket expressions may span lines. Chained guard lines apply conjunctively to the next instruction; here both variables are declared but host-absent, so the gated instruction is skipped:
 
 ```oxdock
 IMPORT [STD]
+
+// Declare both names: inheriting host-absent names stays absent,
+// satisfying the static gate while keeping the runtime skip.
+INHERIT_ENV [OXDOCK_DOC_CHAIN_ONE, OXDOCK_DOC_CHAIN_TWO]
 
 // Brackets may span lines; chained lines AND together and gate
 // the next command.
@@ -1358,7 +445,7 @@ IMPORT [STD]
   env:OXDOCK_DOC_CHAIN_TWO
 ]
 
-// Neither variable exists, so this WRITE is skipped entirely.
+// Neither variable is defined, so this WRITE is skipped entirely.
 WRITE chained.txt applied
 
 // The artifact was never created.
@@ -1459,7 +546,6 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
-| [`MUTATION`](#mutation) | `$var = <expr>` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
@@ -1471,7 +557,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |
 | [`CONTINUE`](#continue) | `CONTINUE` |
-| [`IMPORT`](#import) | `IMPORT [<module>, ...] \| IMPORT <module>` |
+| [`IMPORT`](#import) | `IMPORT [<module>, ...] \| IMPORT <module> \| IMPORT ["<path>" AS <ALIAS>] \| IMPORT [<module \| "<path>" AS <ALIAS> \| [F, ... FROM ("<path>" \| <module>) (AS <ALIAS>)?]>, ...]` |
 
 ### WITH_IO
 
@@ -1856,6 +942,29 @@ ASSERT_CONTAINS $items "b"
 LET $count: INT = 42
 ASSERT_EQ $count 42
 ```
+
+**Example: bool coercion**
+
+```oxdock
+# BOOL spellings coerce case-insensitively. Empty is
+# not a boolean: absent flags state a default through
+# BOOL_OR instead of converting here.
+LET $t: BOOL = "TRUE"
+ASSERT_EQ $t true
+LET $f: BOOL = "no"
+ASSERT_EQ $f false
+```
+
+**Example: bool coercion rejects empty**
+
+```oxdock expect_error:"expected BOOL"
+# Empty never reads as false: an empty string fails
+# BOOL coercion instead of picking a polarity.
+ENV EMPTY_FLAG=""
+LET $e: BOOL = "{{ env:EMPTY_FLAG }}"
+```
+
+**Expected error:** `expected BOOL`
 
 **Example: no hoisting**
 
@@ -2321,22 +1430,32 @@ ASSERT_EQ $body "inner"
 
 ```oxdock
 # The block resets to the session seed: plain steps and
-# spawns run with zero prelude, while outer customs
-# stay out.
-ENV OUTER_CUSTOM=outer-val
+# spawns run with zero prelude. PATH needs no
+# declaration: contract seed rows are always admitted.
 WRITE top-path.txt "{{ env:PATH }}"
 ISOLATED {
     WRITE inner-path.txt "{{ env:PATH }}"
-    WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
     RUN "echo seed-ok"
 }
 LET $top: STRING = READ top-path.txt
 LET $inner: STRING = READ inner-path.txt
 ASSERT_EQ $inner $top
-LET $custom: STRING = READ inner-custom.txt
-ASSERT_EQ $custom ""
 ASSERT_CONTAINS stdout "seed-ok"
 ```
+
+**Example: outer customs stay out**
+
+```oxdock expect_error:"env:OUTER_CUSTOM"
+# Outer customs never enter the block: without an
+# allowlist entry the static gate rejects the read
+# before the first step runs.
+ENV OUTER_CUSTOM=outer-val
+ISOLATED {
+    WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
+}
+```
+
+**Expected error:** `env:OUTER_CUSTOM`
 
 **Example: absent names stay absent**
 
@@ -2728,27 +1847,134 @@ ASSERT_EQ $body "b"
 
 ### IMPORT
 
-Bring module functions into bare-call scope.
+Bring module functions into bare-call scope; import script files and types.
 
-**Syntax:** `IMPORT [<module>, ...] | IMPORT <module>`
+**Syntax:** `IMPORT [<module>, ...] | IMPORT <module> | IMPORT ["<path>" AS <ALIAS>] | IMPORT [<module | "<path>" AS <ALIAS> | [F, ... FROM ("<path>" | <module>) (AS <ALIAS>)?]>, ...]`
 
-Every function call names its module (`STD::GLOB(...)`,
-`MOCK::READ_CSV(...)`) unless the module is imported:
-`IMPORT [STD]` lets the rest of the scope call `GLOB(...)`
-bare. Calls resolve at parse time against `SCRIPT`
-definitions first, then imported modules; unknown modules,
-unknown functions, and unimported bare calls are parse
-errors, never runtime surprises.
+Bare calls:
+- Every call names its module (`STD::GLOB(...)`)
+  unless the module is imported. `IMPORT [STD]` lets
+  the rest of the scope call `GLOB(...)` bare.
+- Calls resolve at parse time: `SCRIPT` definitions
+  first, then imported modules. Unknown modules,
+  unknown functions, and unimported bare calls are
+  parse errors, never runtime surprises.
 
-IMPORT is a lowering directive, not a step: it applies from
-its line to the enclosing block exit, then reverts, exactly
-like `LET` scoping but with no runtime footprint. Guards do
-not apply to it. Two imported modules exporting one name is
-an ambiguity error: qualify the call instead.
+Scope:
+- `IMPORT` is a lowering directive, not a step. It
+  applies from its line to the enclosing block exit,
+  then reverts like `LET` scoping, with no runtime
+  footprint. Guards do not apply to it.
+- Two imported modules exporting one name is an
+  ambiguity error: qualify the call instead.
 
-`EXPORT` marks top-level script `FUNC`s as externally
-callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`).
-Single-file scope; see the MCP host for consumption.
+File imports:
+- Form: `IMPORT ["./lib.oxdock" AS LIB]` (any file
+  extension). The alias is mandatory and becomes the
+  namespace (`LIB::FOO`), with no filename inference.
+- Only `EXPORT`ed top-level `FUNC`s cross the
+  boundary. Unexported means private; variables are
+  never exportable.
+- Types cross as bare globals (like host types). A
+  whole-file import persists every exported alias, so
+  `LET $p: PERSON` works after any import of its file.
+- Each file initializes once; every alias shares the
+  module's top-level bindings.
+- The file must exist when the run starts. Generated
+  imports are rejected before the first step.
+
+Mixed brackets:
+- Brackets mix both kinds across lines if needed
+  (`IMPORT [STD, "a.oxdock" AS A]`). Each module entry
+  registers in order; each file entry runs in order.
+- Without an alias a file entry is a parse error.
+- Value positions (`LET`, `ASYNC`,
+  `WITH_IO`/`TIMEOUT` inners) take exactly one file
+  entry and no modules.
+
+Selective harvests:
+- Form: `IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
+  optionally `AS ALIAS`. Only the named top-level
+  functions register, bare or namespaced under the
+  alias. Harvested names must be `EXPORT`ed.
+- Single name needs no inner brackets
+  (`IMPORT [FOO FROM "x.oxdock"]`); several keep
+  `[[F, G FROM ...]]`. Several harvests group the
+  same way (`IMPORT [[TYPE A FROM STD],
+  [TYPE B FROM STD]]`), file or host alike.
+- Types and functions combine in one entry
+  (`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`).
+  Harvested types must be `EXPORT TYPE`d and persist
+  bare globally, so `FUNC` signatures keep working.
+- The file body never executes, so harvesting is
+  side-effect free. The file's own nested imports
+  still load. Harvests produce no value and never
+  appear in value positions.
+
+Host library types:
+- Form: `IMPORT [TYPE PIPE FROM STD]`. The import
+  validates the type resolves globally and records no
+  file. Host types stay global with or without the
+  harvest; the explicit form only documents the
+  dependency and fails fast on typos.
+- Bare `FROM` names a library; quoted `FROM`
+  names a file path. Quoted `FROM "STD"` still parses
+  for backcompat, but bare is preferred.
+
+Paths:
+- Workspace-side, against the importing file's
+  directory (entry parent at top level; off-workspace
+  entries resolve like stdin against the root).
+- Module-owned relative paths resolve against the
+  module file's own directory, not the caller cwd.
+  Entry code keeps resolving against the run cwd.
+- Missing files fail before the first step runs.
+  Write-then-import in one script is rejected; check
+  libraries into the tree, or compose them at runtime
+  and run a child interpreter (see the child run
+  examples below).
+
+Module rules (every file import is a module):
+- Context: never inherits the caller. Env resets to
+  the seed plus the module init's own contributions
+  (declared `INHERIT_ENV` names re-read from the host
+  on every call), cwd to the defining file's
+  directory, workspace to the run-initial root.
+- Determinism: the same file behaves identically no
+  matter who imports it.
+- State: one init per file, shared by every alias.
+  Top-level `LET` bindings drain into a single store
+  visible to all of the module's functions.
+- Workspace: declare `WORKSPACE` or `WORKDIR`
+  in-function to read outside the module directory.
+  Without it the reset leaves the module on the
+  run-initial root (snapshot by default), even when
+  the caller switched away.
+- Exports: only `EXPORT`ed top-level `FUNC`s and
+  `EXPORT TYPE` aliases cross. Variables never cross.
+- Imports: whole-file or harvest, only exported
+  functions and types cross. Stateful harvests are
+  rejected (import the file to share its module).
+  Nested imports load automatically.
+- Cycles: circular imports and depth over 32 fail
+  before the first step runs.
+
+Exports and tools:
+- `EXPORT` marks top-level `FUNC`s as externally
+  callable (`EXPORT FOO`, `EXPORT [FOO, BAR]`) and as
+  the file importable interface. Re-exports promote
+  an import (`IMPORT ["x.oxdock" AS A]` then `EXPORT
+  A::FOO`).
+- `EXPORT TYPE` marks aliases the same way
+  (`EXPORT TYPE PERSON`, `EXPORT TYPE [A, B]`, mixed
+  `EXPORT [TYPE A, FUNC B]`). Only exported aliases
+  cross, so `FUNC` signatures survive imports.
+- Serving resolves re-exports through the registry;
+  unexported names fail tool setup instead of serving
+  a dead tool. The MCP server skips `TYPE` exports
+  when building tools while still resolving imported
+  types for signatures. Single-file scope otherwise;
+  see the MCP host for consumption.
 
 
 **Examples:**
@@ -2762,6 +1988,164 @@ IMPORT [STD]
 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
 ASSERT_CONTAINS stdout "hi World!"
 ```
+
+**Example: import missing file fails upfront**
+
+```oxdock expect_error:"must exist when the run starts"
+# Generated imports are rejected: a file that does not
+# exist when the run starts cannot be analyzed, so the
+# import fails before the first step runs.
+WORKSPACE LOCAL
+WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
+IMPORT ["lib.oxdock" AS LIB]
+```
+
+**Expected error:** `must exist when the run starts`
+
+**Example: import missing alias fails**
+
+```oxdock expect_error:"mandatory alias"
+# A file entry without AS is a parse error.
+IMPORT ["./lib.oxdock"]
+```
+
+**Expected error:** `mandatory alias`
+
+**Example: module cannot export a variable**
+
+```oxdock expect_error:"does not match any top-level FUNC"
+# Only top-level FUNCs are exportable, never variables.
+LET $FOO: STRING = "x"
+EXPORT FOO
+```
+
+**Expected error:** `does not match any top-level FUNC`
+
+**Example: import re-export unknown alias fails**
+
+```oxdock expect_error:"does not match any top-level FUNC"
+# Re-exports name a visible import alias.
+IMPORT ["x.oxdock" AS A]
+EXPORT NOSUCH::FOO
+```
+
+**Expected error:** `does not match any top-level FUNC`
+
+**Example: export type aliases**
+
+```oxdock
+# TYPE aliases declare shapes once; EXPORT TYPE shares
+# them so importing files can use the same spelling.
+TYPE PERSON = MAP<name: STRING>
+
+FUNC GREET($p: PERSON) {
+    RETURN "hi {{ $p.name }}"
+}
+EXPORT GREET
+EXPORT TYPE PERSON
+
+LET $p: PERSON = {name: "Ada"}
+LET $greeting: STRING = GREET($p)
+ASSERT_EQ $greeting "hi Ada"
+```
+
+**Example: import type from library**
+
+```oxdock
+# One bracket mixes entry kinds: STD brings functions bare,
+# each harvest names a type. Types resolve globally with
+# or without the harvests; the explicit form only documents
+# the dependency, so this grouping is example only. Bare
+# FROM names a library; quoted FROM names a file path.
+IMPORT [STD, [TYPE PIPE FROM STD], [TYPE DURATION FROM STD]]
+
+LET $p: PIPE
+WITH_IO [stdout=$p] ECHO hello
+WITH_IO [stdin=$p] READ_LINE $line
+ASSERT_EQ $line "hello"
+
+LET $d: DURATION = "5s"
+LET $files: LIST<STRING> = GLOB("*.oxdock")
+```
+
+**Example: run composed modules in a child**
+
+```oxdock roots:unified
+# Dynamic composition with files: the parent writes a
+# library and an entry script, then runs the entry in a
+# fresh interpreter. Child-side {{ }} stays escaped so
+# the parent does not interpolate it while writing. The
+# child runs by path so entry-relative IMPORT resolves.
+# Unified roots: the child inherits one workspace, so
+# parent and child see the same files.
+IMPORT [STD]
+WRITE lib.oxfile """
+    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+    EXPORT GREET
+    """
+WRITE main.oxfile """
+    IMPORT ["lib.oxfile" AS LIB]
+    LET $g: STRING = LIB::GREET("Ada")
+    ECHO "says \{{ $g }}"
+    """
+LET $exe: STRING = INTERPRETER()
+LET $out: STRING = RUN [$exe, "main.oxfile"]
+ASSERT_CONTAINS $out "says hi Ada"
+```
+
+**Example: dynamic module composition**
+
+```oxdock roots:unified
+# A function that composes a module: MAKE_GREETER bakes
+# its argument into a generated file with a bare {{ }},
+# then a child run imports the result. Bare {{ }} injects
+# parent values at write time; escaped \{{ }} survives for
+# the child to interpolate. Bind imported calls with LET:
+# {{ }} placeholders resolve pure functions only.
+IMPORT [STD]
+
+# The composer: parent values land in the module source.
+FUNC MAKE_GREETER($who: STRING) {
+    WRITE greeter.oxfile """
+        FUNC GREET() { RETURN "hi {{ $who }}" }
+        EXPORT GREET
+        """
+    RETURN "greeter.oxfile"
+}
+
+# The entry: imports the composed module by its path.
+WRITE main.oxfile """
+    IMPORT ["greeter.oxfile" AS G]
+    LET $g: STRING = G::GREET()
+    ECHO "says \{{ $g }}"
+    """
+
+# Compose, then run the entry in a fresh interpreter.
+LET $made: STRING = MAKE_GREETER("Ada")
+ASSERT_EQ $made "greeter.oxfile"
+LET $exe: STRING = INTERPRETER()
+LET $out: STRING = RUN [$exe, "main.oxfile"]
+ASSERT_CONTAINS $out "says hi Ada"
+```
+
+**Example: export unknown type fails**
+
+```oxdock expect_error:"does not match any top-level TYPE"
+# Only declared TYPE aliases are exportable.
+TYPE PERSON = MAP<name: STRING>
+EXPORT TYPE ANIMAL
+```
+
+**Expected error:** `does not match any top-level TYPE`
+
+**Example: undeclared type fails**
+
+```oxdock expect_error:"unknown type"
+# TYPE names must be declared before use.
+LET $p: PERSON = {name: "Ada"}
+```
+
+**Expected error:** `unknown type`
 
 
 ### WORKDIR
@@ -3063,13 +2447,28 @@ ASSERT_EQ stdout "braced:World\nWorld\n"
 
 ```oxdock
 # `{{ env:KEY }}` reads the script environment; a bare name
-# resolves a DSL variable instead. Unknown keys expand to
-# empty with no host fallback.
+# resolves a DSL variable instead. Spelling rules:
+# `script_env:` is always case-sensitive; `env:` is
+# case-sensitive too, except on Windows where it matches
+# case-insensitively. Every read must be declared first:
+# KEY here comes from the ENV below.
 ENV USER=OxDock
 LET $WHO: STRING = "Ada"
-ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!{{ env:OXDOCK_DOC_NO_SUCH_KEY }}"
-ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada!"
+ECHO "Hello {{ env:USER }}! Hi {{ WHO }}! Again {{ script_env:USER }}!"
+ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada! Again OxDock!"
 ```
+
+**Example: undeclared env read fails**
+
+```oxdock expect_error:"env:OXDOCK_DOC_NO_SUCH_KEY"
+# No declaration anywhere: the whole-closure static gate
+# rejects the read before the first step runs. (The
+# error names the variable: undeclared environment
+# variable `env:OXDOCK_DOC_NO_SUCH_KEY`.)
+ECHO "Hello {{ env:OXDOCK_DOC_NO_SUCH_KEY }}!"
+```
+
+**Expected error:** `env:OXDOCK_DOC_NO_SUCH_KEY`
 
 
 ### RUN
@@ -3813,6 +3212,39 @@ EXPAND template.md
 ASSERT_CONTAINS stdout "Count: 2!"
 ```
 
+**Example: bare override**
+
+```oxdock
+# A bare name reads a KEY=val override with no prefix.
+WRITE template.md "Hi \{{ NAME }}!"
+
+EXPAND template.md NAME=Ada
+ASSERT_CONTAINS stdout "Hi Ada!"
+```
+
+**Example: variable placeholder**
+
+```oxdock
+# `{{ $var }}` placeholders read script variables, dotted
+# paths included. Escape at WRITE so EXPAND sees it.
+LET $u: MAP<name: STRING> = {name: "Bo"}
+WRITE template.md "Hi \{{ $u.name }}!"
+
+EXPAND template.md
+ASSERT_CONTAINS stdout "Hi Bo!"
+```
+
+**Example: missing key fails**
+
+```oxdock expect_error:"missing required step override argument"
+# A missing key is an error, never a silent empty.
+WRITE template.md "Hi \{{ NAME }}!"
+
+EXPAND template.md
+```
+
+**Expected error:** `missing required step override argument`
+
 
 ### ASSERT_EQ
 
@@ -4076,9 +3508,9 @@ releases once); equality is handle identity.
 
 
 <!-- GENERATED by docs-gen from STD function metadata. Do not edit by hand. -->
-## Functions
+## Built-in functions
 
-Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
+The STD standard library: built-in functions available to every script. Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Plugin modules ([`NET`, `SSH`, `MARKDOWN`](https://github.com/jzombie/rust-oxdock#plugin-references)) add more functions the same way, and hosts can extend the language with their own modules ([Extending OxDock from Rust](https://github.com/jzombie/rust-oxdock#extending-oxdock-from-rust)). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
 
 ### STD::BASE64_DECODE
 
@@ -4137,6 +3569,78 @@ standard decoder. Pairs with `BASE64_DECODE` for the round trip.
 IMPORT [STD]
 LET $encoded: STRING = BASE64_ENCODE("hello")
 ASSERT_EQ $encoded "aGVsbG8="
+```
+
+### STD::BOOL
+
+Convert a value to BOOL.
+
+Trims ASCII whitespace; accepts `true`/`false`, `1`/`0`,
+`yes`/`no`, `on`/`off` in any case. Passes Bool through. Empty
+and anything else fail: an empty string is not a boolean, so
+absent env names (which read empty) must go through `BOOL_OR`
+with a stated default instead of converting here.
+
+
+**Signature:** `STD::BOOL($val: BOOL|STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$val` (`BOOL|STRING`): Value to convert to `BOOL`.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: convert**
+
+```oxdock
+IMPORT [STD]
+LET $n: BOOL = BOOL("yes")
+ASSERT_EQ $n true
+LET $f: BOOL = BOOL("0")
+ASSERT_EQ $f false
+```
+
+### STD::BOOL_OR
+
+Coerce text to `BOOL`, substituting a default for empty.
+
+Returns `BOOL`. Blank input (a declared-but-absent env name, which
+reads empty) resolves to `default` instead of failing, so each flag
+site states its own absent polarity explicitly: negative-polarity
+flags (`dry_run`) default true, positive ones default false. No
+implicit polarity lives in the coercion. Non-blank garbage still
+fails naming the input, exactly like `LET $x: BOOL` coercion.
+
+
+**Signature:** `STD::BOOL_OR($text: STRING, $default: BOOL) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to coerce (`true`/`false`, `1`/`0`, `yes`/`no`/`on`/`off`, any case).
+- `$default` (`BOOL`): Absent-value default, used when the text is blank.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: absent-default**
+
+```oxdock
+# Absent names read empty; the default settles the polarity.
+IMPORT [STD]
+INHERIT_ENV [OXDOCK_TEST_ABSENT_FLAG]
+LET $dry: BOOL = BOOL_OR("{{ env:OXDOCK_TEST_ABSENT_FLAG }}", true)
+ASSERT_EQ $dry true
+
+# Present values coerce strictly, ignoring the default.
+LET $off: BOOL = BOOL_OR("false", true)
+ASSERT_EQ $off false
 ```
 
 ### STD::CWD
@@ -4501,6 +4005,63 @@ LET $flag: INT = INT(true)
 ASSERT_EQ $flag 1
 ```
 
+### STD::INTERPRETER
+
+Path of the running interpreter binary.
+
+Returns the executing binary as a `STRING`, so one script can
+reinvoke the interpreter on another script without bridging an env
+var. The child re-parses from bytes in a separate process: no
+bindings cross back (only stdout and files), and each run pays
+a spawn. Prefer modules for reuse (statically gated, in-process);
+reach for reinvocation when the child must run isolated, or under
+a different binary than the parent.
+
+Unsupported under Miri isolation: the lookup itself fails there
+instead of returning a path.
+
+
+**Signature:** `STD::INTERPRETER() -> STRING`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: self**
+
+```oxdock
+# The running interpreter resolves to a non-empty path.
+IMPORT [STD]
+LET $exe: STRING = INTERPRETER()
+LET $nonempty: BOOL = $exe != ""
+ASSERT_EQ $nonempty true
+```
+
+**Example: dynamic composition**
+
+```oxdock
+# Compose the child script dynamically: the parent interpolates
+# its own bindings into the pipe, then runs the interpreter on it.
+# Unescaped {{ }} bakes in at compose time; \{{ }} stays literal
+# so the child expands it with its own bindings.
+# The pipe delivers EOF when the producer step ends, so the child
+# reads exactly one script.
+IMPORT [STD]
+LET $exe: STRING = INTERPRETER()
+LET $who: STRING = "Ada"
+LET $child: PIPE
+WITH_IO [stdout=$child] ECHO """
+    ECHO "hello {{ $who }}!"
+    LET $who: STRING = "Grace"
+    ECHO "child sees \{{ $who }}!"
+    """
+LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe]
+ASSERT_CONTAINS $out "hello Ada!"
+ASSERT_CONTAINS $out "child sees Grace!"
+```
+
 ### STD::IS_EXEC
 
 Report whether a name resolves to an executable file (#100).
@@ -4540,6 +4101,73 @@ ASSERT_EQ $missing false
 WRITE tool.txt payload
 LET $plain: BOOL = IS_EXEC("tool.txt")
 ASSERT_EQ $plain false
+```
+
+### STD::IS_MAIN
+
+Report whether the current context is the entry script.
+
+True at entry top level and inside entry-owned functions; false
+inside module-owned functions and module init bodies. Lets a
+library file double as a runnable demo: guard the demo with
+`IF IS_MAIN()` so importing it stays side-effect free.
+
+
+**Signature:** `STD::IS_MAIN() -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: main**
+
+```oxdock
+# Entry top level runs as main.
+IMPORT [STD]
+LET $m: BOOL = IS_MAIN()
+ASSERT_EQ $m true
+```
+
+**Example: library doubles as demo**
+
+```oxdock roots:unified
+# A library doubles as a runnable demo: guard the demo with
+# IF IS_MAIN() so importing it stays side effect free. The
+# parent writes both files, then runs each in a fresh
+# interpreter: direct execution prints the demo, importing
+# it does not. Unified roots: the child inherits one
+# workspace, so parent and child see the same files. The
+# exact stdout match proves the demo line stays out of the
+# importing run.
+IMPORT [STD]
+
+# The library under test: demo guarded by IS_MAIN.
+WRITE lib.oxfile """
+    IMPORT [STD]
+    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+    EXPORT GREET
+    IF IS_MAIN() {
+        ECHO "demo: hi Ada"
+    }
+    """
+
+# The importer: calls the library, prints only its own line.
+WRITE main.oxfile """
+    IMPORT ["lib.oxfile" AS LIB]
+    LET $g: STRING = LIB::GREET("Bo")
+    ECHO "imported: \{{ $g }}"
+    """
+
+# Direct run executes the demo.
+LET $exe: STRING = INTERPRETER()
+LET $direct: STRING = RUN [$exe, "lib.oxfile"]
+ASSERT_CONTAINS $direct "demo: hi Ada"
+
+# Importing run stays silent apart from its own line.
+LET $via: STRING = RUN [$exe, "main.oxfile"]
+ASSERT_EQ $via "imported: hi Bo\n"
 ```
 
 ### STD::IS_TERMINAL
@@ -6369,14 +5997,49 @@ The parsed tree of a script, walked one step at a time. Statements, declarations
 
 Arithmetic and comparison expressions compiled to a flat stack program of values with no statements, scopes, pipes, or step numbers. Pure functions run here with no flag. Stateful functions run here only when they opt in with `#[oxdock_func(rpn)]`, which is reserved for read only queries that stay meaningful inside math (`GLOB`, `LOAD_TOML`, `LOAD_JSON` do this). A call that fails inside math reports the bare error with no step number.
 
-## Plugin references
+## Selective environment inheritance
 
-Full function and type references for the bundled host plugins live in
-their own READMEs:
+Scripts no longer inherit the caller's environment wholesale. Except for the host-mirrored essentials documented in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md), host variables stay private unless you opt in explicitly.
 
-- [SSH plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md): ephemeral loopback SSH servers and session pumps.
-- [NET plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md): virtual-endpoint TCP listeners, pumps, and memory sessions.
-- [MARKDOWN plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-markdown-plugin/README.md): render record data as Markdown tables and parse Markdown document structure.
+- Add `INHERIT_ENV [FOO, BAR, BAZ]` at the very top of the script to copy those keys from the process environment before any other command runs.
+- The directive must be top-level: no guards, no surrounding blocks, and no repeats. Trying to nest or guard it triggers a parser error so scripts stay deterministic.
+- Subsequent `ENV` commands can override inherited values, similar to how Docker's `ENV` overrides `--env` flags.
+- Test harnesses and embedders can supply values programmatically; the [environment-guards example](#environment-guards) injects `DEPLOY_TARGET` through the docs-conformance runner rather than the real process environment.
+
+Keeping inheritance selective avoids leaking secrets by default while still allowing ergonomics for well-known keys (proxy settings, artifact caches, etc.).
+
+Every variable the seed provides to spawned children is specified in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md).
+
+## Path Separators
+
+- **Cross-platform behavior:** Paths in OxDock scripts are treated as filesystem paths and are resolved using Rust's `Path`/`PathBuf` APIs. That means you can use either `/`-separated paths or `./`-prefixed relative paths in scripts and they will be interpreted correctly on Windows, macOS, and Linux.
+
+- **Path separator preference / requirement:** For consistency and portability, OxDock scripts should use the forward slash (`/`) as the path separator in script source. While the runtime resolves paths using platform APIs and will accept platform-specific absolute paths, using `/` in scripts (even on Windows) avoids needing to escape backslashes (`\`) and matches Docker-style examples. If you must reference a native Windows absolute path, prefer the `C:/path/to` form or escape backslashes carefully.
+
+- **Relative paths:** A leading `./` indicates a path relative to the current DSL working directory (the same semantics used by Docker). For example: `COPY ./src ./out` or `SYMLINK ./dir ./dir-link` will work on all platforms.
+
+- **Absolute paths:** Use platform-appropriate absolute paths (e.g., `/usr/bin` on Unix-like systems, `C:\path\to` on Windows). OxDock will use the host OS path semantics when resolving absolute paths.
+
+- **Symlinks and Windows:** Creating symlinks on Windows may require elevated permissions on some older OS versions; without permission the `SYMLINK` step fails with an error instead of falling back.
+
+- **Globbing & shell expansion:** OxDock does not implicitly perform shell globbing or shell-side expansion for file arguments. When you need shell semantics use `RUN` with the platform shell, or add explicit DSL commands that accept wildcards if you want portable behavior.
+
+## Workspaces & Filesystem
+
+- **How workspaces are created:** OxDock materializes a clean workspace as an isolated temporary directory. It does not implicitly populate that directory from Git; scripts can pull files in via `COPY` (from the build context) or `COPY_GIT` (from a specific revision). Treat this workspace as a scratchpad surface for experimentation: you can run scripts inside it, create or modify files, and prepare assets for publishing without affecting your main source tree or requiring `--allow-dirty` workflows.
+
+- **Typical usage pattern:** the temporary workspace is intended for short lived build and test iterations. Run scripts against it, inspect outputs, and discard when done. Because it is separate from the original repo it is safe to run multiple concurrent experiments without changing the original repo.
+
+- **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
+
+- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`.
+- **Cache identity and lifecycle:** identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
+
+- **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
+
+- **What `oxdock-fs` protects you from:** the guardrails are pragmatic. They prevent common mistakes such as accidentally writing outside the materialized workspace or reading files from arbitrary absolute paths. However, they are not a full sandbox. A determined process or script can still create destructive actions (for example, invoking native `RUN` commands that modify external state). If you require strict isolation, run OxDock inside a container or VM.
+
+- **Performance:** routing via `oxdock-fs` adds negligible overhead for typical workloads. The module focuses on correctness and containment with minimal runtime cost so interactive iteration remains fast.
 
 ## Errors stop the pipeline
 
@@ -6490,49 +6153,938 @@ Runtime failures name their position the same way: `step N, line L, col C`
 (the step index, then the statement's source coordinates), so a failing
 run points at the exact script line instead of an index alone.
 
-## Selective environment inheritance
+## Plugin references
 
-Scripts no longer inherit the caller's environment wholesale. Except for the host-mirrored essentials documented in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md), host variables stay private unless you opt in explicitly.
+Full function and type references for the bundled host plugins live in
+their own READMEs:
 
-- Add `INHERIT_ENV [FOO, BAR, BAZ]` at the very top of the script to copy those keys from the process environment before any other command runs.
-- The directive must be top-level: no guards, no surrounding blocks, and no repeats. Trying to nest or guard it triggers a parser error so scripts stay deterministic.
-- Subsequent `ENV` commands can override inherited values, similar to how Docker's `ENV` overrides `--env` flags.
-- Test harnesses and embedders can supply values programmatically; the [environment-guards example](#environment-guards) injects `DEPLOY_TARGET` through the docs-conformance runner rather than the real process environment.
+- [SSH plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md): ephemeral loopback SSH servers and session pumps.
+- [NET plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md): virtual-endpoint TCP listeners, pumps, and memory sessions.
+- [MARKDOWN plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-markdown-plugin/README.md): render record data as Markdown tables and parse Markdown document structure.
 
-Keeping inheritance selective avoids leaking secrets by default while still allowing ergonomics for well-known keys (proxy settings, artifact caches, etc.).
+## Runtime architecture
 
-Every variable the seed provides to spawned children is specified in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md).
+Four mechanisms keep script execution predictable: how values are stored, how bytes move between commands, how state stays isolated, and how the host stays sandboxed. Each one is shown running below.
 
-## Path Separators
+### Values: words, not objects
 
-- **Cross-platform behavior:** Paths in OxDock scripts are treated as filesystem paths and are resolved using Rust's `Path`/`PathBuf` APIs. That means you can use either `/`-separated paths or `./`-prefixed relative paths in scripts and they will be interpreted correctly on Windows, macOS, and Linux.
+Every script value is a fixed 128 bit word that lives on the stack: a static type descriptor pointer plus a 64 bit payload. Only payload contents may live on the heap, never the word itself.
 
-- **Path separator preference / requirement:** For consistency and portability, OxDock scripts should use the forward slash (`/`) as the path separator in script source. While the runtime resolves paths using platform APIs and will accept platform-specific absolute paths, using `/` in scripts (even on Windows) avoids needing to escape backslashes (`\`) and matches Docker-style examples. If you must reference a native Windows absolute path, prefer the `C:/path/to` form or escape backslashes carefully.
+Scalars that fit (`INT`, `FLOAT`, `BOOL`, handles) ride inline, copied into the payload byte for byte with zero allocation, so arithmetic and loop counters run at register speed and never touch the allocator. Strings and host types ride behind a thin pointer to a single owned box holding the concrete Rust type, while containers (`LIST`, `MAP`) ride behind a thin pointer to a shared reference counted buffer. The pointer stays thin because every payload type is sized, so there are no fat pointers and no trait objects anywhere in the path.
 
-- **Relative paths:** A leading `./` indicates a path relative to the current DSL working directory (the same semantics used by Docker). For example: `COPY ./src ./out` or `SYMLINK ./dir ./dir-link` will work on all platforms.
+A naive tagged enum needs 32 bytes per value (a 24 byte payload plus tag and padding), so the word form holds four values per 64 byte cache line instead of two.
 
-- **Absolute paths:** Use platform-appropriate absolute paths (e.g., `/usr/bin` on Unix-like systems, `C:\path\to` on Windows). OxDock will use the host OS path semantics when resolving absolute paths.
+Type checks compare one descriptor address, and operations (`clone`, `drop`, equality, formatting) call the descriptor directly, with no registry lookup and no lock. Each type owns one compile time descriptor singleton, so identity is pointer equality that fails closed. Host types extend the same path: `#[oxdock_type]` derives a static descriptor for the payload struct, and `inline` selects the zero allocation form for small `Copy` scalars.
 
-- **Symlinks and Windows:** Creating symlinks on Windows may require elevated permissions on some older OS versions; without permission the `SYMLINK` step fails with an error instead of falling back.
+There is no garbage collector because values form trees, not graphs. Each exclusive heap word owns its box exactly once: cloning allocates a fresh box with a deep copy, dropping frees it. Each container word co-owns its buffer instead: cloning a `LIST` or `MAP` bumps a reference count in constant time with no allocation, dropping releases one count. A `LIST` owns its items and a `MAP` owns its entries. Mutating a shared container detaches first, so clones never observe each other's writes: assignment behaves as a copy.
 
-- **Globbing & shell expansion:** OxDock does not implicitly perform shell globbing or shell-side expansion for file arguments. When you need shell semantics use `RUN` with the platform shell, or add explicit DSL commands that accept wildcards if you want portable behavior.
+Nothing is mutably borrowed from two places, so cycles cannot form and plain deterministic cleanup suffices. Pointer casts always round trip through the same concrete box or buffer type, and inline words never enter the pointer domain, which keeps provenance intact. The lifecycle is checked under Miri.
 
-## Workspaces & Filesystem
+No pauses, no write barriers, no background collector. Python, JavaScript, and Lua permit aliasing and cycles and need tracing collectors to reclaim them; here there is nothing to trace.
 
-- **How workspaces are created:** OxDock materializes a clean workspace as an isolated temporary directory. It does not implicitly populate that directory from Git; scripts can pull files in via `COPY` (from the build context) or `COPY_GIT` (from a specific revision). Treat this workspace as a scratchpad surface for experimentation: you can run scripts inside it, create or modify files, and prepare assets for publishing without affecting your main source tree or requiring `--allow-dirty` workflows.
+| Design | Stack word | Scalar allocs | Cache density | Host extensibility |
+| --- | --- | --- | --- | --- |
+| Tagged Rust enum | 32 bytes | 0 | 2 values per line | Closed |
+| Boxed trait objects | 16 byte fat pointer | 1 per scalar | Medium | Open |
+| 16 byte word (this design) | 16 bytes | 0 | 4 values per line | Open, static descriptors |
+| NaN boxing (LuaJIT, V8) | 8 bytes | 0 | 8 values per line | Constrained |
 
-- **Typical usage pattern:** the temporary workspace is intended for short lived build and test iterations. Run scripts against it, inspect outputs, and discard when done. Because it is separate from the original repo it is safe to run multiple concurrent experiments without changing the original repo.
+Two trade offs come with the form. Cloning a string still deep copies it, since only containers share buffers. And 16 bytes is roomier than 8 byte NaN boxing, which buys clean 64 bit integer and float storage plus safe abstraction boundaries without pointer masking.
 
-- **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
+### Transport: pipes
 
-- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`.
-- **Cache identity and lifecycle:** identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
+A command's standard streams can be rerouted through pipes declared with `LET $p: PIPE`, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
 
-- **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
+```oxdock
+LET $log: PIPE
+WITH_IO [stdout=$log] ECHO hello
+WITH_IO [stdin=$log] READ_LINE $line
+ASSERT_EQ $line "hello"
+```
 
-- **What `oxdock-fs` protects you from:** the guardrails are pragmatic. They prevent common mistakes such as accidentally writing outside the materialized workspace or reading files from arbitrary absolute paths. However, they are not a full sandbox. A determined process or script can still create destructive actions (for example, invoking native `RUN` commands that modify external state). If you require strict isolation, run OxDock inside a container or VM.
+### Scope isolation
 
-- **Performance:** routing via `oxdock-fs` adds negligible overhead for typical workloads. The module focuses on correctness and containment with minimal runtime cost so interactive iteration remains fast.
+State mutations stay where the script puts them. Entering a braced block or a function call snapshots variables and settings, and exiting restores all of them, so nothing leaks outward. Background tasks fork the same way, so concurrent workers cannot observe each other's half finished mutations. Only pipes and filesystem effects cross these boundaries, by design.
+
+```oxdock
+# Calls snapshot caller state: the parameter shadows without clobbering.
+LET $v: STRING = "outer"
+FUNC SHADOW($v: STRING) {
+    LET $inner: STRING = "inner"
+    RETURN $v
+}
+
+LET $out: STRING = SHADOW("param")
+ASSERT_EQ $out "param"
+ASSERT_EQ $v "outer"
+
+# Background tasks fork the same way: worker mutations never escape.
+LET $w: STRING = "outer"
+LET $t: HANDLE = ASYNC {
+    $w = "inner"
+    ECHO "task-ran"
+}
+AWAIT $t
+ASSERT_EQ $w "outer"
+ASSERT_CONTAINS stdout "task-ran"
+```
+
+### Sandboxing
+
+Every path resolves inside a guarded workspace root, and escapes are rejected before any filesystem call. Scripts start with only builtin keys (Cargo feature/cfg entries, `WORKSPACE_GIT_COMMIT`) and opt into host variables explicitly.
+
+```oxdock expect_error:"escapes allowed root"
+WRITE ../escape.txt "nope"
+```
+
+OxDock sandboxes by plumbing, not virtualization: scrubbed child
+environments, workspace-scoped paths, and typed verbs instead of raw
+shell let scripts communicate across trust barriers with no hypervisor.
+That same plumbing is what lets an agent talk to other environments in
+a controlled fashion: pipes, guarded paths, scrubbed environments, and
+the `REMOTE` and SSH transports are all declared channels, so every
+crossing goes through the boundary, never around it.
+
+That is a competence boundary, not a security boundary. It keeps a
+clumsy agent from wandering; it does not contain a hostile payload.
+For untrusted code, run OxDock itself inside a container or VM.
+
+### Prepare during the build
+
+`oxdock_embed!` ships artifacts inside the binary. `oxdock_prepare!` runs the same script but emits no runtime module. Use it when assets only need to exist during the build, for codegen or `include!` workflows.
+
+```rust
+use oxdock_macros::oxdock_prepare;
+
+oxdock_prepare! {
+    name: PreparedAssets,
+    script: {
+        MKDIR gen
+        WRITE gen/out.txt generated
+        LET $o: STRING = READ gen/out.txt
+        ASSERT_EQ $o "generated"
+    },
+    out_dir: "target/prebuilt_prepare",
+}
+
+fn main() {}
+```
+
+### Stream bytes between steps
+
+`WITH_IO` routes a step's stdout into a script pipe and back into another step's stdin. Run the producer under `ASYNC` so both ends stay live while bytes flow.
+
+```oxdock
+LET $msg: PIPE
+WITH_IO [stdout=$msg] ASYNC ECHO piped-bytes
+WITH_IO [stdin=$msg] WRITE piped.txt
+READ piped.txt
+ASSERT_CONTAINS stdout "piped-bytes"
+```
+
+### Scripts start in SNAPSHOT
+
+Scripts start in the SNAPSHOT workspace, an ephemeral isolated temp dir that leaves the source tree untouched. It is the only ephemeral root. Pull inputs with `COPY` or `COPY_GIT`. Each root below is entered inside a scoped block, which reverts to the previous root on exit.
+
+```oxdock
+IMPORT [STD]
+
+# SNAPSHOT is the starting root.
+WRITE snap.txt from-snapshot
+LET $s: STRING = READ snap.txt
+ASSERT_EQ $s "from-snapshot"
+
+# LOCAL is a separate directory: snapshot files are absent there.
+[bool:true] {
+    WORKSPACE LOCAL
+    LET $t: STRING = PATH_TYPE("snap.txt")
+    ASSERT_EQ $t "absent"
+    WRITE local.txt from-local
+}
+
+# The block reverted to SNAPSHOT: the local file is absent here.
+LET $u: STRING = PATH_TYPE("local.txt")
+ASSERT_EQ $u "absent"
+
+# CACHE persists outside the snapshot and reads back through its own root.
+[bool:true] {
+    WORKSPACE CACHE
+    WRITE cached.txt from-cache
+}
+COPY --from-workspace CACHE cached.txt restored.txt
+LET $w: STRING = READ restored.txt
+ASSERT_EQ $w "from-cache"
+
+# CACHE --local is a different directory from the OS cache.
+[bool:true] {
+    WORKSPACE CACHE --local
+    LET $x: STRING = PATH_TYPE("cached.txt")
+    ASSERT_EQ $x "absent"
+}
+
+# SYSTEM keeps the current directory: relative paths keep working.
+# Scripts using it are not hermetic.
+[bool:true] {
+    WORKSPACE SYSTEM
+    WRITE sys.txt from-system
+}
+LET $y: STRING = READ sys.txt
+ASSERT_EQ $y "from-system"
+```
+
+## Machine model
+
+How the machinery operates, for the curious. Behavior contracts live in
+the command and function reference. This section maps those contracts
+onto the moving parts: words, evaluators, and the stack program that
+runs math.
+
+### Words
+
+Every script value is one 128 bit word: a descriptor pointer plus a 64
+bit payload. The descriptor names the type and carries the vtable that
+clones, drops, compares, and renders the value. The payload is either
+inline bytes (for `Copy` scalars that fit in 64 bits, with zero
+allocation) or a pointer to one owned heap box (for containers and
+everything else). Words are fixed size and deterministic to move, which
+is what keeps the host boundary cheap: plain Rust functions returning
+`Result<Value>`, nothing to pin and nothing reference counted. The
+glossary defines each of these terms precisely.
+
+### Two evaluators
+
+Scripts run under two evaluators. The AST evaluator walks the parsed
+tree one step at a time, with line numbers on every failure. The RPN
+evaluator runs arithmetic and comparison as a flat stack program with
+values only and no step numbers. Which functions may run where is the
+[Contexts](#contexts) rule: everything runs on the tree, and only pure
+functions plus explicit `rpn` opt ins run on the stack program.
+
+### The stack program
+
+Parsing lowers each arithmetic or comparison subtree in three passes.
+First, literal only subtrees fold to their value and vanish. Then the
+survivors flatten to postfix ops with resolved arities: loads for
+variables, env reads, and keypaths; prebuilt constants; calls; and one
+op per arithmetic or comparison operator. Anything without a stack
+encoding (`!`, `&&` and `||`, list and map literals, pipes) stays a
+tree node and runs on the AST path. The static pre-pass type checks the
+same program abstractly before the first step runs, so math shape errors
+surface early with the same step free wording the runtime reports. The
+program is built once per parse and runs again on every evaluation, so a
+`WHILE` condition pays lowering once no matter how many iterations it
+runs.
+
+The demos below are computed, not copied: each placeholder lowers its
+expression through the real parser on every docs run, so the shown ops
+cannot drift from the implementation.
+
+`$a + 2 * $b` is the classic shape: loads and one constant feeding two
+operators.
+
+```text
+`$a + 2 * $b` lowers to 5 ops:
+1. LoadVar($a)
+2. PushConst(2)
+3. LoadVar($b)
+4. Mul
+5. Add
+```
+
+`1 + 2 * 3` never reaches the stack machine: both subtrees fold at parse
+time.
+
+```text
+`1 + 2 * 3` folds to the literal `7` at parse time: no ops are emitted
+```
+
+`!$ready` has no stack encoding and stays on the tree path.
+
+```text
+`!$ready` has no RPN encoding and stays a tree node: `!$ready`
+```
+
+One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps (buffered in memory to 8 MiB, then spilled to a temp file), fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
+
+## Why this shape
+
+- Effects arrive confined: reads resolve inside the workspace, env vars read empty unless declared, endpoints bind only when the runner maps them.
+- Declared dependencies make runs reproducible; the conformance suites pin the contract.
+- The engine stays fixed while process lives in editable text; only the vocabulary needs recompiling.
+
+## Variants
+
+OxDock comes in two variants, each of which is independent of the other, but share the same core:
+
+- [oxdock-macros](./oxdock-macros/): Provides a Rust build-time dependency which runs OxDock scripts during the compilation of a Rust program.
+- [oxdock-cli](./oxdock-cli/): Command-line interface for running OxDock scripts from the command line.
+
+## Goals
+
+OxDock has a simple goal to provide a simple DSL that works the same across macOS, Linux, and Windows, including support for background processes, symlinks, and boolean conditionals (such as env and platform-based command filtering), which runs the same whether it's used as a preprocessing step in a build-time Rust macro, or as a CLI program, regardless of platform it is building on.
+
+Every internal command is engineered to run the same way across platforms, except for the `RUN` command, which calls native programs.
+
+**OxDock adds no additional runtime dependencies if used as a macro preprocessor.**
+
+## Dynamically embed assets at compile time
+
+Embed build-time dependencies from any language: scripts run inline during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
+
+```rust
+use oxdock_macros::oxdock_embed;
+
+oxdock_embed! {
+    // Generated struct for resource lookups via `SiteAssets::get(path)`.
+    name: SiteAssets,
+
+    // Manifest-relative staging directory. Run `cargo build` locally to generate
+    // the files and `.oxdock_hash` fingerprint, then commit `prebuilt/` to git.
+    // `cargo publish` vendors these files so downstream crates embed them
+    // directly without re-running the script on read-only registry paths.
+    // Set OXDOCK_EMBED_FORCE_REBUILD=1 to force re-execution.
+    out_dir: "prebuilt",
+
+    script: {
+        // Executes in an isolated temporary workspace (`WORKSPACE SNAPSHOT`),
+        // keeping the source tree clean unless `WORKSPACE LOCAL` is requested.
+        ENV PROJECT=OxDock
+        MKDIR dist
+
+        // Exec form spawns cargo portably without a shell. Asserting the version string
+        // in memory verifies the toolchain without baking volatile output into staged assets.
+        LET $cargo: STRING = RUN ["cargo", "--version"]
+        ASSERT_CONTAINS $cargo "cargo"
+
+        // Assets stage under subdirectories relative to `out_dir` (e.g., prebuilt/dist/os.txt)
+        WRITE dist/hello.txt "hello from {{ env:PROJECT }}"
+        WRITE dist/project.txt "the-project"
+        WRITE dist/manifest.txt "the-manifest"
+    }
+}
+
+fn main() {
+    // Verify we can read the resources we just created
+    let hello = SiteAssets::get("dist/hello.txt").expect("hello must be embedded");
+    assert_eq!(hello.data.as_ref(), b"hello from OxDock");
+
+    let project = SiteAssets::get("dist/project.txt").expect("project must be embedded");
+    assert_eq!(project.data.as_ref(), b"the-project");
+
+    let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
+    assert_eq!(manifest.data.as_ref(), b"the-manifest");
+}
+```
+
+> You can find an example of this workspace dogfooding this very design in its own CLI binary by searching for: [usage-prebuilt](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+usage-prebuilt&type=code).
+
+For each artifact the macro emits a constant backed by `include_bytes!`, which bakes the file bytes into read-only binary data during compilation. At runtime `get()` scans a static table and returns a borrowed slice, so there are no file reads and no heap allocation. The support types only need `alloc::borrow::Cow` and core iterators, which is why it works in `no_std`.
+
+Asset scripts resolve `STD` (via `IMPORT [STD]`) and `SCRIPT` functions only. There is no `modules:` prefix here, and that is structural, not missing: opaque modules defer membership to runtime, but asset scripts execute at compile time with no `Engine` to resolve against. Scripts needing host functions belong in `build.rs` through the `Engine` facade instead.
+
+## Run scripts inline
+
+The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
+
+```rust
+use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
+use oxdock_fs::{GuardedPath, PathResolver};
+
+// A version stamping pipeline: variables, a function, a loop over a list,
+// a conditional call, templates, and native assertions. The version comes
+// from Cargo at compile time, never a literal.
+let crate_version = env!("CARGO_PKG_VERSION");
+let steps: Vec<oxdock_parser::Step> = oxdock! {
+    ENV PROJECT=OxDock
+    LET $version: STRING = #crate_version
+    MKDIR dist
+
+    FUNC STAMP($name: STRING) {
+        WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
+        RETURN $name
+    }
+    FOR $name: STRING IN ["alpha", "beta"] {
+        STAMP($name)
+    }
+
+    FUNC PICK($flag: BOOL) {
+        IF $flag {
+            RETURN "alpha"
+        }
+        RETURN "beta"
+    }
+    LET $picked: STRING = PICK(true)
+    WRITE dist/picked.txt {{ $picked }}
+
+    LET $a: STRING = READ dist/alpha.txt
+    LET $b: STRING = READ dist/beta.txt
+    LET $p: STRING = READ dist/picked.txt
+    ASSERT_EQ $a "alpha OxDock 0.34.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.34.0-alpha"
+    ASSERT_EQ $p "alpha"
+};
+
+let temp = GuardedPath::tempdir().expect("tempdir");
+let root = temp.as_guarded_path().clone();
+run_steps_with_context(&root, &root, &steps).expect("run script");
+
+let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+let out = root.join("dist/alpha.txt").expect("out path");
+assert_eq!(
+    resolver.read_to_string(&out).expect("read out"),
+    "alpha OxDock 0.34.0-alpha"
+);
+```
+
+Use `#var` to inject Rust values into the script (any value that implements `Display`). DSL variables keep their `$var` form and are unaffected. Guards accept injected values too, so Rust flags can gate steps. The script below wires a pipe between steps, reads one line back into a variable, and expands every generated file.
+
+```rust
+use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
+use oxdock_fs::{GuardedPath, PathResolver};
+
+let project = "OxDock";
+let verbose = true;
+let steps: Vec<oxdock_parser::Step> = oxdock! {
+    ENV PROJECT=#project
+    MKDIR dist
+    [bool:#verbose] WRITE dist/verbose.log "verbose on"
+
+    LET $log: PIPE
+    WITH_IO [stdout=$log] ECHO "built {{ env:PROJECT }}"
+    WITH_IO [stdin=$log] READ_LINE $line
+    WRITE dist/build.txt "{{ $line }}"
+
+    IMPORT [STD]
+    FOR $f: STRING IN GLOB("dist/*.txt") {
+        EXPAND $f
+    }
+
+    ASSERT_CONTAINS stdout "built OxDock"
+    LET $build: STRING = READ dist/build.txt
+    LET $verbose: STRING = READ dist/verbose.log
+    ASSERT_EQ $build "built OxDock"
+    ASSERT_EQ $verbose "verbose on"
+};
+
+let temp = GuardedPath::tempdir().expect("tempdir");
+let root = temp.as_guarded_path().clone();
+run_steps_with_context(&root, &root, &steps).expect("run script");
+
+let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+let out = root.join("dist/build.txt").expect("out path");
+assert_eq!(
+    resolver.read_to_string(&out).expect("read out"),
+    "built OxDock"
+);
+```
+
+The top level runners need the default `cli` feature. With `--no-default-features`, run the same steps through `oxdock::oxdock_core::run_steps_*` instead.
+
+Scripts that call host functions declare their modules up front: the macro parses at compile time with only `STD` known, so `modules: [DEMO],` as the first line makes `IMPORT [DEMO]` and `DEMO::...` calls resolve (membership is checked at runtime). Scripts using only `STD` and `SCRIPT` functions omit it. See [Extending OxDock from Rust](#extending-oxdock-from-rust) for the complete example.
+
+## Extend the language
+
+New types and functions take two attributes, a type registration, and a function module. Small
+`Copy` scalars can ride inline on the stack with zero allocation
+instead of heap boxing; both forms, with stateful functions, live under
+[Extending OxDock from Rust](#extending-oxdock-from-rust) below.
+
+```rust
+use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
+use std::fmt;
+
+/// Word count summary: computed in Rust, carried as one script value.
+#[oxdock_type(name = "STATS")]
+#[derive(Debug, Clone, PartialEq)]
+struct Stats {
+    words: usize,
+    chars: usize,
+}
+
+impl fmt::Display for Stats {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} words, {} chars", self.words, self.chars)
+    }
+}
+
+/// Summarize a string: `STATS("hello brave world")` carries its counts.
+#[oxdock_func(pure, name = "STATS")]
+fn summarize(text: String) -> anyhow::Result<Value> {
+    let words = text.split_whitespace().count();
+    let chars = text.chars().count();
+    Ok(Value::mint_heap(
+        Stats::descriptor(),
+        Stats { words, chars },
+    ))
+}
+
+/// Read the word count back out: `WORD_COUNT($s)` is an `INT`.
+#[oxdock_func(pure, returns = TypeTag::Int)]
+fn word_count(summary: Value) -> anyhow::Result<Value> {
+    let Some(stats) = summary.read_heap::<Stats>(Stats::descriptor()) else {
+        anyhow::bail!("WORD_COUNT() expects a STATS value");
+    };
+    Ok(Value::int(stats.words as i64))
+}
+
+fn main() -> anyhow::Result<()> {
+    let mut engine = Engine::new();
+    engine.register_type::<Stats>();
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![Summarize::registration(), WordCount::registration()],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
+        types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
+        record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
+    });
+    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        modules: [DEMO],
+        IMPORT [DEMO]
+        LET $s: STATS = STATS("hello brave world")
+        LET $n: INT = WORD_COUNT($s)
+        ASSERT_EQ $n 3
+    };
+    let run = engine.run_steps(&root, &steps)?;
+    assert_eq!(format!("{}", run.bindings["s"]), "3 words, 17 chars");
+    Ok(())
+}
+```
+
+## Extending OxDock from Rust
+
+Scripts call host functions and custom types that Rust code registers
+under a module. Registration is a type plus a module on one facade, and
+scripts name the module: `IMPORT [DEMO]` lets the rest call
+`MAKE_TAG()` bare, or qualify as `DEMO::MAKE_TAG()`. This example runs as
+written: the shape first, the definitions it names right below it.
+
+### Complete example: define a type, define functions, run a script
+
+```rust
+use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
+use std::fmt;
+
+// The script below is the DSL itself, not a string: the `oxdock!` macro
+// builds it into steps at compile time.
+
+fn main() -> anyhow::Result<()> {
+    let mut engine = Engine::new();
+    engine.register_type::<Tag>();
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
+        types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
+        record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
+    });
+
+    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let root_path = temp.as_guarded_path().clone();
+    let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        modules: [DEMO],
+        IMPORT [DEMO]
+        LET $t: TAG = MAKE_TAG()
+        LET $s: STRING = READ_TAG($t)
+        ASSERT_EQ $s "demo"
+        WRITE tag.txt "{{ $s }}::{{ $t }}"
+    };
+    let run = engine.run_steps(&root_path, &steps)?;
+    assert!(run.bindings.contains_key("s"));
+
+    let reader = oxdock_fs::PathResolver::new(root_path.root(), root_path.root()).unwrap();
+    let written = reader
+        .read_to_string(&root_path.join("tag.txt").unwrap())
+        .expect("script writes tag.txt");
+    assert_eq!(written.trim(), "demo::tag:demo");
+    Ok(())
+}
+
+// The type. `#[oxdock_type]` implements `OxDockType` on the payload struct
+// itself. The default is the heap path: the word holds a thin pointer to
+// an owned box. Heap payloads require `Clone + PartialEq + Display +
+// Debug + Send + Sync`.
+
+/// Opaque label type.
+#[oxdock_type(name = "TAG")]
+#[derive(Debug, Clone, PartialEq)]
+struct Tag(String);
+
+impl fmt::Display for Tag {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "tag:{}", self.0)
+    }
+}
+
+// The functions. `#[oxdock_func(pure)]` implements `OxDockFn` on a
+// registration marker named after the function (`make_tag` becomes
+// `MakeTag`). The DSL name defaults to the uppercased Rust name.
+// `Value::mint_heap` with the payload type's own descriptor mints a word
+// of the registered type, and `read_heap` with that descriptor reads it
+// back. No name lookup runs anywhere on this path.
+
+/// Mint one opaque label.
+#[oxdock_func(pure)]
+fn make_tag() -> anyhow::Result<oxdock::Value> {
+    Ok(oxdock::Value::mint_heap(Tag::descriptor(), Tag("demo".into())))
+}
+
+/// Read the payload back out through a descriptor-checked typed read.
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn read_tag(val: oxdock::Value) -> anyhow::Result<oxdock::Value> {
+    let Some(tag) = val.read_heap::<Tag>(Tag::descriptor()) else {
+        anyhow::bail!("READ_TAG() expects a TAG value");
+    };
+    Ok(oxdock::Value::string(tag.0.clone()))
+}
+```
+
+The shape is always the same. `LET $t: TAG = MAKE_TAG()` calls a host
+function like any native one: arity, depth budget, and the declared `TAG`
+coercion apply uniformly. `READ_TAG($t)` reclaims the payload through an
+id checked read. `{{ $t }}` renders the custom value through its
+`Display`, so interpolation, `WRITE`, and equality treat host values like
+native ones. `TYPES()` lists every registered name and
+`TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
+host surface exactly like native surface. Script `TYPE` aliases ride the
+same listing: `TYPES()` includes alias names and `TYPE_DESCRIBE("PERSON")`
+reports the canonical target spelling.
+
+Host types stay opaque:
+literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
+and `MAP` only, so queryable containers expose host accessor functions
+(`MATRIX_GET($m, $row, $col)`) instead of new syntax.
+
+### Reference: stateful functions
+
+Without `pure`, the first parameter must be `cx: &mut StepCtx<P>`, which
+exposes variables, environment, pipes, and IO. Override the DSL name and
+the declared return type explicitly when the defaults do not fit:
+
+```rust
+use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
+use oxdock::oxdock_core::TypeTag;
+use oxdock::oxdock_core::ProcessManager;
+
+/// Read an environment variable, defaulting to empty.
+#[oxdock_func(name = "ENV_OR", returns = TypeTag::String)]
+fn env_or<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    key: String,
+) -> anyhow::Result<oxdock::Value> {
+    Ok(oxdock::Value::string(cx.get_env(&key).unwrap_or_default()))
+}
+
+fn main() {
+    let mut engine = oxdock::Engine::new();
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![EnvOr::registration()],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
+        types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
+        record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
+    });
+}
+```
+
+Parameters accept `Value`, `String`, `i64`, `f64`, and `bool`, in either
+form. Stateful markers register exactly like pure ones. Pure functions run
+on the compiled math path too; stateful ones stay on the AST path unless
+they opt in with `#[oxdock_func(rpn)]` (as `GLOB` does).
+
+### Reference: inline types
+
+`#[oxdock_type(inline)]` selects the zero allocation path for `Copy`
+scalars that fit in 64 bits: the word holds the value bytes directly. This
+is the same derivation the startup integer, float, boolean, and handle
+types use:
+
+```rust
+use oxdock::{OxDockType, oxdock_type};
+use std::fmt;
+
+/// Entity handle.
+#[oxdock_type(name = "ENTITY", inline)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EntityId(u64);
+
+impl fmt::Display for EntityId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "entity#{}", self.0)
+    }
+}
+
+fn main() {
+    let mut engine = oxdock::Engine::new();
+    engine.register_type::<EntityId>();
+    let val = oxdock::Value::mint_inline(EntityId::descriptor(), EntityId(7));
+    assert_eq!(val.inline_bits(), 7);
+    assert_eq!(format!("{val}"), "entity#7");
+    assert_eq!(val.clone(), val);
+}
+```
+
+Four limits decide what can ride inline:
+
+1. **Fixed 64 bit slot.** Anything larger panics at mint time (a runtime
+   check, not a compile time one).
+2. **`Copy` payloads only.** Inline clones copy bits and drops do
+   nothing, which resource owning types cannot satisfy.
+3. **No variable length data.** `STRING`, `LIST`, and `MAP` can never fit
+   a fixed slot and stay behind the pointer.
+4. **Widening punishes everything.** A bigger slot means fewer words per
+   cache line and costlier moves for the scalars that dominate scripts.
+
+One boundary to keep straight: words stored inside a `LIST` or `MAP`
+live in that container's heap buffer, so inline describes the payload
+encoding, not a promise that every word sits on the stack.
+
+### Reference: queryable containers
+
+Opaque types can still answer queries: pair the payload with host
+accessor functions and scripts read cells, lengths, and keys through
+ordinary calls, with no new syntax. The example below mints a grid and
+reads one cell through its accessor; from a script the same call spells
+`LET $c: INT = MATRIX_GET($m, 0, 1)`. Key paths and `FOR` iteration stay
+unavailable by the boundary above.
+
+```rust
+use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
+use std::fmt;
+
+/// Integer grid with no literal syntax: scripts query it through functions.
+#[oxdock_type(name = "MATRIX")]
+#[derive(Debug, Clone, PartialEq)]
+struct Matrix(Vec<Vec<i64>>);
+
+impl fmt::Display for Matrix {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "matrix[{}x{}]", self.0.len(), self.0.first().map_or(0, Vec::len))
+    }
+}
+
+/// Mint a fixed 1x2 grid.
+#[oxdock_func(pure)]
+fn make_matrix() -> anyhow::Result<Value> {
+    Ok(Value::mint_heap(
+        Matrix::descriptor(),
+        Matrix(vec![vec![1, 2]]),
+    ))
+}
+
+/// Read one cell by row and column.
+#[oxdock_func(pure, returns = TypeTag::Int)]
+fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
+    let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
+        anyhow::bail!("MATRIX_GET() expects a MATRIX value");
+    };
+    let cell = usize::try_from(row)
+        .ok()
+        .and_then(|r| grid.0.get(r))
+        .and_then(|r| usize::try_from(col).ok().and_then(|c| r.get(c)))
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("index out of bounds"))?;
+    Ok(Value::int(cell))
+}
+
+fn main() -> anyhow::Result<()> {
+    let word = Value::mint_heap(Matrix::descriptor(), Matrix(vec![vec![1, 2]]));
+    let cell = matrix_get(word, 0, 1).unwrap();
+    assert_eq!(cell.as_i64(), Some(2));
+
+    let mut engine = oxdock::Engine::new();
+    engine.register_type::<Matrix>();
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![
+            MakeMatrix::registration(),
+            MatrixGet::registration(),
+        ],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
+        types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
+        record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
+    });
+    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let run = engine.run_script(
+        &root,
+        "IMPORT [DEMO]\nLET $m: MATRIX = MAKE_MATRIX()\nLET $c: INT = MATRIX_GET($m, 0, 1)\n",
+    )?;
+    assert_eq!(run.bindings["c"].as_i64(), Some(2));
+    Ok(())
+}
+```
+
+### Reference: evaluation paths and the `rpn` flag
+
+Two evaluators run scripts, and the distinction decides where a host
+function may run. The AST evaluator walks the parsed tree one step at a
+time. Every step knows its line number, so failures name it (`step 1:
+INT() expects 1 argument(s), got 2`). Scopes, pipes, declarations, and
+every statement form live here. The RPN evaluator runs arithmetic and
+comparison expressions compiled to a flat stack-machine program
+(`PushConst`, `LoadVar`, `Call`, `Add`, ...). A stack program carries
+values only: no statements, no scopes, no pipes, and no step numbers, so
+a failing call inside math reports the bare error (`INT() expects 1
+argument(s), got 2`).
+
+The tradeoff is expressiveness against compactness, not speed. The tree
+can say anything the language can say, with errors that point at the
+script. The stack program can only compute values, which is exactly what
+math needs and nothing more. That is why not everything runs on RPN:
+statements, declarations, scoping, and IO orchestration have no stack
+encoding, and step-numbered errors require the tree.
+
+For host functions the rule follows from that split. Pure functions take
+only values and touch nothing, so they run on both paths with no flag.
+Stateful functions default to AST-only. Opt in with
+`#[oxdock_func(rpn)]` only for read-only queries that stay meaningful
+inside math (`GLOB`, `LOAD_TOML`, `LOAD_JSON` do this): the function
+still receives full step context, but its failures lose their step
+numbers. Side-effecting stateful functions stay out, since stack-order
+execution with step-less errors is the worst place for an effect to go
+wrong.
+
+### Why embedding Rust here stays simple
+
+Compared against embedding Rust in Python, there are three structural
+reasons the host boundary stays small, and none of them are API polish.
+
+#### No foreign runtime to host
+
+Embedding Rust in Python means linking an interpreter, managing the
+GIL, and marshaling across two object models with different lifetimes.
+OxDock functions are plain Rust functions returning `Result<Value>`:
+the VM is just the calling convention, and values are fixed size words
+with deterministic lifetimes, so there is nothing to pin, nothing
+reference counted, and nothing kept alive across the boundary.
+
+#### No binding layer
+
+The Python path needs module registration plus type conversions
+negotiated with dynamic types. `#[oxdock_func]` derives the
+registration marker, the arity gate, and the `String`, `i64`, `f64`,
+`bool`, and `Value` extraction from the signature, and doc comments
+become introspectable metadata for free.
+
+#### No build system dance
+
+No maturin, no ABI tags, and no wheels built per interpreter. The host
+crate depends on `oxdock-core` and calls `Engine::register_module`.
+The one thing Python still wins is its C ABI as a stable interop target
+for other languages. The OxDock boundary is Rust only, which is exactly
+what keeps it cheap.
+
+## MCP hosting
+
+A script serves its `EXPORT`ed functions as MCP tools instead of
+running linear steps. One function, one tool:
+
+```oxdock
+# Adds two integers. Returns the sum.
+FUNC ADD($a: INT, $b: INT) {
+  RETURN $a + $b
+}
+
+# The export marks the tool without changing linear calls.
+EXPORT [ADD]
+LET $sum: INT = ADD(2, 3)
+ASSERT_EQ $sum 5
+```
+
+Pass the script to the flag (`--mcp` hosting ships in default
+builds; only `--no-default-features` builds drop it):
+
+```sh
+cargo build -p oxdock
+./target/debug/oxdock --mcp tools.oxdock
+```
+
+Register the server in OpenCode with an `opencode.jsonc` entry.
+Any key under `mcp` becomes the tool prefix:
+
+```jsonc
+{
+  "mcp": {
+    "oxdock-demo": {
+      "type": "local",
+      "command": ["/path/to/oxdock", "--mcp", "/path/to/tools.oxdock"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Each entry serves over stdio JSON-RPC with live reload on file
+change. The function above appears as `oxdock-demo_ADD`: a call
+with `{"a": 2, "b": 3}` resolves `{"result": 5}`, and `ECHO`
+output streams live instead of landing in the result. Wire shapes,
+the detach pattern for long calls, and reload semantics live in
+[crates/oxdock-mcp/README.md](./crates/oxdock-mcp/README.md).
+
+Only serve scripts you trust. Exports and `#` docs become the MCP
+tool surface verbatim (names, descriptions, schemas), so a script
+author controls what an MCP client shows its model. Treat a served
+script like installed software, not data. Script docs are untrusted
+model input when the script source is: prefer allowlisted scripts
+you curate, and sanitize or rewrite descriptions before exposing
+them to an LLM-facing client, since no filtering at this layer
+makes untrusted provider text safe to show one. A `tools/call`
+dispatches straight into the live session with no per-call
+confirmation here, so keep high-impact capabilities (`RUN`, `NET`,
+`SSH`, filesystem mutation) out of served scripts unless your
+client or host gates them behind an explicit approval policy.
+Default-routed stdout and stderr stream to the client as
+notifications while the call runs, so anything a tool prints can
+enter client and model context: do not print secrets, pass them via
+env or files, and redact or suppress logs. Failures report the
+captured output tails inside the error text, and return values cross
+as result blocks, so a secret-bearing result (for example a minted
+`SSH_GENERATE_PASSWORD()` password) reaches the client by design
+when a tool returns one: assume anything a tool prints or returns
+may be exposed to connected clients and retained in logs or
+transcripts, and only serve secret-bearing tools where the
+deployment accounts for that egress.
 
 ## GitHub Actions Integration
 
@@ -6649,13 +7201,13 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 
 ## Citation
 
-If you use OxDock in published work, cite version `0.33.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+If you use OxDock in published work, cite version `0.34.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
 
 ```bibtex
 @software{oxdock,
   author = "Jeremy Harris",
   title = "OxDock",
-  version = "0.33.0-alpha",
+  version = "0.34.0-alpha",
   url = "https://github.com/jzombie/rust-oxdock",
   license = "Apache-2.0"
 }

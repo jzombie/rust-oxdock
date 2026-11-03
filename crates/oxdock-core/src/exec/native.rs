@@ -227,6 +227,11 @@ impl<P: ProcessManager> HostRegistration<P> {
 pub(super) struct FuncDefData {
     pub(super) params: Vec<(String, TypeTag)>,
     pub(super) body: Vec<Step>,
+    /// Owning file module (#115, resolved display path): module-owned
+    /// `FUNC`s resolve names against the module's shared store after
+    /// lexical frames miss. `None` for entry/REPL definitions, which
+    /// stay params-only.
+    pub(super) module: Option<String>,
 }
 
 /// Executable body behind one registry entry: an interpreted script, a
@@ -362,6 +367,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         vec![
             Int::registration(),
             Float::registration(),
+            BoolConvert::registration(),
+            BoolOr::registration(),
             FormatByteCount::registration(),
             ParseByteCount::registration(),
             FormatDuration::registration(),
@@ -388,10 +395,12 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TypeOf::registration(),
             Functions::registration(),
             Describe::registration(),
+            IsMain::registration(),
             IsTerminal::registration(),
             Eof::registration(),
             TaskPoll::registration(),
             Version::registration(),
+            Interpreter::registration(),
             TextTrim::registration(),
             TextTrimPrefix::registration(),
             TextTrimSuffix::registration(),
@@ -534,6 +543,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         name: &str,
         params: &[(String, TypeTag)],
         body: &[Step],
+        module: Option<&str>,
     ) -> Result<()> {
         let qualified = qualify(SCRIPT_MODULE_NAME, name);
         let shadowable = matches!(
@@ -541,11 +551,13 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Some(FuncBody::Script(_))
         );
         // Reserved spans every module: compare base names so the message
-        // keeps naming the bare script identifier.
-        let reserved = self
-            .entries
-            .keys()
-            .any(|key| split_qualified(key).is_some_and(|(_, base)| base == name));
+        // keeps naming the bare script identifier. Script-defined entries
+        // (including `ALIAS::NAME` file imports, #115) never reserve: only
+        // native/host bodies are unshadowable.
+        let reserved = self.entries.iter().any(|(key, entry)| {
+            split_qualified(key).is_some_and(|(_, base)| base == name)
+                && !matches!(entry.body, FuncBody::Script(_))
+        });
         if reserved && !shadowable {
             anyhow::bail!("cannot shadow reserved function `{name}`");
         }
@@ -587,6 +599,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 body: FuncBody::Script(FuncDefData {
                     params: params.to_vec(),
                     body: body.to_vec(),
+                    module: module.map(|m| m.to_string()),
                 }),
             },
         );
@@ -597,6 +610,101 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             }
         }
         Ok(())
+    }
+
+    /// Define a file-imported DSL `FUNC` under its import alias (#115)
+    /// into an explicit scope frame: nested imports register their
+    /// aliases in the outermost import's caller frame, so the importer's
+    /// `ALIAS::` bodies keep resolving them after the nested frame pops.
+    /// Out-of-range depths fall back to the top frame; a missing frame
+    /// (never in practice: the registry always holds the global frame)
+    /// defines untracked, like top-level definitions.
+    pub(super) fn define_aliased_in(
+        &mut self,
+        depth: usize,
+        alias: &str,
+        name: &str,
+        params: &[(String, TypeTag)],
+        body: &[Step],
+        module: Option<&str>,
+    ) -> Result<()> {
+        let qualified = qualify(alias, name);
+        let shadowable = matches!(
+            self.entries.get(&qualified).map(|entry| &entry.body),
+            Some(FuncBody::Script(_))
+        );
+        // Reserved spans every module: compare base names so the message
+        // keeps naming the bare script identifier. Script-defined entries
+        // never reserve: only native/host bodies are unshadowable.
+        let reserved = self.entries.iter().any(|(key, entry)| {
+            split_qualified(key).is_some_and(|(_, base)| base == name)
+                && !matches!(entry.body, FuncBody::Script(_))
+        });
+        if reserved && !shadowable {
+            anyhow::bail!("cannot shadow reserved function `{name}`");
+        }
+        // Duplicate scope is the target frame: nested imports share the
+        // outermost import's caller frame, so a repeated alias there is
+        // explicit, never silent.
+        let depth_in_range = depth < self.scopes.len();
+        let frame_idx = if depth_in_range {
+            depth
+        } else {
+            self.scopes.len().saturating_sub(1)
+        };
+        if self
+            .scopes
+            .get(frame_idx)
+            .is_some_and(|frame| frame.defined.contains(&qualified))
+        {
+            anyhow::bail!("duplicate function `{name}` in same scope");
+        }
+        let old = self.entries.insert(
+            qualified.clone(),
+            FuncEntry {
+                meta: FuncMeta {
+                    name: qualified.clone(),
+                    module: alias.to_string(),
+                    kind: FuncKind::Script,
+                    params: Some(
+                        params
+                            .iter()
+                            .map(|(name, param_type)| FuncParam {
+                                name: name.clone(),
+                                param_type: Some(param_type.clone()),
+                                allowed: None,
+                                docs: "",
+                                options: None,
+                                optional: false,
+                            })
+                            .collect(),
+                    ),
+                    returns: None,
+                    rpn: false,
+                    summary: "DSL-defined function.",
+                    docs: "Defined via FUNC in an imported script.",
+                    examples: &[],
+                },
+                body: FuncBody::Script(FuncDefData {
+                    params: params.to_vec(),
+                    body: body.to_vec(),
+                    module: module.map(|m| m.to_string()),
+                }),
+            },
+        );
+        if let Some(frame) = self.scopes.get_mut(frame_idx) {
+            frame.defined.insert(qualified.clone());
+            if let Some(old) = old {
+                frame.shadowed.push((qualified, old));
+            }
+        }
+        Ok(())
+    }
+
+    /// Registry scope depth: the alias frame for an outermost import is
+    /// the frame below the top (#115).
+    pub(super) fn scope_depth(&self) -> usize {
+        self.scopes.len()
     }
 
     /// Open a lexical scope frame for script definitions. Native entries
@@ -711,9 +819,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     /// Metadata for single-file `EXPORT` names in source order. Errors
     /// name the first missing export; callers fail fast before serving.
-    pub fn exported_metas(&self, exports: &[String]) -> anyhow::Result<Vec<FuncMeta>> {
-        let mut out = Vec::with_capacity(exports.len());
-        for name in exports {
+    pub fn exported_metas(&self, func_exports: &[String]) -> anyhow::Result<Vec<FuncMeta>> {
+        let mut out = Vec::with_capacity(func_exports.len());
+        for name in func_exports {
             // Bare names are script FUNCs; qualified names address the
             // registry directly, so host functions export with their
             // own metadata and docs.
@@ -768,14 +876,14 @@ pub fn builtin_function_metas() -> Vec<FuncMeta> {
 /// compile-time knowledge of builtin names.
 pub fn std_module_table() -> oxdock_parser::ModuleTable {
     // Registry names are qualified (`STD::GLOB`); the table holds bases.
-    let functions: HashSet<String> = builtin_function_metas()
+    let func_names: HashSet<String> = builtin_function_metas()
         .into_iter()
         .map(|meta| base_name(&meta.name).to_string())
         .collect();
     oxdock_parser::ModuleTable {
         modules: HashMap::from([(
             STD_MODULE_NAME.to_string(),
-            Some(oxdock_parser::ModuleFuncs { functions }),
+            Some(oxdock_parser::ModuleFuncs { func_names }),
         )]),
     }
 }
@@ -1737,6 +1845,126 @@ fn type_describe<P: ProcessManager>(
         return Ok(Value::map(map));
     }
     Err(anyhow::anyhow!("unknown type {name}"))
+}
+
+/// Path of the running interpreter binary.
+///
+/// Returns the executing binary as a `STRING`, so one script can
+/// reinvoke the interpreter on another script without bridging an env
+/// var. The child re-parses from bytes in a separate process: no
+/// bindings cross back (only stdout and files), and each run pays
+/// a spawn. Prefer modules for reuse (statically gated, in-process);
+/// reach for reinvocation when the child must run isolated, or under
+/// a different binary than the parent.
+///
+/// Unsupported under Miri isolation: the lookup itself fails there
+/// instead of returning a path.
+///
+#[oxdock_func(returns = TypeTag::String)]
+#[example(
+    name = "self",
+    code = r###"
+    # The running interpreter resolves to a non-empty path.
+    IMPORT [STD]
+    LET $exe: STRING = INTERPRETER()
+    LET $nonempty: BOOL = $exe != ""
+    ASSERT_EQ $nonempty true
+    "###
+)]
+#[example(
+    name = "dynamic composition",
+    code = r###"
+    # Compose the child script dynamically: the parent interpolates
+    # its own bindings into the pipe, then runs the interpreter on it.
+    # Unescaped {{ }} bakes in at compose time; \{{ }} stays literal
+    # so the child expands it with its own bindings.
+    # The pipe delivers EOF when the producer step ends, so the child
+    # reads exactly one script.
+    IMPORT [STD]
+    LET $exe: STRING = INTERPRETER()
+    LET $who: STRING = "Ada"
+    LET $child: PIPE
+    WITH_IO [stdout=$child] ECHO """
+        ECHO "hello {{ $who }}!"
+        LET $who: STRING = "Grace"
+        ECHO "child sees \{{ $who }}!"
+        """
+    LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe]
+    ASSERT_CONTAINS $out "hello Ada!"
+    ASSERT_CONTAINS $out "child sees Grace!"
+    "###
+)]
+fn interpreter<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
+    if let Some(staged) = cx.state.io.interpreter_override() {
+        return Ok(Value::string(staged));
+    }
+    Ok(Value::string(oxdock_process::interpreter_exe()?))
+}
+
+/// Report whether the current context is the entry script.
+///
+/// True at entry top level and inside entry-owned functions; false
+/// inside module-owned functions and module init bodies. Lets a
+/// library file double as a runnable demo: guard the demo with
+/// `IF IS_MAIN()` so importing it stays side-effect free.
+///
+#[oxdock_func(returns = TypeTag::Bool)]
+#[example(
+    name = "main",
+    code = r###"
+    # Entry top level runs as main.
+    IMPORT [STD]
+    LET $m: BOOL = IS_MAIN()
+    ASSERT_EQ $m true
+    "###
+)]
+#[example(
+    name = "library doubles as demo",
+    fence_meta = "roots:unified",
+    code = r###"
+    # A library doubles as a runnable demo: guard the demo with
+    # IF IS_MAIN() so importing it stays side effect free. The
+    # parent writes both files, then runs each in a fresh
+    # interpreter: direct execution prints the demo, importing
+    # it does not. Unified roots: the child inherits one
+    # workspace, so parent and child see the same files. The
+    # exact stdout match proves the demo line stays out of the
+    # importing run.
+    IMPORT [STD]
+
+    # The library under test: demo guarded by IS_MAIN.
+    WRITE lib.oxfile """
+        IMPORT [STD]
+        FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+        EXPORT GREET
+        IF IS_MAIN() {
+            ECHO "demo: hi Ada"
+        }
+        """
+
+    # The importer: calls the library, prints only its own line.
+    WRITE main.oxfile """
+        IMPORT ["lib.oxfile" AS LIB]
+        LET $g: STRING = LIB::GREET("Bo")
+        ECHO "imported: \{{ $g }}"
+        """
+
+    # Direct run executes the demo.
+    LET $exe: STRING = INTERPRETER()
+    LET $direct: STRING = RUN [$exe, "lib.oxfile"]
+    ASSERT_CONTAINS $direct "demo: hi Ada"
+
+    # Importing run stays silent apart from its own line.
+    LET $via: STRING = RUN [$exe, "main.oxfile"]
+    ASSERT_EQ $via "imported: hi Bo\n"
+    "###
+)]
+fn is_main<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
+    let main = match cx.state.module_stack.last() {
+        None | Some(None) => true,
+        Some(Some(_)) => false,
+    };
+    Ok(Value::bool(main))
 }
 
 /// Report whether a standard stream is a terminal.
@@ -2743,6 +2971,83 @@ fn text_match(
 ) -> Result<Value> {
     let re = super::args::text_compile_pattern("TEXT_MATCH", &pattern)?;
     Ok(Value::bool(re.is_match(&text)))
+}
+
+/// Convert a value to BOOL.
+///
+/// Trims ASCII whitespace; accepts `true`/`false`, `1`/`0`,
+/// `yes`/`no`, `on`/`off` in any case. Passes Bool through. Empty
+/// and anything else fail: an empty string is not a boolean, so
+/// absent env names (which read empty) must go through `BOOL_OR`
+/// with a stated default instead of converting here.
+///
+#[oxdock_func(pure, name = "BOOL", returns = TypeTag::Bool)]
+#[example(
+    name = "convert",
+    code = r###"
+    IMPORT [STD]
+    LET $n: BOOL = BOOL("yes")
+    ASSERT_EQ $n true
+    LET $f: BOOL = BOOL("0")
+    ASSERT_EQ $f false
+    "###
+)]
+fn bool_convert(
+    /// Value to convert to `BOOL`.
+    #[union(Bool, String)]
+    val: Value,
+) -> Result<Value> {
+    if let Some(b) = val.as_bool() {
+        return Ok(Value::bool(b));
+    }
+    let Some(s) = val.as_str() else {
+        return Err(anyhow::anyhow!(
+            "BOOL needs a Bool or String, found {val:?}"
+        ));
+    };
+    match super::args::parse_bool_str(s) {
+        Some(b) => Ok(Value::bool(b)),
+        None => anyhow::bail!("BOOL cannot coerce {s:?} to BOOL"),
+    }
+}
+
+/// Coerce text to `BOOL`, substituting a default for empty.
+///
+/// Returns `BOOL`. Blank input (a declared-but-absent env name, which
+/// reads empty) resolves to `default` instead of failing, so each flag
+/// site states its own absent polarity explicitly: negative-polarity
+/// flags (`dry_run`) default true, positive ones default false. No
+/// implicit polarity lives in the coercion. Non-blank garbage still
+/// fails naming the input, exactly like `LET $x: BOOL` coercion.
+///
+#[oxdock_func(pure, returns = TypeTag::Bool)]
+#[example(
+    name = "absent-default",
+    code = r###"
+    # Absent names read empty; the default settles the polarity.
+    IMPORT [STD]
+    INHERIT_ENV [OXDOCK_TEST_ABSENT_FLAG]
+    LET $dry: BOOL = BOOL_OR("{{ env:OXDOCK_TEST_ABSENT_FLAG }}", true)
+    ASSERT_EQ $dry true
+
+    # Present values coerce strictly, ignoring the default.
+    LET $off: BOOL = BOOL_OR("false", true)
+    ASSERT_EQ $off false
+    "###
+)]
+fn bool_or(
+    /// Text to coerce (`true`/`false`, `1`/`0`, `yes`/`no`/`on`/`off`, any case).
+    text: String,
+    /// Absent-value default, used when the text is blank.
+    default: bool,
+) -> Result<Value> {
+    if text.trim().is_empty() {
+        return Ok(Value::bool(default));
+    }
+    match super::args::parse_bool_str(&text) {
+        Some(b) => Ok(Value::bool(b)),
+        None => anyhow::bail!("BOOL_OR cannot coerce {text:?} to BOOL"),
+    }
 }
 
 /// Extract capture groups for the first regex match.

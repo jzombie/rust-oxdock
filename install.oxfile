@@ -3,16 +3,17 @@
 
 IMPORT [STD]
 
-INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION, OXDOCK_PIPED_SCRIPT, OXDOCK_INTERPRETER, OXDOCK_INTERACTIVE, OXDOCK_BINARY_NAME, OXDOCK_EXPECTED_VERSION, GITHUB_PATH, GITHUB_ENV, OXDOCK_SKIP_DOWNLOAD]
+INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION, OXDOCK_PIPED_SCRIPT, OXDOCK_INTERACTIVE, OXDOCK_BINARY_NAME, OXDOCK_EXPECTED_VERSION, GITHUB_PATH, GITHUB_ENV, OXDOCK_SKIP_DOWNLOAD]
 
 WORKSPACE SYSTEM
 
-# Piped input runs under the fetched interpreter.
+# Piped input runs under this interpreter.
 LET $piped: STRING = "{{ env:OXDOCK_PIPED_SCRIPT }}"
 LET $has_piped: BOOL = $piped != ""
 
 IF $has_piped {
-    RUN ["{{ env:OXDOCK_INTERPRETER }}", "{{ env:OXDOCK_PIPED_SCRIPT }}"]
+    LET $interp: STRING = INTERPRETER()
+    RUN [$interp, "{{ env:OXDOCK_PIPED_SCRIPT }}"]
 } ELSE {
     LET $asset: STRING = "{{ env:OXDOCK_ASSET }}"
     LET $want: STRING = "{{ env:OXDOCK_SHA }}"
@@ -29,11 +30,13 @@ IF $has_piped {
         $stem = "oxdock"
     }
 
-    # Skip flag for `local` builds.
-    LET $skip: BOOL = "{{ env:OXDOCK_SKIP_DOWNLOAD }}"
+    # Skip flag for `local` builds: absent means download normally.
+    LET $skip: BOOL = BOOL_OR("{{ env:OXDOCK_SKIP_DOWNLOAD }}", false)
 
-    # Interactive destination prompt.
-    IF "{{ env:OXDOCK_INTERACTIVE }}" != "" {
+    # Interactive destination prompt: strict flag, absent means
+    # non-interactive. An explicit "false" no longer prompts.
+    LET $interactive: BOOL = BOOL_OR("{{ env:OXDOCK_INTERACTIVE }}", false)
+    IF $interactive {
         PROMPT $dir "Install destination?" "{{ env:OXDOCK_DIR }}"
 
         WHILE true {
@@ -73,6 +76,14 @@ IF $has_piped {
     [family:windows] $filename = "{{ $stem }}.exe"
     LET $dest: STRING = PATH_JOIN($dir, $filename)
 
+    # One summary block: shared indent dedents to the closing
+    # baseline, the deeper detail lines keep their offset.
+    LET $summary: STRING = """
+        installed {{ $stem }} {{ env:OXDOCK_VERSION }} to {{ $dir }}
+          binary: {{ $dest }}
+          ensure {{ $dir }} is on PATH
+        """
+
     # Verify and place. The CI tail runs only on the fresh pass
     # below, never here: the old engine must not touch CI files.
     IF $skip {
@@ -82,13 +93,6 @@ IF $has_piped {
             INSTALL $bin $dest
         }
 
-        # One summary block: shared indent dedents to the closing
-        # baseline, the deeper detail lines keep their offset.
-        LET $summary: STRING = """
-            installed {{ $stem }} {{ env:OXDOCK_VERSION }} to {{ $dir }}
-              binary: {{ $dest }}
-              ensure {{ $dir }} is on PATH
-            """
         ECHO $summary
 
         # CI smoke and PATH publish, fresh engine only. Strict nest:
@@ -151,11 +155,6 @@ IF $has_piped {
 
         INSTALL $bin $dest
 
-        LET $summary: STRING = """
-            installed {{ $stem }} {{ env:OXDOCK_VERSION }} to {{ $dir }}
-              binary: {{ $dest }}
-              ensure {{ $dir }} is on PATH
-            """
         ECHO $summary
     }
 }

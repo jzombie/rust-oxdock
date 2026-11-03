@@ -46,7 +46,7 @@ const MANIFEST: &str = indoc::indoc! {r#"
     repository = "https://example.test/repo"
 "#};
 
-const BASE_VALUES: &str = r#"{"title": "Base", "who": "base", "dup": "base"}"#;
+const BASE_VALUES: &str = r#"{"title": "Base", "who": "base", "dup": "base", "workspace_url": "https://example.test/repo"}"#;
 const OVERLAY_VALUES: &str = r#"{"who": "overlay", "extra": "yes", "dup": "overlay"}"#;
 
 fn config(policy: &str) -> String {

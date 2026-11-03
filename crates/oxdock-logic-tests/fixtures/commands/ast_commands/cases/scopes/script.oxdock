@@ -1,3 +1,4 @@
+INHERIT_ENV [SCOPE]
 ENV FOO="bar"
 [env:FOO]
 {

@@ -33,6 +33,7 @@ pub mod parser;
 mod resolve;
 pub mod strip_flags;
 pub mod tag;
+pub mod template;
 pub mod tok;
 pub mod value;
 

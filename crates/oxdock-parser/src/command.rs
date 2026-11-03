@@ -611,6 +611,10 @@ pub struct CommandMeta {
     pub flags: &'static [FlagSpec],
     pub default_output: Option<Stream>,
     pub examples: &'static [Example],
+    /// Whether the entry lists in the command index table. Structural
+    /// pseudo-entries with no typable keyword (e.g. `MUTATION` for
+    /// `$var = <expr>`) document in the body but stay out of the index.
+    pub in_index: bool,
 }
 
 /// An executable example for a command or function.

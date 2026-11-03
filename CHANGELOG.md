@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.34.0-alpha] - 2026-11-03
+
+### Added
+
+- External script imports: files load as modules via `IMPORT ["lib.oxdock" AS LIB]` (whole-file namespace) or selective harvests (`IMPORT [FOO FROM "lib.oxdock"]`, `IMPORT [TYPE T, FUNC F FROM "lib.oxdock"]`, grouped `IMPORT [[A FROM "x"], [B FROM "y"]]`). Only `EXPORT`ed `FUNC`s and `EXPORT TYPE`d aliases cross the boundary; host library types harvest with a bare module (`IMPORT [TYPE T FROM STD]`).
+- `STD::IS_MAIN() -> BOOL`: true at entry top level and inside entry-owned functions, false inside module-owned functions and module init bodies. Lets a library double as a runnable demo (`IF IS_MAIN()`).
+- `STD::INTERPRETER() -> STRING`: path of the running interpreter binary, so one script can reinvoke the engine on another script (`RUN [$exe, "other.oxdock"]`). Unsupported under Miri isolation.
+
+### Changed
+
+- Explicit absent-defaults for `BOOL` flags: the strict `BOOL(text)` converter joins the `INT`/`FLOAT` family (case-insensitive spellings, `Bool` passthrough, empty and garbage fail — coercion itself never changed, empty always failed), and `BOOL_OR(text, default)` substitutes a stated default for blank input so each flag site declares its own absent polarity (`BOOL_OR("{{ env:RELEASE_DRY_RUN }}", true)` stays dry-run when unbridged). The branch briefly coerced empty to `false` for totality and reverted it: an implicit `false` fails open on negative-polarity gates. `gha-rust-release.oxfile` branches on `IF !$dry` / `IF !$bins` with fail-closed defaults, and the `IF $x == "false"` string-compare shape is retired.
+
+### Dependencies
+
+- Bump `pulldown-cmark` 0.13.5 → 0.13.6 (RUSTSEC-2026-0433).
+
 ## [0.33.0-alpha] - 2026-11-01
 
 ### Added

@@ -39,20 +39,29 @@
 //!   `declare_var` coercion is the gate.
 //! - Every statement argument participates: `Arg::Expr` operands and
 //!   `{{ }}` fragments inside `Arg::Parts` read through inference,
-//!   and task-handle (`AWAIT`, `CANCEL`, `AWAIT`-capture), pipe
-//!   (`WITH_IO` bindings), and list (`LIST_APPEND`) names read
-//!   through site-aware liveness with their runtime type rules
-//!   (`PIPE`/`LIST` exactly). Plain `Arg::String` text stays
-//!   unchecked by design: `{{ }}` there expands missing names to
-//!   empty at runtime and never errors, so rejecting it would be a
-//!   false positive.
+//!   literal text (`Arg::String`, `ArgPart::Text`) scans for embedded
+//!   `{{ env:KEY }}` / `{{ script_env:KEY }}` reads through the env
+//!   declaration gate, and task-handle (`AWAIT`, `CANCEL`,
+//!   `AWAIT`-capture), pipe (`WITH_IO` bindings), and list
+//!   (`LIST_APPEND`) names read through site-aware liveness with
+//!   their runtime type rules (`PIPE`/`LIST` exactly).
+//! - Environments are declared, except where the contract admits:
+//!   `ENV` and `INHERIT_ENV` declare names into the current scope
+//!   (scoped like variables, scrubbed by `ISOLATED`), and every other
+//!   `env:` read — `env:KEY` expressions, `{{ env:KEY }}` templates,
+//!   `LoadEnv` math operands, and `[env:KEY]` guards — must be
+//!   declared in the same file first. The `ENV_CONTRACTS.md` baseline
+//!   (host-mirrored seed rows plus engine-owned names) needs no
+//!   declaration, exactly as the contract documents. Each file stands
+//!   alone: module functions seed from their own file's top-level
+//!   declarations, never the importer's.
 //!
 //! Performance: single traversal, no fixpoint, no I/O, no registry
 //! writes. Branch forks clone a map of live vars; the merge walk
 //! would cost O(vars) regardless, so overlays would save nothing
 //! measurable. `MAX_STATIC_DEPTH` caps nesting with a static error.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use oxdock_parser::{
@@ -61,7 +70,11 @@ use oxdock_parser::{
 };
 use oxdock_process::ProcessManager;
 
-use super::{ExecState, FuncMeta, FuncParam, required_arity};
+use super::{
+    ExecState, FuncMeta, FuncParam,
+    import::{ClosureFile, ClosureSite},
+    required_arity,
+};
 
 /// Maximum expression nesting and nested-body descent. Parser-bounded
 /// scripts never approach it; hand-built ASTs cannot wedge the pass.
@@ -86,11 +99,14 @@ enum StaticTy {
     Void,
 }
 
-/// One collected script function: resolved params plus body.
+/// One collected script function: resolved params, body, and owning
+/// file module (#115, `None` for entry/REPL functions). The owner
+/// decides whose shared store the body resolves against.
 #[derive(Clone)]
 struct FuncInfo {
     params: Vec<(String, TypeTag)>,
     body: Vec<Step>,
+    module: Option<String>,
 }
 
 /// Lexical environment: a stack of frames mirroring the runtime
@@ -114,6 +130,34 @@ struct Binding {
 #[derive(Clone, Default, Debug)]
 struct Env {
     frames: Vec<HashMap<String, Vec<Binding>>>,
+    /// Module-shared bindings visible to module-owned code (#115):
+    /// the owning file's top-level `LET`s with a touch flag shared
+    /// across forks (reads on any path mark the body state-dependent,
+    /// which is what the harvest gate probes). Reads consult these
+    /// after lexical frames miss; entry code never carries one.
+    module: Option<ModuleScope>,
+    /// Declared environment names, one set per lexical frame: `ENV`
+    /// and `INHERIT_ENV` declare into the top frame, reads resolve
+    /// outward. The stack mirrors `frames` push for push, so braced
+    /// blocks, branch arms, and loop bodies scope declarations
+    /// exactly like the runtime `push_scope` discards them. Contract
+    /// names need no declaration (see the checker's admitted set);
+    /// every other `env:` read must be preceded by an explicit
+    /// declaration in the same file.
+    env_frames: Vec<HashSet<String>>,
+}
+
+/// Module-shared bindings plus a fork-shared touch flag. `Rc` (not
+/// `Arc`): the checker is single-threaded; forks clone the `Rc` so a
+/// touch on any conditional path is still observed after the fork is
+/// discarded.
+#[derive(Clone, Debug)]
+struct ModuleScope {
+    /// Owning module key, so nested checks re-seed from the checker's
+    /// module table instead of inheriting possibly-stale bindings.
+    key: String,
+    lets: HashMap<String, TypeTag>,
+    touched: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 /// Where a `RETURN`/`BREAK`/`CONTINUE` may legally land, mirroring
@@ -138,6 +182,29 @@ struct Scope<'x> {
     ret: RetCtx,
     loops: usize,
     site: Option<GuardExpr>,
+    /// Position of the current step for error attribution: source
+    /// line/column plus the walk index. Set per step by the body
+    /// walk; nested walks overwrite it for their steps. Rendered only
+    /// at the error site via [`step_pos`], exactly like the runtime
+    /// `step_error` context.
+    line: usize,
+    col: usize,
+    idx: usize,
+}
+
+/// Position context for one step, mirroring the runtime `step_error`
+/// rendering one for one: `step N` plus `line L` / `col C` when the
+/// step carries coordinates (parsed scripts do; hand-built steps keep
+/// the historical bare rendering).
+fn step_pos(line: usize, col: usize, idx: usize) -> String {
+    let mut loc = format!("step {}", idx + 1);
+    if line > 0 {
+        loc.push_str(&format!(", line {line}"));
+        if col > 0 {
+            loc.push_str(&format!(", col {col}"));
+        }
+    }
+    loc
 }
 
 /// The pass state: collected functions, host metas, inference
@@ -145,6 +212,27 @@ struct Scope<'x> {
 struct Checker<'a, P: ProcessManager> {
     exec: &'a ExecState<P>,
     funcs: HashMap<String, FuncInfo>,
+    /// Module-owned top-level `LET`s by module key (#115): seeded into
+    /// the environment when checking module-owned function bodies, so
+    /// static resolution sees the same store the runtime drains into.
+    module_lets: HashMap<String, Vec<(String, TypeTag)>>,
+    /// The entry's top-level `ENV` / `INHERIT_ENV` union, plus one per
+    /// module key. Function bodies seed from the union covering their
+    /// file: a module function sees its own file's prelude
+    /// declarations, never the importer's. Each file textually
+    /// declares what it reads; module calls additionally execute in
+    /// an isolated context (seed plus init contributions), so a
+    /// module that reads without declaring fails here, before the
+    /// first step.
+    module_env_unions: HashMap<String, HashSet<String>>,
+    entry_env_union: HashSet<String>,
+    /// Contract-admitted env names: the `ENV_CONTRACTS.md` baseline
+    /// plus engine-owned rows ([`seeded_env_names`](oxdock_process::seeded_env_names)).
+    /// Uses of these need no declaration, exactly as the contract
+    /// documents. Everything else must be declared in the same file.
+    /// Harness/CLI-injected names are never admitted here: they route
+    /// explicitly through `INHERIT_ENV`.
+    seeded_env: HashSet<String>,
     hosts: HashMap<String, FuncMeta>,
     inferred: HashMap<String, StaticTy>,
     inferring: Vec<String>,
@@ -155,12 +243,160 @@ struct Checker<'a, P: ProcessManager> {
     isolated_depth: usize,
 }
 
-/// Run the static pass over top-level steps plus every collected
-/// script function. Fails before the first step executes.
-pub fn validate_script_types<P: ProcessManager>(steps: &[Step], exec: &ExecState<P>) -> Result<()> {
+/// Run the static pass over an imported file's body (#115). The
+/// imported top level is function-like: `RETURN` is the value channel
+/// back to the importer (allowed here, unlike entry scripts), and
+/// falling off the end yields `""` instead of failing. Nested `FUNC`
+/// bodies are fully checked like entry functions. `module` names the
+/// file's module record: top-level `LET`s seed the module environment
+/// that module-owned functions resolve against, mirroring the runtime
+/// store drain on first initialization.
+pub fn validate_import_body_types<P: ProcessManager>(
+    steps: &[Step],
+    exec: &ExecState<P>,
+    module: &str,
+) -> Result<()> {
     let mut checker = Checker::new(exec);
-    checker.collect(steps)?;
-    checker.check_top_level(steps)?;
+    checker.module_lets.insert(
+        module.to_string(),
+        module_lets(steps, exec)?.into_iter().collect(),
+    );
+    checker
+        .module_env_unions
+        .insert(module.to_string(), file_env_union(steps));
+    checker.collect_owned(steps, Some(module))?;
+    checker.check_import_body("import", steps, Some(module))?;
+    for key in checker.func_keys() {
+        checker.func_return(&key, 0)?;
+    }
+    Ok(())
+}
+
+/// Probe whether harvesting `names` from a module body would observe
+/// module state (#115): returns the first state-touching name, if any.
+/// The file body never executes on harvest, so a stateful harvest has
+/// no initialized store to read; it must fail and direct the author to
+/// a full import. Pure helpers probe clean.
+pub(crate) fn harvest_touches_module<P: ProcessManager>(
+    exec: &ExecState<P>,
+    module: &str,
+    steps: &[Step],
+    names: &[String],
+) -> Result<Option<String>> {
+    let mut checker = Checker::new(exec);
+    checker.module_lets.insert(
+        module.to_string(),
+        module_lets(steps, exec)?.into_iter().collect(),
+    );
+    checker
+        .module_env_unions
+        .insert(module.to_string(), file_env_union(steps));
+    for name in names {
+        let Some((params, body)) = steps.iter().find_map(|step| match &step.kind {
+            StepKind::FuncDef {
+                name: def_name,
+                params,
+                body,
+                ..
+            } if def_name == name => Some((params.clone(), body.clone())),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let probe_key = format!("__probe__::{name}");
+        checker.define_collected(
+            &probe_key,
+            vec![probe_key.clone()],
+            &params,
+            &body,
+            Some(module),
+        )?;
+        if checker.func_touches_module(&probe_key)? {
+            return Ok(Some(name.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// Top-level `LET` bindings of a module body (#115): the declarations
+/// that drain into the shared store on first initialization. Names
+/// resolve through the same tags execution uses; dead-guarded steps
+/// are skipped exactly like collection skips them.
+fn module_lets<P: ProcessManager>(
+    steps: &[Step],
+    exec: &ExecState<P>,
+) -> Result<Vec<(String, TypeTag)>> {
+    let mut out = Vec::new();
+    for step in steps {
+        if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+            continue;
+        }
+        // Every top-level binding form drains into the shared store at
+        // runtime (`import_file` takes the whole init frame), so every
+        // form seeds here too: a module using capture/async/readline
+        // initializers must resolve, exactly like plain `LET`.
+        match &step.kind {
+            StepKind::Assign { var, decl_type, .. }
+            | StepKind::AssignCapture { var, decl_type, .. }
+            | StepKind::AssignAsync { var, decl_type, .. } => {
+                let tag = exec
+                    .resolve_tag(decl_type)
+                    .map_err(|err| anyhow::anyhow!("module variable `${var}`: {err:#}"))?;
+                out.push((clean_var(var), tag));
+            }
+            StepKind::ReadLine { var } | StepKind::Prompt { var, .. } => {
+                out.push((clean_var(var), TypeTag::String));
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Run the static pass over the entry script plus the entire import
+/// closure (#115). Every transitively imported file is collected and
+/// checked before the first step executes: cross-file calls resolve
+/// against the collected signatures (arity and argument types enforced
+/// at the call site), and nested files cannot smuggle type errors past
+/// the entry gate. Cycles, depth overflow, and parse failures surface
+/// during expansion, also before any step runs.
+pub fn validate_script_closure<P: ProcessManager>(
+    entry: &[Step],
+    files: &[super::import::ClosureFile],
+    exec: &ExecState<P>,
+) -> Result<()> {
+    // Every file's `EXPORT TYPE` list must name a locally defined alias
+    // in v1 (no lib-level re-exports): entry re-exports are validated
+    // by the MCP host against the closure, since `finish_run` drops
+    // entry export metadata (steps only).
+    for file in files {
+        let mut local = std::collections::HashSet::new();
+        for step in &file.steps {
+            if let StepKind::TypeAlias { name, .. } = &step.kind {
+                local.insert(name.clone());
+            }
+        }
+        for name in &file.type_exports {
+            if !local.contains(name) {
+                anyhow::bail!(
+                    "IMPORT `{}` EXPORT TYPE `{name}` does not match any top-level TYPE in that file",
+                    file.path
+                );
+            }
+        }
+    }
+    let mut checker = Checker::new(exec);
+    checker.build_env_unions(entry, files);
+    checker.collect(entry)?;
+    for file in files {
+        for site in &file.sites {
+            checker.collect_site(site, file)?;
+        }
+    }
+    checker.check_top_level(entry)?;
+    for file in files {
+        checker.check_import_body(&file.key, &file.steps, Some(&file.key))?;
+    }
     for key in checker.func_keys() {
         checker.func_return(&key, 0)?;
     }
@@ -169,13 +405,14 @@ pub fn validate_script_types<P: ProcessManager>(steps: &[Step], exec: &ExecState
 
 /// Same pass returning the visit count, for the linearity test: the
 /// count must stay proportional to input size on adversarial input.
-/// Test-only: production calls `validate_script_types`.
+/// Test-only: production calls `validate_script_closure`.
 #[cfg(test)]
 pub fn validate_script_types_counted<P: ProcessManager>(
     steps: &[Step],
     exec: &ExecState<P>,
 ) -> Result<u64> {
     let mut checker = Checker::new(exec);
+    checker.entry_env_union = file_env_union(steps);
     checker.collect(steps)?;
     checker.check_top_level(steps)?;
     for key in checker.func_keys() {
@@ -395,13 +632,40 @@ struct WalkOut {
     types: Vec<TypeTag>,
 }
 
+/// Union of env names declared by direct top-level steps (never
+/// descending into bodies): `FUNC` bodies are function-local,
+/// branch/loop/block/`ISOLATED` interiors are scope-local at
+/// runtime, so only linear top-level `ENV` / `INHERIT_ENV` names
+/// seed the file's functions. Order-free by design: a function
+/// may run after any top-level step, so the union over-approximates
+/// visibility instead of tracking call sites.
+fn file_env_union(steps: &[Step]) -> HashSet<String> {
+    let mut union = HashSet::new();
+    for step in steps {
+        match &step.kind {
+            StepKind::Env { key, .. } => {
+                union.insert(key.clone());
+            }
+            StepKind::InheritEnv { keys } | StepKind::IsolatedInheritEnv { keys } => {
+                union.extend(keys.iter().cloned());
+            }
+            _ => {}
+        }
+    }
+    union
+}
+
 impl Env {
     fn one_frame(bindings: Vec<(String, TypeTag)>) -> Self {
         let mut top = HashMap::new();
         for (name, tag) in bindings {
             top.insert(name, vec![Binding { tag, guard: None }]);
         }
-        Self { frames: vec![top] }
+        Self {
+            frames: vec![top],
+            module: None,
+            env_frames: vec![HashSet::new()],
+        }
     }
 
     /// Fork for a scoped body: clone the stack and push a fresh frame,
@@ -410,7 +674,22 @@ impl Env {
     fn fork(&self) -> Self {
         let mut fork = self.clone();
         fork.frames.push(HashMap::new());
+        fork.env_frames.push(HashSet::new());
         fork
+    }
+
+    /// Declare an environment name in the top frame. Re-declaration is
+    /// always allowed: `ENV` overwrites and `INHERIT_ENV` refreshes at
+    /// runtime, so there is no shadowing error to mirror.
+    fn declare_env(&mut self, name: String) {
+        if let Some(frame) = self.env_frames.last_mut() {
+            frame.insert(name);
+        }
+    }
+
+    /// Whether `name` was declared in any live frame.
+    fn is_env_declared(&self, name: &str) -> bool {
+        self.env_frames.iter().any(|frame| frame.contains(name))
     }
 
     /// Read a binding under a read-site guard: first frame outward
@@ -487,6 +766,14 @@ impl Env {
                 return Ok((unified.expect("live never empty"), guard));
             }
         }
+        // Module-shared bindings sit beneath every lexical frame (#115):
+        // a hit marks the body as state-dependent for the harvest gate.
+        if let Some(scope) = &self.module
+            && let Some(tag) = scope.lets.get(key)
+        {
+            scope.touched.set(true);
+            return Ok((tag.clone(), None));
+        }
         bail!("undefined variable ${key}");
     }
 
@@ -495,6 +782,10 @@ impl Env {
             .iter()
             .rev()
             .any(|frame| frame.contains_key(key))
+            || self
+                .module
+                .as_ref()
+                .is_some_and(|scope| scope.lets.contains_key(key))
     }
 
     /// Declare in the top frame. A duplicate whose guard overlaps any
@@ -552,6 +843,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         Self {
             exec,
             funcs: HashMap::new(),
+            module_lets: HashMap::new(),
+            module_env_unions: HashMap::new(),
+            entry_env_union: HashSet::new(),
+            seeded_env: oxdock_process::seeded_env_names()
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect(),
             hosts,
             inferred: HashMap::new(),
             inferring: Vec::new(),
@@ -570,45 +868,159 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// steps are skipped: unregistered code is never checked.
     /// Each function is keyed by bare and `SCRIPT::`-qualified name
     /// so calls resolve regardless of parser qualification.
-    fn collect(&mut self, steps: &[Step]) -> Result<()> {
+    fn collect_owned(&mut self, steps: &[Step], module: Option<&str>) -> Result<()> {
         for step in steps {
             if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
                 continue;
             }
-            self.collect_step(step)?;
+            self.collect_step(step, module)?;
         }
         Ok(())
     }
 
-    fn collect_step(&mut self, step: &Step) -> Result<()> {
+    /// Entry shorthand: ownerless collection for entry scripts.
+    fn collect(&mut self, steps: &[Step]) -> Result<()> {
+        self.collect_owned(steps, None)
+    }
+
+    /// Seed env unions for function-body seeding: the entry's union
+    /// plus one per closure file. Module unions gate module functions
+    /// on their own file's prelude declarations (textual, per-file);
+    /// at runtime those calls execute isolated (seed plus init
+    /// contributions), so declarations are load-bearing, not advisory.
+    fn build_env_unions(&mut self, entry: &[Step], files: &[super::import::ClosureFile]) {
+        self.entry_env_union = file_env_union(entry);
+        for file in files {
+            self.module_env_unions
+                .insert(file.key.clone(), file_env_union(&file.steps));
+        }
+    }
+
+    /// Whether `name` may be read here: declared in a live frame, in
+    /// the seeding file union (function bodies start from their
+    /// file's declarations), or admitted by the env contract (baseline
+    /// seed rows and `CARGO_FEATURE_*`/`CARGO_CFG_*` patterns need no
+    /// declaration). Nothing else admits: no host fallbacks, no
+    /// cross-file leakage.
+    fn env_declared(&self, env: &Env, name: &str) -> bool {
+        env.is_env_declared(name)
+            || self.seeded_env.contains(name)
+            || oxdock_process::is_sanctioned_seed(name)
+    }
+
+    /// Reject an undeclared environment read at its use site, naming
+    /// the declarations that would allow it. `prefix` is the source
+    /// spelling (`env:` / `script_env:`) so the message quotes what
+    /// the author wrote. Position renders like the runtime
+    /// `step_error` context (`step N, line L, col C`).
+    fn check_env_name(&self, env: &Env, name: &str, prefix: &str, scope: &Scope) -> Result<()> {
+        if !self.env_declared(env, name) {
+            bail!(
+                "{} in {}: uses undeclared environment variable `{prefix}{name}`: declare it first with ENV or INHERIT_ENV",
+                step_pos(scope.line, scope.col, scope.idx),
+                scope.label,
+            );
+        }
+        Ok(())
+    }
+
+    /// Scan raw string text for `{{ env:KEY }}` / `{{ script_env:KEY }}`
+    /// placeholders and reject undeclared names. Runs on the shared
+    /// [`TemplateSegments`](oxdock_parser::template::TemplateSegments)
+    /// splitter, so what counts as a placeholder here is exactly what
+    /// expands at runtime. Bare keys and `$var` placeholders are not
+    /// env reads and are ignored here.
+    fn check_template_env(&self, text: &str, env: &Env, scope: &Scope) -> Result<()> {
+        use oxdock_parser::template::{TemplateSegment, TemplateSegments};
+        for segment in TemplateSegments::new(text) {
+            let TemplateSegment::Placeholder { key } = segment else {
+                continue;
+            };
+            let found = key
+                .strip_prefix("env:")
+                .map(|name| ("env:", name))
+                .or_else(|| {
+                    key.strip_prefix("script_env:")
+                        .map(|name| ("script_env:", name))
+                });
+            if let Some((prefix, name)) = found {
+                let name = name.trim();
+                if !name.is_empty() {
+                    self.check_env_name(env, name, prefix, scope)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Collect every `[env:KEY]` guard reference in a guard tree.
+    fn guard_env_names(guard: &GuardExpr, out: &mut Vec<String>) {
+        match guard {
+            GuardExpr::Predicate(pred) => {
+                if let oxdock_parser::Guard::Attr { ns, key, .. } = pred
+                    && matches!(ns, oxdock_parser::Ns::Env)
+                    && let Some(name) = key
+                {
+                    out.push(name.clone());
+                }
+            }
+            GuardExpr::All(children) | GuardExpr::Or(children) => {
+                for child in children {
+                    Self::guard_env_names(child, out);
+                }
+            }
+            GuardExpr::Not(inner) => Self::guard_env_names(inner, out),
+        }
+    }
+
+    /// Define one collected function under explicit keys: resolve the
+    /// param tags now (the same error execution reports), store the
+    /// body for return inference, and collect nested definitions.
+    fn define_collected(
+        &mut self,
+        name: &str,
+        keys: Vec<String>,
+        params: &[(String, String)],
+        body: &[Step],
+        module: Option<&str>,
+    ) -> Result<()> {
+        let mut resolved = Vec::with_capacity(params.len());
+        for (pname, ptype) in params {
+            let tag = self
+                .exec
+                .resolve_tag(ptype)
+                .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+            resolved.push((clean_var(pname), tag));
+        }
+        for key in keys {
+            self.funcs.insert(
+                key,
+                FuncInfo {
+                    params: resolved.clone(),
+                    body: body.to_vec(),
+                    module: module.map(|m| m.to_string()),
+                },
+            );
+        }
+        // Nested definitions register if execution reaches them;
+        // collect their bodies too, under the same owner.
+        let nested = body.to_vec();
+        self.collect_owned(&nested, module)?;
+        Ok(())
+    }
+
+    fn collect_step(&mut self, step: &Step, module: Option<&str>) -> Result<()> {
         match &step.kind {
             StepKind::FuncDef {
                 name, params, body, ..
             } => {
-                let mut resolved = Vec::with_capacity(params.len());
-                for (pname, ptype) in params {
-                    let tag = self
-                        .exec
-                        .resolve_tag(ptype)
-                        .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-                    resolved.push((clean_var(pname), tag));
-                }
-                let info = FuncInfo {
-                    params: resolved,
-                    body: body.clone(),
-                };
-                self.funcs.insert(name.clone(), info);
-                self.funcs.insert(
-                    format!("SCRIPT::{name}"),
-                    FuncInfo {
-                        params: self.funcs[name].params.clone(),
-                        body: self.funcs[name].body.clone(),
-                    },
-                );
-                // Nested definitions register if execution reaches
-                // them; collect their bodies too.
-                let nested = self.funcs[name].body.clone();
-                self.collect(&nested)?;
+                self.define_collected(
+                    name,
+                    vec![name.clone(), format!("SCRIPT::{name}")],
+                    params,
+                    body,
+                    module,
+                )?;
             }
             StepKind::If {
                 then_body,
@@ -616,20 +1028,182 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 else_body,
                 ..
             } => {
-                self.collect(then_body)?;
+                self.collect_owned(then_body, module)?;
                 for (_, arm) in else_ifs {
-                    self.collect(arm)?;
+                    self.collect_owned(arm, module)?;
                 }
                 if let Some(arm) = else_body {
-                    self.collect(arm)?;
+                    self.collect_owned(arm, module)?;
                 }
             }
             StepKind::For { body, .. } | StepKind::While { body, .. } => {
-                self.collect(body)?;
+                self.collect_owned(body, module)?;
             }
-            StepKind::AsyncBlock { body } => self.collect(body)?,
+            StepKind::AsyncBlock { body } => self.collect_owned(body, module)?,
             _ => {}
         }
+        Ok(())
+    }
+
+    /// Collect one import site (#115): every wanted *exported* top-level
+    /// `FUNC` registers under the site's namespace (bare `SCRIPT::` names
+    /// for alias-free harvests), owner-tagged with the module so static
+    /// resolution sees the same shared store as the runtime. Unexported
+    /// means private: full imports skip unexported functions, and
+    /// harvesting one fails upfront. Harvesting a state-touching
+    /// function fails too: the body never runs, so there is no
+    /// initialized state for it to observe. Nested control-flow bodies
+    /// collect under the same owner. Shadowing follows the same
+    /// last-wins rule as [`collect_owned`](Self::collect_owned); the
+    /// runtime registry remains the enforcer for true duplicates.
+    /// Type harvests gate against `EXPORT TYPE` the same way; types
+    /// persist bare globally for later `resolve_tag` calls, which read
+    /// the global alias map.
+    fn collect_site(&mut self, site: &ClosureSite, file: &ClosureFile) -> Result<()> {
+        let module = file.key.as_str();
+        let steps = file.steps.as_slice();
+        let alias = site.alias.as_deref();
+        let func_names = site.func_names.as_deref();
+        let type_names = site.type_names.as_deref();
+        let func_exports = &file.func_exports;
+        let type_exports = &file.type_exports;
+        let file_path = file.path.as_str();
+        if !self.module_lets.contains_key(module) {
+            let lets = module_lets(steps, self.exec)?;
+            self.module_lets.insert(module.to_string(), lets);
+        }
+        if let Some(names) = func_names {
+            let defined: Vec<&str> = steps
+                .iter()
+                .filter_map(|step| match &step.kind {
+                    StepKind::FuncDef { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for name in names {
+                if !defined.iter().any(|d| d == name) {
+                    bail!("IMPORT `{file_path}` has no such function `{name}`");
+                }
+                if !func_exports.iter().any(|e| e == name) {
+                    bail!("IMPORT `{file_path}` does not export `{name}`");
+                }
+            }
+        }
+        if let Some(type_names) = type_names {
+            let defined_types: Vec<&str> = steps
+                .iter()
+                .filter_map(|step| match &step.kind {
+                    StepKind::TypeAlias { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for name in type_names {
+                if !defined_types.iter().any(|d| d == name) {
+                    bail!("IMPORT `{file_path}` has no such TYPE `{name}`");
+                }
+                if !type_exports.iter().any(|e| e == name) {
+                    bail!("IMPORT `{file_path}` does not export TYPE `{name}`");
+                }
+            }
+        }
+        let func_exported: std::collections::HashSet<&str> =
+            func_exports.iter().map(|e| e.as_str()).collect();
+        for step in steps {
+            if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+                continue;
+            }
+            if let StepKind::FuncDef {
+                name, params, body, ..
+            } = &step.kind
+            {
+                if !func_exported.contains(name.as_str()) {
+                    continue;
+                }
+                if let Some(names) = func_names
+                    && !names.iter().any(|n| n == name)
+                {
+                    continue;
+                }
+                match alias {
+                    Some(alias) => {
+                        self.define_collected(
+                            name,
+                            vec![format!("{alias}::{name}")],
+                            params,
+                            body,
+                            Some(module),
+                        )?;
+                    }
+                    None => {
+                        self.define_collected(
+                            name,
+                            vec![name.clone(), format!("SCRIPT::{name}")],
+                            params,
+                            body,
+                            Some(module),
+                        )?;
+                    }
+                }
+            } else {
+                // Control-flow bodies can nest definitions; collect
+                // those under the same module owner.
+                self.collect_step(step, Some(module))?;
+            }
+        }
+        // Harvests never execute the file body: any wanted function
+        // that observes module state has nothing to read, so fail the
+        // site with the fix attached.
+        if let Some(names) = func_names {
+            for name in names {
+                let key = match alias {
+                    Some(alias) => format!("{alias}::{name}"),
+                    None => name.clone(),
+                };
+                if self.func_touches_module(&key)? {
+                    bail!(
+                        "IMPORT `{file_path}` cannot harvest stateful function `{name}`: import the file"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check an imported file's top-level steps (#115): function-like,
+    /// so `RETURN` is the value channel back and falling off the end
+    /// yields `""` instead of failing. The label names the file for
+    /// error attribution. The walk env carries the module's shared
+    /// bindings beneath the top frame, so nested definitions resolve
+    /// (and owner-tag) exactly like collected ones.
+    fn check_import_body(
+        &mut self,
+        label: &str,
+        steps: &[Step],
+        module: Option<&str>,
+    ) -> Result<()> {
+        let mut env = Env::one_frame(Vec::new());
+        if let Some(module) = module {
+            let mut lets = HashMap::new();
+            for (name, tag) in self.module_lets.get(module).cloned().unwrap_or_default() {
+                lets.insert(name, tag);
+            }
+            env.module = Some(ModuleScope {
+                key: module.to_string(),
+                lets,
+                touched: std::rc::Rc::new(std::cell::Cell::new(false)),
+            });
+        }
+        let scope = Scope {
+            label,
+            ret: RetCtx::Func("IMPORT".to_string()),
+            loops: 0,
+            site: None,
+            line: 0,
+            col: 0,
+            idx: 0,
+        };
+        let out = self.walk_body(steps, &mut env, &scope, 0)?;
+        let _ = out;
         Ok(())
     }
 
@@ -643,6 +1217,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             ret: RetCtx::Top,
             loops: 0,
             site: None,
+            line: 0,
+            col: 0,
+            idx: 0,
         };
         let out = self.walk_body(steps, &mut env, &scope, 0)?;
         let _ = out;
@@ -672,22 +1249,70 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     }
 
     /// Check one function body: terminal unification, MissingReturn,
-    /// VOID classification.
+    /// VOID classification. Module-owned bodies resolve against the
+    /// owning file's top-level `LET`s beneath the params, mirroring
+    /// the runtime shared store.
     fn check_function_body(
         &mut self,
         key: &str,
         info: &FuncInfo,
         depth: usize,
     ) -> Result<StaticTy> {
+        self.check_function_body_probed(key, info, depth, None)
+    }
+
+    /// Same, with an optional touch probe: when present, any read of a
+    /// module-shared binding sets it, so harvest callers can reject
+    /// state-dependent functions. The probe `Rc` is shared across env
+    /// forks, so touches on discarded conditional paths still count.
+    fn check_function_body_probed(
+        &mut self,
+        key: &str,
+        info: &FuncInfo,
+        depth: usize,
+        probe: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    ) -> Result<StaticTy> {
         if depth > MAX_STATIC_DEPTH {
             bail!("static analysis depth exceeded in function `{key}`");
         }
         let mut env = Env::one_frame(info.params.clone());
+        if let Some(module) = info.module.as_deref() {
+            let lets = self.module_lets.get(module).cloned().unwrap_or_default();
+            let touched = probe.unwrap_or_default();
+            let mut module_lets = HashMap::new();
+            for (name, tag) in lets {
+                module_lets.insert(name, tag);
+            }
+            env.module = Some(ModuleScope {
+                key: module.to_string(),
+                lets: module_lets,
+                touched,
+            });
+            // The file's prelude union seeds the body: a module
+            // function sees its own file's top-level declarations,
+            // never the importer's. Execution matches: module calls
+            // run isolated (seed plus init contributions), so the gate
+            // here approves exactly what the runtime will provide.
+            if let Some(union) = self.module_env_unions.get(module) {
+                for name in union {
+                    env.declare_env(name.clone());
+                }
+            }
+        } else if !self.entry_env_union.is_empty() {
+            // Entry top-level declarations persist globally for later
+            // calls, so entry functions seed from the entry union.
+            for name in self.entry_env_union.clone() {
+                env.declare_env(name);
+            }
+        }
         let scope = Scope {
             label: key,
             ret: RetCtx::Func(key.to_string()),
             loops: 0,
             site: None,
+            line: 0,
+            col: 0,
+            idx: 0,
         };
         let out = self.walk_body(&info.body, &mut env, &scope, depth + 1)?;
         if out.has_return && out.falls_through {
@@ -727,6 +1352,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             bail!("static analysis depth exceeded in `{}`", scope.label);
         }
         let base_frames = env.frames.len();
+        let base_env_frames = env.env_frames.len();
         let mut out = WalkOut {
             falls_through: true,
             has_return: false,
@@ -749,6 +1375,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 ret: scope.ret.clone(),
                 loops: scope.loops,
                 site,
+                line: step.line,
+                col: step.col,
+                idx,
             };
             let scope = &scoped;
             // Positional scopes mirror execution exactly: pushed
@@ -756,6 +1385,19 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             // for dead steps (net effect zero there).
             for _ in 0..step.scope_enter {
                 env.frames.push(HashMap::new());
+                env.env_frames.push(HashSet::new());
+            }
+            // Guard `[env:KEY]` references read the environment: they
+            // need the same declaration as any other use. Checked
+            // before the step runs, mirroring evaluation order.
+            if let Some(guard) = step.guard.as_ref()
+                && !matches!(classify_guard(Some(guard)), GuardClass::Dead)
+            {
+                let mut names = Vec::new();
+                Self::guard_env_names(guard, &mut names);
+                for name in names {
+                    self.check_env_name(env, &name, "env:", scope)?;
+                }
             }
             match classify_guard(step.guard.as_ref()) {
                 GuardClass::Dead => {}
@@ -777,6 +1419,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             for _ in 0..step.scope_exit {
                 if env.frames.len() > base_frames {
                     env.frames.pop();
+                }
+                if env.env_frames.len() > base_env_frames {
+                    env.env_frames.pop();
                 }
             }
             // Early terminal returns above skip the pops and discard
@@ -928,6 +1573,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let info = FuncInfo {
                     params: resolved,
                     body: body.clone(),
+                    module: env.module.as_ref().map(|scope| scope.key.clone()),
                 };
                 self.check_function_body(name, &info, depth + 1)?;
                 Ok(live)
@@ -963,7 +1609,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             } => {
                 // The captured command runs first at runtime, so its
                 // expressions check before the declaration lands.
-                self.walk_wrapped(cmd, env, scope, idx, depth + 1)?;
+                self.walk_wrapped(step, cmd, env, scope, idx, depth + 1)?;
                 let tag = self
                     .exec
                     .resolve_tag(decl_type)
@@ -1012,6 +1658,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     ret: RetCtx::AsyncStmt,
                     loops: 0,
                     site: scope.site.clone(),
+                    line: scope.line,
+                    col: scope.col,
+                    idx: scope.idx,
                 };
                 self.walk_body(body, &mut fork, &task, depth + 1)?;
                 Ok(live)
@@ -1030,6 +1679,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     ret: RetCtx::AsyncValue,
                     loops: 0,
                     site: scope.site.clone(),
+                    line: scope.line,
+                    col: scope.col,
+                    idx: scope.idx,
                 };
                 self.walk_body(body, &mut fork, &task, depth + 1)?;
                 let tag = self
@@ -1063,7 +1715,16 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // any depth below this head, including nested blocks
                 // and nested `ISOLATED`.
                 self.isolated_depth += 1;
-                let inner = self.walk_body(body, env, scope, depth + 1)?;
+                // Scrub outer declarations for the walk: the runtime
+                // resets the live map, so outer names are unreadable
+                // inside unless the allowlist (or an in-block `ENV`)
+                // re-adds them. Saved and restored around the body so
+                // declarations inside never leak outward, exactly like
+                // the runtime scope pop. Types keep flowing in place.
+                let saved = std::mem::replace(&mut env.env_frames, vec![HashSet::new()]);
+                let inner = self.walk_body(body, env, scope, depth + 1);
+                env.env_frames = saved;
+                let inner = inner?;
                 self.isolated_depth -= 1;
                 let mut out = live;
                 out.has_return = inner.has_return;
@@ -1074,22 +1735,38 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(out)
             }
-            StepKind::IsolatedInheritEnv { .. } => {
+            StepKind::InheritEnv { keys } => {
+                // Declaration, not a read: each key becomes readable
+                // from here on in this scope. Absent host names read as
+                // empty at runtime, but the name is declared either way,
+                // so later uses pass here and resolve empty when missing.
+                for key in keys {
+                    env.declare_env(key.clone());
+                }
+                Ok(live)
+            }
+            StepKind::IsolatedInheritEnv { keys } => {
                 // Only the parser produces this node, strictly inside
                 // `ISOLATED` bodies; anywhere else it is a bug, never a
                 // user spelling (the grammar has no other production).
-                // The node carries no expressions and binds nothing, so
-                // inside its scope it is a no-op for types.
+                // Re-adds scrubbed snapshot names for the rest of the
+                // block, mirroring `isolated_inherit_env` one for one.
                 if self.isolated_depth == 0 {
                     return Err(anyhow::anyhow!(
                         "step {}: isolated allowlist outside ISOLATED",
                         idx + 1
                     ));
                 }
+                for key in keys {
+                    env.declare_env(key.clone());
+                }
                 Ok(live)
             }
             StepKind::RemoteBlock {
-                target, vars, body, ..
+                target,
+                vars,
+                env: header_env,
+                body,
             } => {
                 // Sealed scope: the guest starts empty and only
                 // header-listed names cross, seeded from the outer
@@ -1107,14 +1784,31 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             })?;
                     sealed.insert_top(key, tag, guard.as_ref());
                 }
+                // Header `env:` names read the outer environment at
+                // ship time, so each must be declared outside; inside
+                // the seal they arrive declared.
+                for name in header_env {
+                    self.check_env_name(env, name, "env:", scope).map_err(|_| {
+                        anyhow::anyhow!(
+                            "{} in {}: REMOTE '{target}' ships undeclared environment variable `env:{name}`: declare it first with ENV or INHERIT_ENV",
+                            step_pos(scope.line, scope.col, scope.idx),
+                            scope.label,
+                        )
+                    })?;
+                    sealed.declare_env(name.clone());
+                }
                 // Body declarations shadow injected names: the seal
                 // pushes a scope exactly like a braced block.
                 sealed.frames.push(HashMap::new());
+                sealed.env_frames.push(HashSet::new());
                 let remote = Scope {
                     label: scope.label,
                     ret: RetCtx::Top,
                     loops: 0,
                     site: None,
+                    line: scope.line,
+                    col: scope.col,
+                    idx: scope.idx,
                 };
                 self.walk_body(body, &mut sealed, &remote, depth + 1)?;
                 Ok(live)
@@ -1122,7 +1816,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             StepKind::WithIo { bindings, cmd } => {
                 // Bindings resolve before the wrapped command runs.
                 Self::check_pipe_bindings(env, bindings, scope, idx)?;
-                self.walk_wrapped(cmd, env, scope, idx, depth + 1)
+                self.walk_wrapped(step, cmd, env, scope, idx, depth + 1)
             }
             StepKind::ReadLine { var } => {
                 // Declares `STRING` when absent, mutates (type kept)
@@ -1142,11 +1836,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(live)
             }
-            StepKind::Env { .. } => {
-                // Uniform script-wins: the seed populates defaults and
-                // explicit `ENV` overwrites them like any other variable.
-                // No name is immutable.
+            StepKind::Env { key, .. } => {
+                // `ENV KEY=value`: the value may read live bindings
+                // (checked first, so self-reads fail), then the key
+                // becomes readable from here on in this scope.
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
+                env.declare_env(key.clone());
                 Ok(live)
             }
             _ => {
@@ -1225,9 +1920,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// Check every argument expression of one simple command through
     /// `infer_expr`: `Arg::Expr` operands and `{{ }}` template
-    /// fragments (`Arg::Parts`) read live bindings; plain strings
-    /// carry nothing. Built on the exhaustive `walk_exprs` visitor,
-    /// so a new expression-carrying variant fails compilation in the
+    /// fragments (`Arg::Parts`) read live bindings; literal text
+    /// (`Arg::String`, `ArgPart::Text`) scans for embedded
+    /// `{{ env:KEY }}` reads through the declaration gate. Built on the
+    /// exhaustive `walk_exprs` / `walk_raw_strings` visitors, so a new
+    /// expression- or string-carrying variant fails compilation in the
     /// parser instead of slipping past this pass.
     fn check_step_args(
         &mut self,
@@ -1241,6 +1938,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         kind.walk_exprs(&mut |expr| {
             if failed.is_none()
                 && let Err(err) = self.infer_expr(expr, env, scope, idx, depth + 1)
+            {
+                failed = Some(err);
+            }
+        });
+        if let Some(err) = failed {
+            return Err(err);
+        }
+        // Embedded `{{ env:KEY }}` placeholders in literal text expand
+        // at runtime through the same `expand_string` as whole-arg
+        // expressions, so they read through the same declaration gate.
+        // `Arg::String` and `ArgPart::Text` carry nothing else.
+        let mut failed: Option<anyhow::Error> = None;
+        kind.walk_raw_strings(&mut |text| {
+            if failed.is_none()
+                && let Err(err) = self.check_template_env(text, env, scope)
             {
                 failed = Some(err);
             }
@@ -1316,9 +2028,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// Walk a single boxed `StepKind` (the `WithIo` payload) as if it
     /// were a step: the enclosing guard was already classified by the
-    /// caller, so this inherits the live context directly.
+    /// caller, so this inherits the live context directly. Coordinates
+    /// come from the outer step, so errors inside the box name the
+    /// source line that produced them instead of going coordinate-less.
     fn walk_wrapped(
         &mut self,
+        outer: &Step,
         cmd: &StepKind,
         env: &mut Env,
         scope: &Scope,
@@ -1330,8 +2045,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             kind: cmd.clone(),
             scope_enter: 0,
             scope_exit: 0,
-            line: 0,
-            col: 0,
+            line: outer.line,
+            col: outer.col,
         };
         self.walk_step(&step, env, scope, idx, depth)
     }
@@ -1537,6 +2252,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             ret: StaticTy::Ty(TypeTag::Any),
             host_params: None,
         })
+    }
+
+    /// Whether checking this function observes module-shared state
+    /// (#115): runs the body check with an armed probe and reports the
+    /// flag. Used by the harvest gate, statically and at load time.
+    fn func_touches_module(&mut self, key: &str) -> Result<bool> {
+        let info = self.funcs.get(key).cloned();
+        let Some(info) = info else {
+            return Ok(false);
+        };
+        if info.module.is_none() {
+            return Ok(false);
+        }
+        let probe = std::rc::Rc::new(std::cell::Cell::new(false));
+        let _ = self.check_function_body_probed(key, &info, 0, Some(probe.clone()))?;
+        Ok(probe.get())
     }
 
     /// Memoized script return with recursion guard, keyed by the
@@ -1859,7 +2590,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         self.visits += 1;
         let at = || format!("step {}", idx + 1);
         match expr {
-            Expr::Literal(value) => Ok(StaticTy::Ty(literal_tag(value))),
+            Expr::Literal(value) => {
+                // String literals expand `{{ env:KEY }}` at runtime
+                // through `expand_string`, so embedded reads gate here
+                // exactly like whole-arg expressions.
+                if let Some(text) = value.as_str() {
+                    self.check_template_env(text, env, scope)?;
+                }
+                Ok(StaticTy::Ty(literal_tag(value)))
+            }
             Expr::Var(name) => {
                 let key = clean_var(name);
                 if !env.is_declared(&key) {
@@ -1867,7 +2606,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?))
             }
-            Expr::Env(_) => Ok(StaticTy::Ty(TypeTag::String)),
+            Expr::Env(name) => {
+                self.check_env_name(env, name, "env:", scope)?;
+                Ok(StaticTy::Ty(TypeTag::String))
+            }
             Expr::KeyPath { base, keys } => {
                 let key = clean_var(base);
                 if !env.is_declared(&key) {
@@ -1964,6 +2706,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         ret: RetCtx::Block,
                         loops: 0,
                         site: scope.site.clone(),
+                        line: scope.line,
+                        col: scope.col,
+                        idx: scope.idx,
                     },
                     depth + 1,
                 )?;
@@ -2051,7 +2796,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let mut stack: Vec<StaticTy> = Vec::new();
         for op in ops {
             match op {
-                MathOp::PushConst(value) => stack.push(StaticTy::Ty(literal_tag(value))),
+                MathOp::PushConst(value) => {
+                    if let Some(text) = value.as_str() {
+                        self.check_template_env(text, env, scope)?;
+                    }
+                    stack.push(StaticTy::Ty(literal_tag(value)))
+                }
                 MathOp::LoadVar(name) => {
                     let key = clean_var(name);
                     if !env.is_declared(&key) {
@@ -2059,7 +2809,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     }
                     stack.push(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?));
                 }
-                MathOp::LoadEnv(_) => stack.push(StaticTy::Ty(TypeTag::String)),
+                MathOp::LoadEnv(name) => {
+                    self.check_env_name(env, name, "env:", scope)?;
+                    stack.push(StaticTy::Ty(TypeTag::String))
+                }
                 MathOp::LoadKeyPath { base, keys } => {
                     let key = clean_var(base);
                     if !env.is_declared(&key) {

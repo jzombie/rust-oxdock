@@ -19,17 +19,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Vocabulary baseline for every leg below is 0.32.0-alpha: legs use
-# PATH_JOIN and fail to parse on anything older, which fails loudly at
-# step start by design. These legs prove branch behavior on branch
-# builds; no leg here installs or verifies a previous release, so no
-# product markers are needed. The pin below is only a version input,
-# never depended upon as a fallback engine.
+# Vocabulary is the branch itself: every leg below runs on a branch-built
+# engine, so legs may use unreleased syntax (file IMPORT, HASH_SHA256,
+# BOOL_OR) with no pin to satisfy. No leg here installs or verifies a
+# previous release, so no product markers are needed.
 env:
-  OXDOCK_PINNED_ENGINE: v0.32.0-alpha
-  # Legs assume the 0.32.0-alpha vocabulary, so the engine running them
-  # must provide it: local branch builds do, and the pin above now does
-  # too. Source stays local so legs keep proving branch behavior.
+  # Source stays local so legs keep proving branch behavior.
   OXDOCK_ENGINE_SOURCE: local
 
 jobs:
@@ -54,7 +49,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       # Native hashing: HASH_SHA256 digests Cargo.lock identically on
@@ -64,8 +58,8 @@ jobs:
         id: hashes
         shell: oxdock --script {0}
         run: |
-          IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
 
@@ -75,14 +69,14 @@ jobs:
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
 
-          LET $lock: STRING = HASH_SHA256("Cargo.lock")
+          LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
 
           LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
-          ECHO "rustc: {{ $caps.1 }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
+          LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
+          ECHO "rustc: {{ $rustc }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -208,39 +202,33 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      # TODO (#269): unpin the nightly toolchain once upstream fixes the
-      # E0391 async-drop query cycle in ssh-key 0.7.0-rc.11 (via
-      # russh). Pinned to nightly-2026-10-29 (proven green); nightly
-      # 2026-10-31 breaks the build. Re-pin deliberately, never drift.
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-10-29
           components: rustfmt, clippy
 
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       - name: Hash lockfile and toolchain
         id: hashes
         shell: oxdock --script {0}
         run: |
-          IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $lock: STRING = HASH_SHA256("Cargo.lock")
+          LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
-          ECHO "rustc: {{ $caps.1 }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
+          LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
+          ECHO "rustc: {{ $rustc }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -270,11 +258,10 @@ jobs:
           IF !$has_udeps {
             RUN ["cargo", "install", "cargo-udeps", "--locked"]
           }
-          # Explicit +nightly-2026-10-29: udeps needs nightly cargo,
-          # and the closed script env does not inherit the runner's
-          # RUSTUP_TOOLCHAIN. TODO (#269): revert to +nightly when the
-          # toolchain pin goes away.
-          RUN ["cargo", "+nightly-2026-10-29", "udeps", "--workspace", "--all-targets", "--all-features"]
+          # Explicit +nightly: udeps needs nightly cargo, and the
+          # closed script env does not inherit the runner's
+          # RUSTUP_TOOLCHAIN.
+          RUN ["cargo", "+nightly", "udeps", "--workspace", "--all-targets", "--all-features"]
 
       - name: Run Clippy with cfg miri
         shell: oxdock --script {0}
@@ -286,9 +273,7 @@ jobs:
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           ENV RUSTFLAGS="--cfg miri"
-          # TODO (#269): revert to +nightly when the toolchain pin
-          # goes away.
-          RUN ["cargo", "+nightly-2026-10-29", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+          RUN ["cargo", "+nightly", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
 
   test:
     name: test (OS=${{ matrix.os }}, Flags=${{ matrix.flags }})
@@ -318,26 +303,25 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       - name: Hash lockfile and toolchain
         id: hashes
         shell: oxdock --script {0}
         run: |
-          IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $lock: STRING = HASH_SHA256("Cargo.lock")
+          LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
-          ECHO "rustc: {{ $caps.1 }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
+          LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
+          ECHO "rustc: {{ $rustc }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -404,26 +388,25 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       - name: Hash lockfile and toolchain
         id: hashes
         shell: oxdock --script {0}
         run: |
-          IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $lock: STRING = HASH_SHA256("Cargo.lock")
+          LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
           APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
           LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
-          ECHO "rustc: {{ $caps.1 }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
+          LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
+          ECHO "rustc: {{ $rustc }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -519,7 +502,6 @@ jobs:
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
-          version: ${{ env.OXDOCK_PINNED_ENGINE }}
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
       - name: Evaluate all results

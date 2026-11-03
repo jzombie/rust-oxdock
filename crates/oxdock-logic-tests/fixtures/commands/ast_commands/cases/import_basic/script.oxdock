@@ -1,0 +1,15 @@
+# File imports load another script as an isolated pipeline: the alias
+# becomes the namespace, the import's RETURN value is the only channel
+# back, and nothing leaks across the boundary. Brackets mix module and
+# file entries across lines; each file entry runs in order. The libs
+# are seeded by the case setup: imports resolve files that exist when
+# the run starts, and every file is validated before the first step.
+IMPORT [STD,
+        "lib.oxdock" AS LIB]
+LET $d: STRING = LIB::DOUBLE("hi")
+ASSERT_EQ $d "hi"
+LET $r: STRING = IMPORT ["lib_value.oxdock" AS LIB2]
+ASSERT_EQ $r "lib-value"
+IMPORT [HELPER FROM "helpers.oxdock"]
+LET $h: STRING = HELPER("yo")
+ASSERT_EQ $h "yo"
