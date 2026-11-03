@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/docs-gen",
+    "crates/oxdock-build",
+    "crates/oxdock-cli",
     "crates/oxdock-core",
     "crates/oxdock-doc-tests",
     "crates/oxdock-embed",
@@ -8,6 +10,7 @@ members = [
     "crates/oxdock-func-macro",
     "crates/oxdock-logic-tests",
     "crates/oxdock-logic-tests/fixtures/commands/ast_commands",
+    "crates/oxdock-macros",
     "crates/oxdock-mcp",
     "crates/oxdock-parser",
     "crates/oxdock-pty",
@@ -20,9 +23,6 @@ members = [
     "crates/sys/oxdock-process",
     "crates/sys/oxdock-sys-test-utils",
     "oxdock",
-    "oxdock-build",
-    "oxdock-cli",
-    "oxdock-macros",
 ]
 # Bare `cargo run` at the workspace root defaults to the `oxdock` binary.
 # `cargo build/test/...` with explicit `--workspace`/`-p` flags are unaffected.
@@ -60,16 +60,16 @@ muxio-rpc-service-endpoint = "0.17.0-alpha"
 muxio-sync-rpc-client = "0.17.0-alpha"
 muxio-sync-rpc-server = "0.17.0-alpha"
 oxdock = { path = "oxdock", version = "0.34.0-alpha" }
-oxdock-build = { path = "oxdock-build", version = "0.34.0-alpha" }
+oxdock-build = { path = "crates/oxdock-build", version = "0.34.0-alpha" }
 # Dependents opt into `oxdock-cli` features explicitly.
-oxdock-cli = { path = "oxdock-cli", version = "0.34.0-alpha", default-features = false }
+oxdock-cli = { path = "crates/oxdock-cli", version = "0.34.0-alpha", default-features = false }
 oxdock-core = { path = "crates/oxdock-core", version = "0.34.0-alpha" }
 oxdock-embed = { path = "crates/oxdock-embed", version = "0.34.0-alpha" }
 oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.34.0-alpha" }
 oxdock-fs = { path = "crates/sys/oxdock-fs", version = "0.34.0-alpha" }
 oxdock-func-macro = { path = "crates/oxdock-func-macro", version = "0.34.0-alpha" }
 oxdock-logic-tests = { path = "crates/oxdock-logic-tests", version = "0.34.0-alpha" }
-oxdock-macros = { path = "oxdock-macros", version = "0.34.0-alpha" }
+oxdock-macros = { path = "crates/oxdock-macros", version = "0.34.0-alpha" }
 oxdock-markdown-plugin = { path = "crates/plugins/oxdock-markdown-plugin", version = "0.34.0-alpha" }
 oxdock-mcp = { path = "crates/oxdock-mcp", version = "0.34.0-alpha" }
 oxdock-net-plugin = { path = "crates/plugins/oxdock-net-plugin", version = "0.34.0-alpha" }

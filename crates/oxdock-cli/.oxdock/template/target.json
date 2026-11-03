@@ -2,19 +2,19 @@
   "targets": [
     {
       "name": "oxdock-cli-readme",
-      "out": "oxdock-cli/README.md",
-      "values": "oxdock-cli/.oxdock/template/values.json",
-      "template": "oxdock-cli/.oxdock/template/README.md.tmpl",
+      "out": "crates/oxdock-cli/README.md",
+      "values": "crates/oxdock-cli/.oxdock/template/values.json",
+      "template": "crates/oxdock-cli/.oxdock/template/README.md.tmpl",
       "fragments": {
         "local": [
-          "oxdock-cli/.oxdock/template/fragments/*"
+          "crates/oxdock-cli/.oxdock/template/fragments/*"
         ],
         "shared": [
           ".oxdock/template/shared/header.md.tmpl",
           ".oxdock/template/shared/footer.md.tmpl"
         ],
         "usage": [
-          "oxdock-cli/usage-prebuilt/dist/*.txt"
+          "crates/oxdock-cli/usage-prebuilt/dist/*.txt"
         ]
       }
     }
