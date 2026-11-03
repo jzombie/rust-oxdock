@@ -320,7 +320,7 @@ impl Engine<DefaultProcessManager> {
     /// and a resolver built from `root`.
     pub fn run_script(&self, root: &GuardedPath, script: &str) -> Result<EngineOutput> {
         let steps = crate::parse_script_with_modules(script, self.module_table())?;
-        self.run_steps_eagerly(root, &steps)
+        self.run_steps_without_snapshot(root, &steps)
     }
 
     /// Run already parsed `steps` (for example from the `oxdock!` macro,
@@ -328,7 +328,7 @@ impl Engine<DefaultProcessManager> {
     /// with the registered host surface available. Writes land exactly in
     /// `root`; for the lazy snapshot default use [`Engine::run_steps`].
     /// Uses the default process manager and a resolver built from `root`.
-    pub fn run_steps_eagerly(
+    pub fn run_steps_without_snapshot(
         &self,
         root: &GuardedPath,
         steps: &[Step],

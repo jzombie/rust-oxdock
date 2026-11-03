@@ -12,8 +12,8 @@ fn main() -> anyhow::Result<()> {
 
     // Picker menu built by the DSL: GLOB discovers the scripts, PROMPT
     // chooses one, and the answer returns through Engine bindings. The
-    // picker stays eager so listings see this directory; the picked
-    // script below runs lazy like the CLI.
+    // picker runs without a snapshot so listings see this directory; the
+    // picked script below runs lazy like the CLI.
     let picker: Vec<Step> = oxdock! {
         IMPORT [STD]
         LET $exts: LIST<STRING> = [".oxfile", ".oxdock"]
@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
         ECHO "Starting {{ $choice }}."
     };
 
-    let output = Engine::new().run_steps_eagerly(&examples, &picker)?;
+    let output = Engine::new().run_steps_without_snapshot(&examples, &picker)?;
     let choice = output
         .bindings
         .get("choice")

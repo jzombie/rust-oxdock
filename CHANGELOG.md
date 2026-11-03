@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Changed
 
-- `run_steps` is now lazy: `oxdock_core::run_steps(build_context, steps, io)` executes with the CLI default (a lazily-created snapshot; reads of existing workspace files fall through to the build context while directory listings stay snapshot-scoped). The eager form that runs directly against a given root is `run_steps_eagerly`, as a free function and as `Engine::run_steps_eagerly` (the previous `Engine::run_steps` name); the lazy engine entry point is `Engine::run_steps`. The `oxdock` facade re-exports both names. Existing callers pinning on-disk state keep exact behavior under the eager name.
+- `run_steps` is now lazy: `oxdock_core::run_steps(build_context, steps, io)` executes with the CLI default (a lazily-created snapshot; reads of existing workspace files fall through to the build context while directory listings stay snapshot-scoped). Running directly against a given root with no snapshot is `run_steps_without_snapshot`, as a free function and as `Engine::run_steps_without_snapshot` (the previous `Engine::run_steps` name); the lazy engine entry point is `Engine::run_steps`. The `oxdock` facade re-exports both names. Existing callers pinning on-disk state keep exact behavior under the explicit name.
 
 ## [0.34.0-alpha] - 2026-11-03
 

@@ -1,5 +1,5 @@
 use indoc::indoc;
-use oxdock_core::run_steps_eagerly;
+use oxdock_core::run_steps_without_snapshot;
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_parser::{Step, StepKind};
 
@@ -13,7 +13,7 @@ fn read_file(path: &GuardedPath) -> String {
 }
 
 #[test]
-/// Verifies that `run_steps_eagerly` can be called multiple times against the same filesystem root,
+/// Verifies that `run_steps_without_snapshot` can be called multiple times against the same filesystem root,
 /// allowing for incremental state accumulation (e.g., incremental compilation artifacts).
 /// This supports the `oxbook-cli` feature where subsequent code blocks run in the same
 /// persistent environment (filesystem).
@@ -34,7 +34,7 @@ fn incremental_execution_persists_filesystem_state() {
         col: 0,
     }];
 
-    run_steps_eagerly(&root, &steps1).unwrap();
+    run_steps_without_snapshot(&root, &steps1).unwrap();
     assert_eq!(read_file(&root.join("state.txt").unwrap()), "initial");
 
     // Second execution: Modify the file
@@ -45,7 +45,7 @@ fn incremental_execution_persists_filesystem_state() {
     "#})
     .unwrap();
 
-    run_steps_eagerly(&root, &steps2).unwrap();
+    run_steps_without_snapshot(&root, &steps2).unwrap();
     assert_eq!(read_file(&root.join("state.txt").unwrap()), "updated");
 }
 
@@ -77,10 +77,10 @@ fn incremental_execution_persists_cwd() {
         },
     ];
 
-    run_steps_eagerly(&root, &steps1).unwrap();
+    run_steps_without_snapshot(&root, &steps1).unwrap();
 
     // Second execution: Verify we can access the file created in the previous step
-    // Note: run_steps_eagerly resets CWD to root by default unless we pass a modified context.
+    // Note: run_steps_without_snapshot resets CWD to root by default unless we pass a modified context.
     // But here we just want to verify the file exists.
     let steps2 = oxdock_core::parse_script(indoc! {r#"
         [family:windows] RUN "type subdir\marker.txt"
@@ -88,5 +88,5 @@ fn incremental_execution_persists_cwd() {
     "#})
     .unwrap();
 
-    run_steps_eagerly(&root, &steps2).unwrap();
+    run_steps_without_snapshot(&root, &steps2).unwrap();
 }

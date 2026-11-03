@@ -100,7 +100,7 @@ pub const SNAPSHOT_TREE_UNAVAILABLE: &str = "<unavailable>";
 /// `WORKSPACE LOCAL`. Fire-and-forget form of
 /// [`run_steps_with_lazy_snapshot`]: for bindings and the snapshot
 /// handle, call that directly. For runs that must land exactly in a
-/// given root with no snapshot, use [`run_steps_eagerly`].
+/// given root with no snapshot, use [`run_steps_without_snapshot`].
 pub fn run_steps(
     build_context: &GuardedPath,
     steps: &[Step],
@@ -109,11 +109,11 @@ pub fn run_steps(
     run_steps_with_lazy_snapshot(build_context, steps, io).map(|_| ())
 }
 
-/// Eager form: execute directly against `fs_root` with no snapshot, so
+/// Without snapshot: execute directly against `fs_root` with no snapshot, so
 /// writes land exactly in the given root and read-backs observe them.
 /// Tests pinning on-disk state and hosts with caller-built filesystems
 /// want this; interactive runs want [`run_steps`].
-pub fn run_steps_eagerly(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
+pub fn run_steps_without_snapshot(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
     run_steps_with_context(fs_root, fs_root, steps)
 }
 

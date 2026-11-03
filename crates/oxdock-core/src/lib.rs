@@ -148,7 +148,7 @@ mod tests {
 
         let steps = parse_script(&format!("RUN {cmd}")).unwrap();
 
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         let seen = read_trimmed(&root.join("seen.txt").unwrap());
         let legacy = root.join(".cargo-target").unwrap();
@@ -346,7 +346,7 @@ mod tests {
         );
         let steps = crate::parse_script(&script).unwrap();
 
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert!(
             !exists(&root, "skipped.txt"),
@@ -369,7 +369,7 @@ mod tests {
         );
         let steps = crate::parse_script(script).unwrap();
 
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert!(
             exists(&root, "hit.txt"),
@@ -391,7 +391,7 @@ mod tests {
         );
         let steps = crate::parse_script(script).unwrap();
 
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert!(exists(&root, "always.txt"), "WRITE after ECHO should run");
     }
@@ -411,7 +411,7 @@ mod tests {
         );
         let steps = crate::parse_script(script).unwrap();
 
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert!(
             exists(&root, "hit.txt"),
@@ -433,7 +433,7 @@ mod tests {
         );
         let steps = crate::parse_script(script).unwrap();
 
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         #[allow(clippy::disallowed_macros)]
         let expect_skipped = cfg!(unix);
@@ -467,7 +467,7 @@ mod tests {
         );
         let steps = crate::parse_script(script).unwrap();
 
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert!(exists(&root, "scoped.txt"), "block should run");
         assert!(
@@ -494,7 +494,7 @@ mod tests {
         );
         let steps = crate::parse_script(script).unwrap();
 
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert!(
             exists(&root, "nested/inside.txt"),
@@ -565,7 +565,7 @@ mod tests {
         );
 
         let steps = crate::parse_script(&script).unwrap();
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert!(
             exists(&root, "hit.txt"),
@@ -595,7 +595,7 @@ mod tests {
             k = key
         );
         let steps = crate::parse_script(&script).unwrap();
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert!(
             exists(&root, "hit.txt"),
@@ -622,7 +622,7 @@ mod tests {
             k = key
         );
         let steps = crate::parse_script(&script).unwrap();
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert!(
             !exists(&root, "miss.txt"),
@@ -648,7 +648,7 @@ mod tests {
             "#
         };
         let steps = crate::parse_script(script).unwrap();
-        let res = run_steps_eagerly(&root, &steps);
+        let res = run_steps_without_snapshot(&root, &steps);
         assert!(res.is_ok(), "ASYNC success should allow clean exit");
     }
 
@@ -668,7 +668,7 @@ mod tests {
             "#
         };
         let steps = crate::parse_script(script).unwrap();
-        let err = run_steps_eagerly(&root, &steps).unwrap_err();
+        let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("ASYNC process exited with status")
@@ -699,7 +699,7 @@ mod tests {
 
         let steps = crate::parse_script(script).unwrap();
         let start = Instant::now();
-        let res = run_steps_eagerly(&root, &steps);
+        let res = run_steps_without_snapshot(&root, &steps);
         let elapsed = start.elapsed();
 
         assert!(res.is_ok(), "ASYNC success should allow clean exit");
@@ -752,7 +752,7 @@ mod tests {
         let steps = crate::parse_script(script).unwrap();
         let start = Instant::now();
         assert!(
-            run_steps_eagerly(&root, &steps).is_err(),
+            run_steps_without_snapshot(&root, &steps).is_err(),
             "pipeline should fail on the missing command"
         );
         // The ASYNC handle is dropped mid-pipeline when the error propagates;
@@ -800,7 +800,7 @@ mod tests {
         };
 
         let steps = crate::parse_script(script).unwrap();
-        let err = run_steps_eagerly(&root, &steps).unwrap_err();
+        let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("EXIT requested with code 5"));
         assert!(
@@ -831,7 +831,7 @@ mod tests {
 
         let steps = crate::parse_script(script).unwrap();
         let start = std::time::Instant::now();
-        let err = run_steps_eagerly(&root, &steps).unwrap_err();
+        let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
         assert!(
             err.to_string().contains("EXIT requested with code 5"),
             "nested EXIT must report its code: {err}"
@@ -862,7 +862,7 @@ mod tests {
         };
 
         let steps = crate::parse_script(script).unwrap();
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert_eq!(read_trimmed(&root.join("run.txt").unwrap()), "bar");
         assert_eq!(read_trimmed(&root.join("bg.txt").unwrap()), "bar");
@@ -1309,7 +1309,7 @@ mod tests {
             "#
         );
         let steps = crate::parse_script(script).unwrap();
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         assert_eq!(
             read_trimmed(&root.join("plain.txt").unwrap()),
@@ -1374,7 +1374,7 @@ mod tests {
             "#
         );
         let steps = crate::parse_script(script).unwrap();
-        run_steps_eagerly(&root, &steps).unwrap();
+        run_steps_without_snapshot(&root, &steps).unwrap();
 
         let read_env = |name: &str| {
             let body = read_trimmed(&root.join(name).unwrap());

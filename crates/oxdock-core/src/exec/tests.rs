@@ -568,7 +568,7 @@ fn symlink_errors_report_underlying_cause() {
             col: 0,
         },
     ];
-    let err = run_steps_eagerly(&root, &steps).unwrap_err();
+    let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("step 2 (SYMLINK taken.txt taken.txt)"),
@@ -1387,7 +1387,7 @@ fn cat_and_capture_expand_env_paths() {
             col: 0,
         },
     ];
-    run_steps_eagerly(&root, &steps).expect("capture with env paths succeeds");
+    run_steps_without_snapshot(&root, &steps).expect("capture with env paths succeeds");
     let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
     let captured_path = root.join("cat-snippet.txt").expect("capture path");
     let contents = resolver

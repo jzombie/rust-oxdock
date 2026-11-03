@@ -237,7 +237,7 @@ fn main() -> anyhow::Result<()> {
         LET $n: INT = WORD_COUNT($s)
         ASSERT_EQ $n 3
     };
-    let run = engine.run_steps_eagerly(&root, &steps)?;
+    let run = engine.run_steps_without_snapshot(&root, &steps)?;
     assert_eq!(format!("{}", run.bindings["s"]), "3 words, 17 chars");
     Ok(())
 }
@@ -378,7 +378,7 @@ fn main() -> anyhow::Result<()> {
         ASSERT_EQ $s "demo"
         WRITE tag.txt "{{ $s }}::{{ $t }}"
     };
-    let run = engine.run_steps_eagerly(&root_path, &steps)?;
+    let run = engine.run_steps_without_snapshot(&root_path, &steps)?;
     assert!(run.bindings.contains_key("s"));
 
     let reader = oxdock::PathResolver::new(root_path.root(), root_path.root()).unwrap();

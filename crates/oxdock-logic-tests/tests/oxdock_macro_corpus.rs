@@ -10,7 +10,7 @@ use oxdock_logic_tests::mock_remote::MockRemoteRunner;
 use oxdock_macros::oxdock;
 use std::sync::Arc;
 
-fn run_steps_eagerly(root: &GuardedPath, steps: &[oxdock_parser::Step]) {
+fn run_steps_without_snapshot(root: &GuardedPath, steps: &[oxdock_parser::Step]) {
     run_steps_with_context_result_with_io(root, root, steps, ExecIo::new()).unwrap();
 }
 
@@ -132,7 +132,7 @@ fn macro_block_dedent_self_asserts() {
         ASSERT_EQ $prompt "SELECT *\nFROM users"
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -157,7 +157,7 @@ fn macro_block_variants_self_assert() {
         ASSERT_EQ $blank "outer\n\ntail"
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -172,7 +172,7 @@ fn macro_block_interpolation_self_asserts() {
         ASSERT_EQ $query "SELECT * FROM users\nWHERE active"
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -188,7 +188,7 @@ fn macro_let_scalars_and_collections_write_file() {
     };
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_steps_eagerly(&root, &steps);
+    run_steps_without_snapshot(&root, &steps);
     assert_macro_string_roundtrip(&steps);
     assert_eq!(read_file(&root, "scalars.txt"), "ada|42|3.5|true|ab");
 }
@@ -209,7 +209,7 @@ fn macro_if_else_for_control_flow() {
     };
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_steps_eagerly(&root, &steps);
+    run_steps_without_snapshot(&root, &steps);
     assert_macro_string_roundtrip(&steps);
     assert_eq!(read_file(&root, "six.txt"), "yes");
 }
@@ -239,7 +239,7 @@ fn macro_env_block_value_round_trips() {
     };
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_steps_eagerly(&root, &steps);
+    run_steps_without_snapshot(&root, &steps);
     assert_macro_string_roundtrip(&steps);
     assert_eq!(read_file(&root, "env.txt"), "hi there");
 }
@@ -254,7 +254,7 @@ fn macro_assert_block_expected() {
             """
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -274,7 +274,7 @@ fn macro_while_break_continue() {
         ASSERT_EQ $i 5
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -288,7 +288,7 @@ fn macro_func_call_return() {
         ASSERT_EQ $s 3
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -300,7 +300,7 @@ fn macro_map_and_keypath() {
         ASSERT_EQ $m.city "london"
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -315,7 +315,7 @@ fn macro_bool_logic_and_comparison() {
     };
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_steps_eagerly(&root, &steps);
+    run_steps_without_snapshot(&root, &steps);
     assert_macro_string_roundtrip(&steps);
     assert_eq!(read_file(&root, "five.txt"), "yes");
 }
@@ -326,7 +326,7 @@ fn macro_timeout_runs_fast_command() {
         TIMEOUT 30s ECHO quick
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -337,7 +337,7 @@ fn macro_async_await_task() {
         AWAIT $t
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -350,7 +350,7 @@ fn macro_with_io_pipe_round_trip() {
         ASSERT_EQ $line "piped"
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -363,7 +363,7 @@ fn macro_isolated_runs_quietly() {
     };
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_steps_eagerly(&root, &steps);
+    run_steps_without_snapshot(&root, &steps);
     assert_macro_string_roundtrip(&steps);
     assert_eq!(read_file(&root, "iso.txt"), "yes");
 }
@@ -379,7 +379,7 @@ fn macro_type_alias_and_list_append() {
         ASSERT_EQ $l.1 "b"
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -390,7 +390,7 @@ fn macro_prompt_binds_default_off_terminal() {
         ASSERT_EQ $city "london"
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -402,7 +402,7 @@ fn macro_std_call_through_import() {
         ASSERT_EQ $n 5
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -421,7 +421,7 @@ fn macro_dynamic_math_and_inline_block() {
         ASSERT_EQ $greeting "hi"
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -434,7 +434,7 @@ fn macro_inspect_and_fresh_pipe() {
         LET $p: PIPE
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
 }
 
@@ -449,7 +449,7 @@ fn macro_isolated_inherit_env_rewrites() {
     };
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_steps_eagerly(&root, &steps);
+    run_steps_without_snapshot(&root, &steps);
     assert_macro_string_roundtrip(&steps);
     assert_eq!(read_file(&root, "iso-inherit.txt"), "yes");
 }
@@ -484,7 +484,7 @@ fn macro_with_io_block_consumes_node() {
     };
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_steps_eagerly(&root, &steps);
+    run_steps_without_snapshot(&root, &steps);
     assert_macro_string_roundtrip(&steps);
     assert!(
         !steps
@@ -500,7 +500,7 @@ fn macro_sleep_and_exit_code() {
         SLEEP 1ms
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &steps);
+    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
     assert_macro_string_roundtrip(&steps);
     let failing = oxdock! {
         EXIT 3
@@ -562,7 +562,7 @@ fn macro_hash_comments_and_gapless_interpolation() {
         );
     }
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_eagerly(temp.as_guarded_path(), &commented);
+    run_steps_without_snapshot(temp.as_guarded_path(), &commented);
     assert_macro_string_roundtrip(&commented);
     // A comment alone parses to nothing: this invocation carries a
     // single `#` comment line and must expand to zero steps, proving

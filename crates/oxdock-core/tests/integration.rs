@@ -33,3 +33,5 @@ mod unified_values;
 mod unquoted_syntax;
 #[path = "integration/with_io_tty.rs"]
 mod with_io_tty;
+#[path = "integration/workspaces.rs"]
+mod workspaces;
