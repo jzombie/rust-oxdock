@@ -12,5 +12,3 @@ here, just pointers.
   with an embedded script, optionally dropping into a shell. Run with:
   `cargo run -p oxdock-cli --example tree_shell`
   (`-- --shell` to drop into the shell after the script finishes).
-- `crates/docs-gen/examples/`: template inputs for the docs pipeline
-  itself (`generic-readme`, `resume`), not OxDock scripts.
