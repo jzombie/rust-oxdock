@@ -737,7 +737,9 @@ impl StepKind {
                 walk_target(actual, f);
                 walk_opt(expected, f);
             }
-            StepKind::AssertNe { actual, expected, .. } => {
+            StepKind::AssertNe {
+                actual, expected, ..
+            } => {
                 walk_target(actual, f);
                 walk_opt(expected, f);
             }
@@ -867,7 +869,9 @@ impl StepKind {
                 walk_target(actual, f);
                 walk_opt(expected, f);
             }
-            StepKind::AssertNe { actual, expected, .. } => {
+            StepKind::AssertNe {
+                actual, expected, ..
+            } => {
                 walk_target(actual, f);
                 walk_opt(expected, f);
             }
@@ -5712,7 +5716,12 @@ mod tests {
     #[test]
     fn assert_ne_lowers_and_round_trips() {
         let steps = parse_script("ASSERT_NE $status 404\n", lower_command).expect("parses");
-        let StepKind::AssertNe { hash, actual, expected } = &steps[0].kind else {
+        let StepKind::AssertNe {
+            hash,
+            actual,
+            expected,
+        } = &steps[0].kind
+        else {
             panic!("expected AssertNe, got {:?}", steps[0].kind);
         };
         assert!(hash.is_none());

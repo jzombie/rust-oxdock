@@ -1,7 +1,7 @@
 use indoc::{formatdoc, indoc};
 use oxdock_core::{
-    ExecIo, run_steps_without_snapshot, run_steps_with_context, run_steps_with_context_result_with_io,
-    run_steps_with_fs,
+    ExecIo, run_steps_with_context, run_steps_with_context_result_with_io, run_steps_with_fs,
+    run_steps_without_snapshot,
 };
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, ensure_git_identity};
 use oxdock_parser::{IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};

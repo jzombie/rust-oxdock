@@ -7,8 +7,8 @@
 use oxdock::{Engine, GuardedPath, PathResolver, Step, oxdock, parse_script};
 
 fn main() -> anyhow::Result<()> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let examples = GuardedPath::new_root(dir.as_path())?;
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let examples = GuardedPath::new_root_from_str(&format!("{manifest}/examples"))?;
 
     // Picker menu built by the DSL: GLOB discovers the scripts, PROMPT
     // chooses one, and the answer returns through Engine bindings. The

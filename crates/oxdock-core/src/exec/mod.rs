@@ -29,9 +29,8 @@ pub use self::conformance::assert_module_returns_conformance;
 pub use self::engine::{Engine, EngineOutput};
 pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
-    dispatch_append, dispatch_archive, dispatch_assert_eq, dispatch_assert_ne,
-    dispatch_assert_contains,
-    dispatch_assign, dispatch_assign_async_step, dispatch_assign_capture_step,
+    dispatch_append, dispatch_archive, dispatch_assert_contains, dispatch_assert_eq,
+    dispatch_assert_ne, dispatch_assign, dispatch_assign_async_step, dispatch_assign_capture_step,
     dispatch_async_block, dispatch_await_capture_step, dispatch_await_step, dispatch_break,
     dispatch_call, dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git,
     dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
@@ -102,11 +101,7 @@ pub const SNAPSHOT_TREE_UNAVAILABLE: &str = "<unavailable>";
 /// [`run_steps_with_lazy_snapshot`]: for bindings and the snapshot
 /// handle, call that directly. For runs that must land exactly in a
 /// given root with no snapshot, use [`run_steps_without_snapshot`].
-pub fn run_steps(
-    build_context: &GuardedPath,
-    steps: &[Step],
-    io: ExecIo,
-) -> Result<()> {
+pub fn run_steps(build_context: &GuardedPath, steps: &[Step], io: ExecIo) -> Result<()> {
     run_steps_with_lazy_snapshot(build_context, steps, io).map(|_| ())
 }
 

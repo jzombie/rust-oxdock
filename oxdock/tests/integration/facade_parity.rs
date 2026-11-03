@@ -5,9 +5,9 @@
 
 #[cfg(feature = "cli")]
 use oxdock::{EndpointFlags, Options, ScriptSource, execute_with_result};
-use oxdock::{oxdock, oxdock_parser};
 #[cfg(feature = "cli")]
 use oxdock::{GuardedPath, PathResolver};
+use oxdock::{oxdock, oxdock_parser};
 
 #[cfg(feature = "cli")]
 #[cfg_attr(
