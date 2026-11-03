@@ -415,6 +415,21 @@ fn flat_body_image_eq(a: &Step, b: &Step) -> bool {
                     _ => false,
                 }
         }
+        (
+            StepKind::AssertNe {
+                actual: ax,
+                expected: ex,
+            },
+            StepKind::AssertNe {
+                actual: ay,
+                expected: ey,
+            },
+        ) => {
+            (match (ax, ay) {
+                (AssertTarget::Value(x), AssertTarget::Value(y)) => arg_content_eq(x, y),
+                _ => ax == ay,
+            }) && arg_content_eq(ex, ey)
+        }
         // `Block` bodies hold only the flat subset above: anything else
         // fails loudly instead of comparing strictly (flags would lie).
         _ => false,
@@ -655,6 +670,10 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             hash: None,
             actual: AssertTarget::Value(actual.into()),
             expected: Some(expected.into()),
+        }),
+        (safe_string(), any_msg()).prop_map(|(actual, expected)| StepKind::AssertNe {
+            actual: AssertTarget::Value(actual.into()),
+            expected: expected.into(),
         }),
         (safe_string(), any_msg()).prop_map(|(haystack, needle)| StepKind::AssertContains {
             haystack: AssertTarget::Value(haystack.into()),
@@ -1306,6 +1325,23 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             );
         }
         (
+            StepKind::AssertNe {
+                actual: la,
+                expected: le,
+            },
+            StepKind::AssertNe {
+                actual: ra,
+                expected: re,
+            },
+        ) => {
+            assert_target_eq(la, ra, "AssertNe actual mismatch", msg);
+            assert!(
+                arg_content_eq(le, re),
+                "AssertNe expected mismatch: {}",
+                msg
+            );
+        }
+        (
             StepKind::AssertContains {
                 haystack: lh,
                 needle: ln,
@@ -1877,6 +1913,10 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             actual: AssertTarget::Value("coverage-actual".into()),
             expected: Some("coverage-expected".into()),
         },
+        StepKind::AssertNe {
+            actual: AssertTarget::Value("coverage-actual".into()),
+            expected: "coverage-expected".into(),
+        },
         StepKind::AssertContains {
             haystack: AssertTarget::Value("coverage haystack".into()),
             needle: "coverage".into(),
@@ -2162,6 +2202,7 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         | StepKind::Remove { .. }
         | StepKind::Write { .. }
         | StepKind::AssertEq { .. }
+        | StepKind::AssertNe { .. }
         | StepKind::AssertContains { .. }
         | StepKind::Exit(..)
         | StepKind::TypeAlias { .. } => true,

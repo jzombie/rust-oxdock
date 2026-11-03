@@ -700,6 +700,7 @@ fn kind_covered(kind: &oxdock_parser::StepKind) -> bool {
         | StepKind::Remove { .. }
         | StepKind::Expand { .. }
         | StepKind::AssertEq { .. }
+        | StepKind::AssertNe { .. }
         | StepKind::AssertContains { .. }
         | StepKind::Sleep { .. }
         | StepKind::ListAppend { .. }
@@ -869,6 +870,16 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
                 expected: ey,
             },
         ) => hx == hy && target_eq(ax, ay) && opt_arg_eq(ex, ey),
+        (
+            StepKind::AssertNe {
+                actual: ax,
+                expected: ex,
+            },
+            StepKind::AssertNe {
+                actual: ay,
+                expected: ey,
+            },
+        ) => target_eq(ax, ay) && arg_content_eq(ex, ey),
         (
             StepKind::AssertContains {
                 haystack: hx,

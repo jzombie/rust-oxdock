@@ -2047,6 +2047,37 @@ fn assert_eq_rejects_content_mismatch() {
 }
 
 #[test]
+fn assert_ne_accepts_differing_content() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            WRITE out.txt actual
+            LET $b: STRING = READ out.txt
+            ASSERT_NE $b "expected"
+        "#},
+    )
+    .expect("differing content passes");
+}
+
+#[test]
+fn assert_ne_rejects_equal_content() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            WRITE out.txt same
+            LET $b: STRING = READ out.txt
+            ASSERT_NE $b "same"
+        "#},
+    )
+    .expect_err("equality must fail");
+    assert!(err.to_string().contains("ASSERT_NE"), "{err}");
+}
+
+#[test]
 fn assert_eq_path_type_reports_absent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -2751,6 +2782,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Remove { .. } => {}
         StepKind::Expand { .. } => {}
         StepKind::AssertEq { .. } => {}
+        StepKind::AssertNe { .. } => {}
         StepKind::AssertContains { .. } => {}
         StepKind::WithIo { .. } => {}
         StepKind::WithIoBlock { .. } => {}

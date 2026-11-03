@@ -737,6 +737,10 @@ impl StepKind {
                 walk_target(actual, f);
                 walk_opt(expected, f);
             }
+            StepKind::AssertNe { actual, expected } => {
+                walk_target(actual, f);
+                walk_arg(expected, f);
+            }
             StepKind::AssertContains { haystack, needle } => {
                 walk_target(haystack, f);
                 walk_arg(needle, f);
@@ -863,6 +867,10 @@ impl StepKind {
                 walk_target(actual, f);
                 walk_opt(expected, f);
             }
+            StepKind::AssertNe { actual, expected } => {
+                walk_target(actual, f);
+                walk_arg(expected, f);
+            }
             StepKind::AssertContains { haystack, needle } => {
                 walk_target(haystack, f);
                 walk_arg(needle, f);
@@ -955,6 +963,7 @@ impl StepKind {
             | StepKind::Remove { .. }
             | StepKind::Expand { .. }
             | StepKind::AssertEq { .. }
+            | StepKind::AssertNe { .. }
             | StepKind::AssertContains { .. }
             | StepKind::Exit(_)
             | StepKind::WithIoBlock { .. }
@@ -2139,6 +2148,54 @@ declare_commands! {
                 Some(join_value(remaining, "ASSERT_EQ")?)
             };
             Ok(StepKind::AssertEq { hash, actual, expected })
+        },
+    ],
+
+    AssertNe => [
+        name: "ASSERT_NE",
+        variant: AssertNe { actual: AssertTarget, expected: Arg },
+        syntax: "ASSERT_NE <actual> <expected>",
+        summary: "Assert strict inequality.",
+        description: indoc! {r#"
+            Compares two evaluated values with typed inequality (no coercion:
+            `INT(42)` never equals `STRING("42")`), aborting the pipeline
+            with a step-numbered error showing expected vs actual when they
+            are equal; differing values pass silently.
+
+            Both sides are values: `$var`, literals, templates, and calls
+            evaluate in memory and never touch disk. Read files explicitly
+            first (`LET $text: STRING = READ "out.txt"`, then
+            `ASSERT_NE $text ...`).
+            Bare `stdout` / `stderr` observe stream buffers; a `$var`
+            holding a `PIPE` observes its backend bytes.
+        "#},
+        args: &[
+            ArgSpec { name: "actual", arg_type: ArgType::Any, description: "Value, stdout, stderr, or a $var holding a PIPE", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "expected", arg_type: ArgType::Rest(&ArgType::Any), description: "Value the actual must differ from", io: IoDirection::Read, index: 1, required: true, fallback_stream: None },
+        ],
+        flags: &[],
+        default_output: None,
+        examples: &[ Example { name: "assert ne", fence_meta: None, code: indoc! {r#"
+            LET $status: INT = 200
+            ASSERT_NE $status 404
+        "#} },
+        Example { name: "assert ne file", fence_meta: None, code: indoc! {r#"
+            WRITE payload.bin stable-content
+            LET $body: STRING = READ payload.bin
+            ASSERT_NE $body "other-content"
+        "#} } ],
+        lower: |flags, args| {
+            let _ = flags;
+            let mut it = args.into_iter();
+            let actual = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_NE", "ASSERT_NE requires a value".to_string(), &SpanContext::line_only(0)))?)?;
+            let remaining: Vec<Arg> = it
+                .map(lower_assert_operand)
+                .collect::<Vec<Arg>>();
+            if remaining.is_empty() {
+                return Err(ParseError::validation("ASSERT_NE", "ASSERT_NE requires an expected value".to_string(), &SpanContext::line_only(0)))
+            }
+            let expected = join_value(remaining, "ASSERT_NE")?;
+            Ok(StepKind::AssertNe { actual, expected })
         },
     ],
 
@@ -4154,6 +4211,12 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
+            StepKind::AssertNe { actual, expected } => write!(
+                f,
+                "ASSERT_NE {} {}",
+                fmt_assert_target(actual),
+                fmt_value(expected, quote_msg)
+            ),
             StepKind::AssertContains { haystack, needle } => write!(
                 f,
                 "ASSERT_CONTAINS {} {}",
@@ -5615,6 +5678,33 @@ mod tests {
     }
 
     #[test]
+    fn assert_ne_lowers_and_round_trips() {
+        let steps = parse_script("ASSERT_NE $status 404\n", lower_command).expect("parses");
+        let StepKind::AssertNe { actual, expected } = &steps[0].kind else {
+            panic!("expected AssertNe, got {:?}", steps[0].kind);
+        };
+        assert!(
+            matches!(actual, AssertTarget::Value(_)),
+            "unexpected actual: {actual:?}"
+        );
+        assert!(
+            matches!(expected, Arg::Expr(_)),
+            "numeric expected lowers to an expression: {expected:?}"
+        );
+        let roundtrip = steps[0].kind.to_string();
+        assert!(
+            roundtrip.contains("ASSERT_NE") && roundtrip.contains("404"),
+            "display should round-trip the command: {roundtrip}"
+        );
+
+        let err = parse_script("ASSERT_NE $status\n", lower_command).expect_err("needs expected");
+        assert!(
+            err.to_string().contains("requires argument `expected`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn space_before_paren_is_not_a_call() {
         // The call head and `(` must be contiguous: `ECHO (1 + 2)` is an
         // instruction, never a function invocation.
@@ -6157,6 +6247,7 @@ mod tests {
                 | StepKind::Expand { .. }
                 | StepKind::AssertEq { .. }
                 | StepKind::AssertContains { .. }
+                | StepKind::AssertNe { .. }
                 | StepKind::CopyGit { .. }
                 | StepKind::Exit(_)
                 | StepKind::Sleep { .. }

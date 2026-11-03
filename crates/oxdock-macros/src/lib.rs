@@ -1150,6 +1150,11 @@ fn emit_stepkind(
                 }
             }
         }
+        StepKind::AssertNe { actual, expected } => {
+            let a = emit_assert_target(actual, interp);
+            let e = emit_arg(expected, interp);
+            quote! { StepKind::AssertNe { actual: #a, expected: #e } }
+        }
         StepKind::AssertContains { haystack, needle } => {
             let h = emit_assert_target(haystack, interp);
             let n = emit_arg(needle, interp);

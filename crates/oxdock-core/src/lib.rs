@@ -34,6 +34,7 @@ define_pipeline! {
     StepKind::Remove { .. } => exec::dispatch_remove,
     StepKind::Expand { .. } => exec::dispatch_expand,
     StepKind::AssertEq { .. } => exec::dispatch_assert_eq,
+    StepKind::AssertNe { .. } => exec::dispatch_assert_ne,
     StepKind::AssertContains { .. } => exec::dispatch_assert_contains,
     StepKind::Exit(..) => exec::dispatch_exit,
     StepKind::AssignAsync { .. } => exec::dispatch_assign_async_step,

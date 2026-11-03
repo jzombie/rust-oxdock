@@ -1779,6 +1779,87 @@ pub(super) fn assert_eq<P: ProcessManager>(
     }
 }
 
+/// Inequality assertion over values, streams, and pipes: the mirror of
+/// [`assert_eq`] without the `--hash` form. Differing values pass
+/// silently; equality aborts with a step-numbered error showing both
+/// sides. Like `assert_eq`, files never appear here; read them into
+/// variables first.
+pub(super) fn assert_ne<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    generation: usize,
+    actual: &super::steps::ResolvedAssertTarget,
+    expected: &Value,
+) -> Result<()> {
+    use super::steps::ResolvedAssertTarget;
+    // Mode 1: exact stdout with piped stdin consumes the stream, mirroring
+    // the legacy substring behavior, but compares exact bytes.
+    if let ResolvedAssertTarget::Stdout = actual
+        && let CommandStdin::Stream(input_stream) = cx.stdin.clone()
+    {
+        let drained = drain_stdin_bounded(input_stream, "ASSERT_NE")?;
+        super::io::write_stdout(cx.out.clone(), |w| {
+            w.write_all(&drained)?;
+            Ok(())
+        })?;
+        let Some(want) = expected.as_str() else {
+            bail!(
+                "ASSERT_NE stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                expected,
+                String::from_utf8_lossy(&drained)
+            );
+        };
+        if drained == want.as_bytes() {
+            bail!("ASSERT_NE stream unexpectedly equal: {:?}", want,);
+        }
+        return Ok(());
+    }
+    match actual {
+        ResolvedAssertTarget::Value(got) => {
+            if got != expected {
+                Ok(())
+            } else {
+                bail!(
+                    "ASSERT_NE mismatch: values are equal\nexpected: {:?}\nactual:   {:?}",
+                    expected,
+                    got
+                )
+            }
+        }
+        ResolvedAssertTarget::Stdout => {
+            let bytes = exact_stdout_bytes(cx, generation)?;
+            let Some(want) = expected.as_str() else {
+                bail!(
+                    "ASSERT_NE stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                    expected,
+                    String::from_utf8_lossy(&bytes)
+                );
+            };
+            if bytes == want.as_bytes() {
+                bail!("ASSERT_NE stream unexpectedly equal: {want:?}");
+            }
+            Ok(())
+        }
+        ResolvedAssertTarget::Stderr => {
+            bail!("ASSERT_NE over stderr is not supported; use ASSERT_CONTAINS stderr ...");
+        }
+        ResolvedAssertTarget::Pipe(bytes) => {
+            let actual_str = String::from_utf8(bytes.clone())
+                .with_context(|| "ASSERT_NE pipe content is not UTF-8".to_string())?;
+            let Some(want) = expected.as_str() else {
+                bail!(
+                    "ASSERT_NE pipe mismatch\nexpected: {:?}\nactual:   {:?}",
+                    expected,
+                    actual_str
+                );
+            };
+            if actual_str == want {
+                bail!("ASSERT_NE pipe unexpectedly equal: {want:?}");
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Drain a piped stdin fully while enforcing the exact-match byte cap.
 /// Shared by `ASSERT_EQ stdout` Mode 1.
 fn drain_stdin_bounded(input_stream: SharedInput, verb: &str) -> Result<Vec<u8>> {
@@ -3784,6 +3865,18 @@ pub(crate) fn dispatch_assert_eq<P: ProcessManager>(
         None => None,
     };
     assert_eq(cx, 0, hash, &target, expected_val.as_ref())
+}
+
+pub(crate) fn dispatch_assert_ne<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::AssertNe { actual, expected } = step else {
+        unreachable!()
+    };
+    let target = super::steps::resolve_assert_target(actual, cx)?;
+    let expected_val = super::args::evaluate_assert_operand(expected, cx)?;
+    assert_ne(cx, 0, &target, &expected_val)
 }
 
 pub(crate) fn dispatch_assert_contains<P: ProcessManager>(

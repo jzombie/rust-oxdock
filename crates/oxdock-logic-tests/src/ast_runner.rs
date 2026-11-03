@@ -1506,6 +1506,7 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Append { .. } => "Append",
         StepKind::Remove { .. } => "Remove",
         StepKind::AssertEq { .. } => "AssertEq",
+        StepKind::AssertNe { .. } => "AssertNe",
         StepKind::AssertContains { .. } => "AssertContains",
         StepKind::CopyGit { .. } => "CopyGit",
         StepKind::Exit(_) => "Exit",

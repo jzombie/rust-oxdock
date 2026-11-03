@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Added
+
+- `ASSERT_NE <actual> <expected>`: strict-inequality assertion, the mirror of `ASSERT_EQ` without `--hash` (typed comparison, no coercion; differing values pass, equality aborts showing expected vs actual). Values, `stdout`, and `PIPE` targets behave like the equality form; `stderr` stays unsupported.
+
 ### Changed
 
 - `run_steps` is now lazy: `oxdock_core::run_steps(build_context, steps, io)` executes with the CLI default (a lazily-created snapshot; reads of existing workspace files fall through to the build context while directory listings stay snapshot-scoped). Running directly against a given root with no snapshot is `run_steps_without_snapshot`, as a free function and as `Engine::run_steps_without_snapshot` (the previous `Engine::run_steps` name); the lazy engine entry point is `Engine::run_steps`. The `oxdock` facade re-exports both names. Existing callers pinning on-disk state keep exact behavior under the explicit name.

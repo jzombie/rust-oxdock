@@ -47,13 +47,8 @@ fn lazy_runner_keeps_snapshot_and_local_distinct() {
         LET $s: STRING = CWD()
         WORKSPACE LOCAL
         LET $l: STRING = CWD()
+        ASSERT_NE $s $l
     "#})
     .unwrap();
-    let output = Engine::new().run_steps(&root, &steps).unwrap();
-    let snap = output.bindings.get("s").and_then(|v| v.as_str()).unwrap_or("<missing>");
-    let local = output.bindings.get("l").and_then(|v| v.as_str()).unwrap_or("<missing>");
-    assert_ne!(
-        snap, local,
-        "lazy snapshot and local roots must differ (snapshot={snap:?}, local={local:?})"
-    );
+    Engine::new().run_steps(&root, &steps).unwrap();
 }

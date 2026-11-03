@@ -29,7 +29,8 @@ pub use self::conformance::assert_module_returns_conformance;
 pub use self::engine::{Engine, EngineOutput};
 pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
-    dispatch_append, dispatch_archive, dispatch_assert_contains, dispatch_assert_eq,
+    dispatch_append, dispatch_archive, dispatch_assert_eq, dispatch_assert_ne,
+    dispatch_assert_contains,
     dispatch_assign, dispatch_assign_async_step, dispatch_assign_capture_step,
     dispatch_async_block, dispatch_await_capture_step, dispatch_await_step, dispatch_break,
     dispatch_call, dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git,

@@ -242,6 +242,9 @@ fn needs_exact_stdout(kind: &StepKind) -> bool {
         StepKind::AssertEq {
             actual: AssertTarget::Stdout,
             ..
+        } | StepKind::AssertNe {
+            actual: AssertTarget::Stdout,
+            ..
         }
     )
 }
@@ -974,6 +977,11 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 expected_resolved.as_ref(),
             )
         }
+        StepKind::AssertNe { actual, expected } => {
+            let target = resolve_assert_target(actual, &mut cx)?;
+            let expected_resolved = super::args::evaluate_assert_operand(expected, &mut cx)?;
+            handlers::assert_ne(&mut cx, generation, &target, &expected_resolved)
+        }
         StepKind::AssertContains { haystack, needle } => {
             let target = resolve_assert_target(haystack, &mut cx)?;
             handlers::assert_contains(&mut cx, generation, idx, &target, needle)
@@ -1337,6 +1345,17 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     hash,
                                     &target,
                                     expected_resolved.as_ref(),
+                                )
+                            }
+                            StepKind::AssertNe { actual, expected } => {
+                                let target = resolve_assert_target(actual, &mut cx)?;
+                                let expected_resolved =
+                                    super::args::evaluate_assert_operand(expected, &mut cx)?;
+                                handlers::assert_ne(
+                                    &mut cx,
+                                    generation,
+                                    &target,
+                                    &expected_resolved,
                                 )
                             }
                             StepKind::AssertContains { haystack, needle } => {

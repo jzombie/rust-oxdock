@@ -1,0 +1,4 @@
+name = "assert_ne"
+
+[expect]
+files = { "payload.bin" = "stable-content" }

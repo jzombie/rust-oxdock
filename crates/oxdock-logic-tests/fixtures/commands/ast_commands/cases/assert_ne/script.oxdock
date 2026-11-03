@@ -1,0 +1,5 @@
+LET $status: INT = 200
+ASSERT_NE $status 404
+WRITE payload.bin stable-content
+LET $body: STRING = READ payload.bin
+ASSERT_NE $body "other-content"
