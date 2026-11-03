@@ -1,28 +1,40 @@
 # All commands except RUN are intended to have similar cross-platform support.
-# Hello examples for oxdock-cli DSL
+# Hello examples for the OxDock CLI: `oxdock hello.oxfile` from the
+# repository root.
 #
 # This file demonstrates:
 # - unguarded commands (run always)
-# - guarded commands using `[...]` (commas for AND, `or(...)` for OR)
+# - guarded commands using `[...]` (commas for AND, `any(...)` for OR)
 # - guard-only lines that apply to the next command
 # - `ENV` which sets variables for subsequent RUN/RUN_BG commands
 # - platform guards, negation, and env-equality checks
+#
+# The ASSERT lines make the file self-verifying: running it proves
+# every demonstrated behavior on the current platform. Guarded
+# ASSERTs mirror the guarded ECHOs, so each platform checks exactly
+# the output it was supposed to produce.
 
 # --- Unguarded commands run unconditionally ---
 ECHO "This runs unconditionally"
+ASSERT_CONTAINS stdout "This runs unconditionally"
 
 # --- Platform-specific guarded RUNs (inline guards) ---
 # Two axes: `os:` names the exact system, `family:` splits unix-shell
 # vs Windows (`family:unix` covers macOS and Linux).
 [os:macos] ECHO "Hello from macOS"
+[os:macos] ASSERT_CONTAINS stdout "Hello from macOS"
 [os:linux] ECHO "Hello from Linux"
+[os:linux] ASSERT_CONTAINS stdout "Hello from Linux"
 [os:windows] ECHO "Hello from Windows"
+[os:windows] ASSERT_CONTAINS stdout "Hello from Windows"
 
 # Negation: run when NOT on Windows
 [not(os:windows)] ECHO "Not on Windows"
+[not(os:windows)] ASSERT_CONTAINS stdout "Not on Windows"
 
 # OR: run on mac OR linux
-[or(os:macos, os:linux)] ECHO "mac or linux"
+[any(os:macos, os:linux)] ECHO "mac or linux"
+[any(os:macos, os:linux)] ASSERT_CONTAINS stdout "mac or linux"
 
 # --- ENV and env-guards ---
 # Set an environment variable for subsequent RUN commands
@@ -30,19 +42,30 @@ ENV FOO=1
 
 # Guard on the same line: only runs when FOO is set
 [env:FOO] ECHO "(inline) Foo is set"
+[env:FOO] ASSERT_CONTAINS stdout "(inline) Foo is set"
 
 # Guard-only line (previous-line guard): applies to the next command
 [env:FOO]
 ECHO "(previous-line) Foo is set"
+[env:FOO]
+ASSERT_CONTAINS stdout "(previous-line) Foo is set"
 
 # Example mixing AND/OR: (FOO and linux) OR mac
-[or((env:FOO, os:linux), os:macos)] ECHO "Foo on Linux, or any Mac"
+[any((env:FOO, os:linux), os:macos)] ECHO "Foo on Linux, or any Mac"
+[any((env:FOO, os:linux), os:macos)] ASSERT_CONTAINS stdout "Foo on Linux, or any Mac"
 
 # Show that ECHO can print the ENV we set earlier (cross-platform)
-ECHO {{ env:FOO }}
+ECHO "FOO is {{ env:FOO }}"
+ASSERT_CONTAINS stdout "FOO is 1"
+
+# ENV propagates into RUN children on every platform.
+[family:unix] LET $u: STRING = RUN env | grep FOO
+[family:unix] ASSERT_CONTAINS $u "FOO=1"
+[family:windows] LET $w: STRING = RUN cmd /C "echo %FOO%"
+[family:windows] ASSERT_CONTAINS $w "1"
 
 # --- Notes ---
-# - Guards in `[...]` support comma-separated AND, `or(...)` for OR, parentheses for grouping, and `not(...)` for inversion.
+# - Guards in `[...]` support comma-separated AND, `any(...)` for OR, parentheses for grouping, and `not(...)` for inversion.
 # - Guard-only lines accumulate and apply to the next non-empty command line.
 # - `ENV` affects subsequent RUN and RUN_BG commands and is also considered by guards.
 
@@ -52,10 +75,6 @@ ECHO {{ env:FOO }}
 # Example: list the current directory using the native command on each platform.
 [family:unix] RUN ls -la
 [family:windows] RUN dir
-
-# Example: show the `FOO` env using native commands (guarded per-platform).
-[family:unix] RUN env | grep FOO
-[family:windows] RUN cmd /C "echo %FOO%"
 
 # Note: The LS command is also a built-in command
 # LS

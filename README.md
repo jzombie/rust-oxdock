@@ -106,6 +106,8 @@ cargo add oxdock@0.34.0-alpha
 oxdock <PATH>
 ```
 
+New here? [`hello.oxfile`](https://github.com/jzombie/rust-oxdock/blob/main/hello.oxfile) demonstrates guards, `ENV`, and native commands, and verifies itself with assertions: `oxdock hello.oxfile` from a checkout runs it green.
+
 The same script also runs standalone through the CLI. It builds artifacts **and verifies them** with native assertions. Every fenced `oxdock` example in this README is executed against the implementation by [`crates/oxdock-logic-tests/tests/docs_conformance.rs`](./crates/oxdock-logic-tests/tests/docs_conformance.rs), so what you read here is guaranteed to match what the DSL actually does:
 
 ```oxdock

@@ -20,6 +20,8 @@ Add it to your Rust build with `cargo add oxdock@0.34.0-alpha`, or install the s
 oxdock <PATH>
 ```
 
+New here? [`hello.oxfile`](https://github.com/jzombie/rust-oxdock/blob/main/hello.oxfile) demonstrates guards, `ENV`, and native commands, and verifies itself with assertions: `oxdock hello.oxfile` from a checkout runs it green.
+
 OxDock scripts automate build-time work: creating files, snapshotting
 workspaces, verifying artifacts with native assertions. You run them
 two ways off the same core: embedded in your build with macros, or as

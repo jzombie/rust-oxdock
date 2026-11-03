@@ -10,5 +10,8 @@ mod cli_bin;
 #[path = "integration/facade_parity.rs"]
 mod facade_parity;
 #[cfg(feature = "cli")]
+#[path = "integration/hello_cli.rs"]
+mod hello_cli;
+#[cfg(feature = "cli")]
 #[path = "integration/readme_quickstart.rs"]
 mod readme_quickstart;
