@@ -22,6 +22,23 @@ pub fn shell_program() -> String {
     }
 }
 
+/// Path of the running interpreter binary, for scripts that reinvoke
+/// the engine on another script (`RUN [$exe, "other.oxdock"]`) instead
+/// of bridging an env var. `current_exe` is an unsupported isolation
+/// operation under Miri (hard error, not a recoverable `Err`), so Miri
+/// builds report it as unsupported instead of calling through.
+pub fn interpreter_exe() -> Result<String> {
+    #[cfg(miri)]
+    {
+        bail!("INTERPRETER is unsupported under Miri isolation")
+    }
+    #[cfg(not(miri))]
+    {
+        let exe = std::env::current_exe().context("determine current executable")?;
+        Ok(exe.display().to_string())
+    }
+}
+
 /// Deterministic batch shell for `RUN` step execution: `sh` on Unix,
 /// `cmd` on Windows. Never the operator's `$SHELL`: login shells
 /// re-pollute scrubbed children (observed live: zsh sourcing

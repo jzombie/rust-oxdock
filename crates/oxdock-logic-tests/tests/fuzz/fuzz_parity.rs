@@ -839,6 +839,20 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             name: "STD::TEXT_LENGTH".to_string(),
             args: vec![Expr::Literal(Value::string("coverage".to_string()))],
         }),
+        // File-backed, but the parity pathways only parse: no files are
+        // read, so fixed samples round-trip. Multistep scripts uniquify
+        // aliases/names below (like MULTIFUNC) to dodge duplicate-alias
+        // collisions between draws.
+        Just(StepKind::ImportFile {
+            path: "coverage.oxdock".to_string(),
+            alias: "COVERAGE".to_string(),
+        }),
+        Just(StepKind::ImportFuncs {
+            path: "coverage.oxdock".to_string(),
+            alias: None,
+            func_names: vec!["COVERAGE".to_string()],
+            type_names: vec![],
+        }),
         Just(StepKind::Isolated {
             body: vec![Step {
                 guard: None,
@@ -1676,6 +1690,20 @@ proptest! {
             if let StepKind::FuncDef { name, .. } = &mut step.kind {
                 *name = format!("MULTIFUNC{i}");
             }
+            // Import aliases and harvested names register per script:
+            // uniquify them like function definitions so repeated draws
+            // never collide.
+            if let StepKind::ImportFile { alias, .. } = &mut step.kind {
+                *alias = format!("COVERAGE{i}");
+            }
+            if let StepKind::ImportFuncs { alias, func_names, .. } = &mut step.kind {
+                if let Some(alias) = alias {
+                    *alias = format!("COVERAGE{i}");
+                }
+                for name in func_names.iter_mut() {
+                    *name = format!("{name}{i}");
+                }
+            }
         }
         // Prelude order: `INHERIT_ENV` must precede all other commands,
         // so stable-partition it front (single-step fuzz never meets
@@ -1869,6 +1897,16 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         },
         StepKind::Return {
             expr: Box::new(Expr::Literal(Value::bool(true))),
+        },
+        StepKind::ImportFile {
+            path: "coverage.oxdock".to_string(),
+            alias: "COVERAGE".to_string(),
+        },
+        StepKind::ImportFuncs {
+            path: "coverage.oxdock".to_string(),
+            alias: None,
+            func_names: vec!["COVERAGE".to_string()],
+            type_names: vec![],
         },
         StepKind::Break,
         StepKind::Continue,
@@ -2147,6 +2185,10 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         StepKind::FuncDef { .. } => true,
         StepKind::Call { .. } => true,
         StepKind::Return { .. } => true,
+        // Parse-only round-trip: samples render and re-parse with no
+        // files on disk (execution would resolve them).
+        StepKind::ImportFile { .. } => true,
+        StepKind::ImportFuncs { .. } => true,
         StepKind::While { .. } => true,
         StepKind::Break => true,
         StepKind::Continue => true,

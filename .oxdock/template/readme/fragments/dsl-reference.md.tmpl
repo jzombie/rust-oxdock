@@ -271,6 +271,11 @@ ASSERT_CONTAINS stdout "arch-detected"
 // Bring the runner-injected value into the script environment.
 INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
 
+// Absence is testable, but every guard reference must still be
+// declared: inheriting a host-absent name stays absent, it only
+// satisfies the static gate.
+INHERIT_ENV [OXDOCK_DOC_UNDEFINED_VAR, OXDOCK_DOC_FEATURE_B]
+
 // not(...) inverts the predicate: passes because the variable does NOT exist.
 [not(env:OXDOCK_DOC_UNDEFINED_VAR)] ECHO negation-passes-for-undefined
 ASSERT_CONTAINS stdout "negation-passes-for-undefined"
@@ -286,10 +291,14 @@ ASSERT_CONTAINS stdout "composed-and-or-guard"
 
 ### Multi-line guards
 
-Bracket expressions may span lines. Chained guard lines apply conjunctively to the next instruction; here neither variable is defined, so the gated instruction is skipped:
+Bracket expressions may span lines. Chained guard lines apply conjunctively to the next instruction; here both variables are declared but host-absent, so the gated instruction is skipped:
 
 ```oxdock
 IMPORT [STD]
+
+// Declare both names: inheriting host-absent names stays absent,
+// satisfying the static gate while keeping the runtime skip.
+INHERIT_ENV [OXDOCK_DOC_CHAIN_ONE, OXDOCK_DOC_CHAIN_TWO]
 
 // Brackets may span lines; chained lines AND together and gate
 // the next command.
@@ -298,7 +307,7 @@ IMPORT [STD]
   env:OXDOCK_DOC_CHAIN_TWO
 ]
 
-// Neither variable exists, so this WRITE is skipped entirely.
+// Neither variable is defined, so this WRITE is skipped entirely.
 WRITE chained.txt applied
 
 // The artifact was never created.

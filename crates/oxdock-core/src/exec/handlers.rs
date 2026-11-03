@@ -86,7 +86,7 @@ pub(super) fn workdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) ->
     cx.state.cwd = cx
         .state
         .fs
-        .resolve_workdir(&cx.state.cwd, path)
+        .resolve_workdir(&cx.state.effective_cwd(), path)
         .with_context(|| format!("WORKDIR {}", path))?;
     Ok(())
 }
@@ -702,7 +702,7 @@ pub(super) fn copy<P: ProcessManager>(
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, to)
+        .resolve_write(&cx.state.effective_cwd(), to)
         .with_context(|| format!("COPY {} {}", from, to))?;
     let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
         .with_context(|| format!("COPY {} {}", from, to))?;
@@ -752,7 +752,7 @@ pub(super) fn copy_git<P: ProcessManager>(
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, to)
+        .resolve_write(&cx.state.effective_cwd(), to)
         .with_context(|| format!("COPY_GIT {} {} {}", rev, from, to))?;
     cx.state
         .fs
@@ -805,15 +805,15 @@ fn resolve_archive_src<P: ProcessManager>(
         return cx
             .state
             .fs
-            .resolve_read(&cx.state.cwd, src)
+            .resolve_read(&cx.state.effective_cwd(), src)
             .with_context(|| tag.to_string());
     }
     let parent_abs = if parent.is_empty() {
-        cx.state.cwd.clone()
+        cx.state.effective_cwd()
     } else {
         cx.state
             .fs
-            .resolve_read(&cx.state.cwd, &parent)
+            .resolve_read(&cx.state.effective_cwd(), &parent)
             .with_context(|| tag.to_string())?
     };
     let mut matched = false;
@@ -843,7 +843,7 @@ fn resolve_archive_src<P: ProcessManager>(
         return cx
             .state
             .fs
-            .resolve_read(&cx.state.cwd, src)
+            .resolve_read(&cx.state.effective_cwd(), src)
             .with_context(|| tag.to_string());
     }
     parent_abs.join(&name).with_context(|| tag.to_string())
@@ -982,7 +982,7 @@ pub(super) fn archive<P: ProcessManager>(
     let dst_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, dst)
+        .resolve_write(&cx.state.effective_cwd(), dst)
         .with_context(|| tag.clone())?;
     // Opening the destination truncates it: an archive landing on its
     // own source would destroy inputs before their bytes stream, so
@@ -1054,12 +1054,12 @@ pub(super) fn unarchive<P: ProcessManager>(
     let src_abs = cx
         .state
         .fs
-        .resolve_read(&cx.state.cwd, src)
+        .resolve_read(&cx.state.effective_cwd(), src)
         .with_context(|| tag.clone())?;
     let dst_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, dst)
+        .resolve_write(&cx.state.effective_cwd(), dst)
         .with_context(|| tag.clone())?;
     cx.state
         .fs
@@ -1204,7 +1204,7 @@ pub(super) fn symlink<P: ProcessManager>(
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, to)
+        .resolve_write(&cx.state.effective_cwd(), to)
         .with_context(|| format!("SYMLINK {} {}", from, to))?;
     let from_abs = if let Some(target) = from_workspace {
         cx.state
@@ -1254,7 +1254,7 @@ pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> R
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, path)
+        .resolve_write(&cx.state.effective_cwd(), path)
         .with_context(|| format!("MKDIR {}", path))?;
     cx.state
         .fs
@@ -1267,7 +1267,7 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
     let target_dir = if let Some(p) = arg {
         cx.state
             .fs
-            .resolve_read(&cx.state.cwd, p)
+            .resolve_read(&cx.state.effective_cwd(), p)
             .with_context(|| format!("LS {}", p))?
     } else {
         // Bare `LS` lists the current directory: ride the choke point so a
@@ -1275,7 +1275,7 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
         // explicit-path branch above. Local roots resolve with zero I/O.
         cx.state
             .fs
-            .resolve_read(&cx.state.cwd, ".")
+            .resolve_read(&cx.state.effective_cwd(), ".")
             .with_context(|| "LS".to_string())?
     };
     let mut entries = cx
@@ -1302,7 +1302,7 @@ pub(super) fn read<P: ProcessManager>(
         let target = cx
             .state
             .fs
-            .resolve_read(&cx.state.cwd, path)
+            .resolve_read(&cx.state.effective_cwd(), path)
             .with_context(|| format!("READ {}", path))?;
         let mut reader = cx
             .state
@@ -1466,7 +1466,7 @@ pub(super) fn write<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, path)
+        .resolve_write(&cx.state.effective_cwd(), path)
         .with_context(|| format!("WRITE {}", path))?;
     cx.state
         .fs
@@ -1517,7 +1517,7 @@ pub(super) fn append<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, path)
+        .resolve_write(&cx.state.effective_cwd(), path)
         .with_context(|| format!("APPEND {}", path))?;
     cx.state
         .fs
@@ -1601,7 +1601,7 @@ pub(super) fn replace<P: ProcessManager>(
             let target = cx
                 .state
                 .fs
-                .resolve_read(&cx.state.cwd, path)
+                .resolve_read(&cx.state.effective_cwd(), path)
                 .with_context(|| format!("EXPAND {}", path))?;
             let mut reader = cx
                 .state
@@ -2273,6 +2273,35 @@ fn extract_call(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &[Expr])> {
     }
 }
 
+/// Peel `WITH_IO` layers off an `IMPORT ["path" AS ALIAS]` capture body
+/// (#115), mirroring [`extract_call`]: merged bindings plus path/alias.
+/// `None` for any other shape (the stdout-capture path owns those).
+fn extract_import(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &str)> {
+    let mut layers: Vec<&Vec<IoBinding>> = Vec::new();
+    let mut current = cmd;
+    loop {
+        match current {
+            StepKind::ImportFile { path, alias } => {
+                let mut merged: Vec<IoBinding> = Vec::new();
+                for layer in &layers {
+                    for binding in layer.iter() {
+                        match merged.iter_mut().find(|m| m.stream == binding.stream) {
+                            Some(slot) => *slot = binding.clone(),
+                            None => merged.push(binding.clone()),
+                        }
+                    }
+                }
+                return Some((merged, path, alias));
+            }
+            StepKind::WithIo { bindings, cmd } => {
+                layers.push(bindings);
+                current = cmd;
+            }
+            _ => return None,
+        }
+    }
+}
+
 pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i64) -> Result<()> {
     for child in cx.state.bg_children.iter_mut() {
         if let Ok(None) = child.handle.try_wait() {
@@ -2430,8 +2459,13 @@ pub(crate) fn define_func<P: ProcessManager>(
         resolved.push((pname.clone(), cx.state.resolve_tag(ptype)?));
     }
     // Runtime counterpart of the parse-time scope validation; the single
-    // registry owns the reserved, duplicate, and shadowing rules.
-    cx.state.functions.define_script(name, &resolved, body)
+    // registry owns the reserved, duplicate, and shadowing rules. The
+    // owner is the innermost module on the stack (lexically enclosing
+    // file), or `None` for entry definitions, which stay params-only.
+    let owner = cx.state.current_module();
+    cx.state
+        .functions
+        .define_script(name, &resolved, body, owner.as_deref())
 }
 
 /// Invoke a function by UPPERCASE name and return its value. One lookup
@@ -2489,8 +2523,47 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     // 5. Execution by body kind.
     match entry.body {
         FuncBody::Script(def) => {
+            // Snapshot the caller's context first; module-owned bodies
+            // then reset to their own below, and the pop restores the
+            // caller on every path.
+            let module_key = def.module.clone();
+            let module_ctx = module_key.as_deref().and_then(|key| {
+                cx.state.modules.get(key).map(|record| {
+                    (
+                        record.dir.clone(),
+                        record
+                            .init
+                            .as_ref()
+                            .map(|init| (init.envs.clone(), init.inherit_names.clone())),
+                    )
+                })
+            });
             cx.state.call_depth += 1;
             cx.state.push_scope();
+            // Module-owned bodies execute with their module on the
+            // context stack, so name resolution falls back to the
+            // module's shared store; entry bodies push `None`, keeping
+            // entry functions params-only even when called from module
+            // code. Balanced below on every exit path.
+            cx.state.module_stack.push(module_key);
+            // A module must not inherit its caller's context (#115):
+            // env resets to the seed plus the module init's own
+            // contributions, cwd to the defining file's directory, and
+            // the workspace to the run-initial root. Declared
+            // `INHERIT_ENV` names re-read from the host here (a
+            // re-inherit of an already-present value leaves no init
+            // delta, yet must still admit the name). A module that
+            // reads outside that (e.g. the host checkout) declares its
+            // own `WORKSPACE`/`WORKDIR` in-function. When the module is
+            // still initializing (reentrant init-time self-call) there
+            // is no stored env yet: the init scope stays as-is, since
+            // it is the module's own in-progress context.
+            if let Some((dir, Some((envs, inherit_names)))) = module_ctx {
+                cx.state.reset_module_context(dir, envs);
+                if !inherit_names.is_empty() {
+                    inherit_env(cx, &inherit_names)?;
+                }
+            }
             let outcome: Result<Value> = (|| {
                 for ((pname, ptype), pval) in def.params.iter().zip(arg_vals) {
                     cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
@@ -2526,6 +2599,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             })();
             let pop_res = cx.state.pop_scope();
             cx.state.call_depth -= 1;
+            let _ = cx.state.module_stack.pop();
             match (outcome, pop_res) {
                 (Ok(value), Ok(())) => Ok(value),
                 (Err(e), _) => Err(e),
@@ -2702,6 +2776,45 @@ pub(crate) fn assign_capture<P: ProcessManager>(
 ) -> Result<Flow> {
     use std::sync::Arc;
 
+    if let Some((bindings, path, alias)) = extract_import(cmd) {
+        // `IMPORT` (possibly under `WITH_IO` layers): no capture sink.
+        // The imported pipeline's stdout keeps its routed streams; the
+        // bound value is the `RETURN` payload, exactly like `CALL`.
+        if bindings
+            .iter()
+            .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
+        {
+            bail!(
+                "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+            );
+        }
+        let value = if bindings.is_empty() {
+            super::import::import_file(cx, path, alias)?
+        } else {
+            let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
+                resolve_io_streams(cx, &bindings, cmd)?;
+            let state = &mut *cx.state;
+            let process = &mut *cx.process;
+            let mut sub_cx = super::steps::StepCtx {
+                state,
+                process,
+                stdin: step_stdin,
+                expose_stdin,
+                out: step_stdout,
+                err: step_stderr,
+                out_pipe,
+                stdin_pipe,
+                // `IMPORT` layers never carry a terminal: lowering rejects
+                // `tty` outside `RUN` before execution reaches them.
+                tty: None,
+            };
+            super::import::import_file(&mut sub_cx, path, alias)?
+        };
+        let clean_var = var.trim_start_matches('$').to_string();
+        let tag = cx.state.resolve_tag(&decl_type)?;
+        cx.state.declare_var(clean_var, tag, value)?;
+        return Ok(Flow::Done);
+    }
     if let Some((bindings, name, args)) = extract_call(cmd) {
         // `CALL` (possibly under `WITH_IO` layers): no capture sink. The
         // callee's stdout keeps its routed streams (observable via
@@ -3332,12 +3445,12 @@ pub(super) fn install<P: ProcessManager>(
     let from_abs = cx
         .state
         .fs
-        .resolve_read(&cx.state.cwd, from)
+        .resolve_read(&cx.state.effective_cwd(), from)
         .with_context(|| format!("INSTALL {from} {to}"))?;
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, to)
+        .resolve_write(&cx.state.effective_cwd(), to)
         .with_context(|| format!("INSTALL {from} {to}"))?;
     cx.state
         .fs
@@ -3560,7 +3673,11 @@ pub(super) fn remove<P: ProcessManager>(
     path: &str,
     recursive: bool,
 ) -> Result<()> {
-    let cwd = cx.state.cwd.clone();
+    // Removal resolves against the effective base (module-owned code
+    // anchors to its file). The deletion guard below compares against
+    // the real run cwd and roots, so a module can never remove the
+    // caller's working directory out from under it.
+    let cwd = cx.state.effective_cwd();
     let target = cx
         .state
         .fs
@@ -3571,12 +3688,14 @@ pub(super) fn remove<P: ProcessManager>(
     // under `WORKSPACE SYSTEM`) would destroy the execution context or
     // the host root, so fail closed before any filesystem driver runs.
     // Both sides compare canonicalized: symlinked prefixes would
-    // otherwise defeat a lexical equality check.
+    // otherwise defeat a lexical equality check. Guarded against the
+    // real run cwd, never the module-anchored base.
+    let guard_cwd = cx.state.cwd.clone();
     let cwd_canon = cx
         .state
         .fs
-        .canonicalize(&cwd)
-        .unwrap_or_else(|_| cwd.clone());
+        .canonicalize(&guard_cwd)
+        .unwrap_or_else(|_| guard_cwd.clone());
     if target == cwd_canon
         || cwd_canon.as_path().starts_with(target.as_path())
         || Some(&target) == cx.state.fs.workspace_root()
@@ -3811,6 +3930,32 @@ pub(crate) fn dispatch_func_def<P: ProcessManager>(
     define_func(cx, name, params, body)
 }
 
+pub(crate) fn dispatch_import_file<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::ImportFile { path, alias } = step else {
+        unreachable!()
+    };
+    super::import::import_file(cx, path, alias).map(|_| ())
+}
+
+pub(crate) fn dispatch_import_funcs<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::ImportFuncs {
+        path,
+        alias,
+        func_names,
+        type_names,
+    } = step
+    else {
+        unreachable!()
+    };
+    super::import::import_funcs(cx, path, alias.as_deref(), func_names, type_names)
+}
+
 pub(crate) fn dispatch_call<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -3877,6 +4022,11 @@ fn body_returns_value(body: &[Step]) -> bool {
 fn step_returns_value(kind: &StepKind) -> bool {
     match kind {
         StepKind::Return { .. } => true,
+        // A bare `IMPORT` statement discards its pipeline value, but a
+        // single-import `ASYNC` body publishes it (the worker fast path
+        // above); claiming `true` routes that shape through the fast
+        // path, and any other placement falls off the end loudly.
+        StepKind::ImportFile { .. } => true,
         StepKind::WithIo { cmd, .. } => step_returns_value(cmd),
         StepKind::For { body, .. }
         | StepKind::While { body, .. }
@@ -3971,11 +4121,19 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
             .map(|(bindings, name, args)| (bindings, name.to_string(), args.to_vec())),
         _ => None,
     };
-    // Single-call bodies always yield their call value; block bodies yield
-    // one only when they can RETURN. Recorded on the entry so a later
-    // capture can tell "void task" (binds 0) from "fell off the end"
-    // (loud error).
-    let returns_value = call_task.is_some() || body_returns_value(&body);
+    // Single-`IMPORT` bodies (#115) publish the imported pipeline's
+    // `RETURN` value the same way single calls do; anything else runs
+    // the block path below.
+    let import_task: Option<(Vec<IoBinding>, String, String)> = match body.as_slice() {
+        [step] => extract_import(&step.kind)
+            .map(|(bindings, path, alias)| (bindings, path.to_string(), alias.to_string())),
+        _ => None,
+    };
+    // Single-call and single-import bodies always yield their value;
+    // block bodies yield one only when they can RETURN. Recorded on the
+    // entry so a later capture can tell "void task" (binds 0) from "fell
+    // off the end" (loud error).
+    let returns_value = call_task.is_some() || import_task.is_some() || body_returns_value(&body);
     let (entry_tx, entry_rx) = std::sync::mpsc::channel::<Arc<super::state::TaskEntry>>();
     let join = std::thread::spawn(move || {
         // Slot guard first: dropping on return or unwind releases the
@@ -4023,6 +4181,47 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                     tty: None,
                 };
                 call_func_value(&mut sub_cx, &name, &args)?
+            };
+            entry
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .return_value = Some(value);
+            return Ok(());
+        }
+        if let Some((bindings, path, alias)) = import_task {
+            let mut child_cx = super::steps::StepCtx {
+                state: &mut child_state,
+                process: &mut child_process,
+                stdin,
+                expose_stdin,
+                out,
+                err,
+                out_pipe,
+                stdin_pipe,
+                tty: None,
+            };
+            // Apply call-site bindings like the inline path; stdout stays
+            // shared-live (parse rejects stdout pipes).
+            let value = if bindings.is_empty() {
+                super::import::import_file(&mut child_cx, &path, &alias)?
+            } else {
+                let (task_stdin, task_expose, task_out, task_err, task_out_pipe, task_stdin_pipe) =
+                    resolve_io_streams(&mut child_cx, &bindings, &body[0].kind)?;
+                let state = &mut *child_cx.state;
+                let process = &mut *child_cx.process;
+                let mut sub_cx = super::steps::StepCtx {
+                    state,
+                    process,
+                    stdin: task_stdin,
+                    expose_stdin: task_expose,
+                    out: task_out,
+                    err: task_err,
+                    out_pipe: task_out_pipe.or(child_cx.out_pipe.clone()),
+                    stdin_pipe: task_stdin_pipe.or(child_cx.stdin_pipe.clone()),
+                    tty: None,
+                };
+                super::import::import_file(&mut sub_cx, &path, &alias)?
             };
             entry
                 .state

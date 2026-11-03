@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use oxdock_fs::{GuardedPath, MockFs, PathResolver, WorkspaceFs};
-use oxdock_parser::{ModuleFuncs, ModuleTable};
+use oxdock_parser::{ModuleFuncs, ModuleTable, STD_MODULE_NAME};
 
 use super::args::check_host_return_value;
 use super::base_name;
@@ -225,9 +225,9 @@ fn run_example<P: ProcessManager + Clone + Send + 'static>(
 ) -> ExampleOutcome {
     let mut table = ModuleTable {
         modules: HashMap::from([(
-            "STD".to_string(),
+            STD_MODULE_NAME.to_string(),
             Some(ModuleFuncs {
-                functions: builtin_function_metas()
+                func_names: builtin_function_metas()
                     .iter()
                     .map(|meta| base_name(&meta.name).to_string())
                     .collect::<HashSet<_>>(),
@@ -237,7 +237,7 @@ fn run_example<P: ProcessManager + Clone + Send + 'static>(
     table.modules.insert(
         module_name.to_string(),
         Some(ModuleFuncs {
-            functions: funcs
+            func_names: funcs
                 .iter()
                 .map(|registration| base_name(&registration.meta().name).to_string())
                 .collect::<HashSet<_>>(),
@@ -331,6 +331,7 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         cargo_scratch: oxdock_fs::reserve_cargo_scratch().expect("cargo scratch"),
         seed: Arc::new(HashMap::new()),
         cwd: fs.root().clone(),
+        initial_root: fs.root().clone(),
         envs: Arc::new(HashMap::new()),
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
@@ -351,6 +352,12 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         cancellable: false,
         reap_floor: None,
         functions: super::native::FunctionRegistry::with_builtins(),
+        entry_file: None,
+        import_stack: Vec::new(),
+        import_alias_frame: None,
+        modules: HashMap::new(),
+        module_stack: Vec::new(),
+        module_table: super::native::std_module_table(),
         types: super::typing::startup_type_map(),
         record_schemas: HashMap::new(),
         module_states: HashMap::new(),

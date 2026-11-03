@@ -132,6 +132,9 @@ fn ci_tail_harness() -> Result<CiTailRun> {
     io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "v0.0.0-test");
     io.insert_inherit_env("GITHUB_PATH", gh_path.as_path().display().to_string());
     io.insert_inherit_env("GITHUB_ENV", gh_env.as_path().display().to_string());
+    // Declared-but-absent reads as empty: the tail takes the install
+    // path with no piped script, prompt, or publish unless a test
+    // bridges those names.
     Ok(CiTailRun {
         _temp: temp,
         root,

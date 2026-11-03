@@ -16,7 +16,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v0.33.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
+#   $env:VERSION = 'v0.34.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
@@ -269,11 +269,6 @@ try {
   $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } else { (Join-Path $tmp 'x\oxdock.exe') }
 
   if (-not (Test-Path $Engine)) { throw "installer engine missing: $Engine" }
-
-  # Interactive consoles confirm the destination in the oxfile: export
-  # the flag only with a console behind stdin. Either condition alone
-  # misfires in CI-without-console, so both must hold.
-  $env:OXDOCK_INTERPRETER = $Engine
 
   Push-Location $tmp
   try {

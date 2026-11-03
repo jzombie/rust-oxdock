@@ -289,6 +289,27 @@ define_env_contract! {
 /// for the call signature. Narrow by name, never wholesale: only the
 /// declared rows read the host, so ambient secrets and harness
 /// internals still stay out unless explicitly routed.
+/// Every name the session seed may inject into the initial script
+/// env (the contract baseline table plus the engine-owned rows), for
+/// static env-declaration checks: uses of these need no in-script
+/// `ENV`/`INHERIT_ENV`, exactly as `ENV_CONTRACTS.md` documents
+/// ("arrives mirrored from the host, without declaration"). Mirrors
+/// [`seed_defaults`] plus [`BuiltinEnv`](crate::builtin_env::BuiltinEnv)
+/// without reading the host, so the checker and the seeder cannot
+/// disagree on the set. `CARGO_FEATURE_*`/`CARGO_CFG_*` patterns are
+/// not listed; check those with [`is_sanctioned_seed`]. Harness and
+/// CLI injected names (`io` overrides) are deliberately absent: they
+/// route explicitly through `INHERIT_ENV`, never ambiently.
+pub fn seeded_env_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = describe_baseline_defaults()
+        .iter()
+        .map(|entry| entry.name)
+        .collect();
+    names.push(oxdock_fs::env::cargo::TARGET_DIR);
+    names.push(crate::builtin_env::BuiltinEnv::WORKSPACE_GIT_COMMIT);
+    names
+}
+
 pub fn seed_defaults(scratch_tmp: &str, scratch_target: &str) -> HashMap<String, String> {
     let _ = scratch_tmp;
     interpret_seed_table(&platform_seed_names(), scratch_target, &host_var)

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use oxdock_parser::{Expr, ParsedScript};
+use oxdock_parser::{Expr, ParsedScript, StepKind};
 use oxdock_process::{CommandStdin, ProcessManager, SharedOutput};
 
 use super::handlers::call_func_value;
@@ -41,7 +41,7 @@ pub struct McpCallOutput {
 pub struct McpSession<P: ProcessManager> {
     state: ExecState<P>,
     process: P,
-    exports: Vec<String>,
+    func_exports: Vec<String>,
     stdout_buf: Arc<Mutex<TailRing>>,
     stderr_buf: Arc<Mutex<TailRing>>,
     /// Live-stream tap installed by the host per call. `None` outside a
@@ -90,7 +90,45 @@ impl<P: ProcessManager> McpSession<P> {
 
         state.type_aliases = super::typing::collect_type_aliases(&parsed.steps, &state)?;
         state.validate_function_type_tags()?;
-        super::static_check::validate_script_types(&parsed.steps, &state)?;
+        let saved_aliases = state.type_aliases.clone();
+        let closure = super::import::expand_import_closure(&mut state, &parsed.steps)?;
+        for file in &closure {
+            let aliases = super::typing::collect_type_aliases(&file.steps, &state)?;
+            for (name, target) in &aliases {
+                state.type_aliases.insert(name.clone(), target.clone());
+            }
+        }
+        super::static_check::validate_script_closure(&parsed.steps, &closure, &state)?;
+        // Entry `EXPORT TYPE` names must be locally defined or re-exported
+        // from the closure (bare re-exports only in v1; qualified stays
+        // future). MCP skips types for tools, but typos still fail here.
+        {
+            let mut local = std::collections::HashSet::new();
+            for step in &parsed.steps {
+                if let StepKind::TypeAlias { name, .. } = &step.kind {
+                    local.insert(name.clone());
+                }
+            }
+            let mut exported_available = std::collections::HashSet::new();
+            for file in &closure {
+                for name in &file.type_exports {
+                    exported_available.insert(name.clone());
+                }
+            }
+            for name in &parsed.type_exports {
+                if name.contains("::") {
+                    anyhow::bail!(
+                        "EXPORT TYPE `{name}` must be bare in v1 (qualified ALIAS::TYPE stays future work)"
+                    );
+                }
+                if !local.contains(name) && !exported_available.contains(name) {
+                    anyhow::bail!(
+                        "EXPORT TYPE `{name}` matches no local TYPE and no imported file exports it"
+                    );
+                }
+            }
+        }
+        state.type_aliases = saved_aliases;
 
         let assert_windows = Arc::clone(&state.assert_windows);
         let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
@@ -131,23 +169,23 @@ impl<P: ProcessManager> McpSession<P> {
             }
         }
 
-        state.functions.exported_metas(&parsed.exports)?;
+        state.functions.exported_metas(&parsed.func_exports)?;
         drain_buf(&stdout_buf);
         drain_buf(&stderr_buf);
 
         Ok(Self {
             state,
             process,
-            exports: parsed.exports.clone(),
+            func_exports: parsed.func_exports.clone(),
             stdout_buf,
             stderr_buf,
             stream_hook: None,
         })
     }
 
-    /// Export list in source order.
-    pub fn exports(&self) -> &[String] {
-        &self.exports
+    /// Func export list in source order.
+    pub fn func_exports(&self) -> &[String] {
+        &self.func_exports
     }
 
     /// Install (or clear with `None`) the live-stream tap for the next
@@ -160,7 +198,7 @@ impl<P: ProcessManager> McpSession<P> {
     /// Tool metadata for the export list, in source order. Fails fast
     /// naming the first missing export.
     pub fn tool_metas(&self) -> Result<Vec<FuncMeta>> {
-        self.state.functions.exported_metas(&self.exports)
+        self.state.functions.exported_metas(&self.func_exports)
     }
 
     /// Script `#` docs for a qualified name, if collected at parse.
@@ -176,11 +214,11 @@ impl<P: ProcessManager> McpSession<P> {
     /// Qualified exports (`STD::INT`) answer under their base name;
     /// tool-name duplicates fail at table build, so the match is unique.
     pub fn call(&mut self, base: &str, args: Vec<Value>) -> Result<McpCallOutput> {
-        let qualified = if self.exports.iter().any(|e| e == base) {
+        let qualified = if self.func_exports.iter().any(|e| e == base) {
             oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, base)
         } else {
             match self
-                .exports
+                .func_exports
                 .iter()
                 .find(|e| e.rsplit("::").next() == Some(base))
             {

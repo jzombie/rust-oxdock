@@ -35,7 +35,6 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
-| [`MUTATION`](#mutation) | `$var = <expr>` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
@@ -47,7 +46,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |
 | [`CONTINUE`](#continue) | `CONTINUE` |
-| [`IMPORT`](#import) | `IMPORT [<module>, ...] \| IMPORT <module>` |
+| [`IMPORT`](#import) | `IMPORT [<module>, ...] \| IMPORT <module> \| IMPORT ["<path>" AS <ALIAS>] \| IMPORT [<module \| "<path>" AS <ALIAS> \| [F, ... FROM ("<path>" \| <module>) (AS <ALIAS>)?]>, ...]` |
 
 ### WITH_IO
 
@@ -432,6 +431,29 @@ ASSERT_CONTAINS $items "b"
 LET $count: INT = 42
 ASSERT_EQ $count 42
 ```
+
+**Example: bool coercion**
+
+```oxdock
+# BOOL spellings coerce case-insensitively. Empty is
+# not a boolean: absent flags state a default through
+# BOOL_OR instead of converting here.
+LET $t: BOOL = "TRUE"
+ASSERT_EQ $t true
+LET $f: BOOL = "no"
+ASSERT_EQ $f false
+```
+
+**Example: bool coercion rejects empty**
+
+```oxdock expect_error:"expected BOOL"
+# Empty never reads as false: an empty string fails
+# BOOL coercion instead of picking a polarity.
+ENV EMPTY_FLAG=""
+LET $e: BOOL = "{{ env:EMPTY_FLAG }}"
+```
+
+**Expected error:** `expected BOOL`
 
 **Example: no hoisting**
 
@@ -897,22 +919,32 @@ ASSERT_EQ $body "inner"
 
 ```oxdock
 # The block resets to the session seed: plain steps and
-# spawns run with zero prelude, while outer customs
-# stay out.
-ENV OUTER_CUSTOM=outer-val
+# spawns run with zero prelude. PATH needs no
+# declaration: contract seed rows are always admitted.
 WRITE top-path.txt "{{ env:PATH }}"
 ISOLATED {
     WRITE inner-path.txt "{{ env:PATH }}"
-    WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
     RUN "echo seed-ok"
 }
 LET $top: STRING = READ top-path.txt
 LET $inner: STRING = READ inner-path.txt
 ASSERT_EQ $inner $top
-LET $custom: STRING = READ inner-custom.txt
-ASSERT_EQ $custom ""
 ASSERT_CONTAINS stdout "seed-ok"
 ```
+
+**Example: outer customs stay out**
+
+```oxdock expect_error:"env:OUTER_CUSTOM"
+# Outer customs never enter the block: without an
+# allowlist entry the static gate rejects the read
+# before the first step runs.
+ENV OUTER_CUSTOM=outer-val
+ISOLATED {
+    WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
+}
+```
+
+**Expected error:** `env:OUTER_CUSTOM`
 
 **Example: absent names stay absent**
 
@@ -1304,27 +1336,132 @@ ASSERT_EQ $body "b"
 
 ### IMPORT
 
-Bring module functions into bare-call scope.
+Bring module functions into bare-call scope; import script files and types.
 
-**Syntax:** `IMPORT [<module>, ...] | IMPORT <module>`
+**Syntax:** `IMPORT [<module>, ...] | IMPORT <module> | IMPORT ["<path>" AS <ALIAS>] | IMPORT [<module | "<path>" AS <ALIAS> | [F, ... FROM ("<path>" | <module>) (AS <ALIAS>)?]>, ...]`
 
-Every function call names its module (`STD::GLOB(...)`,
-`MOCK::READ_CSV(...)`) unless the module is imported:
-`IMPORT [STD]` lets the rest of the scope call `GLOB(...)`
-bare. Calls resolve at parse time against `SCRIPT`
-definitions first, then imported modules; unknown modules,
-unknown functions, and unimported bare calls are parse
-errors, never runtime surprises.
+Bare calls:
+- Every call names its module (`STD::GLOB(...)`)
+  unless the module is imported. `IMPORT [STD]` lets
+  the rest of the scope call `GLOB(...)` bare.
+- Calls resolve at parse time: `SCRIPT` definitions
+  first, then imported modules. Unknown modules,
+  unknown functions, and unimported bare calls are
+  parse errors, never runtime surprises.
 
-IMPORT is a lowering directive, not a step: it applies from
-its line to the enclosing block exit, then reverts, exactly
-like `LET` scoping but with no runtime footprint. Guards do
-not apply to it. Two imported modules exporting one name is
-an ambiguity error: qualify the call instead.
+Scope:
+- `IMPORT` is a lowering directive, not a step. It
+  applies from its line to the enclosing block exit,
+  then reverts like `LET` scoping, with no runtime
+  footprint. Guards do not apply to it.
+- Two imported modules exporting one name is an
+  ambiguity error: qualify the call instead.
 
-`EXPORT` marks top-level script `FUNC`s as externally
-callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`).
-Single-file scope; see the MCP host for consumption.
+File imports:
+- Form: `IMPORT ["./lib.oxdock" AS LIB]` (any file
+  extension). The alias is mandatory and becomes the
+  namespace (`LIB::FOO`), with no filename inference.
+- Only `EXPORT`ed top-level `FUNC`s cross the
+  boundary. Unexported means private; variables are
+  never exportable.
+- Types cross as bare globals (like host types). A
+  whole-file import persists every exported alias, so
+  `LET $p: PERSON` works after any import of its file.
+- Each file initializes once; every alias shares the
+  module's top-level bindings.
+- The file must exist when the run starts. Generated
+  imports are rejected before the first step.
+
+Mixed brackets:
+- Brackets mix both kinds across lines if needed
+  (`IMPORT [STD, "a.oxdock" AS A]`). Each module entry
+  registers in order; each file entry runs in order.
+- Without an alias a file entry is a parse error.
+- Value positions (`LET`, `ASYNC`,
+  `WITH_IO`/`TIMEOUT` inners) take exactly one file
+  entry and no modules.
+
+Selective harvests:
+- Form: `IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
+  optionally `AS ALIAS`. Only the named top-level
+  functions register, bare or namespaced under the
+  alias. Harvested names must be `EXPORT`ed.
+- Single name needs no inner brackets
+  (`IMPORT [FOO FROM "x.oxdock"]`); several keep
+  `[[F, G FROM ...]]`. Several harvests group the
+  same way (`IMPORT [[TYPE A FROM STD],
+  [TYPE B FROM STD]]`), file or host alike.
+- Types and functions combine in one entry
+  (`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`).
+  Harvested types must be `EXPORT TYPE`d and persist
+  bare globally, so `FUNC` signatures keep working.
+- The file body never executes, so harvesting is
+  side-effect free. The file's own nested imports
+  still load. Harvests produce no value and never
+  appear in value positions.
+
+Host library types:
+- Form: `IMPORT [TYPE PIPE FROM STD]`. The import
+  validates the type resolves globally and records no
+  file. Host types stay global with or without the
+  harvest; the explicit form only documents the
+  dependency and fails fast on typos.
+- Bare `FROM` names a library; quoted `FROM`
+  names a file path. Quoted `FROM "STD"` still parses
+  for backcompat, but bare is preferred.
+
+Paths:
+- Workspace-side, against the importing file's
+  directory (entry parent at top level; off-workspace
+  entries resolve like stdin against the root).
+- Module-owned relative paths resolve against the
+  module file's own directory, not the caller cwd.
+  Entry code keeps resolving against the run cwd.
+- Missing files fail before the first step runs.
+  Write-then-import in one script is rejected; check
+  libraries into the tree.
+
+Module rules (every file import is a module):
+- Context: never inherits the caller. Env resets to
+  the seed plus the module init's own contributions
+  (declared `INHERIT_ENV` names re-read from the host
+  on every call), cwd to the defining file's
+  directory, workspace to the run-initial root.
+- Determinism: the same file behaves identically no
+  matter who imports it.
+- State: one init per file, shared by every alias.
+  Top-level `LET` bindings drain into a single store
+  visible to all of the module's functions.
+- Workspace: declare `WORKSPACE` or `WORKDIR`
+  in-function to read outside the module directory.
+  Without it the reset leaves the module on the
+  run-initial root (snapshot by default), even when
+  the caller switched away.
+- Exports: only `EXPORT`ed top-level `FUNC`s and
+  `EXPORT TYPE` aliases cross. Variables never cross.
+- Imports: whole-file or harvest, only exported
+  functions and types cross. Stateful harvests are
+  rejected (import the file to share its module).
+  Nested imports load automatically.
+- Cycles: circular imports and depth over 32 fail
+  before the first step runs.
+
+Exports and tools:
+- `EXPORT` marks top-level `FUNC`s as externally
+  callable (`EXPORT FOO`, `EXPORT [FOO, BAR]`) and as
+  the file importable interface. Re-exports promote
+  an import (`IMPORT ["x.oxdock" AS A]` then `EXPORT
+  A::FOO`).
+- `EXPORT TYPE` marks aliases the same way
+  (`EXPORT TYPE PERSON`, `EXPORT TYPE [A, B]`, mixed
+  `EXPORT [TYPE A, FUNC B]`). Only exported aliases
+  cross, so `FUNC` signatures survive imports.
+- Serving resolves re-exports through the registry;
+  unexported names fail tool setup instead of serving
+  a dead tool. The MCP server skips `TYPE` exports
+  when building tools while still resolving imported
+  types for signatures. Single-file scope otherwise;
+  see the MCP host for consumption.
 
 
 **Examples:**
@@ -1338,6 +1475,104 @@ IMPORT [STD]
 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
 ASSERT_CONTAINS stdout "hi World!"
 ```
+
+**Example: import missing file fails upfront**
+
+```oxdock expect_error:"must exist when the run starts"
+# Generated imports are rejected: a file that does not
+# exist when the run starts cannot be analyzed, so the
+# import fails before the first step runs.
+WORKSPACE LOCAL
+WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
+IMPORT ["lib.oxdock" AS LIB]
+```
+
+**Expected error:** `must exist when the run starts`
+
+**Example: import missing alias fails**
+
+```oxdock expect_error:"mandatory alias"
+# A file entry without AS is a parse error.
+IMPORT ["./lib.oxdock"]
+```
+
+**Expected error:** `mandatory alias`
+
+**Example: module cannot export a variable**
+
+```oxdock expect_error:"does not match any top-level FUNC"
+# Only top-level FUNCs are exportable, never variables.
+LET $FOO: STRING = "x"
+EXPORT FOO
+```
+
+**Expected error:** `does not match any top-level FUNC`
+
+**Example: import re-export unknown alias fails**
+
+```oxdock expect_error:"does not match any top-level FUNC"
+# Re-exports name a visible import alias.
+IMPORT ["x.oxdock" AS A]
+EXPORT NOSUCH::FOO
+```
+
+**Expected error:** `does not match any top-level FUNC`
+
+**Example: export type aliases**
+
+```oxdock
+# TYPE aliases declare shapes once; EXPORT TYPE shares
+# them so importing files can use the same spelling.
+TYPE PERSON = MAP<name: STRING>
+
+FUNC GREET($p: PERSON) {
+    RETURN "hi {{ $p.name }}"
+}
+EXPORT GREET
+EXPORT TYPE PERSON
+
+LET $p: PERSON = {name: "Ada"}
+LET $greeting: STRING = GREET($p)
+ASSERT_EQ $greeting "hi Ada"
+```
+
+**Example: import type from library**
+
+```oxdock
+# One bracket mixes entry kinds: STD brings functions bare,
+# each harvest names a type. Types resolve globally with
+# or without the harvests; the explicit form only documents
+# the dependency, so this grouping is example only. Bare
+# FROM names a library; quoted FROM names a file path.
+IMPORT [STD, [TYPE PIPE FROM STD], [TYPE DURATION FROM STD]]
+
+LET $p: PIPE
+WITH_IO [stdout=$p] ECHO hello
+WITH_IO [stdin=$p] READ_LINE $line
+ASSERT_EQ $line "hello"
+
+LET $d: DURATION = "5s"
+LET $files: LIST<STRING> = GLOB("*.oxdock")
+```
+
+**Example: export unknown type fails**
+
+```oxdock expect_error:"does not match any top-level TYPE"
+# Only declared TYPE aliases are exportable.
+TYPE PERSON = MAP<name: STRING>
+EXPORT TYPE ANIMAL
+```
+
+**Expected error:** `does not match any top-level TYPE`
+
+**Example: undeclared type fails**
+
+```oxdock expect_error:"unknown type"
+# TYPE names must be declared before use.
+LET $p: PERSON = {name: "Ada"}
+```
+
+**Expected error:** `unknown type`
 
 
 ### WORKDIR
@@ -1639,13 +1874,25 @@ ASSERT_EQ stdout "braced:World\nWorld\n"
 
 ```oxdock
 # `{{ env:KEY }}` reads the script environment; a bare name
-# resolves a DSL variable instead. Unknown keys expand to
-# empty with no host fallback.
+# resolves a DSL variable instead. Every `env:` read must
+# be declared first: KEY here comes from the ENV below.
 ENV USER=OxDock
 LET $WHO: STRING = "Ada"
-ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!{{ env:OXDOCK_DOC_NO_SUCH_KEY }}"
+ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!"
 ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada!"
 ```
+
+**Example: undeclared env read fails**
+
+```oxdock expect_error:"env:OXDOCK_DOC_NO_SUCH_KEY"
+# No declaration anywhere: the whole-closure static gate
+# rejects the read before the first step runs. (The
+# error names the variable: undeclared environment
+# variable `env:OXDOCK_DOC_NO_SUCH_KEY`.)
+ECHO "Hello {{ env:OXDOCK_DOC_NO_SUCH_KEY }}!"
+```
+
+**Expected error:** `env:OXDOCK_DOC_NO_SUCH_KEY`
 
 
 ### RUN
@@ -2652,9 +2899,9 @@ releases once); equality is handle identity.
 
 
 <!-- GENERATED by docs-gen from STD function metadata. Do not edit by hand. -->
-## Functions
+## Built-in functions
 
-Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
+The STD standard library: built-in functions available to every script. Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Plugin modules ([`NET`, `SSH`, `MARKDOWN`](https://github.com/jzombie/rust-oxdock#plugin-references)) add more functions the same way, and hosts can extend the language with their own modules ([Extending OxDock from Rust](https://github.com/jzombie/rust-oxdock#extending-oxdock-from-rust)). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
 
 ### STD::BASE64_DECODE
 
@@ -2713,6 +2960,78 @@ standard decoder. Pairs with `BASE64_DECODE` for the round trip.
 IMPORT [STD]
 LET $encoded: STRING = BASE64_ENCODE("hello")
 ASSERT_EQ $encoded "aGVsbG8="
+```
+
+### STD::BOOL
+
+Convert a value to BOOL.
+
+Trims ASCII whitespace; accepts `true`/`false`, `1`/`0`,
+`yes`/`no`, `on`/`off` in any case. Passes Bool through. Empty
+and anything else fail: an empty string is not a boolean, so
+absent env names (which read empty) must go through `BOOL_OR`
+with a stated default instead of converting here.
+
+
+**Signature:** `STD::BOOL($val: BOOL|STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$val` (`BOOL|STRING`): Value to convert to `BOOL`.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: convert**
+
+```oxdock
+IMPORT [STD]
+LET $n: BOOL = BOOL("yes")
+ASSERT_EQ $n true
+LET $f: BOOL = BOOL("0")
+ASSERT_EQ $f false
+```
+
+### STD::BOOL_OR
+
+Coerce text to `BOOL`, substituting a default for empty.
+
+Returns `BOOL`. Blank input (a declared-but-absent env name, which
+reads empty) resolves to `default` instead of failing, so each flag
+site states its own absent polarity explicitly: negative-polarity
+flags (`dry_run`) default true, positive ones default false. No
+implicit polarity lives in the coercion. Non-blank garbage still
+fails naming the input, exactly like `LET $x: BOOL` coercion.
+
+
+**Signature:** `STD::BOOL_OR($text: STRING, $default: BOOL) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to coerce (`true`/`false`, `1`/`0`, `yes`/`no`/`on`/`off`, any case).
+- `$default` (`BOOL`): Absent-value default, used when the text is blank.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: absent-default**
+
+```oxdock
+# Absent names read empty; the default settles the polarity.
+IMPORT [STD]
+INHERIT_ENV [OXDOCK_TEST_ABSENT_FLAG]
+LET $dry: BOOL = BOOL_OR("{{ env:OXDOCK_TEST_ABSENT_FLAG }}", true)
+ASSERT_EQ $dry true
+
+# Present values coerce strictly, ignoring the default.
+LET $off: BOOL = BOOL_OR("false", true)
+ASSERT_EQ $off false
 ```
 
 ### STD::CWD
@@ -3077,6 +3396,64 @@ LET $flag: INT = INT(true)
 ASSERT_EQ $flag 1
 ```
 
+### STD::INTERPRETER
+
+Path of the running interpreter binary.
+
+Runtime script assembly: compose a child script dynamically, then
+execute it in a fresh interpreter run. Returns the executing
+binary as a `STRING`, so the parent needs no bridged env var.
+Feed the child script on stdin: no file is written, and the child
+reads it because its stdin is piped (bare `RUN [$exe]` suffices,
+no `--script -`):
+
+```text
+# Assemble the child script dynamically: the parent interpolates
+# its own bindings into the pipe, then runs the interpreter on it.
+# The pipe delivers EOF when the producer step ends, so the child
+# reads exactly one script.
+LET $exe: STRING = INTERPRETER()
+LET $who: STRING = "Ada"
+LET $child: PIPE
+WITH_IO [stdout=$child] ECHO """
+    ECHO "hello {{ $who }}!"
+    """
+LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe]
+ASSERT_CONTAINS $out "hello Ada!"
+```
+
+(Shown as `text`: fence runners execute against a harness binary,
+not a CLI, so reinvocation only runs under a real interpreter.)
+
+Eval-like, not macro-like: the child re-parses from bytes in a
+separate process, so no bindings cross back (only stdout and files),
+no static gate spans parent and child, and each run pays a spawn.
+Prefer modules for reuse (statically gated, in-process) and build
+macros for compile-time codegen. Reach for assembly when the child
+must run isolated, or under a different binary than the parent
+(version-skew runs, fresh-binary proofs).
+Unsupported under Miri isolation: the lookup itself fails there
+instead of returning a path.
+
+
+**Signature:** `STD::INTERPRETER() -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: self**
+
+```oxdock
+# The running interpreter resolves to a non-empty path.
+IMPORT [STD]
+LET $exe: STRING = INTERPRETER()
+LET $nonempty: BOOL = $exe != ""
+ASSERT_EQ $nonempty true
+```
+
 ### STD::IS_EXEC
 
 Report whether a name resolves to an executable file (#100).
@@ -3116,6 +3493,33 @@ ASSERT_EQ $missing false
 WRITE tool.txt payload
 LET $plain: BOOL = IS_EXEC("tool.txt")
 ASSERT_EQ $plain false
+```
+
+### STD::IS_MAIN
+
+Report whether the current context is the entry script.
+
+True at entry top level and inside entry-owned functions; false
+inside module-owned functions and module init bodies. Lets a
+library file double as a runnable demo: guard the demo with
+`IF IS_MAIN()` so importing it stays side-effect free.
+
+
+**Signature:** `STD::IS_MAIN() -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: main**
+
+```oxdock
+# Entry top level runs as main.
+IMPORT [STD]
+LET $m: BOOL = IS_MAIN()
+ASSERT_EQ $m true
 ```
 
 ### STD::IS_TERMINAL

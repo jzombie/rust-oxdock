@@ -252,18 +252,18 @@ impl<P: ProcessManager> Engine<P> {
     pub fn module_table(&self) -> oxdock_parser::ModuleTable {
         let mut table = std_module_table();
         for module in &self.modules {
-            let mut functions = std::collections::HashSet::new();
+            let mut func_names = std::collections::HashSet::new();
             for registration in &module.funcs {
                 let name = match registration {
                     HostRegistration::Stateful { name, .. } => name,
                     HostRegistration::Pure { name, .. } => name,
                     HostRegistration::Both { name, .. } => name,
                 };
-                functions.insert(name.clone());
+                func_names.insert(name.clone());
             }
             table.modules.insert(
                 module.name.clone(),
-                Some(oxdock_parser::ModuleFuncs { functions }),
+                Some(oxdock_parser::ModuleFuncs { func_names }),
             );
         }
         table

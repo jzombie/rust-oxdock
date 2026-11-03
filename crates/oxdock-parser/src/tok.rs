@@ -15,6 +15,10 @@
 //! `expand_string`, matching `parse_quoted_string`); `"""` bodies lower
 //! later through the shared `lower_block_string`.
 
+use crate::constants::{
+    KEYWORD_ASYNC, KEYWORD_ELSE, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_ISOLATED,
+    KEYWORD_REMOTE, KEYWORD_TIMEOUT, KEYWORD_WHILE, KEYWORD_WITH_IO,
+};
 use crate::error::ParseErrorKind;
 use std::fmt;
 
@@ -137,15 +141,16 @@ impl std::error::Error for LexError {}
 fn is_block_head(w: &str) -> bool {
     matches!(
         w,
-        "IF" | "ELSE"
-            | "FOR"
-            | "WHILE"
-            | "FUNC"
-            | "TIMEOUT"
-            | "ISOLATED"
-            | "ASYNC"
-            | "REMOTE"
-            | "WITH_IO"
+        KEYWORD_IF
+            | KEYWORD_ELSE
+            | KEYWORD_FOR
+            | KEYWORD_WHILE
+            | KEYWORD_FUNC
+            | KEYWORD_TIMEOUT
+            | KEYWORD_ISOLATED
+            | KEYWORD_ASYNC
+            | KEYWORD_REMOTE
+            | KEYWORD_WITH_IO
     )
 }
 
@@ -612,10 +617,10 @@ impl<'a> StrLexer<'a> {
             ),
             // An unclosed `WITH_IO` bracket is that command's syntax
             // error (never unknown): it names the missing closer.
-            (GroupDelim::Bracket, Some((head, opened))) if head == "WITH_IO" => (
-                format!("WITH_IO bindings missing closing `]` (opened on line {opened})"),
+            (GroupDelim::Bracket, Some((head, opened))) if head == KEYWORD_WITH_IO => (
+                format!("{KEYWORD_WITH_IO} bindings missing closing `]` (opened on line {opened})"),
                 Some(ParseErrorKind::InvalidSyntax {
-                    command: "WITH_IO".to_string(),
+                    command: KEYWORD_WITH_IO.to_string(),
                 }),
             ),
             _ => (format!("unclosed group, expected `{close}`"), None),

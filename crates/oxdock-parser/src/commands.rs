@@ -472,7 +472,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME, PATH]`; got {got}."
         )),
         name if name == KEYWORD_IMPORT => Some(format!(
-            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; got {got}."
+            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; file imports take a quoted path with a mandatory alias, e.g. `IMPORT [\"./lib.oxdock\" AS LIB]`, and brackets mix both across lines, e.g. `IMPORT [STD, \"a.oxdock\" AS A]`; got {got}."
         )),
         name if name == KEYWORD_EXPORT => Some(
             "EXPORT marks script FUNCs and qualified host functions as tools, e.g. `EXPORT FOO`, `EXPORT [FOO, STD::INT]`."
@@ -597,6 +597,7 @@ macro_rules! declare_commands {
                             name: $name, syntax: $syntax, summary: $summary,
                             description: $desc, args: $args, flags: $flags,
                             default_output: $out, examples: $examples,
+                            in_index: true,
                         };
                         let (flags, positional) = crate::strip_flags(raw_args, &meta)?;
                         crate::command::validate_positionals_against_meta(
@@ -620,6 +621,7 @@ macro_rules! declare_commands {
                     name: $name, syntax: $syntax, summary: $summary,
                     description: $desc, args: $args, flags: $flags,
                     default_output: $out, examples: $examples,
+                    in_index: true,
                 }, )*
             ];
             // Structural statements are registered separately (see
@@ -670,6 +672,7 @@ impl StepKind {
                     f(arg);
                 }
             }
+            StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => {}
             StepKind::For { in_expr, .. } => f(in_expr),
             StepKind::If { cond, else_ifs, .. } => {
                 f(cond);
@@ -765,6 +768,134 @@ impl StepKind {
         }
     }
 
+    /// Visit every immediate raw string fragment (literal argument text
+    /// and mixed-value text fragments). Typed expressions are NOT
+    /// visited here. Boxed sub-kinds and bodies are NOT descended, same
+    /// as [`walk_exprs`](Self::walk_exprs): the caller recurses through
+    /// [`walk_child_kinds`](Self::walk_child_kinds) or the checker's own
+    /// body walk. Exhaustive for the same reason: a new string-carrying
+    /// variant must appear here or env-template checking misses it.
+    pub fn walk_raw_strings(&self, f: &mut impl FnMut(&str)) {
+        fn walk_arg(arg: &Arg, f: &mut impl FnMut(&str)) {
+            match arg {
+                Arg::String(text, _) => f(text),
+                Arg::Expr(_) => {}
+                Arg::Parts(parts) => {
+                    for part in parts {
+                        if let ArgPart::Text(text, _) = part {
+                            f(text);
+                        }
+                    }
+                }
+            }
+        }
+        fn walk_opt(arg: &Option<Arg>, f: &mut impl FnMut(&str)) {
+            if let Some(arg) = arg {
+                walk_arg(arg, f);
+            }
+        }
+        fn walk_target(target: &AssertTarget, f: &mut impl FnMut(&str)) {
+            if let AssertTarget::Value(arg) = target {
+                walk_arg(arg, f);
+            }
+        }
+        match self {
+            StepKind::Assign { .. }
+            | StepKind::Set { .. }
+            | StepKind::Call { .. }
+            | StepKind::Return { .. }
+            | StepKind::For { .. }
+            | StepKind::If { .. }
+            | StepKind::While { .. } => {}
+            StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
+                walk_arg(duration, f);
+            }
+            StepKind::Workdir(arg)
+            | StepKind::Echo(arg)
+            | StepKind::Run(arg)
+            | StepKind::Mkdir(arg)
+            | StepKind::Exit(arg) => walk_arg(arg, f),
+            StepKind::Env { value, .. } => walk_arg(value, f),
+            StepKind::Copy { from, to, .. }
+            | StepKind::Symlink { from, to, .. }
+            | StepKind::Archive {
+                src: from, dst: to, ..
+            }
+            | StepKind::Install { from, to } => {
+                walk_arg(from, f);
+                walk_arg(to, f);
+            }
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                walk_arg(src, f);
+                walk_arg(dst, f);
+                walk_opt(max_bytes, f);
+            }
+            StepKind::CopyGit { rev, from, to, .. } => {
+                walk_arg(rev, f);
+                walk_arg(from, f);
+                walk_arg(to, f);
+            }
+            StepKind::Ls(arg) | StepKind::Read(arg) => walk_opt(arg, f),
+            StepKind::Remove { path, .. } => walk_arg(path, f),
+            StepKind::Prompt {
+                message, default, ..
+            } => {
+                walk_arg(message, f);
+                walk_opt(default, f);
+            }
+            StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
+                walk_arg(path, f);
+                walk_opt(contents, f);
+            }
+            StepKind::Expand { path, overrides } => {
+                walk_opt(path, f);
+                for (_, value) in overrides {
+                    walk_arg(value, f);
+                }
+            }
+            StepKind::AssertEq {
+                actual, expected, ..
+            } => {
+                walk_target(actual, f);
+                walk_opt(expected, f);
+            }
+            StepKind::AssertContains { haystack, needle } => {
+                walk_target(haystack, f);
+                walk_arg(needle, f);
+            }
+            StepKind::ListAppend { item, .. } => walk_arg(item, f),
+            StepKind::RunExec { argv } => {
+                for arg in argv {
+                    walk_arg(arg, f);
+                }
+            }
+            StepKind::WithIo { .. }
+            | StepKind::WithIoBlock { .. }
+            | StepKind::TypeAlias { .. }
+            | StepKind::Workspace(_)
+            | StepKind::ImportFile { .. }
+            | StepKind::ImportFuncs { .. }
+            | StepKind::InheritEnv { .. }
+            | StepKind::Isolated { .. }
+            | StepKind::IsolatedInheritEnv { .. }
+            | StepKind::ReadLine { .. }
+            | StepKind::AssignCapture { .. }
+            | StepKind::AwaitCapture { .. }
+            | StepKind::AsyncBlock { .. }
+            | StepKind::AssignAsync { .. }
+            | StepKind::Await { .. }
+            | StepKind::Cancel { .. }
+            | StepKind::RemoteBlock { .. }
+            | StepKind::FuncDef { .. }
+            | StepKind::Break
+            | StepKind::Continue => {}
+        }
+    }
+
     /// Visit every immediate child kind: boxed sub-commands and the kinds
     /// of every body step. Exhaustive like [`walk_exprs`](Self::walk_exprs):
     /// new block shapes fail compilation here.
@@ -835,6 +966,8 @@ impl StepKind {
             | StepKind::Sleep { .. }
             | StepKind::ListAppend { .. }
             | StepKind::Call { .. }
+            | StepKind::ImportFile { .. }
+            | StepKind::ImportFuncs { .. }
             | StepKind::Return { .. }
             | StepKind::Break
             | StepKind::Continue => {}
@@ -955,6 +1088,13 @@ declare_commands! {
         FuncDef { name: String, params: Vec<(String, String)>, body: Vec<Step>, docs: Option<(String, String)> },
         Call { name: String, args: Vec<Expr> },
         Return { expr: Box<Expr> },
+        ImportFile { path: String, alias: String },
+        ImportFuncs {
+            path: String,
+            alias: Option<String>,
+            func_names: Vec<String>,
+            type_names: Vec<String>,
+        },
         While { cond: Box<Expr>, body: Vec<Step> },
         Break,
         Continue,
@@ -1205,12 +1345,19 @@ declare_commands! {
             "#} },
             Example { name: "interpolation", fence_meta: None, code: indoc! {r#"
                 # `{{ env:KEY }}` reads the script environment; a bare name
-                # resolves a DSL variable instead. Unknown keys expand to
-                # empty with no host fallback.
+                # resolves a DSL variable instead. Every `env:` read must
+                # be declared first: KEY here comes from the ENV below.
                 ENV USER=OxDock
                 LET $WHO: STRING = "Ada"
-                ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!{{ env:OXDOCK_DOC_NO_SUCH_KEY }}"
+                ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!"
                 ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada!"
+            "#} },
+            Example { name: "undeclared env read fails", fence_meta: Some("expect_error:\"env:OXDOCK_DOC_NO_SUCH_KEY\""), code: indoc! {r#"
+                # No declaration anywhere: the whole-closure static gate
+                # rejects the read before the first step runs. (The
+                # error names the variable: undeclared environment
+                # variable `env:OXDOCK_DOC_NO_SUCH_KEY`.)
+                ECHO "Hello {{ env:OXDOCK_DOC_NO_SUCH_KEY }}!"
             "#} },
         ],
         lower: |_flags, args| Ok(StepKind::Echo(join_value(args, "ECHO")?)),
@@ -2145,6 +2292,7 @@ declare_commands! {
 pub fn all_structural_metadata() -> Vec<CommandMeta> {
     vec![
         CommandMeta {
+            in_index: true,
             name: "WITH_IO",
             syntax: "WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> } | WITH_IO [tty[, stdin=$p][, rows=<int>][, cols=<int>]] RUN ...",
             summary: "Reroute standard streams.",
@@ -2260,6 +2408,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "FOR",
             syntax: "FOR $item: TYPE IN <expr> { <commands> } | FOR $key: STRING, $value: TYPE IN <expr> { <commands> }",
             summary: "Iterate over a list or map.",
@@ -2314,6 +2463,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "IF",
             syntax: "IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]",
             summary: "Conditional execution.",
@@ -2406,6 +2556,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "LET",
             syntax: "LET $var: TYPE = <expr> | LET $p: PIPE | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task | LET $var: TYPE = { <commands> }",
             summary: "Bind script-local variables.",
@@ -2537,6 +2688,29 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 LET $count: INT = 42
                 ASSERT_EQ $count 42
+            "#},
+                },
+                Example {
+                    name: "bool coercion",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # BOOL spellings coerce case-insensitively. Empty is
+                # not a boolean: absent flags state a default through
+                # BOOL_OR instead of converting here.
+                LET $t: BOOL = "TRUE"
+                ASSERT_EQ $t true
+                LET $f: BOOL = "no"
+                ASSERT_EQ $f false
+            "#},
+                },
+                Example {
+                    name: "bool coercion rejects empty",
+                    fence_meta: Some("expect_error:\"expected BOOL\""),
+                    code: indoc! {r#"
+                # Empty never reads as false: an empty string fails
+                # BOOL coercion instead of picking a polarity.
+                ENV EMPTY_FLAG=""
+                LET $e: BOOL = "{{ env:EMPTY_FLAG }}"
             "#},
                 },
                 Example {
@@ -2690,6 +2864,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            // `MUTATION` is not an actual keyword, so don't index it as such.
+            in_index: false,
             name: "MUTATION",
             syntax: "$var = <expr>",
             summary: "Mutate a declared variable.",
@@ -2774,6 +2950,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "ASYNC",
             syntax: "ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }",
             summary: "Run steps in a background thread.",
@@ -2825,6 +3002,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "AWAIT",
             syntax: "AWAIT $var | LET $out: STRING = AWAIT $var",
             summary: "Join a background task.",
@@ -2867,6 +3045,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "CANCEL",
             syntax: "CANCEL $var",
             summary: "Synchronously cancel a background task.",
@@ -2902,6 +3081,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "TIMEOUT",
             syntax: "TIMEOUT <duration> <command...> | TIMEOUT <duration> { <commands> } | TIMEOUT <duration> AWAIT $var",
             summary: "Enforce an execution deadline.",
@@ -2979,6 +3159,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "ISOLATED",
             syntax: "ISOLATED { INHERIT_ENV [...] <commands> } | ISOLATED <command...>",
             summary: "Run steps with the seeded script environment.",
@@ -3028,21 +3209,30 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                     # The block resets to the session seed: plain steps and
-                    # spawns run with zero prelude, while outer customs
-                    # stay out.
-                    ENV OUTER_CUSTOM=outer-val
+                    # spawns run with zero prelude. PATH needs no
+                    # declaration: contract seed rows are always admitted.
                     WRITE top-path.txt "{{ env:PATH }}"
                     ISOLATED {
                         WRITE inner-path.txt "{{ env:PATH }}"
-                        WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
                         RUN "echo seed-ok"
                     }
                     LET $top: STRING = READ top-path.txt
                     LET $inner: STRING = READ inner-path.txt
                     ASSERT_EQ $inner $top
-                    LET $custom: STRING = READ inner-custom.txt
-                    ASSERT_EQ $custom ""
                     ASSERT_CONTAINS stdout "seed-ok"
+                "#},
+                },
+                Example {
+                    name: "outer customs stay out",
+                    fence_meta: Some("expect_error:\"env:OUTER_CUSTOM\""),
+                    code: indoc! {r#"
+                    # Outer customs never enter the block: without an
+                    # allowlist entry the static gate rejects the read
+                    # before the first step runs.
+                    ENV OUTER_CUSTOM=outer-val
+                    ISOLATED {
+                        WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
+                    }
                 "#},
                 },
                 Example {
@@ -3081,6 +3271,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "REMOTE",
             syntax: "REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }",
             summary: "Run a sealed block on a remote target.",
@@ -3254,6 +3445,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "FUNC",
             syntax: "FUNC NAME([$param: TYPE, ...]) { <commands> }",
             summary: "Define a user function.",
@@ -3319,6 +3511,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
             name: "RETURN",
             syntax: "RETURN [<expr>]",
             summary: "Return a value from a function, task, or inline block.",
@@ -3356,6 +3549,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             }],
         },
         CommandMeta {
+            in_index: true,
             name: "WHILE",
             syntax: "WHILE <bool-expr> { <commands> }",
             summary: "Loop while a condition holds.",
@@ -3388,6 +3582,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             }],
         },
         CommandMeta {
+            in_index: true,
             name: "BREAK",
             syntax: "BREAK",
             summary: "Exit the innermost loop.",
@@ -3415,6 +3610,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             }],
         },
         CommandMeta {
+            in_index: true,
             name: "CONTINUE",
             syntax: "CONTINUE",
             summary: "Skip to the next loop iteration.",
@@ -3445,42 +3641,244 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             }],
         },
         CommandMeta {
+            in_index: true,
             name: KEYWORD_IMPORT,
-            syntax: "IMPORT [<module>, ...] | IMPORT <module>",
-            summary: "Bring module functions into bare-call scope.",
+            syntax: "IMPORT [<module>, ...] | IMPORT <module> | IMPORT [\"<path>\" AS <ALIAS>] | IMPORT [<module | \"<path>\" AS <ALIAS> | [F, ... FROM (\"<path>\" | <module>) (AS <ALIAS>)?]>, ...]",
+            summary: "Bring module functions into bare-call scope; import script files and types.",
             description: indoc! {r#"
-                Every function call names its module (`STD::GLOB(...)`,
-                `MOCK::READ_CSV(...)`) unless the module is imported:
-                `IMPORT [STD]` lets the rest of the scope call `GLOB(...)`
-                bare. Calls resolve at parse time against `SCRIPT`
-                definitions first, then imported modules; unknown modules,
-                unknown functions, and unimported bare calls are parse
-                errors, never runtime surprises.
+                Bare calls:
+                - Every call names its module (`STD::GLOB(...)`)
+                  unless the module is imported. `IMPORT [STD]` lets
+                  the rest of the scope call `GLOB(...)` bare.
+                - Calls resolve at parse time: `SCRIPT` definitions
+                  first, then imported modules. Unknown modules,
+                  unknown functions, and unimported bare calls are
+                  parse errors, never runtime surprises.
 
-                IMPORT is a lowering directive, not a step: it applies from
-                its line to the enclosing block exit, then reverts, exactly
-                like `LET` scoping but with no runtime footprint. Guards do
-                not apply to it. Two imported modules exporting one name is
-                an ambiguity error: qualify the call instead.
+                Scope:
+                - `IMPORT` is a lowering directive, not a step. It
+                  applies from its line to the enclosing block exit,
+                  then reverts like `LET` scoping, with no runtime
+                  footprint. Guards do not apply to it.
+                - Two imported modules exporting one name is an
+                  ambiguity error: qualify the call instead.
 
-                `EXPORT` marks top-level script `FUNC`s as externally
-                callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`).
-                Single-file scope; see the MCP host for consumption.
+                File imports:
+                - Form: `IMPORT ["./lib.oxdock" AS LIB]` (any file
+                  extension). The alias is mandatory and becomes the
+                  namespace (`LIB::FOO`), with no filename inference.
+                - Only `EXPORT`ed top-level `FUNC`s cross the
+                  boundary. Unexported means private; variables are
+                  never exportable.
+                - Types cross as bare globals (like host types). A
+                  whole-file import persists every exported alias, so
+                  `LET $p: PERSON` works after any import of its file.
+                - Each file initializes once; every alias shares the
+                  module's top-level bindings.
+                - The file must exist when the run starts. Generated
+                  imports are rejected before the first step.
+
+                Mixed brackets:
+                - Brackets mix both kinds across lines if needed
+                  (`IMPORT [STD, "a.oxdock" AS A]`). Each module entry
+                  registers in order; each file entry runs in order.
+                - Without an alias a file entry is a parse error.
+                - Value positions (`LET`, `ASYNC`,
+                  `WITH_IO`/`TIMEOUT` inners) take exactly one file
+                  entry and no modules.
+
+                Selective harvests:
+                - Form: `IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
+                  optionally `AS ALIAS`. Only the named top-level
+                  functions register, bare or namespaced under the
+                  alias. Harvested names must be `EXPORT`ed.
+                - Single name needs no inner brackets
+                  (`IMPORT [FOO FROM "x.oxdock"]`); several keep
+                  `[[F, G FROM ...]]`. Several harvests group the
+                  same way (`IMPORT [[TYPE A FROM STD],
+                  [TYPE B FROM STD]]`), file or host alike.
+                - Types and functions combine in one entry
+                  (`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`).
+                  Harvested types must be `EXPORT TYPE`d and persist
+                  bare globally, so `FUNC` signatures keep working.
+                - The file body never executes, so harvesting is
+                  side-effect free. The file's own nested imports
+                  still load. Harvests produce no value and never
+                  appear in value positions.
+
+                Host library types:
+                - Form: `IMPORT [TYPE PIPE FROM STD]`. The import
+                  validates the type resolves globally and records no
+                  file. Host types stay global with or without the
+                  harvest; the explicit form only documents the
+                  dependency and fails fast on typos.
+                - Bare `FROM` names a library; quoted `FROM`
+                  names a file path. Quoted `FROM "STD"` still parses
+                  for backcompat, but bare is preferred.
+
+                Paths:
+                - Workspace-side, against the importing file's
+                  directory (entry parent at top level; off-workspace
+                  entries resolve like stdin against the root).
+                - Module-owned relative paths resolve against the
+                  module file's own directory, not the caller cwd.
+                  Entry code keeps resolving against the run cwd.
+                - Missing files fail before the first step runs.
+                  Write-then-import in one script is rejected; check
+                  libraries into the tree.
+
+                Module rules (every file import is a module):
+                - Context: never inherits the caller. Env resets to
+                  the seed plus the module init's own contributions
+                  (declared `INHERIT_ENV` names re-read from the host
+                  on every call), cwd to the defining file's
+                  directory, workspace to the run-initial root.
+                - Determinism: the same file behaves identically no
+                  matter who imports it.
+                - State: one init per file, shared by every alias.
+                  Top-level `LET` bindings drain into a single store
+                  visible to all of the module's functions.
+                - Workspace: declare `WORKSPACE` or `WORKDIR`
+                  in-function to read outside the module directory.
+                  Without it the reset leaves the module on the
+                  run-initial root (snapshot by default), even when
+                  the caller switched away.
+                - Exports: only `EXPORT`ed top-level `FUNC`s and
+                  `EXPORT TYPE` aliases cross. Variables never cross.
+                - Imports: whole-file or harvest, only exported
+                  functions and types cross. Stateful harvests are
+                  rejected (import the file to share its module).
+                  Nested imports load automatically.
+                - Cycles: circular imports and depth over 32 fail
+                  before the first step runs.
+
+                Exports and tools:
+                - `EXPORT` marks top-level `FUNC`s as externally
+                  callable (`EXPORT FOO`, `EXPORT [FOO, BAR]`) and as
+                  the file importable interface. Re-exports promote
+                  an import (`IMPORT ["x.oxdock" AS A]` then `EXPORT
+                  A::FOO`).
+                - `EXPORT TYPE` marks aliases the same way
+                  (`EXPORT TYPE PERSON`, `EXPORT TYPE [A, B]`, mixed
+                  `EXPORT [TYPE A, FUNC B]`). Only exported aliases
+                  cross, so `FUNC` signatures survive imports.
+                - Serving resolves re-exports through the registry;
+                  unexported names fail tool setup instead of serving
+                  a dead tool. The MCP server skips `TYPE` exports
+                  when building tools while still resolving imported
+                  types for signatures. Single-file scope otherwise;
+                  see the MCP host for consumption.
             "#},
             args: &[],
             flags: &[],
             default_output: None,
-            examples: &[Example {
-                name: "import",
-                fence_meta: None,
-                code: indoc! {r#"
+            examples: &[
+                Example {
+                    name: "import",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 # Calls name their module (STD::GLOB); IMPORT [STD] drops the prefix.
                 WRITE a.txt "hi \{{ env:WHO }}!"
                 IMPORT [STD]
                 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
                 ASSERT_CONTAINS stdout "hi World!"
             "#},
-            }],
+                },
+                Example {
+                    name: "import missing file fails upfront",
+                    fence_meta: Some("expect_error:\"must exist when the run starts\""),
+                    code: indoc! {r#"
+                # Generated imports are rejected: a file that does not
+                # exist when the run starts cannot be analyzed, so the
+                # import fails before the first step runs.
+                WORKSPACE LOCAL
+                WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
+                IMPORT ["lib.oxdock" AS LIB]
+            "#},
+                },
+                Example {
+                    name: "import missing alias fails",
+                    fence_meta: Some("expect_error:\"mandatory alias\""),
+                    code: indoc! {r#"
+                # A file entry without AS is a parse error.
+                IMPORT ["./lib.oxdock"]
+            "#},
+                },
+                Example {
+                    name: "module cannot export a variable",
+                    fence_meta: Some("expect_error:\"does not match any top-level FUNC\""),
+                    code: indoc! {r#"
+                # Only top-level FUNCs are exportable, never variables.
+                LET $FOO: STRING = "x"
+                EXPORT FOO
+            "#},
+                },
+                Example {
+                    name: "import re-export unknown alias fails",
+                    fence_meta: Some("expect_error:\"does not match any top-level FUNC\""),
+                    code: indoc! {r#"
+                # Re-exports name a visible import alias.
+                IMPORT ["x.oxdock" AS A]
+                EXPORT NOSUCH::FOO
+            "#},
+                },
+                Example {
+                    name: "export type aliases",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # TYPE aliases declare shapes once; EXPORT TYPE shares
+                # them so importing files can use the same spelling.
+                TYPE PERSON = MAP<name: STRING>
+
+                FUNC GREET($p: PERSON) {
+                    RETURN "hi {{ $p.name }}"
+                }
+                EXPORT GREET
+                EXPORT TYPE PERSON
+
+                LET $p: PERSON = {name: "Ada"}
+                LET $greeting: STRING = GREET($p)
+                ASSERT_EQ $greeting "hi Ada"
+            "#},
+                },
+                Example {
+                    name: "import type from library",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # One bracket mixes entry kinds: STD brings functions bare,
+                # each harvest names a type. Types resolve globally with
+                # or without the harvests; the explicit form only documents
+                # the dependency, so this grouping is example only. Bare
+                # FROM names a library; quoted FROM names a file path.
+                IMPORT [STD, [TYPE PIPE FROM STD], [TYPE DURATION FROM STD]]
+
+                LET $p: PIPE
+                WITH_IO [stdout=$p] ECHO hello
+                WITH_IO [stdin=$p] READ_LINE $line
+                ASSERT_EQ $line "hello"
+
+                LET $d: DURATION = "5s"
+                LET $files: LIST<STRING> = GLOB("*.oxdock")
+            "#},
+                },
+                Example {
+                    name: "export unknown type fails",
+                    fence_meta: Some("expect_error:\"does not match any top-level TYPE\""),
+                    code: indoc! {r#"
+                # Only declared TYPE aliases are exportable.
+                TYPE PERSON = MAP<name: STRING>
+                EXPORT TYPE ANIMAL
+            "#},
+                },
+                Example {
+                    name: "undeclared type fails",
+                    fence_meta: Some("expect_error:\"unknown type\""),
+                    code: indoc! {r#"
+                # TYPE names must be declared before use.
+                LET $p: PERSON = {name: "Ada"}
+            "#},
+                },
+            ],
         },
     ]
 }
@@ -3886,6 +4284,33 @@ impl fmt::Display for StepKind {
                 let ps: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
                 write!(f, "{}({})", name, ps.join(", "))
             }
+            StepKind::ImportFile { path, alias } => {
+                write!(f, "IMPORT [\"{}\" AS {}]", path, alias)
+            }
+            StepKind::ImportFuncs {
+                path,
+                alias,
+                func_names,
+                type_names,
+            } => {
+                let mut parts: Vec<String> = Vec::new();
+                for t in type_names {
+                    parts.push(format!("TYPE {t}"));
+                }
+                for n in func_names {
+                    parts.push(n.clone());
+                }
+                match alias {
+                    Some(alias) => write!(
+                        f,
+                        "IMPORT [[{} FROM \"{}\" AS {}]]",
+                        parts.join(", "),
+                        path,
+                        alias
+                    ),
+                    None => write!(f, "IMPORT [[{} FROM \"{}\"]]", parts.join(", "), path),
+                }
+            }
             StepKind::Return { expr } => write!(f, "RETURN {}", expr),
             StepKind::TypeAlias { name, target } => write!(f, "TYPE {} = {}", name, target),
             StepKind::While { cond, body } => {
@@ -4262,26 +4687,71 @@ pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> Parse
 /// EXPORT site. Promoted verbatim (the pest finish pass delegates).
 pub(crate) fn validate_exports(
     ctx: &SpanContext,
-    exports: &[String],
+    func_exports: &[String],
+    type_exports: &[String],
     top: &HashSet<String>,
+    top_types: &HashSet<String>,
     modules: &ModuleTable,
+    top_imports: &[String],
 ) -> ParseResult<()> {
-    for name in exports {
-        let valid = match name.split_once("::") {
+    for name in func_exports {
+        let valid = match name.split_once(crate::constants::MODULE_SEPARATOR) {
             None => top.contains(name),
             Some((module, base)) if module == crate::constants::SCRIPT_MODULE_NAME => {
                 top.contains(base)
             }
-            Some((module, base)) => match modules.modules.get(module) {
-                None => false,
+            Some((module, _base)) => match modules.modules.get(module) {
+                None => {
+                    // File-import aliases (#115) never enter the module
+                    // table: a re-export names an imported function for
+                    // the entry's own tool surface. The alias must be a
+                    // visible import; whether the file actually exports
+                    // the name is checked where the import loads (closure
+                    // validation, then serving), since parse performs no
+                    // IO. Anything else is an unknown module.
+                    top_imports.iter().any(|m| m == module)
+                }
                 Some(None) => true,
-                Some(Some(funcs)) => funcs.functions.contains(base),
+                Some(Some(funcs)) => funcs.func_names.contains(_base),
             },
         };
         if !valid {
             return Err(ParseError::validation(
                 crate::constants::KEYWORD_EXPORT,
                 format!("EXPORT `{name}` does not match any top-level FUNC or known module member"),
+                ctx,
+            ));
+        }
+    }
+    for name in type_exports {
+        // Local TYPE aliases export bare; qualified `ALIAS::TYPE`
+        // re-exports defer existence to import loading (same as func
+        // re-exports), requiring only a visible import alias here.
+        // Bare re-exports of imported types (whole-file types land
+        // bare) defer when the file has imports, so `EXPORT PERSON`
+        // after `IMPORT ["lib" AS LIB]` can promote the imported type.
+        let valid = match name.split_once(crate::constants::MODULE_SEPARATOR) {
+            None => top_types.contains(name) || !top_imports.is_empty(),
+            Some((module, _base)) => {
+                if module == crate::constants::SCRIPT_MODULE_NAME {
+                    top_types.contains(_base)
+                } else {
+                    match modules.modules.get(module) {
+                        None => top_imports.iter().any(|m| m == module),
+                        // Host modules: types live in the global type
+                        // directory, not the func table. Parse cannot
+                        // know host type membership (descriptors register
+                        // at runtime), so a known module passes here and
+                        // import loading validates the member.
+                        Some(_) => true,
+                    }
+                }
+            }
+        };
+        if !valid {
+            return Err(ParseError::validation(
+                crate::constants::KEYWORD_EXPORT,
+                format!("EXPORT TYPE `{name}` does not match any top-level TYPE"),
                 ctx,
             ));
         }
@@ -5565,6 +6035,8 @@ mod tests {
                 // Bare `NAME(...)` calls share the `FUNC` reference page;
                 // there is no call keyword to document on its own.
                 StepKind::Call { .. } => None,
+                // Both import forms are documented on the `IMPORT` page.
+                StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => Some("IMPORT"),
                 StepKind::Return { .. } => Some("RETURN"),
                 StepKind::While { .. } => Some("WHILE"),
                 StepKind::Break => Some("BREAK"),

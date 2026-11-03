@@ -6,7 +6,7 @@ use oxdock_mcp::{
     schema::{is_json_compatible, schema_for_tag},
     tools::map_json_args,
 };
-use oxdock_parser::TypeTag;
+use oxdock_parser::{SCRIPT_MODULE_NAME, TypeTag};
 use serde_json::json;
 
 use std::sync::Arc;
@@ -34,7 +34,7 @@ fn meta_docs(
 ) -> FuncMeta {
     FuncMeta {
         name: name.to_string(),
-        module: "SCRIPT".to_string(),
+        module: SCRIPT_MODULE_NAME.to_string(),
         kind: oxdock_core::FuncKind::Script,
         params: Some(params),
         returns: None,

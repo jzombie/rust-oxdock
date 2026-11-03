@@ -17,7 +17,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   (export VERSION=v0.33.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
+#   (export VERSION=v0.34.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
@@ -351,7 +351,6 @@ fi
   OXDOCK_BINARY_NAME="${OXDOCK_BINARY_NAME:-}" \
   OXDOCK_EXPECTED_VERSION="$VERSION" \
   OXDOCK_SKIP_DOWNLOAD=false \
-  OXDOCK_INTERPRETER="$ENGINE" \
   OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" \
   OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" \
   "$ENGINE" "$tmp/install.oxfile") || {

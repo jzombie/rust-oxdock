@@ -504,7 +504,7 @@ mod tests {
             .modules
             .keys()
             .map(String::as_str)
-            .filter(|name| *name != "STD")
+            .filter(|name| *name != oxdock_parser::STD_MODULE_NAME)
             .collect();
         registered.sort_unstable();
         let mut expected = header.clone();

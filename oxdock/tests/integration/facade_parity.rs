@@ -27,6 +27,7 @@ fn facade_execute_with_result_runs_script() {
     let opts = Options {
         script: ScriptSource::Path(script_path),
         shell: false,
+        dry_run: false,
         endpoints: EndpointFlags::default(),
         remote_serve: false,
         mcp: false,

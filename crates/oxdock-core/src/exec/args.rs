@@ -22,10 +22,17 @@ pub(crate) fn type_mismatch(ctx: &str, expected: &TypeTag, value: &Value) -> any
 }
 
 /// Single BOOL spelling for the whole runtime: trim, case-insensitive
-/// `true`/`false`, plus `1`/`0`. Empty and anything else is `None`
-/// (coercion fails, flag checks default false). One rule, no piecemeal.
+/// `true`/`false`, plus `1`/`0`, plus `yes`/`no`/`on`/`off`. Empty is
+/// `None`: an empty string is not a boolean, so declared-but-absent
+/// names (which read empty) fail here instead of silently picking a
+/// polarity. Flag sites state their own absent-default explicitly
+/// through `STD::BOOL_OR`. Anything else is `None` too. One rule,
+/// no piecemeal.
 pub(crate) fn parse_bool_str(s: &str) -> Option<bool> {
     let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
     if t.eq_ignore_ascii_case("true")
         || t.eq_ignore_ascii_case("yes")
         || t.eq_ignore_ascii_case("on")
@@ -375,7 +382,11 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}")),
         Expr::Env(key) => match cx.state.get_env(key) {
             Some(v) => Ok(Value::string(v.to_string())),
-            None => anyhow::bail!("undefined environment variable `env:{key}`"),
+            // Declared-but-absent means empty: the static gate already
+            // rejected undeclared reads, so anything reaching here was
+            // explicitly inherited or set. No empty-value bridging is
+            // needed on the host side.
+            None => Ok(Value::string(String::new())),
         },
         Expr::KeyPath { base, keys } => resolve_key_path_value(cx, base, keys),
         Expr::List(items) => {
@@ -549,7 +560,7 @@ pub(crate) fn path_type_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, &path_str)
+        .resolve_write(&cx.state.effective_cwd(), &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
     let kind = match cx.state.fs.entry_kind_no_follow(&target) {
         Ok(EntryKind::Symlink) => "symlink",
@@ -690,7 +701,11 @@ fn is_executable_candidate<P: ProcessManager>(
     candidate: &str,
     exts: &[String],
 ) -> bool {
-    let Ok(guard) = cx.state.fs.resolve_read(&cx.state.cwd, candidate) else {
+    let Ok(guard) = cx
+        .state
+        .fs
+        .resolve_read(&cx.state.effective_cwd(), candidate)
+    else {
         return false;
     };
     if !matches!(
@@ -748,7 +763,7 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.cwd, &path_str)
+        .resolve_write(&cx.state.effective_cwd(), &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
     let mut current = target;
     loop {
@@ -764,7 +779,7 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
                     return Ok(Value::bool(false));
                 };
                 if parent.as_path().as_os_str().is_empty() {
-                    let cwd = cx.state.cwd.clone();
+                    let cwd = cx.state.effective_cwd();
                     let anchor =
                         cx.state.fs.resolve_write(&cwd, ".").map_err(|e| {
                             anyhow::anyhow!("failed to resolve working directory: {e}")
@@ -1236,7 +1251,8 @@ fn evaluate_compiled_math<P: ProcessManager>(
             }
             MathOp::LoadEnv(key) => match cx.state.get_env(key) {
                 Some(v) => stack.push(Value::string(v.to_string())),
-                None => anyhow::bail!("undefined environment variable `env:{key}`"),
+                // Same absent-means-empty rule as `Expr::Env` above.
+                None => stack.push(Value::string(String::new())),
             },
             MathOp::LoadKeyPath { base, keys } => {
                 stack.push(resolve_key_path_value(cx, base, keys)?);
@@ -1361,7 +1377,7 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
     // pending snapshot materializes here (a snapshot read), while local
     // roots resolve with zero I/O. The listing below then runs on concrete
     // paths in both cases.
-    let _ = cx.state.fs.resolve_read(&cx.state.cwd, ".")?;
+    let _ = cx.state.fs.resolve_read(&cx.state.effective_cwd(), ".")?;
     let root = cx.state.fs.root().clone();
     let root_path = root.as_path().to_path_buf();
     let mut entries: Vec<Value> = root
@@ -1393,7 +1409,7 @@ pub(crate) fn load_toml_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_read(&cx.state.cwd, &path_str)
+        .resolve_read(&cx.state.effective_cwd(), &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve TOML path '{}': {}", path_str, e))?;
     let content = cx
         .state
@@ -1420,7 +1436,7 @@ pub(crate) fn load_json_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_read(&cx.state.cwd, &path_str)
+        .resolve_read(&cx.state.effective_cwd(), &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve JSON path '{}': {}", path_str, e))?;
     let content = cx
         .state
@@ -1542,24 +1558,12 @@ pub fn json_to_value(v: serde_json::Value) -> Value {
     }
 }
 
-/// Single-pass string expansion: handles escapes and `{{ }}` template tags.
-///
-/// `{{ $var }}` : interpolates script variable (supports key-paths: `{{ $d.name.0 }}`).
-/// `{{ env:KEY }}` : interpolates environment variable.
-/// Bare `$` is literal text : `{{ }}` is the ONLY interpolation trigger.
-///
-/// Escape rules:
-/// - `\\` → literal `\`
-/// - `\{{` → literal `{{` (skip template expansion)
-/// - `\n`, `\t`, `\r`, `\"` → control characters
-/// - Unrecognized `\X` → literal `\X`
-pub(crate) fn expand_string<P: ProcessManager>(
-    input: &str,
-    env: &std::collections::HashMap<String, String>,
-    state: &ExecState<P>,
-) -> Result<String> {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+/// Emit literal template text with the historical backslash escapes.
+/// Braces are always literal here because the shared template splitter
+/// already pulled every live placeholder out. See
+/// [`TemplateSegments`](oxdock_parser::template::TemplateSegments).
+fn push_escaped_text(output: &mut String, text: &str) {
+    let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\\' => match chars.peek() {
@@ -1599,88 +1603,111 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     output.push('\\');
                 }
             },
-            '{' if chars.peek() == Some(&'{') => {
-                chars.next(); // consume second {
-                let mut template_key = String::new();
-                let mut found_close = false;
-                while let Some(ch) = chars.next() {
-                    if ch == '}' && chars.peek() == Some(&'}') {
-                        chars.next(); // consume second }
-                        found_close = true;
-                        break;
-                    }
-                    template_key.push(ch);
-                }
-                if found_close {
-                    let key = template_key.trim();
-                    if let Some(var_expr) = key.strip_prefix('$') {
-                        // {{ $var }} or {{ $var.path.0 }} : look up in scope chain.
-                        // Parse key-path from the extracted string, NOT from chars.
-                        // Trim whitespace from segments to tolerate spaces around dots.
-                        // Bare $var never reads the environment; use {{ env:KEY }}.
-                        let mut parts = var_expr.split('.');
-                        if let Some(base_var) = parts.next() {
-                            let base_trim = base_var.trim();
-                            let mut current = state.get_var(base_trim);
-                            for part in parts {
-                                let part_trim = part.trim();
-                                current = match current {
-                                    Some(v) => {
-                                        if let Some(map) = v.as_map() {
-                                            map.get(part_trim).cloned()
-                                        } else if let Some(list) = v.as_list() {
-                                            part_trim
-                                                .parse::<usize>()
-                                                .ok()
-                                                .and_then(|idx| list.get(idx).cloned())
-                                        } else {
-                                            None
-                                        }
+            _ => {
+                output.push(c);
+            }
+        }
+    }
+}
+
+/// Single-pass string expansion: handles escapes and `{{ }}`
+/// template tags, split by the shared template scanner.
+///
+/// `{{ $var }}` : interpolates script variable (supports key-paths:
+/// `{{ $d.name.0 }}`).
+/// `{{ env:KEY }}` : interpolates environment variable.
+/// Bare `$` is literal text : `{{ }}` is the ONLY interpolation trigger.
+///
+/// Escape rules:
+/// - `\\` is a literal backslash
+/// - `\{{` is a literal opener (skip template expansion)
+/// - `\n`, `\t`, `\r`, `\"` are control characters
+/// - Unrecognized escapes keep the backslash
+pub(crate) fn expand_string<P: ProcessManager>(
+    input: &str,
+    env: &std::collections::HashMap<String, String>,
+    state: &ExecState<P>,
+) -> Result<String> {
+    use oxdock_parser::template::{TemplateSegment, TemplateSegments};
+    let mut output = String::with_capacity(input.len());
+    for segment in TemplateSegments::new(input) {
+        match segment {
+            TemplateSegment::Text(text) => push_escaped_text(&mut output, text),
+            TemplateSegment::Placeholder { key } => {
+                if let Some(var_expr) = key.strip_prefix('$') {
+                    // {{ $var }} or {{ $var.path.0 }} : look up in scope chain.
+                    // Parse key-path from the extracted string, NOT from chars.
+                    // Trim whitespace from segments to tolerate spaces around dots.
+                    // Bare $var never reads the environment; use {{ env:KEY }}.
+                    let mut parts = var_expr.split('.');
+                    if let Some(base_var) = parts.next() {
+                        let base_trim = base_var.trim();
+                        let mut current = state.get_var(base_trim);
+                        for part in parts {
+                            let part_trim = part.trim();
+                            current = match current {
+                                Some(v) => {
+                                    if let Some(map) = v.as_map() {
+                                        map.get(part_trim).cloned()
+                                    } else if let Some(list) = v.as_list() {
+                                        part_trim
+                                            .parse::<usize>()
+                                            .ok()
+                                            .and_then(|idx| list.get(idx).cloned())
+                                    } else {
+                                        None
                                     }
-                                    None => None,
-                                };
-                                if current.is_none() {
-                                    break;
                                 }
+                                None => None,
+                            };
+                            if current.is_none() {
+                                break;
                             }
-                            if let Some(v) = current {
-                                output.push_str(&format_value_for_string(&v)?);
-                            }
-                            // Missing → emit empty
                         }
-                    } else {
-                        // {{ env:KEY }} : seeded script env map
-                        // {{ script_env:KEY }} : explicit script env only
-                        // {{ bare_key }} : DSL variable only, NOT env
-                        if let Some(env_key) = key.strip_prefix("env:") {
-                            if let Some(val) = env
-                                .get(env_key)
-                                .map(String::as_str)
-                                .or_else(|| state.get_env(env_key))
-                            {
-                                output.push_str(val);
-                            }
-                            // Missing → emit empty
-                        } else if let Some(env_key) = key.strip_prefix("script_env:") {
-                            if let Some(val) = env.get(env_key) {
-                                output.push_str(val);
-                            }
-                            // Missing → emit empty
-                        } else if let Some(val) = state.get_var(key) {
-                            output.push_str(&format_value_for_string(&val)?);
-                        } else if let Some((module, func, args_src)) =
-                            oxdock_process::parse_placeholder_call(key)
-                        {
-                            // `{{ MODULE::FUNC(args) }}` through the shared
-                            // pure table: the same registry EXPAND
-                            // templates resolve, so ordinary strings and
-                            // file templates agree. Unknown functions and
-                            // bad args fail here instead of rendering
-                            // empty; keys that are not call shaped keep
-                            // the empty below (no variable can spell
-                            // `::` plus parens).
-                            let table = state.pure_function_table();
-                            let callee = table
+                        if let Some(v) = current {
+                            output.push_str(&format_value_for_string(&v)?);
+                        }
+                        // Missing → emit empty
+                    }
+                } else {
+                    // `{{ env:KEY }}` reads the script env: declared-but-
+                    // absent emits empty, exactly like `env:KEY`
+                    // expressions. Undeclared use is a static error
+                    // before the run; this empty is the runtime rule for
+                    // declared names the host did not provide.
+                    // `{{ script_env:KEY }}` reads the explicit
+                    // script env only. `{{ bare_key }}` reads DSL
+                    // variables only, never env.
+                    if let Some(env_key) = key.strip_prefix("env:") {
+                        // Whitespace-tolerant like the static gate: the
+                        // shared splitter trims the whole key, and the
+                        // name trims here, so `{{ env: FOO }}` resolves
+                        // exactly what the checker admitted.
+                        let env_key = env_key.trim();
+                        let val = env
+                            .get(env_key)
+                            .map(String::as_str)
+                            .or_else(|| state.get_env(env_key))
+                            .unwrap_or_default();
+                        output.push_str(val);
+                    } else if let Some(env_key) = key.strip_prefix("script_env:") {
+                        let env_key = env_key.trim();
+                        output.push_str(env.get(env_key).map(String::as_str).unwrap_or_default());
+                    } else if let Some(val) = state.get_var(key) {
+                        output.push_str(&format_value_for_string(&val)?);
+                    } else if let Some((module, func, args_src)) =
+                        oxdock_process::parse_placeholder_call(key)
+                    {
+                        // `{{ MODULE::FUNC(args) }}` through the shared
+                        // pure table: the same registry EXPAND
+                        // templates resolve, so ordinary strings and
+                        // file templates agree. Unknown functions and
+                        // bad args fail here instead of rendering
+                        // empty; keys that are not call shaped keep
+                        // the empty below (no variable can spell
+                        // `::` plus parens).
+                        let table = state.pure_function_table();
+                        let callee = table
                                 .get(module.as_str())
                                 .and_then(|entries| entries.get(func.as_str()))
                                 .ok_or_else(|| {
@@ -1696,24 +1723,16 @@ pub(crate) fn expand_string<P: ProcessManager>(
                                         known.join(", ")
                                     )
                                 })?;
-                            let vars = state.all_vars();
-                            let mut args = Vec::with_capacity(args_src.len());
-                            for src in args_src {
-                                args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
-                            }
-                            let result = callee(args)?;
-                            output.push_str(&format_value_for_string(&result)?);
+                        let vars = state.all_vars();
+                        let mut args = Vec::with_capacity(args_src.len());
+                        for src in args_src {
+                            args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
                         }
-                        // Bare key not in DSL vars → emit empty
+                        let result = callee(args)?;
+                        output.push_str(&format_value_for_string(&result)?);
                     }
-                } else {
-                    // Unclosed template : preserve verbatim
-                    output.push_str("{{");
-                    output.push_str(&template_key);
+                    // Bare key not in DSL vars → emit empty
                 }
-            }
-            _ => {
-                output.push(c);
             }
         }
     }
