@@ -1,36 +1,47 @@
-// Games launcher: picks a `.oxfile`/`.oxdock` game from this directory
-// with the DSL itself, then runs it.
+// Script launcher: picks a runnable script from this directory with
+// the DSL itself, then runs it.
 //
 // Run with:
 //   cargo run -p oxdock --example index
 
-use oxdock::{Engine, Step, oxdock, parse_script};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{Engine, GuardedPath, PathResolver, Step, oxdock, parse_script};
 
 fn main() -> anyhow::Result<()> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
     let examples = GuardedPath::new_root(dir.as_path())?;
 
-    // Picker menu built by the DSL: GLOB discovers the games, PROMPT
+    // Picker menu built by the DSL: GLOB discovers the scripts, PROMPT
     // chooses one, and the answer returns through Engine bindings.
     let picker: Vec<Step> = oxdock! {
         IMPORT [STD]
-        LET $games: LIST<STRING> = GLOB("*.ox*")
-        LET $count: INT = 0
-        FOR $g: STRING IN $games {
-            IF TEXT_ENDS_WITH($g, ".oxfile") || TEXT_ENDS_WITH($g, ".oxdock") {
-                $count = $count + 1
-                ECHO "{{ $count }}: {{ $g }}"
+        LET $exts: LIST<STRING> = [".oxfile", ".oxdock"]
+        LET $found: LIST<STRING> = GLOB("*.ox*")
+        LET $scripts: LIST<STRING> = []
+        LET $ok: BOOL = false
+        FOR $f: STRING IN $found {
+            $ok = false
+            FOR $e: STRING IN $exts {
+                IF TEXT_ENDS_WITH($f, $e) {
+                    $ok = true
+                }
+            }
+            IF $ok {
+                LIST_APPEND $scripts $f
             }
         }
+        LET $count: INT = 0
+        FOR $s: STRING IN $scripts {
+            $count = $count + 1
+            ECHO "{{ $count }}: {{ $s }}"
+        }
         IF $count == 0 {
-            ECHO "No games found beside index.rs."
+            ECHO "No runnable scripts found beside index.rs."
             EXIT 1
         }
         LET $raw: STRING = ""
         LET $choice: STRING = ""
         WHILE true {
-            PROMPT $raw "Choose a game by number?" "1"
+            PROMPT $raw "Choose a script by number?" "1"
             IF !TEXT_MATCH($raw, "^[0-9]+$") {
                 ECHO "Numbers only."
                 CONTINUE
@@ -41,12 +52,10 @@ fn main() -> anyhow::Result<()> {
                 CONTINUE
             }
             LET $k: INT = 0
-            FOR $h: STRING IN $games {
-                IF TEXT_ENDS_WITH($h, ".oxfile") || TEXT_ENDS_WITH($h, ".oxdock") {
-                    $k = $k + 1
-                    IF $k == $n {
-                        $choice = $h
-                    }
+            FOR $t: STRING IN $scripts {
+                $k = $k + 1
+                IF $k == $n {
+                    $choice = $t
                 }
             }
             BREAK
@@ -59,12 +68,12 @@ fn main() -> anyhow::Result<()> {
         .bindings
         .get("choice")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow::anyhow!("picker did not choose a game"))?;
+        .ok_or_else(|| anyhow::anyhow!("picker did not choose a script"))?;
 
-    let game_path = examples.join(choice)?;
+    let script_path = examples.join(choice)?;
     let resolver = PathResolver::new(examples.as_path(), examples.as_path())?;
-    let text = resolver.read_to_string(&game_path)?;
-    let game: Vec<Step> = parse_script(&text)?;
-    Engine::new().run_steps(&examples, &game)?;
+    let text = resolver.read_to_string(&script_path)?;
+    let script: Vec<Step> = parse_script(&text)?;
+    Engine::new().run_steps(&examples, &script)?;
     Ok(())
 }

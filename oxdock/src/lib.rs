@@ -6,6 +6,7 @@
 // including `--no-default-features` (macros-only) builds.
 pub use oxdock_build;
 pub use oxdock_core;
+pub use oxdock_fs::{GuardedPath, PathResolver};
 pub use oxdock_parser;
 
 pub use oxdock_macros::{oxdock, oxdock_embed, oxdock_prepare};
