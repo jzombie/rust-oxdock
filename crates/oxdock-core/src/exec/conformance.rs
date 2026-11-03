@@ -116,7 +116,7 @@ pub fn assert_module_returns_conformance<P: ProcessManager + Clone + Send + 'sta
                 ExampleOutcome::Failed(reason) => {
                     failures.push(format!("{qualified} example '{}': {reason}", example.name))
                 }
-                ExampleOutcome::TimedOut => {}
+                ExampleOutcome::TimedOut | ExampleOutcome::Skipped => {}
             }
         }
         if ok == 0 {
@@ -210,6 +210,14 @@ enum ExampleOutcome {
     ExpectedError,
     Failed(String),
     TimedOut,
+    /// Reinvocation examples (calling `INTERPRETER()` and spawning the
+    /// result via `RUN [$exe ...]`) never run here: the mock manager
+    /// records argv runs without spawning, so a child interpreter
+    /// cannot execute in-gate. Hermetic slot coverage comes from
+    /// sibling examples; docs_conformance owns the reinvocation
+    /// verdict with a staged interpreter binary. Inconclusive, like
+    /// `TimedOut`: never counts for or against coverage.
+    Skipped,
 }
 
 /// Execute one example end to end with `exec_modules` registered, on
@@ -254,6 +262,16 @@ fn run_example<P: ProcessManager + Clone + Send + 'static>(
         },
         None => None,
     };
+    // Reinvocation examples call INTERPRETER() and spawn the result
+    // (`RUN [$exe ...]`). The gate runs under the caller's process
+    // manager (a recording mock in core's own suite), which never
+    // spawns: the child could not execute here. Parsing above still
+    // validates the script; execution belongs to docs_conformance
+    // with its staged binary. Hermetic examples without a child run
+    // (like INTERPRETER's own `self`) still execute below.
+    if example.code.contains("INTERPRETER()") && example.code.contains("RUN [$exe") {
+        return ExampleOutcome::Skipped;
+    }
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let modules: Vec<HostModule<P>> = exec_modules.to_vec();
     std::thread::spawn(move || {

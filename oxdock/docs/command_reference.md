@@ -1419,7 +1419,9 @@ Paths:
   Entry code keeps resolving against the run cwd.
 - Missing files fail before the first step runs.
   Write-then-import in one script is rejected; check
-  libraries into the tree.
+  libraries into the tree, or compose them at runtime
+  and run a child interpreter (see the child run
+  examples below).
 
 Module rules (every file import is a module):
 - Context: never inherits the caller. Env resets to
@@ -1553,6 +1555,66 @@ ASSERT_EQ $line "hello"
 
 LET $d: DURATION = "5s"
 LET $files: LIST<STRING> = GLOB("*.oxdock")
+```
+
+**Example: run composed modules in a child**
+
+```oxdock roots:unified
+# Dynamic composition with files: the parent writes a
+# library and an entry script, then runs the entry in a
+# fresh interpreter. Child-side {{ }} stays escaped so
+# the parent does not interpolate it while writing. The
+# child runs by path so entry-relative IMPORT resolves.
+# Unified roots: the child inherits one workspace, so
+# parent and child see the same files.
+IMPORT [STD]
+WRITE lib.oxfile """
+    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+    EXPORT GREET
+    """
+WRITE main.oxfile """
+    IMPORT ["lib.oxfile" AS LIB]
+    LET $g: STRING = LIB::GREET("Ada")
+    ECHO "says \{{ $g }}"
+    """
+LET $exe: STRING = INTERPRETER()
+LET $out: STRING = RUN [$exe, "main.oxfile"]
+ASSERT_CONTAINS $out "says hi Ada"
+```
+
+**Example: dynamic module composition**
+
+```oxdock roots:unified
+# A function that composes a module: MAKE_GREETER bakes
+# its argument into a generated file with a bare {{ }},
+# then a child run imports the result. Bare {{ }} injects
+# parent values at write time; escaped \{{ }} survives for
+# the child to interpolate. Bind imported calls with LET:
+# {{ }} placeholders resolve pure functions only.
+IMPORT [STD]
+
+# The composer: parent values land in the module source.
+FUNC MAKE_GREETER($who: STRING) {
+    WRITE greeter.oxfile """
+        FUNC GREET() { RETURN "hi {{ $who }}" }
+        EXPORT GREET
+        """
+    RETURN "greeter.oxfile"
+}
+
+# The entry: imports the composed module by its path.
+WRITE main.oxfile """
+    IMPORT ["greeter.oxfile" AS G]
+    LET $g: STRING = G::GREET()
+    ECHO "says \{{ $g }}"
+    """
+
+# Compose, then run the entry in a fresh interpreter.
+LET $made: STRING = MAKE_GREETER("Ada")
+ASSERT_EQ $made "greeter.oxfile"
+LET $exe: STRING = INTERPRETER()
+LET $out: STRING = RUN [$exe, "main.oxfile"]
+ASSERT_CONTAINS $out "says hi Ada"
 ```
 
 **Example: export unknown type fails**
@@ -3400,45 +3462,36 @@ ASSERT_EQ $flag 1
 
 Path of the running interpreter binary.
 
-Runtime script assembly: compose a child script dynamically, then
+Dynamic composition: compose a child script dynamically, then
 execute it in a fresh interpreter run. Returns the executing
 binary as a `STRING`, so the parent needs no bridged env var.
 Feed the child script on stdin: no file is written, and the child
 reads it because its stdin is piped (bare `RUN [$exe]` suffices,
-no `--script -`):
+no `--script -`).
 
-```text
-# Assemble the child script dynamically: the parent interpolates
-# its own bindings into the pipe, then runs the interpreter on it.
-# The pipe delivers EOF when the producer step ends, so the child
-# reads exactly one script.
-LET $exe: STRING = INTERPRETER()
-LET $who: STRING = "Ada"
-LET $child: PIPE
-WITH_IO [stdout=$child] ECHO """
-    ECHO "hello {{ $who }}!"
-    """
-LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe]
-ASSERT_CONTAINS $out "hello Ada!"
-```
-
-(Shown as `text`: fence runners execute against a harness binary,
-not a CLI, so reinvocation only runs under a real interpreter.)
+Child-side `{{ }}` must survive the parent's write: escape it as
+`\{{` wherever the composition passes through `WRITE` or a pipe
+producer, or the parent interpolates it away before the child
+ever parses. File children run by path (`RUN [$exe, "main.oxdock"]`)
+so entry-relative `IMPORT` resolves; self-contained children ride
+the stdin pipe.
 
 Eval-like, not macro-like: the child re-parses from bytes in a
 separate process, so no bindings cross back (only stdout and files),
 no static gate spans parent and child, and each run pays a spawn.
 Prefer modules for reuse (statically gated, in-process) and build
-macros for compile-time codegen. Reach for assembly when the child
+macros for compile-time codegen. Reach for composition when the child
 must run isolated, or under a different binary than the parent
 (version-skew runs, fresh-binary proofs).
+Embedding hosts staging an interpreter override change only where
+the path points; the spawn semantics stay identical.
 Unsupported under Miri isolation: the lookup itself fails there
 instead of returning a path.
 
 
 **Signature:** `STD::INTERPRETER() -> STRING`
 
-**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+**Contexts:** [`AST`](#context-ast) only
 
 **Returns:** `STRING`
 
@@ -3452,6 +3505,24 @@ IMPORT [STD]
 LET $exe: STRING = INTERPRETER()
 LET $nonempty: BOOL = $exe != ""
 ASSERT_EQ $nonempty true
+```
+
+**Example: dynamic composition**
+
+```oxdock
+# Compose the child script dynamically: the parent interpolates
+# its own bindings into the pipe, then runs the interpreter on it.
+# The pipe delivers EOF when the producer step ends, so the child
+# reads exactly one script.
+IMPORT [STD]
+LET $exe: STRING = INTERPRETER()
+LET $who: STRING = "Ada"
+LET $child: PIPE
+WITH_IO [stdout=$child] ECHO """
+    ECHO "hello {{ $who }}!"
+    """
+LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe]
+ASSERT_CONTAINS $out "hello Ada!"
 ```
 
 ### STD::IS_EXEC
@@ -3520,6 +3591,46 @@ library file double as a runnable demo: guard the demo with
 IMPORT [STD]
 LET $m: BOOL = IS_MAIN()
 ASSERT_EQ $m true
+```
+
+**Example: library doubles as demo**
+
+```oxdock roots:unified
+# A library doubles as a runnable demo: guard the demo with
+# IF IS_MAIN() so importing it stays side effect free. The
+# parent writes both files, then runs each in a fresh
+# interpreter: direct execution prints the demo, importing
+# it does not. Unified roots: the child inherits one
+# workspace, so parent and child see the same files. The
+# exact stdout match proves the demo line stays out of the
+# importing run.
+IMPORT [STD]
+
+# The library under test: demo guarded by IS_MAIN.
+WRITE lib.oxfile """
+    IMPORT [STD]
+    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+    EXPORT GREET
+    IF IS_MAIN() {
+        ECHO "demo: hi Ada"
+    }
+    """
+
+# The importer: calls the library, prints only its own line.
+WRITE main.oxfile """
+    IMPORT ["lib.oxfile" AS LIB]
+    LET $g: STRING = LIB::GREET("Bo")
+    ECHO "imported: \{{ $g }}"
+    """
+
+# Direct run executes the demo.
+LET $exe: STRING = INTERPRETER()
+LET $direct: STRING = RUN [$exe, "lib.oxfile"]
+ASSERT_CONTAINS $direct "demo: hi Ada"
+
+# Importing run stays silent apart from its own line.
+LET $via: STRING = RUN [$exe, "main.oxfile"]
+ASSERT_EQ $via "imported: hi Bo\n"
 ```
 
 ### STD::IS_TERMINAL

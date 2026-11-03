@@ -235,6 +235,11 @@ pub struct ExecIo {
     /// and forks inherit it, so one run's workers attribute to exactly
     /// one counter even as tasks fan out.
     worker_counter: Arc<AtomicU64>,
+    /// Host override for `INTERPRETER()`: the path returned instead of
+    /// the current executable. Staged by embedding hosts (and doc
+    /// conformance) whose in-process binary is not a CLI; `None` keeps
+    /// the `current_exe` default.
+    interpreter_override: Option<String>,
 }
 
 /// Shared append-only manifest of executed `--to-host` declarations.
@@ -659,6 +664,21 @@ impl ExecIo {
     /// This run's shared pump-worker count.
     pub fn worker_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.worker_counter)
+    }
+
+    /// Stage the `INTERPRETER()` path for this run. Chainable. Embedding
+    /// hosts whose engine runs in-process (no CLI binary as the current
+    /// executable) point this at their CLI so child reinvocation leaves
+    /// the process boundary intact.
+    pub fn set_interpreter<S: Into<String>>(&mut self, path: S) -> &mut Self {
+        self.interpreter_override = Some(path.into());
+        self
+    }
+
+    /// The staged interpreter path, if any. `None` selects the
+    /// `current_exe` default.
+    pub fn interpreter_override(&self) -> Option<String> {
+        self.interpreter_override.clone()
     }
 
     /// Stage the transport behind one `REMOTE` target. Chainable; the NET

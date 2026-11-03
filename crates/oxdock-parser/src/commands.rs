@@ -3725,7 +3725,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   Entry code keeps resolving against the run cwd.
                 - Missing files fail before the first step runs.
                   Write-then-import in one script is rejected; check
-                  libraries into the tree.
+                  libraries into the tree, or compose them at runtime
+                  and run a child interpreter (see the child run
+                  examples below).
 
                 Module rules (every file import is a module):
                 - Context: never inherits the caller. Env resets to
@@ -3859,6 +3861,68 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 LET $d: DURATION = "5s"
                 LET $files: LIST<STRING> = GLOB("*.oxdock")
+            "#},
+                },
+                Example {
+                    name: "run composed modules in a child",
+                    fence_meta: Some("roots:unified"),
+                    code: indoc! {r#"
+                # Dynamic composition with files: the parent writes a
+                # library and an entry script, then runs the entry in a
+                # fresh interpreter. Child-side {{ }} stays escaped so
+                # the parent does not interpolate it while writing. The
+                # child runs by path so entry-relative IMPORT resolves.
+                # Unified roots: the child inherits one workspace, so
+                # parent and child see the same files.
+                IMPORT [STD]
+                WRITE lib.oxfile """
+                    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+                    EXPORT GREET
+                    """
+                WRITE main.oxfile """
+                    IMPORT ["lib.oxfile" AS LIB]
+                    LET $g: STRING = LIB::GREET("Ada")
+                    ECHO "says \{{ $g }}"
+                    """
+                LET $exe: STRING = INTERPRETER()
+                LET $out: STRING = RUN [$exe, "main.oxfile"]
+                ASSERT_CONTAINS $out "says hi Ada"
+            "#},
+                },
+                Example {
+                    name: "dynamic module composition",
+                    fence_meta: Some("roots:unified"),
+                    code: indoc! {r#"
+                # A function that composes a module: MAKE_GREETER bakes
+                # its argument into a generated file with a bare {{ }},
+                # then a child run imports the result. Bare {{ }} injects
+                # parent values at write time; escaped \{{ }} survives for
+                # the child to interpolate. Bind imported calls with LET:
+                # {{ }} placeholders resolve pure functions only.
+                IMPORT [STD]
+
+                # The composer: parent values land in the module source.
+                FUNC MAKE_GREETER($who: STRING) {
+                    WRITE greeter.oxfile """
+                        FUNC GREET() { RETURN "hi {{ $who }}" }
+                        EXPORT GREET
+                        """
+                    RETURN "greeter.oxfile"
+                }
+
+                # The entry: imports the composed module by its path.
+                WRITE main.oxfile """
+                    IMPORT ["greeter.oxfile" AS G]
+                    LET $g: STRING = G::GREET()
+                    ECHO "says \{{ $g }}"
+                    """
+
+                # Compose, then run the entry in a fresh interpreter.
+                LET $made: STRING = MAKE_GREETER("Ada")
+                ASSERT_EQ $made "greeter.oxfile"
+                LET $exe: STRING = INTERPRETER()
+                LET $out: STRING = RUN [$exe, "main.oxfile"]
+                ASSERT_CONTAINS $out "says hi Ada"
             "#},
                 },
                 Example {

@@ -591,6 +591,32 @@ fn readme_snippets_execute_as_documented() -> Result<()> {
     Ok(())
 }
 
+/// Path of the workspace CLI binary next to the test executable
+/// (`target/debug/deps/<test>` -> `target/debug/oxdock`). Doc fences
+/// that reinvoke the interpreter (`INTERPRETER()` + `RUN`) run against
+/// this binary; the harness binary itself cannot interpret scripts.
+/// Bails when the binary is missing so the failure names the fix
+/// (`cargo build -p oxdock`) instead of spawning nonsense.
+fn conformance_interpreter() -> Result<String> {
+    let exe = std::env::current_exe().context("determine test executable")?;
+    let debug = exe
+        .parent()
+        .and_then(|deps| deps.parent())
+        .ok_or_else(|| anyhow::anyhow!("test executable has no target dir"))?;
+    #[cfg(windows)]
+    let candidate = debug.join("oxdock.exe");
+    #[cfg(not(windows))]
+    let candidate = debug.join("oxdock");
+    if candidate.is_file() {
+        Ok(candidate.to_string_lossy().into_owned())
+    } else {
+        Err(anyhow::anyhow!(
+            "interpreter binary missing at {}",
+            candidate.display()
+        ))
+    }
+}
+
 /// Pin the project cache dir for doc-fence execution (issue #163).
 /// `WORKSPACE CACHE` fences must not write to the developer's real OS
 /// cache: every fence resolver computes its cache guard from this override,
@@ -656,6 +682,15 @@ fn execute_block(block: &FencedBlock, name: &str) -> Result<()> {
     for target in &block.metadata.mock_remote {
         io.set_remote_runner_for_target(target.clone(), Arc::new(MockRemoteRunner));
     }
+    // Reinvocation fences (`INTERPRETER()` + `RUN`) need a real CLI:
+    // the harness binary cannot interpret scripts. Point the run at
+    // the workspace CLI binary next to the test executable
+    // (`target/debug/oxdock`); the binary must exist, so build it
+    // first (`cargo build -p oxdock`). Fails loudly instead of
+    // spawning the test runner as a script interpreter.
+    io.set_interpreter(conformance_interpreter().with_context(|| {
+        format!("{name}: snippet needs the oxdock CLI binary; run `cargo build -p oxdock` first")
+    })?);
 
     let execution = run_steps_with_context_result_with_io(&fs_root, &context_root, &steps, io);
 
