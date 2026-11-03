@@ -6654,7 +6654,7 @@ fn main() -> anyhow::Result<()> {
         LET $n: INT = WORD_COUNT($s)
         ASSERT_EQ $n 3
     };
-    let run = engine.run_steps(&root, &steps)?;
+    let run = engine.run_steps_eagerly(&root, &steps)?;
     assert_eq!(format!("{}", run.bindings["s"]), "3 words, 17 chars");
     Ok(())
 }
@@ -6708,7 +6708,7 @@ fn main() -> anyhow::Result<()> {
         ASSERT_EQ $s "demo"
         WRITE tag.txt "{{ $s }}::{{ $t }}"
     };
-    let run = engine.run_steps(&root_path, &steps)?;
+    let run = engine.run_steps_eagerly(&root_path, &steps)?;
     assert!(run.bindings.contains_key("s"));
 
     let reader = oxdock::PathResolver::new(root_path.root(), root_path.root()).unwrap();
@@ -7191,7 +7191,7 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 - **Inline**: Payload bytes carried inside the word itself, with zero allocation. Available to `Copy` scalars that fit in 64 bits.
 - **NaN boxing**: A technique that packs values into 64 bits by reusing NaN float patterns. Denser than 16 byte words at the cost of pointer masking and constrained host values.
 - **Payload**: The 64 bit data half of a word: either inline bytes or a pointer to one owned box.
-- **Plugin**: A host extension module ([NET](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md), [SSH](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md)) loaded with IMPORT, bringing extra functions into script scope.
+- **Plugin**: A host extension module ([NET](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md), [SSH](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md), [MARKDOWN](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-markdown-plugin/README.md)) loaded with IMPORT, bringing extra functions into script scope.
 - **Provenance**: The recorded origin of a pointer, which Rust uses to judge whether a memory access is valid. Round tripping through the same box type preserves it.
 - **RPN**: Reverse Polish Notation: arithmetic compiled to a flat stack program instead of tree walking.
 - **Vtable**: The operations half of a descriptor: function pointers that clone, drop, compare, and render values of that type.

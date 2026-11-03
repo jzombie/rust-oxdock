@@ -3,7 +3,7 @@ use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_macros::oxdock;
 
-fn run_steps(root: &GuardedPath, steps: &[oxdock_parser::Step]) {
+fn run_steps_eagerly(root: &GuardedPath, steps: &[oxdock_parser::Step]) {
     run_steps_with_context_result_with_io(root, root, steps, ExecIo::new()).unwrap();
 }
 
@@ -22,7 +22,7 @@ fn macro_nested_arithmetic_folds_and_runs() {
 
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_steps(&root, &steps);
+    run_steps_eagerly(&root, &steps);
     assert_eq!(read_file(&root, "nested.txt"), "80");
 }
 
@@ -44,7 +44,7 @@ fn macro_dynamic_rpn_matches_runtime() {
 
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_steps(&root, &steps);
+    run_steps_eagerly(&root, &steps);
     // 14 + 1 = 15; 1 + (15 * (2.5 - 2)) = 8.5; 30 > 25 so big.txt exists.
     assert_eq!(read_file(&root, "total.txt"), "15|8.5");
     assert_eq!(read_file(&root, "big.txt"), "yes");
@@ -98,11 +98,11 @@ fn macro_and_parse_execute_identically() {
 
     let temp_macro = GuardedPath::tempdir().unwrap();
     let root_macro = temp_macro.as_guarded_path().clone();
-    run_steps(&root_macro, &via_macro);
+    run_steps_eagerly(&root_macro, &via_macro);
 
     let temp_parse = GuardedPath::tempdir().unwrap();
     let root_parse = temp_parse.as_guarded_path().clone();
-    run_steps(&root_parse, &via_parse);
+    run_steps_eagerly(&root_parse, &via_parse);
 
     // 6 * 8 - 5 = 43; 43 + 0.5 = 43.5.
     assert_eq!(read_file(&root_macro, "out.txt"), "43|43.5");

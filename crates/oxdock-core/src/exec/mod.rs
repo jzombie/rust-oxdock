@@ -92,7 +92,28 @@ pub const SNAPSHOT_PENDING_DISPLAY: &str = "<snapshot:pending>";
 /// lazy error path.
 pub const SNAPSHOT_TREE_UNAVAILABLE: &str = "<unavailable>";
 
-pub fn run_steps(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
+/// Execute the DSL with the CLI default: a lazily-created snapshot.
+/// No temporary directory exists until the first snapshot-targeted
+/// resolution. Reads of existing workspace files fall through to the
+/// build context, but directory listings (GLOB, LS) are snapshot-scoped,
+/// so workspace discovery belongs before the lazy run or under
+/// `WORKSPACE LOCAL`. Fire-and-forget form of
+/// [`run_steps_with_lazy_snapshot`]: for bindings and the snapshot
+/// handle, call that directly. For runs that must land exactly in a
+/// given root with no snapshot, use [`run_steps_eagerly`].
+pub fn run_steps(
+    build_context: &GuardedPath,
+    steps: &[Step],
+    io: ExecIo,
+) -> Result<()> {
+    run_steps_with_lazy_snapshot(build_context, steps, io).map(|_| ())
+}
+
+/// Eager form: execute directly against `fs_root` with no snapshot, so
+/// writes land exactly in the given root and read-backs observe them.
+/// Tests pinning on-disk state and hosts with caller-built filesystems
+/// want this; interactive runs want [`run_steps`].
+pub fn run_steps_eagerly(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
     run_steps_with_context(fs_root, fs_root, steps)
 }
 

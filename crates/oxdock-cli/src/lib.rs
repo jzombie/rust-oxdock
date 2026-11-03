@@ -15,7 +15,7 @@ pub use oxdock_core::{
     Engine, EngineOutput, ExecState, ExitRequest, FuncKind, FuncMeta, FuncParam, HostModule,
     HostRegistration, NativeFn, OxDockFn, OxDockType, PureFn, PushManifestSink, StepCtx,
     TypeDescriptor, Value, dry_run_closure, exit_code_of, parse_script, parse_script_with_modules,
-    run_steps, run_steps_with_context, run_steps_with_context_result,
+    run_steps, run_steps_eagerly, run_steps_with_context, run_steps_with_context_result,
     run_steps_with_lazy_snapshot_and_modules_and_entry, run_steps_with_manager_with_modules,
     run_steps_with_manager_with_modules_and_entry,
 };

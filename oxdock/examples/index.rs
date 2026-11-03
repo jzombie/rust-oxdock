@@ -11,7 +11,9 @@ fn main() -> anyhow::Result<()> {
     let examples = GuardedPath::new_root(dir.as_path())?;
 
     // Picker menu built by the DSL: GLOB discovers the scripts, PROMPT
-    // chooses one, and the answer returns through Engine bindings.
+    // chooses one, and the answer returns through Engine bindings. The
+    // picker stays eager so listings see this directory; the picked
+    // script below runs lazy like the CLI.
     let picker: Vec<Step> = oxdock! {
         IMPORT [STD]
         LET $exts: LIST<STRING> = [".oxfile", ".oxdock"]
@@ -63,7 +65,7 @@ fn main() -> anyhow::Result<()> {
         ECHO "Starting {{ $choice }}."
     };
 
-    let output = Engine::new().run_steps(&examples, &picker)?;
+    let output = Engine::new().run_steps_eagerly(&examples, &picker)?;
     let choice = output
         .bindings
         .get("choice")
@@ -74,6 +76,8 @@ fn main() -> anyhow::Result<()> {
     let resolver = PathResolver::new(examples.as_path(), examples.as_path())?;
     let text = resolver.read_to_string(&script_path)?;
     let script: Vec<Step> = parse_script(&text)?;
+    // Same lazy default as the CLI: snapshot-targeted writes land in a
+    // temp snapshot, so file-writing scripts never touch this directory.
     Engine::new().run_steps(&examples, &script)?;
     Ok(())
 }

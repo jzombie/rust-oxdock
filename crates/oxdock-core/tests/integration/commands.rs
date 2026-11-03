@@ -1,6 +1,6 @@
 use indoc::{formatdoc, indoc};
 use oxdock_core::{
-    ExecIo, run_steps, run_steps_with_context, run_steps_with_context_result_with_io,
+    ExecIo, run_steps_eagerly, run_steps_with_context, run_steps_with_context_result_with_io,
     run_steps_with_fs,
 };
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, ensure_git_identity};
@@ -623,7 +623,7 @@ fn exit_stops_pipeline_and_reports_code() {
         },
     ];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_eagerly(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("EXIT requested with code 9"),
         "error message should surface EXIT code"
@@ -639,7 +639,7 @@ fn accepts_semicolon_separated_commands() {
     let root = guard_root(&temp);
     let script = "WRITE one.txt 1; WRITE two.txt 2";
     let steps = oxdock_core::parse_script(script).unwrap();
-    run_steps(&root, &steps).unwrap();
+    run_steps_eagerly(&root, &steps).unwrap();
     assert_eq!(read_trimmed(&root.join("one.txt").unwrap()), "1");
     assert_eq!(read_trimmed(&root.join("two.txt").unwrap()), "2");
 }
@@ -656,7 +656,7 @@ fn write_cmd_captures_output() {
     };
     let capture = capture_pipeline("cap-write", "out.txt", *parse_one(cmd));
     let steps = capture.into_iter().collect::<Vec<_>>();
-    run_steps(&root, &steps).unwrap();
+    run_steps_eagerly(&root, &steps).unwrap();
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hello");
 }
 
@@ -682,7 +682,7 @@ fn capture_echo_interpolates_env() {
         *parse_one("ECHO \"value={{ env:FOO }}\""),
     ));
 
-    run_steps(&root, &steps).unwrap();
+    run_steps_eagerly(&root, &steps).unwrap();
     assert_eq!(read_trimmed(&root.join("echo.txt").unwrap()), "value=hi");
 }
 
@@ -706,7 +706,7 @@ fn capture_ls_lists_entries_with_header() {
     let mut steps = steps;
     steps.extend(capture_pipeline("cap-ls", "ls.txt", *parse_one("LS")));
 
-    run_steps(&root, &steps).unwrap();
+    run_steps_eagerly(&root, &steps).unwrap();
 
     let content = read_trimmed(&root.join("items/ls.txt").unwrap());
     let mut lines: Vec<_> = content.lines().map(str::to_string).collect();
@@ -730,7 +730,7 @@ fn capture_cat_emits_file_contents() {
 
     let steps = capture_pipeline("cap-cat", "out.txt", *parse_one("READ note.txt"));
 
-    run_steps(&root, &steps).unwrap();
+    run_steps_eagerly(&root, &steps).unwrap();
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hello note");
 }
 
@@ -968,7 +968,7 @@ fn env_exposes_git_commit_hash() {
         "#
     ))
     .unwrap();
-    run_steps(&repo, &steps).unwrap();
+    run_steps_eagerly(&repo, &steps).unwrap();
 
     assert_eq!(read_trimmed(&repo.join("out.txt").unwrap()), rev);
 }
@@ -987,7 +987,7 @@ fn workdir_cannot_escape_root() {
         col: 0,
     }];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_eagerly(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("WORKDIR") && err.to_string().contains("escapes"),
         "expected WORKDIR escape error, got {}",
@@ -1011,7 +1011,7 @@ fn write_cannot_escape_root() {
         col: 0,
     }];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_eagerly(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("WRITE") && err.to_string().contains("escapes"),
         "expected WRITE escape error, got {}",
@@ -1049,7 +1049,7 @@ fn read_cannot_escape_root() {
         col: 0,
     }];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_eagerly(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("READ") && err.to_string().contains("escapes"),
         "expected READ escape error, got {}",
@@ -1105,7 +1105,7 @@ fn read_symlink_escape_is_blocked() {
         col: 0,
     }];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_eagerly(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("READ") && err.to_string().contains("escapes"),
         "expected READ symlink escape error, got {}",
@@ -1222,7 +1222,7 @@ fn write_missing_path_cannot_escape_root() {
         col: 0,
     }];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_eagerly(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("WRITE") && err.to_string().contains("escapes"),
         "expected WRITE escape error for missing path, got {}",
@@ -1243,7 +1243,7 @@ fn workdir_creates_missing_dirs_within_root() {
         col: 0,
     }];
 
-    run_steps(&root, &steps).unwrap();
+    run_steps_eagerly(&root, &steps).unwrap();
 
     assert!(root.join("a/b/c").unwrap().exists());
 }
@@ -1263,7 +1263,7 @@ fn cat_reads_file_contents_without_error() {
     }];
 
     // This should succeed and emit contents to stdout; we only verify it does not error.
-    run_steps(&root, &steps).unwrap();
+    run_steps_eagerly(&root, &steps).unwrap();
 }
 
 #[test]
@@ -2530,7 +2530,7 @@ fn run_exec_nonzero_status_bails_with_step_context() {
         RUN ["cargo", "--invalid-oxdock-flag-xyz"]
     "#})
     .unwrap();
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_eagerly(&root, &steps).unwrap_err();
     let msg = format!("{err:#}");
     // Foreground failures surface the manager's non-zero error wrapped in
     // step context : identical to shell `RUN` (the `exited with status`
@@ -2559,7 +2559,7 @@ fn failing_step_reports_source_line_and_column() {
         RUN ["cargo", "--invalid-oxdock-flag-xyz"]
     "#})
     .unwrap();
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_eagerly(&root, &steps).unwrap_err();
     let msg = format!("{err:#}");
     assert!(
         msg.contains("step 2, line 2, col 1"),
@@ -2637,7 +2637,7 @@ fn grouped_numbers_survive_arithmetic_and_conversions() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let steps = oxdock_core::parse_script(script).unwrap();
-    run_steps(&root, &steps).unwrap();
+    run_steps_eagerly(&root, &steps).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -2667,14 +2667,14 @@ fn archive_interoperates_with_system_tar() {
         LET $has_tar: BOOL = IS_EXEC("tar")
         ASSERT_EQ $has_tar true
     "#};
-    run_steps(&root, &oxdock_core::parse_script(probe).unwrap()).unwrap();
+    run_steps_eagerly(&root, &oxdock_core::parse_script(probe).unwrap()).unwrap();
 
     let seed = indoc! {r#"
         WRITE bundle/app.txt app-payload
         WRITE bundle/nested/deep.txt deep-payload
         WRITE bundle/tool.sh tool-payload
     "#};
-    run_steps(&root, &oxdock_core::parse_script(seed).unwrap()).unwrap();
+    run_steps_eagerly(&root, &oxdock_core::parse_script(seed).unwrap()).unwrap();
 
     // Seed the executable bit through the resolver: the script cannot
     // pause mid-run, so modes stage between two runs over one root.
@@ -2693,7 +2693,7 @@ fn archive_interoperates_with_system_tar() {
         LET $deep: STRING = READ sys-out/nested/deep.txt
         ASSERT_EQ $deep "deep-payload"
     "#};
-    run_steps(&root, &oxdock_core::parse_script(pack).unwrap()).unwrap();
+    run_steps_eagerly(&root, &oxdock_core::parse_script(pack).unwrap()).unwrap();
 
     #[cfg(unix)]
     {
@@ -2716,7 +2716,7 @@ fn archive_interoperates_with_system_tar() {
         LET $note: STRING = READ dsl-out/note.txt
         ASSERT_EQ $note "sys-note"
     "#};
-    run_steps(&root, &oxdock_core::parse_script(unpack).unwrap()).unwrap();
+    run_steps_eagerly(&root, &oxdock_core::parse_script(unpack).unwrap()).unwrap();
 }
 
 // ---------------------------------------------------------------------------

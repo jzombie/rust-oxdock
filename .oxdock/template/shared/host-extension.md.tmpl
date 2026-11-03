@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
         ASSERT_EQ $s "demo"
         WRITE tag.txt "\{{ $s }}::\{{ $t }}"
     };
-    let run = engine.run_steps(&root_path, &steps)?;
+    let run = engine.run_steps_eagerly(&root_path, &steps)?;
     assert!(run.bindings.contains_key("s"));
 
     let reader = oxdock::PathResolver::new(root_path.root(), root_path.root()).unwrap();

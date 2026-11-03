@@ -3,7 +3,7 @@ use oxdock_fs::GuardedPath;
 
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     let steps = oxdock_core::parse_script(script).expect("parse script");
-    oxdock_core::run_steps(root, &steps).map_err(|e| anyhow::anyhow!("{e}"))
+    oxdock_core::run_steps_eagerly(root, &steps).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[test]

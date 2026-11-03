@@ -9,6 +9,10 @@ pub use oxdock_core;
 pub use oxdock_fs::{GuardedPath, PathResolver};
 pub use oxdock_parser;
 
+// Core runner surface flattened for embedders: the lazy snapshot default
+// plus its IO handle, without reaching into `oxdock_core`.
+pub use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
+
 pub use oxdock_macros::{oxdock, oxdock_embed, oxdock_prepare};
 
 pub use oxdock_func_macro::{oxdock_func, oxdock_type};
@@ -20,8 +24,8 @@ pub use oxdock_cli::{
     Guard, HostModule, HostRegistration, NativeFn, Options, OxDockFn, OxDockType, PureFn,
     ScriptSource, Step, StepCtx, StepKind, TypeDescriptor, Value, execute, execute_with_result,
     parse_script, parse_script_with_modules, process_exit_code, run, run_script, run_steps,
-    run_steps_with_context, run_steps_with_context_result, run_steps_with_manager_with_modules,
-    shell_program, usage,
+    run_steps_eagerly, run_steps_with_context, run_steps_with_context_result,
+    run_steps_with_manager_with_modules, shell_program, usage,
 };
 // `build_registry` only exists when the `net` feature is on (`cli` implies
 // `net`, so this is present in every facade build with `cli`).
