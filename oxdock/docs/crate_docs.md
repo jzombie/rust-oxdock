@@ -67,11 +67,10 @@ Asset scripts resolve `STD` (via `IMPORT [STD]`) and `SCRIPT` functions only. Th
 
 ## Run scripts inline
 
-The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
+The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types are re-exported from `oxdock`, so one dependency covers macros, runners, and roots: `cargo add oxdock`. Only portable commands are used below, so the script behaves identically on every OS.
 
 ```rust
-use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{GuardedPath, PathResolver, oxdock, oxdock_parser, run_steps_with_context};
 
 // A version stamping pipeline: variables, a function, a loop over a list,
 // a conditional call, templates, and native assertions. The version comes
@@ -122,8 +121,7 @@ assert_eq!(
 Use `#var` to inject Rust values into the script (any value that implements `Display`). DSL variables keep their `$var` form and are unaffected. Guards accept injected values too, so Rust flags can gate steps. The script below wires a pipe between steps, reads one line back into a variable, and expands every generated file.
 
 ```rust
-use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{GuardedPath, PathResolver, oxdock, oxdock_parser, run_steps_with_context};
 
 let project = "OxDock";
 let verbose = true;
@@ -230,7 +228,7 @@ fn main() -> anyhow::Result<()> {
         // `.with_state(...)`. These are stateless, so none.
         states: vec![],
     });
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
         modules: [DEMO],
@@ -370,7 +368,7 @@ fn main() -> anyhow::Result<()> {
         states: vec![],
     });
 
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root_path = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
         modules: [DEMO],
@@ -383,7 +381,7 @@ fn main() -> anyhow::Result<()> {
     let run = engine.run_steps(&root_path, &steps)?;
     assert!(run.bindings.contains_key("s"));
 
-    let reader = oxdock_fs::PathResolver::new(root_path.root(), root_path.root()).unwrap();
+    let reader = oxdock::PathResolver::new(root_path.root(), root_path.root()).unwrap();
     let written = reader
         .read_to_string(&root_path.join("tag.txt").unwrap())
         .expect("script writes tag.txt");
@@ -614,7 +612,7 @@ fn main() -> anyhow::Result<()> {
         // `.with_state(...)`. These are stateless, so none.
         states: vec![],
     });
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let run = engine.run_script(
         &root,

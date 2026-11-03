@@ -1,10 +1,9 @@
 ## Run scripts inline
 
-The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
+The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types are re-exported from `oxdock`, so one dependency covers macros, runners, and roots: `cargo add oxdock`. Only portable commands are used below, so the script behaves identically on every OS.
 
 ```rust
-use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{GuardedPath, PathResolver, oxdock, oxdock_parser, run_steps_with_context};
 
 // A version stamping pipeline: variables, a function, a loop over a list,
 // a conditional call, templates, and native assertions. The version comes
@@ -55,8 +54,7 @@ assert_eq!(
 Use `#var` to inject Rust values into the script (any value that implements `Display`). DSL variables keep their `$var` form and are unaffected. Guards accept injected values too, so Rust flags can gate steps. The script below wires a pipe between steps, reads one line back into a variable, and expands every generated file.
 
 ```rust
-use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{GuardedPath, PathResolver, oxdock, oxdock_parser, run_steps_with_context};
 
 let project = "OxDock";
 let verbose = true;
