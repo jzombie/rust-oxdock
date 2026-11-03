@@ -83,6 +83,35 @@ fn macro_emitted_quoting_flags_survive() {
     }
 }
 
+#[test]
+fn macro_assert_ne_emits_against_reexported_parser() {
+    // Emission fidelity for the inequality twin: the macro product must
+    // carry the NE variant with the quoted literal intact, and render
+    // back to a script that reparses identically.
+    let steps: Vec<oxdock_parser::Step> = oxdock! {
+        ASSERT_NE $x "200"
+    };
+    match &steps[0].kind {
+        oxdock_parser::StepKind::AssertNe {
+            hash,
+            actual,
+            expected,
+        } => {
+            assert!(hash.is_none());
+            assert!(
+                matches!(actual, oxdock_parser::AssertTarget::Value(_)),
+                "unexpected actual: {actual:?}"
+            );
+            assert_eq!(
+                expected,
+                &Some(oxdock_parser::Arg::String("200".to_string(), true))
+            );
+        }
+        other => panic!("expected AssertNe, got {:?}", other),
+    }
+    assert_macro_string_roundtrip(&steps);
+}
+
 fn arg_content_eq(a: &oxdock_parser::Arg, b: &oxdock_parser::Arg) -> bool {
     use oxdock_parser::Arg;
     match (a, b) {
@@ -872,14 +901,16 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
         ) => hx == hy && target_eq(ax, ay) && opt_arg_eq(ex, ey),
         (
             StepKind::AssertNe {
+                hash: hx,
                 actual: ax,
                 expected: ex,
             },
             StepKind::AssertNe {
+                hash: hy,
                 actual: ay,
                 expected: ey,
             },
-        ) => target_eq(ax, ay) && arg_content_eq(ex, ey),
+        ) => hx == hy && target_eq(ax, ay) && opt_arg_eq(ex, ey),
         (
             StepKind::AssertContains {
                 haystack: hx,

@@ -231,7 +231,7 @@ fn extract_stream_needle(kind: &StepKind) -> Option<(AssertStream, &Arg)> {
 }
 
 /// Whether the step needs the exact-match stdout accumulator:
-/// `ASSERT_EQ stdout`, top-level or WITH_IO-wrapped.
+/// `ASSERT_EQ`/`ASSERT_NE stdout`, top-level or WITH_IO-wrapped.
 fn needs_exact_stdout(kind: &StepKind) -> bool {
     let step = match kind {
         StepKind::WithIo { cmd, .. } => cmd.as_ref(),
@@ -286,7 +286,7 @@ pub(super) fn resolve_assert_target<P: ProcessManager>(
 
 /// Pre-register stream assertion observers so tees feed them data before
 /// the steps execute. Substring needles (`ASSERT_CONTAINS stdout|stderr`)
-/// get per-step `SlidingWindow`s; `ASSERT_EQ stdout` allocates the
+/// get per-step `SlidingWindow`s; `ASSERT_EQ`/`ASSERT_NE stdout` allocates the
 /// generation's exact accumulator. Uses `args::resolve_arg_state` for
 /// actual template expansion. Handles both top-level and WITH_IO-wrapped
 /// assertions via `extract_stream_needle` / `needs_exact_stdout`.
@@ -977,10 +977,23 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 expected_resolved.as_ref(),
             )
         }
-        StepKind::AssertNe { actual, expected } => {
+        StepKind::AssertNe {
+            hash,
+            actual,
+            expected,
+        } => {
             let target = resolve_assert_target(actual, &mut cx)?;
-            let expected_resolved = super::args::evaluate_assert_operand(expected, &mut cx)?;
-            handlers::assert_ne(&mut cx, generation, &target, &expected_resolved)
+            let expected_resolved = match expected {
+                Some(e) => Some(super::args::evaluate_assert_operand(e, &mut cx)?),
+                None => None,
+            };
+            handlers::assert_ne(
+                &mut cx,
+                generation,
+                hash,
+                &target,
+                expected_resolved.as_ref(),
+            )
         }
         StepKind::AssertContains { haystack, needle } => {
             let target = resolve_assert_target(haystack, &mut cx)?;
@@ -1347,15 +1360,24 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     expected_resolved.as_ref(),
                                 )
                             }
-                            StepKind::AssertNe { actual, expected } => {
+                            StepKind::AssertNe {
+                                hash,
+                                actual,
+                                expected,
+                            } => {
                                 let target = resolve_assert_target(actual, &mut cx)?;
-                                let expected_resolved =
-                                    super::args::evaluate_assert_operand(expected, &mut cx)?;
+                                let expected_resolved = match expected {
+                                    Some(e) => {
+                                        Some(super::args::evaluate_assert_operand(e, &mut cx)?)
+                                    }
+                                    None => None,
+                                };
                                 handlers::assert_ne(
                                     &mut cx,
                                     generation,
+                                    hash,
                                     &target,
-                                    &expected_resolved,
+                                    expected_resolved.as_ref(),
                                 )
                             }
                             StepKind::AssertContains { haystack, needle } => {

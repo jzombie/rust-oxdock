@@ -1150,10 +1150,27 @@ fn emit_stepkind(
                 }
             }
         }
-        StepKind::AssertNe { actual, expected } => {
+        StepKind::AssertNe {
+            hash,
+            actual,
+            expected,
+        } => {
             let a = emit_assert_target(actual, interp);
-            let e = emit_arg(expected, interp);
-            quote! { StepKind::AssertNe { actual: #a, expected: #e } }
+            let e = match expected {
+                Some(v) => {
+                    let t = emit_arg(v, interp);
+                    quote! { Some(#t) }
+                }
+                None => quote! { None },
+            };
+            match hash {
+                Some(h) => {
+                    quote! { StepKind::AssertNe { hash: Some(#h.to_string()), actual: #a, expected: #e } }
+                }
+                None => {
+                    quote! { StepKind::AssertNe { hash: None, actual: #a, expected: #e } }
+                }
+            }
         }
         StepKind::AssertContains { haystack, needle } => {
             let h = emit_assert_target(haystack, interp);

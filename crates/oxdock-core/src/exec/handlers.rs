@@ -1702,7 +1702,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
                 }
             },
             ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
-            ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation)?,
+            ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation, "ASSERT_EQ")?,
             ResolvedAssertTarget::Stderr => {
                 bail!("ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...");
             }
@@ -1737,7 +1737,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
             }
         }
         ResolvedAssertTarget::Stdout => {
-            let bytes = exact_stdout_bytes(cx, generation)?;
+            let bytes = exact_stdout_bytes(cx, generation, "ASSERT_EQ")?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
                 bail!(
                     "ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
@@ -1787,8 +1787,9 @@ pub(super) fn assert_eq<P: ProcessManager>(
 pub(super) fn assert_ne<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
+    hash: &Option<String>,
     actual: &super::steps::ResolvedAssertTarget,
-    expected: &Value,
+    expected: Option<&Value>,
 ) -> Result<()> {
     use super::steps::ResolvedAssertTarget;
     // Mode 1: exact stdout with piped stdin consumes the stream, mirroring
@@ -1801,7 +1802,7 @@ pub(super) fn assert_ne<P: ProcessManager>(
             w.write_all(&drained)?;
             Ok(())
         })?;
-        let Some(want) = expected.as_str() else {
+        let Some(want) = expected.and_then(|v| v.as_str()) else {
             bail!(
                 "ASSERT_NE stream mismatch\nexpected: {:?}\nactual:   {:?}",
                 expected,
@@ -1809,25 +1810,52 @@ pub(super) fn assert_ne<P: ProcessManager>(
             );
         };
         if drained == want.as_bytes() {
-            bail!("ASSERT_NE stream unexpectedly equal: {:?}", want,);
+            bail!("ASSERT_NE stream unexpectedly equal: {want:?}");
+        }
+        return Ok(());
+    }
+    if let Some(sha) = hash {
+        let actual_bytes: Vec<u8> = match actual {
+            ResolvedAssertTarget::Value(v) => match v.as_str() {
+                Some(s) => s.as_bytes().to_vec(),
+                None => {
+                    bail!("ASSERT_NE --hash needs a string actual, found {:?}", v);
+                }
+            },
+            ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
+            ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation, "ASSERT_NE")?,
+            ResolvedAssertTarget::Stderr => {
+                bail!("ASSERT_NE over stderr is not supported; use ASSERT_CONTAINS stderr ...");
+            }
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(&actual_bytes);
+        let digest = hasher.finalize();
+        let bytes: &[u8] = digest.as_ref();
+        let computed: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        if computed.eq_ignore_ascii_case(sha) {
+            bail!("ASSERT_NE --hash match: content matches {}", sha);
         }
         return Ok(());
     }
     match actual {
         ResolvedAssertTarget::Value(got) => {
-            if got != expected {
+            let Some(want) = expected else {
+                bail!("ASSERT_NE requires an expected value");
+            };
+            if got != want {
                 Ok(())
             } else {
                 bail!(
                     "ASSERT_NE mismatch: values are equal\nexpected: {:?}\nactual:   {:?}",
-                    expected,
+                    want,
                     got
                 )
             }
         }
         ResolvedAssertTarget::Stdout => {
-            let bytes = exact_stdout_bytes(cx, generation)?;
-            let Some(want) = expected.as_str() else {
+            let bytes = exact_stdout_bytes(cx, generation, "ASSERT_NE")?;
+            let Some(want) = expected.and_then(|v| v.as_str()) else {
                 bail!(
                     "ASSERT_NE stream mismatch\nexpected: {:?}\nactual:   {:?}",
                     expected,
@@ -1845,7 +1873,7 @@ pub(super) fn assert_ne<P: ProcessManager>(
         ResolvedAssertTarget::Pipe(bytes) => {
             let actual_str = String::from_utf8(bytes.clone())
                 .with_context(|| "ASSERT_NE pipe content is not UTF-8".to_string())?;
-            let Some(want) = expected.as_str() else {
+            let Some(want) = expected.and_then(|v| v.as_str()) else {
                 bail!(
                     "ASSERT_NE pipe mismatch\nexpected: {:?}\nactual:   {:?}",
                     expected,
@@ -1861,7 +1889,7 @@ pub(super) fn assert_ne<P: ProcessManager>(
 }
 
 /// Drain a piped stdin fully while enforcing the exact-match byte cap.
-/// Shared by `ASSERT_EQ stdout` Mode 1.
+/// Shared by `ASSERT_EQ`/`ASSERT_NE stdout` Mode 1.
 fn drain_stdin_bounded(input_stream: SharedInput, verb: &str) -> Result<Vec<u8>> {
     let mut guard = input_stream
         .lock()
@@ -1890,6 +1918,7 @@ fn drain_stdin_bounded(input_stream: SharedInput, verb: &str) -> Result<Vec<u8>>
 fn exact_stdout_bytes<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
+    verb: &str,
 ) -> Result<Vec<u8>> {
     let captures = cx
         .state
@@ -1898,10 +1927,10 @@ fn exact_stdout_bytes<P: ProcessManager>(
         .map_err(|_| anyhow!("exact_stdout poisoned"))?;
     match captures.get(&generation) {
         Some(entry) if entry.overflowed => bail!(
-            "ASSERT_EQ stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
+            "{verb} stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
         ),
         Some(entry) => Ok(entry.bytes.clone()),
-        None => bail!("ASSERT_EQ stdout has no exact capture registered"),
+        None => bail!("{verb} stdout has no exact capture registered"),
     }
 }
 
@@ -3871,12 +3900,20 @@ pub(crate) fn dispatch_assert_ne<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::AssertNe { actual, expected } = step else {
+    let StepKind::AssertNe {
+        hash,
+        actual,
+        expected,
+    } = step
+    else {
         unreachable!()
     };
     let target = super::steps::resolve_assert_target(actual, cx)?;
-    let expected_val = super::args::evaluate_assert_operand(expected, cx)?;
-    assert_ne(cx, 0, &target, &expected_val)
+    let expected_val = match expected {
+        Some(e) => Some(super::args::evaluate_assert_operand(e, cx)?),
+        None => None,
+    };
+    assert_ne(cx, 0, hash, &target, expected_val.as_ref())
 }
 
 pub(crate) fn dispatch_assert_contains<P: ProcessManager>(

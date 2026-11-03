@@ -359,9 +359,13 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     template_keys(&mut keys, e);
                 }
             }
-            StepKind::AssertNe { actual, expected } => {
+            StepKind::AssertNe {
+                actual, expected, ..
+            } => {
                 template_keys_target(&mut keys, actual);
-                template_keys(&mut keys, expected);
+                if let Some(e) = expected {
+                    template_keys(&mut keys, e);
+                }
             }
             StepKind::AssertContains { haystack, needle } => {
                 template_keys_target(&mut keys, haystack);

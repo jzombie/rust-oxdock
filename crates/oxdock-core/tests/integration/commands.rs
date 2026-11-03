@@ -2078,6 +2078,39 @@ fn assert_ne_rejects_equal_content() {
 }
 
 #[test]
+fn assert_ne_hash_mode_accepts_differing_digest() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            WRITE payload.bin stable-content
+            LET $body: STRING = READ payload.bin
+            ASSERT_NE --hash 0000000000000000000000000000000000000000000000000000000000000000 $body
+        "#},
+    )
+    .expect("differing digest passes");
+}
+
+#[test]
+fn assert_ne_hash_mode_rejects_matching_digest() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // sha256("stable-content")
+    let digest = "08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c";
+    let err = run_script(
+        &root,
+        &formatdoc! {r#"
+            WRITE payload.bin stable-content
+            LET $body: STRING = READ payload.bin
+            ASSERT_NE --hash {digest} $body
+        "#},
+    )
+    .expect_err("matching digest must fail");
+    assert!(err.to_string().contains("ASSERT_NE"), "{err}");
+}
+
+#[test]
 fn assert_eq_path_type_reports_absent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

@@ -737,9 +737,9 @@ impl StepKind {
                 walk_target(actual, f);
                 walk_opt(expected, f);
             }
-            StepKind::AssertNe { actual, expected } => {
+            StepKind::AssertNe { actual, expected, .. } => {
                 walk_target(actual, f);
-                walk_arg(expected, f);
+                walk_opt(expected, f);
             }
             StepKind::AssertContains { haystack, needle } => {
                 walk_target(haystack, f);
@@ -867,9 +867,9 @@ impl StepKind {
                 walk_target(actual, f);
                 walk_opt(expected, f);
             }
-            StepKind::AssertNe { actual, expected } => {
+            StepKind::AssertNe { actual, expected, .. } => {
                 walk_target(actual, f);
-                walk_arg(expected, f);
+                walk_opt(expected, f);
             }
             StepKind::AssertContains { haystack, needle } => {
                 walk_target(haystack, f);
@@ -2153,8 +2153,8 @@ declare_commands! {
 
     AssertNe => [
         name: "ASSERT_NE",
-        variant: AssertNe { actual: AssertTarget, expected: Arg },
-        syntax: "ASSERT_NE <actual> <expected>",
+        variant: AssertNe { hash: Option<String>, actual: AssertTarget, expected: Option<Arg> },
+        syntax: "ASSERT_NE <actual> <expected> | ASSERT_NE --hash <sha256> <actual>",
         summary: "Assert strict inequality.",
         description: indoc! {r#"
             Compares two evaluated values with typed inequality (no coercion:
@@ -2167,13 +2167,16 @@ declare_commands! {
             first (`LET $text: STRING = READ "out.txt"`, then
             `ASSERT_NE $text ...`).
             Bare `stdout` / `stderr` observe stream buffers; a `$var`
-            holding a `PIPE` observes its backend bytes.
+            holding a `PIPE` observes its backend bytes. `--hash` compares
+            the SHA-256 of a string, pipe, or captured-stdout actual
+            instead of the raw bytes (`stderr` is unsupported); the digest
+            must differ from the given hash.
         "#},
         args: &[
             ArgSpec { name: "actual", arg_type: ArgType::Any, description: "Value, stdout, stderr, or a $var holding a PIPE", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
-            ArgSpec { name: "expected", arg_type: ArgType::Rest(&ArgType::Any), description: "Value the actual must differ from", io: IoDirection::Read, index: 1, required: true, fallback_stream: None },
+            ArgSpec { name: "expected", arg_type: ArgType::Rest(&ArgType::Any), description: "Value the actual must differ from (required unless --hash)", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
         ],
-        flags: &[],
+        flags: &[ FlagSpec { name: "hash", long: "--hash", value_type: FlagValueType::String, required: false, description: "SHA-256" } ],
         default_output: None,
         examples: &[ Example { name: "assert ne", fence_meta: None, code: indoc! {r#"
             LET $status: INT = 200
@@ -2183,19 +2186,32 @@ declare_commands! {
             WRITE payload.bin stable-content
             LET $body: STRING = READ payload.bin
             ASSERT_NE $body "other-content"
+        "#} },
+        Example { name: "assert ne hash", fence_meta: None, code: indoc! {r#"
+            # --hash compares the SHA-256 digest instead of raw bytes.
+            WRITE payload.bin stable-content
+            LET $body: STRING = READ payload.bin
+            ASSERT_NE --hash 0000000000000000000000000000000000000000000000000000000000000000 $body
         "#} } ],
         lower: |flags, args| {
-            let _ = flags;
+            let hash = flags.iter().find(|(k, _)| k == "hash").map(|(_, v)| v.as_str().to_string());
             let mut it = args.into_iter();
             let actual = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_NE", "ASSERT_NE requires a value".to_string(), &SpanContext::line_only(0)))?)?;
             let remaining: Vec<Arg> = it
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
-            if remaining.is_empty() {
-                return Err(ParseError::validation("ASSERT_NE", "ASSERT_NE requires an expected value".to_string(), &SpanContext::line_only(0)))
-            }
-            let expected = join_value(remaining, "ASSERT_NE")?;
-            Ok(StepKind::AssertNe { actual, expected })
+            // Exactly two operands, except --hash carries its expectation
+            // in the flag and takes none positionally.
+            let expected = if remaining.is_empty() {
+                if hash.is_some() {
+                    None
+                } else {
+                    return Err(ParseError::validation("ASSERT_NE", "ASSERT_NE requires an expected value".to_string(), &SpanContext::line_only(0)))
+                }
+            } else {
+                Some(join_value(remaining, "ASSERT_NE")?)
+            };
+            Ok(StepKind::AssertNe { hash, actual, expected })
         },
     ],
 
@@ -4211,12 +4227,28 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
-            StepKind::AssertNe { actual, expected } => write!(
-                f,
-                "ASSERT_NE {} {}",
-                fmt_assert_target(actual),
-                fmt_value(expected, quote_msg)
-            ),
+            StepKind::AssertNe {
+                hash,
+                actual,
+                expected,
+            } => {
+                if let Some(d) = hash {
+                    write!(f, "ASSERT_NE --hash {d} {}", fmt_assert_target(actual))?;
+                } else {
+                    write!(
+                        f,
+                        "ASSERT_NE {} {}",
+                        fmt_assert_target(actual),
+                        fmt_value(
+                            expected
+                                .as_ref()
+                                .expect("Display of ASSERT_NE without --hash needs expected"),
+                            quote_msg
+                        )
+                    )?;
+                }
+                Ok(())
+            }
             StepKind::AssertContains { haystack, needle } => write!(
                 f,
                 "ASSERT_CONTAINS {} {}",
@@ -5680,15 +5712,16 @@ mod tests {
     #[test]
     fn assert_ne_lowers_and_round_trips() {
         let steps = parse_script("ASSERT_NE $status 404\n", lower_command).expect("parses");
-        let StepKind::AssertNe { actual, expected } = &steps[0].kind else {
+        let StepKind::AssertNe { hash, actual, expected } = &steps[0].kind else {
             panic!("expected AssertNe, got {:?}", steps[0].kind);
         };
+        assert!(hash.is_none());
         assert!(
             matches!(actual, AssertTarget::Value(_)),
             "unexpected actual: {actual:?}"
         );
         assert!(
-            matches!(expected, Arg::Expr(_)),
+            matches!(expected, Some(Arg::Expr(_))),
             "numeric expected lowers to an expression: {expected:?}"
         );
         let roundtrip = steps[0].kind.to_string();
@@ -5699,7 +5732,7 @@ mod tests {
 
         let err = parse_script("ASSERT_NE $status\n", lower_command).expect_err("needs expected");
         assert!(
-            err.to_string().contains("requires argument `expected`"),
+            err.to_string().contains("requires an expected value"),
             "unexpected error: {err}"
         );
     }

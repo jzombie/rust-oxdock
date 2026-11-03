@@ -318,7 +318,7 @@ pub(crate) fn resolve_arg_opt<P: ProcessManager>(
 /// Evaluate an assertion operand to a typed [`Value`]: expressions
 /// evaluate (variables, key-paths, calls, pre-typed literals); strings,
 /// templates, and parts render to `String`. This is what makes
-/// `ASSERT_EQ` strict: no coercion happens here.
+/// `ASSERT_EQ`/`ASSERT_NE` strict: no coercion happens here.
 pub(crate) fn evaluate_assert_operand<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,

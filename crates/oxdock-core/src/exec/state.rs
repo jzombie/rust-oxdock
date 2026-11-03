@@ -94,7 +94,7 @@ pub struct ExecState<P: ProcessManager> {
     pub(super) assert_windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
     /// Same observer map fed by the stderr tee for `ASSERT_CONTAINS stderr`.
     pub(super) assert_windows_stderr: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
-    /// Exact-match stdout accumulators for `ASSERT_EQ stdout`, keyed by
+    /// Exact-match stdout accumulators for `ASSERT_EQ`/`ASSERT_NE stdout`, keyed by
     /// generation and fed by the same tee. Entries allocated during
     /// pre-registration observe bytes from scope entry; the common
     /// top-level case therefore sees trial-cumulative output.

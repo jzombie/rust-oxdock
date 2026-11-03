@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
-- `ASSERT_NE <actual> <expected>`: strict-inequality assertion, the mirror of `ASSERT_EQ` without `--hash` (typed comparison, no coercion; differing values pass, equality aborts showing expected vs actual). Values, `stdout`, and `PIPE` targets behave like the equality form; `stderr` stays unsupported.
+- `ASSERT_NE <actual> <expected>` and `ASSERT_NE --hash <sha256> <actual>`: strict-inequality assertion, the mirror of `ASSERT_EQ` including its digest form (typed comparison, no coercion; differing values or digests pass, equality aborts showing expected vs actual). Values, `stdout`, and `PIPE` targets behave like the equality form; `stderr` stays unsupported.
 
 ### Changed
 

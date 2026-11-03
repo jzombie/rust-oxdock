@@ -3,3 +3,4 @@ ASSERT_NE $status 404
 WRITE payload.bin stable-content
 LET $body: STRING = READ payload.bin
 ASSERT_NE $body "other-content"
+ASSERT_NE --hash 0000000000000000000000000000000000000000000000000000000000000000 $body
