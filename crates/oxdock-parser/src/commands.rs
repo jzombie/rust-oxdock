@@ -1345,12 +1345,15 @@ declare_commands! {
             "#} },
             Example { name: "interpolation", fence_meta: None, code: indoc! {r#"
                 # `{{ env:KEY }}` reads the script environment; a bare name
-                # resolves a DSL variable instead. Every `env:` read must
-                # be declared first: KEY here comes from the ENV below.
+                # resolves a DSL variable instead. Spelling rules:
+                # `script_env:` is always case-sensitive; `env:` is
+                # case-sensitive too, except on Windows where it matches
+                # case-insensitively. Every read must be declared first:
+                # KEY here comes from the ENV below.
                 ENV USER=OxDock
                 LET $WHO: STRING = "Ada"
-                ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!"
-                ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada!"
+                ECHO "Hello {{ env:USER }}! Hi {{ WHO }}! Again {{ script_env:USER }}!"
+                ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada! Again OxDock!"
             "#} },
             Example { name: "undeclared env read fails", fence_meta: Some("expect_error:\"env:OXDOCK_DOC_NO_SUCH_KEY\""), code: indoc! {r#"
                 # No declaration anywhere: the whole-closure static gate
@@ -2039,6 +2042,28 @@ declare_commands! {
 
                 EXPAND template.md
                 ASSERT_CONTAINS stdout "Count: 2!"
+            "#} },
+            Example { name: "bare override", fence_meta: None, code: indoc! {r#"
+                # A bare name reads a KEY=val override with no prefix.
+                WRITE template.md "Hi \{{ NAME }}!"
+
+                EXPAND template.md NAME=Ada
+                ASSERT_CONTAINS stdout "Hi Ada!"
+            "#} },
+            Example { name: "variable placeholder", fence_meta: None, code: indoc! {r#"
+                # `{{ $var }}` placeholders read script variables, dotted
+                # paths included. Escape at WRITE so EXPAND sees it.
+                LET $u: MAP<name: STRING> = {name: "Bo"}
+                WRITE template.md "Hi \{{ $u.name }}!"
+
+                EXPAND template.md
+                ASSERT_CONTAINS stdout "Hi Bo!"
+            "#} },
+            Example { name: "missing key fails", fence_meta: Some("expect_error:\"missing required step override argument\""), code: indoc! {r#"
+                # A missing key is an error, never a silent empty.
+                WRITE template.md "Hi \{{ NAME }}!"
+
+                EXPAND template.md
             "#} },
         ],
         lower: |_flags, args| {
