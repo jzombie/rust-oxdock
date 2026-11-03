@@ -1,0 +1,13 @@
+# Demo: build a small file tree to explore.
+#
+# Run with:
+#   oxdock --script oxdock/examples/tree-shell.oxfile
+# Add --shell to land in the finished tree instead of exiting.
+
+IMPORT [STD]
+
+# Build a demo tree to explore.
+MKDIR demo/assets
+MKDIR demo/logs
+WRITE demo/assets/hello.txt hello
+LS demo
