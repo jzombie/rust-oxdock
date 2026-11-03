@@ -3971,29 +3971,14 @@ ASSERT_EQ $flag 1
 
 Path of the running interpreter binary.
 
-Dynamic composition: compose a child script dynamically, then
-execute it in a fresh interpreter run. Returns the executing
-binary as a `STRING`, so the parent needs no bridged env var.
-Feed the child script on stdin: no file is written, and the child
-reads it because its stdin is piped (bare `RUN [$exe]` suffices,
-no `--script -`).
+Returns the executing binary as a `STRING`, so one script can
+reinvoke the interpreter on another script without bridging an env
+var. The child re-parses from bytes in a separate process: no
+bindings cross back (only stdout and files), and each run pays
+a spawn. Prefer modules for reuse (statically gated, in-process);
+reach for reinvocation when the child must run isolated, or under
+a different binary than the parent.
 
-Child-side `{{ }}` must survive the parent's write: escape it as
-`\{{` wherever the composition passes through `WRITE` or a pipe
-producer, or the parent interpolates it away before the child
-ever parses. File children run by path (`RUN [$exe, "main.oxdock"]`)
-so entry-relative `IMPORT` resolves; self-contained children ride
-the stdin pipe.
-
-Eval-like, not macro-like: the child re-parses from bytes in a
-separate process, so no bindings cross back (only stdout and files),
-no static gate spans parent and child, and each run pays a spawn.
-Prefer modules for reuse (statically gated, in-process) and build
-macros for compile-time codegen. Reach for composition when the child
-must run isolated, or under a different binary than the parent
-(version-skew runs, fresh-binary proofs).
-Embedding hosts staging an interpreter override change only where
-the path points; the spawn semantics stay identical.
 Unsupported under Miri isolation: the lookup itself fails there
 instead of returning a path.
 
