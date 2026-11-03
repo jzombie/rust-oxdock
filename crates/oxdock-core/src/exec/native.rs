@@ -1876,6 +1876,8 @@ fn type_describe<P: ProcessManager>(
     code = r###"
     # Compose the child script dynamically: the parent interpolates
     # its own bindings into the pipe, then runs the interpreter on it.
+    # Unescaped {{ }} bakes in at compose time; \{{ }} stays literal
+    # so the child expands it with its own bindings.
     # The pipe delivers EOF when the producer step ends, so the child
     # reads exactly one script.
     IMPORT [STD]
@@ -1884,9 +1886,12 @@ fn type_describe<P: ProcessManager>(
     LET $child: PIPE
     WITH_IO [stdout=$child] ECHO """
         ECHO "hello {{ $who }}!"
+        LET $who: STRING = "Grace"
+        ECHO "child sees \{{ $who }}!"
         """
     LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe]
     ASSERT_CONTAINS $out "hello Ada!"
+    ASSERT_CONTAINS $out "child sees Grace!"
     "###
 )]
 fn interpreter<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
