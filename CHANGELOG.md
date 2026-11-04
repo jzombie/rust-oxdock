@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Fixed
+
+- Miri coverage badge now reports failure: the nightly report step runs on `always()` and turns the badge red with a "failing" message when the Miri run fails, instead of fossilizing at the last green publish. The listing commands tolerate a broken tree so the report itself cannot abort the update (#222).
+
 ### Added
 
 - `ASSERT_NE <actual> <expected>` and `ASSERT_NE --hash <sha256> <actual>`: strict-inequality assertion, the mirror of `ASSERT_EQ` including its digest form (typed comparison, no coercion; differing values or digests pass, equality aborts showing expected vs actual). Values, `stdout`, and `PIPE` targets behave like the equality form; `stderr` stays unsupported.

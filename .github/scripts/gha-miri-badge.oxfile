@@ -2,11 +2,13 @@
 # under Miri vs. the total and writes badge artifacts for the README.
 # Invoked from the miri-nightly workflow only. The badge reports exactly
 # what is measured: runnable tests over total tests, with both counts in
-# the message.
+# the message. When the Miri run itself fails, the badge reports
+# "failing" in red instead: a stale green badge on a red nightly is
+# worse than no signal at all (#222).
 
 IMPORT [STD]
 
-INHERIT_ENV [MIRI_TEST_CMD, GITHUB_OUTPUT, GITHUB_STEP_SUMMARY]
+INHERIT_ENV [MIRI_TEST_CMD, MIRI_FAILED, GITHUB_OUTPUT, GITHUB_STEP_SUMMARY]
 
 # Pin to the live tree: badge artifacts must land in the real repo.
 WORKSPACE LOCAL
@@ -26,11 +28,19 @@ IF $cmd == "" {
     $cmd = "cargo test --workspace --all-features --lib --tests"
 }
 
+# The Miri step outcome rides in from the workflow as a boolean string;
+# BOOL_OR defaults blank (local runs) to false, preserving the
+# historical ratio-only behavior there.
+LET $failing: BOOL = BOOL_OR("{{ env:MIRI_FAILED }}", false)
+
 # Listings capture raw and count in the DSL: TEXT_COUNT_MATCHES is the
 # grep -c shape, so a zero-match listing binds zero instead of failing
-# the run the way grep -c does without an `|| true` guard.
-LET $total_listing: STRING = RUN "{{ $cmd }} -- --list --format terse"
-LET $ignored_listing: STRING = RUN "{{ $cmd }} -- --ignored --list --format terse"
+# the run the way grep -c does without an `|| true` guard. The trailing
+# `|| true` keeps the report alive when the tree cannot even build under
+# the Miri cfg (a failing run must still move the badge, never abort
+# the reporter): cargo error text simply matches zero tests.
+LET $total_listing: STRING = RUN "{{ $cmd }} -- --list --format terse || true"
+LET $ignored_listing: STRING = RUN "{{ $cmd }} -- --ignored --list --format terse || true"
 LET $total: INT = TEXT_COUNT_MATCHES($total_listing, ": test")
 LET $ignored: INT = TEXT_COUNT_MATCHES($ignored_listing, ": test")
 LET $run_cnt: INT = $total - $ignored
@@ -52,11 +62,21 @@ IF $pct >= 90.0 {
 }
 
 LET $message: STRING = "{{ $ratio_label }} ({{ $run_cnt }}/{{ $total }})"
+IF $failing {
+    $color = "red"
+    $message = "failing"
+}
 ECHO "Miri runnable tests: {{ $run_cnt }}/{{ $total }}"
 ECHO "Runnable ratio: {{ $ratio_label }}"
+IF $failing {
+    ECHO "Miri result: failing (badge set to failing)"
+}
 
 MKDIR badges
 WRITE miri-summary.txt "Miri runnable tests: {{ $run_cnt }}/{{ $total }}\nRunnable ratio: {{ $ratio_label }}\n"
+IF $failing {
+    APPEND "miri-summary.txt" "Miri result: failing (badge set to failing)\n"
+}
 WRITE miri-output.env "runnable_ratio={{ $ratio_label }}\n"
 LET $badge: MAP<ANY> = {schemaVersion: 1, label: "miri coverage", message: $message, color: $color}
 LET $badge_json: STRING = TO_JSON($badge)
@@ -72,8 +92,14 @@ IF $gh_out != "" {
 LET $gh_sum: STRING = "{{ env:GITHUB_STEP_SUMMARY }}"
 IF $gh_sum != "" {
     APPEND $gh_sum "### Miri coverage\n\nMiri runnable tests: {{ $run_cnt }}/{{ $total }}\nRunnable ratio: {{ $ratio_label }}\n"
+    IF $failing {
+        APPEND $gh_sum "Miri result: failing (badge set to failing)\n"
+    }
 } ELSE {
     ECHO "### Miri coverage"
     ECHO "Miri runnable tests: {{ $run_cnt }}/{{ $total }}"
     ECHO "Runnable ratio: {{ $ratio_label }}"
+    IF $failing {
+        ECHO "Miri result: failing (badge set to failing)"
+    }
 }

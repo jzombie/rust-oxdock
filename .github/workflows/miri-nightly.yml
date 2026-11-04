@@ -96,9 +96,14 @@ jobs:
         run: cargo miri setup
 
       - name: Run Miri (unit tests only)
+        id: miri
         run: cargo miri test --workspace --all-features --lib --tests
 
       - name: Report Miri coverage
+        # Always report: on a failing run the badge must turn red instead
+        # of fossilizing at the last green publish. The boolean outcome
+        # rides in via MIRI_FAILED below.
+        if: always()
         shell: bash
         # Listings don't need interpretation: Miri ignores are
         # #[cfg_attr(miri, ignore)], i.e. compile-time, so a native
@@ -113,12 +118,15 @@ jobs:
         env:
           OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
           MIRI_TEST_CMD: RUSTFLAGS="--cfg miri" cargo test --workspace --all-features --lib --tests
+          MIRI_FAILED: ${{ steps.miri.outcome != 'success' }}
         run: |
           set -euo pipefail
           oxdock ./.github/scripts/gha-miri-badge.oxfile
 
       - name: Publish Miri coverage badge
-        if: github.ref == 'refs/heads/main'
+        # Publish on failure too: that is exactly when the badge must flip
+        # to red. Branch gate stays: only main moves the public badge.
+        if: always() && github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
