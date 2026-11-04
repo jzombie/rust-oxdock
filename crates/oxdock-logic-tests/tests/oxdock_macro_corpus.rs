@@ -8,7 +8,8 @@ use oxdock_core::{ExecIo, SCRIPT_MODULE_NAME, run_steps_with_context_result_with
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_logic_tests::mock_remote::MockRemoteRunner;
 use oxdock_macros::oxdock;
-use std::sync::Arc;
+use std::io::Cursor;
+use std::sync::{Arc, Mutex};
 
 fn run_steps_without_snapshot(root: &GuardedPath, steps: &[oxdock_parser::Step]) {
     run_steps_with_context_result_with_io(root, root, steps, ExecIo::new()).unwrap();
@@ -419,7 +420,19 @@ fn macro_prompt_binds_default_off_terminal() {
         ASSERT_EQ $city "london"
     };
     let temp = GuardedPath::tempdir().unwrap();
-    run_steps_without_snapshot(temp.as_guarded_path(), &steps);
+    // Bind an explicit non-TTY stdin: a redirected stdin can never answer
+    // an interactive prompt, so PROMPT binds the default even when the
+    // ambient test process owns a terminal. Without this the test blocks
+    // on read_line when run from a terminal.
+    let mut io = ExecIo::new();
+    io.set_stdin(Some(Arc::new(Mutex::new(Cursor::new(Vec::<u8>::new())))));
+    run_steps_with_context_result_with_io(
+        temp.as_guarded_path(),
+        temp.as_guarded_path(),
+        &steps,
+        io,
+    )
+    .unwrap();
     assert_macro_string_roundtrip(&steps);
 }
 
