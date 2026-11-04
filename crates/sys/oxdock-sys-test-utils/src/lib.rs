@@ -118,7 +118,7 @@ pub fn can_create_symlinks(target: &Path) -> bool {
     #[cfg(miri)]
     {
         let _ = target;
-        return false;
+        false
     }
 
     #[cfg(all(unix, not(miri)))]
