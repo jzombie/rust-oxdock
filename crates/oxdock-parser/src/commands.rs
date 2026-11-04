@@ -2135,7 +2135,7 @@ declare_commands! {
     AssertEq => [
         name: Command::AssertEq.as_str(),
         variant: AssertEq { hash: Option<String>, actual: AssertTarget, expected: Option<Arg> },
-        syntax: "ASSERT_EQ <actual> <expected> | ASSERT_EQ --hash <sha256> <actual>",
+        syntax: Command::AssertEq.syntax(),
         summary: "Assert strict equality.",
         description: indoc! {r#"
             Compares two evaluated values with typed equality (no coercion:
@@ -2181,7 +2181,7 @@ declare_commands! {
     AssertNe => [
         name: Command::AssertNe.as_str(),
         variant: AssertNe { hash: Option<String>, actual: AssertTarget, expected: Option<Arg> },
-        syntax: "ASSERT_NE <actual> <expected> | ASSERT_NE --hash <sha256> <actual>",
+        syntax: Command::AssertNe.syntax(),
         summary: "Assert strict inequality.",
         description: indoc! {r#"
             Compares two evaluated values with typed inequality (no coercion:
@@ -2227,9 +2227,9 @@ declare_commands! {
     ],
 
     AssertContains => [
-        name: "ASSERT_CONTAINS",
+        name: Command::AssertContains.as_str(),
         variant: AssertContains { haystack: AssertTarget, needle: Arg },
-        syntax: "ASSERT_CONTAINS <haystack> <needle>",
+        syntax: Command::AssertContains.syntax(),
         summary: "Assert containment.",
         description: indoc! {r#"
             Checks containment and aborts the pipeline with a step-numbered
@@ -2255,14 +2255,14 @@ declare_commands! {
         lower: |flags, args| {
             let _ = flags;
             let mut it = args.into_iter();
-            let haystack = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_CONTAINS", "ASSERT_CONTAINS requires a value".to_string(), &SpanContext::line_only(0)))?)?;
+            let haystack = lower_assert_target(it.next().ok_or_else(|| ParseError::validation(Command::AssertContains.as_str(), format!("{} requires a value", Command::AssertContains.as_str()), &SpanContext::line_only(0)))?)?;
             let remaining: Vec<Arg> = it
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
             if remaining.is_empty() {
-                return Err(ParseError::validation("ASSERT_CONTAINS", "ASSERT_CONTAINS requires a needle".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::validation(Command::AssertContains.as_str(), format!("{} requires a needle", Command::AssertContains.as_str()), &SpanContext::line_only(0)))
             }
-            let needle = join_value(remaining, "ASSERT_CONTAINS")?;
+            let needle = join_value(remaining, Command::AssertContains.as_str())?;
             Ok(StepKind::AssertContains { haystack, needle })
         },
     ],
@@ -4249,7 +4249,8 @@ impl fmt::Display for StepKind {
             }
             StepKind::AssertContains { haystack, needle } => write!(
                 f,
-                "ASSERT_CONTAINS {} {}",
+                "{} {} {}",
+                Command::AssertContains.as_str(),
                 fmt_assert_target(haystack),
                 fmt_value(needle, quote_msg)
             ),
@@ -5729,7 +5730,7 @@ mod tests {
         );
         let roundtrip = steps[0].kind.to_string();
         assert!(
-            roundtrip.contains("ASSERT_NE") && roundtrip.contains("404"),
+            roundtrip.contains(Command::AssertNe.as_str()) && roundtrip.contains("404"),
             "display should round-trip the command: {roundtrip}"
         );
 

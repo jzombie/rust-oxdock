@@ -1725,7 +1725,10 @@ pub(super) fn assert_equality<P: ProcessManager>(
             ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
             ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation, verb)?,
             ResolvedAssertTarget::Stderr => {
-                bail!("{verb} over stderr is not supported; use ASSERT_CONTAINS stderr ...");
+                bail!(
+                    "{verb} over stderr is not supported; use {} stderr ...",
+                    Command::AssertContains.as_str()
+                );
             }
         };
         let computed = sha256_hex(&actual_bytes);
@@ -1782,7 +1785,10 @@ pub(super) fn assert_equality<P: ProcessManager>(
             Ok(())
         }
         ResolvedAssertTarget::Stderr => {
-            bail!("{verb} over stderr is not supported; use ASSERT_CONTAINS stderr ...");
+            bail!(
+                "{verb} over stderr is not supported; use {} stderr ...",
+                Command::AssertContains.as_str()
+            );
         }
         ResolvedAssertTarget::Pipe(bytes) => {
             let actual_str = String::from_utf8(bytes.clone())
@@ -1869,6 +1875,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
     needle: &Arg,
 ) -> Result<()> {
     use super::steps::ResolvedAssertTarget;
+    let verb = Command::AssertContains.as_str();
     let needle_str = super::args::resolve_arg(needle, cx)?;
     match haystack {
         ResolvedAssertTarget::Value(v) => {
@@ -1876,11 +1883,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 if hay.contains(needle_str.as_str()) {
                     return Ok(());
                 }
-                bail!(
-                    "ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
-                    needle_str,
-                    hay
-                );
+                bail!("{verb} did not contain '{}'; actual: {:?}", needle_str, hay);
             }
             if let Some(items) = v.as_list() {
                 if items
@@ -1889,20 +1892,16 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 {
                     return Ok(());
                 }
-                bail!(
-                    "ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
-                    needle_str,
-                    v
-                );
+                bail!("{verb} did not contain '{}'; actual: {:?}", needle_str, v);
             }
             if let Some(map) = v.as_map() {
                 if map.contains_key(needle_str.as_str()) {
                     return Ok(());
                 }
-                bail!("ASSERT_CONTAINS did not contain '{}'", needle_str);
+                bail!("{verb} did not contain '{}'", needle_str);
             }
             bail!(
-                "ASSERT_CONTAINS needs a string, list, or map haystack, found {:?}",
+                "{verb} needs a string, list, or map haystack, found {:?}",
                 v
             );
         }
@@ -1912,14 +1911,14 @@ pub(super) fn assert_contains<P: ProcessManager>(
             if let CommandStdin::Stream(input_stream) = cx.stdin.clone() {
                 let mut guard = input_stream
                     .lock()
-                    .map_err(|_| anyhow!("failed to lock stdin for ASSERT_CONTAINS"))?;
+                    .map_err(|_| anyhow!("failed to lock stdin for {verb}"))?;
                 let mut window = super::io::SlidingWindow::new(needle_str.as_bytes().to_vec());
                 let mut buf = [0u8; super::io::CHUNK_SIZE];
                 let mut read_any = false;
                 loop {
                     let n = guard
                         .read(&mut buf)
-                        .context("failed to read from stdin for ASSERT_CONTAINS")?;
+                        .context(format!("failed to read from stdin for {verb}"))?;
                     if n == 0 {
                         break;
                     }
@@ -1936,7 +1935,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
                     }
                     let emitted = String::from_utf8_lossy(&window.ring_buffer()).into_owned();
                     bail!(
-                        "ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
+                        "{verb} did not contain '{}'; emitted:\n{}",
                         needle_str,
                         emitted.trim_end()
                     );
@@ -1953,12 +1952,12 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
                     bail!(
-                        "ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
+                        "{verb} did not contain '{}'; emitted:\n{}",
                         needle_str,
                         emitted.trim_end()
                     )
                 }
-                _ => bail!("ASSERT_CONTAINS did not contain '{}'", needle_str),
+                _ => bail!("{verb} did not contain '{}'", needle_str),
             }
         }
         ResolvedAssertTarget::Stderr => {
@@ -1974,22 +1973,22 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
                     bail!(
-                        "ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
+                        "{verb} did not contain '{}'; emitted:\n{}",
                         needle_str,
                         emitted.trim_end()
                     )
                 }
-                _ => bail!("ASSERT_CONTAINS did not contain '{}'", needle_str),
+                _ => bail!("{verb} did not contain '{}'", needle_str),
             }
         }
         ResolvedAssertTarget::Pipe(bytes) => {
             let hay = String::from_utf8(bytes.clone())
-                .with_context(|| "ASSERT_CONTAINS pipe content is not UTF-8".to_string())?;
+                .with_context(|| format!("{verb} pipe content is not UTF-8"))?;
             if hay.contains(needle_str.as_str()) {
                 Ok(())
             } else {
                 bail!(
-                    "ASSERT_CONTAINS did not contain '{}'; pipe held {:?}",
+                    "{verb} did not contain '{}'; pipe held {:?}",
                     needle_str,
                     hay
                 );
