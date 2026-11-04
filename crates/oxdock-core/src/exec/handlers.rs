@@ -21,8 +21,8 @@ use oxdock_process::{
     check_spawn_anchors, read_pump_chunk,
 };
 use oxdock_pty::{PtyInput, PtyOutcome, PtyRequest, WatchSize, run_pty_session};
-use oxdock_remote_proto::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
-use sha2::{Digest, Sha256};
+use oxdock_utils::sha256_hex;
+use oxdock_utils::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
 
 use super::args::parse_bool_str;
 use super::fs_ops::copy_entry;
@@ -1637,15 +1637,6 @@ pub(super) fn replace<P: ProcessManager>(
     })?;
 
     Ok(())
-}
-
-/// Shared SHA-256 hex digest for `ASSERT_EQ`/`ASSERT_NE --hash`.
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let bytes: &[u8] = digest.as_ref();
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Strict equality/inequality assertion over evaluated values, stream

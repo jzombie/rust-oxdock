@@ -24,6 +24,7 @@ oxdock-core.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser.workspace = true
 oxdock-process.workspace = true
+oxdock-utils.workspace = true
 rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true

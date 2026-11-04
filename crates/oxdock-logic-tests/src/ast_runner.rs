@@ -16,7 +16,7 @@ use oxdock_fs::{
 };
 use oxdock_parser::{Step, StepKind};
 use oxdock_process::{CommandBuilder, SharedInput, SharedOutput, default_process_manager};
-use sha2::{Digest, Sha256};
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use toml_edit::{DocumentMut, Item, Table, Value};
@@ -1032,11 +1032,7 @@ fn verify_expectations(
             Root::Local => local,
         };
         let actual = read_trimmed_root(root, &hash.file)?;
-        let mut hasher = Sha256::new();
-        hasher.update(hash.source.as_bytes());
-        let digest = hasher.finalize();
-        let bytes: &[u8] = digest.as_ref();
-        let expected: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let expected: String = oxdock_utils::sha256_hex(hash.source.as_bytes());
         if actual != expected {
             return Err(anyhow!(
                 "HASH_SHA256() output mismatch: expected {expected}, got {actual}"
@@ -1108,11 +1104,7 @@ fn verify_expectations_local(expect: &Expectations, local: &GuardedPath) -> Resu
         && hash.root == Root::Local
     {
         let actual = read_trimmed_root(local, &hash.file)?;
-        let mut hasher = Sha256::new();
-        hasher.update(hash.source.as_bytes());
-        let digest = hasher.finalize();
-        let bytes: &[u8] = digest.as_ref();
-        let expected: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let expected: String = oxdock_utils::sha256_hex(hash.source.as_bytes());
         if actual != expected {
             return Err(anyhow!(
                 "HASH_SHA256() output mismatch: expected {expected}, got {actual}"

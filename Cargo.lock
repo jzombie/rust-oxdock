@@ -1635,6 +1635,7 @@ dependencies = [
  "oxdock-parser",
  "oxdock-process",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "proc-macro2",
  "sha2",
  "syn 3.0.6",
@@ -1663,6 +1664,7 @@ dependencies = [
  "oxdock-remote-proto",
  "oxdock-ssh-plugin",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1683,8 +1685,8 @@ dependencies = [
  "oxdock-pipe",
  "oxdock-process",
  "oxdock-pty",
- "oxdock-remote-proto",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "proptest",
  "rand",
  "regex",
@@ -1715,6 +1717,7 @@ version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
+ "oxdock-utils",
  "proc-macro2",
  "quote",
  "sha2",
@@ -1777,6 +1780,7 @@ dependencies = [
  "oxdock-process",
  "oxdock-ssh-plugin",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "proc-macro2",
  "proptest",
  "serde_json",
@@ -1826,6 +1830,7 @@ dependencies = [
  "oxdock-parser",
  "oxdock-process",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "rmcp",
  "serde",
  "serde_json",
@@ -1854,6 +1859,7 @@ dependencies = [
  "oxdock-process",
  "oxdock-remote-proto",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "serde_json",
  "sha2",
  "shell-words",
@@ -1915,12 +1921,11 @@ name = "oxdock-remote-proto"
 version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
- "flate2",
  "muxio-rpc-service",
+ "oxdock-utils",
  "serde",
  "serde_json",
  "sha2",
- "tar",
 ]
 
 [[package]]
@@ -1951,6 +1956,16 @@ dependencies = [
 [[package]]
 name = "oxdock-sys-test-utils"
 version = "0.35.0-alpha"
+
+[[package]]
+name = "oxdock-utils"
+version = "0.35.0-alpha"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "sha2",
+ "tar",
+]
 
 [[package]]
 name = "p256"

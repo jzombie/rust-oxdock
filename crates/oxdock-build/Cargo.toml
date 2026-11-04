@@ -17,6 +17,7 @@ oxdock-embed.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser = { workspace = true, features = ["proc-macro-api"] }
 oxdock-process.workspace = true
+oxdock-utils.workspace = true
 proc-macro2.workspace = true
 sha2.workspace = true
 syn.workspace = true

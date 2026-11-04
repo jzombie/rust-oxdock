@@ -1,13 +1,19 @@
 //! Contract for OxDock sealed remote execution (`REMOTE` blocks).
 //!
 //! Three stable muxio methods ([`methods`]), a content-derived protocol
-//! digest (no manual version), JSON control types ([`types`]), and guarded
-//! tarball pack/unpack ([`tar`]). Dependency-light by design (`anyhow`,
-//! `serde`, `serde_json`, `sha2`, `muxio-rpc-service`, `tar`, `flate2`):
+//! digest (no manual version), JSON control types ([`types`]), and the
+//! chunk/exclusion constants both ends enforce. Dependency-light by design
+//! (`anyhow`, `serde`, `serde_json`, `sha2`, `muxio-rpc-service`, plus the
+//! leaf `oxdock-utils` for digest hex):
 //! usable from the NET plugin, the guest serve loop, and minimal test
 //! harnesses. Never depends on `oxdock-core`, `oxdock-parser`, or
 //! `oxdock-fs`, so filesystem application stays with the caller under
 //! [`GuardedPath`](https://github.com/jzombie/rust-oxdock) containment.
+//!
+//! Streaming tarball pack/unpack and byte digests live in
+//! `oxdock-utils`, shared with local archive commands: the wire format
+//! stays identical because both ends call the same code, without core
+//! depending on this contract.
 //!
 //! Security split, enforced by construction here and documented for both
 //! ends: the filesystem boundary is OxDock's domain (every entry resolves
@@ -18,7 +24,6 @@
 
 pub mod channel;
 pub mod methods;
-pub mod tar;
 pub mod types;
 
 use std::sync::LazyLock;
@@ -31,17 +36,12 @@ use std::sync::LazyLock;
 /// manual steps; compatibility is decided by digest equality.
 pub static PROTO_DIGEST: LazyLock<String> = LazyLock::new(|| {
     use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
     let mut hasher = Sha256::new();
     hasher.update(b"oxdock-remote-proto/v1\n");
     hasher.update(canonical_contract_source(include_str!("methods.rs")).as_bytes());
     hasher.update(b"\n");
     hasher.update(canonical_contract_source(include_str!("types.rs")).as_bytes());
-    let mut out = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    oxdock_utils::hex_encode(hasher.finalize())
 });
 
 /// Canonical form for digesting: trimmed lines, blanks and `//` comments
@@ -67,21 +67,6 @@ pub const CHUNK_BYTES: usize = 64 * 1024;
 /// holds persistent per-project state that is meaningless on the guest.
 pub const EXCLUDED_TOP_LEVEL_DIRS: &[&str] = &[".cache"];
 pub const EXCLUDED_TOP_LEVEL_FILES: &[&str] = &[".oxdock-tempdir", ".oxdock-tempdir.lock"];
-
-/// Canonical sha256 hex over bytes: single heap allocation (pre-sized
-/// `String` plus `write!`, no per-byte temporaries). Single home for every
-/// remote-path digest (tarball integrity, script/stdout echo hashes,
-/// module table): callers in `oxdock-net-plugin` and `oxdock-cli` use
-/// this instead of local copies so the formatting rule cannot drift.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
-}
 
 /// True when a top-level workspace entry must never enter a sync tarball.
 pub fn excluded_from_sync(name: &str) -> bool {

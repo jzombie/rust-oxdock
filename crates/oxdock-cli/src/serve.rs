@@ -23,7 +23,8 @@ use muxio_sync_rpc_server::RpcSyncServer;
 use oxdock_fs::{GuardedPath, PathResolver};
 use sha2::Digest;
 
-use oxdock_remote_proto::{channel, methods, tar, types};
+use oxdock_remote_proto::{channel, methods, types};
+use oxdock_utils::{hex_encode, sha256_hex, tar};
 
 /// Module-table surface for the handshake: sorted module names each with
 /// their sorted function names. Built once at serve startup from the
@@ -324,11 +325,7 @@ fn start_exec(exec: &mut GuestExec, responder: StreamResponder) {
         return;
     };
     // Verify before touching the workspace.
-    use std::fmt::Write as _;
-    let mut hex = String::with_capacity(64);
-    for byte in hash.finalize() {
-        let _ = write!(hex, "{byte:02x}");
-    }
+    let hex = hex_encode(hash.finalize());
     if hex != descriptor.sha256 {
         fail_started_exec(&responder, exec, "fetch sha256 mismatch");
         return;
@@ -361,7 +358,7 @@ fn start_exec(exec: &mut GuestExec, responder: StreamResponder) {
             return;
         }
     };
-    let script_hash = oxdock_remote_proto::sha256_hex(script_text.as_bytes());
+    let script_hash = sha256_hex(script_text.as_bytes());
     std::thread::Builder::new()
         .name("oxdock-serve-engine".to_string())
         .spawn(move || {
@@ -501,7 +498,7 @@ fn run_guest_engine(
         .unwrap_or_else(|_| Err(anyhow::anyhow!("serve engine thread panicked")));
     drop(feed);
     let stdout_bytes = stdout_sink.lock().unwrap().clone();
-    let stdout_hash = oxdock_remote_proto::sha256_hex(&stdout_bytes);
+    let stdout_hash = sha256_hex(&stdout_bytes);
     // Pack the executed manifest to spill, then stream it as result-tar
     // chunks behind the prefixed result JSON.
     let manifest = manifest_sink
@@ -671,11 +668,7 @@ fn pack_manifest(
         hasher.update(&buf[..n]);
         len += n as u64;
     }
-    use std::fmt::Write as _;
-    let mut sha = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        let _ = write!(sha, "{byte:02x}");
-    }
+    let sha = hex_encode(hasher.finalize());
     spill.rewind()?;
     Ok((len, sha, spill, push_dir))
 }

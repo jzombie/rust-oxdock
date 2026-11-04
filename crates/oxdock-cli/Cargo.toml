@@ -18,7 +18,7 @@ build = []
 
 [features]
 default = ["net", "ssh", "markdown", "mcp"]
-net = ["dep:oxdock-net-plugin", "dep:oxdock-remote-proto"]
+net = ["dep:oxdock-net-plugin", "dep:oxdock-remote-proto", "dep:oxdock-utils"]
 ssh = ["net", "dep:oxdock-ssh-plugin"]
 # Markdown helpers in the CLI runner (oxdock-markdown-plugin). On by
 # default; `--no-default-features` builds drop the module.
@@ -46,6 +46,7 @@ oxdock-parser.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
 oxdock-remote-proto = { workspace = true, optional = true }
+oxdock-utils = { workspace = true, optional = true }
 oxdock-ssh-plugin = { workspace = true, optional = true }
 serde_json.workspace = true
 sha2.workspace = true

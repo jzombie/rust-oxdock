@@ -15,6 +15,7 @@ members = [
     "crates/oxdock-parser",
     "crates/oxdock-pty",
     "crates/oxdock-remote-proto",
+    "crates/oxdock-utils",
     "crates/plugins/oxdock-markdown-plugin",
     "crates/plugins/oxdock-net-plugin",
     "crates/plugins/oxdock-ssh-plugin",
@@ -78,6 +79,7 @@ oxdock-pipe = { path = "crates/sys/oxdock-pipe", version = "0.35.0-alpha" }
 oxdock-process = { path = "crates/sys/oxdock-process", version = "0.35.0-alpha" }
 oxdock-pty = { path = "crates/oxdock-pty", version = "0.35.0-alpha" }
 oxdock-remote-proto = { path = "crates/oxdock-remote-proto", version = "0.35.0-alpha" }
+oxdock-utils = { path = "crates/oxdock-utils", version = "0.35.0-alpha" }
 oxdock-ssh-plugin = { path = "crates/plugins/oxdock-ssh-plugin", version = "0.35.0-alpha" }
 oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.35.0-alpha" }
 portable-pty = "0.9"

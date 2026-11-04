@@ -29,7 +29,8 @@ use muxio_rpc_service_caller::dynamic_channel::{DynamicChannelType, DynamicRecei
 use muxio_sync_rpc_client::RpcSyncClient;
 use oxdock_core::{RemoteRequest, RemoteResponse, RemoteRunner};
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
-use oxdock_remote_proto::{channel, methods, tar, types};
+use oxdock_remote_proto::{channel, methods, types};
+use oxdock_utils::{hex_encode, tar};
 use sha2::Digest;
 use std::io::{Read, Write};
 use std::sync::{
@@ -71,12 +72,7 @@ pub fn module_hash(entries: &[(String, Vec<String>)]) -> String {
             hasher.update(b"\n");
         }
     }
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    hex_encode(hasher.finalize())
 }
 
 type Encoder = RpcStreamEncoder<Box<dyn RpcEmit + Send + Sync>>;
@@ -603,7 +599,7 @@ impl MuxioSession {
             );
         }
         // End-to-end integrity over the bytes each side actually saw.
-        let script_hash = oxdock_remote_proto::sha256_hex(request.script_text.as_bytes());
+        let script_hash = oxdock_utils::sha256_hex(request.script_text.as_bytes());
         if result.script_sha256 != script_hash {
             bail!(
                 "REMOTE target '{}' executed different script bytes than shipped (transport corruption)",
@@ -613,12 +609,7 @@ impl MuxioSession {
         let stdout_hash = {
             use sha2::Digest;
             let digest = std::mem::replace(&mut self.stdout_hash, sha2::Sha256::new());
-            use std::fmt::Write as _;
-            let mut out = String::with_capacity(64);
-            for byte in digest.finalize() {
-                let _ = write!(out, "{byte:02x}");
-            }
-            out
+            hex_encode(digest.finalize())
         };
         if result.stdout_sha256 != stdout_hash {
             bail!(
@@ -631,12 +622,7 @@ impl MuxioSession {
         };
         let result_hash = self.result_hash.take().map(|hasher| {
             use sha2::Digest;
-            use std::fmt::Write as _;
-            let mut out = String::with_capacity(64);
-            for byte in hasher.finalize() {
-                let _ = write!(out, "{byte:02x}");
-            }
-            out
+            hex_encode(hasher.finalize())
         });
         if result_hash.as_deref() != Some(result.result_tar_sha256.as_str()) {
             bail!(
@@ -758,12 +744,7 @@ impl TransferScratch {
             hasher.update(&buf[..n]);
             len += n as u64;
         }
-        use std::fmt::Write as _;
-        let mut out = String::with_capacity(64);
-        for byte in hasher.finalize() {
-            let _ = write!(out, "{byte:02x}");
-        }
-        Ok((out, len))
+        Ok((hex_encode(hasher.finalize()), len))
     }
 }
 

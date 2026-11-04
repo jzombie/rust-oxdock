@@ -547,7 +547,7 @@ pub fn asset_input_fingerprint(
 
     let digest = hasher.finalize();
     let bytes: &[u8] = digest.as_ref();
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(oxdock_utils::hex_encode(bytes))
 }
 
 fn hash_input_path(
