@@ -18,12 +18,9 @@
   <a href="https://coveralls.io/github/jzombie/rust-oxdock?branch=main">
     <img src="https://coveralls.io/repos/github/jzombie/rust-oxdock/badge.svg?branch=main" alt="Coverage Status" />
   </a>
-  <!-- Miri coverage badge hidden while the nightly Miri run is red:
-       un-comment once main is green again (issue #222).
   <a href="#miri-coverage">
     <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fjzombie%2Frust-oxdock%2Fbadges%2Fmiri-coverage.json" alt="Miri Coverage" />
   </a>
-  -->
 </div>
 
 **OxDock is a Dockerfile-inspired DSL for native builds, multi-node pipelines, and sealed remote execution.**
