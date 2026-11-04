@@ -26,8 +26,8 @@ See the [changelog]({{ $docs_global.changelog_url }}) for what changed in each r
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
 | [`REMOVE`](#remove) | `REMOVE [--recursive] <path>` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
-| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ <actual> <expected> \| ASSERT_EQ --hash <sha256> <actual>` |
-| [`ASSERT_NE`](#assert_ne) | `ASSERT_NE <actual> <expected> \| ASSERT_NE --hash <sha256> <actual>` |
+| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ [--hash <sha256>] <actual> <expected>` |
+| [`ASSERT_NE`](#assert_ne) | `ASSERT_NE [--hash <sha256>] <actual> <expected>` |
 | [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |

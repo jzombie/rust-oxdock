@@ -26,8 +26,8 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
 | [`REMOVE`](#remove) | `REMOVE [--recursive] <path>` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
-| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ <actual> <expected> \| ASSERT_EQ --hash <sha256> <actual>` |
-| [`ASSERT_NE`](#assert_ne) | `ASSERT_NE <actual> <expected> \| ASSERT_NE --hash <sha256> <actual>` |
+| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ [--hash <sha256>] <actual> <expected>` |
+| [`ASSERT_NE`](#assert_ne) | `ASSERT_NE [--hash <sha256>] <actual> <expected>` |
 | [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
@@ -2740,7 +2740,7 @@ EXPAND template.md
 
 Assert strict equality.
 
-**Syntax:** `ASSERT_EQ <actual> <expected> | ASSERT_EQ --hash <sha256> <actual>`
+**Syntax:** `ASSERT_EQ [--hash <sha256>] <actual> <expected>`
 
 Compares two evaluated values with typed equality (no coercion:
 `INT(42)` never equals `STRING("42")`), aborting the pipeline
@@ -2800,7 +2800,7 @@ ASSERT_EQ --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103
 
 Assert strict inequality.
 
-**Syntax:** `ASSERT_NE <actual> <expected> | ASSERT_NE --hash <sha256> <actual>`
+**Syntax:** `ASSERT_NE [--hash <sha256>] <actual> <expected>`
 
 Compares two evaluated values with typed inequality (no coercion:
 `INT(42)` never equals `STRING("42")`), aborting the pipeline
