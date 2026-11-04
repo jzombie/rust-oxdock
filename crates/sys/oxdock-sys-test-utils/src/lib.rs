@@ -121,13 +121,13 @@ pub fn can_create_symlinks(target: &Path) -> bool {
         return false;
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(miri)))]
     {
         let _ = target;
         true
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, not(miri)))]
     {
         use std::fs;
         use std::os::windows::fs::symlink_dir;
@@ -141,7 +141,7 @@ pub fn can_create_symlinks(target: &Path) -> bool {
         ok
     }
 
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(any(unix, windows, miri)))]
     {
         let _ = target;
         false
