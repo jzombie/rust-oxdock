@@ -36,7 +36,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: main
+          # Follow the triggering ref, not a pinned branch: scheduled
+          # runs trigger on the default branch (main), while manual
+          # dispatches must test the selected branch, not main.
+          ref: ${{ github.ref }}
 
       # Latest nightly plus Miri: the dated pin went away with the
       # upstream ssh-key E0391 fix (#269, #272). Re-pin a dated nightly
