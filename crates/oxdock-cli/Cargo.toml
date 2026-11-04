@@ -46,8 +46,8 @@ oxdock-parser.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
 oxdock-remote-proto = { workspace = true, optional = true }
-oxdock-utils = { workspace = true, optional = true }
 oxdock-ssh-plugin = { workspace = true, optional = true }
+oxdock-utils = { workspace = true, optional = true }
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
