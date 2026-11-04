@@ -2128,6 +2128,25 @@ fn assert_ne_hash_mode_covers_piped_stdout() {
 }
 
 #[test]
+fn assert_eq_hash_mode_covers_piped_stdout() {
+    // Mode 1 parity: the unified core digests the drained stream for EQ
+    // too (previously only the plain-value form worked here).
+    // sha256("piped-bytes\n"): ECHO appends the trailing newline.
+    let digest = "1cb21eddbef5728846864297cf1e542883eda384e004d3e330f95604ca30aa24";
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        &formatdoc! {r#"
+            LET $p: PIPE
+            WITH_IO [stdout=$p] ECHO "piped-bytes"
+            WITH_IO [stdin=$p] ASSERT_EQ --hash {digest} stdout
+        "#},
+    )
+    .expect("matching piped digest passes");
+}
+
+#[test]
 fn assert_eq_path_type_reports_absent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

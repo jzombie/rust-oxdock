@@ -16,8 +16,8 @@ use std::collections::HashSet;
 use std::fmt;
 
 use crate::ast::{
-    Arg, ArgPart, ArithOp, CompareOp, Expr, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable,
-    PipeTarget, Step, Value, WorkspaceTarget,
+    Arg, ArgPart, ArithOp, Command, CompareOp, Expr, GuardExpr, IoBinding, IoStream, MathOp,
+    ModuleTable, PipeTarget, Step, Value, WorkspaceTarget,
 };
 use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
@@ -733,11 +733,8 @@ impl StepKind {
             }
             StepKind::AssertEq {
                 actual, expected, ..
-            } => {
-                walk_target(actual, f);
-                walk_opt(expected, f);
             }
-            StepKind::AssertNe {
+            | StepKind::AssertNe {
                 actual, expected, ..
             } => {
                 walk_target(actual, f);
@@ -865,11 +862,8 @@ impl StepKind {
             }
             StepKind::AssertEq {
                 actual, expected, ..
-            } => {
-                walk_target(actual, f);
-                walk_opt(expected, f);
             }
-            StepKind::AssertNe {
+            | StepKind::AssertNe {
                 actual, expected, ..
             } => {
                 walk_target(actual, f);
@@ -1076,6 +1070,51 @@ fn lower_assert_operand(arg: Arg) -> Arg {
         }
         other => other,
     }
+}
+
+/// Shared positional lowering for `ASSERT_EQ`/`ASSERT_NE`: one actual plus
+/// an optional expected, with `--hash` carrying the expectation in the
+/// flag. Combining `--hash` with a positional expected is rejected so a
+/// stray value cannot silently vanish. `verb` names the command for errors.
+fn lower_equality_args(
+    verb: &str,
+    flags: Vec<(String, Arg)>,
+    args: Vec<Arg>,
+) -> ParseResult<(Option<String>, AssertTarget, Option<Arg>)> {
+    let hash = flags
+        .iter()
+        .find(|(k, _)| k == "hash")
+        .map(|(_, v)| v.as_str().to_string());
+    let mut it = args.into_iter();
+    let actual = lower_assert_target(it.next().ok_or_else(|| {
+        ParseError::validation(
+            verb,
+            format!("{verb} requires a value"),
+            &SpanContext::line_only(0),
+        )
+    })?)?;
+    let remaining: Vec<Arg> = it.map(lower_assert_operand).collect::<Vec<Arg>>();
+    let expected = if remaining.is_empty() {
+        if hash.is_some() {
+            None
+        } else {
+            return Err(ParseError::validation(
+                verb,
+                format!("{verb} requires an expected value"),
+                &SpanContext::line_only(0),
+            ));
+        }
+    } else {
+        if hash.is_some() {
+            return Err(ParseError::validation(
+                verb,
+                format!("{verb} --hash cannot be combined with an expected value"),
+                &SpanContext::line_only(0),
+            ));
+        }
+        Some(join_value(remaining, verb)?)
+    };
+    Ok((hash, actual, expected))
 }
 
 declare_commands! {
@@ -2094,7 +2133,7 @@ declare_commands! {
     ],
 
     AssertEq => [
-        name: "ASSERT_EQ",
+        name: Command::AssertEq.as_str(),
         variant: AssertEq { hash: Option<String>, actual: AssertTarget, expected: Option<Arg> },
         syntax: "ASSERT_EQ <actual> <expected> | ASSERT_EQ --hash <sha256> <actual>",
         summary: "Assert strict equality.",
@@ -2134,29 +2173,13 @@ declare_commands! {
             ASSERT_EQ --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c $body
         "#} } ],
         lower: |flags, args| {
-            let hash = flags.iter().find(|(k, _)| k == "hash").map(|(_, v)| v.as_str().to_string());
-            let mut it = args.into_iter();
-            let actual = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_EQ", "ASSERT_EQ requires a value".to_string(), &SpanContext::line_only(0)))?)?;
-            let remaining: Vec<Arg> = it
-                .map(lower_assert_operand)
-                .collect::<Vec<Arg>>();
-            // Exactly two operands, except --hash carries its expectation
-            // in the flag and takes none positionally.
-            let expected = if remaining.is_empty() {
-                if hash.is_some() {
-                    None
-                } else {
-                    return Err(ParseError::validation("ASSERT_EQ", "ASSERT_EQ requires an expected value".to_string(), &SpanContext::line_only(0)))
-                }
-            } else {
-                Some(join_value(remaining, "ASSERT_EQ")?)
-            };
+            let (hash, actual, expected) = lower_equality_args(Command::AssertEq.as_str(), flags, args)?;
             Ok(StepKind::AssertEq { hash, actual, expected })
         },
     ],
 
     AssertNe => [
-        name: "ASSERT_NE",
+        name: Command::AssertNe.as_str(),
         variant: AssertNe { hash: Option<String>, actual: AssertTarget, expected: Option<Arg> },
         syntax: "ASSERT_NE <actual> <expected> | ASSERT_NE --hash <sha256> <actual>",
         summary: "Assert strict inequality.",
@@ -2198,27 +2221,7 @@ declare_commands! {
             ASSERT_NE --hash 0000000000000000000000000000000000000000000000000000000000000000 $body
         "#} } ],
         lower: |flags, args| {
-            let hash = flags.iter().find(|(k, _)| k == "hash").map(|(_, v)| v.as_str().to_string());
-            let mut it = args.into_iter();
-            let actual = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_NE", "ASSERT_NE requires a value".to_string(), &SpanContext::line_only(0)))?)?;
-            let remaining: Vec<Arg> = it
-                .map(lower_assert_operand)
-                .collect::<Vec<Arg>>();
-            // Exactly two operands, except --hash carries its expectation
-            // in the flag and takes none positionally; combining both is
-            // rejected so a stray expected value cannot silently vanish.
-            let expected = if remaining.is_empty() {
-                if hash.is_some() {
-                    None
-                } else {
-                    return Err(ParseError::validation("ASSERT_NE", "ASSERT_NE requires an expected value".to_string(), &SpanContext::line_only(0)))
-                }
-            } else {
-                if hash.is_some() {
-                    return Err(ParseError::validation("ASSERT_NE", "ASSERT_NE --hash cannot be combined with an expected value".to_string(), &SpanContext::line_only(0)));
-                }
-                Some(join_value(remaining, "ASSERT_NE")?)
-            };
+            let (hash, actual, expected) = lower_equality_args(Command::AssertNe.as_str(), flags, args)?;
             Ok(StepKind::AssertNe { hash, actual, expected })
         },
     ],
@@ -4217,40 +4220,27 @@ impl fmt::Display for StepKind {
                 hash,
                 actual,
                 expected,
-            } => {
-                if let Some(d) = hash {
-                    write!(f, "ASSERT_EQ --hash {d} {}", fmt_assert_target(actual))?;
-                } else {
-                    write!(
-                        f,
-                        "ASSERT_EQ {} {}",
-                        fmt_assert_target(actual),
-                        fmt_value(
-                            expected
-                                .as_ref()
-                                .expect("Display of ASSERT_EQ without --hash needs expected"),
-                            quote_msg
-                        )
-                    )?;
-                }
-                Ok(())
             }
-            StepKind::AssertNe {
+            | StepKind::AssertNe {
                 hash,
                 actual,
                 expected,
             } => {
+                let verb = match self {
+                    StepKind::AssertEq { .. } => Command::AssertEq.as_str(),
+                    _ => Command::AssertNe.as_str(),
+                };
                 if let Some(d) = hash {
-                    write!(f, "ASSERT_NE --hash {d} {}", fmt_assert_target(actual))?;
+                    write!(f, "{verb} --hash {d} {}", fmt_assert_target(actual))?;
                 } else {
                     write!(
                         f,
-                        "ASSERT_NE {} {}",
+                        "{verb} {} {}",
                         fmt_assert_target(actual),
                         fmt_value(
                             expected
                                 .as_ref()
-                                .expect("Display of ASSERT_NE without --hash needs expected"),
+                                .expect("Display of ASSERT without --hash needs expected"),
                             quote_msg
                         )
                     )?;
@@ -5750,6 +5740,14 @@ mod tests {
         );
 
         let err = parse_script("ASSERT_NE --hash abc123 $status \"junk\"\n", lower_command)
+            .expect_err("hash plus expected must fail");
+        assert!(
+            err.to_string().contains("cannot be combined"),
+            "unexpected error: {err}"
+        );
+
+        // Parity: the shared lowering rejects the combination for EQ too.
+        let err = parse_script("ASSERT_EQ --hash abc123 $status \"junk\"\n", lower_command)
             .expect_err("hash plus expected must fail");
         assert!(
             err.to_string().contains("cannot be combined"),

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
-use oxdock_parser::{Arg, AssertTarget, Step, StepKind, Value, guard_option_allows};
+use oxdock_parser::{Arg, AssertTarget, Command, Step, StepKind, Value, guard_option_allows};
 use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager, SharedInput, SharedOutput};
 
 /// Create an ExitStatus from a raw exit code. Cross-platform.
@@ -963,33 +963,26 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             hash,
             actual,
             expected,
-        } => {
-            let target = resolve_assert_target(actual, &mut cx)?;
-            let expected_resolved = match expected {
-                Some(e) => Some(super::args::evaluate_assert_operand(e, &mut cx)?),
-                None => None,
-            };
-            handlers::assert_eq(
-                &mut cx,
-                generation,
-                hash,
-                &target,
-                expected_resolved.as_ref(),
-            )
         }
-        StepKind::AssertNe {
+        | StepKind::AssertNe {
             hash,
             actual,
             expected,
         } => {
+            let (verb, expect_equal) = match cmd {
+                StepKind::AssertEq { .. } => (Command::AssertEq.as_str(), true),
+                _ => (Command::AssertNe.as_str(), false),
+            };
             let target = resolve_assert_target(actual, &mut cx)?;
             let expected_resolved = match expected {
                 Some(e) => Some(super::args::evaluate_assert_operand(e, &mut cx)?),
                 None => None,
             };
-            handlers::assert_ne(
+            handlers::assert_equality(
                 &mut cx,
                 generation,
+                verb,
+                expect_equal,
                 hash,
                 &target,
                 expected_resolved.as_ref(),
@@ -1344,27 +1337,16 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 hash,
                                 actual,
                                 expected,
-                            } => {
-                                let target = resolve_assert_target(actual, &mut cx)?;
-                                let expected_resolved = match expected {
-                                    Some(e) => {
-                                        Some(super::args::evaluate_assert_operand(e, &mut cx)?)
-                                    }
-                                    None => None,
-                                };
-                                handlers::assert_eq(
-                                    &mut cx,
-                                    generation,
-                                    hash,
-                                    &target,
-                                    expected_resolved.as_ref(),
-                                )
                             }
-                            StepKind::AssertNe {
+                            | StepKind::AssertNe {
                                 hash,
                                 actual,
                                 expected,
                             } => {
+                                let (verb, expect_equal) = match &step.kind {
+                                    StepKind::AssertEq { .. } => (Command::AssertEq.as_str(), true),
+                                    _ => (Command::AssertNe.as_str(), false),
+                                };
                                 let target = resolve_assert_target(actual, &mut cx)?;
                                 let expected_resolved = match expected {
                                     Some(e) => {
@@ -1372,9 +1354,11 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     }
                                     None => None,
                                 };
-                                handlers::assert_ne(
+                                handlers::assert_equality(
                                     &mut cx,
                                     generation,
+                                    verb,
+                                    expect_equal,
                                     hash,
                                     &target,
                                     expected_resolved.as_ref(),
