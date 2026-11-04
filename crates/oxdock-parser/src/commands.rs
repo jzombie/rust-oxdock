@@ -2205,7 +2205,8 @@ declare_commands! {
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
             // Exactly two operands, except --hash carries its expectation
-            // in the flag and takes none positionally.
+            // in the flag and takes none positionally; combining both is
+            // rejected so a stray expected value cannot silently vanish.
             let expected = if remaining.is_empty() {
                 if hash.is_some() {
                     None
@@ -2213,6 +2214,9 @@ declare_commands! {
                     return Err(ParseError::validation("ASSERT_NE", "ASSERT_NE requires an expected value".to_string(), &SpanContext::line_only(0)))
                 }
             } else {
+                if hash.is_some() {
+                    return Err(ParseError::validation("ASSERT_NE", "ASSERT_NE --hash cannot be combined with an expected value".to_string(), &SpanContext::line_only(0)));
+                }
                 Some(join_value(remaining, "ASSERT_NE")?)
             };
             Ok(StepKind::AssertNe { hash, actual, expected })
@@ -5742,6 +5746,13 @@ mod tests {
         let err = parse_script("ASSERT_NE $status\n", lower_command).expect_err("needs expected");
         assert!(
             err.to_string().contains("requires an expected value"),
+            "unexpected error: {err}"
+        );
+
+        let err = parse_script("ASSERT_NE --hash abc123 $status \"junk\"\n", lower_command)
+            .expect_err("hash plus expected must fail");
+        assert!(
+            err.to_string().contains("cannot be combined"),
             "unexpected error: {err}"
         );
     }

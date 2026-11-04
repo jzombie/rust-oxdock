@@ -1785,6 +1785,19 @@ pub(super) fn assert_ne<P: ProcessManager>(
             w.write_all(&drained)?;
             Ok(())
         })?;
+        if let Some(sha) = hash {
+            // Hash form carries no positional expected: digest the
+            // drained stream and require inequality instead.
+            let mut hasher = Sha256::new();
+            hasher.update(&drained);
+            let digest = hasher.finalize();
+            let bytes: &[u8] = digest.as_ref();
+            let computed: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            if computed.eq_ignore_ascii_case(sha) {
+                bail!("ASSERT_NE --hash match: content matches {}", sha);
+            }
+            return Ok(());
+        }
         let Some(want) = expected.and_then(|v| v.as_str()) else {
             bail!(
                 "ASSERT_NE stream mismatch\nexpected: {:?}\nactual:   {:?}",

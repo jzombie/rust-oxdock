@@ -186,7 +186,7 @@ impl Command {
             Command::Remove => "REMOVE [--recursive] <path>",
             Command::Expand => "EXPAND [<path>] [<KEY=val> ...]",
             Command::AssertEq => "ASSERT_EQ [--hash <sha256>] <actual> <expected>",
-            Command::AssertNe => "ASSERT_NE <actual> <expected>",
+            Command::AssertNe => "ASSERT_NE [--hash <sha256>] <actual> <expected>",
             Command::AssertContains => "ASSERT_CONTAINS <haystack> <needle>",
             Command::Exit => "EXIT <code>",
             Command::Async => "ASYNC <command...> | ASYNC { <commands> }",

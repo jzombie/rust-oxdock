@@ -2111,6 +2111,23 @@ fn assert_ne_hash_mode_rejects_matching_digest() {
 }
 
 #[test]
+fn assert_ne_hash_mode_covers_piped_stdout() {
+    // Mode 1: WITH_IO [stdin=$p] makes stdin a stream, so the drained
+    // pipe bytes (not a positional expected) feed the digest comparison.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            LET $p: PIPE
+            WITH_IO [stdout=$p] ECHO "piped-bytes"
+            WITH_IO [stdin=$p] ASSERT_NE --hash 0000000000000000000000000000000000000000000000000000000000000000 stdout
+        "#},
+    )
+    .expect("differing piped digest passes");
+}
+
+#[test]
 fn assert_eq_path_type_reports_absent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
