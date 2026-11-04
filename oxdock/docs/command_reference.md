@@ -27,7 +27,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`REMOVE`](#remove) | `REMOVE [--recursive] <path>` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
 | [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ <actual> <expected> \| ASSERT_EQ --hash <sha256> <actual>` |
-| [`ASSERT_NE`](#assert_ne) | `ASSERT_NE <actual> <expected>` |
+| [`ASSERT_NE`](#assert_ne) | `ASSERT_NE <actual> <expected> \| ASSERT_NE --hash <sha256> <actual>` |
 | [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
@@ -2800,7 +2800,7 @@ ASSERT_EQ --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103
 
 Assert strict inequality.
 
-**Syntax:** `ASSERT_NE <actual> <expected>`
+**Syntax:** `ASSERT_NE <actual> <expected> | ASSERT_NE --hash <sha256> <actual>`
 
 Compares two evaluated values with typed inequality (no coercion:
 `INT(42)` never equals `STRING("42")`), aborting the pipeline
@@ -2812,7 +2812,10 @@ evaluate in memory and never touch disk. Read files explicitly
 first (`LET $text: STRING = READ "out.txt"`, then
 `ASSERT_NE $text ...`).
 Bare `stdout` / `stderr` observe stream buffers; a `$var`
-holding a `PIPE` observes its backend bytes.
+holding a `PIPE` observes its backend bytes. `--hash` compares
+the SHA-256 of a string, pipe, or captured-stdout actual
+instead of the raw bytes (`stderr` is unsupported); the digest
+must differ from the given hash.
 
 
 **Arguments:**
@@ -2820,7 +2823,13 @@ holding a `PIPE` observes its backend bytes.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `actual` | `<any>` | yes | Value, stdout, stderr, or a $var holding a PIPE |
-| `expected` | `<any>...` | yes | Value the actual must differ from |
+| `expected` | `<any>...` | no | Value the actual must differ from (required unless --hash) |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--hash` | `STRING` | SHA-256 |
 
 **Examples:**
 
@@ -2837,6 +2846,15 @@ ASSERT_NE $status 404
 WRITE payload.bin stable-content
 LET $body: STRING = READ payload.bin
 ASSERT_NE $body "other-content"
+```
+
+**Example: assert ne hash**
+
+```oxdock
+# --hash compares the SHA-256 digest instead of raw bytes.
+WRITE payload.bin stable-content
+LET $body: STRING = READ payload.bin
+ASSERT_NE --hash 0000000000000000000000000000000000000000000000000000000000000000 $body
 ```
 
 
