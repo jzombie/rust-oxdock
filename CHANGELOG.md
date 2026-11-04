@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Fixed
 
-- Miri coverage badge now reports failure: the nightly report step runs on `always()` and turns the badge red with a "failing" message when the Miri run fails, instead of fossilizing at the last green publish. The listing commands tolerate a broken tree so the report itself cannot abort the update (#222).
+- Miri isolation abort in archive packing: `ARCHIVE` no longer stats the host for header lengths and modes. A new `archive_member_stat` query answers from synthetic filesystem state under Miri (exact lengths, conventional default modes), so the full archive suite interprets cleanly instead of aborting on `open`.
 
 ### Added
 

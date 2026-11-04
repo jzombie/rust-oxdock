@@ -31,6 +31,24 @@ trait BackendImpl: Send + Sync {
     ) -> Result<Box<dyn std::io::Write + Send>>;
     fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath>;
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata>;
+    /// Byte length plus real Unix mode bits for one archive member, for
+    /// callers that cannot use a host `stat`. The default implementation
+    /// stats the host path, preserving exact native behavior; backends
+    /// without a host filesystem override it from their own state
+    /// (exact lengths, `None` mode so callers fall back to conventional
+    /// defaults).
+    fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
+        let meta = self.metadata(path)?;
+        let len = meta.len();
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            Some(meta.permissions().mode() & 0o7777)
+        };
+        #[cfg(not(unix))]
+        let mode: Option<u32> = None;
+        Ok((len, mode))
+    }
     fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind>;
     fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<super::EntryKind>;
     fn resolve_workdir(&self, resolved: GuardedPath) -> Result<GuardedPath>;
@@ -711,6 +729,27 @@ mod miri_backend {
             }
         }
 
+        /// Archive facts without a host `stat` (which Miri isolation
+        /// forbids): exact lengths from synthetic state, no modes (the
+        /// synthetic filesystem has none, so callers use conventional
+        /// defaults, matching the non-Unix behavior).
+        fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
+            let rel = normalize_rel(path);
+            let binding = self.state_for_guard_rc(path)?;
+            let state = binding.lock().expect("miri state poisoned");
+            match state.entry_kind(&rel) {
+                Some(EntryKind::File) => {
+                    let len = state.read_file(&rel)?.len() as u64;
+                    Ok((len, None))
+                }
+                Some(EntryKind::Dir) => Ok((0, None)),
+                Some(EntryKind::Symlink) => {
+                    bail!("archive member is a symlink: {}", path.display())
+                }
+                None => bail!("failed to stat {}", path.display()),
+            }
+        }
+
         fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind> {
             let rel = normalize_rel(path);
             let binding = self.state_for_guard_rc(path)?;
@@ -1099,6 +1138,10 @@ impl Backend {
 
     pub(super) fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata> {
         self.as_impl().metadata(path)
+    }
+
+    pub(super) fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
+        self.as_impl().archive_member_stat(path)
     }
 
     pub(super) fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind> {

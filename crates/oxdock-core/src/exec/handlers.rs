@@ -761,23 +761,6 @@ pub(super) fn copy_git<P: ProcessManager>(
     Ok(())
 }
 
-/// Source mode for one archive header: Unix records the real mode so
-/// unpackers (system `tar` or `UNARCHIVE`) restore it; other platforms
-/// land the conventional default.
-fn archive_entry_mode(meta: &std::fs::Metadata, default: u32) -> u32 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = default;
-        meta.permissions().mode() & 0o7777
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        default
-    }
-}
-
 /// Resolve an archive source with a symlink refusal: canonical
 /// resolution routes through the final link, so the resolved guard alone
 /// cannot see it. The parent resolves normally (intermediate links stay
@@ -939,8 +922,8 @@ fn append_archive_tree<W: std::io::Write>(
     for (rel, guard) in dirs {
         let rel = sanitize_rel(rel).with_context(|| tag.to_string())?;
         let mode = fs
-            .metadata(guard)
-            .map(|meta| archive_entry_mode(&meta, 0o755))
+            .archive_member_stat(guard)
+            .map(|(_, mode)| mode.unwrap_or(0o755))
             .with_context(|| tag.to_string())?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode);
@@ -953,7 +936,7 @@ fn append_archive_tree<W: std::io::Write>(
     }
     for (rel, guard) in files {
         let rel = sanitize_rel(rel).with_context(|| tag.to_string())?;
-        let meta = fs.metadata(guard).with_context(|| tag.to_string())?;
+        let (len, mode) = fs.archive_member_stat(guard).with_context(|| tag.to_string())?;
         // Link-refusing open: a symlink planted after the listing
         // probe fails here instead of packing its target's bytes, and
         // the descriptor must stay under the packed tree.
@@ -961,8 +944,8 @@ fn append_archive_tree<W: std::io::Write>(
             .open_read_nofollow(guard, src_abs)
             .with_context(|| tag.to_string())?;
         let mut header = tar::Header::new_gnu();
-        header.set_mode(archive_entry_mode(&meta, 0o644));
-        header.set_size(meta.len());
+        header.set_mode(mode.unwrap_or(0o644));
+        header.set_size(len);
         header.set_cksum();
         builder
             .append_data(&mut header, &rel, &mut reader)

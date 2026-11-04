@@ -240,6 +240,20 @@ impl PathResolver {
         self.backend.metadata(&guarded)
     }
 
+    /// Byte length plus real Unix mode bits for one archive member (see
+    /// [`crate::WorkspaceFs::archive_member_stat`]). Guard checks mirror
+    /// [`Self::metadata`]; the backend answers without a host `stat` where
+    /// it cannot perform one.
+    pub fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
+        let guarded = self
+            .check_access(path.as_path(), AccessMode::Read)
+            .or_else(|_| {
+                self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
+            })
+            .with_context(|| format!("metadata denied for {}", path.display()))?;
+        self.backend.archive_member_stat(&guarded)
+    }
+
     pub fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind> {
         self.backend.entry_kind(path)
     }

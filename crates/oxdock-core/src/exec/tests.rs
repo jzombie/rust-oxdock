@@ -2622,6 +2622,10 @@ fn archive_destination_cannot_be_source_or_inside_packed_tree() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "asserts real Unix mode bits via host stat; the synthetic Miri filesystem has no modes"
+)]
 fn unarchive_restores_read_only_dirs_after_children_land() {
     // A 0555 member dir applied eagerly would lock out its own file
     // creations with EACCES; modes must settle after extraction.
@@ -2841,6 +2845,10 @@ fn archive_refuses_nested_symlink_in_tree() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "asserts real Unix mode bits via host stat; the synthetic Miri filesystem has no modes"
+)]
 fn archive_round_trips_unix_modes() {
     // Pack-side mode recording plus unpack-side restore: an executable
     // bit set before ARCHIVE must survive the round trip.
@@ -4124,6 +4132,10 @@ fn echo_of_pipe_handle_fails_loudly() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "wall-clock task join; Miri interprets orders of magnitude slower than the script timeout"
+)]
 fn nested_spawn_marks_pipes_nested_in_collections_escaped() {
     // Pipes travel inside lists and maps: spawning a nested task must
     // mark them escaped through the collection. Here the pipe is
@@ -4223,6 +4235,10 @@ fn eof_false_while_buffered_true_once_drained() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "wall-clock task join; Miri interprets orders of magnitude slower than the script timeout"
+)]
 fn eof_false_with_live_writer_true_after_join() {
     // A task holding the write end answers false; once it exits and the
     // pipe closes, the same handle answers true.
@@ -4314,6 +4330,10 @@ fn loop_body_declarations_mint_per_iteration() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "wall-clock task join; Miri interprets orders of magnitude slower than the script timeout"
+)]
 fn mixed_task_body_pins_script_and_run_adapts() {
     // Strict promotion: a RUN producer sharing a handle with a DSL
     // consumer pins script (not every binding is RUN-terminated). The RUN
@@ -7356,6 +7376,10 @@ fn file_import_dotdot_escape_fails_before_any_step() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "parse-time IMPORT probe needs a host filesystem; unresolvable under Miri isolation"
+)]
 fn file_import_outside_entry_resolves_against_workspace_root() {
     // Entries staged outside the workspace (CI temp dirs) resolve
     // top-level imports against the workspace root, like stdin runs.

@@ -136,6 +136,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "asserts scratch-dir naming and host cargo env layout; synthetic Miri tempdirs carry neither"
+    )]
     fn run_isolates_cargo_target_dir_from_workspace() {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
