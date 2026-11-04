@@ -8,8 +8,9 @@ anything can depend on it without a cycle.
   sanitized member paths and write-through integrity. Backs local
   `ARCHIVE` / `UNARCHIVE` and remote declared transfers from the same
   code, with no filesystem access of its own.
-- Digests: canonical hex over raw bytes (`sha256_hex`) and over
-  already-finalized digests (`hex_encode`), so the encoding cannot
+- Digests: canonical hex over raw bytes (`sha256_hex`), over
+  already-finalized digests (`hex_encode`), and over re-read streams
+  (`hash_stream`, yielding hex plus length), so the encoding cannot
   drift between one-shot hashes, streaming hashers, and tests.
 
 See rustdoc for the item-level API.

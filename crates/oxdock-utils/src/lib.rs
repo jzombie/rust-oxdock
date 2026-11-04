@@ -45,3 +45,24 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex_encode(Sha256::digest(bytes))
 }
+
+/// Hash a byte stream to `(hex, len)` in one 64 KiB pass with O(1)
+/// memory. Both remote ends re-read staged archives through this, so the
+/// byte count and the digest cannot drift apart. Callers hashing
+/// incremental state instead (sorted tables, running pumps) keep their
+/// own feed and use [`hex_encode`] for the tail.
+pub fn hash_stream(mut source: impl std::io::Read) -> anyhow::Result<(String, u64)> {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    let mut len = 0u64;
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = source.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        len += n as u64;
+    }
+    Ok((hex_encode(hasher.finalize()), len))
+}

@@ -731,20 +731,7 @@ impl TransferScratch {
     }
 
     fn hash_and_len(&self, stage: &mut oxdock_core::TransferStage) -> Result<(String, u64)> {
-        use std::io::Read;
-        let mut hasher = sha2::Sha256::new();
-        use sha2::Digest;
-        let mut len = 0u64;
-        let mut buf = [0u8; 65536];
-        loop {
-            let n = stage.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            len += n as u64;
-        }
-        Ok((hex_encode(hasher.finalize()), len))
+        oxdock_utils::hash_stream(&mut *stage)
     }
 }
 
