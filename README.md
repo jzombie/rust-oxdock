@@ -52,6 +52,7 @@ command list with runnable examples, or view the standard library
 
 <details>
 <summary>Prebuilt installers (all features)</summary>
+<br>
 
 **Linux / macOS:**
 ```sh
@@ -79,6 +80,7 @@ $env:VERSION = 'v0.34.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/
 
 <details>
 <summary>Install from source (Cargo)</summary>
+<br>
 
 **Build from source via Cargo** (same full module surface as the
 release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
