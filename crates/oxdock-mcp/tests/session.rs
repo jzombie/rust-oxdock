@@ -5,7 +5,7 @@ use indoc::indoc;
 use oxdock_core::{
     Engine, McpSession, StreamHook, TeeStream, Value, parse_script_with_modules_and_exports,
 };
-use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
+use oxdock_fs::{GuardedPath, MockFs, PathResolver, WorkspaceFs};
 use oxdock_mcp::{McpServerConfig, init_handler};
 use oxdock_process::default_process_manager;
 
@@ -14,8 +14,10 @@ fn test_fs() -> (Box<dyn WorkspaceFs>, GuardedPath) {
     let root = temp.as_guarded_path().clone();
     let mut resolver = PathResolver::new_lazy(root.clone()).expect("lazy resolver");
     resolver.set_workspace_root(root.clone());
-    let snapshot = resolver.snapshot_handle();
-    std::mem::forget(snapshot);
+    // No `mem::forget` on the snapshot handle: the resolver itself owns
+    // the shared backing dir for as long as the test holds `fs`, so an
+    // extra forgotten clone only leaks (Miri's leak checker aborts on
+    // it) without extending anything's life.
     let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
     (fs, root)
 }
@@ -671,16 +673,13 @@ fn async_block_runs_child_processes() {
 }
 
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "needs a real filesystem for module import; unsupported under Miri"
-)]
 fn reexported_import_serves_as_tool() {
     // An entry re-export promotes an imported function to the entry's
     // own tool surface: the lib's EXPORT gates visibility, the entry's
     // EXPORT LIB::FOO gates serving, and calls share module state.
-    let (fs, root) = test_fs();
-    let lib = root.join("lib.oxdock").expect("lib path");
+    // In-memory FS so this runs under Miri isolation too.
+    let fs = MockFs::new();
+    let lib = fs.root().join("lib.oxdock").expect("lib path");
     fs.write_file(
         &lib,
         b"LET $n: INT = 0\nFUNC COUNT() {\n $n = $n + 1\n RETURN $n\n}\nEXPORT COUNT\n",
@@ -696,7 +695,7 @@ fn reexported_import_serves_as_tool() {
     )
     .expect("parse");
     let mut session = McpSession::init(
-        fs,
+        Box::new(fs),
         default_process_manager(),
         Vec::new(),
         Vec::new(),

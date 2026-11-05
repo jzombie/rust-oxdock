@@ -414,7 +414,6 @@ fn macro_type_alias_and_list_append() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "PROMPT needs a terminal; unavailable under Miri")]
 fn macro_prompt_binds_default_off_terminal() {
     let steps = oxdock! {
         PROMPT $city "City?" "london"

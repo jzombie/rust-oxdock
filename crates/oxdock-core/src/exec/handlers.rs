@@ -3554,54 +3554,50 @@ pub(super) fn prompt<P: ProcessManager>(
     message: &str,
     default: Option<&str>,
 ) -> Result<()> {
-    #[cfg(miri)]
-    {
-        let _ = (cx, var, message, default);
-        bail!("PROMPT unavailable under Miri (no terminal)");
-    }
-    #[cfg(not(miri))]
-    {
-        let clean_var = var.trim_start_matches('$').to_string();
-        // Interactivity needs both a host TTY and an unredirected
-        // stdin: a `WITH_IO [stdin=...]` pipe can never answer a
-        // prompt, so PROMPT short-circuits instead of blocking on it.
-        if !cx.process.stdin_is_terminal() || cx.stdin.is_redirected() {
-            match default {
-                Some(d) => {
-                    eprintln!("non-interactive: using default for {message}");
-                    let text = Value::string(d.to_string());
-                    bind_prompt_var(cx, &clean_var, text)?;
-                    return Ok(());
-                }
-                None => {
-                    bail!("PROMPT {message}: non-TTY stdin has no answer and no default",);
-                }
+    // No Miri special-case: `SyntheticProcessManager::stdin_is_terminal`
+    // reports false without touching a fd, so under Miri this always
+    // takes the non-interactive branch below (default binds, else
+    // bail). The terminal-reading tail is unreachable there.
+    let clean_var = var.trim_start_matches('$').to_string();
+    // Interactivity needs both a host TTY and an unredirected
+    // stdin: a `WITH_IO [stdin=...]` pipe can never answer a
+    // prompt, so PROMPT short-circuits instead of blocking on it.
+    if !cx.process.stdin_is_terminal() || cx.stdin.is_redirected() {
+        match default {
+            Some(d) => {
+                eprintln!("non-interactive: using default for {message}");
+                let text = Value::string(d.to_string());
+                bind_prompt_var(cx, &clean_var, text)?;
+                return Ok(());
+            }
+            None => {
+                bail!("PROMPT {message}: non-TTY stdin has no answer and no default",);
             }
         }
-        let rendered = format_prompt(message, default);
-        {
-            use std::io::Write;
-            let mut err = std::io::stderr().lock();
-            err.write_all(rendered.as_bytes())
-                .with_context(|| format!("PROMPT {message}: failed to write prompt"))?;
-            err.flush()
-                .with_context(|| format!("PROMPT {message}: failed to flush prompt"))?;
-        }
-        let mut line = String::new();
-        let n = std::io::stdin()
-            .read_line(&mut line)
-            .with_context(|| format!("PROMPT {message}: failed reading stdin"))?;
-        if n == 0 && line.is_empty() {
-            bail!("PROMPT {message}: EOF on stdin before any input",);
-        }
-        let trimmed = line
-            .strip_suffix("\r\n")
-            .or_else(|| line.strip_suffix('\n'))
-            .unwrap_or(&line);
-        let text = Value::string(apply_prompt_answer(trimmed, default));
-        bind_prompt_var(cx, &clean_var, text)?;
-        Ok(())
     }
+    let rendered = format_prompt(message, default);
+    {
+        use std::io::Write;
+        let mut err = std::io::stderr().lock();
+        err.write_all(rendered.as_bytes())
+            .with_context(|| format!("PROMPT {message}: failed to write prompt"))?;
+        err.flush()
+            .with_context(|| format!("PROMPT {message}: failed to flush prompt"))?;
+    }
+    let mut line = String::new();
+    let n = std::io::stdin()
+        .read_line(&mut line)
+        .with_context(|| format!("PROMPT {message}: failed reading stdin"))?;
+    if n == 0 && line.is_empty() {
+        bail!("PROMPT {message}: EOF on stdin before any input",);
+    }
+    let trimmed = line
+        .strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(&line);
+    let text = Value::string(apply_prompt_answer(trimmed, default));
+    bind_prompt_var(cx, &clean_var, text)?;
+    Ok(())
 }
 
 #[cfg_attr(miri, allow(dead_code))]

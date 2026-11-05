@@ -21,7 +21,7 @@ default = []
 [dependencies]
 anyhow.workspace = true
 oxdock-core.workspace = true
-oxdock-fs.workspace = true
+oxdock-fs = { workspace = true, features = ["mock-fs"] }
 oxdock-parser.workspace = true
 oxdock-process.workspace = true
 oxdock-utils.workspace = true

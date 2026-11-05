@@ -23,6 +23,7 @@ use anyhow::{Context, Result};
 use oxdock_core::{FuncMeta, McpSession, StreamChunk, StreamHook, TeeStream, Value};
 use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_process::DefaultProcessManager;
+use oxdock_process::unix_now;
 use oxdock_utils::sha256_hex;
 /// Logging/message imports live separately: the notification family is
 /// deprecated by SEP-2577, but it remains the only content-carrying
@@ -784,13 +785,6 @@ impl StatusState {
 
 fn script_hash(text: &str) -> String {
     sha256_hex(text.as_bytes())
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
 }
 
 /// One validated rebuild: parse, init the session, derive the table.
