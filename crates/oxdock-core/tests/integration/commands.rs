@@ -4990,8 +4990,15 @@ fn static_exclusive_platform_guards_share_scope() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     for script in [
-        "[family:unix] LET $o: STRING = \"unix\"\n[family:windows] LET $o: STRING = \"windows\"\n",
-        "[os:macos] LET $o: STRING = \"macos\"\n[os:linux] LET $o: STRING = \"linux\"\nWRITE out.txt \"{{ $o }}\"\n",
+        indoc! {r#"
+            [family:unix] LET $o: STRING = "unix"
+            [family:windows] LET $o: STRING = "windows"
+        "#},
+        indoc! {r#"
+            [os:macos] LET $o: STRING = "macos"
+            [os:linux] LET $o: STRING = "linux"
+            [family:unix] WRITE out.txt "{{ $o }}"
+        "#},
     ] {
         run_script(&root, script).expect("exclusive guards share scope");
     }
@@ -5005,9 +5012,19 @@ fn static_overlapping_platform_guards_still_error() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     for guarded in [
-        "[os:macos] LET $o: STRING = \"m\"\n[family:unix] LET $o: STRING = \"u\"\n",
-        "[family:unix] LET $o: STRING = \"u\"\n[family:unix] LET $o: STRING = \"u2\"\n",
-        "[os:macos] LET $o: STRING = \"m\"\n[os:linux] LET $o: STRING = \"l\"\n[family:unix] LET $o: STRING = \"u\"\n",
+        indoc! {r#"
+            [os:macos] LET $o: STRING = "m"
+            [family:unix] LET $o: STRING = "u"
+        "#},
+        indoc! {r#"
+            [family:unix] LET $o: STRING = "u"
+            [family:unix] LET $o: STRING = "u2"
+        "#},
+        indoc! {r#"
+            [os:macos] LET $o: STRING = "m"
+            [os:linux] LET $o: STRING = "l"
+            [family:unix] LET $o: STRING = "u"
+        "#},
     ] {
         let err = run_script(&root, guarded).expect_err("overlapping must fail");
         assert!(err.to_string().contains("redeclaration error"), "{err}");
