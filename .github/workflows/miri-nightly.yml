@@ -18,6 +18,9 @@ on:
     - cron: "0 5 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 # Nightly runs must not pile up if one overruns the 24h cadence.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
