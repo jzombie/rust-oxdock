@@ -59,8 +59,7 @@ IF !$dry {
     IF $probedir == "" {
         $probedir = "/tmp"
     }
-    LET $meta_raw: STRING = RUN cargo metadata --no-deps --format-version 1
-    LET $meta: MAP<ANY> = PARSE_JSON($meta_raw)
+    LET $packages: LIST<MAP<ANY>> = CI_HELPERS::WORKSPACE_PACKAGES()
     LET $round: INT = 0
     LET $landed: BOOL = false
     # A successful round is convergence: transient errors and partial progress just run another.
@@ -72,7 +71,7 @@ IF !$dry {
         }
         LET $excludes: STRING = ""
         LET $missing: INT = 0
-        FOR $pkg: MAP<ANY> IN $meta.packages {
+        FOR $pkg: MAP<ANY> IN $packages {
             LET $pname: STRING = $pkg.name
             LET $pver: STRING = $pkg.version
             # Probes run outside the tree: cargo info inside the workspace resolves local packages instead of the registry.

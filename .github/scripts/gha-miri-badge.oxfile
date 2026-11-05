@@ -8,10 +8,15 @@
 
 IMPORT [STD]
 
-INHERIT_ENV [MIRI_TEST_CMD, MIRI_FAILED, GITHUB_OUTPUT, GITHUB_STEP_SUMMARY]
+INHERIT_ENV [MIRI_TEST_CMD, MIRI_FAILED, GITHUB_OUTPUT, GITHUB_STEP_SUMMARY, GITHUB_WORKSPACE]
 
 # Pin to the live tree: badge artifacts must land in the real repo.
-WORKSPACE LOCAL
+# Unconfined: GITHUB_OUTPUT / GITHUB_STEP_SUMMARY are absolute host
+# paths outside the checkout, and WORKSPACE LOCAL would rebase them
+# back under the repo where no runner ever reads them. WORKDIR pins
+# relative writes (badges/, miri-*.txt/env) to the checkout.
+WORKSPACE SYSTEM
+WORKDIR "{{ env:GITHUB_WORKSPACE }}"
 
 # Shell formatting isolated behind a call: reassignment takes
 # expressions, never bare RUN statements, so the branch below assigns

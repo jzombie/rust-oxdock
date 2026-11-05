@@ -1,0 +1,79 @@
+# Miri shard enumeration: one matrix entry per (package, test target)
+# chunk, so no single CI job can hit the 6-hour timeout. Discovery is
+# dynamic (cargo metadata + test listings): adding a crate, target, or
+# test needs no workflow edit. Bins and doctests stay out, matching the
+# historical `cargo miri test --lib --tests` coverage exactly.
+#
+# Invoked from the miri-nightly workflow (enumerate job) only. Writes
+# `matrix` (JSON array of {package, args, tests, index}) and `cache_key`
+# to GITHUB_OUTPUT for the matrix and cache steps downstream.
+
+INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, RUSTFLAGS]
+
+IMPORT [STD, "helpers/ci-helpers.oxfile" AS CI_HELPERS]
+
+# Unconfined: this script only writes outside the checkout
+# (GITHUB_OUTPUT) and shells out for the rest. WORKSPACE LOCAL would
+# rebase the absolute GITHUB_OUTPUT path back under the repo, and the
+# matrix would never reach downstream jobs.
+WORKSPACE SYSTEM
+WORKDIR "{{ env:GITHUB_WORKSPACE }}"
+ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+
+# Shard cap: the worst-case shard stays far under the 6h job limit
+# (oxdock-core lib averages ~3min/test under Miri; 50 tests ~= 2.5h).
+LET $shard_size: INT = 50
+
+# Cache key inputs, same recipe as the build jobs (no sha256sum).
+LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
+LET $report: STRING = RUN ["rustc", "-Vv"]
+LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
+
+# Workspace members and their test targets, no hardcoding: one
+# "pkg|flag" job per lib + per integration test binary (see
+# CI_HELPERS::MIRI_JOBS).
+LET $packages: LIST<MAP<ANY>> = CI_HELPERS::WORKSPACE_PACKAGES()
+LET $jobs: LIST<STRING> = CI_HELPERS::MIRI_JOBS($packages)
+
+# Chunk each job's test list: names feed `--exact` filters at run time,
+# so every shard runs a disjoint slice of the same coverage.
+LET $entries: LIST<STRING> = []
+LET $index: INT = 0
+FOR $j: STRING IN $jobs {
+    LET $parts: LIST<STRING> = TEXT_SPLIT($j, "|")
+    LET $pkg: STRING = $parts.0
+    LET $flag: STRING = $parts.1
+    LET $listing: STRING = RUN "cargo test -p {{ $pkg }} --all-features {{ $flag }} -- --list --format terse || true"
+    LET $lines: LIST<STRING> = TEXT_LINES($listing)
+    LET $cur: STRING = ""
+    LET $n: INT = 0
+    FOR $line: STRING IN $lines {
+        IF TEXT_CONTAINS($line, ": test") {
+            LET $name: STRING = TEXT_TRIM_SUFFIX($line, ": test")
+            IF $cur == "" {
+                $cur = $name
+            } ELSE {
+                $cur = "{{ $cur }} {{ $name }}"
+            }
+            $n = $n + 1
+            IF $n >= $shard_size {
+                $index = $index + 1
+                LIST_APPEND $entries "{\"package\":\"{{ $pkg }}\",\"args\":\"{{ $flag }}\",\"tests\":\"{{ $cur }}\",\"index\":{{ $index }}}"
+                $cur = ""
+                $n = 0
+            }
+        }
+    }
+    IF $n > 0 {
+        $index = $index + 1
+        LIST_APPEND $entries "{\"package\":\"{{ $pkg }}\",\"args\":\"{{ $flag }}\",\"tests\":\"{{ $cur }}\",\"index\":{{ $index }}}"
+    }
+}
+
+LET $sep: STRING = ","
+LET $matrix: STRING = "[{{ STD::TEXT_JOIN($entries, $sep) }}]"
+ECHO "Miri shards: {{ $index }}"
+
+LET $gh_out: STRING = "{{ env:GITHUB_OUTPUT }}"
+APPEND $gh_out "matrix={{ $matrix }}\n"
+APPEND $gh_out "cache_key=miri-ubuntu-latest-{{ $rustc }}-{{ $lock }}\n"

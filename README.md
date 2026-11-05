@@ -7225,7 +7225,7 @@ cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 
 #### Miri coverage
 
-The nightly `miri` job monitors how many workspace unit tests can run under [`cargo miri`](https://github.com/rust-lang/miri). Miri is too slow for the PR path, so it runs on schedule against `main` instead of gating merges; findings become follow-up issues. Each run publishes a badge description (`badges/miri-coverage.json` on the `badges` branch) that backs the Miri coverage badge above.
+The nightly `miri` jobs monitor how many workspace unit tests can run under [`cargo miri`](https://github.com/rust-lang/miri). Miri is too slow for the PR path, so it runs on schedule against `main` instead of gating merges; findings become follow-up issues. The suite runs as a per-crate shard matrix (enumerated by `.github/scripts/gha-miri-matrix.oxfile`, so no single job can hit the 6-hour execution limit); each run publishes a badge description (`badges/miri-coverage.json` on the `badges` branch) that backs the Miri coverage badge above.
 
 The badge reports the runnable test ratio directly: runnable tests over total tests (`cargo miri test -- --list` vs. `-- --ignored --list`), with both counts in the message. LLVM line coverage keeps its own badge; this one answers only how much of the suite Miri can execute.
 
@@ -7233,6 +7233,7 @@ To test the calculation locally without waiting for CI:
 
 ```bash
 MIRI_TEST_CMD="cargo test --workspace --all-features --lib --tests" \
+GITHUB_WORKSPACE="$PWD" \
   cargo run -p oxdock -- ./.github/scripts/gha-miri-badge.oxfile
 ```
 

@@ -1,11 +1,18 @@
 name: miri-nightly
 
-# UB signal without blocking merges: Miri is too slow for the PR path
-# (a full workspace run exceeds the 6-hour job limit), so it runs on a
-# nightly schedule against main instead. PRs merge on the stable gate
-# (test matrix, coverage, lint); Miri findings become follow-up issues.
-# The runnable-ratio badge below still publishes on every run, so the
-# README badge tracks main daily.
+# UB signal without blocking merges: Miri is too slow for the PR path,
+# so it runs on a nightly schedule against main instead of gating
+# merges. PRs merge on the stable gate (test matrix, coverage, lint);
+# Miri findings become follow-up issues. The runnable-ratio badge below
+# still publishes on every run, so the README badge tracks main daily.
+#
+# Sharding: one matrix job per (crate, test-target) chunk, so no single
+# job can hit the 6-hour execution limit (a full-workspace run proved
+# it needs more: run 41846432872 timed out at 6h). The shard list is
+# enumerated dynamically by gha-miri-matrix.oxfile (cargo metadata +
+# test listings), so adding crates, targets, or tests needs no workflow
+# edit. Bins and doctests stay out, matching the historical
+# `cargo miri test --lib --tests` coverage exactly.
 on:
   schedule:
     - cron: "0 5 * * *"
@@ -23,15 +30,12 @@ env:
   OXDOCK_ENGINE_SOURCE: local
 
 jobs:
-  miri:
-    name: miri (ubuntu-latest)
+  enumerate:
+    name: enumerate miri shards
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    # No job-level OXDOCK_WORKSPACE_ROOT: `cargo miri test` executes
-    # the suite, and the variable would leak into the test processes
-    # and hijack root discovery there. OxDock steps below bridge it
-    # per step instead; their children never run tests.
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+      cache_key: ${{ steps.shards.outputs.cache_key }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -39,6 +43,68 @@ jobs:
           # Follow the triggering ref, not a pinned branch: scheduled
           # runs trigger on the default branch (main), while manual
           # dispatches must test the selected branch, not main.
+          ref: ${{ github.ref }}
+
+      # Plain nightly: listing builds natively with cfg(miri) set (Miri
+      # ignores are compile-time), so the Miri component is unneeded
+      # here; matrix jobs install it for the interpreting runs.
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      # Branch-built engine, never `latest`: a moving default would
+      # change CI with no repo diff.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          source: ${{ env.OXDOCK_ENGINE_SOURCE }}
+
+      # Local source builds install stable as the default toolchain.
+      # Restore the nightly default so cargo below keeps interpreting
+      # under nightly.
+      - name: Restore nightly toolchain default
+        uses: dtolnay/rust-toolchain@nightly
+
+      # Registry plus native target/: the listing builds every native
+      # test target, and the report job restores this same entry so its
+      # listing build is incremental instead of clean. Native only:
+      # never the Miri key below (different fingerprints).
+      - name: Cache Cargo registry and native target for listing
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: miri-enumerate-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      # Shard discovery runs under cfg(miri) so the listing enumerates
+      # exactly the set Miri will see (ignores are compile-time).
+      - name: Enumerate Miri shards
+        id: shards
+        shell: bash
+        env:
+          RUSTFLAGS: "--cfg miri"
+        run: |
+          set -euo pipefail
+          oxdock ./.github/scripts/gha-miri-matrix.oxfile
+
+  miri:
+    name: miri (${{ matrix.shard.package }} ${{ matrix.shard.args }} #${{ matrix.shard.index }})
+    needs: enumerate
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.enumerate.outputs.matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          # Same ref rule as enumerate: manual dispatches test the
+          # selected branch, not main.
           ref: ${{ github.ref }}
 
       # Latest nightly plus Miri: the dated pin went away with the
@@ -49,41 +115,16 @@ jobs:
         with:
           components: miri
 
-      # Branch-built engine, never `latest`: a moving default would
-      # change CI with no repo diff.
-      - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
-        with:
-          source: ${{ env.OXDOCK_ENGINE_SOURCE }}
+      # No engine build here: this job runs raw cargo only, so there
+      # is no stable default to restore either.
 
-      # Local source builds install stable as the default toolchain.
-      # Restore the nightly default so cargo miri below keeps
-      # interpreting under nightly.
-      - name: Restore nightly toolchain default
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-
-      # Native hashing: HASH_SHA256 digests Cargo.lock directly, and
-      # TEXT_EXTRACT picks the rustc commit out of the version report.
-      # No sha256sum, shasum, awk, or sed.
-      - name: Hash lockfile and toolchain
-        id: hashes
-        shell: oxdock --script {0}
-        run: |
-          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
-          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
-          WORKSPACE SYSTEM
-          WORKDIR {{ env:GITHUB_WORKSPACE }}
-          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
-          LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
-          ECHO "lockfile: {{ $lock }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
-          LET $report: STRING = RUN ["rustc", "-Vv"]
-          LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
-          ECHO "rustc: {{ $rustc }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
-
+      # One shared key across all shards, deliberately: concurrent
+      # saves to an immutable key are skipped, not failed, and every
+      # shard restores the same entry. Dependency fingerprints match
+      # across shards (identical toolchain, lockfile, flags, source),
+      # so each shard only recompiles its own crate's test binaries.
+      # Per-shard keys would store ~79 copies of multi-GB Miri
+      # target/ dirs against the 10GB repo quota and evict everything.
       - name: Cache Cargo dependencies for Miri
         uses: actions/cache@v4
         with:
@@ -93,25 +134,66 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: miri-${{ runner.os }}-${{ steps.hashes.outputs.rustc_hash }}-${{ steps.hashes.outputs.lockfile_hash }}
+          key: ${{ needs.enumerate.outputs.cache_key }}
 
       - name: Prepare Miri
         run: cargo miri setup
 
-      - name: Run Miri (unit tests only)
-        id: miri
-        run: cargo miri test --workspace --all-features --lib --tests
+      # One shard: disjoint --exact filters, so shards partition the
+      # historical workspace coverage without overlap.
+      - name: Run Miri shard
+        run: cargo miri test -p ${{ matrix.shard.package }} --all-features ${{ matrix.shard.args }} -- --exact ${{ matrix.shard.tests }}
+
+  report:
+    name: report miri coverage
+    needs: [enumerate, miri]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          source: ${{ env.OXDOCK_ENGINE_SOURCE }}
+
+      - name: Restore nightly toolchain default
+        uses: dtolnay/rust-toolchain@nightly
+
+      # Native listing needs the native build cache, not the Miri one:
+      # restore enumerate's entry (registry plus native target/) so the
+      # listing build below is incremental. No Miri component here:
+      # nothing in this job interprets.
+      - name: Cache Cargo registry and native target for listing
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: miri-enumerate-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Report Miri coverage
         # Always report: on a failing run the badge must turn red instead
-        # of fossilizing at the last green publish. The boolean outcome
-        # rides in via MIRI_FAILED below.
+        # of fossilizing at the last green publish. Any non-success across
+        # the matrix (a shard failed, or enumeration itself failed) rides
+        # in as a failing badge.
         if: always()
         shell: bash
         # Listings don't need interpretation: Miri ignores are
         # #[cfg_attr(miri, ignore)], i.e. compile-time, so a native
         # listing with the cfg set enumerates identically. This spares
-        # two full Miri boots; only the test run above interprets.
+        # two full Miri boots; only the matrix jobs interpret.
         # Bare `cargo` resolves to the job's pinned nightly toolchain
         # (see the setup step above), matching every other step here;
         # no toolchain override: the workspace does not compile on
@@ -121,7 +203,7 @@ jobs:
         env:
           OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
           MIRI_TEST_CMD: RUSTFLAGS="--cfg miri" cargo test --workspace --all-features --lib --tests
-          MIRI_FAILED: ${{ steps.miri.outcome != 'success' }}
+          MIRI_FAILED: ${{ needs.miri.result != 'success' }}
         run: |
           set -euo pipefail
           oxdock ./.github/scripts/gha-miri-badge.oxfile

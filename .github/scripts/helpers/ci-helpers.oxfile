@@ -14,9 +14,10 @@
 INHERIT_ENV [GITHUB_WORKSPACE]
 IMPORT [STD]
 
+# Lockfile hash for cache keys. Module calls never inherit caller
+# context: the workspace resets to the run-initial root, so reach the
+# checkout explicitly.
 FUNC LOCKFILE_HASH() {
-  # Module calls never inherit caller context: the workspace resets
-  # to the run-initial root, so reach the checkout explicitly.
   WORKSPACE SYSTEM
 
   RETURN HASH_SHA256(PATH_JOIN(env:GITHUB_WORKSPACE, "Cargo.lock"))
@@ -29,10 +30,11 @@ FUNC RUSTC_HASH($report: STRING) {
 }
 EXPORT RUSTC_HASH
 
+# Workspace package version for gates and tags. Same workspace
+# discipline as LOCKFILE_HASH above: reach the checkout explicitly so
+# file scripts importing this module resolve the manifest from the
+# checkout, not the module directory.
 FUNC MANIFEST_VERSION() {
-  # Same workspace discipline as LOCKFILE_HASH above: reach the
-  # checkout explicitly so file scripts importing this module resolve
-  # the manifest from the checkout, not the module directory.
   WORKSPACE SYSTEM
 
   LET $manifest: MAP<ANY> = LOAD_TOML(PATH_JOIN(env:GITHUB_WORKSPACE, "Cargo.toml"))
@@ -48,3 +50,58 @@ FUNC MANIFEST_VERSION() {
   }
 }
 EXPORT MANIFEST_VERSION
+
+# Raw `cargo metadata` package entries (name, version, targets) in
+# workspace order. The shared primitive behind every script that
+# walks the workspace: Miri shards, release publish rounds.
+#
+# Reach the checkout explicitly and unconfined: module calls never
+# inherit the caller's WORKSPACE or WORKDIR, and cargo metadata must
+# resolve the real checkout (under LOCAL the module directory falls
+# outside the snapshot root).
+FUNC WORKSPACE_PACKAGES() {
+  WORKSPACE SYSTEM
+  WORKDIR "{{ env:GITHUB_WORKSPACE }}"
+
+  # Shell form, not argv: the recording test harness matches mock
+  # responses by command substring, which only exists for shell runs.
+  LET $meta_raw: STRING = RUN "cargo metadata --no-deps --format-version 1"
+  LET $meta: MAP<ANY> = PARSE_JSON($meta_raw)
+  RETURN $meta.packages
+}
+EXPORT WORKSPACE_PACKAGES
+
+# One "pkg|flag" job per lib + per integration test binary, in
+# workspace order. The flag travels in the string (packages and
+# flags never contain `|`) so callers chunk in a single loop. Bins
+# and doctests stay out, matching the historical
+# `cargo miri test --lib --tests` coverage exactly.
+FUNC MIRI_JOBS($packages: LIST<MAP<ANY>>) {
+  LET $jobs: LIST<STRING> = []
+  FOR $p: MAP<ANY> IN $packages {
+    LET $pkg: STRING = $p.name
+    LET $targets: LIST<MAP<ANY>> = $p.targets
+    LET $has_lib: BOOL = false
+    LET $bins: LIST<STRING> = []
+    FOR $t: MAP<ANY> IN $targets {
+      LET $kinds: LIST<STRING> = $t.kind
+      LET $tname: STRING = $t.name
+      FOR $k: STRING IN $kinds {
+        IF $k == "lib" {
+          $has_lib = true
+        }
+        IF $k == "test" {
+          LIST_APPEND $bins $tname
+        }
+      }
+    }
+    IF $has_lib {
+      LIST_APPEND $jobs "{{ $pkg }}|--lib"
+    }
+    FOR $b: STRING IN $bins {
+      LIST_APPEND $jobs "{{ $pkg }}|--test {{ $b }}"
+    }
+  }
+  RETURN $jobs
+}
+EXPORT MIRI_JOBS
