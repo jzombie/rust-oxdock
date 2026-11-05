@@ -4,8 +4,9 @@
 #
 # Two levels, both dynamic (no hardcoded crates, targets, or tests):
 # 1. One pair per lib + per integration test binary, in workspace
-#    order (see CI_HELPERS::MIRI_JOBS). Bins and doctests stay out,
-#    matching the historical coverage exactly.
+#    order (see MIRI_JOBS below). Bins carry no tests and doctests
+#    don't run under Miri, so libs + integration targets are the
+#    whole provable set.
 # 2. Shards: each pair's `cargo test --list` output is dealt into
 #    slices of at most $shard_size tests. One matrix entry per slice:
 #    {package, args, tests, index} where `tests` is the space-separated
@@ -29,6 +30,51 @@ WORKSPACE SYSTEM
 WORKDIR "{{ env:GITHUB_WORKSPACE }}"
 ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
 
+# List every test binary in the workspace: one pair per lib and per
+# integration test target, in workspace order, e.g.
+# ["oxdock-core", "--lib"]. Bins carry no tests (only `main`,
+# which Miri would interpret with nothing to assert); doctests are
+# unsupported under Miri upstream. Libs + integration targets are
+# the whole provable set. The chunk loop below splits each pair's
+# tests into shards of at most $shard_size tests.
+FUNC MIRI_JOBS($packages: LIST<MAP<ANY>>) {
+  LET $jobs: LIST<LIST<STRING>> = []
+  FOR $p: MAP<ANY> IN $packages {
+    LET $pkg: STRING = $p.name
+    LET $targets: LIST<MAP<ANY>> = $p.targets
+    LET $has_lib: BOOL = false
+    LET $bins: LIST<STRING> = []
+    FOR $t: MAP<ANY> IN $targets {
+      LET $kinds: LIST<STRING> = $t.kind
+      LET $tname: STRING = $t.name
+      FOR $k: STRING IN $kinds {
+        IF $k == "lib" {
+          $has_lib = true
+        }
+        IF $k == "test" {
+          LIST_APPEND $bins $tname
+        }
+      }
+    }
+    IF $has_lib {
+      LET $job: LIST<STRING> = [$pkg, "--lib"]
+      LIST_APPEND $jobs $job
+    }
+    FOR $b: STRING IN $bins {
+      LET $job: LIST<STRING> = [$pkg, "--test {{ $b }}"]
+      LIST_APPEND $jobs $job
+    }
+  }
+  RETURN $jobs
+}
+
+# One matrix entry: {package, args, tests, index} as JSON. Single
+# construction site for the chunk loop below, which flushes on full
+# shards and once more on the remainder.
+FUNC MIRI_SHARD_ENTRY($pkg: STRING, $flag: STRING, $tests: STRING, $index: INT) {
+  RETURN "{\"package\":\"{{ $pkg }}\",\"args\":\"{{ $flag }}\",\"tests\":\"{{ $tests }}\",\"index\":{{ $index }}}"
+}
+
 # Shard cap: tests per matrix entry. Sized so the slowest shard stays
 # far under the 6h job limit; wall-time scales linearly with this
 # number, so raise it only if the heaviest suite stays well clear.
@@ -40,11 +86,11 @@ LET $report: STRING = RUN ["rustc", "-Vv"]
 LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
 
 # Workspace members and their test targets, no hardcoding: one pair
-# per lib + per integration test binary (see
-# CI_HELPERS::MIRI_JOBS). The loop below chunks each pair into
-# shards of at most $shard_size tests.
+# per lib + per integration test binary (see MIRI_JOBS above). The
+# loop below chunks each pair into shards of at most $shard_size
+# tests.
 LET $packages: LIST<MAP<ANY>> = CI_HELPERS::WORKSPACE_PACKAGES()
-LET $jobs: LIST<LIST<STRING>> = CI_HELPERS::MIRI_JOBS($packages)
+LET $jobs: LIST<LIST<STRING>> = MIRI_JOBS($packages)
 
 # Chunk each pair's test list into shards: names feed `--exact`
 # filters at run time, so shards partition the target's tests with
@@ -70,7 +116,7 @@ FOR $j: LIST<STRING> IN $jobs {
             $n = $n + 1
             IF $n >= $shard_size {
                 $index = $index + 1
-                LET $entry: STRING = CI_HELPERS::MIRI_SHARD_ENTRY($pkg, $flag, $cur, $index)
+                LET $entry: STRING = MIRI_SHARD_ENTRY($pkg, $flag, $cur, $index)
                 LIST_APPEND $entries $entry
                 $cur = ""
                 $n = 0
@@ -79,7 +125,7 @@ FOR $j: LIST<STRING> IN $jobs {
     }
     IF $n > 0 {
         $index = $index + 1
-        LET $entry: STRING = CI_HELPERS::MIRI_SHARD_ENTRY($pkg, $flag, $cur, $index)
+        LET $entry: STRING = MIRI_SHARD_ENTRY($pkg, $flag, $cur, $index)
         LIST_APPEND $entries $entry
     }
 }
