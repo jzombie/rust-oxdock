@@ -792,23 +792,21 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
 }
 
 /// Probe whether a file can be created inside `dir` by creating and
-/// deleting `.oxdock_probe_<rand>`. The [`ProbeGuard`] removes the probe
-/// on drop, so early returns cannot litter. Any failure to create reads
-/// as not-writable, never as an error.
+/// deleting `.oxdock_probe_<counter>`. The [`ProbeGuard`] removes the
+/// probe on drop, so early returns cannot litter. Any failure to create
+/// reads as not-writable, never as an error.
 fn probe_dir_writable<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     dir: &oxdock_fs::GuardedPath,
 ) -> bool {
     use std::sync::atomic::{AtomicU64, Ordering};
     static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    // Counter only, no wall clock or pid: the guard deletes the probe
+    // before return, so process-local uniqueness is all correctness
+    // needs. A timestamp here would abort under Miri isolation
+    // (`clock_gettime` REALTIME is blocked) for zero benefit.
     let id = PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-        ^ (std::process::id() as u128)
-        ^ ((id as u128) << 64);
-    let name = format!(".oxdock_probe_{nanos:x}");
+    let name = format!(".oxdock_probe_{id:x}");
     let Ok(probe) = dir.join(&name) else {
         return false;
     };
