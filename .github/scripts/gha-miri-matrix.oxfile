@@ -1,12 +1,21 @@
-# Miri shard enumeration: one matrix entry per (package, test target)
-# chunk, so no single CI job can hit the 6-hour timeout. Discovery is
-# dynamic (cargo metadata + test listings): adding a crate, target, or
-# test needs no workflow edit. Bins and doctests stay out, matching the
-# historical `cargo miri test --lib --tests` coverage exactly.
+# Miri shard enumeration: the full `cargo miri test --lib --tests`
+# workspace run takes 6h+ (run 41846432872 timed out), so this script
+# splits it into matrix shards that each run a disjoint slice.
+#
+# Two levels, both dynamic (no hardcoded crates, targets, or tests):
+# 1. Jobs: one per lib + per integration test binary, in workspace
+#    order (see CI_HELPERS::MIRI_JOBS). Bins and doctests stay out,
+#    matching the historical coverage exactly.
+# 2. Shards: each job's `cargo test --list` output is dealt into
+#    slices of at most 50 tests. One matrix entry per slice:
+#    {package, args, tests, index} where `tests` is the space-separated
+#    `--exact` filter list the shard runs. Repeated matrix titles
+#    (same package + args, different index) are slices of one job,
+#    not duplicate jobs.
 #
 # Invoked from the miri-nightly workflow (enumerate job) only. Writes
-# `matrix` (JSON array of {package, args, tests, index}) and `cache_key`
-# to GITHUB_OUTPUT for the matrix and cache steps downstream.
+# `matrix` (JSON array of shards) and `cache_key` to GITHUB_OUTPUT
+# for the matrix and cache steps downstream.
 
 INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, RUSTFLAGS]
 
@@ -20,8 +29,9 @@ WORKSPACE SYSTEM
 WORKDIR "{{ env:GITHUB_WORKSPACE }}"
 ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
 
-# Shard cap: the worst-case shard stays far under the 6h job limit
-# (oxdock-core lib averages ~3min/test under Miri; 50 tests ~= 2.5h).
+# Shard cap: at most 50 tests per matrix entry. The worst-case shard
+# stays far under the 6h job limit (oxdock-core lib averages
+# ~3min/test under Miri; 50 tests ~= 2.5h).
 LET $shard_size: INT = 50
 
 # Cache key inputs, same recipe as the build jobs (no sha256sum).
@@ -33,16 +43,17 @@ LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
 # "pkg|flag" job per lib + per integration test binary (see
 # CI_HELPERS::MIRI_JOBS).
 LET $packages: LIST<MAP<ANY>> = CI_HELPERS::WORKSPACE_PACKAGES()
-LET $jobs: LIST<STRING> = CI_HELPERS::MIRI_JOBS($packages)
+LET $jobs: LIST<LIST<STRING>> = CI_HELPERS::MIRI_JOBS($packages)
 
-# Chunk each job's test list: names feed `--exact` filters at run time,
-# so every shard runs a disjoint slice of the same coverage.
+# Chunk each job's test list into shards: names feed `--exact`
+# filters at run time, so shards partition the job's tests with no
+# overlap. Each flush below emits one matrix entry; the trailing
+# flush emits the remainder.
 LET $entries: LIST<STRING> = []
 LET $index: INT = 0
-FOR $j: STRING IN $jobs {
-    LET $parts: LIST<STRING> = TEXT_SPLIT($j, "|")
-    LET $pkg: STRING = $parts.0
-    LET $flag: STRING = $parts.1
+FOR $j: LIST<STRING> IN $jobs {
+    LET $pkg: STRING = $j.0
+    LET $flag: STRING = $j.1
     LET $listing: STRING = RUN "cargo test -p {{ $pkg }} --all-features {{ $flag }} -- --list --format terse || true"
     LET $lines: LIST<STRING> = TEXT_LINES($listing)
     LET $cur: STRING = ""
@@ -58,7 +69,8 @@ FOR $j: STRING IN $jobs {
             $n = $n + 1
             IF $n >= $shard_size {
                 $index = $index + 1
-                LIST_APPEND $entries CI_HELPERS::MIRI_SHARD_ENTRY($pkg, $flag, $cur, $index)
+                LET $entry: STRING = CI_HELPERS::MIRI_SHARD_ENTRY($pkg, $flag, $cur, $index)
+                LIST_APPEND $entries $entry
                 $cur = ""
                 $n = 0
             }
@@ -66,7 +78,8 @@ FOR $j: STRING IN $jobs {
     }
     IF $n > 0 {
         $index = $index + 1
-        LIST_APPEND $entries CI_HELPERS::MIRI_SHARD_ENTRY($pkg, $flag, $cur, $index)
+        LET $entry: STRING = CI_HELPERS::MIRI_SHARD_ENTRY($pkg, $flag, $cur, $index)
+        LIST_APPEND $entries $entry
     }
 }
 

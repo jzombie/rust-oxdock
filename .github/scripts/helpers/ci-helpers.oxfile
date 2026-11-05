@@ -79,13 +79,13 @@ FUNC MIRI_SHARD_ENTRY($pkg: STRING, $flag: STRING, $tests: STRING, $index: INT) 
 }
 EXPORT MIRI_SHARD_ENTRY
 
-# One "pkg|flag" job per lib + per integration test binary, in
-# workspace order. The flag travels in the string (packages and
-# flags never contain `|`) so callers chunk in a single loop. Bins
-# and doctests stay out, matching the historical
-# `cargo miri test --lib --tests` coverage exactly.
+# Build the job list from cargo metadata: one pair per test binary
+# (each lib, each integration test target), in workspace order:
+# [$pkg, $flag], e.g. ["oxdock-core", "--lib"]. Bins and doctests
+# are skipped to match the historical coverage. The caller splits
+# each pair's tests into <=50-test shards.
 FUNC MIRI_JOBS($packages: LIST<MAP<ANY>>) {
-  LET $jobs: LIST<STRING> = []
+  LET $jobs: LIST<LIST<STRING>> = []
   FOR $p: MAP<ANY> IN $packages {
     LET $pkg: STRING = $p.name
     LET $targets: LIST<MAP<ANY>> = $p.targets
@@ -104,10 +104,12 @@ FUNC MIRI_JOBS($packages: LIST<MAP<ANY>>) {
       }
     }
     IF $has_lib {
-      LIST_APPEND $jobs "{{ $pkg }}|--lib"
+      LET $job: LIST<STRING> = [$pkg, "--lib"]
+      LIST_APPEND $jobs $job
     }
     FOR $b: STRING IN $bins {
-      LIST_APPEND $jobs "{{ $pkg }}|--test {{ $b }}"
+      LET $job: LIST<STRING> = [$pkg, "--test {{ $b }}"]
+      LIST_APPEND $jobs $job
     }
   }
   RETURN $jobs
