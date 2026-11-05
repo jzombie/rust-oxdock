@@ -58,7 +58,7 @@ FOR $j: STRING IN $jobs {
             $n = $n + 1
             IF $n >= $shard_size {
                 $index = $index + 1
-                LIST_APPEND $entries "{\"package\":\"{{ $pkg }}\",\"args\":\"{{ $flag }}\",\"tests\":\"{{ $cur }}\",\"index\":{{ $index }}}"
+                LIST_APPEND $entries CI_HELPERS::MIRI_SHARD_ENTRY($pkg, $flag, $cur, $index)
                 $cur = ""
                 $n = 0
             }
@@ -66,7 +66,7 @@ FOR $j: STRING IN $jobs {
     }
     IF $n > 0 {
         $index = $index + 1
-        LIST_APPEND $entries "{\"package\":\"{{ $pkg }}\",\"args\":\"{{ $flag }}\",\"tests\":\"{{ $cur }}\",\"index\":{{ $index }}}"
+        LIST_APPEND $entries CI_HELPERS::MIRI_SHARD_ENTRY($pkg, $flag, $cur, $index)
     }
 }
 

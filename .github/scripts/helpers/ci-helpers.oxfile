@@ -71,6 +71,14 @@ FUNC WORKSPACE_PACKAGES() {
 }
 EXPORT WORKSPACE_PACKAGES
 
+# One matrix entry: {package, args, tests, index} as JSON. Single
+# construction site for the chunk loop below, which flushes on full
+# shards and once more on the remainder.
+FUNC MIRI_SHARD_ENTRY($pkg: STRING, $flag: STRING, $tests: STRING, $index: INT) {
+  RETURN "{\"package\":\"{{ $pkg }}\",\"args\":\"{{ $flag }}\",\"tests\":\"{{ $tests }}\",\"index\":{{ $index }}}"
+}
+EXPORT MIRI_SHARD_ENTRY
+
 # One "pkg|flag" job per lib + per integration test binary, in
 # workspace order. The flag travels in the string (packages and
 # flags never contain `|`) so callers chunk in a single loop. Bins

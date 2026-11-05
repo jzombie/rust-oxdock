@@ -382,7 +382,12 @@ mod tests {
 
     #[test]
     fn background_capture_stdout_bails_without_spawning() {
-        let (_temp, ctx) = make_ctx_with_host_exec(&[]);
+        // Hermetic PATH: the shell form requires PATH staged before the
+        // background-capture check runs, and Miri forwards no host env,
+        // so a host-derived PATH would leave this test asserting the
+        // PATH anchor instead of the capture rule. The value is never
+        // used: the capture check bails before any spawn.
+        let (_temp, ctx) = make_ctx_with_host_exec(&[(oxdock_env::os::PATH, "test-path")]);
         let mut pm = ShellProcessManager;
         let options = CommandOptions {
             mode: CommandMode::Background,
