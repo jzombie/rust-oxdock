@@ -149,6 +149,13 @@ jobs:
       # One shard: disjoint --exact filters, so shards partition the
       # historical workspace coverage without overlap.
       - name: Run Miri shard
+        env:
+          # proptest persists failing seeds via `current_dir()`, which
+          # Miri isolation blocks. Disable persistence under Miri only
+          # (native runs keep regression files); the var must also be
+          # forwarded, since Miri hides all host env by default.
+          PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
+          MIRIFLAGS: "-Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE"
         run: cargo miri test -p ${{ matrix.shard.package }} --all-features ${{ matrix.shard.args }} -- --exact ${{ matrix.shard.tests }}
 
   report:

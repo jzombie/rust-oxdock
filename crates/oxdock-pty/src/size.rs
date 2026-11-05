@@ -314,6 +314,10 @@ impl SizeSource for WatchSize {
 mod tests {
     use super::*;
 
+    #[cfg_attr(
+        miri,
+        ignore = "resolve_size probes the host console (`ioctl`); blocked under Miri isolation"
+    )]
     #[test]
     fn explicit_geometry_wins_over_host() {
         // Explicit dims hold whatever the host reports (or not): the
@@ -322,6 +326,10 @@ mod tests {
         assert_eq!((size.rows, size.cols), (40, 100));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "probes the host console (`ioctl`); blocked under Miri isolation"
+    )]
     #[test]
     fn unnamed_geometry_falls_back_without_host() {
         // Under test runners stdout is captured, never a terminal, so

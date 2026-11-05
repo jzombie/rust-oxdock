@@ -181,6 +181,10 @@ fn redirected_output_never_streams() {
 
 #[test]
 #[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "spawns a real `sh` child process; unsupported under Miri"
+)]
 fn bare_run_output_streams_through_the_pump() {
     // Bare RUN (no LET capture) routes child output to the default
     // stdout: the pump path must stream exactly like ECHO does.
@@ -667,6 +671,10 @@ fn async_block_runs_child_processes() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "needs a real filesystem for module import; unsupported under Miri"
+)]
 fn reexported_import_serves_as_tool() {
     // An entry re-export promotes an imported function to the entry's
     // own tool surface: the lib's EXPORT gates visibility, the entry's

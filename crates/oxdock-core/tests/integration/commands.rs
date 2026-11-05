@@ -3230,7 +3230,10 @@ fn semaphore_cancel_releases_the_permit() {
 
 #[test]
 fn semaphore_worker_error_releases_the_permit() {
-    // The failing worker is never awaited, so its error surfaces at the
+    // Join on state, not on time: poll the worker to `finished` (a
+    // SLEEP-based join races the worker under Miri, where virtual
+    // time need not track worker progress), then re-acquire. The
+    // failing worker is never awaited, so its error surfaces at the
     // end-of-pipeline reap instead: the script fails overall, but the
     // marker written after re-acquire proves the permit dropped on the
     // error unwind first.
@@ -3245,7 +3248,16 @@ fn semaphore_worker_error_releases_the_permit() {
             WRITE holding.txt "yes"
             ASSERT_EQ 1 2
         }
-        SLEEP 2s
+        LET $running: BOOL = true
+        WHILE $running {
+            LET $p: MAP<ANY> = TASK_POLL($t)
+            IF $p.state == "finished" {
+                $running = false
+            }
+            IF $running {
+                SLEEP 10ms
+            }
+        }
         LET $re: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
         WRITE released.txt "{{ $re.held }}"
     "#};
