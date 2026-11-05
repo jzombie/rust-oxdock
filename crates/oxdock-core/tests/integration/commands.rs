@@ -5495,13 +5495,14 @@ fn static_simple_command_args_participate_in_liveness() {
         WRITE out.txt prefix $val
     "#};
     run_script(&root, script).expect("live reads pass");
-    // Quoted `{{ }}` templates are runtime-total (missing names
-    // expand to empty, never error), so they stay unchecked by
-    // design: rejecting them would be a false positive.
+    // Quoted `{{ }}` templates are runtime-strict: a missing name is
+    // a hard error naming it, never empty. The static gate still
+    // skips interiors; the runtime reports the name.
     let script = indoc! {r#"
         WRITE out.txt "{{ $missing }}"
     "#};
-    run_script(&root, script).expect("plain-string templates stay unchecked");
+    let err = run_script(&root, script).expect_err("missing template name must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err:#}");
 }
 
 #[test]

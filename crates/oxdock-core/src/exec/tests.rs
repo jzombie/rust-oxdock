@@ -1195,7 +1195,7 @@ fn declared_bool_vs_string_treatment_differs() {
 fn bool_coercion_rejects_empty() {
     // Declared-but-absent env names read empty, and empty is not a
     // boolean: coercion fails instead of silently picking a polarity.
-    // Flag sites state their absent-default via STD::BOOL_OR.
+    // Flag sites state their absent default via STD::BOOL_OR.
     let steps = crate::parse_script(indoc! {r#"
         INHERIT_ENV [OXDOCK_TEST_ABSENT_FLAG]
         LET $h: BOOL = "{{ env:OXDOCK_TEST_ABSENT_FLAG }}"
@@ -4440,6 +4440,50 @@ fn host_round_trip_through_adapters() {
     .expect("host round-trip runs");
     let files = fs.snapshot();
     assert_eq!(file_content(&files, "out.txt"), b"hello host-seed");
+}
+
+#[test]
+fn expand_placeholders_reject_missing_names() {
+    // Runtime half of the missing-key contract: `$var`, bare keys,
+    // and empty placeholders have no static coverage (the gate checks
+    // only `env:` names), so direct expansion must fail loudly.
+    // Absent env reads empty here by design: declaration is enforced
+    // by the static gate before any step runs, and a runtime miss is
+    // therefore always a declared name the host did not bridge.
+    use crate::exec::args::expand_string;
+    let mut state = create_exec_state(MockFs::new());
+    let err = expand_string("{{ $nope }}", &state.envs.clone(), &state)
+        .expect_err("missing var must fail");
+    assert!(format!("{err:#}").contains("undefined variable"), "{err:#}");
+    let err = expand_string("{{ bare_nope }}", &state.envs.clone(), &state)
+        .expect_err("missing bare key must fail");
+    assert!(
+        format!("{err:#}").contains("undefined script variable"),
+        "{err:#}"
+    );
+    let err = expand_string("{{ }}", &state.envs.clone(), &state)
+        .expect_err("empty placeholder must fail");
+    assert!(
+        format!("{err:#}").contains("empty template placeholder"),
+        "{err:#}"
+    );
+    let out = expand_string(
+        "{{ env:OXDOCK_TEST_NEVER_DECLARED }}",
+        &state.envs.clone(),
+        &state,
+    )
+    .expect("runtime env miss reads empty; the static gate owns declaration");
+    assert_eq!(out, "");
+    // A bare key shadowing a present env name still fails: bare keys
+    // never read the environment, so the error points at `env:`.
+    Arc::make_mut(&mut state.envs)
+        .insert("OXDOCK_TEST_PRESENT".to_string(), "host-value".to_string());
+    let err = expand_string("{{ OXDOCK_TEST_PRESENT }}", &state.envs.clone(), &state)
+        .expect_err("bare key must fail even when the env name exists");
+    assert!(
+        format!("{err:#}").contains("env:OXDOCK_TEST_PRESENT"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[test]
@@ -8429,7 +8473,17 @@ fn workflow_inline_scripts_pass_static_gate() {
                 blocks.push((format!("{workflow}::{name}"), body.join("\n")));
             }
         }
-        assert!(!blocks.is_empty(), "no blocks in {workflow}");
+        assert!(
+            !blocks.is_empty() || workflow == "miri-nightly.yml",
+            "no blocks in {workflow}"
+        );
+        if blocks.is_empty() {
+            // miri-nightly runs file scripts (gha-miri-*.oxfile) via the
+            // CLI instead of inline oxdock blocks: those files carry
+            // their own conformance tests plus local runs, so there is
+            // nothing inline left for this gate to check.
+            continue;
+        }
         for (label, body) in &blocks {
             // GitHub expressions are interpolated before the engine
             // runs; stand in a dummy value so parsing sees the shape.

@@ -382,13 +382,12 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}")),
         Expr::Env(key) => match cx.state.get_env(key) {
             Some(v) => Ok(Value::string(v.to_string())),
-            // Declared-but-absent means empty: the static gate already
-            // rejected undeclared reads, so anything reaching here was
-            // explicitly inherited or set. No empty-value bridging is
-            // needed on the host side.
+            // Declared-but-absent reads empty, exactly like a host
+            // that bridged nothing: undeclared names never reach here,
+            // the static gate rejects them before any step runs.
             None => Ok(Value::string(String::new())),
         },
-        Expr::KeyPath { base, keys } => resolve_key_path_value(cx, base, keys),
+        Expr::KeyPath { base, keys } => resolve_key_path_value(cx.state, base, keys),
         Expr::List(items) => {
             let mut result = Vec::new();
             for item in items {
@@ -1194,14 +1193,15 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value> {
 }
 
 /// Resolve `$base.key...` against the scope chain (shared by the AST
-/// `KeyPath` arm and the RPN `LoadKeyPath` op).
+/// `KeyPath` arm, the RPN `LoadKeyPath` op, and `{{ $base.key... }}`
+/// template interpolation, so all three report the same hard error on
+/// missing keys instead of rendering empty).
 fn resolve_key_path_value<P: ProcessManager>(
-    cx: &StepCtx<'_, P>,
+    state: &ExecState<P>,
     base: &str,
     keys: &[String],
 ) -> Result<Value> {
-    let mut current = cx
-        .state
+    let mut current = state
         .get_var(base)
         .ok_or_else(|| anyhow::anyhow!("undefined variable ${base}"))?;
     for key in keys {
@@ -1251,11 +1251,11 @@ fn evaluate_compiled_math<P: ProcessManager>(
             }
             MathOp::LoadEnv(key) => match cx.state.get_env(key) {
                 Some(v) => stack.push(Value::string(v.to_string())),
-                // Same absent-means-empty rule as `Expr::Env` above.
+                // Same declared-absent rule as `Expr::Env` above.
                 None => stack.push(Value::string(String::new())),
             },
             MathOp::LoadKeyPath { base, keys } => {
-                stack.push(resolve_key_path_value(cx, base, keys)?);
+                stack.push(resolve_key_path_value(cx.state, base, keys)?);
             }
             MathOp::Call { name, arity } => {
                 let mut args = Vec::with_capacity(*arity);
@@ -1610,13 +1610,26 @@ fn push_escaped_text(output: &mut String, text: &str) {
     }
 }
 
-/// Single-pass string expansion: handles escapes and `{{ }}`
-/// template tags, split by the shared template scanner.
+/// Single-pass string expansion: handles escapes and `{{ }}` tags,
+/// split by the shared template scanner.
 ///
 /// `{{ $var }}` : interpolates script variable (supports key-paths:
-/// `{{ $d.name.0 }}`).
-/// `{{ env:KEY }}` : interpolates environment variable.
+/// `{{ $d.name.0 }}`); unknown names are a hard error.
+/// `{{ env:KEY }}` : interpolates a declared environment variable
+/// (`INHERIT_ENV`); absent names read empty. Undeclared names never
+/// reach here: the static gate rejects them before any step runs.
+/// `{{ script_env:KEY }}` : same, script env only.
+/// `{{ bare_key }}` : interpolates a DSL variable, never env;
+/// unknown names are a hard error.
+/// `{{ MODULE::FUNC(args) }}` : pure call through the registry;
+/// unknown functions are a hard error.
 /// Bare `$` is literal text : `{{ }}` is the ONLY interpolation trigger.
+///
+/// Missing keys never render empty, with one deliberate exception:
+/// absent environment reads. Undeclared `env:` names fail statically
+/// before any step runs, so a runtime miss is always a declared name
+/// whose host bridged nothing — which reads empty, exactly like a
+/// host-provided empty value.
 ///
 /// Escape rules:
 /// - `\\` is a literal backslash
@@ -1634,47 +1647,25 @@ pub(crate) fn expand_string<P: ProcessManager>(
         match segment {
             TemplateSegment::Text(text) => push_escaped_text(&mut output, text),
             TemplateSegment::Placeholder { key } => {
+                if key.is_empty() {
+                    bail!("empty template placeholder");
+                }
                 if let Some(var_expr) = key.strip_prefix('$') {
-                    // {{ $var }} or {{ $var.path.0 }} : look up in scope chain.
-                    // Parse key-path from the extracted string, NOT from chars.
-                    // Trim whitespace from segments to tolerate spaces around dots.
-                    // Bare $var never reads the environment; use {{ env:KEY }}.
-                    let mut parts = var_expr.split('.');
-                    if let Some(base_var) = parts.next() {
-                        let base_trim = base_var.trim();
-                        let mut current = state.get_var(base_trim);
-                        for part in parts {
-                            let part_trim = part.trim();
-                            current = match current {
-                                Some(v) => {
-                                    if let Some(map) = v.as_map() {
-                                        map.get(part_trim).cloned()
-                                    } else if let Some(list) = v.as_list() {
-                                        part_trim
-                                            .parse::<usize>()
-                                            .ok()
-                                            .and_then(|idx| list.get(idx).cloned())
-                                    } else {
-                                        None
-                                    }
-                                }
-                                None => None,
-                            };
-                            if current.is_none() {
-                                break;
-                            }
-                        }
-                        if let Some(v) = current {
-                            output.push_str(&format_value_for_string(&v)?);
-                        }
-                        // Missing → emit empty
-                    }
+                    // {{ $var }} or {{ $var.path.0 }} : same hard
+                    // resolution as expression-position key paths, so
+                    // templates and code agree on every error. Bare
+                    // $var never reads the environment; use {{ env:KEY }}.
+                    let parts: Vec<String> =
+                        var_expr.split('.').map(|s| s.trim().to_string()).collect();
+                    let (base, rest) = parts.split_first().expect("split always yields one");
+                    let value = resolve_key_path_value(state, base, rest)?;
+                    output.push_str(&format_value_for_string(&value)?);
                 } else {
-                    // `{{ env:KEY }}` reads the script env: declared-but-
-                    // absent emits empty, exactly like `env:KEY`
-                    // expressions. Undeclared use is a static error
-                    // before the run; this empty is the runtime rule for
-                    // declared names the host did not provide.
+                    // `{{ env:KEY }}` reads the script env: absent names
+                    // read empty. Undeclared names never reach here: the
+                    // static gate rejects them before any step runs, so
+                    // a runtime miss is always a declared name the host
+                    // did not bridge.
                     // `{{ script_env:KEY }}` reads the explicit
                     // script env only. `{{ bare_key }}` reads DSL
                     // variables only, never env.
@@ -1687,12 +1678,18 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         let val = env
                             .get(env_key)
                             .map(String::as_str)
-                            .or_else(|| state.get_env(env_key))
-                            .unwrap_or_default();
-                        output.push_str(val);
+                            .or_else(|| state.get_env(env_key));
+                        // Absent reads empty: undeclared names never
+                        // reach here, the static gate rejects them
+                        // before any step runs.
+                        if let Some(v) = val {
+                            output.push_str(v);
+                        }
                     } else if let Some(env_key) = key.strip_prefix("script_env:") {
                         let env_key = env_key.trim();
-                        output.push_str(env.get(env_key).map(String::as_str).unwrap_or_default());
+                        if let Some(v) = env.get(env_key).map(String::as_str) {
+                            output.push_str(v);
+                        }
                     } else if let Some(val) = state.get_var(key) {
                         output.push_str(&format_value_for_string(&val)?);
                     } else if let Some((module, func, args_src)) =
@@ -1702,10 +1699,8 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         // pure table: the same registry EXPAND
                         // templates resolve, so ordinary strings and
                         // file templates agree. Unknown functions and
-                        // bad args fail here instead of rendering
-                        // empty; keys that are not call shaped keep
-                        // the empty below (no variable can spell
-                        // `::` plus parens).
+                        // bad args fail here; anything else falls
+                        // through to the missing-key error below.
                         let table = state.pure_function_table();
                         let callee = table
                                 .get(module.as_str())
@@ -1730,8 +1725,20 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         }
                         let result = callee(args)?;
                         output.push_str(&format_value_for_string(&result)?);
+                    } else {
+                        // Bare key not in DSL vars → hard error: missing
+                        // keys never render empty. Bare keys read the
+                        // same store as $vars, so suggest the sigil form.
+                        let mut msg = format!("undefined script variable: '{key}'");
+                        if env.contains_key(key) || state.get_env(key).is_some() {
+                            msg.push_str(&format!(
+                                "; did you mean 'env:{key}' (environment variable)?"
+                            ));
+                        } else {
+                            msg.push_str(&format!("; did you mean '${key}'?"));
+                        }
+                        bail!("{msg}");
                     }
-                    // Bare key not in DSL vars → emit empty
                 }
             }
         }

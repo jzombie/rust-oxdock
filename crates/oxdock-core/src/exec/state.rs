@@ -78,7 +78,6 @@ pub struct ExecState<P: ProcessManager> {
     /// the caller afterwards.
     pub(super) initial_root: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
-    /// Outer-scope env snapshots for `ISOLATED` blocks, innermost last.
     /// Each entry is the script env as it stood at that block's entry, so
     /// the block allowlist resolves against the enclosing scope even as
     /// the live envs are scrubbed underneath. Nesting snapshots the
