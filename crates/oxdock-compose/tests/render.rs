@@ -32,7 +32,7 @@ fn child_bin() -> String {
 }
 
 /// Checked-in DSL support files every run needs at repo-relative
-/// paths: the entry, the composer, the dispatcher, and the stage
+/// paths: the entry, the composer, the stage order, and the stage
 /// hooks. Tests seed them byte-identical so temp roots mirror the
 /// real tree.
 fn support_files() -> Vec<(&'static str, &'static str)> {
@@ -54,8 +54,8 @@ fn support_files() -> Vec<(&'static str, &'static str)> {
             include_str!("../src/compose.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/dispatcher.oxfile",
-            include_str!("../src/dispatcher.oxfile"),
+            "crates/oxdock-compose/src/stages.oxfile",
+            include_str!("../src/stages.oxfile"),
         ),
         (
             "crates/oxdock-compose/src/hooks/ingest.oxfile",

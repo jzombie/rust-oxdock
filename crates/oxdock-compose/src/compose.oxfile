@@ -1,6 +1,6 @@
 # Assembly before dispatch: leaf FUNCs only, no nested calls.
 # The registry names hook files; the stage order comes from the
-# dispatcher's STAGES() and is unrolled into the child, so the order
+# stages file's STAGES() and is unrolled into the child, so the order
 # lives in exactly one place. Every child-runtime placeholder below
 # is escaped: unescaped braces bake at compose time, escaped ones
 # survive for the child. Paths ride forward slashes: the child text

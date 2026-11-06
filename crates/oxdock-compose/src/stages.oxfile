@@ -1,0 +1,10 @@
+# Stage order registry: the single source of lifecycle order.
+# The composer reads it through STAGES() and unrolls qualified hook
+# calls into the child in the same order, so there is nothing to
+# drift. The child never imports this file: it receives the unrolled
+# calls, never stubs.
+FUNC STAGES() {
+    RETURN ["INGEST", "ASSEMBLE", "RENDER", "DEFERRED", "WRITE_OUT", "VERIFY"]
+}
+
+EXPORT STAGES

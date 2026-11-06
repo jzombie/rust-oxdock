@@ -33,7 +33,7 @@ use std::path::Path;
 /// External plugins never go here either: pass them to
 /// [`run_with_plugins`], which registers them alongside this list.
 /// The static scripts (`run.oxfile`, `compose.oxfile`,
-/// `dispatcher.oxfile`, hook files) declare their own `IMPORT`s; a
+/// `stages.oxfile`, hook files) declare their own `IMPORT`s; a
 /// missing registration fails the import loudly naming the module,
 /// and the render suite executes every script on every run.
 ///
@@ -287,7 +287,7 @@ pub fn run_with_plugins(
     Ok(())
 }
 
-/// Pipeline files the binary carries: entry, composer, dispatcher,
+/// Pipeline files the binary carries: entry, composer, stage order,
 /// shared types, and the default hook set. Provisioned into the repo
 /// (see [`provision_dist`]) so a bare binary runs anywhere without a
 /// source checkout and without per-repo vendoring: byte-copy, never
@@ -303,8 +303,8 @@ fn embedded_dist() -> Vec<(&'static str, &'static str)> {
             include_str!("compose.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/dispatcher.oxfile",
-            include_str!("dispatcher.oxfile"),
+            "crates/oxdock-compose/src/stages.oxfile",
+            include_str!("stages.oxfile"),
         ),
         (
             "crates/oxdock-compose/src/types.oxfile",

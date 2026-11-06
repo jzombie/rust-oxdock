@@ -7,14 +7,14 @@ IMPORT [STD]
 IMPORT [TYPE CTX FROM "crates/oxdock-compose/src/types.oxfile"]
 IMPORT [TYPE PLUGIN FROM "crates/oxdock-compose/src/types.oxfile"]
 IMPORT ["crates/oxdock-compose/src/compose.oxfile" AS C]
-IMPORT ["crates/oxdock-compose/src/dispatcher.oxfile" AS D]
+IMPORT ["crates/oxdock-compose/src/stages.oxfile" AS STAGES]
 
 LET $cfgpath: STRING = "{{ env:COMPOSE_CONFIG }}"
 LET $wsroot: STRING = "{{ env:OXDOCK_WORKSPACE_ROOT }}"
 LET $cfg: MAP<ANY> = LOAD_JSON($cfgpath)
 LET $types: STRING = $cfg.lifecycle.types
 LET $plugins: LIST<PLUGIN> = $cfg.lifecycle.plugins
-LET $stages: LIST<STRING> = D::STAGES()
+LET $stages: LIST<STRING> = STAGES::STAGES()
 LET $mod: STRING = C::COMPOSE_ALL($plugins, $stages, $types)
 LET $log: STRING = C::PIPE_RUN($mod, $wsroot, $cfgpath)
 ECHO "{{ $log }}"
