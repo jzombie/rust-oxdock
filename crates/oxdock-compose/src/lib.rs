@@ -1,9 +1,11 @@
 //! oxdock-compose: composed artifacts, byte-identical.
 //!
 //! General-purpose composition pipeline extracted from the workspace docs
-//! renderer. The core module is now `COMPOSE_ENGINE` (see [`engine`]);
-//! domain plugins (`OXDOCK`, `RUST`, `DOCS`, `MARKDOWN`) still register
+//! renderer. The core is now `COMPOSE_ENGINE` (see [`engine`]) plus
+//! the core `DEFER` plugin (see [`defer`]); domain plugins (`OXDOCK`,
+//! `RUST`, `MARKDOWN`) and the `DOCS` compat alias still register
 //! per-pipeline until their extraction slices land.
+pub mod defer;
 pub mod engine;
 pub mod plugins;
 
@@ -25,8 +27,9 @@ use std::path::Path;
 /// requirements, not engine defaults: the only module the engine
 /// itself defaults to is `COMPOSE_ENGINE` (see [`pipeline_engine`]);
 /// `OXDOCK`, `RUST`, and `MARKDOWN` are here because this pipeline
-/// documents an OxDock Rust workspace, `DOCS` because deferred
-/// placeholders (`DEFER`/`EXPAND_DEFERRED`) resolve in every template,
+/// documents an OxDock Rust workspace, `DEFER` because deferred
+/// placeholders (`DEFER`/`EXPAND_DEFERRED`) resolve in every template
+/// (`DOCS` rides alongside as its compat alias until retired),
 /// and a resume pipeline would list a different set.
 ///
 /// External plugins never go here either: pass them to
@@ -51,6 +54,7 @@ macro_rules! pipeline_modules {
         pipeline_split! {
             $final ; [$($args)*] ;
             (COMPOSE_ENGINE, crate::engine),
+            (DEFER, crate::defer),
             (DOCS, crate::plugins::docs),
             (OXDOCK, crate::plugins::oxdock),
             (RUST, crate::plugins::rust),
@@ -322,7 +326,7 @@ pub fn run_with_plugins(
         FUNC POST_TARGET($t: MAP<ANY>) {
             LET $out_path: STRING = $t.out
             LET $full_text: STRING = READ_TEXT($out_path)
-            LET $toc_final: STRING = DOCS::EXPAND_DEFERRED($full_text)
+            LET $toc_final: STRING = DEFER::EXPAND_DEFERRED($full_text)
             WRITE $t.out $toc_final
         }
         FOR $rscope: STRING IN $cfg.scopes {
