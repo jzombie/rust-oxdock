@@ -1,0 +1,57 @@
+# Assembly before dispatch: leaf FUNCs only, no nested calls.
+# Order lives in exactly one place, dispatcher RUN_LIFECYCLE. This
+# file emits only the five phase implementations populated from the
+# plugin registry; the piped child statically imports the dispatcher
+# and calls D::RUN_LIFECYCLE, whose bare phase calls resolve to the
+# implementations in the child scope. A missing or renamed stage
+# fails naming it instead of silently skipping. No files written.
+IMPORT [STD]
+
+TYPE CTX = MAP<text: STRING>
+TYPE PLUGIN = MAP<path: STRING, alias: STRING, hooks: LIST<STRING>>
+
+FUNC COMPOSE_FIVE($plugins: LIST<PLUGIN>, $dispatcher: STRING) {
+    LET $imports: STRING = ""
+    FOR $p: PLUGIN IN $plugins {
+        $imports = "{{ $imports }}IMPORT [\"{{ $p.path }}\" AS {{ $p.alias }}]\n"
+    }
+    LET $impls: STRING = ""
+    FOR $stage: STRING IN ["INGEST", "ASSEMBLE", "RENDER", "WRITE_OUT", "VERIFY"] {
+        LET $calls: STRING = ""
+        FOR $p: PLUGIN IN $plugins {
+            FOR $h: STRING IN $p.hooks {
+                IF $h == $stage {
+                    $calls = "{{ $calls }}    $ctx = {{ $p.alias }}::{{ $h }}($ctx)\n"
+                }
+            }
+        }
+        $impls = "{{ $impls }}FUNC {{ $stage }}($ctx: CTX) {\n{{ $calls }}    RETURN $ctx\n}\nEXPORT {{ $stage }}\n"
+    }
+    LET $mod: STRING = """
+        IMPORT [STD]
+        TYPE CTX = MAP<text: STRING>
+        {{ $imports }}IMPORT ["{{ $dispatcher }}" AS D]
+        {{ $impls }}"""
+    RETURN $mod
+}
+
+FUNC PIPE_RUN($mod: STRING, $ctx: CTX) {
+    WORKSPACE LOCAL
+    LET $exe: STRING = STD::INTERPRETER()
+    LET $json: STRING = STD::TO_JSON($ctx)
+    LET $child: PIPE
+    WITH_IO [stdout=$child] ECHO """
+        {{ $mod }}
+        LET $ctx: CTX = PARSE_JSON(\"\"\"{{ $json }}\"\"\")
+        LET $next: CTX = D::RUN_LIFECYCLE($ctx)
+        ECHO "\{{ STD::TO_JSON($next) }}"
+        """
+    LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe]
+    LET $back: CTX = STD::PARSE_JSON($out)
+    RETURN $back
+}
+
+EXPORT COMPOSE_FIVE
+EXPORT PIPE_RUN
+EXPORT TYPE CTX
+EXPORT TYPE PLUGIN
