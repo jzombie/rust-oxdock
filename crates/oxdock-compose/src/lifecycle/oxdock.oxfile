@@ -11,7 +11,7 @@
 # The values path below is the OxDock workspace convention; a
 # different layout ships its own plugin file instead of this one.
 IMPORT [STD, RUST, OXDOCK]
-IMPORT [TYPE CTX FROM "../src/types.oxfile"]
+IMPORT [TYPE CTX FROM "../types.oxfile"]
 
 FUNC SETUP($ctx: CTX) {
     LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)

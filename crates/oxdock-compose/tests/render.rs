@@ -42,12 +42,12 @@ fn support_files() -> Vec<(&'static str, &'static str)> {
             include_str!("../src/run.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/generic.oxfile",
-            include_str!("../src/generic.oxfile"),
+            "crates/oxdock-compose/src/lifecycle/generic.oxfile",
+            include_str!("../src/lifecycle/generic.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/oxdock.oxfile",
-            include_str!("../src/oxdock.oxfile"),
+            "crates/oxdock-compose/src/lifecycle/oxdock.oxfile",
+            include_str!("../src/lifecycle/oxdock.oxfile"),
         ),
         (
             "crates/oxdock-compose/src/types.oxfile",
@@ -87,14 +87,13 @@ fn with_lifecycle(cfg: &str) -> String {
     }
     obj.entry("version_key")
         .or_insert_with(|| serde_json::Value::String("CRATE_VERSION".to_string()));
-    // Only the domain override: the OXDOCK intake fills SETUP while
-    // every other slot falls back to the engine's generic hooks, so
-    // this also proves the merge path on every fixture run.
+    // Registration order is execution order: generic behavior first,
+    // the OxDock docs intake second.
     obj.insert(
         "lifecycle".to_string(),
         serde_json::json!({"files": [
-            "crates/oxdock-compose/src/generic.oxfile",
-            "crates/oxdock-compose/src/oxdock.oxfile"
+            "crates/oxdock-compose/src/lifecycle/generic.oxfile",
+            "crates/oxdock-compose/src/lifecycle/oxdock.oxfile"
         ]}),
     );
     serde_json::to_string(&v).expect("serialize fixture config")

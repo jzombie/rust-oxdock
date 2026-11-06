@@ -81,7 +81,7 @@ Lifecycle files are DSL, not plugin modules: one file per
 pipeline participant under `src/`, every file exposing the same
 lifecycle methods, registered by path in the config's `files`
 list in execution order. Omit the list and the engine's own
-`src/generic.oxfile` runs every stage alone.
+`src/lifecycle/generic.oxfile` runs every stage alone.
 
 Third-party plugin modules join through `run_with_plugins(root, extras)`,
 which registers external modules so template placeholders resolve them

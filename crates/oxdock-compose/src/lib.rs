@@ -318,12 +318,12 @@ fn embedded_dist() -> Vec<(&'static str, &'static str)> {
             include_str!("types.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/generic.oxfile",
-            include_str!("generic.oxfile"),
+            "crates/oxdock-compose/src/lifecycle/generic.oxfile",
+            include_str!("lifecycle/generic.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/oxdock.oxfile",
-            include_str!("oxdock.oxfile"),
+            "crates/oxdock-compose/src/lifecycle/oxdock.oxfile",
+            include_str!("lifecycle/oxdock.oxfile"),
         ),
     ]
 }
@@ -360,7 +360,7 @@ fn provision_dist(resolver: &PathResolver, root: &GuardedPath) -> Result<()> {
 
 /// The engine's default lifecycle provider: the generic plugin
 /// file. Used when the config names no plugins of its own.
-const GENERIC_PLUGIN: &str = "crates/oxdock-compose/src/generic.oxfile";
+const GENERIC_PLUGIN: &str = "crates/oxdock-compose/src/lifecycle/generic.oxfile";
 
 /// Lifecycle plugin paths from the config, or the generic default
 /// when the config names none. Entries are plain paths: every

@@ -146,7 +146,7 @@ EXPORT PIPE_RUN
 # plugin file exposes the same lifecycle methods, so registration
 # order is execution order and there is nothing else to declare.
 FUNC LIFECYCLE_FILES_WITH_DEFAULT($cfg: MAP<ANY>) {
-    LET $paths: LIST<STRING> = ["crates/oxdock-compose/src/generic.oxfile"]
+    LET $paths: LIST<STRING> = ["crates/oxdock-compose/src/lifecycle/generic.oxfile"]
     LET $has_lc: BOOL = HAS_KEY($cfg, "lifecycle")
     IF $has_lc {
         LET $lc: MAP<ANY> = $cfg.lifecycle

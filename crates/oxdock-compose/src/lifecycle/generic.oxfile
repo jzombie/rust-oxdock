@@ -7,7 +7,7 @@
 # of editing it: scope key names and the version env name come from
 # the config, never from this file.
 IMPORT [STD, COMPOSE_ENGINE, DEFER]
-IMPORT [TYPE CTX FROM "types.oxfile"]
+IMPORT [TYPE CTX FROM "../types.oxfile"]
 
 # Run-once intake: generic passthrough. A domain pipeline that needs
 # intake work registers its own plugin file providing SETUP.
