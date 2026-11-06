@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-oxdock-compose = { version = "0.0.0", path = "../oxdock-compose" }
+oxdock-compose = { version = "0.0.0", path = "../../oxdock-compose" }
 oxdock-fs.workspace = true
 
 [lints]

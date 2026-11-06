@@ -38,27 +38,27 @@ fn child_bin() -> String {
 fn support_files() -> Vec<(&'static str, &'static str)> {
     vec![
         (
-            "crates/oxdock-compose/src/run.oxfile",
+            "oxdock-compose/src/run.oxfile",
             include_str!("../src/run.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/lifecycle/generic.oxfile",
+            "oxdock-compose/src/lifecycle/generic.oxfile",
             include_str!("../src/lifecycle/generic.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/lifecycle/oxdock.oxfile",
+            "oxdock-compose/src/lifecycle/oxdock.oxfile",
             include_str!("../src/lifecycle/oxdock.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/types.oxfile",
+            "oxdock-compose/src/types.oxfile",
             include_str!("../src/types.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/compose.oxfile",
+            "oxdock-compose/src/compose.oxfile",
             include_str!("../src/compose.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/stages.oxfile",
+            "oxdock-compose/src/stages.oxfile",
             include_str!("../src/stages.oxfile"),
         ),
     ]
@@ -92,8 +92,8 @@ fn with_lifecycle(cfg: &str) -> String {
     obj.insert(
         "lifecycle".to_string(),
         serde_json::json!({"files": [
-            "crates/oxdock-compose/src/lifecycle/generic.oxfile",
-            "crates/oxdock-compose/src/lifecycle/oxdock.oxfile"
+            "oxdock-compose/src/lifecycle/generic.oxfile",
+            "oxdock-compose/src/lifecycle/oxdock.oxfile"
         ]}),
     );
     serde_json::to_string(&v).expect("serialize fixture config")

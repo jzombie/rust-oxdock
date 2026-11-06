@@ -284,7 +284,7 @@ pub fn run_with_plugins(
     // tree: it reads the config, assembles the child from the plugin
     // registry, and pipes it through the interpreter. What runs is
     // what the tree holds, never Rust-assembled text.
-    let entry = read_support(&fs_resolver, &root, "crates/oxdock-compose/src/run.oxfile")?;
+    let entry = read_support(&fs_resolver, &root, "oxdock-compose/src/run.oxfile")?;
     let fs: Box<dyn WorkspaceFs> = Box::new(fs_resolver);
     let output = engine
         .run_script_on(fs, &entry, default_process_manager())
@@ -302,28 +302,25 @@ pub fn run_with_plugins(
 /// Rust-assembled text.
 fn embedded_dist() -> Vec<(&'static str, &'static str)> {
     vec![
+        ("oxdock-compose/src/run.oxfile", include_str!("run.oxfile")),
         (
-            "crates/oxdock-compose/src/run.oxfile",
-            include_str!("run.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/compose.oxfile",
+            "oxdock-compose/src/compose.oxfile",
             include_str!("compose.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/stages.oxfile",
+            "oxdock-compose/src/stages.oxfile",
             include_str!("stages.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/types.oxfile",
+            "oxdock-compose/src/types.oxfile",
             include_str!("types.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/lifecycle/generic.oxfile",
+            "oxdock-compose/src/lifecycle/generic.oxfile",
             include_str!("lifecycle/generic.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/lifecycle/oxdock.oxfile",
+            "oxdock-compose/src/lifecycle/oxdock.oxfile",
             include_str!("lifecycle/oxdock.oxfile"),
         ),
     ]
@@ -361,7 +358,7 @@ fn provision_dist(resolver: &PathResolver, root: &GuardedPath) -> Result<()> {
 
 /// The engine's default lifecycle provider: the generic plugin
 /// file. Used when the config names no plugins of its own.
-const GENERIC_PLUGIN: &str = "crates/oxdock-compose/src/lifecycle/generic.oxfile";
+const GENERIC_PLUGIN: &str = "oxdock-compose/src/lifecycle/generic.oxfile";
 
 /// Lifecycle plugin paths from the config, or the generic default
 /// when the config names none. Entries are plain paths: every
