@@ -4401,15 +4401,23 @@ fn parse_import_statement(
     {
         // Comma-separated entries, `ws` gaps (newlines ok inside and
         // around entries, comments MISS — `ws` admits neither).
+        // Single-file multi-name harvests skip the split: in
+        // `[TYPE A, TYPE B FROM "f"]` the first comma-part (`[TYPE A]`)
+        // carries no FROM and is invalid alone, so the whole bracket
+        // is one harvest (see `whole_file_harvest`).
         let mut parts: Vec<&[Tok]> = Vec::new();
-        let mut start = 0;
-        for (i, tok) in inner.iter().enumerate() {
-            if matches!(&tok.kind, TokKind::Punct(',')) {
-                parts.push(&inner[start..i]);
-                start = i + 1;
+        if whole_file_harvest(inner).is_some() {
+            parts.push(inner);
+        } else {
+            let mut start = 0;
+            for (i, tok) in inner.iter().enumerate() {
+                if matches!(&tok.kind, TokKind::Punct(',')) {
+                    parts.push(&inner[start..i]);
+                    start = i + 1;
+                }
             }
+            parts.push(&inner[start..]);
         }
-        parts.push(&inner[start..]);
         for part in parts {
             let dense: Vec<&Tok> = part
                 .iter()
@@ -4764,6 +4772,54 @@ fn parse_from_entry(inner: &[Tok]) -> Option<HarvestImport> {
             })
         }
         _ => None,
+    }
+}
+
+/// Whole-bracket single-file harvest (`[TYPE A, TYPE B FROM "f"]`):
+/// the comma-split would orphan `[TYPE A]` (no FROM, invalid alone),
+/// so the entire bracket parses as one harvest. Only explicitly
+/// prefixed names qualify: a bare word keeps its legacy module
+/// reading, so `[STD, TYPE T FROM "f"]` still splits into a module
+/// plus a harvest instead of harvesting STD as a function.
+fn whole_file_harvest(inner: &[Tok]) -> Option<HarvestImport> {
+    let owned: Vec<Tok> = inner.to_vec();
+    let harvest = parse_from_entry(&owned)?;
+    let dense: Vec<&Tok> = inner
+        .iter()
+        .filter(|t| !matches!(&t.kind, TokKind::Newline))
+        .collect();
+    let from = dense
+        .iter()
+        .position(|t| matches!(&t.kind, TokKind::Word(w) if w == KEYWORD_FROM))?;
+    let mut start = 0;
+    for (i, tok) in dense[..from].iter().enumerate() {
+        if matches!(&tok.kind, TokKind::Punct(',')) {
+            if !is_prefixed_name(&dense[start..i]) {
+                return None;
+            }
+            start = i + 1;
+        }
+    }
+    if !is_prefixed_name(&dense[start..from]) {
+        return None;
+    }
+    Some(harvest)
+}
+
+/// One explicitly prefixed name (`TYPE NAME` / `FUNC NAME`): the name
+/// stays gapped from its kind; the kind may joint to `[` or `,`.
+fn is_prefixed_name(part: &[&Tok]) -> bool {
+    match part {
+        [kind_tok, name_tok] if !name_tok.joint => {
+            matches!(
+                (&kind_tok.kind, &name_tok.kind),
+                (
+                    TokKind::Word(kind),
+                    TokKind::Word(_)
+                ) if kind == KEYWORD_TYPE || kind == KEYWORD_FUNC
+            )
+        }
+        _ => false,
     }
 }
 

@@ -1174,3 +1174,66 @@ fn file_import_from_single_bracket_value_position_rejected() {
         .expect_err("harvest in value position must fail");
     assert!(err.to_string().contains("single file import"), "{err}");
 }
+
+#[test]
+fn file_import_single_bracket_multi_type_harvest() {
+    let steps = parse("IMPORT [TYPE ALPHA, TYPE BETA FROM \"lib.oxfile\"]\n")
+        .expect("multi-type harvest parses");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepKind::ImportFuncs {
+        path,
+        alias,
+        func_names,
+        type_names,
+    } = &steps[0].kind
+    else {
+        panic!("expected ImportFuncs, got {:?}", steps[0].kind);
+    };
+    assert_eq!(path, "lib.oxfile");
+    assert_eq!(alias, &None);
+    assert!(func_names.is_empty());
+    assert_eq!(type_names, &["ALPHA".to_string(), "BETA".to_string()]);
+}
+
+#[test]
+fn file_import_single_bracket_multi_func_harvest() {
+    let steps = parse("IMPORT [FUNC FOO, FUNC BAR FROM \"lib.oxfile\"]\n")
+        .expect("multi-func harvest parses");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepKind::ImportFuncs {
+        func_names,
+        type_names,
+        ..
+    } = &steps[0].kind
+    else {
+        panic!("expected ImportFuncs, got {:?}", steps[0].kind);
+    };
+    assert_eq!(func_names, &["FOO".to_string(), "BAR".to_string()]);
+    assert!(type_names.is_empty());
+}
+
+#[test]
+fn file_import_single_bracket_aliased_multi_type_harvest() {
+    let steps = parse("IMPORT [TYPE ALPHA, TYPE BETA FROM \"lib.oxfile\" AS H]\n")
+        .expect("aliased harvest parses");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepKind::ImportFuncs {
+        alias, type_names, ..
+    } = &steps[0].kind
+    else {
+        panic!("expected ImportFuncs, got {:?}", steps[0].kind);
+    };
+    assert_eq!(alias, &Some("H".to_string()));
+    assert_eq!(type_names, &["ALPHA".to_string(), "BETA".to_string()]);
+}
+
+#[test]
+fn file_import_single_bracket_bare_word_keeps_module_reading() {
+    let steps = parse("IMPORT [ALPHA, TYPE BETA FROM \"lib.oxfile\"]\n")
+        .expect("module plus harvest parses");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepKind::ImportFuncs { type_names, .. } = &steps[0].kind else {
+        panic!("expected ImportFuncs, got {:?}", steps[0].kind);
+    };
+    assert_eq!(type_names, &["BETA".to_string()]);
+}

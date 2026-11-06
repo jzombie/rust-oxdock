@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_process::ProcessManager;
 
-use crate::config::{GENERIC_PLUGIN, configured_plugins};
+use crate::config::{configured_plugins, default_plugins};
 
 /// Pipeline files the binary carries: entry, composer, stage order,
 /// shared types, and the default hook set. Provisioned into the repo
@@ -32,6 +32,10 @@ fn embedded_dist() -> Vec<(&'static str, &'static str)> {
         (
             "oxdock-compose/src/types.oxfile",
             include_str!("types.oxfile"),
+        ),
+        (
+            "oxdock-compose/src/lifecycle/scanner.oxfile",
+            include_str!("lifecycle/scanner.oxfile"),
         ),
         (
             "oxdock-compose/src/lifecycle/generic.oxfile",
@@ -85,7 +89,7 @@ pub(crate) fn check_plugin_uniformity(
     engine: &oxdock_core::Engine<impl ProcessManager>,
     config_name: &str,
 ) -> Result<()> {
-    let mut files = vec![GENERIC_PLUGIN.to_string()];
+    let mut files = default_plugins();
     for plugin in configured_plugins(resolver, root, config_name)? {
         if !files.contains(&plugin) {
             files.push(plugin);

@@ -7,7 +7,7 @@
 # passes through a pipe that unescapes backslashes, so the backslash
 # gate fails fast naming the violator instead of a corrupted path.
 IMPORT [STD]
-IMPORT [TYPE PLUGIN FROM "types.oxfile"]
+IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "types.oxfile"]
 
 FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) {
     LET $clean: BOOL = STD::TEXT_CONTAINS($types, "\\")
@@ -68,7 +68,7 @@ FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) 
         INHERIT_ENV [COMPOSE_CONFIG, OXDOCK_WORKSPACE_ROOT]
         WORKSPACE LOCAL
         IMPORT [STD, COMPOSE_ENGINE]
-        IMPORT [TYPE CTX FROM "{{ $types }}"]
+        IMPORT [TYPE CTX, TYPE PLUGIN, TYPE VARS, TYPE WORKSPACE_SNAPSHOT, TYPE WORKSPACE_PACKAGE, TYPE GENERATED_ENTRY, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "{{ $types }}"]
         {{ $imports }}LET $cfgpath: STRING = "\{{ env:COMPOSE_CONFIG }}"
         LET $wsroot: STRING = "\{{ env:OXDOCK_WORKSPACE_ROOT }}"
         LET $cfg: MAP<ANY> = LOAD_JSON($cfgpath)
@@ -100,8 +100,8 @@ FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) 
         LET $count: INT = 0
         FOR $scope: STRING IN $cfg.scopes {
             FOR $tj: STRING IN GLOB("\{{ $scope }}/**/target.json") {
-                LET $file: MAP<ANY> = LOAD_JSON($tj)
-                FOR $t: MAP<ANY> IN $file.targets {
+                LET $file: TARGET_FILE = LOAD_JSON($tj)
+                FOR $t: TARGET IN $file.targets {
                     LET $tname: STRING = $t.name
                     IF HAS_KEY($seen, $tname) {
                         ECHO "duplicate target name '\{{ $tname }}' (in \{{ $tj }})"
@@ -161,14 +161,17 @@ EXPORT COMPOSE_ALL
 EXPORT PIPE_RUN
 
 # Lifecycle files from the config, or the engine's own lifecycle
-# file when the config names none. Entries stay plain paths: every
+# files when the config names none. Entries stay plain paths: every
 # plugin file exposes the same lifecycle methods, so registration
 # order is execution order and there is nothing else to declare.
+# The default pair is scanner plus generic: discovery plus
+# expansion first, manifest promotion second. A pipeline naming its
+# own files owns the whole list, scanner included.
 FUNC LIFECYCLE_FILES_WITH_DEFAULT($cfg: MAP<ANY>) {
-    LET $paths: LIST<STRING> = ["oxdock-compose/src/lifecycle/generic.oxfile"]
+    LET $paths: LIST<STRING> = ["oxdock-compose/src/lifecycle/scanner.oxfile", "oxdock-compose/src/lifecycle/generic.oxfile"]
     LET $has_lc: BOOL = HAS_KEY($cfg, "lifecycle")
     IF $has_lc {
-        LET $lc: MAP<ANY> = $cfg.lifecycle
+        LET $lc: LIFECYCLE_REF = $cfg.lifecycle
         LET $has_p: BOOL = HAS_KEY($lc, "files")
         IF $has_p {
             $paths = $lc.files
@@ -182,7 +185,7 @@ FUNC TYPES_WITH_DEFAULT($cfg: MAP<ANY>) {
     IF $has_lc == false {
         RETURN "oxdock-compose/src/types.oxfile"
     }
-    LET $lc: MAP<ANY> = $cfg.lifecycle
+    LET $lc: LIFECYCLE_REF = $cfg.lifecycle
     LET $has_t: BOOL = HAS_KEY($lc, "types")
     IF $has_t == false {
         RETURN "oxdock-compose/src/types.oxfile"

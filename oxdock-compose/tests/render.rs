@@ -32,14 +32,18 @@ fn child_bin() -> String {
 }
 
 /// Checked-in DSL support files every run needs at repo-relative
-/// paths: the entry, the composer, the stage order, the generic
-/// lifecycle, and the OxDock docs plugin. Tests seed them
-/// byte-identical so temp roots mirror the real tree.
+/// paths: the entry, the composer, the stage order, the scanner
+/// source plugin, the generic lifecycle, and the OxDock docs plugin.
+/// Tests seed them byte-identical so temp roots mirror the real tree.
 fn support_files() -> Vec<(&'static str, &'static str)> {
     vec![
         (
             "oxdock-compose/src/run.oxfile",
             include_str!("../src/run.oxfile"),
+        ),
+        (
+            "oxdock-compose/src/lifecycle/scanner.oxfile",
+            include_str!("../src/lifecycle/scanner.oxfile"),
         ),
         (
             "oxdock-compose/src/lifecycle/generic.oxfile",
@@ -87,11 +91,12 @@ fn with_lifecycle(cfg: &str) -> String {
     }
     obj.entry("version_key")
         .or_insert_with(|| serde_json::Value::String("CRATE_VERSION".to_string()));
-    // Registration order is execution order: generic behavior first,
-    // the OxDock docs intake second.
+    // Registration order is execution order: source discovery
+    // first, generic stage behavior second, OxDock intake third.
     obj.insert(
         "lifecycle".to_string(),
         serde_json::json!({"files": [
+            "oxdock-compose/src/lifecycle/scanner.oxfile",
             "oxdock-compose/src/lifecycle/generic.oxfile",
             "oxdock-compose/src/lifecycle/oxdock.oxfile"
         ]}),

@@ -55,6 +55,7 @@
   ],
   "lifecycle": {
     "files": [
+      "oxdock-compose/src/lifecycle/scanner.oxfile",
       "oxdock-compose/src/lifecycle/generic.oxfile",
       "oxdock-compose/src/lifecycle/oxdock.oxfile"
     ]

@@ -11,19 +11,19 @@
 # The values path below is the OxDock workspace convention; a
 # different layout ships its own plugin file instead of this one.
 IMPORT [STD, RUST, OXDOCK]
-IMPORT [TYPE CTX FROM "../types.oxfile"]
+IMPORT [TYPE CTX, TYPE GENERATED_ENTRY, TYPE WORKSPACE_PACKAGE FROM "../types.oxfile"]
 
 FUNC SETUP($ctx: CTX) {
     LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)
     LET $gen: LIST<ANY> = $cfg.generated
-    FOR $entry: MAP<ANY> IN $gen {
+    FOR $entry: GENERATED_ENTRY IN $gen {
         LET $key: STRING = $entry.key
         LET $text: STRING = OXDOCK::GENERATED($key)
         LET $gout: STRING = "{{ $ctx.wsroot }}/{{ $entry.out }}"
         WRITE $gout $text
     }
     LET $version: STRING = RUST::WORKSPACE_VERSION()
-    LET $wspkg: MAP<ANY> = RUST::WORKSPACE_PACKAGE()
+    LET $wspkg: WORKSPACE_PACKAGE = RUST::WORKSPACE_PACKAGE()
     LET $wsmap: MAP<ANY> = {}
     $wsmap = MAP_SET($wsmap, "version", $version)
     $wsmap = MAP_SET($wsmap, "package", $wspkg)
@@ -53,6 +53,11 @@ FUNC INGEST($ctx: CTX) {
     RETURN $ctx
 }
 
+# Source discovery lives in the scanner plugin: passthrough here.
+FUNC SCAN($ctx: CTX) {
+    RETURN $ctx
+}
+
 FUNC ASSEMBLE($ctx: CTX) {
     RETURN $ctx
 }
@@ -73,4 +78,4 @@ FUNC VERIFY($ctx: CTX) {
     RETURN $ctx
 }
 
-EXPORT [SETUP, INGEST, ASSEMBLE, RENDER, DEFERRED, WRITE_OUT, VERIFY]
+EXPORT [SETUP, INGEST, SCAN, ASSEMBLE, RENDER, DEFERRED, WRITE_OUT, VERIFY]

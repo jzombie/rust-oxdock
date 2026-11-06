@@ -1,8 +1,17 @@
 # Shared lifecycle shapes, defined once.
 # Every other file imports this instead of redeclaring.
+# Records are closed: a file carrying an unlisted key fails naming
+# it, so open user data (globals, values, scope, manifests) stays
+# MAP<ANY> at its use site with a comment saying why.
 
 TYPE CTX = MAP<wsroot: STRING, config: STRING, staging: STRING, globals: STRING, target?: STRING, template?: STRING, out?: STRING, values?: STRING, fragments?: STRING, text?: STRING, exec: BOOL>
 TYPE PLUGIN = MAP<path: STRING, as: STRING>
+TYPE VARS = MAP<global: STRING, ctx: STRING, workspace_pkg?: STRING>
+TYPE WORKSPACE_SNAPSHOT = MAP<version: STRING, package: MAP<ANY>>
+TYPE WORKSPACE_PACKAGE = MAP<author: STRING, author_given: STRING, author_family: STRING, author_email: STRING, license: STRING, repository: STRING>
+TYPE GENERATED_ENTRY = MAP<key: STRING, out: STRING>
+TYPE TARGET_FILE = MAP<targets: LIST<ANY>>
+TYPE TARGET = MAP<name: STRING, template?: STRING, out?: STRING, values?: STRING, fragments: MAP<ANY>, executable?: BOOL, globs?: ANY>
+TYPE LIFECYCLE_REF = MAP<files?: LIST<STRING>, types?: STRING>
 
-EXPORT TYPE CTX
-EXPORT TYPE PLUGIN
+EXPORT [TYPE CTX, TYPE PLUGIN, TYPE VARS, TYPE WORKSPACE_SNAPSHOT, TYPE WORKSPACE_PACKAGE, TYPE GENERATED_ENTRY, TYPE TARGET_FILE, TYPE TARGET, TYPE LIFECYCLE_REF]

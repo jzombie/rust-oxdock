@@ -41,7 +41,7 @@ fn compose_all_derives_qualifiers_from_stems_in_order() {
     seed(&root, &resolver);
 
     let steps = oxdock! {
-        IMPORT [TYPE PLUGIN FROM "types.oxfile"]
+        IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "types.oxfile"]
         IMPORT ["compose.oxfile" AS C]
         LET $plugins: LIST<STRING> = ["hooks/generic.oxfile", "hooks/oxdock.oxfile"]
         LET $stages: LIST<STRING> = ["INGEST"]
@@ -76,7 +76,7 @@ fn compose_all_calls_every_plugin_for_every_stage() {
     seed(&root, &resolver);
 
     let steps = oxdock! {
-        IMPORT [TYPE PLUGIN FROM "types.oxfile"]
+        IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "types.oxfile"]
         IMPORT ["compose.oxfile" AS C]
         LET $plugins: LIST<STRING> = ["a.oxfile", "b.oxfile"]
         LET $stages: LIST<STRING> = ["INGEST", "VERIFY"]
@@ -105,7 +105,7 @@ fn compose_all_unrolls_setup_before_target_loop() {
     seed(&root, &resolver);
 
     let steps = oxdock! {
-        IMPORT [TYPE PLUGIN FROM "types.oxfile"]
+        IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "types.oxfile"]
         IMPORT ["compose.oxfile" AS C]
         LET $plugins: LIST<STRING> = ["a.oxfile"]
         LET $stages: LIST<STRING> = ["INGEST"]
@@ -129,7 +129,7 @@ fn compose_all_rejects_backslash_paths() {
     seed(&root, &resolver);
 
     let steps = oxdock! {
-        IMPORT [TYPE PLUGIN FROM "types.oxfile"]
+        IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "types.oxfile"]
         IMPORT ["compose.oxfile" AS C]
         LET $plugins: LIST<STRING> = ["a\\b.oxfile"]
         LET $stages: LIST<STRING> = ["INGEST"]
@@ -153,7 +153,7 @@ fn compose_all_rejects_qualifier_collisions_naming_both() {
     seed(&root, &resolver);
 
     let steps = oxdock! {
-        IMPORT [TYPE PLUGIN FROM "types.oxfile"]
+        IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "types.oxfile"]
         IMPORT ["compose.oxfile" AS C]
         LET $plugins: LIST<STRING> = ["x/ingest.oxfile", "y/ingest.oxfile"]
         LET $stages: LIST<STRING> = ["INGEST"]
@@ -177,7 +177,7 @@ fn compose_all_fails_closed_on_zero_targets() {
     seed(&root, &resolver);
 
     let steps = oxdock! {
-        IMPORT [TYPE PLUGIN FROM "types.oxfile"]
+        IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "types.oxfile"]
         IMPORT ["compose.oxfile" AS C]
         LET $plugins: LIST<STRING> = ["a.oxfile"]
         LET $stages: LIST<STRING> = ["INGEST"]

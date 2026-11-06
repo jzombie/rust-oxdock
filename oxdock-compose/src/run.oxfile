@@ -4,8 +4,7 @@
 # extra plugin files in execution order, or nothing at all.
 INHERIT_ENV [COMPOSE_CONFIG, OXDOCK_WORKSPACE_ROOT, COMPOSE_PRINT_CHILD]
 IMPORT [STD]
-IMPORT [TYPE CTX FROM "oxdock-compose/src/types.oxfile"]
-IMPORT [TYPE PLUGIN FROM "oxdock-compose/src/types.oxfile"]
+IMPORT [TYPE CTX, TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "oxdock-compose/src/types.oxfile"]
 IMPORT ["oxdock-compose/src/compose.oxfile" AS C]
 IMPORT ["oxdock-compose/src/stages.oxfile" AS STAGES]
 
