@@ -1,8 +1,10 @@
 [package]
 name = "oxdock-compose"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 description = "Composed artifacts, byte-identical: a general-purpose lifecycle renderer turning one context into deterministic outputs."
 
 # Prototype crate; don't publish with this name

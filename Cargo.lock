@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-compose"
-version = "0.0.0"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "base64",
