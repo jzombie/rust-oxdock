@@ -2,6 +2,7 @@
   "global_values": ".oxdock/template/_global/values.json",
   "scopes": [
     ".oxdock",
+    "oxdock-compose",
     "crates",
     "oxdock",
     "tests"

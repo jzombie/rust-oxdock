@@ -2,20 +2,24 @@
   "targets": [
     {
       "name": "resume-md",
-      "out": "crates/oxdock-compose/examples/resume/resume.md",
-      "values": "crates/oxdock-compose/examples/resume/values.json",
-      "template": "crates/oxdock-compose/examples/resume/resume.md.tmpl",
+      "out": "oxdock-compose/examples/resume/resume.md",
+      "values": "oxdock-compose/examples/resume/values.json",
+      "template": "oxdock-compose/examples/resume/resume.md.tmpl",
       "fragments": {
-        "sec": ["crates/oxdock-compose/examples/resume/fragments/sec/*.md.tmpl"]
+        "sec": [
+          "oxdock-compose/examples/resume/fragments/sec/*.md.tmpl"
+        ]
       }
     },
     {
       "name": "resume-jsonld",
-      "out": "crates/oxdock-compose/examples/resume/resume.jsonld",
-      "values": "crates/oxdock-compose/examples/resume/values.json",
-      "template": "crates/oxdock-compose/examples/resume/resume.jsonld.tmpl",
+      "out": "oxdock-compose/examples/resume/resume.jsonld",
+      "values": "oxdock-compose/examples/resume/values.json",
+      "template": "oxdock-compose/examples/resume/resume.jsonld.tmpl",
       "fragments": {
-        "data": ["crates/oxdock-compose/examples/resume/fragments/data/*.tmpl"]
+        "data": [
+          "oxdock-compose/examples/resume/fragments/data/*.tmpl"
+        ]
       }
     }
   ]

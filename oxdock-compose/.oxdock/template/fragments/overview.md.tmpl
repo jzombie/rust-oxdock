@@ -4,33 +4,30 @@
 inputs through an ordered lifecycle: one context in, byte-identical
 outputs out. Markdown docs are the first pipeline, not the
 boundary: the same engine composes any text artifacts a repo's
-plugins describe. Run it with `cargo run -p oxdock-compose --root
-<repo> [--config compose.json]` after changing anything under a
-`.oxdock/template` directory, then commit the regenerated outputs.
+plugins describe.
 
-Concretely, each run:
+Render this workspace:
 
-- discovers every target by walking the configured scopes for
-  `target.json` files, failing closed on duplicate names and on
-  zero discoveries alike,
-- assembles every README from a master template whose section order
-  is the order you see in that file,
-- fills in sections shared between documents (the project intro,
-  install instructions, embed example) from single canonical files,
-- stamps the workspace version into every version reference from one
-  source (the configured `version_key`, overridable per run),
-- regenerates the command reference from the parser command registry,
-  so the docs can never list a removed command or miss a new one,
-- re-derives each member document display name and description from that
-  member's `Cargo.toml` (documents without a member manifest keep static
-  values files),
-- and fails the whole run on a misspelled section or unknown value
-  instead of rendering wrong docs.
+```sh
+cargo run -p oxdock-compose
+```
 
-It accepts two flags:
+Render another checkout with its own pipeline:
 
-- `--root <path>`: which workspace root to render. Without it, the
-  runner discovers the enclosing workspace from the current
-  directory.
-- `--config <path>`: which pipeline config to read. Without it, the
-  runner requires `compose.json` at the root.
+```sh
+oxdock-compose --root /path/to/repo --config compose.json
+```
+
+Inspect the composition without running it:
+
+```sh
+oxdock-compose --root /path/to/repo --print-child
+```
+
+Flags: `--root <path>` (workspace root, default: discovered),
+`--config <path>` (pipeline config, default: `compose.json`),
+`--print-child` (print the composed child script, skip the run).
+
+Fail-closed throughout: duplicate target names, zero discovered
+targets, misspelled placeholders, and unknown values fail the run
+instead of rendering wrong outputs.

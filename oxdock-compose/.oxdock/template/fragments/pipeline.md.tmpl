@@ -2,30 +2,22 @@
 
 Each run performs the same steps, in order:
 
-1. Load `compose.json` (global values files, scopes, generated
-   inputs, merge policy, staging dir, version key, scope key
-   aliases, lifecycle plugin files).
+1. Load `compose.json` (global values, scopes, generated inputs,
+   scope key aliases, version key, staging dir).
 2. Provision the embedded pipeline files and check every plugin
    file exposes the same lifecycle methods, failing fast naming
    any outlier instead of mid-run at first use.
-3. Compose the child script: unroll one qualified call per stage
-   per plugin, in registration order (`SETUP` once up front, then
-   the six stages per target), and pipe it through a fresh
-   interpreter. The child is never written to disk.
-4. Per target: validate the descriptor (`INGEST`), expand every
-   fragment once into a staging manifest (`ASSEMBLE`), expand the
-   master template over that manifest (`RENDER`), expand deferred
-   sentinels (`DEFERRED`), write the output (`WRITE_OUT`), and
-   byte-compare disk against pipe (`VERIFY`).
-5. Docs intake (the OxDock plugin's `SETUP`, not the generic
-   passthrough): render generated inputs through config-driven
-   `GENERATED(key)` dispatch, snapshot workspace version plus
-   package into staging, and sync each member's `values.json`
-   from its manifest, values only (see below). Target files,
-   masters, and fragments are never touched by sync.
-6. Re-apply executable bits from `target.json` declarations, then
-   report. Zero discovered targets fails closed naming the
-   config: a silent empty render is never a success.
+3. Compose the child script: one qualified call per stage per
+   plugin, in registration order (`SETUP` once up front, then the
+   six stages per target), piped through a fresh interpreter that
+   never touches disk.
+4. Per target: validate the descriptor, expand fragments into a
+   staging manifest, expand the master template, expand deferred
+   sentinels, write the output, byte-compare disk against pipe.
+   The docs plugin's `SETUP` additionally refreshes generated
+   inputs, snapshots workspace metadata, and syncs member values.
+5. Re-apply executable bits from `target.json` declarations, then
+   report. Zero discovered targets fails the run.
 
 The pipeline itself is OxDock: static `.oxfile` sources byte-copied
 from the tree, entry plus composer plus per-stage lifecycle files,
@@ -56,9 +48,7 @@ list in execution order. Omit the list and the engine's own
 
 Third-party plugin modules join through `run_with_plugins(root, extras)`,
 which registers external modules so template placeholders resolve them
-with no header changes. `pipeline_engine()` returns an engine carrying
-exactly the `COMPOSE_ENGINE` default, for custom scripts that need
-the engine primitives without the domain plugins.
+with no header changes.
 
 ### Fetch, parse, render
 
@@ -79,10 +69,10 @@ committed `name` wins as a display override (`OxDock` vs the package
 name `oxdock`). Members without a manifest keep static values files.
 Sync writes values only: masters, fragments, and target declarations
 are the author's and are never rewritten.
-Shared strings stay in the global values file and are referenced as
-`\{{ $docs_global.* }}`. Manifest-wide facts ride alongside under
-their own scope keys: the workspace version (`version_key`, default
-`CRATE_VERSION`, overridable per run through the environment) and the
-workspace package record (`vars.workspace_pkg`, default
-`workspace_pkg`) carrying author, license, and repository for
-citations.
+Shared strings stay in the global values file and are referenced
+under the configured scope keys (e.g. `\{{ $docs_global.* }}`).
+Manifest-wide facts ride alongside under their own scope keys:
+the workspace version (`version_key`) and the workspace package
+record (`vars.workspace_pkg`) carrying author, license, and
+repository for citations. Both names come from the config and are
+required whenever the workspace snapshot exists.

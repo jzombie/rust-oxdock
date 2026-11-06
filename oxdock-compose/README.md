@@ -10,65 +10,54 @@ Composed artifacts, byte-identical: a general-purpose lifecycle renderer turning
 inputs through an ordered lifecycle: one context in, byte-identical
 outputs out. Markdown docs are the first pipeline, not the
 boundary: the same engine composes any text artifacts a repo's
-plugins describe. Run it with `cargo run -p oxdock-compose --root
-<repo> [--config compose.json]` after changing anything under a
-`.oxdock/template` directory, then commit the regenerated outputs.
+plugins describe.
 
-Concretely, each run:
+Render this workspace:
 
-- discovers every target by walking the configured scopes for
-  `target.json` files, failing closed on duplicate names and on
-  zero discoveries alike,
-- assembles every README from a master template whose section order
-  is the order you see in that file,
-- fills in sections shared between documents (the project intro,
-  install instructions, embed example) from single canonical files,
-- stamps the workspace version into every version reference from one
-  source (the configured `version_key`, overridable per run),
-- regenerates the command reference from the parser command registry,
-  so the docs can never list a removed command or miss a new one,
-- re-derives each member document display name and description from that
-  member's `Cargo.toml` (documents without a member manifest keep static
-  values files),
-- and fails the whole run on a misspelled section or unknown value
-  instead of rendering wrong docs.
+```sh
+cargo run -p oxdock-compose
+```
 
-It accepts two flags:
+Render another checkout with its own pipeline:
 
-- `--root <path>`: which workspace root to render. Without it, the
-  runner discovers the enclosing workspace from the current
-  directory.
-- `--config <path>`: which pipeline config to read. Without it, the
-  runner requires `compose.json` at the root.
+```sh
+oxdock-compose --root /path/to/repo --config compose.json
+```
+
+Inspect the composition without running it:
+
+```sh
+oxdock-compose --root /path/to/repo --print-child
+```
+
+Flags: `--root <path>` (workspace root, default: discovered),
+`--config <path>` (pipeline config, default: `compose.json`),
+`--print-child` (print the composed child script, skip the run).
+
+Fail-closed throughout: duplicate target names, zero discovered
+targets, misspelled placeholders, and unknown values fail the run
+instead of rendering wrong outputs.
 
 ## Pipeline
 
 Each run performs the same steps, in order:
 
-1. Load `compose.json` (global values files, scopes, generated
-   inputs, merge policy, staging dir, version key, scope key
-   aliases, lifecycle plugin files).
+1. Load `compose.json` (global values, scopes, generated inputs,
+   scope key aliases, version key, staging dir).
 2. Provision the embedded pipeline files and check every plugin
    file exposes the same lifecycle methods, failing fast naming
    any outlier instead of mid-run at first use.
-3. Compose the child script: unroll one qualified call per stage
-   per plugin, in registration order (`SETUP` once up front, then
-   the six stages per target), and pipe it through a fresh
-   interpreter. The child is never written to disk.
-4. Per target: validate the descriptor (`INGEST`), expand every
-   fragment once into a staging manifest (`ASSEMBLE`), expand the
-   master template over that manifest (`RENDER`), expand deferred
-   sentinels (`DEFERRED`), write the output (`WRITE_OUT`), and
-   byte-compare disk against pipe (`VERIFY`).
-5. Docs intake (the OxDock plugin's `SETUP`, not the generic
-   passthrough): render generated inputs through config-driven
-   `GENERATED(key)` dispatch, snapshot workspace version plus
-   package into staging, and sync each member's `values.json`
-   from its manifest, values only (see below). Target files,
-   masters, and fragments are never touched by sync.
-6. Re-apply executable bits from `target.json` declarations, then
-   report. Zero discovered targets fails closed naming the
-   config: a silent empty render is never a success.
+3. Compose the child script: one qualified call per stage per
+   plugin, in registration order (`SETUP` once up front, then the
+   six stages per target), piped through a fresh interpreter that
+   never touches disk.
+4. Per target: validate the descriptor, expand fragments into a
+   staging manifest, expand the master template, expand deferred
+   sentinels, write the output, byte-compare disk against pipe.
+   The docs plugin's `SETUP` additionally refreshes generated
+   inputs, snapshots workspace metadata, and syncs member values.
+5. Re-apply executable bits from `target.json` declarations, then
+   report. Zero discovered targets fails the run.
 
 The pipeline itself is OxDock: static `.oxfile` sources byte-copied
 from the tree, entry plus composer plus per-stage lifecycle files,
@@ -99,9 +88,7 @@ list in execution order. Omit the list and the engine's own
 
 Third-party plugin modules join through `run_with_plugins(root, extras)`,
 which registers external modules so template placeholders resolve them
-with no header changes. `pipeline_engine()` returns an engine carrying
-exactly the `COMPOSE_ENGINE` default, for custom scripts that need
-the engine primitives without the domain plugins.
+with no header changes.
 
 ### Fetch, parse, render
 
@@ -122,13 +109,13 @@ committed `name` wins as a display override (`OxDock` vs the package
 name `oxdock`). Members without a manifest keep static values files.
 Sync writes values only: masters, fragments, and target declarations
 are the author's and are never rewritten.
-Shared strings stay in the global values file and are referenced as
-`{{ $docs_global.* }}`. Manifest-wide facts ride alongside under
-their own scope keys: the workspace version (`version_key`, default
-`CRATE_VERSION`, overridable per run through the environment) and the
-workspace package record (`vars.workspace_pkg`, default
-`workspace_pkg`) carrying author, license, and repository for
-citations.
+Shared strings stay in the global values file and are referenced
+under the configured scope keys (e.g. `{{ $docs_global.* }}`).
+Manifest-wide facts ride alongside under their own scope keys:
+the workspace version (`version_key`) and the workspace package
+record (`vars.workspace_pkg`) carrying author, license, and
+repository for citations. Both names come from the config and are
+required whenever the workspace snapshot exists.
 
 ## Targets and assemblies
 
@@ -167,9 +154,6 @@ present-but-not-boolean flag fails the run instead of rendering.
 One values file can feed several masters: the generic example renders
 a human `README.md`, a slim agent pointer `llms.txt`, and a full
 carrier `llms-full.txt` from the same values through shared fragments.
-Each master selects its sections, so the split between outputs is
-structural (same values, same fragments) and can never drift into
-copies.
 
 ## License
 
