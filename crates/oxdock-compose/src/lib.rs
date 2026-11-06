@@ -7,7 +7,7 @@
 //! per-pipeline until their extraction slices land.
 pub mod defer;
 pub mod engine;
-pub mod plugins;
+pub mod hosts;
 
 use anyhow::{Context, Result};
 use oxdock_core::{Engine, ExecIo, HostModule, OxDockFn, TypeTag, Value};
@@ -20,17 +20,16 @@ use std::path::Path;
 /// `run()`'s module set, written once.
 ///
 /// Each entry is `(HeaderIdent, module_path)` registered on the
-/// `Engine`, so hook calls and template placeholders resolve the
-/// same set. This list is this pipeline's requirements, not engine
-/// defaults: the only module the engine itself defaults to is
-/// `COMPOSE_ENGINE` (see [`pipeline_engine`]); `DEFER` because
-/// deferred placeholders resolve in every template (`DOCS` rides
-/// alongside as its compat alias until retired); `OXDOCK`, `RUST`,
-/// and `MARKDOWN` because the shipped hooks are the docs pipeline's
-/// hooks, and a different pipeline would register a different set
-/// alongside its own hooks.
+/// `Engine`, so host calls and template placeholders resolve the
+/// same set. These are host modules (Rust functions), not lifecycle
+/// plugins (DSL files): `COMPOSE_ENGINE` is the only module the
+/// engine itself defaults to; `DEFER` because deferred placeholders
+/// resolve in every template (`DOCS` rides alongside as its compat
+/// alias until retired); `OXDOCK`, `RUST`, and `MARKDOWN` because
+/// the shipped OxDock docs plugin calls them, and a different
+/// pipeline registers whatever its own plugins need.
 ///
-/// External plugins never go here either: pass them to
+/// External host modules never go here either: pass them to
 /// [`run_with_plugins`], which registers them alongside this list.
 /// The static scripts (`run.oxfile`, `compose.oxfile`,
 /// `stages.oxfile`, hook files) declare their own `IMPORT`s; a
@@ -48,9 +47,9 @@ macro_rules! pipeline_modules {
             $final ; [$($args)*] ;
             (COMPOSE_ENGINE, crate::engine),
             (DEFER, crate::defer),
-            (DOCS, crate::plugins::docs),
-            (OXDOCK, crate::plugins::oxdock),
-            (RUST, crate::plugins::rust),
+            (DOCS, crate::hosts::docs),
+            (OXDOCK, crate::hosts::oxdock),
+            (RUST, crate::hosts::rust),
             (MARKDOWN, oxdock_markdown_plugin)
         }
     };
@@ -77,14 +76,13 @@ macro_rules! pipeline_emit_register {
     }};
 }
 
-/// Execute the composition pipeline in two static runs sharing one
-/// filesystem: the domain preamble first (Rust-aware enrichment over
-/// `COMPOSE_CONFIG`: version, member values, generated inputs, then
-/// the plain-data domain file), then the core composition (discover,
-/// assemble, render every master template through the lifecycle
-/// pipe, verify). Static scripts are byte-copied from the tree (see
-/// `read_support`); sequencing and all writes live in the DSL while
-/// Rust owns only run order plus the executable-bit fixup below.
+/// Execute the composition pipeline: provision the embedded files,
+/// check every registered plugin exposes the same lifecycle
+/// methods, then run the entry script, which composes the child from
+/// the plugin registry and pipes it through the interpreter. Static
+/// scripts are byte-copied from the tree (see `read_support`);
+/// sequencing and all writes live in the DSL while Rust owns only
+/// run order plus the executable-bit fixup below.
 #[allow(clippy::disallowed_types)]
 pub fn run(repo_root: &Path) -> Result<()> {
     run_with_plugins(repo_root, vec![])
@@ -237,10 +235,12 @@ pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
 /// Execute the composition pipeline with extra modules registered
 /// alongside this pipeline's set.
 ///
-/// External plugins arrive here, never in `pipeline_modules!`: any
-/// `{{ CUSTOM::FUNC($var) }}` placeholder in a template or fragment
-/// resolves through the live registered snapshot, so no header or
-/// script change is needed. Custom *scripts* are a separate path:
+/// External host modules arrive here, never in `pipeline_modules!`:
+/// any `{{ CUSTOM::FUNC($var) }}` placeholder in a template or
+/// fragment resolves through the live registered snapshot, so no
+/// header or script change is needed. Lifecycle plugins are
+/// separate: they are DSL files named by the config's `plugins`
+/// registry, not host modules. Custom *scripts* are a third path:
 /// build them over [`pipeline_engine`] with their own `oxdock!`
 /// header naming their own modules.
 #[allow(clippy::disallowed_types)]

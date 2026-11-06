@@ -7,7 +7,7 @@
 //! pass-agnostic: any `fn(document: STRING, ...args: ANY) -> STRING`
 //! defers through this wrapper without sentinel logic of its own.
 //! This is core machinery: every pipeline registers it. The `DOCS`
-//! module (see [`crate::plugins::docs`]) is a compat alias kept
+//! module (see [`crate::hosts::docs`]) is a compat alias kept
 //! working until it is retired.
 
 use anyhow::{Context, Result, bail};
