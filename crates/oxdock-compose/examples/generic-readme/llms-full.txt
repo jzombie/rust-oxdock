@@ -13,4 +13,3 @@ A minimal non Rust project documented through the generic file-set renderer: no 
 Install with `npm install tiny-tool`, then run `tiny-tool --help`.
 
 Values: {"blurb":"A minimal non Rust project documented through the generic file-set renderer: no manifests, no registry, just values plus fragments.","install":"npm install tiny-tool","project":"Tiny Tool","usage":"tiny-tool --help"}
-

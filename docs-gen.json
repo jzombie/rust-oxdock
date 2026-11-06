@@ -1,29 +1,115 @@
 {
   "global_values": ".oxdock/template/_global/values.json",
-  "scopes": [".oxdock", "crates", "oxdock", "tests"],
+  "scopes": [
+    ".oxdock",
+    "crates",
+    "oxdock",
+    "tests"
+  ],
   "generated": [
-    {"key": "command_index", "out": ".oxdock/template/readme/generated/command-reference.md.tmpl"},
-    {"key": "command_body", "out": ".oxdock/template/readme/generated/command-body.md.tmpl"},
-    {"key": "value_types", "out": ".oxdock/template/readme/generated/value-types.md.tmpl"},
-    {"key": "function_reference", "out": ".oxdock/template/readme/generated/function-reference.md.tmpl"},
-    {"key": "context_reference", "out": ".oxdock/template/readme/generated/context-reference.md.tmpl"},
-    {"key": "ssh_function_reference", "out": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-function-reference.md.tmpl"},
-    {"key": "ssh_type_reference", "out": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-type-reference.md.tmpl"},
-    {"key": "net_function_reference", "out": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-function-reference.md.tmpl"},
-    {"key": "net_type_reference", "out": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-type-reference.md.tmpl"},
-    {"key": "markdown_function_reference", "out": "crates/plugins/oxdock-markdown-plugin/.oxdock/template/generated/markdown-function-reference.md.tmpl"},
-    {"key": "env_contracts", "out": ".oxdock/template/envcontracts/generated/env_contracts.md.tmpl"}
+    {
+      "key": "command_index",
+      "out": ".oxdock/template/readme/generated/command-reference.md.tmpl"
+    },
+    {
+      "key": "command_body",
+      "out": ".oxdock/template/readme/generated/command-body.md.tmpl"
+    },
+    {
+      "key": "value_types",
+      "out": ".oxdock/template/readme/generated/value-types.md.tmpl"
+    },
+    {
+      "key": "function_reference",
+      "out": ".oxdock/template/readme/generated/function-reference.md.tmpl"
+    },
+    {
+      "key": "context_reference",
+      "out": ".oxdock/template/readme/generated/context-reference.md.tmpl"
+    },
+    {
+      "key": "ssh_function_reference",
+      "out": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-function-reference.md.tmpl"
+    },
+    {
+      "key": "ssh_type_reference",
+      "out": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-type-reference.md.tmpl"
+    },
+    {
+      "key": "net_function_reference",
+      "out": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-function-reference.md.tmpl"
+    },
+    {
+      "key": "net_type_reference",
+      "out": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-type-reference.md.tmpl"
+    },
+    {
+      "key": "markdown_function_reference",
+      "out": "crates/plugins/oxdock-markdown-plugin/.oxdock/template/generated/markdown-function-reference.md.tmpl"
+    },
+    {
+      "key": "env_contracts",
+      "out": ".oxdock/template/envcontracts/generated/env_contracts.md.tmpl"
+    }
   ],
   "lifecycle": {
     "types": "crates/oxdock-compose/src/types.oxfile",
     "plugins": [
-      {"path": "crates/oxdock-compose/src/hooks/setup.oxfile", "alias": "H0", "hooks": ["SETUP"]},
-      {"path": "crates/oxdock-compose/src/hooks/ingest.oxfile", "alias": "H1", "hooks": ["INGEST"]},
-      {"path": "crates/oxdock-compose/src/hooks/assemble.oxfile", "alias": "H2", "hooks": ["ASSEMBLE"]},
-      {"path": "crates/oxdock-compose/src/hooks/render.oxfile", "alias": "H3", "hooks": ["RENDER"]},
-      {"path": "crates/oxdock-compose/src/hooks/deferred.oxfile", "alias": "H4", "hooks": ["DEFERRED"]},
-      {"path": "crates/oxdock-compose/src/hooks/write.oxfile", "alias": "H5", "hooks": ["WRITE_OUT"]},
-      {"path": "crates/oxdock-compose/src/hooks/verify.oxfile", "alias": "H6", "hooks": ["VERIFY"]}
+      {
+        "path": "crates/oxdock-compose/src/hooks/docs_setup.oxfile",
+        "alias": "H0",
+        "hooks": [
+          "SETUP"
+        ]
+      },
+      {
+        "path": "crates/oxdock-compose/src/hooks/ingest.oxfile",
+        "alias": "H1",
+        "hooks": [
+          "INGEST"
+        ]
+      },
+      {
+        "path": "crates/oxdock-compose/src/hooks/assemble.oxfile",
+        "alias": "H2",
+        "hooks": [
+          "ASSEMBLE"
+        ]
+      },
+      {
+        "path": "crates/oxdock-compose/src/hooks/render.oxfile",
+        "alias": "H3",
+        "hooks": [
+          "RENDER"
+        ]
+      },
+      {
+        "path": "crates/oxdock-compose/src/hooks/deferred.oxfile",
+        "alias": "H4",
+        "hooks": [
+          "DEFERRED"
+        ]
+      },
+      {
+        "path": "crates/oxdock-compose/src/hooks/write.oxfile",
+        "alias": "H5",
+        "hooks": [
+          "WRITE_OUT"
+        ]
+      },
+      {
+        "path": "crates/oxdock-compose/src/hooks/verify.oxfile",
+        "alias": "H6",
+        "hooks": [
+          "VERIFY"
+        ]
+      }
     ]
-  }
+  },
+  "vars": {
+    "global": "docs_global",
+    "ctx": "docs_ctx",
+    "workspace_pkg": "workspace_pkg"
+  },
+  "version_key": "CRATE_VERSION"
 }

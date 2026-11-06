@@ -23,4 +23,3 @@ Contact: mary@example.com, https://example.com
 | Markdown | OxDock  | Rust   |
 | -------- | ------- | ------ |
 | advanced | working | expert |
-

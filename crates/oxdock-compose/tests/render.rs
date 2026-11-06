@@ -46,6 +46,10 @@ fn support_files() -> Vec<(&'static str, &'static str)> {
             include_str!("../src/hooks/setup.oxfile"),
         ),
         (
+            "crates/oxdock-compose/src/hooks/docs_setup.oxfile",
+            include_str!("../src/hooks/docs_setup.oxfile"),
+        ),
+        (
             "crates/oxdock-compose/src/types.oxfile",
             include_str!("../src/types.oxfile"),
         ),
@@ -84,25 +88,43 @@ fn support_files() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Lifecycle registry every fixture config gets: the seven docs
-/// hooks with run-root-relative paths mirroring the real tree.
+/// Lifecycle registry plus scope contract every fixture config gets:
+/// the docs hooks (Rust-docs intake as the SETUP overlay, generic
+/// stages after it) with run-root-relative paths mirroring the real
+/// tree. Scope key names and the version env name are config data,
+/// never hook code: fixtures declaring their own keep them, the rest
+/// get the docs-pipeline mapping.
 fn with_lifecycle(cfg: &str) -> String {
-    let inner = cfg
-        .trim()
-        .strip_prefix('{')
-        .and_then(|s| s.strip_suffix('}'))
-        .expect("fixture config is a JSON object");
-    format!(
-        "{{{inner}, \"lifecycle\": {{\"types\": \"crates/oxdock-compose/src/types.oxfile\", \"plugins\": [\
-         {{\"path\": \"crates/oxdock-compose/src/hooks/setup.oxfile\", \"alias\": \"H0\", \"hooks\": [\"SETUP\"]}}, \
-         {{\"path\": \"crates/oxdock-compose/src/hooks/ingest.oxfile\", \"alias\": \"H1\", \"hooks\": [\"INGEST\"]}}, \
-         {{\"path\": \"crates/oxdock-compose/src/hooks/assemble.oxfile\", \"alias\": \"H2\", \"hooks\": [\"ASSEMBLE\"]}}, \
-         {{\"path\": \"crates/oxdock-compose/src/hooks/render.oxfile\", \"alias\": \"H3\", \"hooks\": [\"RENDER\"]}}, \
-         {{\"path\": \"crates/oxdock-compose/src/hooks/deferred.oxfile\", \"alias\": \"H4\", \"hooks\": [\"DEFERRED\"]}}, \
-         {{\"path\": \"crates/oxdock-compose/src/hooks/write.oxfile\", \"alias\": \"H5\", \"hooks\": [\"WRITE_OUT\"]}}, \
-         {{\"path\": \"crates/oxdock-compose/src/hooks/verify.oxfile\", \"alias\": \"H6\", \"hooks\": [\"VERIFY\"]}}\
-         ]}}}}"
-    )
+    let mut v: serde_json::Value =
+        serde_json::from_str(cfg).expect("fixture config is a JSON object");
+    let obj = v.as_object_mut().expect("fixture config is an object");
+    let vars = obj
+        .entry("vars")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let vm = vars.as_object_mut().expect("config vars is a map");
+    for (key, fallback) in [
+        ("global", "docs_global"),
+        ("ctx", "docs_ctx"),
+        ("workspace_pkg", "workspace_pkg"),
+    ] {
+        vm.entry(key)
+            .or_insert_with(|| serde_json::Value::String(fallback.to_string()));
+    }
+    obj.entry("version_key")
+        .or_insert_with(|| serde_json::Value::String("CRATE_VERSION".to_string()));
+    obj.insert(
+        "lifecycle".to_string(),
+        serde_json::json!({"types": "crates/oxdock-compose/src/types.oxfile", "plugins": [
+            {"path": "crates/oxdock-compose/src/hooks/docs_setup.oxfile", "alias": "H0", "hooks": ["SETUP"]},
+            {"path": "crates/oxdock-compose/src/hooks/ingest.oxfile", "alias": "H1", "hooks": ["INGEST"]},
+            {"path": "crates/oxdock-compose/src/hooks/assemble.oxfile", "alias": "H2", "hooks": ["ASSEMBLE"]},
+            {"path": "crates/oxdock-compose/src/hooks/render.oxfile", "alias": "H3", "hooks": ["RENDER"]},
+            {"path": "crates/oxdock-compose/src/hooks/deferred.oxfile", "alias": "H4", "hooks": ["DEFERRED"]},
+            {"path": "crates/oxdock-compose/src/hooks/write.oxfile", "alias": "H5", "hooks": ["WRITE_OUT"]},
+            {"path": "crates/oxdock-compose/src/hooks/verify.oxfile", "alias": "H6", "hooks": ["VERIFY"]}
+        ]}),
+    );
+    serde_json::to_string(&v).expect("serialize fixture config")
 }
 
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
@@ -361,7 +383,7 @@ fn custom_scope_keys_and_staging_render() {
         (
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
-                # {{ $docs_global.title }} {{ $docs_ctx.n }}
+                # {{ $g.title }} {{ $c.n }}
                 {{ $files.sec.a }}
             "#}
             .to_string(),

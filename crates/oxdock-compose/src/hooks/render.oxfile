@@ -1,28 +1,79 @@
 # RENDER hook: expand the master template over the manifest scope.
-# User data stays in open maps; the CTX boundary stays exact. The
-# master template always sees $files, $docs_global, $docs_ctx, and
-# $workspace_pkg (read from the SETUP staging snapshot, never a
-# per-target host call); custom scope names apply to fragments.
+# User data stays in open maps; the CTX boundary stays exact. Scope
+# key names and the version env name come from the config, never
+# from this file: missing declarations fail closed naming the key.
+# The workspace snapshot below is optional staging data (see
+# ASSEMBLE); when absent, scope carries only the configured maps.
 IMPORT [STD, COMPOSE_ENGINE]
 IMPORT [TYPE CTX FROM "../types.oxfile"]
 
 FUNC RENDER($ctx: CTX) {
-    LET $ws: MAP<ANY> = LOAD_JSON("{{ $ctx.staging }}/_workspace.json")
-    LET $version: STRING = $ws.version
-    ENV CRATE_VERSION=$version
+    LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)
+    LET $has_vars: BOOL = HAS_KEY($cfg, "vars")
+    IF $has_vars == false {
+        ECHO "render: config needs a 'vars' map declaring scope key names"
+        EXIT 1
+    }
+    LET $vars: MAP<ANY> = $cfg.vars
+    LET $has_global: BOOL = HAS_KEY($vars, "global")
+    IF $has_global == false {
+        ECHO "render: config 'vars' needs a 'global' scope key name"
+        EXIT 1
+    }
+    LET $vglobal: STRING = $vars.global
+    LET $has_vctx: BOOL = HAS_KEY($vars, "ctx")
+    IF $has_vctx == false {
+        ECHO "render: config 'vars' needs a 'ctx' scope key name"
+        EXIT 1
+    }
+    LET $vctx: STRING = $vars.ctx
+    LET $wspt: STRING = PATH_TYPE("{{ $ctx.staging }}/_workspace.json")
+    LET $has_ws: BOOL = $wspt == "file"
+    LET $vkey: STRING = ""
+    LET $vpkg: STRING = ""
+    IF $has_ws {
+        LET $has_vkey: BOOL = HAS_KEY($cfg, "version_key")
+        IF $has_vkey == false {
+            ECHO "render: staging snapshot present but config lacks 'version_key'"
+            EXIT 1
+        }
+        $vkey = $cfg.version_key
+        LET $has_vpkg: BOOL = HAS_KEY($vars, "workspace_pkg")
+        IF $has_vpkg == false {
+            ECHO "render: staging snapshot present but config 'vars' lacks 'workspace_pkg'"
+            EXIT 1
+        }
+        $vpkg = $vars.workspace_pkg
+    }
     LET $docs_global: MAP<ANY> = LOAD_JSON($ctx.globals)
     LET $docs_ctx: MAP<ANY> = LOAD_JSON($ctx.values)
-    LET $workspace_pkg: MAP<ANY> = $ws.package
     LET $files: MAP<ANY> = LOAD_JSON("{{ $ctx.staging }}/{{ $ctx.target }}.json")
-    WRITE $ctx.out ""
-    LET $render: PIPE
-    WITH_IO [stdout=$render] EXPAND $ctx.template
-    WITH_IO [stdin=$render] APPEND $ctx.out
-    LET $text: STRING = READ $ctx.out
+    LET $scope: MAP<ANY> = {}
+    $scope = MAP_SET($scope, $vglobal, $docs_global)
+    $scope = MAP_SET($scope, $vctx, $docs_ctx)
+    $scope = MAP_SET($scope, "files", $files)
+    LET $envmap: MAP<ANY> = {}
+    IF $has_ws {
+        LET $ws: MAP<ANY> = LOAD_JSON("{{ $ctx.staging }}/_workspace.json")
+        LET $ws_version: STRING = $ws.version
+        LET $ws_pkg: MAP<ANY> = $ws.package
+        $scope = MAP_SET($scope, $vpkg, $ws_pkg)
+        $envmap = MAP_SET($envmap, $vkey, $ws_version)
+    }
+    LET $raw: STRING = READ $ctx.template
+    LET $text: STRING = COMPOSE_ENGINE::EXPAND_TEMPLATE($raw, $scope, $envmap)
+    LET $raw_ends: BOOL = STD::TEXT_ENDS_WITH($raw, "\n")
+    IF $raw_ends {
+        LET $text_ends: BOOL = STD::TEXT_ENDS_WITH($text, "\n")
+        IF $text_ends == false {
+            $text = "{{ $text }}\n"
+        }
+    }
     IF $text == "" {
         ECHO "render: target '{{ $ctx.target }}' rendered empty"
         EXIT 1
     }
+    WRITE $ctx.out $text
     RETURN {wsroot: $ctx.wsroot, config: $ctx.config, staging: $ctx.staging, globals: $ctx.globals, target: $ctx.target, template: $ctx.template, out: $ctx.out, values: $ctx.values, fragments: $ctx.fragments, text: $text}
 }
 
