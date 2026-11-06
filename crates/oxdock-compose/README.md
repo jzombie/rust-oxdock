@@ -37,7 +37,7 @@ It accepts one flag:
 
 Each run performs the same steps, in order:
 
-1. Load `docs-gen.json` (global values files, doc root scopes, generated
+1. Load `compose.json` (global values files, doc root scopes, generated
    inputs, merge policy, staging dir, version key, scope key aliases).
 2. Render generated inputs through config-driven `GENERATED(key)`
    dispatch (command index and body, function references): the script

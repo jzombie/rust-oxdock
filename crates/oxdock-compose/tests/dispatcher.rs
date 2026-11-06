@@ -178,3 +178,89 @@ fn compose_all_rejects_backslash_paths() {
         "backslash hook path exits 1: {err}"
     );
 }
+
+#[test]
+fn compose_all_emits_host_module_imports_once_with_qualified_calls() {
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    seed(&root, &resolver);
+
+    let got = compose_text(
+        &root,
+        r#"[{module: "OXDOCK", hooks: ["SETUP", "INGEST"]}, {module: "OXDOCK", hooks: ["VERIFY"]}]"#,
+        r#"["INGEST", "VERIFY"]"#,
+    );
+    assert_eq!(
+        got.matches("IMPORT [OXDOCK]").count(),
+        1,
+        "host module imports once no matter how many entries name it"
+    );
+    assert!(
+        got.contains("$run = OXDOCK::SETUP($run)"),
+        "setup unrolls the host call"
+    );
+    let ingest = got
+        .find("$ctx = OXDOCK::INGEST($ctx)")
+        .expect("ingest call");
+    let verify = got
+        .find("$ctx = OXDOCK::VERIFY($ctx)")
+        .expect("verify call");
+    assert!(ingest < verify, "host calls follow stage order");
+}
+
+#[test]
+fn compose_all_orders_mixed_file_and_module_entries_by_registration() {
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    seed(&root, &resolver);
+
+    let got = compose_text(
+        &root,
+        r#"[{path: "a.oxfile", alias: "P0", hooks: ["INGEST"]}, {module: "OXDOCK", hooks: ["INGEST"]}]"#,
+        r#"["INGEST"]"#,
+    );
+    let file_call = got.find("$ctx = P0::INGEST($ctx)").expect("file call");
+    let host_call = got.find("$ctx = OXDOCK::INGEST($ctx)").expect("host call");
+    assert!(
+        file_call < host_call,
+        "mixed entries keep registration order"
+    );
+}
+
+#[test]
+fn compose_all_rejects_entry_with_both_path_and_module() {
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    seed(&root, &resolver);
+
+    let err = compose_err(
+        &root,
+        r#"[{path: "a.oxfile", module: "OXDOCK", alias: "P0", hooks: ["INGEST"]}]"#,
+        r#"["INGEST"]"#,
+    );
+    assert!(
+        err.contains("EXIT requested with code 1"),
+        "exactly one of path or module: {err}"
+    );
+}
+
+#[test]
+fn compose_all_rejects_file_entry_without_alias() {
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    seed(&root, &resolver);
+
+    let err = compose_err(
+        &root,
+        r#"[{path: "a.oxfile", hooks: ["INGEST"]}]"#,
+        r#"["INGEST"]"#,
+    );
+    assert!(
+        err.contains("EXIT requested with code 1"),
+        "file entry needs an alias: {err}"
+    );
+}

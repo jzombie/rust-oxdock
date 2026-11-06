@@ -14,7 +14,7 @@ fn main() -> Result<()> {
     };
     if let Some(config) = config_arg(&args) {
         // Edge default lives here so the DSL never names a filename:
-        // the flag wins, otherwise run() falls back to docs-gen.json.
+        // the flag wins, otherwise run() requires compose.json.
         // SAFETY: process startup, single-threaded; no threads exist
         // yet and nothing reads this var concurrently.
         unsafe {

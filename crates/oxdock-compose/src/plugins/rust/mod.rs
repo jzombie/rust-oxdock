@@ -7,9 +7,9 @@
 //! reusable by any Rust project feeding its manifests into a pipeline,
 //! registered by no non-Cargo project.
 
-mod cargo;
+pub(crate) mod cargo;
 mod io;
-mod version;
+pub(crate) mod version;
 
 use std::collections::BTreeMap;
 
@@ -152,9 +152,9 @@ fn cargo_package<P: ProcessManager>(
 /// committed `name` override winning, stable key order, serde escaping,
 /// and one trailing newline. `existing` may be an empty map when no
 /// values file exists yet; a missing `name` there keeps the manifest
-/// name instead of failing.
+/// name instead of failing. Shared with the run-once intake.
 #[oxdock_func(pure, returns = TypeTag::String)]
-fn package_values_json(
+pub(crate) fn package_values_json(
     /// Manifest name and description; closed: extras fail at the boundary.
     #[record("name: String", "description: String")]
     pkg: BTreeMap<String, Value>,

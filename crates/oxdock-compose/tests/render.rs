@@ -46,10 +46,6 @@ fn support_files() -> Vec<(&'static str, &'static str)> {
             include_str!("../src/hooks/setup.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/hooks/docs_setup.oxfile",
-            include_str!("../src/hooks/docs_setup.oxfile"),
-        ),
-        (
             "crates/oxdock-compose/src/types.oxfile",
             include_str!("../src/types.oxfile"),
         ),
@@ -89,8 +85,8 @@ fn support_files() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Lifecycle registry plus scope contract every fixture config gets:
-/// the docs hooks (Rust-docs intake as the SETUP overlay, generic
-/// stages after it) with run-root-relative paths mirroring the real
+/// the SETUP intake via the OXDOCK host module and the generic
+/// stage hooks with run-root-relative paths mirroring the real
 /// tree. Scope key names and the version env name are config data,
 /// never hook code: fixtures declaring their own keep them, the rest
 /// get the docs-pipeline mapping.
@@ -115,7 +111,7 @@ fn with_lifecycle(cfg: &str) -> String {
     obj.insert(
         "lifecycle".to_string(),
         serde_json::json!({"types": "crates/oxdock-compose/src/types.oxfile", "plugins": [
-            {"path": "crates/oxdock-compose/src/hooks/docs_setup.oxfile", "alias": "H0", "hooks": ["SETUP"]},
+            {"module": "OXDOCK", "hooks": ["SETUP"]},
             {"path": "crates/oxdock-compose/src/hooks/ingest.oxfile", "alias": "H1", "hooks": ["INGEST"]},
             {"path": "crates/oxdock-compose/src/hooks/assemble.oxfile", "alias": "H2", "hooks": ["ASSEMBLE"]},
             {"path": "crates/oxdock-compose/src/hooks/render.oxfile", "alias": "H3", "hooks": ["RENDER"]},
@@ -146,7 +142,7 @@ fn fixture(files: &[(&str, &str)]) -> (GuardedTempDir, GuardedPath, PathResolver
             resolver.create_dir_all(&dir).expect("create dir");
         }
         let path = root.join(rel).expect("join file");
-        let bytes: Vec<u8> = if *rel == "docs-gen.json" {
+        let bytes: Vec<u8> = if *rel == "compose.json" {
             with_lifecycle(contents).into_bytes()
         } else {
             contents.as_bytes().to_vec()
@@ -197,7 +193,7 @@ const FRAG_B: &str = "B {{ $docs_global.extra }}";
 fn base_tree(policy: &str) -> Vec<(String, String)> {
     vec![
         ("Cargo.toml".to_string(), MANIFEST.to_string()),
-        ("docs-gen.json".to_string(), config(policy)),
+        ("compose.json".to_string(), config(policy)),
         ("base.json".to_string(), BASE_VALUES.to_string()),
         ("overlay.json".to_string(), OVERLAY_VALUES.to_string()),
         ("target.json".to_string(), TARGET.to_string()),
@@ -374,7 +370,7 @@ fn custom_scope_keys_and_staging_render() {
     let tree = vec![
         ("Cargo.toml".to_string(), MANIFEST.to_string()),
         (
-            "docs-gen.json".to_string(),
+            "compose.json".to_string(),
             r#"{"global_values": "base.json", "scopes": ["."], "generated": [], "staging_dir": "target/custom", "version_key": "VER", "vars": {"global": "g", "ctx": "c"}}"#.to_string(),
         ),
         ("base.json".to_string(), BASE_VALUES.to_string()),
@@ -415,7 +411,7 @@ fn unknown_generated_key_lists_known_keys() {
     let tree = vec![
         ("Cargo.toml".to_string(), MANIFEST.to_string()),
         (
-            "docs-gen.json".to_string(),
+            "compose.json".to_string(),
             r#"{"global_values": "base.json", "scopes": ["."], "generated": [{"key": "nope", "out": "x.md"}]}"#.to_string(),
         ),
         ("base.json".to_string(), BASE_VALUES.to_string()),
@@ -449,7 +445,7 @@ fn slim_and_full_share_fragments_with_split_content() {
     let tree = [
         ("Cargo.toml", MANIFEST),
         (
-            "docs-gen.json",
+            "compose.json",
             r#"{"global_values": "values.json", "scopes": ["."], "generated": []}"#,
         ),
         ("values.json", VALUES),
@@ -536,7 +532,7 @@ fn toc_renders_tree_from_final_readme() {
     let tree = vec![
         ("Cargo.toml".to_string(), MANIFEST.to_string()),
         (
-            "docs-gen.json".to_string(),
+            "compose.json".to_string(),
             r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
         ),
         ("base.json".to_string(), BASE_VALUES.to_string()),
@@ -590,7 +586,7 @@ fn toc_renders_inline_bar_for_single_level() {
     let tree = vec![
         ("Cargo.toml".to_string(), MANIFEST.to_string()),
         (
-            "docs-gen.json".to_string(),
+            "compose.json".to_string(),
             r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
         ),
         ("base.json".to_string(), BASE_VALUES.to_string()),
@@ -634,7 +630,7 @@ fn toc_replaces_multiple_sentinels_independently() {
     let tree = vec![
         ("Cargo.toml".to_string(), MANIFEST.to_string()),
         (
-            "docs-gen.json".to_string(),
+            "compose.json".to_string(),
             r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
         ),
         ("base.json".to_string(), BASE_VALUES.to_string()),
@@ -678,7 +674,7 @@ fn toc_rejects_multi_level_inline_at_dispatch() {
     let tree = vec![
         ("Cargo.toml".to_string(), MANIFEST.to_string()),
         (
-            "docs-gen.json".to_string(),
+            "compose.json".to_string(),
             r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
         ),
         ("base.json".to_string(), BASE_VALUES.to_string()),
@@ -716,7 +712,7 @@ fn toc_renders_immediately_without_deferral() {
     let tree = vec![
         ("Cargo.toml".to_string(), MANIFEST.to_string()),
         (
-            "docs-gen.json".to_string(),
+            "compose.json".to_string(),
             r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
         ),
         ("base.json".to_string(), BASE_VALUES.to_string()),
@@ -760,7 +756,7 @@ fn context_reference_composes_once_with_resolving_links() {
     let tree = vec![
         ("Cargo.toml", MANIFEST),
         (
-            "docs-gen.json",
+            "compose.json",
             r#"{"global_values": "base.json", "scopes": ["."], "generated": [{"key": "function_reference", "out": "gen/fn.md.tmpl"}, {"key": "context_reference", "out": "gen/ctx.md.tmpl"}]}"#,
         ),
         ("base.json", BASE_VALUES),
@@ -820,7 +816,7 @@ fn function_reference_without_context_fragment_leaves_dangling_anchors() {
     let tree = vec![
         ("Cargo.toml", MANIFEST),
         (
-            "docs-gen.json",
+            "compose.json",
             r#"{"global_values": "base.json", "scopes": ["."], "generated": [{"key": "function_reference", "out": "gen/fn.md.tmpl"}]}"#,
         ),
         ("base.json", BASE_VALUES),
@@ -853,7 +849,7 @@ fn toc_rejects_unknown_defer_targets_at_dispatch() {
     let tree = vec![
         ("Cargo.toml".to_string(), MANIFEST.to_string()),
         (
-            "docs-gen.json".to_string(),
+            "compose.json".to_string(),
             r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
         ),
         ("base.json".to_string(), BASE_VALUES.to_string()),

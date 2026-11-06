@@ -56,8 +56,7 @@
     "types": "crates/oxdock-compose/src/types.oxfile",
     "plugins": [
       {
-        "path": "crates/oxdock-compose/src/hooks/docs_setup.oxfile",
-        "alias": "H0",
+        "module": "OXDOCK",
         "hooks": [
           "SETUP"
         ]

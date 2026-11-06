@@ -211,6 +211,9 @@ fn child_config() -> Option<String> {
 #[allow(clippy::disallowed_types)]
 pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
     let root = GuardedPath::new_root(dir)?;
+    let resolver = PathResolver::new(root.as_path(), root.as_path())?;
+    // Standalone child runs provision too; the piped flow already did.
+    provision_dist(&resolver, &root).context("provision pipeline files")?;
     let mut io = ExecIo::new();
     // The child's INHERIT_ENV reads these overrides; it never sees the
     // parent's script environment through the spawn boundary. Paths are
@@ -220,7 +223,7 @@ pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
         oxdock_fs::env::oxdock::WORKSPACE_ROOT,
         dir.to_string_lossy().into_owned(),
     );
-    let cfg = child_config().unwrap_or_else(|| "docs-gen.json".to_string());
+    let cfg = child_config().unwrap_or_else(|| "compose.json".to_string());
     // `Path::join` with an absolute second half replaces the first,
     // so one join covers both shapes with no absolute check.
     let cfg_abs = dir.join(cfg).to_string_lossy().into_owned();
@@ -261,10 +264,13 @@ pub fn run_with_plugins(
         oxdock_fs::env::oxdock::WORKSPACE_ROOT,
         root.as_path().to_string_lossy().into_owned(),
     );
-    io.insert_inherit_env(
-        "COMPOSE_CONFIG",
-        std::env::var("COMPOSE_CONFIG").unwrap_or_else(|_| "docs-gen.json".to_string()),
-    );
+    let config_name =
+        std::env::var("COMPOSE_CONFIG").or_else(|_| resolve_config_name(&fs_resolver, &root))?;
+    io.insert_inherit_env("COMPOSE_CONFIG", config_name.clone());
+    // Binary-only repos have no checkout: lay the embedded pipeline
+    // files down first (write-if-missing, customizations win), so the
+    // entry read below and every DSL import resolve.
+    provision_dist(&fs_resolver, &root).context("provision pipeline files")?;
     let engine = pipeline_full_engine(extra_modules, io);
     // The pipeline entry is one static script, byte-copied from the
     // tree: it reads the config, assembles the child from the plugin
@@ -275,18 +281,120 @@ pub fn run_with_plugins(
     let output = engine
         .run_script_on(fs, &entry, default_process_manager())
         .context("compose pipeline")?;
-    apply_executable_bits(output.fs.as_ref(), &root).context("apply executable bits")?;
+    apply_executable_bits(output.fs.as_ref(), &root, &config_name)
+        .context("apply executable bits")?;
     eprintln!("docs rendered");
     Ok(())
 }
 
-/// Byte-copy one static script out of the tree: what runs is what
-/// the tree holds, never Rust-assembled text.
+/// Pipeline files the binary carries: entry, composer, dispatcher,
+/// shared types, and the default hook set. Provisioned into the repo
+/// (see [`provision_dist`]) so a bare binary runs anywhere without a
+/// source checkout and without per-repo vendoring: byte-copy, never
+/// Rust-assembled text.
+fn embedded_dist() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "crates/oxdock-compose/src/run.oxfile",
+            include_str!("run.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/compose.oxfile",
+            include_str!("compose.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/dispatcher.oxfile",
+            include_str!("dispatcher.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/types.oxfile",
+            include_str!("types.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/setup.oxfile",
+            include_str!("hooks/setup.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/ingest.oxfile",
+            include_str!("hooks/ingest.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/assemble.oxfile",
+            include_str!("hooks/assemble.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/render.oxfile",
+            include_str!("hooks/render.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/deferred.oxfile",
+            include_str!("hooks/deferred.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/write.oxfile",
+            include_str!("hooks/write.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/verify.oxfile",
+            include_str!("hooks/verify.oxfile"),
+        ),
+    ]
+}
+
+/// Lay the embedded pipeline files into the repo: write-if-missing,
+/// no-op when identical, and hands off a customized file untouched
+/// (its owner wins; delete it to resync). Keeps binary-only repos
+/// working with zero vendored maintenance while preserving every
+/// on-disk path the DSL imports resolve.
+fn provision_dist(resolver: &PathResolver, root: &GuardedPath) -> Result<()> {
+    for (rel, contents) in embedded_dist() {
+        let path = root.join(rel)?;
+        let current: Option<Vec<u8>> = resolver.read_file(&path).ok();
+        match current {
+            None => {
+                if let Some((parent, _)) = rel.rsplit_once('/') {
+                    let dir = root.join(parent)?;
+                    resolver
+                        .create_dir_all(&dir)
+                        .context("provision hooks dir")?;
+                }
+                resolver
+                    .write_file(&path, contents.as_bytes())
+                    .with_context(|| format!("provision default '{rel}'"))?;
+            }
+            Some(bytes) if bytes == contents.as_bytes() => {}
+            Some(_) => {
+                eprintln!("compose: keeping customized '{rel}' (delete it to resync the default)");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Byte-copy one static script out of the repo: what runs is what
+/// the provisioned files hold, never Rust-assembled text.
 fn read_support(resolver: &PathResolver, root: &GuardedPath, rel: &str) -> Result<String> {
     let path = root.join(rel)?;
     resolver
         .read_to_string(&path)
         .with_context(|| format!("read static script '{rel}'"))
+}
+
+/// Config filename: explicit `COMPOSE_CONFIG` wins, else the one
+/// neutral name. Anything else fails closed naming what was looked
+/// for; the DSL never carries a filename default.
+fn resolve_config_name(resolver: &PathResolver, root: &GuardedPath) -> Result<String> {
+    if let Ok(name) = std::env::var("COMPOSE_CONFIG") {
+        return Ok(name);
+    }
+    let neutral = root.join("compose.json")?;
+    if resolver.metadata(&neutral).is_ok() {
+        return Ok("compose.json".to_string());
+    }
+    anyhow::bail!(
+        "no compose.json under {}; pass --config or set COMPOSE_CONFIG",
+        root.as_path().to_string_lossy()
+    )
 }
 
 /// Mode re-applied to rendered outputs whose target declares
@@ -375,21 +483,25 @@ fn collect_target_manifests(
 /// surviving. The bit itself lands through
 /// `set_permissions_mode_unix`, so Windows and Miri runs succeed as
 /// no-ops and only POSIX trees change.
-fn apply_executable_bits(fs: &dyn WorkspaceFs, root: &GuardedPath) -> Result<()> {
+fn apply_executable_bits(
+    fs: &dyn WorkspaceFs,
+    root: &GuardedPath,
+    config_name: &str,
+) -> Result<()> {
     let cfg_raw = fs
-        .read_to_string(&root.join("docs-gen.json")?)
-        .context("read docs-gen.json for executable-bit pass")?;
-    let cfg: serde_json::Value =
-        serde_json::from_str(&cfg_raw).context("parse docs-gen.json for executable-bit pass")?;
+        .read_to_string(&root.join(config_name)?)
+        .with_context(|| format!("read {config_name} for executable-bit pass"))?;
+    let cfg: serde_json::Value = serde_json::from_str(&cfg_raw)
+        .with_context(|| format!("parse {config_name} for executable-bit pass"))?;
     let scopes = cfg
         .get("scopes")
         .and_then(|scopes| scopes.as_array())
-        .context("docs-gen.json needs a 'scopes' array")?;
+        .with_context(|| format!("{config_name} needs a 'scopes' array"))?;
     let mut manifests = Vec::new();
     for scope in scopes {
         let scope = scope
             .as_str()
-            .context("docs-gen.json 'scopes' entries must be strings")?;
+            .with_context(|| format!("{config_name} 'scopes' entries must be strings"))?;
         collect_target_manifests(fs, root, scope, &mut manifests)?;
     }
     for manifest_rel in &manifests {

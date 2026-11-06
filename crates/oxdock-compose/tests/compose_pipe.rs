@@ -90,7 +90,7 @@ fn tracer_stages_run_through_pipe_in_order() {
         ECHO "trace=\{{ $x }}"
         """
         LET $wsroot: STRING = "{{ env:OXDOCK_WORKSPACE_ROOT }}"
-        LET $out: STRING = C::PIPE_RUN($mod, $wsroot, "docs-gen.json")
+        LET $out: STRING = C::PIPE_RUN($mod, $wsroot, "compose.json")
     "#};
     let output = engine(&root)
         .run_script(&root, parent)

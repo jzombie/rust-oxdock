@@ -17,10 +17,23 @@ FUNC COMPOSE_ALL($plugins: LIST<PLUGIN>, $stages: LIST<STRING>, $types: STRING) 
         EXIT 1
     }
     FOR $p: PLUGIN IN $plugins {
-        LET $okpath: BOOL = STD::TEXT_CONTAINS($p.path, "\\")
-        IF $okpath {
-            ECHO "hook path '{{ $p.path }}' uses backslashes; use forward slashes"
+        LET $has_path: BOOL = HAS_KEY($p, "path")
+        LET $has_mod: BOOL = HAS_KEY($p, "module")
+        IF $has_path == $has_mod {
+            ECHO "plugin entry needs exactly one of 'path' or 'module'"
             EXIT 1
+        }
+        IF $has_path {
+            LET $okalias: BOOL = HAS_KEY($p, "alias")
+            IF $okalias == false {
+                ECHO "file plugin '{{ $p.path }}' needs an 'alias'"
+                EXIT 1
+            }
+            LET $okpath: BOOL = STD::TEXT_CONTAINS($p.path, "\\")
+            IF $okpath {
+                ECHO "hook path '{{ $p.path }}' uses backslashes; use forward slashes"
+                EXIT 1
+            }
         }
         FOR $h: STRING IN $p.hooks {
             LET $ok: BOOL = $h == "SETUP"
@@ -30,30 +43,55 @@ FUNC COMPOSE_ALL($plugins: LIST<PLUGIN>, $stages: LIST<STRING>, $types: STRING) 
                 }
             }
             IF $ok == false {
-                ECHO "unknown hook '{{ $h }}' from '{{ $p.alias }}'; stages come from STAGES()"
+                ECHO "unknown hook '{{ $h }}'; stages come from STAGES()"
                 EXIT 1
             }
         }
     }
     LET $imports: STRING = ""
+    LET $seen_mods: MAP<ANY> = {}
     FOR $p: PLUGIN IN $plugins {
-        $imports = "{{ $imports }}IMPORT [\"{{ $p.path }}\" AS {{ $p.alias }}]\n"
+        LET $has_path: BOOL = HAS_KEY($p, "path")
+        IF $has_path {
+            $imports = "{{ $imports }}IMPORT [\"{{ $p.path }}\" AS {{ $p.alias }}]\n"
+        } ELSE {
+            LET $m: STRING = $p.module
+            LET $done: BOOL = HAS_KEY($seen_mods, $m)
+            IF $done == false {
+                $imports = "{{ $imports }}IMPORT [{{ $m }}]\n"
+                $seen_mods = MAP_SET($seen_mods, $m, true)
+            }
+        }
     }
     LET $per_target: STRING = ""
     FOR $stage: STRING IN $stages {
         FOR $p: PLUGIN IN $plugins {
+            LET $has_path: BOOL = HAS_KEY($p, "path")
+            LET $qual: STRING = ""
+            IF $has_path {
+                $qual = $p.alias
+            } ELSE {
+                $qual = $p.module
+            }
             FOR $h: STRING IN $p.hooks {
                 IF $h == $stage {
-                    $per_target = "{{ $per_target }}    $ctx = {{ $p.alias }}::{{ $h }}($ctx)\n"
+                    $per_target = "{{ $per_target }}    $ctx = {{ $qual }}::{{ $h }}($ctx)\n"
                 }
             }
         }
     }
     LET $setup: STRING = ""
     FOR $p: PLUGIN IN $plugins {
+        LET $has_path: BOOL = HAS_KEY($p, "path")
+        LET $qual: STRING = ""
+        IF $has_path {
+            $qual = $p.alias
+        } ELSE {
+            $qual = $p.module
+        }
         FOR $h: STRING IN $p.hooks {
             IF $h == "SETUP" {
-                $setup = "{{ $setup }}$run = {{ $p.alias }}::SETUP($run)\n"
+                $setup = "{{ $setup }}$run = {{ $qual }}::SETUP($run)\n"
             }
         }
     }
