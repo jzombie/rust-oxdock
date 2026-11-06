@@ -1,10 +1,10 @@
 //! oxdock-compose: composed artifacts, byte-identical.
 //!
 //! General-purpose composition pipeline extracted from the workspace docs
-//! renderer. For now this crate is the renamed docs pipeline, byte for
-//! byte: module names (`DOCS_GEN_ENGINE`, `pipeline_engine`, `run`) and
-//! behavior stay as-is until the refactor steps land.
-pub mod docs_gen_engine;
+//! renderer. The core module is now `COMPOSE_ENGINE` (see [`engine`]);
+//! domain plugins (`OXDOCK`, `RUST`, `DOCS`, `MARKDOWN`) still register
+//! per-pipeline until their extraction slices land.
+pub mod engine;
 pub mod plugins;
 
 use anyhow::{Context, Result};
@@ -23,7 +23,7 @@ use std::path::Path;
 /// `EXPAND_TEMPLATE` snapshots) and script steps (bare or qualified
 /// calls) resolve the same set. This list is this pipeline's
 /// requirements, not engine defaults: the only module the engine
-/// itself defaults to is `DOCS_GEN_ENGINE` (see [`pipeline_engine`]);
+/// itself defaults to is `COMPOSE_ENGINE` (see [`pipeline_engine`]);
 /// `OXDOCK`, `RUST`, and `MARKDOWN` are here because this pipeline
 /// documents an OxDock Rust workspace, `DOCS` because deferred
 /// placeholders (`DEFER`/`EXPAND_DEFERRED`) resolve in every template,
@@ -50,7 +50,7 @@ macro_rules! pipeline_modules {
     ($final:ident [$($args:tt)*]) => {
         pipeline_split! {
             $final ; [$($args)*] ;
-            (DOCS_GEN_ENGINE, crate::docs_gen_engine),
+            (COMPOSE_ENGINE, crate::engine),
             (DOCS, crate::plugins::docs),
             (OXDOCK, crate::plugins::oxdock),
             (RUST, crate::plugins::rust),
@@ -106,7 +106,7 @@ macro_rules! pipeline_emit_header_names {
 /// assemble one `$files` manifest per target, then render every master
 /// template through native OxDock commands. Order lives in the master
 /// templates as `{{ $files.group.stem }}` placeholders; the value
-/// returning engine builtins in [`docs_gen_engine`] supply the pieces the DSL
+/// returning engine builtins in [`engine`] supply the pieces the DSL
 /// has no primitives for (registry rendering, TOML metadata, strict JSON
 /// encoding, placeholder-safe stems) while the script owns all
 /// sequencing and all writes. Each stage below is a named `FUNC` so
@@ -244,14 +244,16 @@ pub fn run_with_plugins(
             RETURN MAP_SET($seen, $name, $tj)
         }
 
-        // One target manifest as JSON: expand every fragment once.
+        // One target manifest as a MAP: expand every fragment once.
+        // The codec stays out of the assembler: callers encode with
+        // STD::TO_JSON at the write edge.
         FUNC BUILD_MANIFEST($t: MAP<ANY>, $docs_global: MAP<ANY>, $docs_ctx: MAP<ANY>, $version: STRING, $workspace_pkg: MAP<ANY>, $vglobal: STRING, $vctx: STRING, $vkey: STRING, $vpkg: STRING) {
             LET $manifest: MAP<ANY> = {}
             FOR $group: STRING, $patterns: LIST<ANY> IN $t.fragments {
                 LET $group_map: MAP<ANY> = {}
                 FOR $pattern: STRING IN $patterns {
                     FOR $file_rel: STRING IN GLOB($pattern) {
-                        LET $stem: STRING = DOCS_GEN_ENGINE::FILE_STEM($file_rel)
+                        LET $stem: STRING = COMPOSE_ENGINE::FILE_STEM($file_rel)
                         IF HAS_KEY($group_map, $stem) {
                             ECHO "target '{{ $t.name }}': '{{ $stem }}' matches more than one file; placeholders must resolve to exactly one"
                             EXIT 1
@@ -266,13 +268,13 @@ pub fn run_with_plugins(
                         $scope = MAP_SET($scope, $vpkg, $workspace_pkg)
                         LET $envmap: MAP<ANY> = {}
                         $envmap = MAP_SET($envmap, $vkey, $version)
-                        LET $expanded: STRING = DOCS_GEN_ENGINE::EXPAND_TEMPLATE($raw, $scope, $envmap)
+                        LET $expanded: STRING = COMPOSE_ENGINE::EXPAND_TEMPLATE($raw, $scope, $envmap)
                         $group_map = MAP_SET($group_map, $stem, $expanded)
                     }
                 }
                 $manifest = MAP_SET($manifest, $group, $group_map)
             }
-            RETURN TO_JSON($manifest)
+            RETURN $manifest
         }
         LET $seen: MAP<ANY> = {}
         FOR $scope: STRING IN $cfg.scopes {
@@ -287,7 +289,8 @@ pub fn run_with_plugins(
                     }
                     LET $values_path: STRING = $t.values
                     LET $docs_ctx: MAP<ANY> = LOAD_JSON($values_path)
-                    LET $json: STRING = BUILD_MANIFEST($t, $docs_global, $docs_ctx, $version, $workspace_pkg, $vglobal, $vctx, $vkey, $vpkg)
+                    LET $assembled: MAP<ANY> = BUILD_MANIFEST($t, $docs_global, $docs_ctx, $version, $workspace_pkg, $vglobal, $vctx, $vkey, $vpkg)
+                    LET $json: STRING = TO_JSON($assembled)
                     WRITE "{{ $staging }}/{{ $t.name }}.json" $json
                 }
             }
@@ -469,7 +472,7 @@ fn apply_executable_bits(fs: &dyn WorkspaceFs, root: &GuardedPath) -> Result<()>
 /// Engine with the engine default registered, for downstream
 /// pipelines running their own scripts.
 ///
-/// The only default is `DOCS_GEN_ENGINE`: the file-set assembler's
+/// The only default is `COMPOSE_ENGINE`: the file-set assembler's
 /// own primitives, needed by every pipeline built on this engine.
 /// Domain modules are per-pipeline choices, registered by the
 /// pipeline itself: custom scripts declare their own `oxdock!`
@@ -478,7 +481,7 @@ fn apply_executable_bits(fs: &dyn WorkspaceFs, root: &GuardedPath) -> Result<()>
 /// such pipeline, for OxDock Rust workspaces.
 pub fn pipeline_engine() -> Engine<oxdock_process::DefaultProcessManager> {
     let mut engine = Engine::new().with_io(ExecIo::new());
-    engine.register_module(docs_gen_engine::module());
+    engine.register_module(engine::module());
     engine
 }
 
@@ -493,7 +496,7 @@ mod tests {
         // ident with no registration, or a registration with no
         // header ident. STD is always present and never listed.
         // `pipeline_engine()` is deliberately not used: it carries
-        // only the DOCS_GEN_ENGINE default, while this pins run()'s
+        // only the COMPOSE_ENGINE default, while this pins run()'s
         // full pipeline set.
         let header: Vec<&str> = pipeline_modules!(pipeline_emit_header_names []).to_vec();
         assert!(!header.is_empty(), "pipeline must declare modules");

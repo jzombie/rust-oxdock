@@ -1553,28 +1553,11 @@ pub(super) fn replace<P: ProcessManager>(
     let ctx = cx.state.command_ctx()?;
     let vars = cx.state.all_vars();
     // Dispatch `{{ MODULE::FUNC(args) }}` through the shared pure table:
-    // one `Arc` clone per EXPAND, nested lookup per call with zero
-    // allocation, known-names listing built only on failure. Stateful,
-    // script, and pipe backed entries never appear here: placeholders
-    // evaluate without a step context and must stay side effect free.
-    let table = cx.state.pure_function_table();
-    let calls: oxdock_process::PlaceholderCall = Arc::new(move |module, func, args| {
-        let callee = table
-            .get(module)
-            .and_then(|entries| entries.get(func))
-            .ok_or_else(|| {
-                let mut known: Vec<String> = table
-                    .iter()
-                    .flat_map(|(m, entries)| entries.keys().map(move |f| format!("{m}::{f}")))
-                    .collect();
-                known.sort();
-                anyhow!(
-                    "unknown placeholder function '{module}::{func}'; known functions: {}",
-                    known.join(", ")
-                )
-            })?;
-        callee(args)
-    });
+    // one `Arc` clone per EXPAND. Stateful, script, and pipe backed
+    // entries never appear here: placeholders evaluate without a step
+    // context and must stay side effect free. Lookup and the
+    // unknown-name error live in [`super::native::placeholder_resolver`].
+    let calls = super::native::placeholder_resolver(cx.state.pure_function_table());
 
     let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs())
         .with_vars(&vars)

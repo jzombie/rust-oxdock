@@ -8,7 +8,7 @@
 //! core language never sees them. Plugins are named for their domain,
 //! not for docs-gen: any pipeline reuses the ones matching its project
 //! (`OXDOCK` for OxDock projects, `RUST` for Cargo workspaces) plus the
-//! engine builtins in [`crate::docs_gen_engine`], and registers nothing else.
+//! engine builtins in [`crate::engine`], and registers nothing else.
 
 pub mod docs;
 pub mod oxdock;

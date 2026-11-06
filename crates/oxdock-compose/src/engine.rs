@@ -1,13 +1,12 @@
-//! Render engine builtins for document pipelines.
+//! Compose engine builtins for artifact pipelines.
 //!
-//! The file-set assembler's own primitives: fragment keys and fragment
+//! The composer's own primitives: fragment keys and fragment
 //! expansion. Map assembly (`MAP_SET`, `HAS_KEY`) and manifest encoding
 //! (`TO_JSON`) live in STD; domain content comes from plugins (`OXDOCK`,
 //! `RUST`, `MARKDOWN`, ...). A pipeline for a project outside OxDock
 //! registers these plus its own domain plugins and nothing else.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::{HostModule, OxDockFn, StepCtx, TypeTag, Value};
@@ -117,24 +116,10 @@ pub(crate) fn render_fragment(
     }
     let mut expander = oxdock_process::StreamingExpand::new(&[], &inherit).with_vars(&scope);
     if let Some(table) = calls {
-        let resolver: oxdock_process::PlaceholderCall = Arc::new(move |module, func, args| {
-            let callee = table
-                .get(module)
-                .and_then(|entries| entries.get(func))
-                .ok_or_else(|| {
-                    let mut known: Vec<String> = table
-                        .iter()
-                        .flat_map(|(m, entries)| entries.keys().map(move |f| format!("{m}::{f}")))
-                        .collect();
-                    known.sort();
-                    anyhow::anyhow!(
-                        "unknown placeholder function '{module}::{func}'; known functions: {}",
-                        known.join(", ")
-                    )
-                })?;
-            callee(args)
-        });
-        expander = expander.with_call_resolver(resolver);
+        // Dispatch and the unknown-name error live in the shared
+        // [`oxdock_core::placeholder_resolver`]; only the caller-built
+        // scope and the newline strip below are this wrapper's job.
+        expander = expander.with_call_resolver(oxdock_core::placeholder_resolver(table));
     }
     let mut out = Vec::with_capacity(raw.len());
     expander
@@ -148,11 +133,11 @@ pub(crate) fn render_fragment(
     Ok(Value::string(text))
 }
 
-/// The render engine builtins, registered unconditionally by
+/// The compose engine builtins, registered unconditionally by
 /// `crate::run` alongside whichever domain plugins a pipeline needs.
 pub fn module<P: ProcessManager>() -> HostModule<P> {
     HostModule {
-        name: "DOCS_GEN_ENGINE".to_string(),
+        name: "COMPOSE_ENGINE".to_string(),
         funcs: vec![FileStem::registration(), ExpandTemplate::registration()],
         types: vec![],
         record_schemas: vec![],
@@ -164,6 +149,7 @@ pub fn module<P: ProcessManager>() -> HostModule<P> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     fn map(entries: &[(&str, Value)]) -> Value {
         Value::map(

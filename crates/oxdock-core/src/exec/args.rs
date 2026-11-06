@@ -1696,32 +1696,19 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         // `{{ MODULE::FUNC(args) }}` through the shared
                         // pure table: the same registry EXPAND
                         // templates resolve, so ordinary strings and
-                        // file templates agree. Unknown functions and
-                        // bad args fail here; anything else falls
-                        // through to the missing-key error below.
-                        let table = state.pure_function_table();
-                        let callee = table
-                                .get(module.as_str())
-                                .and_then(|entries| entries.get(func.as_str()))
-                                .ok_or_else(|| {
-                                    let mut known: Vec<String> = table
-                                        .iter()
-                                        .flat_map(|(m, entries)| {
-                                            entries.keys().map(move |f| format!("{m}::{f}"))
-                                        })
-                                        .collect();
-                                    known.sort();
-                                    anyhow::anyhow!(
-                                        "unknown placeholder function '{module}::{func}'; known functions: {}",
-                                        known.join(", ")
-                                    )
-                                })?;
+                        // file templates agree. Dispatch and the
+                        // unknown-name error live in
+                        // [`super::native::placeholder_resolver`];
+                        // anything else falls through to the
+                        // missing-key error below.
+                        let resolve =
+                            super::native::placeholder_resolver(state.pure_function_table());
                         let vars = state.all_vars();
                         let mut args = Vec::with_capacity(args_src.len());
                         for src in args_src {
                             args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
                         }
-                        let result = callee(args)?;
+                        let result = resolve(module.as_str(), func.as_str(), args)?;
                         output.push_str(&format_value_for_string(&result)?);
                     } else {
                         // Bare key not in DSL vars → hard error: missing

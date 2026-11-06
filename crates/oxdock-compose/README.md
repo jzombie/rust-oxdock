@@ -69,7 +69,7 @@ stems).
 Domain content arrives as in-crate plugins registered only by `run()`:
 the core language never sees them.
 
-- `DOCS_GEN_ENGINE` builtins: `FILE_STEM` and generic
+- `COMPOSE_ENGINE` builtins: `FILE_STEM` and generic
   `EXPAND_TEMPLATE(raw, vars, env)`. Layered values merge through
   the pure `STD::MERGE_MAPS` builtin instead of engine code.
 - `OXDOCK` registry introspection with config-driven `GENERATED(key)`
@@ -80,7 +80,7 @@ the core language never sees them.
 Third-party plugins join through `run_with_plugins(root, extras)`,
 which registers external modules so template placeholders resolve them
 with no header changes. `pipeline_engine()` returns an engine carrying
-exactly the `DOCS_GEN_ENGINE` default, for custom scripts that need
+exactly the `COMPOSE_ENGINE` default, for custom scripts that need
 the engine primitives without the domain plugins.
 
 ### Fetch, parse, render
