@@ -20,9 +20,10 @@ use oxdock_func_macro::oxdock_func;
 use oxdock_process::ProcessManager;
 
 fn docs_resolver(cx: &StepCtx<impl ProcessManager>) -> Result<(GuardedPath, PathResolver)> {
-    // Pipelines run the script with cwd at the repo root, so stage
-    // helpers resolve against it.
-    let root = cx.cwd().clone();
+    // Pipelines read run-level manifests, so resolve against the run
+    // root itself: entry scope and hook scope agree, while bare
+    // relative paths still follow the calling module's directory.
+    let root = cx.workspace_root().clone();
     let resolver = PathResolver::new(root.as_path(), root.as_path())?;
     Ok((root, resolver))
 }

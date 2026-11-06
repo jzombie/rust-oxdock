@@ -1,9 +1,13 @@
-# Lifecycle caller: five phases, stubs only.
-# INGEST covers DISCOVER plus LOAD plus SCAN.
-# RENDER covers EXPAND plus DEFERRED.
+# Lifecycle caller: six phases, stubs only.
+# The order lives in exactly one place: the STAGES list below. The
+# composer reads it through STAGES() and unrolls the same order into
+# the child, so there is nothing to drift.
 IMPORT [STD]
+IMPORT [TYPE CTX FROM "types.oxfile"]
 
-TYPE CTX = MAP<text: STRING>
+FUNC STAGES() {
+    RETURN ["INGEST", "ASSEMBLE", "RENDER", "DEFERRED", "WRITE_OUT", "VERIFY"]
+}
 
 FUNC INGEST($ctx: CTX) {
     RETURN $ctx
@@ -14,6 +18,10 @@ FUNC ASSEMBLE($ctx: CTX) {
 }
 
 FUNC RENDER($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC DEFERRED($ctx: CTX) {
     RETURN $ctx
 }
 
@@ -29,6 +37,7 @@ FUNC RUN_LIFECYCLE($ctx: CTX) {
     $ctx = INGEST($ctx)
     $ctx = ASSEMBLE($ctx)
     $ctx = RENDER($ctx)
+    $ctx = DEFERRED($ctx)
     $ctx = WRITE_OUT($ctx)
     $ctx = VERIFY($ctx)
     RETURN $ctx
@@ -37,7 +46,8 @@ FUNC RUN_LIFECYCLE($ctx: CTX) {
 EXPORT INGEST
 EXPORT ASSEMBLE
 EXPORT RENDER
+EXPORT DEFERRED
 EXPORT WRITE_OUT
 EXPORT VERIFY
 EXPORT RUN_LIFECYCLE
-EXPORT TYPE CTX
+EXPORT STAGES

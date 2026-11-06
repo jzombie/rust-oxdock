@@ -12,6 +12,15 @@ fn main() -> Result<()> {
             .as_path()
             .to_path_buf(),
     };
+    if let Some(config) = config_arg(&args) {
+        // Edge default lives here so the DSL never names a filename:
+        // the flag wins, otherwise run() falls back to docs-gen.json.
+        // SAFETY: process startup, single-threaded; no threads exist
+        // yet and nothing reads this var concurrently.
+        unsafe {
+            std::env::set_var("COMPOSE_CONFIG", config);
+        }
+    }
     run(&repo_root)
 }
 
@@ -19,5 +28,12 @@ fn main() -> Result<()> {
 fn root_arg(args: &[String]) -> Option<PathBuf> {
     args.windows(2)
         .find(|w| w[0] == "--root")
+        .map(|w| PathBuf::from(&w[1]))
+}
+
+#[allow(clippy::disallowed_types)]
+fn config_arg(args: &[String]) -> Option<PathBuf> {
+    args.windows(2)
+        .find(|w| w[0] == "--config")
         .map(|w| PathBuf::from(&w[1]))
 }

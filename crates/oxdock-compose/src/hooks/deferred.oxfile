@@ -1,0 +1,11 @@
+# DEFERRED hook: expand deferred sentinels against the full text.
+IMPORT [STD, DEFER]
+IMPORT [TYPE CTX FROM "../types.oxfile"]
+
+FUNC DEFERRED($ctx: CTX) {
+    LET $text: STRING = $ctx.text
+    LET $final: STRING = DEFER::EXPAND_DEFERRED($text)
+    RETURN {wsroot: $ctx.wsroot, config: $ctx.config, staging: $ctx.staging, globals: $ctx.globals, target: $ctx.target, template: $ctx.template, out: $ctx.out, values: $ctx.values, fragments: $ctx.fragments, text: $final}
+}
+
+EXPORT DEFERRED

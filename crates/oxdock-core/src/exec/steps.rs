@@ -478,6 +478,14 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         &self.state.cwd
     }
 
+    /// Run root (guarded): the workspace the run was launched over.
+    /// Unlike [`cwd`](Self::cwd), this never follows module-scope
+    /// directories, so host helpers that read run-level files resolve
+    /// identically from entry and hook scope.
+    pub fn workspace_root(&self) -> &GuardedPath {
+        self.state.fs.root()
+    }
+
     /// Shared snapshot of every registered pure function, keyed by
     /// qualified name. Lets host-driven expansion resolve
     /// `{{ MODULE::FUNC(args) }}` through the live registry instead of

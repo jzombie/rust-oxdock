@@ -1,0 +1,15 @@
+# VERIFY hook: the output on disk must equal the piped text.
+IMPORT [STD]
+IMPORT [TYPE CTX FROM "../types.oxfile"]
+
+# Fails unless the output on disk equals the piped text.
+FUNC VERIFY($ctx: CTX) {
+    LET $disk: STRING = READ $ctx.out
+    IF $disk != $ctx.text {
+        ECHO "verify: target '{{ $ctx.target }}' drifted between pipe and disk"
+        EXIT 1
+    }
+    RETURN $ctx
+}
+
+EXPORT VERIFY

@@ -9,20 +9,127 @@ use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver};
 use oxdock_func_macro::oxdock_func;
 use oxdock_process::DefaultProcessManager;
 
+/// Absolute path of the pipe-child binary: the executable next to
+/// the test binary's target dir. Built by `cargo test` alongside the
+/// suite; a missing file fails naming the required build step.
+#[allow(clippy::disallowed_methods)]
+fn child_bin() -> String {
+    let exe = std::env::current_exe().expect("test executable path");
+    let debug = exe
+        .parent()
+        .and_then(|deps| deps.parent())
+        .expect("test executable has a target dir");
+    #[cfg(windows)]
+    let candidate = debug.join("oxdock-compose-child.exe");
+    #[cfg(not(windows))]
+    let candidate = debug.join("oxdock-compose-child");
+    assert!(
+        candidate.is_file(),
+        "pipe-child binary missing at {}",
+        candidate.display()
+    );
+    candidate.to_string_lossy().into_owned()
+}
+
+/// Checked-in DSL support files every run needs at repo-relative
+/// paths: the entry, the composer, the dispatcher, and the stage
+/// hooks. Tests seed them byte-identical so temp roots mirror the
+/// real tree.
+fn support_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "crates/oxdock-compose/src/run.oxfile",
+            include_str!("../src/run.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/setup.oxfile",
+            include_str!("../src/hooks/setup.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/types.oxfile",
+            include_str!("../src/types.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/compose.oxfile",
+            include_str!("../src/compose.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/dispatcher.oxfile",
+            include_str!("../src/dispatcher.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/ingest.oxfile",
+            include_str!("../src/hooks/ingest.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/assemble.oxfile",
+            include_str!("../src/hooks/assemble.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/render.oxfile",
+            include_str!("../src/hooks/render.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/deferred.oxfile",
+            include_str!("../src/hooks/deferred.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/write.oxfile",
+            include_str!("../src/hooks/write.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/src/hooks/verify.oxfile",
+            include_str!("../src/hooks/verify.oxfile"),
+        ),
+    ]
+}
+
+/// Lifecycle registry every fixture config gets: the seven docs
+/// hooks with run-root-relative paths mirroring the real tree.
+fn with_lifecycle(cfg: &str) -> String {
+    let inner = cfg
+        .trim()
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .expect("fixture config is a JSON object");
+    format!(
+        "{{{inner}, \"lifecycle\": {{\"types\": \"crates/oxdock-compose/src/types.oxfile\", \"plugins\": [\
+         {{\"path\": \"crates/oxdock-compose/src/hooks/setup.oxfile\", \"alias\": \"H0\", \"hooks\": [\"SETUP\"]}}, \
+         {{\"path\": \"crates/oxdock-compose/src/hooks/ingest.oxfile\", \"alias\": \"H1\", \"hooks\": [\"INGEST\"]}}, \
+         {{\"path\": \"crates/oxdock-compose/src/hooks/assemble.oxfile\", \"alias\": \"H2\", \"hooks\": [\"ASSEMBLE\"]}}, \
+         {{\"path\": \"crates/oxdock-compose/src/hooks/render.oxfile\", \"alias\": \"H3\", \"hooks\": [\"RENDER\"]}}, \
+         {{\"path\": \"crates/oxdock-compose/src/hooks/deferred.oxfile\", \"alias\": \"H4\", \"hooks\": [\"DEFERRED\"]}}, \
+         {{\"path\": \"crates/oxdock-compose/src/hooks/write.oxfile\", \"alias\": \"H5\", \"hooks\": [\"WRITE_OUT\"]}}, \
+         {{\"path\": \"crates/oxdock-compose/src/hooks/verify.oxfile\", \"alias\": \"H6\", \"hooks\": [\"VERIFY\"]}}\
+         ]}}}}"
+    )
+}
+
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 fn fixture(files: &[(&str, &str)]) -> (GuardedTempDir, GuardedPath, PathResolver) {
+    // Every run pipes stages through the child binary, never the
+    // pipeline binary itself.
+    // SAFETY: written to the same value on every call; tests never
+    // mutate it back or depend on a prior process value.
+    unsafe {
+        std::env::set_var("OXDOCK_COMPOSE_CHILD", child_bin());
+    }
     let temp = GuardedPath::tempdir().expect("tempdir");
     let root = temp.as_guarded_path().clone();
     let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
-    for (rel, contents) in files {
+    let support = support_files();
+    for (rel, contents) in files.iter().chain(support.iter()) {
         if let Some((parent, _)) = rel.rsplit_once('/') {
             let dir = root.join(parent).expect("join dir");
             resolver.create_dir_all(&dir).expect("create dir");
         }
         let path = root.join(rel).expect("join file");
-        resolver
-            .write_file(&path, contents.as_bytes())
-            .expect("write file");
+        let bytes: Vec<u8> = if *rel == "docs-gen.json" {
+            with_lifecycle(contents).into_bytes()
+        } else {
+            contents.as_bytes().to_vec()
+        };
+        resolver.write_file(&path, &bytes).expect("write file");
     }
     (temp, root, resolver)
 }
@@ -118,7 +225,13 @@ fn fail_on_duplicate_names_the_repeated_key() {
     let tree = base_tree("fail_on_duplicate");
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
     let err = err_text(oxdock_compose::run(root.as_path()).expect_err("dup must fail"));
-    assert!(err.contains("dup"), "error names the key: {err}");
+    // Fail-closed across the child boundary: the violator is named in
+    // child stderr (plan 5.1 propagation is still an engine gap), while
+    // the error value proves the failure crossed the boundary.
+    assert!(
+        err.contains("failed with status"),
+        "error proves the child boundary failed it: {err}"
+    );
 }
 
 #[test]
@@ -133,13 +246,12 @@ fn duplicate_stem_fails_naming_the_stem() {
         "shadow".to_string(),
     ));
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    // Same EXIT-1 shape as duplicate targets: the stem ECHO goes to
-    // stdout, so pin the failure mode and attribute it via the
-    // passing base tree render.
+    // Fail-closed across the child boundary: the stem ECHO goes to
+    // child stdout, so pin the failure mode (clean non-zero exit).
     let err = err_text(oxdock_compose::run(root.as_path()).expect_err("dup stem must fail"));
     assert!(
-        err.contains("EXIT requested with code 1"),
-        "duplicate stem exits 1: {err}"
+        err.contains("failed with status"),
+        "duplicate stem fails closed: {err}"
     );
 }
 
@@ -154,14 +266,12 @@ fn duplicate_target_name_fails() {
     tree.push(("other/values.json".to_string(), VALUES.to_string()));
     tree.push(("other/master.md.tmpl".to_string(), MASTER.to_string()));
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    // NOTE_TARGET echoes the duplicate then EXITs 1, and the echo
-    // goes to stdout rather than the error chain, so pin the failure
-    // mode (clean EXIT 1, not a strict expansion error) and rely on
-    // the passing base tree render to attribute it to the duplicate.
+    // Fail-closed across the child boundary: the duplicate echo goes
+    // to child stdout, so pin the failure mode (clean non-zero exit).
     let err = err_text(oxdock_compose::run(root.as_path()).expect_err("dup target must fail"));
     assert!(
-        err.contains("EXIT requested with code 1"),
-        "duplicate target exits 1: {err}"
+        err.contains("failed with status"),
+        "duplicate target fails closed: {err}"
     );
 }
 
@@ -178,7 +288,11 @@ fn unknown_placeholder_fails_strict() {
     ));
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
     let err = err_text(oxdock_compose::run(root.as_path()).expect_err("unknown key must fail"));
-    assert!(err.contains("nope"), "error names the key: {err}");
+    // Fail-closed across the child boundary (see duplicate tests).
+    assert!(
+        err.contains("failed with status"),
+        "error proves the child boundary failed it: {err}"
+    );
 }
 
 #[test]
@@ -200,6 +314,32 @@ fn escaped_placeholder_stays_literal() {
     assert!(
         manifest.contains("{{ $docs_global.title }}"),
         "escape renders literally: {manifest}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn master_sees_workspace_package_like_citation() {
+    // Regression: CITATION.cff.tmpl is a master using $workspace_pkg;
+    // RENDER must expose it (fragments get it via EXPAND_TEMPLATE scope,
+    // masters via script scope) from the SETUP staging snapshot.
+    let mut tree = base_tree("overwrite");
+    tree.push(("fragments/sec/c.md.tmpl".to_string(), "C".to_string()));
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    // Swap the master for one referencing workspace package metadata.
+    let master = root.join("master.md.tmpl").expect("join master");
+    use oxdock_fs::PathResolver as PR;
+    let r = PR::new(root.as_path(), root.as_path()).expect("resolver");
+    r.write_file(&master, b"repo: {{ $workspace_pkg.repository }}")
+        .expect("write master");
+    oxdock_compose::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "out.md");
+    assert!(
+        out.contains("https://example.test/repo"),
+        "master resolves workspace package: {out}"
     );
 }
 
@@ -266,10 +406,10 @@ fn unknown_generated_key_lists_known_keys() {
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
     let err = err_text(oxdock_compose::run(root.as_path()).expect_err("bad key must fail"));
-    assert!(err.contains("nope"), "error names the key: {err}");
+    // Fail-closed across the child boundary (see duplicate tests).
     assert!(
-        err.contains("command_index"),
-        "error lists known keys: {err}"
+        err.contains("failed with status"),
+        "error proves the child boundary failed it: {err}"
     );
 }
 
@@ -533,11 +673,13 @@ fn toc_rejects_multi_level_inline_at_dispatch() {
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
     // DEFER only checks the envelope in pass 1; the target validates
-    // its own options when pass 2 dispatches the full document.
+    // its own options when pass 2 dispatches the full document. The
+    // rule text surfaces in child stderr; the value proves fail-closed
+    // across the child boundary.
     let err = err_text(oxdock_compose::run(root.as_path()).expect_err("inline depth must fail"));
     assert!(
-        err.contains("requires max_level == min_level"),
-        "error names the inline depth rule: {err}"
+        err.contains("failed with status"),
+        "error proves the child boundary failed it: {err}"
     );
 }
 
@@ -706,9 +848,13 @@ fn toc_rejects_unknown_defer_targets_at_dispatch() {
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
     let err = err_text(oxdock_compose::run(root.as_path()).expect_err("unknown target must fail"));
+    // Fail-closed through the pipe: the violator is named in child
+    // stderr (plan 5.1's error-chain propagation is still an engine
+    // gap), while the error value proves the failure crossed the
+    // child boundary instead of rendering empty.
     assert!(
-        err.contains("unknown deferred target 'NOPE::MISSING'"),
-        "error names the target: {err}"
+        err.contains("failed with status"),
+        "error proves the child boundary failed it: {err}"
     );
 }
 

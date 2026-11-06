@@ -1,0 +1,46 @@
+# SETUP hook: run-once intake. Syncs per-member values files,
+# refreshes generated inputs, and snapshots workspace version plus
+# package into staging for downstream stages to read as plain JSON.
+# Idempotent: reruns rewrite identical bytes. The values path below
+# is the OxDock workspace convention; a different layout ships its
+# own setup hook instead.
+IMPORT [STD, RUST, OXDOCK]
+IMPORT [TYPE CTX FROM "../types.oxfile"]
+
+FUNC SETUP($ctx: CTX) {
+    LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)
+    LET $gen: LIST<ANY> = $cfg.generated
+    FOR $entry: MAP<ANY> IN $gen {
+        LET $key: STRING = $entry.key
+        LET $text: STRING = OXDOCK::GENERATED($key)
+        LET $gout: STRING = "{{ $ctx.wsroot }}/{{ $entry.out }}"
+        WRITE $gout $text
+    }
+    LET $version: STRING = RUST::WORKSPACE_VERSION()
+    LET $wspkg: MAP<ANY> = RUST::WORKSPACE_PACKAGE()
+    LET $wsmap: MAP<ANY> = {}
+    $wsmap = MAP_SET($wsmap, "version", $version)
+    $wsmap = MAP_SET($wsmap, "package", $wspkg)
+    LET $wsjson: STRING = TO_JSON($wsmap)
+    WRITE "{{ $ctx.staging }}/_workspace.json" $wsjson
+    FOR $member: STRING IN RUST::WORKSPACE_MEMBERS() {
+        ECHO "syncing values for {{ $member }}"
+        LET $pkg: MAP<name: STRING, description: STRING> = RUST::CARGO_PACKAGE($member)
+        IF $pkg.name != "" {
+            LET $values_path: STRING = "{{ $ctx.wsroot }}/{{ $member }}/.oxdock/template/values.json"
+            LET $pt: STRING = PATH_TYPE($values_path)
+            IF $pt == "file" {
+                LET $existing: MAP<ANY> = LOAD_JSON($values_path)
+                LET $json: STRING = RUST::PACKAGE_VALUES_JSON($pkg, $existing)
+                WRITE $values_path $json
+            } ELSE {
+                LET $empty: MAP<ANY> = {}
+                LET $fresh: STRING = RUST::PACKAGE_VALUES_JSON($pkg, $empty)
+                WRITE $values_path $fresh
+            }
+        }
+    }
+    RETURN $ctx
+}
+
+EXPORT SETUP

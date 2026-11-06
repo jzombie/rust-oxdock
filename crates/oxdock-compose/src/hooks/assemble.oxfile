@@ -1,0 +1,70 @@
+# ASSEMBLE hook: expand every fragment once into the staging manifest.
+# Fragment groups and stems are user data, so the manifest maps stay
+# open here; the lifecycle boundary itself (CTX) stays exact. Docs
+# naming conventions live here, not in the core.
+IMPORT [STD, COMPOSE_ENGINE]
+IMPORT [TYPE CTX FROM "../types.oxfile"]
+
+FUNC ASSEMBLE($ctx: CTX) {
+    LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)
+    LET $vglobal: STRING = "docs_global"
+    LET $vctx: STRING = "docs_ctx"
+    LET $vpkg: STRING = "workspace_pkg"
+    LET $vkey: STRING = "CRATE_VERSION"
+    LET $has_vars: BOOL = HAS_KEY($cfg, "vars")
+    IF $has_vars {
+        LET $vars: MAP<ANY> = $cfg.vars
+        LET $has_global: BOOL = HAS_KEY($vars, "global")
+        IF $has_global {
+            $vglobal = $vars.global
+        }
+        LET $has_ctx: BOOL = HAS_KEY($vars, "ctx")
+        IF $has_ctx {
+            $vctx = $vars.ctx
+        }
+        LET $has_pkg: BOOL = HAS_KEY($vars, "workspace_pkg")
+        IF $has_pkg {
+            $vpkg = $vars.workspace_pkg
+        }
+    }
+    LET $has_vkey: BOOL = HAS_KEY($cfg, "version_key")
+    IF $has_vkey {
+        $vkey = $cfg.version_key
+    }
+    LET $ws: MAP<ANY> = LOAD_JSON("{{ $ctx.staging }}/_workspace.json")
+    LET $version: STRING = $ws.version
+    LET $workspace_pkg: MAP<ANY> = $ws.package
+    LET $docs_global: MAP<ANY> = LOAD_JSON($ctx.globals)
+    LET $docs_ctx: MAP<ANY> = LOAD_JSON($ctx.values)
+    LET $manifest: MAP<ANY> = {}
+    LET $fragments: MAP<ANY> = PARSE_JSON($ctx.fragments)
+    FOR $group: STRING, $patterns: LIST<ANY> IN $fragments {
+        LET $group_map: MAP<ANY> = {}
+        FOR $pattern: STRING IN $patterns {
+            LET $abs: STRING = "{{ $ctx.wsroot }}/{{ $pattern }}"
+            FOR $file_rel: STRING IN GLOB($abs) {
+                LET $stem: STRING = COMPOSE_ENGINE::FILE_STEM($file_rel)
+                LET $dup: BOOL = HAS_KEY($group_map, $stem)
+                IF $dup {
+                    ECHO "target '{{ $ctx.target }}': '{{ $stem }}' matches more than one file; placeholders must resolve to exactly one"
+                    EXIT 1
+                }
+                LET $raw: STRING = READ "{{ $ctx.wsroot }}/{{ $file_rel }}"
+                LET $scope: MAP<ANY> = {}
+                $scope = MAP_SET($scope, $vglobal, $docs_global)
+                $scope = MAP_SET($scope, $vctx, $docs_ctx)
+                $scope = MAP_SET($scope, $vpkg, $workspace_pkg)
+                LET $envmap: MAP<ANY> = {}
+                $envmap = MAP_SET($envmap, $vkey, $version)
+                LET $expanded: STRING = COMPOSE_ENGINE::EXPAND_TEMPLATE($raw, $scope, $envmap)
+                $group_map = MAP_SET($group_map, $stem, $expanded)
+            }
+        }
+        $manifest = MAP_SET($manifest, $group, $group_map)
+    }
+    LET $json: STRING = TO_JSON($manifest)
+    WRITE "{{ $ctx.staging }}/{{ $ctx.target }}.json" $json
+    RETURN $ctx
+}
+
+EXPORT ASSEMBLE

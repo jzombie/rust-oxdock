@@ -1,0 +1,29 @@
+# RENDER hook: expand the master template over the manifest scope.
+# User data stays in open maps; the CTX boundary stays exact. The
+# master template always sees $files, $docs_global, $docs_ctx, and
+# $workspace_pkg (read from the SETUP staging snapshot, never a
+# per-target host call); custom scope names apply to fragments.
+IMPORT [STD, COMPOSE_ENGINE]
+IMPORT [TYPE CTX FROM "../types.oxfile"]
+
+FUNC RENDER($ctx: CTX) {
+    LET $ws: MAP<ANY> = LOAD_JSON("{{ $ctx.staging }}/_workspace.json")
+    LET $version: STRING = $ws.version
+    ENV CRATE_VERSION=$version
+    LET $docs_global: MAP<ANY> = LOAD_JSON($ctx.globals)
+    LET $docs_ctx: MAP<ANY> = LOAD_JSON($ctx.values)
+    LET $workspace_pkg: MAP<ANY> = $ws.package
+    LET $files: MAP<ANY> = LOAD_JSON("{{ $ctx.staging }}/{{ $ctx.target }}.json")
+    WRITE $ctx.out ""
+    LET $render: PIPE
+    WITH_IO [stdout=$render] EXPAND $ctx.template
+    WITH_IO [stdin=$render] APPEND $ctx.out
+    LET $text: STRING = READ $ctx.out
+    IF $text == "" {
+        ECHO "render: target '{{ $ctx.target }}' rendered empty"
+        EXIT 1
+    }
+    RETURN {wsroot: $ctx.wsroot, config: $ctx.config, staging: $ctx.staging, globals: $ctx.globals, target: $ctx.target, template: $ctx.template, out: $ctx.out, values: $ctx.values, fragments: $ctx.fragments, text: $text}
+}
+
+EXPORT RENDER

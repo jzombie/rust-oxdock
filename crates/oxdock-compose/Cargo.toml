@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "oxdock-compose"
 path = "src/main.rs"
 
+[[bin]]
+name = "oxdock-compose-child"
+path = "src/bin/child.rs"
+
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true

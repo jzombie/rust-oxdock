@@ -10,45 +10,38 @@ pub mod engine;
 pub mod plugins;
 
 use anyhow::{Context, Result};
-use oxdock_core::{Engine, ExecIo, HostModule};
+use oxdock_core::{Engine, ExecIo, HostModule, OxDockFn, TypeTag, Value};
 use oxdock_fs::{EntryKind, GuardedPath, PathResolver, WorkspaceFs};
-use oxdock_macros::oxdock;
+use oxdock_func_macro::oxdock_func;
 use oxdock_process::default_process_manager;
 #[allow(clippy::disallowed_types)]
 use std::path::Path;
 
 /// `run()`'s module set, written once.
 ///
-/// Each entry is `(HeaderIdent, module_path)`. Every entry lands in
-/// the `oxdock!` `modules:` list and `IMPORT` and is registered on the
-/// `Engine`, so placeholder calls (`{{ MODULE::FUNC($var) }}` through
-/// `EXPAND_TEMPLATE` snapshots) and script steps (bare or qualified
-/// calls) resolve the same set. This list is this pipeline's
-/// requirements, not engine defaults: the only module the engine
-/// itself defaults to is `COMPOSE_ENGINE` (see [`pipeline_engine`]);
-/// `OXDOCK`, `RUST`, and `MARKDOWN` are here because this pipeline
-/// documents an OxDock Rust workspace, `DEFER` because deferred
-/// placeholders (`DEFER`/`EXPAND_DEFERRED`) resolve in every template
-/// (`DOCS` rides alongside as its compat alias until retired),
-/// and a resume pipeline would list a different set.
+/// Each entry is `(HeaderIdent, module_path)` registered on the
+/// `Engine`, so hook calls and template placeholders resolve the
+/// same set. This list is this pipeline's requirements, not engine
+/// defaults: the only module the engine itself defaults to is
+/// `COMPOSE_ENGINE` (see [`pipeline_engine`]); `DEFER` because
+/// deferred placeholders resolve in every template (`DOCS` rides
+/// alongside as its compat alias until retired); `OXDOCK`, `RUST`,
+/// and `MARKDOWN` because the shipped hooks are the docs pipeline's
+/// hooks, and a different pipeline would register a different set
+/// alongside its own hooks.
 ///
 /// External plugins never go here either: pass them to
 /// [`run_with_plugins`], which registers them alongside this list.
-/// Template and fragment placeholders resolve against the live
-/// registered snapshot with no `IMPORT` scope check, so
-/// `{{ CUSTOM::FUNC($var) }}` in any template works the moment the
-/// module is registered. Script steps are different: the `oxdock!`
-/// header governs them, so a custom *script* names its own modules
-/// in its own header over [`pipeline_engine`].
+/// The static scripts (`run.oxfile`, `compose.oxfile`,
+/// `dispatcher.oxfile`, hook files) declare their own `IMPORT`s; a
+/// missing registration fails the import loudly naming the module,
+/// and the render suite executes every script on every run.
 ///
-/// A runtime `Vec` cannot be this list: `oxdock!` is a proc macro over
-/// token streams at compile time and never sees runtime values. The
-/// list therefore lives at token level, fanned out by
-/// `pipeline_split!` into each use below. Paths thread through as
-/// opaque token runs (never `:path`, which degrades across repeated
-/// match cycles) and accumulate space separated, since a trailing
-/// comma breaks the final match. Add or remove an entry here and the
-/// header, the registrations, and the pinning test follow.
+/// A runtime `Vec` cannot be this list: it lives at token level and
+/// fans out by `pipeline_split!` into the registrations below. Paths
+/// thread through as opaque token runs (never `:path`, which
+/// degrades across repeated match cycles) and accumulate space
+/// separated, since a trailing comma breaks the final match.
 macro_rules! pipeline_modules {
     ($final:ident [$($args:tt)*]) => {
         pipeline_split! {
@@ -77,18 +70,6 @@ macro_rules! pipeline_split {
     };
 }
 
-/// Emit the `oxdock!` steps with the generated header plus `$body`.
-macro_rules! pipeline_emit_steps {
-    ([$($body:tt)*] ; [$($hn:ident),*] ; [$($abag:tt)*]) => {
-        oxdock! {
-            modules: [$($hn),*],
-            INHERIT_ENV [CRATE_VERSION]
-            IMPORT [STD, $($hn),*]
-            $($body)*
-        }
-    };
-}
-
 /// Emit one `register_module` per pipeline module path.
 macro_rules! pipeline_emit_register {
     ([$engine:expr] ; [$($hn:ident),*] ; [$(( $first:tt $(:: $rest:tt)* ))*]) => {{
@@ -96,30 +77,161 @@ macro_rules! pipeline_emit_register {
     }};
 }
 
-/// Emit the header idents as strings, so the pinning test can compare
-/// the DSL visible set against the registered set.
-#[cfg(test)]
-macro_rules! pipeline_emit_header_names {
-    ([] ; [$($hn:ident),*] ; [$($abag:tt)*]) => {
-        [$(stringify!($hn)),*]
-    };
-}
-
-/// Execute the document pipeline through one DSL script: inherit the
-/// host version, refresh generated inputs, sync per-member values,
-/// assemble one `$files` manifest per target, then render every master
-/// template through native OxDock commands. Order lives in the master
-/// templates as `{{ $files.group.stem }}` placeholders; the value
-/// returning engine builtins in [`engine`] supply the pieces the DSL
-/// has no primitives for (registry rendering, TOML metadata, strict JSON
-/// encoding, placeholder-safe stems) while the script owns all
-/// sequencing and all writes. Each stage below is a named `FUNC` so
-/// the top level reads as the stage list.
+/// Execute the composition pipeline in two static runs sharing one
+/// filesystem: the domain preamble first (Rust-aware enrichment over
+/// `COMPOSE_CONFIG`: version, member values, generated inputs, then
+/// the plain-data domain file), then the core composition (discover,
+/// assemble, render every master template through the lifecycle
+/// pipe, verify). Static scripts are byte-copied from the tree (see
+/// `read_support`); sequencing and all writes live in the DSL while
+/// Rust owns only run order plus the executable-bit fixup below.
 #[allow(clippy::disallowed_types)]
 pub fn run(repo_root: &Path) -> Result<()> {
     run_with_plugins(repo_root, vec![])
 }
-/// Execute the document pipeline with extra modules registered
+
+/// Minimal example external plugin (`TEST::PING`): proves a
+/// `run_with_plugins` module resolves in templates across the pipe
+/// without header changes. Registered in both parent and child engines
+/// (see [`pipeline_full_engine`]) so the pipe child resolves it: Rust
+/// modules cannot cross the process boundary any other way, and real
+/// pipelines link their own modules into both binaries the same way.
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn ping(value: String) -> Result<Value> {
+    Ok(Value::string(format!("PONG:{value}")))
+}
+
+/// The example external plugin module (see [`ping`]).
+fn test_ping_module() -> HostModule<oxdock_process::DefaultProcessManager> {
+    HostModule {
+        name: "TEST".to_string(),
+        funcs: vec![Ping::registration()],
+        types: vec![],
+        record_schemas: vec![],
+        states: vec![],
+    }
+}
+
+/// The full pipeline engine: every module this pipeline registers,
+/// no script attached. Shared by the main run and the pipe child so
+/// the child resolves the same host calls (including `DEFER`).
+fn pipeline_full_engine(
+    extra_modules: Vec<HostModule<oxdock_process::DefaultProcessManager>>,
+    io: ExecIo,
+) -> Engine<oxdock_process::DefaultProcessManager> {
+    let mut engine = Engine::new().with_io(io);
+    pipeline_modules!(pipeline_emit_register[engine]);
+    engine.register_module(test_ping_module());
+    for module in extra_modules {
+        // The example module above already registers TEST; a caller
+        // passing its own TEST keeps theirs (last registration wins).
+        if module.name != "TEST" {
+            engine.register_module(module);
+        }
+    }
+    engine
+}
+
+/// Locate the pipe-child interpreter: an explicit override for tests
+/// and harnesses, else the `oxdock-compose-child` binary beside the
+/// running executable (cargo installs both bins side by side).
+/// `INTERPRETER()` alone is unusable here: it returns the pipeline
+/// binary, which cannot interpret scripts.
+fn child_interpreter() -> Result<String> {
+    if let Ok(path) = std::env::var("OXDOCK_COMPOSE_CHILD") {
+        return Ok(path);
+    }
+    let exe = std::env::current_exe().context("locate current executable")?;
+    let child = exe
+        .parent()
+        .context("executable has no parent dir")?
+        .join("oxdock-compose-child");
+    if child.is_file() {
+        Ok(child.to_string_lossy().into_owned())
+    } else {
+        anyhow::bail!(
+            "pipe-child binary missing at {}: set OXDOCK_COMPOSE_CHILD explicitly",
+            child.display()
+        )
+    }
+}
+
+/// Run one piped stage script: the child entry point. Reads the full
+/// script from stdin, runs it over `--root` (or `OXDOCK_WORKSPACE_ROOT`
+/// when the flag is absent, or the current directory) with `--config`
+/// (or `COMPOSE_CONFIG`, or the edge default), and fails the process
+/// on error so the parent `RUN` propagates the failure.
+pub fn run_child_script(script: &str) -> Result<()> {
+    run_child_script_on(script, &child_root().context("locate child root")?)
+}
+
+/// Resolve the child's workspace root: explicit `--root` wins, then
+/// the inherited `OXDOCK_WORKSPACE_ROOT`, then the current directory.
+#[allow(clippy::disallowed_types)]
+fn child_root() -> Result<std::path::PathBuf> {
+    let mut args = std::env::args().skip(1);
+    loop {
+        match args.next() {
+            Some(arg) if arg == "--root" => {
+                if let Some(root) = args.next() {
+                    return Ok(std::path::PathBuf::from(root));
+                }
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    std::env::var(oxdock_fs::env::oxdock::WORKSPACE_ROOT)
+        .map(std::path::PathBuf::from)
+        .or_else(|_| std::env::current_dir().context("child needs a working dir"))
+}
+
+/// Resolve the child's config path: explicit `--config` wins, then
+/// the inherited `COMPOSE_CONFIG`, then the edge default.
+fn child_config() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    loop {
+        match args.next() {
+            Some(arg) if arg == "--config" => {
+                if let Some(cfg) = args.next() {
+                    return Some(cfg);
+                }
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    std::env::var("COMPOSE_CONFIG").ok()
+}
+
+/// Run one piped stage script over an explicit root. Seeds the
+/// child's environment deterministically: the spawn boundary does
+/// not forward the parent's script env, so both paths are absolutized
+/// here and injected as overrides.
+#[allow(clippy::disallowed_types)]
+pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
+    let root = GuardedPath::new_root(dir)?;
+    let mut io = ExecIo::new();
+    // The child's INHERIT_ENV reads these overrides; it never sees the
+    // parent's script environment through the spawn boundary. Paths are
+    // absolutized here (proper path joining is Rust's job, not the DSL's)
+    // so hooks can use them directly regardless of module-relative cwd.
+    io.insert_inherit_env(
+        oxdock_fs::env::oxdock::WORKSPACE_ROOT,
+        dir.to_string_lossy().into_owned(),
+    );
+    let cfg = child_config().unwrap_or_else(|| "docs-gen.json".to_string());
+    // `Path::join` with an absolute second half replaces the first,
+    // so one join covers both shapes with no absolute check.
+    let cfg_abs = dir.join(cfg).to_string_lossy().into_owned();
+    io.insert_inherit_env("COMPOSE_CONFIG", cfg_abs);
+    let engine = pipeline_full_engine(vec![], io);
+    engine
+        .run_script(&root, script)
+        .context("child script failed")?;
+    Ok(())
+}
+/// Execute the composition pipeline with extra modules registered
 /// alongside this pipeline's set.
 ///
 /// External plugins arrive here, never in `pipeline_modules!`: any
@@ -135,224 +247,46 @@ pub fn run_with_plugins(
 ) -> Result<()> {
     let root = GuardedPath::new_root(repo_root)?;
 
-    let steps: Vec<oxdock_parser::Step> = pipeline_modules!(pipeline_emit_steps [
-        // Live-tree invariant: every WRITE below must land in the real
-        // repo, so pin resolution to the build context up front. Without
-        // this, a snapshot-backed resolver would silently materialize a
-        // tempdir and the render would succeed while updating nothing.
-        WORKSPACE LOCAL
-
-        // Version for every expansion scope below.
-        LET $version: STRING = RUST::WORKSPACE_VERSION()
-        ENV CRATE_VERSION=$version
-
-        // Citation metadata for expansion scopes. Workspace author,
-        // license, and repository come from the root manifest here, so
-        // citation templates never copy them into checked-in files.
-        LET $workspace_pkg: MAP<ANY> = RUST::WORKSPACE_PACKAGE()
-
-        // Workspace config: scopes, shared values, generated destinations.
-        LET $cfg: MAP<ANY> = LOAD_JSON("docs-gen.json")
-        LET $gen: LIST<ANY> = $cfg.generated
-
-        // Provider conventions: every key below is optional. Absent
-        // keys keep the OxDock project defaults, so the current
-        // workspace config behaves exactly as before.
-        LET $policy: STRING = "fail_on_duplicate"
-        IF HAS_KEY($cfg, "merge_policy") {
-            $policy = $cfg.merge_policy
-        }
-        LET $staging: STRING = "target/oxdock-docs"
-        IF HAS_KEY($cfg, "staging_dir") {
-            $staging = $cfg.staging_dir
-        }
-        LET $vkey: STRING = "CRATE_VERSION"
-        IF HAS_KEY($cfg, "version_key") {
-            $vkey = $cfg.version_key
-        }
-        LET $vpkg: STRING = "workspace_pkg"
-        IF HAS_KEY($cfg, "vars") {
-            LET $vars: MAP<ANY> = $cfg.vars
-            IF HAS_KEY($vars, "workspace_pkg") {
-                $vpkg = $vars.workspace_pkg
-            }
-        }
-        LET $vglobal: STRING = "docs_global"
-        LET $vctx: STRING = "docs_ctx"
-        IF HAS_KEY($cfg, "vars") {
-            LET $vars: MAP<ANY> = $cfg.vars
-            IF HAS_KEY($vars, "global") {
-                $vglobal = $vars.global
-            }
-            IF HAS_KEY($vars, "ctx") {
-                $vctx = $vars.ctx
-            }
-        }
-
-        // Shared values: one path or a path list, merged in order.
-        // STD::MERGE_MAPS validates the policy and names duplicates.
-        LET $vpaths: LIST<ANY> = []
-        IF TYPE_OF($cfg.global_values) == "LIST" {
-            $vpaths = $cfg.global_values
-        } ELSE {
-            LIST_APPEND $vpaths $cfg.global_values
-        }
-        LET $vmaps: LIST<ANY> = []
-        FOR $vp: STRING IN $vpaths {
-            LET $one: MAP<ANY> = LOAD_JSON($vp)
-            LIST_APPEND $vmaps $one
-        }
-        LET $docs_global: MAP<ANY> = STD::MERGE_MAPS($vmaps, $policy)
-
-        // Registry-derived inputs declared by the config: one entry
-        // per generated artifact, dispatched by key. An unknown key
-        // fails listing the known ones instead of rendering empty.
-        FUNC REFRESH_GENERATED($gen: LIST<ANY>) {
-            FOR $entry: MAP<ANY> IN $gen {
-                LET $key: STRING = $entry.key
-                LET $text: STRING = OXDOCK::GENERATED($key)
-                WRITE $entry.out $text
-            }
-        }
-        REFRESH_GENERATED($gen)
-
-        // One member's values file from its manifest.
-        FUNC SYNC_MEMBER($member: STRING) {
-            ECHO "syncing values for {{ $member }}"
-
-                LET $pkg: MAP<name: STRING, description: STRING> = RUST::CARGO_PACKAGE($member)
-            IF $pkg.name != "" {
-                LET $values_path: STRING = "{{ $member }}/.oxdock/template/values.json"
-                LET $pt: STRING = PATH_TYPE($values_path)
-                IF $pt == "file" {
-                    LET $existing: MAP<ANY> = LOAD_JSON($values_path)
-                    LET $json: STRING = RUST::PACKAGE_VALUES_JSON($pkg, $existing)
-                    WRITE $values_path $json
-                } ELSE {
-                    LET $empty: MAP<ANY> = {}
-                    LET $fresh: STRING = RUST::PACKAGE_VALUES_JSON($pkg, $empty)
-                    WRITE $values_path $fresh
-                }
-            }
-        }
-        FOR $member: STRING IN RUST::WORKSPACE_MEMBERS() {
-            SYNC_MEMBER($member)
-        }
-
-        // Track one target name, failing on duplicates.
-        FUNC NOTE_TARGET($seen: MAP<ANY>, $name: STRING, $tj: STRING) {
-            IF HAS_KEY($seen, $name) {
-                ECHO "duplicate target name '{{ $name }}' (in {{ $tj }})"
-                EXIT 1
-            }
-            RETURN MAP_SET($seen, $name, $tj)
-        }
-
-        // One target manifest as a MAP: expand every fragment once.
-        // The codec stays out of the assembler: callers encode with
-        // STD::TO_JSON at the write edge.
-        FUNC BUILD_MANIFEST($t: MAP<ANY>, $docs_global: MAP<ANY>, $docs_ctx: MAP<ANY>, $version: STRING, $workspace_pkg: MAP<ANY>, $vglobal: STRING, $vctx: STRING, $vkey: STRING, $vpkg: STRING) {
-            LET $manifest: MAP<ANY> = {}
-            FOR $group: STRING, $patterns: LIST<ANY> IN $t.fragments {
-                LET $group_map: MAP<ANY> = {}
-                FOR $pattern: STRING IN $patterns {
-                    FOR $file_rel: STRING IN GLOB($pattern) {
-                        LET $stem: STRING = COMPOSE_ENGINE::FILE_STEM($file_rel)
-                        IF HAS_KEY($group_map, $stem) {
-                            ECHO "target '{{ $t.name }}': '{{ $stem }}' matches more than one file; placeholders must resolve to exactly one"
-                            EXIT 1
-                        }
-                        LET $raw: STRING = READ $file_rel
-                        // Scope assembly lives in the script, not the
-                        // engine: each pipeline maps its own variable
-                        // and env conventions here.
-                        LET $scope: MAP<ANY> = {}
-                        $scope = MAP_SET($scope, $vglobal, $docs_global)
-                        $scope = MAP_SET($scope, $vctx, $docs_ctx)
-                        $scope = MAP_SET($scope, $vpkg, $workspace_pkg)
-                        LET $envmap: MAP<ANY> = {}
-                        $envmap = MAP_SET($envmap, $vkey, $version)
-                        LET $expanded: STRING = COMPOSE_ENGINE::EXPAND_TEMPLATE($raw, $scope, $envmap)
-                        $group_map = MAP_SET($group_map, $stem, $expanded)
-                    }
-                }
-                $manifest = MAP_SET($manifest, $group, $group_map)
-            }
-            RETURN $manifest
-        }
-        LET $seen: MAP<ANY> = {}
-        FOR $scope: STRING IN $cfg.scopes {
-            FOR $tj: STRING IN GLOB("{{ $scope }}/**/target.json") {
-                LET $file: MAP<ANY> = LOAD_JSON($tj)
-                FOR $t: MAP<ANY> IN $file.targets {
-                    LET $tname: STRING = $t.name
-                    $seen = NOTE_TARGET($seen, $tname, $tj)
-                    IF HAS_KEY($t, "globs") {
-                        ECHO "target '{{ $t.name }}' still uses 'globs'; declare 'template' and grouped 'fragments' patterns instead"
-                        EXIT 1
-                    }
-                    LET $values_path: STRING = $t.values
-                    LET $docs_ctx: MAP<ANY> = LOAD_JSON($values_path)
-                    LET $assembled: MAP<ANY> = BUILD_MANIFEST($t, $docs_global, $docs_ctx, $version, $workspace_pkg, $vglobal, $vctx, $vkey, $vpkg)
-                    LET $json: STRING = TO_JSON($assembled)
-                    WRITE "{{ $staging }}/{{ $t.name }}.json" $json
-                }
-            }
-        }
-
-        // One master template expanded into its output.
-        FUNC READ_TEXT($path: STRING) {
-            LET $text: STRING = READ $path
-            RETURN $text
-        }
-        FUNC RENDER_TARGET($t: MAP<ANY>, $docs_global: MAP<ANY>, $staging: STRING) {
-            ECHO "rendering {{ $t.name }} -> {{ $t.out }}"
-
-            LET $values_path: STRING = $t.values
-            LET $docs_ctx: MAP<ANY> = LOAD_JSON($values_path)
-            LET $files: MAP<ANY> = LOAD_JSON("{{ $staging }}/{{ $t.name }}.json")
-
-            WRITE $t.out ""
-            LET $render: PIPE
-            WITH_IO [stdout=$render] EXPAND $t.template
-            WITH_IO [stdin=$render] APPEND $t.out
-        }
-        // Pass 2 lives in its own FUNC because declarations and call
-        // expressions after WITH_IO steps do not bind in the same
-        // scope: pass 1 stays byte-identical above, then this reads the
-        // rendered output back, dispatches deferred sentinels against
-        // the full document, and rewrites it. Outputs without sentinels
-        // round-trip unchanged.
-        FUNC POST_TARGET($t: MAP<ANY>) {
-            LET $out_path: STRING = $t.out
-            LET $full_text: STRING = READ_TEXT($out_path)
-            LET $toc_final: STRING = DEFER::EXPAND_DEFERRED($full_text)
-            WRITE $t.out $toc_final
-        }
-        FOR $rscope: STRING IN $cfg.scopes {
-            FOR $rtj: STRING IN GLOB("{{ $rscope }}/**/target.json") {
-                LET $rfile: MAP<ANY> = LOAD_JSON($rtj)
-                FOR $rt: MAP<ANY> IN $rfile.targets {
-                    RENDER_TARGET($rt, $docs_global, $staging)
-                    POST_TARGET($rt)
-                }
-            }
-        }
-    ]);
     let mut fs_resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
     fs_resolver.set_workspace_root(root.clone());
+    // Every stage runs through the pipe: the interpreter is always
+    // the child binary, never the pipeline binary itself.
+    let mut io = ExecIo::new();
+    io.set_interpreter(child_interpreter().context("locate pipe child")?);
+    // The pipe child resolves every path against this root: inherit it
+    // into every spawn so module-relative child launching cannot skew
+    // staging and output paths. The config filename rides the same
+    // channel with an edge default, never a core assumption.
+    io.insert_inherit_env(
+        oxdock_fs::env::oxdock::WORKSPACE_ROOT,
+        root.as_path().to_string_lossy().into_owned(),
+    );
+    io.insert_inherit_env(
+        "COMPOSE_CONFIG",
+        std::env::var("COMPOSE_CONFIG").unwrap_or_else(|_| "docs-gen.json".to_string()),
+    );
+    let engine = pipeline_full_engine(extra_modules, io);
+    // The pipeline entry is one static script, byte-copied from the
+    // tree: it reads the config, assembles the child from the plugin
+    // registry, and pipes it through the interpreter. What runs is
+    // what the tree holds, never Rust-assembled text.
+    let entry = read_support(&fs_resolver, &root, "crates/oxdock-compose/src/run.oxfile")?;
     let fs: Box<dyn WorkspaceFs> = Box::new(fs_resolver);
-    let mut engine = Engine::new().with_io(ExecIo::new());
-    pipeline_modules!(pipeline_emit_register[engine]);
-    for module in extra_modules {
-        engine.register_module(module);
-    }
     let output = engine
-        .run_steps_on(fs, &steps, default_process_manager())
-        .context("render documents")?;
+        .run_script_on(fs, &entry, default_process_manager())
+        .context("compose pipeline")?;
     apply_executable_bits(output.fs.as_ref(), &root).context("apply executable bits")?;
     eprintln!("docs rendered");
     Ok(())
+}
+
+/// Byte-copy one static script out of the tree: what runs is what
+/// the tree holds, never Rust-assembled text.
+fn read_support(resolver: &PathResolver, root: &GuardedPath, rel: &str) -> Result<String> {
+    let path = root.join(rel)?;
+    resolver
+        .read_to_string(&path)
+        .with_context(|| format!("read static script '{rel}'"))
 }
 
 /// Mode re-applied to rendered outputs whose target declares
@@ -492,38 +426,6 @@ pub fn pipeline_engine() -> Engine<oxdock_process::DefaultProcessManager> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pipeline_registrations_cover_header_modules() {
-        // The header idents and run()'s registered set come from one
-        // token list. Drift in either direction fails here: a header
-        // ident with no registration, or a registration with no
-        // header ident. STD is always present and never listed.
-        // `pipeline_engine()` is deliberately not used: it carries
-        // only the COMPOSE_ENGINE default, while this pins run()'s
-        // full pipeline set.
-        let header: Vec<&str> = pipeline_modules!(pipeline_emit_header_names []).to_vec();
-        assert!(!header.is_empty(), "pipeline must declare modules");
-        let mut engine = Engine::new().with_io(ExecIo::new());
-        pipeline_modules!(pipeline_emit_register[engine]);
-        let table = engine.module_table();
-        for name in &header {
-            assert!(
-                table.modules.contains_key(*name),
-                "header module '{name}' is not registered",
-            );
-        }
-        let mut registered: Vec<&str> = table
-            .modules
-            .keys()
-            .map(String::as_str)
-            .filter(|name| *name != oxdock_parser::STD_MODULE_NAME)
-            .collect();
-        registered.sort_unstable();
-        let mut expected = header.clone();
-        expected.sort_unstable();
-        assert_eq!(registered, expected, "registered set drifted from header");
-    }
 
     #[test]
     fn executable_outs_selects_flagged_targets() {

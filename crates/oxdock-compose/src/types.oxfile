@@ -1,0 +1,8 @@
+# Shared lifecycle shapes, defined once.
+# Every other file imports this instead of redeclaring.
+
+TYPE CTX = MAP<wsroot: STRING, config: STRING, staging: STRING, globals: STRING, target?: STRING, template?: STRING, out?: STRING, values?: STRING, fragments?: STRING, text?: STRING>
+TYPE PLUGIN = MAP<path: STRING, alias: STRING, hooks: LIST<STRING>>
+
+EXPORT TYPE CTX
+EXPORT TYPE PLUGIN

@@ -1,0 +1,11 @@
+# WRITE hook: the only stage that touches the output file.
+IMPORT [STD]
+IMPORT [TYPE CTX FROM "../types.oxfile"]
+
+# Writes the final text to the target output path.
+FUNC WRITE_OUT($ctx: CTX) {
+    WRITE $ctx.out $ctx.text
+    RETURN $ctx
+}
+
+EXPORT WRITE_OUT

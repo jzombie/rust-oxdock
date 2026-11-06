@@ -1,168 +1,180 @@
-//! Lifecycle dispatcher end to end, composed in-DSL.
+//! `COMPOSE_ALL` byte layout, composed in-DSL.
 //!
-//! The parent script imports the real `dispatcher.oxfile` and calls
-//! `COMPOSE_STAGE`: the DSL itself assembles the lifecycle module
-//! (`FUNC SOME_STAGE` wrapping the dynamically inserted hook calls),
-//! exactly as the engine will at runtime. The engine stays agnostic:
-//! it only knows the stage name and calls `LC::STAGE($ctx)` on the
-//! assembled module. Transport over a real pipe plus staged binary is
-//! the pre-proven README pattern, not re-proven here.
+//! The parent script imports the real `src/compose.oxfile` and reads
+//! back the assembled child text: imports follow registration order,
+//! per-target calls follow stage order with qualified names, `SETUP`
+//! unrolls before the target loop. Execution is covered by
+//! `compose_pipe` (pipe mechanics) and `render` (end to end).
 
 use oxdock_core::Engine;
 use oxdock_fs::{GuardedPath, PathResolver};
 
-/// Context shape threaded through every stage in these tests: `name`
-/// arrives from the caller, `saw` is added by the hook. Both optional
-/// so the unknown-hook test can pass an empty map and still reach the
-/// missing-hook failure instead of a shape error.
-const CTX_TYPE: &str = "MAP<name?: STRING, saw?: STRING>";
-const PLUGIN_TYPE: &str = "LIST<MAP<path: STRING, alias: STRING, hooks: LIST<STRING>>>";
-
-fn seed_files(root: &GuardedPath, resolver: &PathResolver) {
-    let hook = root.join("hook.oxfile").expect("join hook");
-    resolver
-        .write_file(
-            &hook,
-            indoc::indoc! {r#"
-                IMPORT [STD]
-                FUNC PRE_RENDER($ctx: MAP<name?: STRING, saw?: STRING>) {
-                    RETURN MAP_SET($ctx, "saw", "hook-ran")
-                }
-                EXPORT PRE_RENDER
-            "#}
-            .as_bytes(),
-        )
-        .expect("write hook");
-    let source = include_str!("../dispatcher.oxfile").as_bytes();
-    let dest = root.join("dispatcher.oxfile").expect("join dispatcher");
-    resolver
-        .write_file(&dest, source)
-        .expect("write dispatcher");
+fn seed(root: &GuardedPath, resolver: &PathResolver) {
+    for (rel, contents) in [
+        ("compose.oxfile", include_str!("../src/compose.oxfile")),
+        ("types.oxfile", include_str!("../src/types.oxfile")),
+    ] {
+        let path = root.join(rel).expect("join seed");
+        resolver
+            .write_file(&path, contents.as_bytes())
+            .expect("write seed");
+    }
 }
 
-fn parent_script(plugins_literal: &str, stage: &str, out: &str) -> String {
-    format!(
+fn compose_text(root: &GuardedPath, plugins_literal: &str, stages_literal: &str) -> String {
+    let parent = format!(
         indoc::indoc! {r#"
-            IMPORT ["dispatcher.oxfile" AS D]
-            LET $plugins: {plugin} = {plugins}
-            D::COMPOSE_STAGE($plugins, "{stage}", "{ctx}", "{out}")
+            IMPORT [TYPE CTX FROM "types.oxfile"]
+            IMPORT [TYPE PLUGIN FROM "types.oxfile"]
+            IMPORT ["compose.oxfile" AS C]
+            LET $plugins: LIST<PLUGIN> = {plugins}
+            LET $stages: LIST<STRING> = {stages}
+            LET $mod: STRING = C::COMPOSE_ALL($plugins, $stages, "types.oxfile")
         "#},
-        plugin = PLUGIN_TYPE,
         plugins = plugins_literal,
-        stage = stage,
-        ctx = CTX_TYPE,
-        out = out,
-    )
-}
-
-#[test]
-fn dispatcher_composes_stage_module_with_hook_calls() {
-    let temp = GuardedPath::tempdir().expect("tempdir");
-    let root = temp.as_guarded_path().clone();
-    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
-    seed_files(&root, &resolver);
-
-    let parent = parent_script(
-        r#"[{path: "hook.oxfile", alias: "P0", hooks: ["PRE_RENDER"]}]"#,
-        "PRE_RENDER",
-        "lifecycle.oxfile",
+        stages = stages_literal,
     );
-    Engine::new()
-        .run_script(&root, &parent)
-        .expect("parent composes lifecycle");
-
-    let path = root.join("lifecycle.oxfile").expect("join lifecycle");
-    let composed = resolver.read_to_string(&path).expect("read lifecycle");
-    assert_eq!(
-        composed,
-        indoc::indoc! {r#"
-            IMPORT [STD]
-            IMPORT ["hook.oxfile" AS P0]
-            FUNC PRE_RENDER($ctx: MAP<name?: STRING, saw?: STRING>) {
-                $ctx = P0::PRE_RENDER($ctx)
-                RETURN $ctx
-            }
-            EXPORT PRE_RENDER
-        "#}
-    );
-
-    let caller = indoc::indoc! {r#"
-        IMPORT ["lifecycle.oxfile" AS LC]
-        LET $ctx: MAP<name?: STRING, saw?: STRING> = {name: "Ada"}
-        $ctx = LC::PRE_RENDER($ctx)
-        LET $saw: STRING = $ctx.saw
-    "#};
     let output = Engine::new()
-        .run_script(&root, caller)
-        .expect("stage runs hooks");
-    assert_eq!(
-        output.bindings.get("saw").and_then(|value| value.as_str()),
-        Some("hook-ran"),
-        "hook mutation threads back through $ctx: {:?}",
-        output.bindings
-    );
+        .run_script(root, &parent)
+        .expect("compose runs");
+    output
+        .bindings
+        .get("mod")
+        .and_then(|v| v.as_str())
+        .expect("mod binding")
+        .to_string()
 }
 
-#[test]
-fn dispatcher_orders_plugins_and_filters_other_stages() {
-    let temp = GuardedPath::tempdir().expect("tempdir");
-    let root = temp.as_guarded_path().clone();
-    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
-    seed_files(&root, &resolver);
-
-    let parent = parent_script(
-        r#"[{path: "a.oxfile", alias: "P0", hooks: ["PRE_RENDER", "POST_RENDER"]}, {path: "b.oxfile", alias: "P1", hooks: ["PRE_RENDER"]}]"#,
-        "PRE_RENDER",
-        "lifecycle.oxfile",
-    );
-    Engine::new()
-        .run_script(&root, &parent)
-        .expect("parent composes lifecycle");
-
-    let path = root.join("lifecycle.oxfile").expect("join lifecycle");
-    let composed = resolver.read_to_string(&path).expect("read lifecycle");
-    assert_eq!(
-        composed,
+fn compose_err(root: &GuardedPath, plugins_literal: &str, stages_literal: &str) -> String {
+    let parent = format!(
         indoc::indoc! {r#"
-            IMPORT [STD]
-            IMPORT ["a.oxfile" AS P0]
-            IMPORT ["b.oxfile" AS P1]
-            FUNC PRE_RENDER($ctx: MAP<name?: STRING, saw?: STRING>) {
-                $ctx = P0::PRE_RENDER($ctx)
-                $ctx = P1::PRE_RENDER($ctx)
-                RETURN $ctx
-            }
-            EXPORT PRE_RENDER
-        "#}
+            IMPORT [TYPE CTX FROM "types.oxfile"]
+            IMPORT [TYPE PLUGIN FROM "types.oxfile"]
+            IMPORT ["compose.oxfile" AS C]
+            LET $plugins: LIST<PLUGIN> = {plugins}
+            LET $stages: LIST<STRING> = {stages}
+            LET $mod: STRING = C::COMPOSE_ALL($plugins, $stages, "types.oxfile")
+        "#},
+        plugins = plugins_literal,
+        stages = stages_literal,
+    );
+    let err = Engine::new()
+        .run_script(root, &parent)
+        .expect_err("compose must fail");
+    format!("{err:#}")
+}
+
+#[test]
+fn compose_all_orders_imports_by_registration() {
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    seed(&root, &resolver);
+
+    let got = compose_text(
+        &root,
+        r#"[{path: "a.oxfile", alias: "P0", hooks: ["INGEST"]}, {path: "b.oxfile", alias: "P1", hooks: ["INGEST"]}]"#,
+        r#"["INGEST"]"#,
+    );
+    let ia = got.find("IMPORT [\"a.oxfile\" AS P0]").expect("a import");
+    let ib = got.find("IMPORT [\"b.oxfile\" AS P1]").expect("b import");
+    assert!(ia < ib, "imports follow registration order");
+}
+
+#[test]
+fn compose_all_orders_per_target_calls_by_stage() {
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    seed(&root, &resolver);
+
+    let got = compose_text(
+        &root,
+        r#"[{path: "a.oxfile", alias: "P0", hooks: ["WRITE_OUT", "INGEST"]}]"#,
+        r#"["INGEST", "WRITE_OUT"]"#,
+    );
+    let ingest = got.find("$ctx = P0::INGEST($ctx)").expect("ingest call");
+    let write = got.find("$ctx = P0::WRITE_OUT($ctx)").expect("write call");
+    assert!(
+        ingest < write,
+        "per-target calls follow stage order, not registration order"
     );
 }
 
 #[test]
-fn dispatcher_unknown_hook_fails_naming_it() {
+fn compose_all_leaves_unregistered_stages_out() {
     let temp = GuardedPath::tempdir().expect("tempdir");
     let root = temp.as_guarded_path().clone();
     let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
-    seed_files(&root, &resolver);
+    seed(&root, &resolver);
 
-    let parent = parent_script(
-        r#"[{path: "hook.oxfile", alias: "P0", hooks: ["NOPE"]}]"#,
-        "NOPE",
-        "lifecycle.oxfile",
+    let got = compose_text(
+        &root,
+        r#"[{path: "a.oxfile", alias: "P0", hooks: ["INGEST"]}]"#,
+        r#"["INGEST", "VERIFY"]"#,
     );
-    Engine::new()
-        .run_script(&root, &parent)
-        .expect("parent composes lifecycle");
+    assert!(
+        got.contains("$ctx = P0::INGEST($ctx)"),
+        "registered hook emits a call"
+    );
+    assert!(
+        !got.contains("VERIFY($ctx)"),
+        "stage with no plugin emits no call"
+    );
+}
 
-    let caller = indoc::indoc! {r#"
-        IMPORT ["lifecycle.oxfile" AS LC]
-        LET $ctx: MAP<name?: STRING, saw?: STRING> = {}
-        $ctx = LC::NOPE($ctx)
-    "#};
-    let err = format!(
-        "{:#}",
-        Engine::new()
-            .run_script(&root, caller)
-            .expect_err("unknown hook must fail")
+#[test]
+fn compose_all_unrolls_setup_before_target_loop() {
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    seed(&root, &resolver);
+
+    let got = compose_text(
+        &root,
+        r#"[{path: "a.oxfile", alias: "P0", hooks: ["SETUP", "INGEST"]}]"#,
+        r#"["INGEST"]"#,
     );
-    assert!(err.contains("NOPE"), "names the violator: {err}");
+    let setup = got.find("$run = P0::SETUP($run)").expect("setup call");
+    let seen = got.find("LET $seen").expect("target loop start");
+    assert!(setup < seen, "SETUP unrolls before the target loop");
+}
+
+#[test]
+fn compose_all_rejects_unknown_hook() {
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    seed(&root, &resolver);
+
+    // The violator is ECHOed naming hook and alias on stdout before
+    // EXIT 1; the error value only proves fail-closed (no stdout
+    // capture on EngineOutput).
+    let err = compose_err(
+        &root,
+        r#"[{path: "a.oxfile", alias: "P0", hooks: ["NOPE"]}]"#,
+        r#"["INGEST"]"#,
+    );
+    assert!(
+        err.contains("EXIT requested with code 1"),
+        "unknown hook exits 1: {err}"
+    );
+}
+
+#[test]
+fn compose_all_rejects_backslash_paths() {
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    seed(&root, &resolver);
+
+    let err = compose_err(
+        &root,
+        r#"[{path: "a\\b.oxfile", alias: "P0", hooks: ["INGEST"]}]"#,
+        r#"["INGEST"]"#,
+    );
+    assert!(
+        err.contains("EXIT requested with code 1"),
+        "backslash hook path exits 1: {err}"
+    );
 }

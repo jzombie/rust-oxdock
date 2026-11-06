@@ -1,57 +1,135 @@
 # Assembly before dispatch: leaf FUNCs only, no nested calls.
-# Order lives in exactly one place, dispatcher RUN_LIFECYCLE. This
-# file emits only the five phase implementations populated from the
-# plugin registry; the piped child statically imports the dispatcher
-# and calls D::RUN_LIFECYCLE, whose bare phase calls resolve to the
-# implementations in the child scope. A missing or renamed stage
-# fails naming it instead of silently skipping. No files written.
+# The registry names hook files; the stage order comes from the
+# dispatcher's STAGES() and is unrolled into the child, so the order
+# lives in exactly one place. Every child-runtime placeholder below
+# is escaped: unescaped braces bake at compose time, escaped ones
+# survive for the child. Paths ride forward slashes: the child text
+# passes through a pipe that unescapes backslashes, so the backslash
+# gate fails fast naming the violator instead of a corrupted path.
 IMPORT [STD]
+IMPORT [TYPE CTX FROM "types.oxfile"]
+IMPORT [TYPE PLUGIN FROM "types.oxfile"]
 
-TYPE CTX = MAP<text: STRING>
-TYPE PLUGIN = MAP<path: STRING, alias: STRING, hooks: LIST<STRING>>
-
-FUNC COMPOSE_FIVE($plugins: LIST<PLUGIN>, $dispatcher: STRING) {
+FUNC COMPOSE_ALL($plugins: LIST<PLUGIN>, $stages: LIST<STRING>, $types: STRING) {
+    LET $clean: BOOL = STD::TEXT_CONTAINS($types, "\\")
+    IF $clean {
+        ECHO "types path '{{ $types }}' uses backslashes; use forward slashes"
+        EXIT 1
+    }
+    FOR $p: PLUGIN IN $plugins {
+        LET $okpath: BOOL = STD::TEXT_CONTAINS($p.path, "\\")
+        IF $okpath {
+            ECHO "hook path '{{ $p.path }}' uses backslashes; use forward slashes"
+            EXIT 1
+        }
+        FOR $h: STRING IN $p.hooks {
+            LET $ok: BOOL = $h == "SETUP"
+            FOR $s: STRING IN $stages {
+                IF $h == $s {
+                    $ok = true
+                }
+            }
+            IF $ok == false {
+                ECHO "unknown hook '{{ $h }}' from '{{ $p.alias }}'; stages come from STAGES()"
+                EXIT 1
+            }
+        }
+    }
     LET $imports: STRING = ""
     FOR $p: PLUGIN IN $plugins {
         $imports = "{{ $imports }}IMPORT [\"{{ $p.path }}\" AS {{ $p.alias }}]\n"
     }
-    LET $impls: STRING = ""
-    FOR $stage: STRING IN ["INGEST", "ASSEMBLE", "RENDER", "WRITE_OUT", "VERIFY"] {
-        LET $calls: STRING = ""
+    LET $per_target: STRING = ""
+    FOR $stage: STRING IN $stages {
         FOR $p: PLUGIN IN $plugins {
             FOR $h: STRING IN $p.hooks {
                 IF $h == $stage {
-                    $calls = "{{ $calls }}    $ctx = {{ $p.alias }}::{{ $h }}($ctx)\n"
+                    $per_target = "{{ $per_target }}    $ctx = {{ $p.alias }}::{{ $h }}($ctx)\n"
                 }
             }
         }
-        $impls = "{{ $impls }}FUNC {{ $stage }}($ctx: CTX) {\n{{ $calls }}    RETURN $ctx\n}\nEXPORT {{ $stage }}\n"
+    }
+    LET $setup: STRING = ""
+    FOR $p: PLUGIN IN $plugins {
+        FOR $h: STRING IN $p.hooks {
+            IF $h == "SETUP" {
+                $setup = "{{ $setup }}$run = {{ $p.alias }}::SETUP($run)\n"
+            }
+        }
     }
     LET $mod: STRING = """
-        IMPORT [STD]
-        TYPE CTX = MAP<text: STRING>
-        {{ $imports }}IMPORT ["{{ $dispatcher }}" AS D]
-        {{ $impls }}"""
+        INHERIT_ENV [COMPOSE_CONFIG, OXDOCK_WORKSPACE_ROOT]
+        WORKSPACE LOCAL
+        IMPORT [STD, COMPOSE_ENGINE]
+        IMPORT [TYPE CTX FROM "{{ $types }}"]
+        {{ $imports }}LET $cfgpath: STRING = "\{{ env:COMPOSE_CONFIG }}"
+        LET $wsroot: STRING = "\{{ env:OXDOCK_WORKSPACE_ROOT }}"
+        LET $cfg: MAP<ANY> = LOAD_JSON($cfgpath)
+        LET $staging_rel: STRING = "target/oxdock-compose"
+        IF HAS_KEY($cfg, "staging_dir") {
+            $staging_rel = $cfg.staging_dir
+        }
+        LET $staging: STRING = "\{{ $wsroot }}/\{{ $staging_rel }}"
+        LET $policy: STRING = "fail_on_duplicate"
+        IF HAS_KEY($cfg, "merge_policy") {
+            $policy = $cfg.merge_policy
+        }
+        LET $gvpaths: LIST<ANY> = []
+        IF TYPE_OF($cfg.global_values) == "LIST" {
+            $gvpaths = $cfg.global_values
+        } ELSE {
+            LIST_APPEND $gvpaths $cfg.global_values
+        }
+        LET $gvmaps: LIST<ANY> = []
+        FOR $vp: STRING IN $gvpaths {
+            LET $one: MAP<ANY> = LOAD_JSON($vp)
+            LIST_APPEND $gvmaps $one
+        }
+        LET $docs_global: MAP<ANY> = STD::MERGE_MAPS($gvmaps, $policy)
+        LET $gjson: STRING = TO_JSON($docs_global)
+        WRITE "\{{ $staging }}/_globals.json" $gjson
+        LET $run: CTX = {wsroot: $wsroot, config: $cfgpath, staging: $staging, globals: "\{{ $staging }}/_globals.json"}
+        {{ $setup }}LET $seen: MAP<ANY> = {}
+        FOR $scope: STRING IN $cfg.scopes {
+            FOR $tj: STRING IN GLOB("\{{ $scope }}/**/target.json") {
+                LET $file: MAP<ANY> = LOAD_JSON($tj)
+                FOR $t: MAP<ANY> IN $file.targets {
+                    LET $tname: STRING = $t.name
+                    IF HAS_KEY($seen, $tname) {
+                        ECHO "duplicate target name '\{{ $tname }}' (in \{{ $tj }})"
+                        EXIT 1
+                    }
+                    $seen = MAP_SET($seen, $tname, $tj)
+                    IF HAS_KEY($t, "globs") {
+                        ECHO "target '\{{ $t.name }}' still uses 'globs'; declare 'template' and grouped 'fragments' patterns instead"
+                        EXIT 1
+                    }
+                    LET $name: STRING = $t.name
+                    LET $template: STRING = $t.template
+                    LET $out: STRING = $t.out
+                    LET $values: STRING = $t.values
+                    LET $tabs: STRING = "\{{ $wsroot }}/\{{ $template }}"
+                    LET $oabs: STRING = "\{{ $wsroot }}/\{{ $out }}"
+                    LET $vabs: STRING = "\{{ $wsroot }}/\{{ $values }}"
+                    LET $fragments: MAP<ANY> = $t.fragments
+                    LET $fjson: STRING = TO_JSON($fragments)
+                    LET $ctx: CTX = {wsroot: $wsroot, config: $cfgpath, staging: $staging, globals: "\{{ $staging }}/_globals.json", target: $name, template: $tabs, out: $oabs, values: $vabs, fragments: $fjson}
+                    ECHO "rendering \{{ $name }} -> \{{ $out }}"
+        {{ $per_target }}        }
+            }
+        }
+        """
     RETURN $mod
 }
 
-FUNC PIPE_RUN($mod: STRING, $ctx: CTX) {
+FUNC PIPE_RUN($mod: STRING, $wsroot: STRING, $cfgpath: STRING) {
     WORKSPACE LOCAL
     LET $exe: STRING = STD::INTERPRETER()
-    LET $json: STRING = STD::TO_JSON($ctx)
     LET $child: PIPE
-    WITH_IO [stdout=$child] ECHO """
-        {{ $mod }}
-        LET $ctx: CTX = PARSE_JSON(\"\"\"{{ $json }}\"\"\")
-        LET $next: CTX = D::RUN_LIFECYCLE($ctx)
-        ECHO "\{{ STD::TO_JSON($next) }}"
-        """
-    LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe]
-    LET $back: CTX = STD::PARSE_JSON($out)
-    RETURN $back
+    WITH_IO [stdout=$child] ECHO "{{ $mod }}"
+    LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe, "--root", $wsroot, "--config", $cfgpath]
+    RETURN $out
 }
 
-EXPORT COMPOSE_FIVE
+EXPORT COMPOSE_ALL
 EXPORT PIPE_RUN
-EXPORT TYPE CTX
-EXPORT TYPE PLUGIN

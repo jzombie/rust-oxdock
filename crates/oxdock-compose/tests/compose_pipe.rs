@@ -1,10 +1,11 @@
-//! Pipe plus fresh interpreter across all five lifecycle stages.
+//! Pipe plus fresh interpreter: tracer order through the child.
 //!
-//! Seeds the real `src/compose.oxfile`, one hook plugin, and a parent
-//! script that runs every stage in dispatcher order through the pipe.
-//! The hook fires inside the child for INGEST; every other stage
-//! passes context through untouched. Needs the real CLI binary next
-//! to the test executable (`cargo build -p oxdock` first).
+//! Seeds the real `src/compose.oxfile`, a tracer hook, and a parent
+//! script that pipes a hand-written child through `PIPE_RUN`. The
+//! child calls tracer FUNCs in order; the parent asserts the output
+//! markers arrive in that order, proving the pipe executes the child
+//! with a fresh interpreter. `COMPOSE_ALL` byte layout is covered by
+//! `dispatcher.rs`; end-to-end docs renders are covered by `render.rs`.
 
 use oxdock_core::{Engine, ExecIo};
 use oxdock_fs::{GuardedPath, PathResolver};
@@ -15,39 +16,44 @@ fn interpreter() -> String {
         .parent()
         .and_then(|deps| deps.parent())
         .expect("test executable has a target dir");
-    let candidate = debug.join("oxdock");
+    #[cfg(windows)]
+    let candidate = debug.join("oxdock-compose-child.exe");
+    #[cfg(not(windows))]
+    let candidate = debug.join("oxdock-compose-child");
     assert!(
         candidate.is_file(),
-        "interpreter binary missing at {}: run `cargo build -p oxdock` first",
+        "pipe-child binary missing at {}: run `cargo build -p oxdock-compose` first",
         candidate.display()
     );
     candidate.to_string_lossy().into_owned()
 }
 
-fn engine() -> Engine<oxdock_process::DefaultProcessManager> {
+fn engine(root: &GuardedPath) -> Engine<oxdock_process::DefaultProcessManager> {
     let mut io = ExecIo::new();
     io.set_interpreter(interpreter());
+    io.insert_inherit_env(
+        oxdock_fs::env::oxdock::WORKSPACE_ROOT,
+        root.as_path().to_string_lossy().into_owned(),
+    );
     Engine::new().with_io(io)
 }
 
 fn seed(root: &GuardedPath, resolver: &PathResolver) {
     for (rel, contents) in [
         ("compose.oxfile", include_str!("../src/compose.oxfile")),
-        (
-            "dispatcher.oxfile",
-            include_str!("../src/dispatcher.oxfile"),
-        ),
+        ("types.oxfile", include_str!("../src/types.oxfile")),
         (
             "hook.oxfile",
             indoc::indoc! {r#"
                 IMPORT [STD]
-                TYPE CTX = MAP<text: STRING>
-                FUNC INGEST($ctx: CTX) {
-                    LET $t: STRING = $ctx.text
-                    RETURN {text: "{{ $t }}+ingest"}
+                FUNC TRACE_A($x: STRING) {
+                    RETURN "{{ $x }}+A"
                 }
-                EXPORT INGEST
-                EXPORT TYPE CTX
+                FUNC TRACE_B($x: STRING) {
+                    RETURN "{{ $x }}+B"
+                }
+                EXPORT TRACE_A
+                EXPORT TRACE_B
             "#},
         ),
     ] {
@@ -60,30 +66,42 @@ fn seed(root: &GuardedPath, resolver: &PathResolver) {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the real interpreter binary")]
-fn all_stages_run_through_pipe_in_dispatcher_order() {
+fn tracer_stages_run_through_pipe_in_order() {
     let temp = GuardedPath::tempdir().expect("tempdir");
     let root = temp.as_guarded_path().clone();
     let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
     seed(&root, &resolver);
 
-    // Order lives only in dispatcher RUN_LIFECYCLE: the child the
-    // composer builds statically imports the dispatcher and calls
-    // D::RUN_LIFECYCLE, whose bare phase calls resolve to the
-    // plugin-populated implementations in the child scope.
+    // Hand-written child: imports the tracer hook, calls A then B,
+    // echoes the trace. PIPE_RUN pipes it through the fresh child
+    // binary; the output markers prove execution order.
     let parent = indoc::indoc! {r#"
+        INHERIT_ENV [OXDOCK_WORKSPACE_ROOT]
+        IMPORT [TYPE CTX FROM "types.oxfile"]
+        IMPORT [TYPE PLUGIN FROM "types.oxfile"]
         IMPORT ["compose.oxfile" AS C]
-        TYPE CTX = MAP<text: STRING>
-        TYPE PLUGIN = MAP<path: STRING, alias: STRING, hooks: LIST<STRING>>
-        LET $plugins: LIST<PLUGIN> = [{path: "hook.oxfile", alias: "H0", hooks: ["INGEST"]}]
-        LET $ctx: CTX = {text: "hello"}
-        LET $mod: STRING = C::COMPOSE_FIVE($plugins, "dispatcher.oxfile")
-        LET $final: CTX = C::PIPE_RUN($mod, $ctx)
-        LET $text: STRING = $final.text
+        LET $mod: STRING = """
+        INHERIT_ENV [COMPOSE_CONFIG, OXDOCK_WORKSPACE_ROOT]
+        WORKSPACE LOCAL
+        IMPORT ["hook.oxfile" AS H0]
+        LET $x: STRING = "start"
+        $x = H0::TRACE_A($x)
+        $x = H0::TRACE_B($x)
+        ECHO "trace=\{{ $x }}"
+        """
+        LET $wsroot: STRING = "{{ env:OXDOCK_WORKSPACE_ROOT }}"
+        LET $out: STRING = C::PIPE_RUN($mod, $wsroot, "docs-gen.json")
     "#};
-    let output = engine().run_script(&root, parent).expect("pipeline runs");
-    assert_eq!(
-        output.bindings.get("text").and_then(|v| v.as_str()),
-        Some("hello+ingest"),
-        "INGEST hook ran in the child; other stages passed through",
+    let output = engine(&root)
+        .run_script(&root, parent)
+        .expect("pipeline runs");
+    let out = output
+        .bindings
+        .get("out")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        out.contains("trace=start+A+B"),
+        "tracer ran A then B in the child: {out}"
     );
 }

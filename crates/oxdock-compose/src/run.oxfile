@@ -1,0 +1,20 @@
+# Pipeline entry: read the config, assemble the child, pipe it.
+# Everything domain-specific arrives through the config's lifecycle
+# registry; this file names no modules, no paths, and no conventions
+# beyond the registry shape itself.
+INHERIT_ENV [COMPOSE_CONFIG, OXDOCK_WORKSPACE_ROOT]
+IMPORT [STD]
+IMPORT [TYPE CTX FROM "crates/oxdock-compose/src/types.oxfile"]
+IMPORT [TYPE PLUGIN FROM "crates/oxdock-compose/src/types.oxfile"]
+IMPORT ["crates/oxdock-compose/src/compose.oxfile" AS C]
+IMPORT ["crates/oxdock-compose/src/dispatcher.oxfile" AS D]
+
+LET $cfgpath: STRING = "{{ env:COMPOSE_CONFIG }}"
+LET $wsroot: STRING = "{{ env:OXDOCK_WORKSPACE_ROOT }}"
+LET $cfg: MAP<ANY> = LOAD_JSON($cfgpath)
+LET $types: STRING = $cfg.lifecycle.types
+LET $plugins: LIST<PLUGIN> = $cfg.lifecycle.plugins
+LET $stages: LIST<STRING> = D::STAGES()
+LET $mod: STRING = C::COMPOSE_ALL($plugins, $stages, $types)
+LET $log: STRING = C::PIPE_RUN($mod, $wsroot, $cfgpath)
+ECHO "{{ $log }}"
