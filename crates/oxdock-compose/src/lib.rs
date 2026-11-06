@@ -1,10 +1,11 @@
 //! oxdock-compose: composed artifacts, byte-identical.
 //!
-//! General-purpose composition pipeline extracted from the workspace docs
-//! renderer. The core is now `COMPOSE_ENGINE` (see [`engine`]) plus
-//! the core `DEFER` plugin (see [`defer`]); domain plugins (`OXDOCK`,
-//! `RUST`, `MARKDOWN`) and the `DOCS` compat alias still register
-//! per-pipeline until their extraction slices land.
+//! General-purpose lifecycle renderer: one context in, deterministic
+//! outputs out. The core is `COMPOSE_ENGINE` (see [`engine`]) plus
+//! the `DEFER` two-pass plugin (see [`defer`]); domain content
+//! arrives through host plugin modules (`OXDOCK`, `RUST`,
+//! `MARKDOWN`) and through lifecycle files (`src/lifecycle`),
+//! one file per pipeline participant exposing the same methods.
 pub mod defer;
 pub mod engine;
 pub mod plugins;

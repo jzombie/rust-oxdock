@@ -1,24 +1,30 @@
-# docs-gen
+# oxdock-compose
 
-Renders every README in the workspace from shared templates.
+Composed artifacts, byte-identical: a general-purpose lifecycle renderer turning one context into deterministic outputs.
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
 
 ## Overview
 
-`docs-gen` builds every `README.md` in this workspace from templates,
-so shared sections are written once and reused everywhere. Run it with
-`cargo run -p docs-gen` after changing anything under a
+`oxdock-compose` renders composed artifacts from separately authored
+inputs through an ordered lifecycle: one context in, byte-identical
+outputs out. Markdown docs are the first pipeline, not the
+boundary: the same engine composes any text artifacts a repo's
+plugins describe. Run it with `cargo run -p oxdock-compose --root
+<repo> [--config compose.json]` after changing anything under a
 `.oxdock/template` directory, then commit the regenerated outputs.
 
 Concretely, each run:
 
+- discovers every target by walking the configured scopes for
+  `target.json` files, failing closed on duplicate names and on
+  zero discoveries alike,
 - assembles every README from a master template whose section order
   is the order you see in that file,
 - fills in sections shared between documents (the project intro,
   install instructions, embed example) from single canonical files,
 - stamps the workspace version into every version reference from one
-  source (`CRATE_VERSION`, overridable per run),
+  source (the configured `version_key`, overridable per run),
 - regenerates the command reference from the parser command registry,
   so the docs can never list a removed command or miss a new one,
 - re-derives each member document display name and description from that
@@ -27,42 +33,50 @@ Concretely, each run:
 - and fails the whole run on a misspelled section or unknown value
   instead of rendering wrong docs.
 
-It accepts one flag:
+It accepts two flags:
 
 - `--root <path>`: which workspace root to render. Without it, the
   runner discovers the enclosing workspace from the current
   directory.
+- `--config <path>`: which pipeline config to read. Without it, the
+  runner requires `compose.json` at the root.
 
 ## Pipeline
 
 Each run performs the same steps, in order:
 
-1. Load `compose.json` (global values files, doc root scopes, generated
-   inputs, merge policy, staging dir, version key, scope key aliases).
-2. Render generated inputs through config-driven `GENERATED(key)`
-   dispatch (command index and body, function references): the script
-   only knows logical keys while the config owns the output paths, so
-   generated content is shareable instead of trapped in one document.
-3. Sync each member's `values.json` from its manifest, values only (see
-   below). Target files, masters, and fragments are never touched by
-   sync.
-4. Read Cargo workspace content once (`WORKSPACE_MEMBERS`,
-   `WORKSPACE_VERSION`, `WORKSPACE_PACKAGE`) for version stamps and
-   citation metadata, carried on the expansion scope under the
-   configured `workspace_pkg` key.
-5. Assemble one `$files` manifest per target: glob every `fragments`
-   pattern, expand each match once, and write the group-to-content map
-   for the pipeline to `LOAD_JSON`.
-6. Render every target: the `RENDER_TARGET` stage reads each
-   `target.json`, loads its values and `$files` manifest, and expands
-   the master template once through native `EXPAND` piped to `APPEND`.
+1. Load `compose.json` (global values files, scopes, generated
+   inputs, merge policy, staging dir, version key, scope key
+   aliases, lifecycle plugin files).
+2. Provision the embedded pipeline files and check every plugin
+   file exposes the same lifecycle methods, failing fast naming
+   any outlier instead of mid-run at first use.
+3. Compose the child script: unroll one qualified call per stage
+   per plugin, in registration order (`SETUP` once up front, then
+   the six stages per target), and pipe it through a fresh
+   interpreter. The child is never written to disk.
+4. Per target: validate the descriptor (`INGEST`), expand every
+   fragment once into a staging manifest (`ASSEMBLE`), expand the
+   master template over that manifest (`RENDER`), expand deferred
+   sentinels (`DEFERRED`), write the output (`WRITE_OUT`), and
+   byte-compare disk against pipe (`VERIFY`).
+5. Docs intake (the OxDock plugin's `SETUP`, not the generic
+   passthrough): render generated inputs through config-driven
+   `GENERATED(key)` dispatch, snapshot workspace version plus
+   package into staging, and sync each member's `values.json`
+   from its manifest, values only (see below). Target files,
+   masters, and fragments are never touched by sync.
+6. Re-apply executable bits from `target.json` declarations, then
+   report. Zero discovered targets fails closed naming the
+   config: a silent empty render is never a success.
 
-The pipeline itself is OxDock, embedded in `src/lib.rs` via `oxdock!`
-and parsed by the production dispatcher. Sequencing and all writes live
-in the DSL as named `FUNC` stages; rendering, expansion, and encoding
-helpers live in Rust only where the DSL has no primitives (registry
-rendering, TOML metadata, strict JSON encoding, placeholder-safe
-stems).
+The pipeline itself is OxDock: static `.oxfile` sources byte-copied
+from the tree, entry plus composer plus per-stage lifecycle files,
+with the child composed fresh every run and piped through a fresh
+interpreter. Sequencing and all writes live in the DSL as named
+`FUNC` stages; rendering, expansion, and encoding helpers live in
+Rust only where the DSL has no primitives (registry rendering,
+TOML metadata, strict JSON encoding, placeholder-safe stems).
 
 ### Modules
 
@@ -145,7 +159,7 @@ literal placeholder examples natively (`{{ ... }}`) so they pass
 through untouched.
 
 A target whose output executes directly declares `"executable":
-true` beside `out`: docs-gen re-applies `0755` after every render,
+true` beside `out`: the pipeline re-applies `0755` after every render,
 so regenerating `install.sh` cannot silently drop the bit the smoke
 workflow needs to execute it. Omitted everywhere else; a
 present-but-not-boolean flag fails the run instead of rendering.
@@ -159,4 +173,4 @@ copies.
 
 ## License
 
-`docs-gen` is distributed under the terms of the [Apache License (Version 2.0)](https://github.com/jzombie/rust-oxdock/blob/main/LICENSE).
+`oxdock-compose` is distributed under the terms of the [Apache License (Version 2.0)](https://github.com/jzombie/rust-oxdock/blob/main/LICENSE).

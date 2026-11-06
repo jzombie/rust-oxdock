@@ -3,7 +3,7 @@ name = "oxdock-compose"
 version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Renders every README in the workspace from shared templates."
+description = "Composed artifacts, byte-identical: a general-purpose lifecycle renderer turning one context into deterministic outputs."
 
 # Prototype crate; don't publish with this name
 publish = false

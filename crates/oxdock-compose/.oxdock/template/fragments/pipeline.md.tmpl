@@ -2,32 +2,38 @@
 
 Each run performs the same steps, in order:
 
-1. Load `compose.json` (global values files, doc root scopes, generated
-   inputs, merge policy, staging dir, version key, scope key aliases).
-2. Render generated inputs through config-driven `GENERATED(key)`
-   dispatch (command index and body, function references): the script
-   only knows logical keys while the config owns the output paths, so
-   generated content is shareable instead of trapped in one document.
-3. Sync each member's `values.json` from its manifest, values only (see
-   below). Target files, masters, and fragments are never touched by
-   sync.
-4. Read Cargo workspace content once (`WORKSPACE_MEMBERS`,
-   `WORKSPACE_VERSION`, `WORKSPACE_PACKAGE`) for version stamps and
-   citation metadata, carried on the expansion scope under the
-   configured `workspace_pkg` key.
-5. Assemble one `$files` manifest per target: glob every `fragments`
-   pattern, expand each match once, and write the group-to-content map
-   for the pipeline to `LOAD_JSON`.
-6. Render every target: the `RENDER_TARGET` stage reads each
-   `target.json`, loads its values and `$files` manifest, and expands
-   the master template once through native `EXPAND` piped to `APPEND`.
+1. Load `compose.json` (global values files, scopes, generated
+   inputs, merge policy, staging dir, version key, scope key
+   aliases, lifecycle plugin files).
+2. Provision the embedded pipeline files and check every plugin
+   file exposes the same lifecycle methods, failing fast naming
+   any outlier instead of mid-run at first use.
+3. Compose the child script: unroll one qualified call per stage
+   per plugin, in registration order (`SETUP` once up front, then
+   the six stages per target), and pipe it through a fresh
+   interpreter. The child is never written to disk.
+4. Per target: validate the descriptor (`INGEST`), expand every
+   fragment once into a staging manifest (`ASSEMBLE`), expand the
+   master template over that manifest (`RENDER`), expand deferred
+   sentinels (`DEFERRED`), write the output (`WRITE_OUT`), and
+   byte-compare disk against pipe (`VERIFY`).
+5. Docs intake (the OxDock plugin's `SETUP`, not the generic
+   passthrough): render generated inputs through config-driven
+   `GENERATED(key)` dispatch, snapshot workspace version plus
+   package into staging, and sync each member's `values.json`
+   from its manifest, values only (see below). Target files,
+   masters, and fragments are never touched by sync.
+6. Re-apply executable bits from `target.json` declarations, then
+   report. Zero discovered targets fails closed naming the
+   config: a silent empty render is never a success.
 
-The pipeline itself is OxDock, embedded in `src/lib.rs` via `oxdock!`
-and parsed by the production dispatcher. Sequencing and all writes live
-in the DSL as named `FUNC` stages; rendering, expansion, and encoding
-helpers live in Rust only where the DSL has no primitives (registry
-rendering, TOML metadata, strict JSON encoding, placeholder-safe
-stems).
+The pipeline itself is OxDock: static `.oxfile` sources byte-copied
+from the tree, entry plus composer plus per-stage lifecycle files,
+with the child composed fresh every run and piped through a fresh
+interpreter. Sequencing and all writes live in the DSL as named
+`FUNC` stages; rendering, expansion, and encoding helpers live in
+Rust only where the DSL has no primitives (registry rendering,
+TOML metadata, strict JSON encoding, placeholder-safe stems).
 
 ### Modules
 
