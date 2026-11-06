@@ -3,9 +3,9 @@ name = "docs-gen"
 version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Renders every README in the workspace from shared templates."
+description = "Compatibility pointer to oxdock-compose; all logic lives there."
 
-# Prototype crate; don't publish with this name
+# Compatibility shim; never publish under this name
 publish = false
 
 [lib]
@@ -18,24 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-base64.workspace = true
-oxdock-core.workspace = true
+oxdock-compose = { version = "0.0.0", path = "../oxdock-compose" }
 oxdock-fs.workspace = true
-oxdock-func-macro.workspace = true
-oxdock-macros.workspace = true
-oxdock-markdown-plugin.workspace = true
-# Plugin crates are linked so their HostModules can be introspected
-# in-process (static linking requires the edge). The docs path only
-# reads metadata; it never serves, connects, or binds.
-oxdock-net-plugin.workspace = true
-oxdock-parser.workspace = true
-oxdock-process.workspace = true
-oxdock-ssh-plugin.workspace = true
-serde_json.workspace = true
-toml_edit.workspace = true
-
-[dev-dependencies]
-indoc.workspace = true
 
 [lints]
 workspace = true

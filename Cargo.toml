@@ -3,6 +3,7 @@ members = [
     "crates/docs-gen",
     "crates/oxdock-build",
     "crates/oxdock-cli",
+    "crates/oxdock-compose",
     "crates/oxdock-core",
     "crates/oxdock-doc-tests",
     "crates/oxdock-embed",

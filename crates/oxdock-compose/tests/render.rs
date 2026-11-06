@@ -1,7 +1,7 @@
 //! End to end pipeline renders over isolated tempdir fixtures.
 //!
 //! Each test builds a tiny repo root (config, values, one target with
-//! master plus fragments) and runs the real `docs_gen::run` over it.
+//! master plus fragments) and runs the real `oxdock_compose::run` over it.
 //! Fixture IO needs a host tempdir, so the suite stays out of Miri.
 
 use oxdock_core::{HostModule, OxDockFn, TypeTag, Value};
@@ -93,7 +93,7 @@ fn as_refs(tree: &[(String, String)]) -> Vec<(&str, &str)> {
 fn overwrite_merge_renders_overlay_values_in_master_order() {
     let tree = base_tree("overwrite");
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(out.contains("# Base 1"), "master header renders: {out}");
     assert!(
@@ -117,7 +117,7 @@ fn overwrite_merge_renders_overlay_values_in_master_order() {
 fn fail_on_duplicate_names_the_repeated_key() {
     let tree = base_tree("fail_on_duplicate");
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(docs_gen::run(root.as_path()).expect_err("dup must fail"));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("dup must fail"));
     assert!(err.contains("dup"), "error names the key: {err}");
 }
 
@@ -136,7 +136,7 @@ fn duplicate_stem_fails_naming_the_stem() {
     // Same EXIT-1 shape as duplicate targets: the stem ECHO goes to
     // stdout, so pin the failure mode and attribute it via the
     // passing base tree render.
-    let err = err_text(docs_gen::run(root.as_path()).expect_err("dup stem must fail"));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("dup stem must fail"));
     assert!(
         err.contains("EXIT requested with code 1"),
         "duplicate stem exits 1: {err}"
@@ -158,7 +158,7 @@ fn duplicate_target_name_fails() {
     // goes to stdout rather than the error chain, so pin the failure
     // mode (clean EXIT 1, not a strict expansion error) and rely on
     // the passing base tree render to attribute it to the duplicate.
-    let err = err_text(docs_gen::run(root.as_path()).expect_err("dup target must fail"));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("dup target must fail"));
     assert!(
         err.contains("EXIT requested with code 1"),
         "duplicate target exits 1: {err}"
@@ -177,7 +177,7 @@ fn unknown_placeholder_fails_strict() {
         "C {{ $docs_global.nope }}".to_string(),
     ));
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(docs_gen::run(root.as_path()).expect_err("unknown key must fail"));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("unknown key must fail"));
     assert!(err.contains("nope"), "error names the key: {err}");
 }
 
@@ -195,7 +195,7 @@ fn escaped_placeholder_stays_literal() {
     // The extra fragment joins group sec; master stays fixed, so read
     // the staged manifest for the literal instead of the output.
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let manifest = read(&resolver, &root, "target/t-docs/t.json");
     assert!(
         manifest.contains("{{ $docs_global.title }}"),
@@ -232,7 +232,7 @@ fn custom_scope_keys_and_staging_render() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(out.contains("# Base 1"), "custom scope keys render: {out}");
     assert!(out.contains("A base "), "custom version key renders: {out}");
@@ -265,7 +265,7 @@ fn unknown_generated_key_lists_known_keys() {
         ),
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(docs_gen::run(root.as_path()).expect_err("bad key must fail"));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("bad key must fail"));
     assert!(err.contains("nope"), "error names the key: {err}");
     assert!(
         err.contains("command_index"),
@@ -308,7 +308,7 @@ fn slim_and_full_share_fragments_with_split_content() {
         .map(|(rel, contents)| (*rel, *contents))
         .collect();
     let (_temp, root, resolver) = fixture(&refs);
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let slim = read(&resolver, &root, "slim.txt");
     let full = read(&resolver, &root, "full.txt");
     assert!(
@@ -357,7 +357,7 @@ fn external_plugin_resolves_in_templates_without_header_changes() {
         "C {{ TEST::PING($docs_global.who) }}".to_string(),
     ));
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    docs_gen::run_with_plugins(root.as_path(), vec![test_module()]).expect("render");
+    oxdock_compose::run_with_plugins(root.as_path(), vec![test_module()]).expect("render");
     let manifest = read(&resolver, &root, "target/t-docs/t.json");
     assert!(
         manifest.contains("PONG:overlay"),
@@ -406,7 +406,7 @@ fn toc_renders_tree_from_final_readme() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(
         out.contains("- [Alpha](#alpha)\n  - [Sub](#sub)\n- [Alpha](#alpha-1)\n"),
@@ -449,7 +449,7 @@ fn toc_renders_inline_bar_for_single_level() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(
         out.contains("[Alpha](#alpha) | [Beta](#beta)"),
@@ -494,7 +494,7 @@ fn toc_replaces_multiple_sentinels_independently() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(
         out.contains("[Alpha](#alpha) | [Beta](#beta)"),
@@ -534,7 +534,7 @@ fn toc_rejects_multi_level_inline_at_dispatch() {
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
     // DEFER only checks the envelope in pass 1; the target validates
     // its own options when pass 2 dispatches the full document.
-    let err = err_text(docs_gen::run(root.as_path()).expect_err("inline depth must fail"));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("inline depth must fail"));
     assert!(
         err.contains("requires max_level == min_level"),
         "error names the inline depth rule: {err}"
@@ -572,7 +572,7 @@ fn toc_renders_immediately_without_deferral() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(
         out.contains("- [Alpha](#alpha)\n- [Beta](#beta)\n"),
@@ -611,7 +611,7 @@ fn context_reference_composes_once_with_resolving_links() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&tree);
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert_eq!(
         out.matches("## Contexts").count(),
@@ -671,7 +671,7 @@ fn function_reference_without_context_fragment_leaves_dangling_anchors() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&tree);
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(out.contains("](#context-ast)"), "links still render: {out}");
     assert!(
@@ -705,7 +705,7 @@ fn toc_rejects_unknown_defer_targets_at_dispatch() {
         ),
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(docs_gen::run(root.as_path()).expect_err("unknown target must fail"));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("unknown target must fail"));
     assert!(
         err.contains("unknown deferred target 'NOPE::MISSING'"),
         "error names the target: {err}"
@@ -727,7 +727,7 @@ fn executable_target_regains_mode_bit_after_render() {
         .expect("base tree carries target.json");
     entry.1 = EXEC_TARGET.to_string();
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    docs_gen::run(root.as_path()).expect("render");
+    oxdock_compose::run(root.as_path()).expect("render");
     let out = read(&resolver, &root, "run.sh");
     assert!(!out.contains("{{"), "no placeholders survive: {out}");
     #[cfg(unix)]

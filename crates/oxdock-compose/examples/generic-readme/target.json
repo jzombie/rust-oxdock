@@ -1,0 +1,31 @@
+{
+  "targets": [
+    {
+      "name": "tiny-readme",
+      "out": "crates/oxdock-compose/examples/generic-readme/README.md",
+      "values": "crates/oxdock-compose/examples/generic-readme/values.json",
+      "template": "crates/oxdock-compose/examples/generic-readme/README.md.tmpl",
+      "fragments": {
+        "sec": ["crates/oxdock-compose/examples/generic-readme/fragments/sec/*.md.tmpl"]
+      }
+    },
+    {
+      "name": "tiny-llms",
+      "out": "crates/oxdock-compose/examples/generic-readme/llms.txt",
+      "values": "crates/oxdock-compose/examples/generic-readme/values.json",
+      "template": "crates/oxdock-compose/examples/generic-readme/llms.txt.tmpl",
+      "fragments": {
+        "sec": ["crates/oxdock-compose/examples/generic-readme/fragments/sec/*.md.tmpl"]
+      }
+    },
+    {
+      "name": "tiny-llms-full",
+      "out": "crates/oxdock-compose/examples/generic-readme/llms-full.txt",
+      "values": "crates/oxdock-compose/examples/generic-readme/values.json",
+      "template": "crates/oxdock-compose/examples/generic-readme/llms-full.txt.tmpl",
+      "fragments": {
+        "sec": ["crates/oxdock-compose/examples/generic-readme/fragments/sec/*.md.tmpl"]
+      }
+    }
+  ]
+}

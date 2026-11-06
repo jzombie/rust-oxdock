@@ -1,0 +1,22 @@
+{
+  "targets": [
+    {
+      "name": "resume-md",
+      "out": "crates/oxdock-compose/examples/resume/resume.md",
+      "values": "crates/oxdock-compose/examples/resume/values.json",
+      "template": "crates/oxdock-compose/examples/resume/resume.md.tmpl",
+      "fragments": {
+        "sec": ["crates/oxdock-compose/examples/resume/fragments/sec/*.md.tmpl"]
+      }
+    },
+    {
+      "name": "resume-jsonld",
+      "out": "crates/oxdock-compose/examples/resume/resume.jsonld",
+      "values": "crates/oxdock-compose/examples/resume/values.json",
+      "template": "crates/oxdock-compose/examples/resume/resume.jsonld.tmpl",
+      "fragments": {
+        "data": ["crates/oxdock-compose/examples/resume/fragments/data/*.tmpl"]
+      }
+    }
+  ]
+}
