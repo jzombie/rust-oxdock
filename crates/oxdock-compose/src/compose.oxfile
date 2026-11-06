@@ -97,6 +97,7 @@ FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) 
         WRITE "\{{ $staging }}/_globals.json" $gjson
         LET $run: CTX = {wsroot: $wsroot, config: $cfgpath, staging: $staging, globals: "\{{ $staging }}/_globals.json"}
         {{ $setup }}LET $seen: MAP<ANY> = {}
+        LET $count: INT = 0
         FOR $scope: STRING IN $cfg.scopes {
             FOR $tj: STRING IN GLOB("\{{ $scope }}/**/target.json") {
                 LET $file: MAP<ANY> = LOAD_JSON($tj)
@@ -107,6 +108,7 @@ FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) 
                         EXIT 1
                     }
                     $seen = MAP_SET($seen, $tname, $tj)
+                    $count = $count + 1
                     IF HAS_KEY($t, "globs") {
                         ECHO "target '\{{ $t.name }}' still uses 'globs'; declare 'template' and grouped 'fragments' patterns instead"
                         EXIT 1
@@ -124,6 +126,10 @@ FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) 
                     ECHO "rendering \{{ $name }} -> \{{ $out }}"
         {{ $per_target }}        }
             }
+        }
+        IF $count == 0 {
+            ECHO "no targets discovered under the configured scopes; check 'scopes' in \{{ $cfgpath }}"
+            EXIT 1
         }
         """
     RETURN $mod

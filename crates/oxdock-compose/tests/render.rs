@@ -101,6 +101,17 @@ fn with_lifecycle(cfg: &str) -> String {
 
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 fn fixture(files: &[(&str, &str)]) -> (GuardedTempDir, GuardedPath, PathResolver) {
+    fixture_opt(files, true)
+}
+
+/// Fixture with optional lifecycle injection: `inject == false`
+/// writes the config verbatim, proving the engine default (generic
+/// lifecycle, no plugins key at all).
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+fn fixture_opt(
+    files: &[(&str, &str)],
+    inject: bool,
+) -> (GuardedTempDir, GuardedPath, PathResolver) {
     // Every run pipes stages through the child binary, never the
     // pipeline binary itself.
     // SAFETY: written to the same value on every call; tests never
@@ -118,7 +129,7 @@ fn fixture(files: &[(&str, &str)]) -> (GuardedTempDir, GuardedPath, PathResolver
             resolver.create_dir_all(&dir).expect("create dir");
         }
         let path = root.join(rel).expect("join file");
-        let bytes: Vec<u8> = if *rel == "compose.json" {
+        let bytes: Vec<u8> = if inject && *rel == "compose.json" {
             with_lifecycle(contents).into_bytes()
         } else {
             contents.as_bytes().to_vec()
@@ -335,6 +346,55 @@ fn master_sees_workspace_package_like_citation() {
         out.contains("https://example.test/repo"),
         "master resolves workspace package: {out}"
     );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn empty_scopes_fail_closed_instead_of_rendering_nothing() {
+    // A scope typo must not render zero targets and exit 0: the
+    // driver counts discoveries and fails naming the config.
+    let tree = vec![
+        ("Cargo.toml".to_string(), MANIFEST.to_string()),
+        (
+            "compose.json".to_string(),
+            r#"{"global_values": "base.json", "scopes": [], "generated": []}"#.to_string(),
+        ),
+        ("base.json".to_string(), BASE_VALUES.to_string()),
+    ];
+    let (_temp, root, _resolver) = fixture(&as_refs(&tree));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("empty must fail"));
+    assert!(
+        err.contains("failed with status"),
+        "error proves the child boundary failed it: {err}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn omitted_lifecycle_falls_back_to_generic() {
+    // No lifecycle key at all: the engine's generic file runs every
+    // stage. Scope contract still comes from the config, never code.
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "compose.json")
+        .expect("base tree carries compose.json");
+    entry.1 = r#"{"global_values": ["base.json", "overlay.json"], "merge_policy": "overwrite", "scopes": ["."], "generated": [], "staging_dir": "target/t-docs", "vars": {"global": "docs_global", "ctx": "docs_ctx"}}"#.to_string();
+    let (_temp, root, resolver) = fixture_opt(&as_refs(&tree), false);
+    oxdock_compose::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "out.md");
+    assert!(out.contains("# Base 1"), "generic master renders: {out}");
+    assert!(
+        out.contains("A overlay 1"),
+        "generic fragments render: {out}"
+    );
+    assert!(!out.contains("{{"), "no placeholders survive: {out}");
 }
 
 #[test]

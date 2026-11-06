@@ -157,3 +157,21 @@ fn compose_all_rejects_qualifier_collisions_naming_both() {
         "shared qualifier fails closed: {err}"
     );
 }
+
+#[test]
+fn compose_all_fails_closed_on_zero_targets() {
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    seed(&root, &resolver);
+
+    let got = compose_text(&root, r#"["a.oxfile"]"#, r#"["INGEST"]"#);
+    assert!(
+        got.contains("LET $count: INT = 0"),
+        "driver counts discovered targets"
+    );
+    assert!(
+        got.contains("no targets discovered"),
+        "empty discovery fails naming the scopes"
+    );
+}
