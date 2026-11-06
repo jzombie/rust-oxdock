@@ -53,54 +53,11 @@
     }
   ],
   "lifecycle": {
-    "types": "crates/oxdock-compose/src/types.oxfile",
     "plugins": [
       {
         "module": "OXDOCK",
         "hooks": [
           "SETUP"
-        ]
-      },
-      {
-        "path": "crates/oxdock-compose/src/hooks/ingest.oxfile",
-        "alias": "H1",
-        "hooks": [
-          "INGEST"
-        ]
-      },
-      {
-        "path": "crates/oxdock-compose/src/hooks/assemble.oxfile",
-        "alias": "H2",
-        "hooks": [
-          "ASSEMBLE"
-        ]
-      },
-      {
-        "path": "crates/oxdock-compose/src/hooks/render.oxfile",
-        "alias": "H3",
-        "hooks": [
-          "RENDER"
-        ]
-      },
-      {
-        "path": "crates/oxdock-compose/src/hooks/deferred.oxfile",
-        "alias": "H4",
-        "hooks": [
-          "DEFERRED"
-        ]
-      },
-      {
-        "path": "crates/oxdock-compose/src/hooks/write.oxfile",
-        "alias": "H5",
-        "hooks": [
-          "WRITE_OUT"
-        ]
-      },
-      {
-        "path": "crates/oxdock-compose/src/hooks/verify.oxfile",
-        "alias": "H6",
-        "hooks": [
-          "VERIFY"
         ]
       }
     ]

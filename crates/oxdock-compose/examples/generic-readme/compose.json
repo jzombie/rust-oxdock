@@ -1,11 +1,12 @@
-{"global_values": "crates/oxdock-compose/examples/generic-readme/values.json", "scopes": ["crates/oxdock-compose/examples/generic-readme"], "generated": [],
- "vars": {"global": "docs_global", "ctx": "docs_ctx", "workspace_pkg": "workspace_pkg"},
- "lifecycle": {"types": "crates/oxdock-compose/src/types.oxfile", "plugins": [
-  {"path": "crates/oxdock-compose/src/hooks/setup.oxfile", "alias": "H0", "hooks": ["SETUP"]},
-  {"path": "crates/oxdock-compose/src/hooks/ingest.oxfile", "alias": "H1", "hooks": ["INGEST"]},
-  {"path": "crates/oxdock-compose/src/hooks/assemble.oxfile", "alias": "H2", "hooks": ["ASSEMBLE"]},
-  {"path": "crates/oxdock-compose/src/hooks/render.oxfile", "alias": "H3", "hooks": ["RENDER"]},
-  {"path": "crates/oxdock-compose/src/hooks/deferred.oxfile", "alias": "H4", "hooks": ["DEFERRED"]},
-  {"path": "crates/oxdock-compose/src/hooks/write.oxfile", "alias": "H5", "hooks": ["WRITE_OUT"]},
-  {"path": "crates/oxdock-compose/src/hooks/verify.oxfile", "alias": "H6", "hooks": ["VERIFY"]}
- ]}}
+{
+  "global_values": "crates/oxdock-compose/examples/generic-readme/values.json",
+  "scopes": [
+    "crates/oxdock-compose/examples/generic-readme"
+  ],
+  "generated": [],
+  "vars": {
+    "global": "docs_global",
+    "ctx": "docs_ctx",
+    "workspace_pkg": "workspace_pkg"
+  }
+}

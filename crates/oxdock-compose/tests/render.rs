@@ -84,10 +84,9 @@ fn support_files() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Lifecycle registry plus scope contract every fixture config gets:
-/// the SETUP intake via the OXDOCK host module and the generic
-/// stage hooks with run-root-relative paths mirroring the real
-/// tree. Scope key names and the version env name are config data,
+/// Lifecycle override plus scope contract every fixture config gets:
+/// the SETUP intake via the OXDOCK host module; every other slot
+/// falls back to the engine's generic hooks. Scope key names and
 /// never hook code: fixtures declaring their own keep them, the rest
 /// get the docs-pipeline mapping.
 fn with_lifecycle(cfg: &str) -> String {
@@ -108,16 +107,13 @@ fn with_lifecycle(cfg: &str) -> String {
     }
     obj.entry("version_key")
         .or_insert_with(|| serde_json::Value::String("CRATE_VERSION".to_string()));
+    // Only the domain override: the OXDOCK intake fills SETUP while
+    // every other slot falls back to the engine's generic hooks, so
+    // this also proves the merge path on every fixture run.
     obj.insert(
         "lifecycle".to_string(),
-        serde_json::json!({"types": "crates/oxdock-compose/src/types.oxfile", "plugins": [
-            {"module": "OXDOCK", "hooks": ["SETUP"]},
-            {"path": "crates/oxdock-compose/src/hooks/ingest.oxfile", "alias": "H1", "hooks": ["INGEST"]},
-            {"path": "crates/oxdock-compose/src/hooks/assemble.oxfile", "alias": "H2", "hooks": ["ASSEMBLE"]},
-            {"path": "crates/oxdock-compose/src/hooks/render.oxfile", "alias": "H3", "hooks": ["RENDER"]},
-            {"path": "crates/oxdock-compose/src/hooks/deferred.oxfile", "alias": "H4", "hooks": ["DEFERRED"]},
-            {"path": "crates/oxdock-compose/src/hooks/write.oxfile", "alias": "H5", "hooks": ["WRITE_OUT"]},
-            {"path": "crates/oxdock-compose/src/hooks/verify.oxfile", "alias": "H6", "hooks": ["VERIFY"]}
+        serde_json::json!({"plugins": [
+            {"module": "OXDOCK", "hooks": ["SETUP"]}
         ]}),
     );
     serde_json::to_string(&v).expect("serialize fixture config")

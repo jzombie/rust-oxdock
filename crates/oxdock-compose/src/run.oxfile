@@ -1,7 +1,8 @@
 # Pipeline entry: read the config, assemble the child, pipe it.
-# Everything domain-specific arrives through the config's lifecycle
-# registry; this file names no modules, no paths, and no conventions
-# beyond the registry shape itself.
+# The engine knows its own lifecycle: stage order plus the generic
+# hook for every stage. The config only overrides what differs (a
+# domain intake, a custom hook); omitted pieces fall back to the
+# generic defaults, never to empty.
 INHERIT_ENV [COMPOSE_CONFIG, OXDOCK_WORKSPACE_ROOT]
 IMPORT [STD]
 IMPORT [TYPE CTX FROM "crates/oxdock-compose/src/types.oxfile"]
@@ -12,8 +13,10 @@ IMPORT ["crates/oxdock-compose/src/stages.oxfile" AS STAGES]
 LET $cfgpath: STRING = "{{ env:COMPOSE_CONFIG }}"
 LET $wsroot: STRING = "{{ env:OXDOCK_WORKSPACE_ROOT }}"
 LET $cfg: MAP<ANY> = LOAD_JSON($cfgpath)
-LET $types: STRING = $cfg.lifecycle.types
-LET $plugins: LIST<PLUGIN> = $cfg.lifecycle.plugins
+LET $types: STRING = C::TYPES_WITH_DEFAULT($cfg)
+LET $over: LIST<PLUGIN> = C::CONFIGURED_PLUGINS($cfg)
+LET $defaults: LIST<PLUGIN> = C::DEFAULT_PLUGINS()
+LET $plugins: LIST<PLUGIN> = C::MERGE_PLUGINS($over, $defaults)
 LET $stages: LIST<STRING> = STAGES::STAGES()
 LET $mod: STRING = C::COMPOSE_ALL($plugins, $stages, $types)
 LET $log: STRING = C::PIPE_RUN($mod, $wsroot, $cfgpath)

@@ -171,3 +171,72 @@ FUNC PIPE_RUN($mod: STRING, $wsroot: STRING, $cfgpath: STRING) {
 
 EXPORT COMPOSE_ALL
 EXPORT PIPE_RUN
+
+# The engine's own providers: the generic hook for every slot.
+# Configs override per hook name; what they omit stays generic.
+FUNC DEFAULT_PLUGINS() {
+    RETURN [
+        {path: "crates/oxdock-compose/src/hooks/setup.oxfile", alias: "G0", hooks: ["SETUP"]},
+        {path: "crates/oxdock-compose/src/hooks/ingest.oxfile", alias: "G1", hooks: ["INGEST"]},
+        {path: "crates/oxdock-compose/src/hooks/assemble.oxfile", alias: "G2", hooks: ["ASSEMBLE"]},
+        {path: "crates/oxdock-compose/src/hooks/render.oxfile", alias: "G3", hooks: ["RENDER"]},
+        {path: "crates/oxdock-compose/src/hooks/deferred.oxfile", alias: "G4", hooks: ["DEFERRED"]},
+        {path: "crates/oxdock-compose/src/hooks/write.oxfile", alias: "G5", hooks: ["WRITE_OUT"]},
+        {path: "crates/oxdock-compose/src/hooks/verify.oxfile", alias: "G6", hooks: ["VERIFY"]}
+    ]
+}
+
+FUNC TYPES_WITH_DEFAULT($cfg: MAP<ANY>) {
+    LET $has_lc: BOOL = HAS_KEY($cfg, "lifecycle")
+    IF $has_lc == false {
+        RETURN "crates/oxdock-compose/src/types.oxfile"
+    }
+    LET $lc: MAP<ANY> = $cfg.lifecycle
+    LET $has_t: BOOL = HAS_KEY($lc, "types")
+    IF $has_t == false {
+        RETURN "crates/oxdock-compose/src/types.oxfile"
+    }
+    LET $t: STRING = $lc.types
+    RETURN $t
+}
+
+FUNC CONFIGURED_PLUGINS($cfg: MAP<ANY>) {
+    LET $over: LIST<PLUGIN> = []
+    LET $has_lc: BOOL = HAS_KEY($cfg, "lifecycle")
+    IF $has_lc {
+        LET $lc: MAP<ANY> = $cfg.lifecycle
+        LET $has_p: BOOL = HAS_KEY($lc, "plugins")
+        IF $has_p {
+            $over = $lc.plugins
+        }
+    }
+    RETURN $over
+}
+
+FUNC MERGE_PLUGINS($over: LIST<PLUGIN>, $defaults: LIST<PLUGIN>) {
+    LET $kept: LIST<PLUGIN> = []
+    FOR $d: PLUGIN IN $defaults {
+        LET $drop: BOOL = false
+        FOR $o: PLUGIN IN $over {
+            FOR $h: STRING IN $o.hooks {
+                FOR $dh: STRING IN $d.hooks {
+                    IF $h == $dh {
+                        $drop = true
+                    }
+                }
+            }
+        }
+        IF $drop == false {
+            LIST_APPEND $kept $d
+        }
+    }
+    FOR $o: PLUGIN IN $over {
+        LIST_APPEND $kept $o
+    }
+    RETURN $kept
+}
+
+EXPORT DEFAULT_PLUGINS
+EXPORT TYPES_WITH_DEFAULT
+EXPORT CONFIGURED_PLUGINS
+EXPORT MERGE_PLUGINS
