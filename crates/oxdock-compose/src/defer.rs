@@ -6,9 +6,8 @@
 //! to the named function. Domain functions stay immediate and
 //! pass-agnostic: any `fn(document: STRING, ...args: ANY) -> STRING`
 //! defers through this wrapper without sentinel logic of its own.
-//! This is core machinery: every pipeline registers it. The `DOCS`
-//! module (see [`crate::hosts::docs`]) is a compat alias kept
-//! working until it is retired.
+//! This is core machinery: every pipeline registers it under the
+//! single canonical `DEFER` name.
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::{HostModule, OxDockFn, PureTable, StepCtx, TypeTag, Value};

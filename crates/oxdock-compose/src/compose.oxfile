@@ -141,18 +141,18 @@ FUNC PIPE_RUN($mod: STRING, $wsroot: STRING, $cfgpath: STRING) {
 EXPORT COMPOSE_ALL
 EXPORT PIPE_RUN
 
-# Plugin paths from the config, or the engine's own lifecycle file
-# when the config names none. Entries stay plain paths: every plugin
-# file exposes the same lifecycle methods, so registration order is
-# execution order and there is nothing else to declare.
-FUNC PLUGIN_PATHS_WITH_DEFAULT($cfg: MAP<ANY>) {
+# Lifecycle files from the config, or the engine's own lifecycle
+# file when the config names none. Entries stay plain paths: every
+# plugin file exposes the same lifecycle methods, so registration
+# order is execution order and there is nothing else to declare.
+FUNC LIFECYCLE_FILES_WITH_DEFAULT($cfg: MAP<ANY>) {
     LET $paths: LIST<STRING> = ["crates/oxdock-compose/src/generic.oxfile"]
     LET $has_lc: BOOL = HAS_KEY($cfg, "lifecycle")
     IF $has_lc {
         LET $lc: MAP<ANY> = $cfg.lifecycle
-        LET $has_p: BOOL = HAS_KEY($lc, "plugins")
+        LET $has_p: BOOL = HAS_KEY($lc, "files")
         IF $has_p {
-            $paths = $lc.plugins
+            $paths = $lc.files
         }
     }
     RETURN $paths
@@ -172,5 +172,5 @@ FUNC TYPES_WITH_DEFAULT($cfg: MAP<ANY>) {
     RETURN $t
 }
 
-EXPORT PLUGIN_PATHS_WITH_DEFAULT
+EXPORT LIFECYCLE_FILES_WITH_DEFAULT
 EXPORT TYPES_WITH_DEFAULT

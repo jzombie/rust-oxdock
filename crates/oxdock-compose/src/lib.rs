@@ -7,7 +7,7 @@
 //! per-pipeline until their extraction slices land.
 pub mod defer;
 pub mod engine;
-pub mod hosts;
+pub mod plugins;
 
 use anyhow::{Context, Result};
 use oxdock_core::{Engine, ExecIo, HostModule, OxDockFn, TypeTag, Value};
@@ -21,15 +21,14 @@ use std::path::Path;
 ///
 /// Each entry is `(HeaderIdent, module_path)` registered on the
 /// `Engine`, so host calls and template placeholders resolve the
-/// same set. These are host modules (Rust functions), not lifecycle
-/// plugins (DSL files): `COMPOSE_ENGINE` is the only module the
-/// engine itself defaults to; `DEFER` because deferred placeholders
-/// resolve in every template (`DOCS` rides alongside as its compat
-/// alias until retired); `OXDOCK`, `RUST`, and `MARKDOWN` because
-/// the shipped OxDock docs plugin calls them, and a different
+/// same set. These are Rust plugin modules, not lifecycle files
+/// (DSL): `COMPOSE_ENGINE` is the only module the engine itself
+/// defaults to; `DEFER` because deferred placeholders resolve in
+/// every template; `OXDOCK`, `RUST`, and `MARKDOWN` because the
+/// shipped OxDock docs lifecycle file calls them, and a different
 /// pipeline registers whatever its own plugins need.
 ///
-/// External host modules never go here either: pass them to
+/// External plugin modules never go here either: pass them to
 /// [`run_with_plugins`], which registers them alongside this list.
 /// The static scripts (`run.oxfile`, `compose.oxfile`,
 /// `stages.oxfile`, hook files) declare their own `IMPORT`s; a
@@ -47,9 +46,8 @@ macro_rules! pipeline_modules {
             $final ; [$($args)*] ;
             (COMPOSE_ENGINE, crate::engine),
             (DEFER, crate::defer),
-            (DOCS, crate::hosts::docs),
-            (OXDOCK, crate::hosts::oxdock),
-            (RUST, crate::hosts::rust),
+            (OXDOCK, crate::plugins::oxdock),
+            (RUST, crate::plugins::rust),
             (MARKDOWN, oxdock_markdown_plugin)
         }
     };
@@ -238,9 +236,9 @@ pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
 /// External host modules arrive here, never in `pipeline_modules!`:
 /// any `{{ CUSTOM::FUNC($var) }}` placeholder in a template or
 /// fragment resolves through the live registered snapshot, so no
-/// header or script change is needed. Lifecycle plugins are
-/// separate: they are DSL files named by the config's `plugins`
-/// registry, not host modules. Custom *scripts* are a third path:
+/// header or script change is needed. Lifecycle files are
+/// separate: they are DSL files named by the config's `files`
+/// registry, not plugin modules. Custom *scripts* are a third path:
 /// build them over [`pipeline_engine`] with their own `oxdock!`
 /// header naming their own modules.
 #[allow(clippy::disallowed_types)]
@@ -324,8 +322,8 @@ fn embedded_dist() -> Vec<(&'static str, &'static str)> {
             include_str!("generic.oxfile"),
         ),
         (
-            "crates/oxdock-compose/plugins/oxdock.oxfile",
-            include_str!("../plugins/oxdock.oxfile"),
+            "crates/oxdock-compose/src/oxdock.oxfile",
+            include_str!("oxdock.oxfile"),
         ),
     ]
 }
@@ -379,18 +377,18 @@ fn configured_plugins(
         .with_context(|| format!("read {config_name} for plugin list"))?;
     let cfg: serde_json::Value = serde_json::from_str(&raw)
         .with_context(|| format!("parse {config_name} for plugin list"))?;
-    let plugins = match cfg.get("lifecycle").and_then(|lc| lc.get("plugins")) {
+    let files = match cfg.get("lifecycle").and_then(|lc| lc.get("files")) {
         None => return Ok(vec![GENERIC_PLUGIN.to_string()]),
-        Some(plugins) => plugins,
+        Some(files) => files,
     };
-    let arr = plugins
+    let arr = files
         .as_array()
-        .context("lifecycle plugins must be plugin file paths as strings")?;
+        .context("lifecycle files must be plugin file paths as strings")?;
     arr.iter()
         .map(|entry| {
-            entry.as_str().with_context(|| {
-                "lifecycle plugins must be plugin file paths as strings; the path-by-hooks registry is retired"
-            })
+            entry
+                .as_str()
+                .with_context(|| "lifecycle files must be plugin file paths as strings")
         })
         .map(|result| result.map(str::to_string))
         .collect()

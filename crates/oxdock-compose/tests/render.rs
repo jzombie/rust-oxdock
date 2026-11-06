@@ -46,8 +46,8 @@ fn support_files() -> Vec<(&'static str, &'static str)> {
             include_str!("../src/generic.oxfile"),
         ),
         (
-            "crates/oxdock-compose/plugins/oxdock.oxfile",
-            include_str!("../plugins/oxdock.oxfile"),
+            "crates/oxdock-compose/src/oxdock.oxfile",
+            include_str!("../src/oxdock.oxfile"),
         ),
         (
             "crates/oxdock-compose/src/types.oxfile",
@@ -92,9 +92,9 @@ fn with_lifecycle(cfg: &str) -> String {
     // this also proves the merge path on every fixture run.
     obj.insert(
         "lifecycle".to_string(),
-        serde_json::json!({"plugins": [
+        serde_json::json!({"files": [
             "crates/oxdock-compose/src/generic.oxfile",
-            "crates/oxdock-compose/plugins/oxdock.oxfile"
+            "crates/oxdock-compose/src/oxdock.oxfile"
         ]}),
     );
     serde_json::to_string(&v).expect("serialize fixture config")
@@ -519,7 +519,7 @@ fn toc_renders_tree_from_final_readme() {
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
                 # {{ $docs_global.title }}
-                {{ DOCS::DEFER("MARKDOWN::TOC", [{}]) }}
+                {{ DEFER::DEFER("MARKDOWN::TOC", [{}]) }}
                 {{ $files.sec.a }}
             "#}
             .to_string(),
@@ -573,7 +573,7 @@ fn toc_renders_inline_bar_for_single_level() {
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
                 # {{ $docs_global.title }}
-                {{ DOCS::DEFER("MARKDOWN::TOC", [{format: "inline"}]) }}
+                {{ DEFER::DEFER("MARKDOWN::TOC", [{format: "inline"}]) }}
                 {{ $files.sec.a }}
             "#}
             .to_string(),
@@ -617,8 +617,8 @@ fn toc_replaces_multiple_sentinels_independently() {
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
                 # {{ $docs_global.title }}
-                {{ DOCS::DEFER("MARKDOWN::TOC", [{format: "inline"}]) }}
-                {{ DOCS::DEFER("MARKDOWN::TOC", [{max_level: 2, delimiter: " • "}]) }}
+                {{ DEFER::DEFER("MARKDOWN::TOC", [{format: "inline"}]) }}
+                {{ DEFER::DEFER("MARKDOWN::TOC", [{max_level: 2, delimiter: " • "}]) }}
                 {{ $files.sec.a }}
             "#}
             .to_string(),
@@ -661,7 +661,7 @@ fn toc_rejects_multi_level_inline_at_dispatch() {
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
                 # {{ $docs_global.title }}
-                {{ DOCS::DEFER("MARKDOWN::TOC", [{format: "inline", max_level: 3}]) }}
+                {{ DEFER::DEFER("MARKDOWN::TOC", [{format: "inline", max_level: 3}]) }}
             "#}
             .to_string(),
         ),
@@ -836,7 +836,7 @@ fn toc_rejects_unknown_defer_targets_at_dispatch() {
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
                 # {{ $docs_global.title }}
-                {{ DOCS::DEFER("NOPE::MISSING", [{}]) }}
+                {{ DEFER::DEFER("NOPE::MISSING", [{}]) }}
             "#}
             .to_string(),
         ),

@@ -66,7 +66,7 @@ stems).
 
 ### Modules
 
-Host modules arrive linked into the binary and registered by `run()`:
+Plugin modules arrive linked into the binary and registered by `run()`:
 the core language never sees them.
 
 - `COMPOSE_ENGINE` builtins: `FILE_STEM` and generic
@@ -77,13 +77,13 @@ the core language never sees them.
 - `RUST` Cargo workspace content: members, versions, and package
   metadata for stamps and citations.
 
-Lifecycle plugins are DSL files, not host modules: one file per
-plugin under `plugins/`, every file exposing the same lifecycle
-methods, registered by path in the config's `plugins` list in
-execution order. Omit the list and the engine's own
+Lifecycle files are DSL, not plugin modules: one file per
+pipeline participant under `src/`, every file exposing the same
+lifecycle methods, registered by path in the config's `files`
+list in execution order. Omit the list and the engine's own
 `src/generic.oxfile` runs every stage alone.
 
-Third-party host modules join through `run_with_plugins(root, extras)`,
+Third-party plugin modules join through `run_with_plugins(root, extras)`,
 which registers external modules so template placeholders resolve them
 with no header changes. `pipeline_engine()` returns an engine carrying
 exactly the `COMPOSE_ENGINE` default, for custom scripts that need

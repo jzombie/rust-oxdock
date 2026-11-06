@@ -53,9 +53,9 @@
     }
   ],
   "lifecycle": {
-    "plugins": [
+    "files": [
       "crates/oxdock-compose/src/generic.oxfile",
-      "crates/oxdock-compose/plugins/oxdock.oxfile"
+      "crates/oxdock-compose/src/oxdock.oxfile"
     ]
   },
   "vars": {
