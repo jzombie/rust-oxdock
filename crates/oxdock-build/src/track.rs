@@ -309,6 +309,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 template_keys(&mut keys, from);
                 template_keys(&mut keys, to);
             }
+            StepKind::SetExecutable { path } => template_keys(&mut keys, path),
             StepKind::Archive { src, dst, .. } => {
                 template_keys(&mut keys, src);
                 template_keys(&mut keys, dst);

@@ -923,6 +923,10 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let to_resolved = super::args::resolve_arg(to, &mut cx)?;
             handlers::install(&mut cx, &from_resolved, &to_resolved)
         }
+        StepKind::SetExecutable { path } => {
+            let resolved = super::args::resolve_arg(path, &mut cx)?;
+            handlers::set_executable(&mut cx, &resolved)
+        }
         StepKind::Ls(arg) => {
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
             handlers::ls(&mut cx, &resolved)
@@ -1280,6 +1284,10 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 let from_resolved = super::args::resolve_arg(from, &mut cx)?;
                                 let to_resolved = super::args::resolve_arg(to, &mut cx)?;
                                 handlers::install(&mut cx, &from_resolved, &to_resolved)
+                            }
+                            StepKind::SetExecutable { path } => {
+                                let resolved = super::args::resolve_arg(path, &mut cx)?;
+                                handlers::set_executable(&mut cx, &resolved)
                             }
                             StepKind::Ls(arg) => {
                                 let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;

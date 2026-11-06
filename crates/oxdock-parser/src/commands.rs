@@ -699,6 +699,7 @@ impl StepKind {
                 walk_arg(from, f);
                 walk_arg(to, f);
             }
+            StepKind::SetExecutable { path } => walk_arg(path, f),
             StepKind::Unarchive {
                 src,
                 dst,
@@ -828,6 +829,7 @@ impl StepKind {
                 walk_arg(from, f);
                 walk_arg(to, f);
             }
+            StepKind::SetExecutable { path } => walk_arg(path, f),
             StepKind::Unarchive {
                 src,
                 dst,
@@ -951,6 +953,7 @@ impl StepKind {
             | StepKind::Archive { .. }
             | StepKind::Unarchive { .. }
             | StepKind::Install { .. }
+            | StepKind::SetExecutable { .. }
             | StepKind::Mkdir(_)
             | StepKind::Ls(_)
             | StepKind::Read(_)
@@ -1648,6 +1651,27 @@ declare_commands! {
             let to = it.next().ok_or_else(|| ParseError::validation("INSTALL", "INSTALL requires a destination".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Install { from, to })
         },
+    ],
+
+    SetExecutable => [
+        name: "SET_EXECUTABLE",
+        variant: SetExecutable { path: Arg },
+        syntax: "SET_EXECUTABLE <path>",
+        summary: "Mark a file executable.",
+        description: "Sets the executable bit on an existing file without moving it. Owner rwx on Unix, bit no-op elsewhere, so the same script runs on every platform; a missing path fails everywhere. `INSTALL` stages, marks, and renames in one atomic step; this command only flips the bit where the file already lives.",
+        args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "File to mark executable", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
+        flags: &[],
+        default_output: None,
+        examples: &[ Example { name: "set-executable", fence_meta: Some("roots:unified"), code: indoc! {r#"
+            # Mark a rendered script executable in place.
+            IMPORT [STD]
+            WRITE tool.sh "echo hi"
+            SET_EXECUTABLE tool.sh
+
+            LET $t: STRING = PATH_TYPE("tool.sh")
+            ASSERT_EQ $t "file"
+        "#} } ],
+        lower: |_flags, args| Ok(StepKind::SetExecutable { path: args.into_iter().next().ok_or_else(|| ParseError::validation("SET_EXECUTABLE", "SET_EXECUTABLE requires a path".to_string(), &SpanContext::line_only(0)))? }),
     ],
 
     Archive => [
@@ -4126,6 +4150,9 @@ impl fmt::Display for StepKind {
                 fmt_value(from, quote_arg),
                 fmt_value(to, quote_arg)
             ),
+            StepKind::SetExecutable { path } => {
+                write!(f, "SET_EXECUTABLE {}", fmt_value(path, quote_arg))
+            }
             StepKind::Archive { src, dst, raw } => {
                 if *raw {
                     write!(
@@ -6289,6 +6316,7 @@ mod tests {
                 | StepKind::Archive { .. }
                 | StepKind::Unarchive { .. }
                 | StepKind::Install { .. }
+                | StepKind::SetExecutable { .. }
                 | StepKind::Ls(_)
                 | StepKind::Read(_)
                 | StepKind::ReadLine { .. }

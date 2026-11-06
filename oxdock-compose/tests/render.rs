@@ -919,6 +919,50 @@ const EXEC_TARGET: &str = r#"{"targets": [{"name": "t", "out": "run.sh", "templa
     miri,
     ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
 )]
+fn executable_without_out_fails_closed() {
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "target.json")
+        .expect("base tree carries target.json");
+    entry.1 = r#"{"targets": [{"name": "bad", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"]}, "executable": true}]}"#.to_string();
+    let (_temp, root, _resolver) = fixture(&as_refs(&tree));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("missing out must fail"));
+    // Fail-closed across the child boundary (see duplicate tests):
+    // the naming ECHO goes to child stdout, the exit proves it fired.
+    assert!(
+        err.contains("failed with status"),
+        "executable without out fails closed: {err}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn non_boolean_executable_fails_closed() {
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "target.json")
+        .expect("base tree carries target.json");
+    entry.1 = r#"{"targets": [{"name": "t", "out": "run.sh", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"]}, "executable": "yes"}]}"#.to_string();
+    let (_temp, root, _resolver) = fixture(&as_refs(&tree));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("string flag must fail"));
+    // Fail-closed across the child boundary (see duplicate tests):
+    // the naming ECHO goes to child stdout, the exit proves it fired.
+    assert!(
+        err.contains("failed with status"),
+        "string executable fails closed: {err}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
 fn executable_target_regains_mode_bit_after_render() {
     let mut tree = base_tree("overwrite");
     let entry = tree

@@ -2369,6 +2369,60 @@ fn hash_sha256_directory_digest_is_deterministic() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "asserts real Unix mode bits via host stat; the synthetic Miri filesystem has no modes"
+)]
+fn set_executable_marks_file() {
+    // In-place bit flip: no staging, no rename. The file keeps its
+    // bytes; only the mode changes.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let tool = root.join("tool.sh").unwrap();
+    resolver.write_file(&tool, b"echo hi").unwrap();
+    let steps = vec![step(StepKind::SetExecutable {
+        path: "tool.sh".into(),
+    })];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .expect("set executable");
+    assert_eq!(
+        resolver.read_file(&tool).unwrap(),
+        b"echo hi",
+        "payload untouched"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = resolver.metadata(&tool).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "executable bit must be set, got {mode:o}");
+    }
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "asserts real host stat failure; the synthetic Miri filesystem has no modes"
+)]
+fn set_executable_rejects_missing_file() {
+    // Parity: Unix fails through set_permissions, other platforms
+    // through the no-op's stat probe, with the same context.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let steps = vec![step(StepKind::SetExecutable {
+        path: "ghost.sh".into(),
+    })];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        err.chain()
+            .any(|c| c.to_string().contains("failed to set permissions")),
+        "missing file fails naming the op: {err:#}"
+    );
+}
+
+#[test]
 fn copy_directory_branch_recurses_into_nested_target() {
     let steps = vec![
         step(StepKind::Mkdir("app".into())),

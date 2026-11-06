@@ -16,6 +16,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`SYMLINK`](#symlink) | `SYMLINK [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
 | [`INSTALL`](#install) | `INSTALL <source> <dest>` |
+| [`SET_EXECUTABLE`](#set_executable) | `SET_EXECUTABLE <path>` |
 | [`ARCHIVE`](#archive) | `ARCHIVE [--raw] <src> <dst>` |
 | [`UNARCHIVE`](#unarchive) | `UNARCHIVE <src> <dst> [--max-bytes <bytes>]` |
 | [`LS`](#ls) | `LS [<path>]` |
@@ -2207,6 +2208,35 @@ WRITE src.bin payload
 INSTALL src.bin dst-bin/tool
 
 LET $t: STRING = PATH_TYPE("dst-bin/tool")
+ASSERT_EQ $t "file"
+```
+
+
+### SET_EXECUTABLE
+
+Mark a file executable.
+
+**Syntax:** `SET_EXECUTABLE <path>`
+
+Sets the executable bit on an existing file without moving it. Owner rwx on Unix, bit no-op elsewhere, so the same script runs on every platform; a missing path fails everywhere. `INSTALL` stages, marks, and renames in one atomic step; this command only flips the bit where the file already lives.
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | [`PATH`](#value-type-path) | yes | File to mark executable |
+
+**Examples:**
+
+**Example: set-executable**
+
+```oxdock roots:unified
+# Mark a rendered script executable in place.
+IMPORT [STD]
+WRITE tool.sh "echo hi"
+SET_EXECUTABLE tool.sh
+
+LET $t: STRING = PATH_TYPE("tool.sh")
 ASSERT_EQ $t "file"
 ```
 

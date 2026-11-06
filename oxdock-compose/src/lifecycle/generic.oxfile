@@ -200,19 +200,24 @@ FUNC RENDER($ctx: CTX) {
         EXIT 1
     }
     WRITE $ctx.out $text
-    RETURN {wsroot: $ctx.wsroot, config: $ctx.config, staging: $ctx.staging, globals: $ctx.globals, target: $ctx.target, template: $ctx.template, out: $ctx.out, values: $ctx.values, fragments: $ctx.fragments, text: $text}
+    RETURN {wsroot: $ctx.wsroot, config: $ctx.config, staging: $ctx.staging, globals: $ctx.globals, target: $ctx.target, template: $ctx.template, out: $ctx.out, values: $ctx.values, fragments: $ctx.fragments, text: $text, exec: $ctx.exec}
 }
 
 # DEFERRED hook: expand deferred sentinels against the full text.
 FUNC DEFERRED($ctx: CTX) {
     LET $text: STRING = $ctx.text
     LET $final: STRING = DEFER::EXPAND_DEFERRED($text)
-    RETURN {wsroot: $ctx.wsroot, config: $ctx.config, staging: $ctx.staging, globals: $ctx.globals, target: $ctx.target, template: $ctx.template, out: $ctx.out, values: $ctx.values, fragments: $ctx.fragments, text: $final}
+    RETURN {wsroot: $ctx.wsroot, config: $ctx.config, staging: $ctx.staging, globals: $ctx.globals, target: $ctx.target, template: $ctx.template, out: $ctx.out, values: $ctx.values, fragments: $ctx.fragments, text: $final, exec: $ctx.exec}
 }
 
-# WRITE hook: the only stage that touches the output file.
+# WRITE hook: the only stage that touches the output file. When the
+# target declares `"executable": true` the bit lands here, in the
+# stage that owns the output, not in a post-pass.
 FUNC WRITE_OUT($ctx: CTX) {
     WRITE $ctx.out $ctx.text
+    IF $ctx.exec {
+        SET_EXECUTABLE $ctx.out
+    }
     RETURN $ctx
 }
 

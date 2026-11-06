@@ -1488,6 +1488,7 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Symlink { .. } => "Symlink",
         StepKind::Mkdir(_) => "Mkdir",
         StepKind::Install { .. } => "Install",
+        StepKind::SetExecutable { .. } => "SetExecutable",
         StepKind::Archive { .. } => "Archive",
         StepKind::Unarchive { .. } => "Unarchive",
         StepKind::Ls(_) => "Ls",

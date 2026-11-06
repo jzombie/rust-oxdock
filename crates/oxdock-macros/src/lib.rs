@@ -1107,6 +1107,10 @@ fn emit_stepkind(
             let t = emit_arg(to, interp);
             quote! { StepKind::Install { from: #f, to: #t } }
         }
+        StepKind::SetExecutable { path } => {
+            let t = emit_arg(path, interp);
+            quote! { StepKind::SetExecutable { path: #t } }
+        }
         StepKind::Archive { src, dst, raw } => {
             let s = emit_arg(src, interp);
             let d = emit_arg(dst, interp);

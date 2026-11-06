@@ -95,7 +95,7 @@ FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) 
         LET $docs_global: MAP<ANY> = STD::MERGE_MAPS($gvmaps, $policy)
         LET $gjson: STRING = TO_JSON($docs_global)
         WRITE "\{{ $staging }}/_globals.json" $gjson
-        LET $run: CTX = {wsroot: $wsroot, config: $cfgpath, staging: $staging, globals: "\{{ $staging }}/_globals.json"}
+        LET $run: CTX = {wsroot: $wsroot, config: $cfgpath, staging: $staging, globals: "\{{ $staging }}/_globals.json", exec: false}
         {{ $setup }}LET $seen: MAP<ANY> = {}
         LET $count: INT = 0
         FOR $scope: STRING IN $cfg.scopes {
@@ -114,6 +114,19 @@ FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) 
                         EXIT 1
                     }
                     LET $name: STRING = $t.name
+                    LET $exec: BOOL = false
+                    IF HAS_KEY($t, "executable") {
+                        LET $has_out: BOOL = HAS_KEY($t, "out")
+                        IF $has_out == false {
+                            ECHO "target '\{{ $tname }}' sets 'executable' without a string 'out'"
+                            EXIT 1
+                        }
+                        IF TYPE_OF($t.executable) != "BOOL" {
+                            ECHO "target '\{{ $tname }}' sets 'executable' to a non-boolean; use true or omit it"
+                            EXIT 1
+                        }
+                        $exec = $t.executable
+                    }
                     LET $template: STRING = $t.template
                     LET $out: STRING = $t.out
                     LET $values: STRING = $t.values
@@ -122,7 +135,7 @@ FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) 
                     LET $vabs: STRING = "\{{ $wsroot }}/\{{ $values }}"
                     LET $fragments: MAP<ANY> = $t.fragments
                     LET $fjson: STRING = TO_JSON($fragments)
-                    LET $ctx: CTX = {wsroot: $wsroot, config: $cfgpath, staging: $staging, globals: "\{{ $staging }}/_globals.json", target: $name, template: $tabs, out: $oabs, values: $vabs, fragments: $fjson}
+                    LET $ctx: CTX = {wsroot: $wsroot, config: $cfgpath, staging: $staging, globals: "\{{ $staging }}/_globals.json", target: $name, template: $tabs, out: $oabs, values: $vabs, fragments: $fjson, exec: $exec}
                     ECHO "rendering \{{ $name }} -> \{{ $out }}"
         {{ $per_target }}        }
             }

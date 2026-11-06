@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use oxdock_fs::CopySourceRoot;
+use oxdock_fs::EXECUTABLE_MODE;
 use oxdock_fs::EntryKind;
 use oxdock_fs::GuardedPath;
 use oxdock_fs::PathResolver;
@@ -1245,6 +1246,19 @@ pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> R
         .fs
         .create_dir_all(&target)
         .with_context(|| format!("failed to create dir {}", target.display()))?;
+    Ok(())
+}
+
+pub(super) fn set_executable<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.effective_cwd(), path)
+        .with_context(|| format!("SET_EXECUTABLE {path}"))?;
+    cx.state
+        .fs
+        .set_executable(&target)
+        .with_context(|| format!("SET_EXECUTABLE {path}"))?;
     Ok(())
 }
 
@@ -3460,7 +3474,7 @@ pub(super) fn install<P: ProcessManager>(
         .with_context(|| format!("INSTALL {from} {to}"))?;
     cx.state
         .fs
-        .install_file_atomic(&from_abs, &to_abs, 0o755)
+        .install_file_atomic(&from_abs, &to_abs, EXECUTABLE_MODE)
         .with_context(|| format!("INSTALL {from} {to}"))?;
     Ok(())
 }
@@ -3475,6 +3489,17 @@ pub(crate) fn dispatch_install<P: ProcessManager>(
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
     install(cx, &from_resolved, &to_resolved)
+}
+
+pub(crate) fn dispatch_set_executable<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::SetExecutable { path } = step else {
+        unreachable!()
+    };
+    let resolved = super::args::resolve_arg(path, cx)?;
+    set_executable(cx, &resolved)
 }
 
 pub(crate) fn dispatch_ls<P: ProcessManager>(

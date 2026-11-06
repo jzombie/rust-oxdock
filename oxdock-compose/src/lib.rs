@@ -9,17 +9,15 @@
 //!
 //! Rust owns only the boundaries the DSL has no primitives for:
 //! [`config`] (filename default, plugin registry read),
-//! [`lifecycle`] (embedded file provisioning, uniformity check),
-//! [`dispatcher`] (engine wiring, pipe spawn), [`writer`]
-//! (executable-bit fixup). Sequencing and all writes live in the
-//! DSL as named `FUNC` stages.
+//! [`lifecycle`] (embedded file provisioning, uniformity check), and
+//! [`dispatcher`] (engine wiring, pipe spawn). Sequencing and all
+//! writes live in the DSL as named `FUNC` stages.
 pub mod config;
 pub mod defer;
 pub mod dispatcher;
 pub mod engine;
 pub mod lifecycle;
 pub mod plugins;
-pub mod writer;
 
 use anyhow::{Context, Result};
 use oxdock_core::{Engine, ExecIo, HostModule};
@@ -33,7 +31,6 @@ pub use dispatcher::{run_child_script, run_child_script_on};
 use config::resolve_config_name;
 use dispatcher::{child_interpreter, pipeline_full_engine};
 use lifecycle::{check_plugin_uniformity, provision_dist, read_support};
-use writer::apply_executable_bits;
 
 /// Execute the composition pipeline: provision the embedded files,
 /// check every registered plugin exposes the same lifecycle
@@ -41,7 +38,7 @@ use writer::apply_executable_bits;
 /// the plugin registry and pipes it through the interpreter. Static
 /// scripts are byte-copied from the tree (see [`lifecycle`]);
 /// sequencing and all writes live in the DSL while Rust owns only
-/// the boundaries above plus the executable-bit fixup below.
+/// the boundaries above.
 #[allow(clippy::disallowed_types)]
 pub fn run(repo_root: &Path) -> Result<()> {
     run_with_plugins(repo_root, vec![])
@@ -102,11 +99,9 @@ pub fn run_with_plugins(
     // what the tree holds, never Rust-assembled text.
     let entry = read_support(&fs_resolver, &root, "oxdock-compose/src/run.oxfile")?;
     let fs: Box<dyn WorkspaceFs> = Box::new(fs_resolver);
-    let output = engine
+    engine
         .run_script_on(fs, &entry, default_process_manager())
         .context("compose pipeline")?;
-    apply_executable_bits(output.fs.as_ref(), &root, &config_name)
-        .context("apply executable bits")?;
     eprintln!("docs rendered");
     Ok(())
 }

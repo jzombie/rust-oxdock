@@ -600,6 +600,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             from: from.into(),
             to: to.into()
         }),
+        safe_string().prop_map(|s| StepKind::SetExecutable { path: s.into() }),
         (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Archive {
             src: from.into(),
             dst: to.into(),
@@ -1178,6 +1179,9 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
         (StepKind::Install { from: lf, to: lt }, StepKind::Install { from: rf, to: rt }) => {
             assert!(arg_content_eq(lf, rf), "Install from mismatch: {}", msg);
             assert!(arg_content_eq(lt, rt), "Install to mismatch: {}", msg);
+        }
+        (StepKind::SetExecutable { path: l }, StepKind::SetExecutable { path: r }) => {
+            assert!(arg_content_eq(l, r), "SetExecutable mismatch: {}", msg)
         }
         (
             StepKind::Archive {
@@ -1892,6 +1896,9 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             from: "coverage-from".into(),
             to: "coverage-to".into(),
         },
+        StepKind::SetExecutable {
+            path: "coverage-path".into(),
+        },
         StepKind::Archive {
             src: "coverage-src".into(),
             dst: "coverage-dst".into(),
@@ -2212,6 +2219,7 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         | StepKind::Symlink { .. }
         | StepKind::Mkdir(..)
         | StepKind::Install { .. }
+        | StepKind::SetExecutable { .. }
         | StepKind::Archive { .. }
         | StepKind::Unarchive { .. }
         | StepKind::Ls(..)

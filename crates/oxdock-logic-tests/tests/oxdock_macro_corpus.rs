@@ -731,6 +731,7 @@ fn kind_covered(kind: &oxdock_parser::StepKind) -> bool {
         | StepKind::CopyGit { .. }
         | StepKind::Symlink { .. }
         | StepKind::Install { .. }
+        | StepKind::SetExecutable { .. }
         | StepKind::Archive { .. }
         | StepKind::Unarchive { .. }
         | StepKind::Ls(..)
@@ -828,6 +829,9 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
         ) => arg_content_eq(fx, fy) && arg_content_eq(tx, ty),
         (StepKind::Install { from: fx, to: tx }, StepKind::Install { from: fy, to: ty }) => {
             arg_content_eq(fx, fy) && arg_content_eq(tx, ty)
+        }
+        (StepKind::SetExecutable { path: px }, StepKind::SetExecutable { path: py }) => {
+            arg_content_eq(px, py)
         }
         (
             StepKind::Archive {

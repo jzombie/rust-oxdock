@@ -61,6 +61,7 @@ pub enum Command {
     Symlink,
     Mkdir,
     Install,
+    SetExecutable,
     Archive,
     Unarchive,
     Ls,
@@ -95,6 +96,7 @@ pub const COMMANDS: &[Command] = &[
     Command::Symlink,
     Command::Mkdir,
     Command::Install,
+    Command::SetExecutable,
     Command::Archive,
     Command::Unarchive,
     Command::Ls,
@@ -119,8 +121,9 @@ pub const COMMANDS: &[Command] = &[
 /// segment). A new `CATEGORY_ACTION` command registers its prefix here;
 /// reusing an existing category needs no change. Single-word commands
 /// carry no category and are unaffected.
-pub const COMMAND_CATEGORIES: &[&str] =
-    &["INHERIT", "WITH", "COPY", "HASH", "READ", "ASSERT", "LIST"];
+pub const COMMAND_CATEGORIES: &[&str] = &[
+    "INHERIT", "WITH", "COPY", "HASH", "READ", "ASSERT", "LIST", "SET",
+];
 
 impl Command {
     pub const fn as_str(self) -> &'static str {
@@ -137,6 +140,7 @@ impl Command {
             Command::Symlink => "SYMLINK",
             Command::Mkdir => "MKDIR",
             Command::Install => "INSTALL",
+            Command::SetExecutable => "SET_EXECUTABLE",
             Command::Archive => "ARCHIVE",
             Command::Unarchive => "UNARCHIVE",
             Command::Ls => "LS",
@@ -175,6 +179,7 @@ impl Command {
             }
             Command::Mkdir => "MKDIR <path>",
             Command::Install => "INSTALL <source> <dest>",
+            Command::SetExecutable => "SET_EXECUTABLE <path>",
             Command::Archive => "ARCHIVE [--raw] <src> <dst>",
             Command::Unarchive => "UNARCHIVE <src> <dst> [--max-bytes <bytes>]",
             Command::Ls => "LS [<path>]",
@@ -222,6 +227,7 @@ impl Command {
             "SYMLINK" => Some(Command::Symlink),
             "MKDIR" => Some(Command::Mkdir),
             "INSTALL" => Some(Command::Install),
+            "SET_EXECUTABLE" => Some(Command::SetExecutable),
             "ARCHIVE" => Some(Command::Archive),
             "UNARCHIVE" => Some(Command::Unarchive),
             "LS" => Some(Command::Ls),

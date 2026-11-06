@@ -38,9 +38,9 @@ pub(crate) use self::handlers::{
     dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env, dispatch_isolated_step,
     dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step, dispatch_read,
     dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return, dispatch_run,
-    dispatch_run_exec, dispatch_set, dispatch_sleep_step, dispatch_symlink, dispatch_timeout_step,
-    dispatch_unarchive, dispatch_while_loop, dispatch_with_io, dispatch_with_io_block,
-    dispatch_workdir, dispatch_workspace, dispatch_write,
+    dispatch_run_exec, dispatch_set, dispatch_set_executable, dispatch_sleep_step,
+    dispatch_symlink, dispatch_timeout_step, dispatch_unarchive, dispatch_while_loop,
+    dispatch_with_io, dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
 };
 pub use self::import::{DryRunStep, dry_run_closure};
 pub use self::io::ExecIo;

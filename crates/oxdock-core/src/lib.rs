@@ -25,6 +25,7 @@ define_pipeline! {
     StepKind::Symlink { .. } => exec::dispatch_symlink,
     StepKind::Mkdir(..) => exec::dispatch_mkdir,
     StepKind::Install { .. } => exec::dispatch_install,
+    StepKind::SetExecutable { .. } => exec::dispatch_set_executable,
     StepKind::Ls(..) => exec::dispatch_ls,
     StepKind::Read(..) => exec::dispatch_read,
     StepKind::ReadLine { .. } => exec::dispatch_read_line,
