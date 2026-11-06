@@ -1,0 +1,43 @@
+# Lifecycle caller: five phases, stubs only.
+# INGEST covers DISCOVER plus LOAD plus SCAN.
+# RENDER covers EXPAND plus DEFERRED.
+IMPORT [STD]
+
+TYPE CTX = MAP<text: STRING>
+
+FUNC INGEST($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC ASSEMBLE($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC RENDER($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC WRITE_OUT($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC VERIFY($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC RUN_LIFECYCLE($ctx: CTX) {
+    $ctx = INGEST($ctx)
+    $ctx = ASSEMBLE($ctx)
+    $ctx = RENDER($ctx)
+    $ctx = WRITE_OUT($ctx)
+    $ctx = VERIFY($ctx)
+    RETURN $ctx
+}
+
+EXPORT INGEST
+EXPORT ASSEMBLE
+EXPORT RENDER
+EXPORT WRITE_OUT
+EXPORT VERIFY
+EXPORT RUN_LIFECYCLE
+EXPORT TYPE CTX
