@@ -292,10 +292,6 @@ mod tests {
     use super::*;
     use quote::format_ident;
 
-    fn hex_encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
     /// `TokenStream::to_string` inserts spaces between idents and punctuation
     /// (`include_bytes !`, `Some (123)`); squash them for substring checks.
     fn squashed(tokens: &TokenStream) -> String {
@@ -359,7 +355,7 @@ mod tests {
             1,
             "control files must live outside asset roots"
         );
-        assert_eq!(hex_encode(&assets[0].sha256), HELLO_DIGEST);
+        assert_eq!(oxdock_utils::hex_encode(assets[0].sha256), HELLO_DIGEST);
     }
 
     fn sample_asset(rel: &str, include: &str, hash_first_byte: u8) -> AssetRecord {

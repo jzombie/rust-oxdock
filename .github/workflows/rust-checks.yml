@@ -485,6 +485,8 @@ jobs:
   docs-fresh:
     name: docs-fresh (docs-gen output matches checked-in docs)
     uses: ./.github/workflows/docs.yml
+    permissions:
+      contents: read
 
   verdict:
     name: verdict

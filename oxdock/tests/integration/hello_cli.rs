@@ -1,4 +1,4 @@
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{GuardedPath, PathResolver};
 use oxdock_process::CommandBuilder;
 
 /// The repo-root hello script is self-verifying: its ASSERT lines fail

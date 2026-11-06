@@ -449,11 +449,11 @@ pub mod harness {
         builder
             .with_path_dependency(
                 "oxdock-macros",
-                workspace_root.join("oxdock-macros")?.to_string(),
+                workspace_root.join("crates/oxdock-macros")?.to_string(),
             )
             .with_path_dependency(
                 "oxdock-build",
-                workspace_root.join("oxdock-build")?.to_string(),
+                workspace_root.join("crates/oxdock-build")?.to_string(),
             )
             .with_path_dependency(
                 "oxdock-embed",
@@ -483,7 +483,10 @@ pub mod harness {
                     .join("crates/oxdock-logic-tests")?
                     .to_string(),
             )
-            .with_path_dependency("oxdock-cli", workspace_root.join("oxdock-cli")?.to_string())
+            .with_path_dependency(
+                "oxdock-cli",
+                workspace_root.join("crates/oxdock-cli")?.to_string(),
+            )
             .instantiate()
             .context("failed to instantiate fixture")
     }

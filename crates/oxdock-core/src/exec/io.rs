@@ -464,13 +464,13 @@ impl std::io::Write for PipeStream {
     }
 }
 
-/// Hard cap for `ASSERT_EQ stdout` exact accumulators, mirroring the
+/// Hard cap for `ASSERT_EQ`/`ASSERT_NE stdout` exact accumulators, mirroring the
 /// `SpillBuffer` spill threshold: exact stream matching is a test-time
 /// opt-in, and unbounded trials must use pipe targets or harness captures.
 pub(crate) const EXACT_STDOUT_CAP: usize = 8 * 1024 * 1024;
 
 /// Cumulative stdout record for one execution generation backing
-/// `ASSERT_EQ stdout`. Unlike `SlidingWindow` nothing is ever evicted;
+/// `ASSERT_EQ`/`ASSERT_NE stdout`. Unlike `SlidingWindow` nothing is ever evicted;
 /// once the cap is exceeded the entry latches `overflowed` and stops
 /// growing, and the asserting step reports it with remediation guidance.
 pub(crate) struct ExactCapture {

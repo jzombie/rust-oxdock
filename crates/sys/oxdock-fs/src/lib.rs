@@ -91,6 +91,23 @@ pub trait WorkspaceFs: Send + Sync {
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata>;
     #[allow(clippy::disallowed_types)]
     fn metadata_unguarded(&self, path: &UnguardedPath) -> Result<std::fs::Metadata>;
+    /// Byte length plus real Unix mode bits for one archive member, for
+    /// cases where a host `stat` is unavailable (the Miri synthetic
+    /// backend has no host filesystem). `None` mode means the caller
+    /// should use its conventional default. The default implementation
+    /// stats the path, preserving exact native behavior.
+    fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
+        let meta = self.metadata(path)?;
+        let len = meta.len();
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            Some(meta.permissions().mode() & 0o7777)
+        };
+        #[cfg(not(unix))]
+        let mode: Option<u32> = None;
+        Ok((len, mode))
+    }
 
     fn root(&self) -> &GuardedPath;
     fn build_context(&self) -> &GuardedPath;
@@ -253,6 +270,10 @@ impl WorkspaceFs for PathResolver {
 
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata> {
         PathResolver::metadata(self, path)
+    }
+
+    fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
+        PathResolver::archive_member_stat(self, path)
     }
 
     #[allow(clippy::disallowed_types)]

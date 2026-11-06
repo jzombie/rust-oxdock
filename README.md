@@ -33,7 +33,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.34.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.35.0-alpha/oxdock/)
 
 Jump to the [Command Reference](#command-reference) below for the full
 command list with runnable examples, or view the standard library
@@ -49,6 +49,7 @@ command list with runnable examples, or view the standard library
 
 <details>
 <summary>Prebuilt installers (all features)</summary>
+<br>
 
 **Linux / macOS:**
 ```sh
@@ -65,17 +66,18 @@ Installs to `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH. Set `$env:I
 For a reproducible install, pin an explicit release:
 
 ```sh
-(export VERSION=v0.34.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
+(export VERSION=v0.35.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
 ```
 
 ```powershell
-$env:VERSION = 'v0.34.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
+$env:VERSION = 'v0.35.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 ```
 
 </details>
 
 <details>
 <summary>Install from source (Cargo)</summary>
+<br>
 
 **Build from source via Cargo** (same full module surface as the
 release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
@@ -83,7 +85,7 @@ release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 From the registry:
 
 ```sh
-cargo install oxdock@0.34.0-alpha
+cargo install oxdock@0.35.0-alpha
 ```
 
 From a local checkout:
@@ -97,7 +99,7 @@ cargo install --path oxdock
 ### Add to Rust project
 
 ```sh
-cargo add oxdock@0.34.0-alpha
+cargo add oxdock@0.35.0-alpha
 ```
 
 ### Run a script with the CLI
@@ -537,7 +539,8 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
 | [`REMOVE`](#remove) | `REMOVE [--recursive] <path>` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
-| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ <actual> <expected> \| ASSERT_EQ --hash <sha256> <actual>` |
+| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ [--hash <sha256>] <actual> <expected>` |
+| [`ASSERT_NE`](#assert_ne) | `ASSERT_NE [--hash <sha256>] <actual> <expected>` |
 | [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
@@ -3250,7 +3253,7 @@ EXPAND template.md
 
 Assert strict equality.
 
-**Syntax:** `ASSERT_EQ <actual> <expected> | ASSERT_EQ --hash <sha256> <actual>`
+**Syntax:** `ASSERT_EQ [--hash <sha256>] <actual> <expected>`
 
 Compares two evaluated values with typed equality (no coercion:
 `INT(42)` never equals `STRING("42")`), aborting the pipeline
@@ -3303,6 +3306,68 @@ ASSERT_EQ $body "stable-content"
 WRITE payload.bin stable-content
 LET $body: STRING = READ payload.bin
 ASSERT_EQ --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c $body
+```
+
+
+### ASSERT_NE
+
+Assert strict inequality.
+
+**Syntax:** `ASSERT_NE [--hash <sha256>] <actual> <expected>`
+
+Compares two evaluated values with typed inequality (no coercion:
+`INT(42)` never equals `STRING("42")`), aborting the pipeline
+with a step-numbered error showing expected vs actual when they
+are equal; differing values pass silently.
+
+Both sides are values: `$var`, literals, templates, and calls
+evaluate in memory and never touch disk. Read files explicitly
+first (`LET $text: STRING = READ "out.txt"`, then
+`ASSERT_NE $text ...`).
+Bare `stdout` / `stderr` observe stream buffers; a `$var`
+holding a `PIPE` observes its backend bytes. `--hash` compares
+the SHA-256 of a string, pipe, or captured-stdout actual
+instead of the raw bytes (`stderr` is unsupported); the digest
+must differ from the given hash.
+
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `actual` | `<any>` | yes | Value, stdout, stderr, or a $var holding a PIPE |
+| `expected` | `<any>...` | no | Value the actual must differ from (required unless --hash) |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--hash` | `STRING` | SHA-256 |
+
+**Examples:**
+
+**Example: assert ne**
+
+```oxdock
+LET $status: INT = 200
+ASSERT_NE $status 404
+```
+
+**Example: assert ne file**
+
+```oxdock
+WRITE payload.bin stable-content
+LET $body: STRING = READ payload.bin
+ASSERT_NE $body "other-content"
+```
+
+**Example: assert ne hash**
+
+```oxdock
+# --hash compares the SHA-256 digest instead of raw bytes.
+WRITE payload.bin stable-content
+LET $body: STRING = READ payload.bin
+ASSERT_NE --hash 0000000000000000000000000000000000000000000000000000000000000000 $body
 ```
 
 
@@ -6416,8 +6481,8 @@ One language for the whole build: farm steps out to npm, bundlers, or code gener
 
 OxDock comes in two variants, each of which is independent of the other, but share the same core:
 
-- [oxdock-macros](./oxdock-macros/): Provides a Rust build-time dependency which runs OxDock scripts during the compilation of a Rust program.
-- [oxdock-cli](./oxdock-cli/): Command-line interface for running OxDock scripts from the command line.
+- [oxdock-macros](./crates/oxdock-macros/): Provides a Rust build-time dependency which runs OxDock scripts during the compilation of a Rust program.
+- [oxdock-cli](./crates/oxdock-cli/): Command-line interface for running OxDock scripts from the command line.
 
 ## Goals
 
@@ -6484,11 +6549,10 @@ Asset scripts resolve `STD` (via `IMPORT [STD]`) and `SCRIPT` functions only. Th
 
 ## Run scripts inline
 
-The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
+The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types are re-exported from `oxdock`, so one dependency covers macros, runners, and roots: `cargo add oxdock`. Only portable commands are used below, so the script behaves identically on every OS.
 
 ```rust
-use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{GuardedPath, PathResolver, oxdock, oxdock_parser, run_steps_with_context};
 
 // A version stamping pipeline: variables, a function, a loop over a list,
 // a conditional call, templates, and native assertions. The version comes
@@ -6519,8 +6583,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.34.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.34.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.35.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.35.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -6532,15 +6596,14 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.34.0-alpha"
+    "alpha OxDock 0.35.0-alpha"
 );
 ```
 
 Use `#var` to inject Rust values into the script (any value that implements `Display`). DSL variables keep their `$var` form and are unaffected. Guards accept injected values too, so Rust flags can gate steps. The script below wires a pipe between steps, reads one line back into a variable, and expands every generated file.
 
 ```rust
-use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{GuardedPath, PathResolver, oxdock, oxdock_parser, run_steps_with_context};
 
 let project = "OxDock";
 let verbose = true;
@@ -6647,7 +6710,7 @@ fn main() -> anyhow::Result<()> {
         // `.with_state(...)`. These are stateless, so none.
         states: vec![],
     });
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
         modules: [DEMO],
@@ -6656,7 +6719,7 @@ fn main() -> anyhow::Result<()> {
         LET $n: INT = WORD_COUNT($s)
         ASSERT_EQ $n 3
     };
-    let run = engine.run_steps(&root, &steps)?;
+    let run = engine.run_steps_without_snapshot(&root, &steps)?;
     assert_eq!(format!("{}", run.bindings["s"]), "3 words, 17 chars");
     Ok(())
 }
@@ -6700,7 +6763,7 @@ fn main() -> anyhow::Result<()> {
         states: vec![],
     });
 
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root_path = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
         modules: [DEMO],
@@ -6710,10 +6773,10 @@ fn main() -> anyhow::Result<()> {
         ASSERT_EQ $s "demo"
         WRITE tag.txt "{{ $s }}::{{ $t }}"
     };
-    let run = engine.run_steps(&root_path, &steps)?;
+    let run = engine.run_steps_without_snapshot(&root_path, &steps)?;
     assert!(run.bindings.contains_key("s"));
 
-    let reader = oxdock_fs::PathResolver::new(root_path.root(), root_path.root()).unwrap();
+    let reader = oxdock::PathResolver::new(root_path.root(), root_path.root()).unwrap();
     let written = reader
         .read_to_string(&root_path.join("tag.txt").unwrap())
         .expect("script writes tag.txt");
@@ -6944,7 +7007,7 @@ fn main() -> anyhow::Result<()> {
         // `.with_state(...)`. These are stateless, so none.
         states: vec![],
     });
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let run = engine.run_script(
         &root,
@@ -7162,7 +7225,7 @@ cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 
 #### Miri coverage
 
-The nightly `miri` job monitors how many workspace unit tests can run under [`cargo miri`](https://github.com/rust-lang/miri). Miri is too slow for the PR path, so it runs on schedule against `main` instead of gating merges; findings become follow-up issues. Each run publishes a badge description (`badges/miri-coverage.json` on the `badges` branch) that backs the Miri coverage badge above.
+The nightly `miri` jobs monitor how many workspace unit tests can run under [`cargo miri`](https://github.com/rust-lang/miri). Miri is too slow for the PR path, so it runs on schedule against `main` instead of gating merges; findings become follow-up issues. The suite runs as a per-crate shard matrix (enumerated by `.github/scripts/gha-miri-matrix.oxfile`, so no single job can hit the 6-hour execution limit); each run publishes a badge description (`badges/miri-coverage.json` on the `badges` branch) that backs the Miri coverage badge above.
 
 The badge reports the runnable test ratio directly: runnable tests over total tests (`cargo miri test -- --list` vs. `-- --ignored --list`), with both counts in the message. LLVM line coverage keeps its own badge; this one answers only how much of the suite Miri can execute.
 
@@ -7170,6 +7233,7 @@ To test the calculation locally without waiting for CI:
 
 ```bash
 MIRI_TEST_CMD="cargo test --workspace --all-features --lib --tests" \
+GITHUB_WORKSPACE="$PWD" \
   cargo run -p oxdock -- ./.github/scripts/gha-miri-badge.oxfile
 ```
 
@@ -7193,7 +7257,7 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 - **Inline**: Payload bytes carried inside the word itself, with zero allocation. Available to `Copy` scalars that fit in 64 bits.
 - **NaN boxing**: A technique that packs values into 64 bits by reusing NaN float patterns. Denser than 16 byte words at the cost of pointer masking and constrained host values.
 - **Payload**: The 64 bit data half of a word: either inline bytes or a pointer to one owned box.
-- **Plugin**: A host extension module ([NET](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md), [SSH](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md)) loaded with IMPORT, bringing extra functions into script scope.
+- **Plugin**: A host extension module ([NET](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md), [SSH](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md), [MARKDOWN](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-markdown-plugin/README.md)) loaded with IMPORT, bringing extra functions into script scope.
 - **Provenance**: The recorded origin of a pointer, which Rust uses to judge whether a memory access is valid. Round tripping through the same box type preserves it.
 - **RPN**: Reverse Polish Notation: arithmetic compiled to a flat stack program instead of tree walking.
 - **Vtable**: The operations half of a descriptor: function pointers that clone, drop, compare, and render values of that type.
@@ -7201,13 +7265,13 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 
 ## Citation
 
-If you use OxDock in published work, cite version `0.34.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+If you use OxDock in published work, cite version `0.35.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
 
 ```bibtex
 @software{oxdock,
   author = "Jeremy Harris",
   title = "OxDock",
-  version = "0.34.0-alpha",
+  version = "0.35.0-alpha",
   url = "https://github.com/jzombie/rust-oxdock",
   license = "Apache-2.0"
 }

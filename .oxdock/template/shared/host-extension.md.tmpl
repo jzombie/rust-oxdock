@@ -36,7 +36,7 @@ fn main() -> anyhow::Result<()> {
         states: vec![],
     });
 
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root_path = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
         modules: [DEMO],
@@ -46,10 +46,10 @@ fn main() -> anyhow::Result<()> {
         ASSERT_EQ $s "demo"
         WRITE tag.txt "\{{ $s }}::\{{ $t }}"
     };
-    let run = engine.run_steps(&root_path, &steps)?;
+    let run = engine.run_steps_without_snapshot(&root_path, &steps)?;
     assert!(run.bindings.contains_key("s"));
 
-    let reader = oxdock_fs::PathResolver::new(root_path.root(), root_path.root()).unwrap();
+    let reader = oxdock::PathResolver::new(root_path.root(), root_path.root()).unwrap();
     let written = reader
         .read_to_string(&root_path.join("tag.txt").unwrap())
         .expect("script writes tag.txt");
@@ -280,7 +280,7 @@ fn main() -> anyhow::Result<()> {
         // `.with_state(...)`. These are stateless, so none.
         states: vec![],
     });
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let run = engine.run_script(
         &root,

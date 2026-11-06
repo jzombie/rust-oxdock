@@ -1,0 +1,20 @@
+[package]
+name = "oxdock-utils"
+description = "Shared leaf utilities for OxDock: streaming tarball pack/unpack, SHA-256 hex digests, and other dependency-light helpers used across crates."
+categories = ["development-tools"]
+keywords = ["oxdock", "utils"]
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
+
+[lints]
+workspace = true

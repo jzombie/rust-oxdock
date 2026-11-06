@@ -267,6 +267,10 @@ mod tests {
     /// Non-terminals stay closed: /dev/null is never a terminal, so
     /// acquisition fails there on every machine, terminal or not.
     #[cfg(unix)]
+    #[cfg_attr(
+        miri,
+        ignore = "opens /dev/null; `open` is blocked under Miri isolation"
+    )]
     #[test]
     fn dev_null_stays_closed() {
         let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
@@ -281,6 +285,10 @@ mod tests {
     /// arrive through the acquired reader with raw mode applied,
     /// and dropping the reader restores the slave's mode.
     #[cfg(unix)]
+    #[cfg_attr(
+        miri,
+        ignore = "needs a real pty pair (`openpty`); blocked under Miri isolation"
+    )]
     #[test]
     fn pty_slave_feeds_acquired_reader() {
         let mut master = 0;

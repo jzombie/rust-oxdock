@@ -1,6 +1,6 @@
 # oxdock-remote-proto
 
-Contract for OxDock sealed remote execution: stable muxio method names, content-derived protocol digest, handshake types, and guarded tarball pack/unpack.
+Contract for OxDock sealed remote execution: stable muxio method names, content-derived protocol digest, and handshake types.
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
 

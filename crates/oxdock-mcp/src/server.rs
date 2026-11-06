@@ -23,6 +23,8 @@ use anyhow::{Context, Result};
 use oxdock_core::{FuncMeta, McpSession, StreamChunk, StreamHook, TeeStream, Value};
 use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_process::DefaultProcessManager;
+use oxdock_process::unix_now;
+use oxdock_utils::sha256_hex;
 /// Logging/message imports live separately: the notification family is
 /// deprecated by SEP-2577, but it remains the only content-carrying
 /// mid-call channel in this rmcp version (see `stream_note`).
@@ -40,7 +42,6 @@ use rmcp::{
     service::RequestContext,
 };
 use serde_json::Value as JsonValue;
-use sha2::{Digest, Sha256};
 
 use crate::tools::{HashMapDoc, McpTool, build_tool_table, map_json_args};
 
@@ -783,15 +784,7 @@ impl StatusState {
 }
 
 fn script_hash(text: &str) -> String {
-    let digest = Sha256::digest(text.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
+    sha256_hex(text.as_bytes())
 }
 
 /// One validated rebuild: parse, init the session, derive the table.

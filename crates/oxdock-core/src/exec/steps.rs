@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
-use oxdock_parser::{Arg, AssertTarget, Step, StepKind, Value, guard_option_allows};
+use oxdock_parser::{Arg, AssertTarget, Command, Step, StepKind, Value, guard_option_allows};
 use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager, SharedInput, SharedOutput};
 
 /// Create an ExitStatus from a raw exit code. Cross-platform.
@@ -231,7 +231,7 @@ fn extract_stream_needle(kind: &StepKind) -> Option<(AssertStream, &Arg)> {
 }
 
 /// Whether the step needs the exact-match stdout accumulator:
-/// `ASSERT_EQ stdout`, top-level or WITH_IO-wrapped.
+/// `ASSERT_EQ`/`ASSERT_NE stdout`, top-level or WITH_IO-wrapped.
 fn needs_exact_stdout(kind: &StepKind) -> bool {
     let step = match kind {
         StepKind::WithIo { cmd, .. } => cmd.as_ref(),
@@ -240,6 +240,9 @@ fn needs_exact_stdout(kind: &StepKind) -> bool {
     matches!(
         step,
         StepKind::AssertEq {
+            actual: AssertTarget::Stdout,
+            ..
+        } | StepKind::AssertNe {
             actual: AssertTarget::Stdout,
             ..
         }
@@ -283,7 +286,7 @@ pub(super) fn resolve_assert_target<P: ProcessManager>(
 
 /// Pre-register stream assertion observers so tees feed them data before
 /// the steps execute. Substring needles (`ASSERT_CONTAINS stdout|stderr`)
-/// get per-step `SlidingWindow`s; `ASSERT_EQ stdout` allocates the
+/// get per-step `SlidingWindow`s; `ASSERT_EQ`/`ASSERT_NE stdout` allocates the
 /// generation's exact accumulator. Uses `args::resolve_arg_state` for
 /// actual template expansion. Handles both top-level and WITH_IO-wrapped
 /// assertions via `extract_stream_needle` / `needs_exact_stdout`.
@@ -960,15 +963,26 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             hash,
             actual,
             expected,
+        }
+        | StepKind::AssertNe {
+            hash,
+            actual,
+            expected,
         } => {
+            let (verb, expect_equal) = match cmd {
+                StepKind::AssertEq { .. } => (Command::AssertEq.as_str(), true),
+                _ => (Command::AssertNe.as_str(), false),
+            };
             let target = resolve_assert_target(actual, &mut cx)?;
             let expected_resolved = match expected {
                 Some(e) => Some(super::args::evaluate_assert_operand(e, &mut cx)?),
                 None => None,
             };
-            handlers::assert_eq(
+            handlers::assert_equality(
                 &mut cx,
                 generation,
+                verb,
+                expect_equal,
                 hash,
                 &target,
                 expected_resolved.as_ref(),
@@ -1323,7 +1337,16 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 hash,
                                 actual,
                                 expected,
+                            }
+                            | StepKind::AssertNe {
+                                hash,
+                                actual,
+                                expected,
                             } => {
+                                let (verb, expect_equal) = match &step.kind {
+                                    StepKind::AssertEq { .. } => (Command::AssertEq.as_str(), true),
+                                    _ => (Command::AssertNe.as_str(), false),
+                                };
                                 let target = resolve_assert_target(actual, &mut cx)?;
                                 let expected_resolved = match expected {
                                     Some(e) => {
@@ -1331,9 +1354,11 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     }
                                     None => None,
                                 };
-                                handlers::assert_eq(
+                                handlers::assert_equality(
                                     &mut cx,
                                     generation,
+                                    verb,
+                                    expect_equal,
                                     hash,
                                     &target,
                                     expected_resolved.as_ref(),

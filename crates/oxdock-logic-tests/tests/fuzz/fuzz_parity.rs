@@ -415,6 +415,29 @@ fn flat_body_image_eq(a: &Step, b: &Step) -> bool {
                     _ => false,
                 }
         }
+        (
+            StepKind::AssertNe {
+                hash: hx,
+                actual: ax,
+                expected: ex,
+            },
+            StepKind::AssertNe {
+                hash: hy,
+                actual: ay,
+                expected: ey,
+            },
+        ) => {
+            hx == hy
+                && match (ax, ay) {
+                    (AssertTarget::Value(x), AssertTarget::Value(y)) => arg_content_eq(x, y),
+                    _ => ax == ay,
+                }
+                && match (ex, ey) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => arg_content_eq(x, y),
+                    _ => false,
+                }
+        }
         // `Block` bodies hold only the flat subset above: anything else
         // fails loudly instead of comparing strictly (flags would lie).
         _ => false,
@@ -652,6 +675,16 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             }
         }),
         (any_msg(), any_msg()).prop_map(|(actual, expected)| StepKind::AssertEq {
+            hash: None,
+            actual: AssertTarget::Value(actual.into()),
+            expected: Some(expected.into()),
+        }),
+        ("[0-9a-f]{64}", safe_string()).prop_map(|(digest, actual)| StepKind::AssertNe {
+            hash: Some(digest),
+            actual: AssertTarget::Value(actual.into()),
+            expected: None,
+        }),
+        (safe_string(), any_msg()).prop_map(|(actual, expected)| StepKind::AssertNe {
             hash: None,
             actual: AssertTarget::Value(actual.into()),
             expected: Some(expected.into()),
@@ -1306,6 +1339,27 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             );
         }
         (
+            StepKind::AssertNe {
+                hash: lh,
+                actual: la,
+                expected: le,
+            },
+            StepKind::AssertNe {
+                hash: rh,
+                actual: ra,
+                expected: re,
+            },
+        ) => {
+            assert_eq!(lh, rh, "AssertNe hash mismatch: {}", msg);
+            assert_target_eq(la, ra, "AssertNe actual mismatch", msg);
+            assert_eq!(
+                le.as_ref().map(|a| a.as_str()),
+                re.as_ref().map(|a| a.as_str()),
+                "AssertNe expected mismatch: {}",
+                msg
+            );
+        }
+        (
             StepKind::AssertContains {
                 haystack: lh,
                 needle: ln,
@@ -1877,6 +1931,11 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             actual: AssertTarget::Value("coverage-actual".into()),
             expected: Some("coverage-expected".into()),
         },
+        StepKind::AssertNe {
+            hash: None,
+            actual: AssertTarget::Value("coverage-actual".into()),
+            expected: Some("coverage-expected".into()),
+        },
         StepKind::AssertContains {
             haystack: AssertTarget::Value("coverage haystack".into()),
             needle: "coverage".into(),
@@ -2162,6 +2221,7 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         | StepKind::Remove { .. }
         | StepKind::Write { .. }
         | StepKind::AssertEq { .. }
+        | StepKind::AssertNe { .. }
         | StepKind::AssertContains { .. }
         | StepKind::Exit(..)
         | StepKind::TypeAlias { .. } => true,

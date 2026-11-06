@@ -1,0 +1,1 @@
+{"name": "oxdock-utils", "description": "Shared leaf utilities for OxDock: streaming tarball pack/unpack, SHA-256 hex digests, and other dependency-light helpers used across crates."}

@@ -1227,9 +1227,7 @@ fn hash_sha256<P: ProcessManager>(
     super::fs_ops::hash_path(cx.state.fs.as_ref(), &target, "", &mut hasher)?;
     let digest = hasher.finalize();
     let bytes: &[u8] = digest.as_ref();
-    Ok(Value::string(
-        bytes.iter().map(|b| format!("{b:02x}")).collect(),
-    ))
+    Ok(Value::string(oxdock_utils::hex_encode(bytes)))
 }
 
 /// Current working directory as a workspace-absolute path.

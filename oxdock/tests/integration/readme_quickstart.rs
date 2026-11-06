@@ -1,4 +1,4 @@
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{GuardedPath, PathResolver};
 use oxdock_parser::extract_fenced_blocks;
 use oxdock_process::CommandBuilder;
 

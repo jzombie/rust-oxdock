@@ -10,9 +10,9 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.34.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.35.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.34.0-alpha`, or install the standalone runner with `cargo install oxdock@0.34.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.35.0-alpha`, or install the standalone runner with `cargo install oxdock@0.35.0-alpha`.
 
 ### Run a script with the CLI
 
@@ -463,7 +463,7 @@ Every variable the seed provides to spawned children is specified in [ENV_CONTRA
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.34.0-alpha
+cargo install oxdock@0.35.0-alpha
 ```
 
 Run a script file:
@@ -708,11 +708,10 @@ Asset scripts resolve `STD` (via `IMPORT [STD]`) and `SCRIPT` functions only. Th
 
 ## Run scripts inline
 
-The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
+The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types are re-exported from `oxdock`, so one dependency covers macros, runners, and roots: `cargo add oxdock`. Only portable commands are used below, so the script behaves identically on every OS.
 
 ```rust
-use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{GuardedPath, PathResolver, oxdock, oxdock_parser, run_steps_with_context};
 
 // A version stamping pipeline: variables, a function, a loop over a list,
 // a conditional call, templates, and native assertions. The version comes
@@ -743,8 +742,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.34.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.34.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.35.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.35.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -756,15 +755,14 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.34.0-alpha"
+    "alpha OxDock 0.35.0-alpha"
 );
 ```
 
 Use `#var` to inject Rust values into the script (any value that implements `Display`). DSL variables keep their `$var` form and are unaffected. Guards accept injected values too, so Rust flags can gate steps. The script below wires a pipe between steps, reads one line back into a variable, and expands every generated file.
 
 ```rust
-use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock::{GuardedPath, PathResolver, oxdock, oxdock_parser, run_steps_with_context};
 
 let project = "OxDock";
 let verbose = true;
@@ -871,7 +869,7 @@ fn main() -> anyhow::Result<()> {
         // `.with_state(...)`. These are stateless, so none.
         states: vec![],
     });
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
         modules: [DEMO],
@@ -880,7 +878,7 @@ fn main() -> anyhow::Result<()> {
         LET $n: INT = WORD_COUNT($s)
         ASSERT_EQ $n 3
     };
-    let run = engine.run_steps(&root, &steps)?;
+    let run = engine.run_steps_without_snapshot(&root, &steps)?;
     assert_eq!(format!("{}", run.bindings["s"]), "3 words, 17 chars");
     Ok(())
 }
@@ -924,7 +922,7 @@ fn main() -> anyhow::Result<()> {
         states: vec![],
     });
 
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root_path = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
         modules: [DEMO],
@@ -934,10 +932,10 @@ fn main() -> anyhow::Result<()> {
         ASSERT_EQ $s "demo"
         WRITE tag.txt "{{ $s }}::{{ $t }}"
     };
-    let run = engine.run_steps(&root_path, &steps)?;
+    let run = engine.run_steps_without_snapshot(&root_path, &steps)?;
     assert!(run.bindings.contains_key("s"));
 
-    let reader = oxdock_fs::PathResolver::new(root_path.root(), root_path.root()).unwrap();
+    let reader = oxdock::PathResolver::new(root_path.root(), root_path.root()).unwrap();
     let written = reader
         .read_to_string(&root_path.join("tag.txt").unwrap())
         .expect("script writes tag.txt");
@@ -1168,7 +1166,7 @@ fn main() -> anyhow::Result<()> {
         // `.with_state(...)`. These are stateless, so none.
         states: vec![],
     });
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let run = engine.run_script(
         &root,
@@ -1249,7 +1247,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.34.0-alpha", default-features = false }
+oxdock = { version = "0.35.0-alpha", default-features = false }
 ```
 
 ## Glossary
@@ -1261,7 +1259,7 @@ oxdock = { version = "0.34.0-alpha", default-features = false }
 - **Inline**: Payload bytes carried inside the word itself, with zero allocation. Available to `Copy` scalars that fit in 64 bits.
 - **NaN boxing**: A technique that packs values into 64 bits by reusing NaN float patterns. Denser than 16 byte words at the cost of pointer masking and constrained host values.
 - **Payload**: The 64 bit data half of a word: either inline bytes or a pointer to one owned box.
-- **Plugin**: A host extension module ([NET](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md), [SSH](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md)) loaded with IMPORT, bringing extra functions into script scope.
+- **Plugin**: A host extension module ([NET](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md), [SSH](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md), [MARKDOWN](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-markdown-plugin/README.md)) loaded with IMPORT, bringing extra functions into script scope.
 - **Provenance**: The recorded origin of a pointer, which Rust uses to judge whether a memory access is valid. Round tripping through the same box type preserves it.
 - **RPN**: Reverse Polish Notation: arithmetic compiled to a flat stack program instead of tree walking.
 - **Vtable**: The operations half of a descriptor: function pointers that clone, drop, compare, and render values of that type.

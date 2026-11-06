@@ -1,0 +1,59 @@
+[package]
+name = "oxdock-cli"
+description = "CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms."
+categories = ["command-line-utilities"]
+keywords = ["cli", "oxdock", "dsl", "workflow", "mcp"]
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.cargo-udeps.ignore]
+# List dependency names to ignore for this package
+normal = ["tracing"]
+development = []
+build = []
+
+[features]
+default = ["net", "ssh", "markdown", "mcp"]
+net = ["dep:oxdock-net-plugin", "dep:oxdock-remote-proto", "dep:oxdock-utils"]
+ssh = ["net", "dep:oxdock-ssh-plugin"]
+# Markdown helpers in the CLI runner (oxdock-markdown-plugin). On by
+# default; `--no-default-features` builds drop the module.
+markdown = ["dep:oxdock-markdown-plugin"]
+# MCP tool hosting for EXPORTed script functions (oxdock-mcp reactor
+# behind `--mcp`). On by default; `--no-default-features` builds drop
+# it.
+mcp = ["dep:oxdock-mcp"]
+
+[dependencies]
+anyhow.workspace = true
+futures-executor.workspace = true
+indoc.workspace = true
+lexopt.workspace = true
+muxio-core.workspace = true
+muxio-rpc-service-endpoint.workspace = true
+muxio-sync-rpc-server.workspace = true
+oxdock-core.workspace = true
+oxdock-fs.workspace = true
+oxdock-macros.workspace = true
+oxdock-markdown-plugin = { workspace = true, optional = true }
+oxdock-mcp = { workspace = true, optional = true }
+oxdock-net-plugin = { workspace = true, optional = true }
+oxdock-parser.workspace = true
+oxdock-pipe.workspace = true
+oxdock-process.workspace = true
+oxdock-remote-proto = { workspace = true, optional = true }
+oxdock-ssh-plugin = { workspace = true, optional = true }
+oxdock-utils = { workspace = true, optional = true }
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+oxdock-sys-test-utils.workspace = true
+
+[lints]
+workspace = true

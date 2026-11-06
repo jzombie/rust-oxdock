@@ -568,7 +568,7 @@ fn symlink_errors_report_underlying_cause() {
             col: 0,
         },
     ];
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("step 2 (SYMLINK taken.txt taken.txt)"),
@@ -1195,7 +1195,7 @@ fn declared_bool_vs_string_treatment_differs() {
 fn bool_coercion_rejects_empty() {
     // Declared-but-absent env names read empty, and empty is not a
     // boolean: coercion fails instead of silently picking a polarity.
-    // Flag sites state their absent-default via STD::BOOL_OR.
+    // Flag sites state their absent default via STD::BOOL_OR.
     let steps = crate::parse_script(indoc! {r#"
         INHERIT_ENV [OXDOCK_TEST_ABSENT_FLAG]
         LET $h: BOOL = "{{ env:OXDOCK_TEST_ABSENT_FLAG }}"
@@ -1387,7 +1387,7 @@ fn cat_and_capture_expand_env_paths() {
             col: 0,
         },
     ];
-    run_steps(&root, &steps).expect("capture with env paths succeeds");
+    run_steps_without_snapshot(&root, &steps).expect("capture with env paths succeeds");
     let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
     let captured_path = root.join("cat-snippet.txt").expect("capture path");
     let contents = resolver
@@ -2622,6 +2622,10 @@ fn archive_destination_cannot_be_source_or_inside_packed_tree() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "asserts real Unix mode bits via host stat; the synthetic Miri filesystem has no modes"
+)]
 fn unarchive_restores_read_only_dirs_after_children_land() {
     // A 0555 member dir applied eagerly would lock out its own file
     // creations with EACCES; modes must settle after extraction.
@@ -2841,6 +2845,10 @@ fn archive_refuses_nested_symlink_in_tree() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "asserts real Unix mode bits via host stat; the synthetic Miri filesystem has no modes"
+)]
 fn archive_round_trips_unix_modes() {
     // Pack-side mode recording plus unpack-side restore: an executable
     // bit set before ARCHIVE must survive the round trip.
@@ -4124,6 +4132,10 @@ fn echo_of_pipe_handle_fails_loudly() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "wall-clock task join; Miri interprets orders of magnitude slower than the script timeout"
+)]
 fn nested_spawn_marks_pipes_nested_in_collections_escaped() {
     // Pipes travel inside lists and maps: spawning a nested task must
     // mark them escaped through the collection. Here the pipe is
@@ -4223,6 +4235,10 @@ fn eof_false_while_buffered_true_once_drained() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "wall-clock task join; Miri interprets orders of magnitude slower than the script timeout"
+)]
 fn eof_false_with_live_writer_true_after_join() {
     // A task holding the write end answers false; once it exits and the
     // pipe closes, the same handle answers true.
@@ -4314,6 +4330,10 @@ fn loop_body_declarations_mint_per_iteration() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "wall-clock task join; Miri interprets orders of magnitude slower than the script timeout"
+)]
 fn mixed_task_body_pins_script_and_run_adapts() {
     // Strict promotion: a RUN producer sharing a handle with a DSL
     // consumer pins script (not every binding is RUN-terminated). The RUN
@@ -4420,6 +4440,50 @@ fn host_round_trip_through_adapters() {
     .expect("host round-trip runs");
     let files = fs.snapshot();
     assert_eq!(file_content(&files, "out.txt"), b"hello host-seed");
+}
+
+#[test]
+fn expand_placeholders_reject_missing_names() {
+    // Runtime half of the missing-key contract: `$var`, bare keys,
+    // and empty placeholders have no static coverage (the gate checks
+    // only `env:` names), so direct expansion must fail loudly.
+    // Absent env reads empty here by design: declaration is enforced
+    // by the static gate before any step runs, and a runtime miss is
+    // therefore always a declared name the host did not bridge.
+    use crate::exec::args::expand_string;
+    let mut state = create_exec_state(MockFs::new());
+    let err = expand_string("{{ $nope }}", &state.envs.clone(), &state)
+        .expect_err("missing var must fail");
+    assert!(format!("{err:#}").contains("undefined variable"), "{err:#}");
+    let err = expand_string("{{ bare_nope }}", &state.envs.clone(), &state)
+        .expect_err("missing bare key must fail");
+    assert!(
+        format!("{err:#}").contains("undefined script variable"),
+        "{err:#}"
+    );
+    let err = expand_string("{{ }}", &state.envs.clone(), &state)
+        .expect_err("empty placeholder must fail");
+    assert!(
+        format!("{err:#}").contains("empty template placeholder"),
+        "{err:#}"
+    );
+    let out = expand_string(
+        "{{ env:OXDOCK_TEST_NEVER_DECLARED }}",
+        &state.envs.clone(),
+        &state,
+    )
+    .expect("runtime env miss reads empty; the static gate owns declaration");
+    assert_eq!(out, "");
+    // A bare key shadowing a present env name still fails: bare keys
+    // never read the environment, so the error points at `env:`.
+    Arc::make_mut(&mut state.envs)
+        .insert("OXDOCK_TEST_PRESENT".to_string(), "host-value".to_string());
+    let err = expand_string("{{ OXDOCK_TEST_PRESENT }}", &state.envs.clone(), &state)
+        .expect_err("bare key must fail even when the env name exists");
+    assert!(
+        format!("{err:#}").contains("env:OXDOCK_TEST_PRESENT"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[test]
@@ -7356,6 +7420,10 @@ fn file_import_dotdot_escape_fails_before_any_step() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "parse-time IMPORT probe needs a host filesystem; unresolvable under Miri isolation"
+)]
 fn file_import_outside_entry_resolves_against_workspace_root() {
     // Entries staged outside the workspace (CI temp dirs) resolve
     // top-level imports against the workspace root, like stdin runs.
@@ -8405,7 +8473,17 @@ fn workflow_inline_scripts_pass_static_gate() {
                 blocks.push((format!("{workflow}::{name}"), body.join("\n")));
             }
         }
-        assert!(!blocks.is_empty(), "no blocks in {workflow}");
+        assert!(
+            !blocks.is_empty() || workflow == "miri-nightly.yml",
+            "no blocks in {workflow}"
+        );
+        if blocks.is_empty() {
+            // miri-nightly runs file scripts (gha-miri-*.oxfile) via the
+            // CLI instead of inline oxdock blocks: those files carry
+            // their own conformance tests plus local runs, so there is
+            // nothing inline left for this gate to check.
+            continue;
+        }
         for (label, body) in &blocks {
             // GitHub expressions are interpolated before the engine
             // runs; stand in a dummy value so parsing sees the shape.

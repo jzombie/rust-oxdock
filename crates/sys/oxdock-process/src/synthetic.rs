@@ -95,6 +95,15 @@ impl Drop for SyntheticBgHandle {
 impl ProcessManager for SyntheticProcessManager {
     type Handle = SyntheticBgHandle;
 
+    /// No terminal exists under Miri isolation, by definition: report
+    /// false without touching any fd (the default probes real stdin,
+    /// which aborts under isolation). This keeps the non-interactive
+    /// PROMPT path (default binds, else bail) working under Miri;
+    /// truly interactive reads stay unreachable there.
+    fn stdin_is_terminal(&self) -> bool {
+        false
+    }
+
     fn run_command(
         &mut self,
         ctx: &CommandContext,

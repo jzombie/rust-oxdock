@@ -12,8 +12,8 @@ use oxdock_fs::PolicyPath;
 use oxdock_fs::command_path;
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::{
-    Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value, WorkspaceTarget,
-    render_structural,
+    Arg, Command, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value,
+    WorkspaceTarget, render_structural,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
@@ -21,8 +21,8 @@ use oxdock_process::{
     check_spawn_anchors, read_pump_chunk,
 };
 use oxdock_pty::{PtyInput, PtyOutcome, PtyRequest, WatchSize, run_pty_session};
-use oxdock_remote_proto::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
-use sha2::{Digest, Sha256};
+use oxdock_utils::sha256_hex;
+use oxdock_utils::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
 
 use super::args::parse_bool_str;
 use super::fs_ops::copy_entry;
@@ -761,23 +761,6 @@ pub(super) fn copy_git<P: ProcessManager>(
     Ok(())
 }
 
-/// Source mode for one archive header: Unix records the real mode so
-/// unpackers (system `tar` or `UNARCHIVE`) restore it; other platforms
-/// land the conventional default.
-fn archive_entry_mode(meta: &std::fs::Metadata, default: u32) -> u32 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = default;
-        meta.permissions().mode() & 0o7777
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        default
-    }
-}
-
 /// Resolve an archive source with a symlink refusal: canonical
 /// resolution routes through the final link, so the resolved guard alone
 /// cannot see it. The parent resolves normally (intermediate links stay
@@ -939,8 +922,8 @@ fn append_archive_tree<W: std::io::Write>(
     for (rel, guard) in dirs {
         let rel = sanitize_rel(rel).with_context(|| tag.to_string())?;
         let mode = fs
-            .metadata(guard)
-            .map(|meta| archive_entry_mode(&meta, 0o755))
+            .archive_member_stat(guard)
+            .map(|(_, mode)| mode.unwrap_or(0o755))
             .with_context(|| tag.to_string())?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(mode);
@@ -953,7 +936,9 @@ fn append_archive_tree<W: std::io::Write>(
     }
     for (rel, guard) in files {
         let rel = sanitize_rel(rel).with_context(|| tag.to_string())?;
-        let meta = fs.metadata(guard).with_context(|| tag.to_string())?;
+        let (len, mode) = fs
+            .archive_member_stat(guard)
+            .with_context(|| tag.to_string())?;
         // Link-refusing open: a symlink planted after the listing
         // probe fails here instead of packing its target's bytes, and
         // the descriptor must stay under the packed tree.
@@ -961,8 +946,8 @@ fn append_archive_tree<W: std::io::Write>(
             .open_read_nofollow(guard, src_abs)
             .with_context(|| tag.to_string())?;
         let mut header = tar::Header::new_gnu();
-        header.set_mode(archive_entry_mode(&meta, 0o644));
-        header.set_size(meta.len());
+        header.set_mode(mode.unwrap_or(0o644));
+        header.set_size(len);
         header.set_cksum();
         builder
             .append_data(&mut header, &rel, &mut reader)
@@ -1654,14 +1639,22 @@ pub(super) fn replace<P: ProcessManager>(
     Ok(())
 }
 
-/// Strict equality assertion over evaluated values, stream buffers, and
-/// pipe buffers. Typed `Value` comparison with no coercion; files never
-/// appear here (read them into variables first). `--hash` compares the
-/// SHA-256 of a string, pipe, or captured-stdout actual instead of the
-/// raw bytes (`stderr` is unsupported).
-pub(super) fn assert_eq<P: ProcessManager>(
+/// Strict equality/inequality assertion over evaluated values, stream
+/// buffers, and pipe buffers. Typed `Value` comparison with no coercion;
+/// files never appear here (read them into variables first). `--hash`
+/// compares the SHA-256 of a string, pipe, or captured-stdout actual
+/// instead of the raw bytes (`stderr` is unsupported).
+///
+/// `expect_equal` selects the polarity: true is `ASSERT_EQ`, false is
+/// `ASSERT_NE`. All target resolution, Mode-1 draining, and digest logic
+/// lives here once; the two verbs differ only in pass/fail sense and
+/// error text.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn assert_equality<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
+    verb: &str,
+    expect_equal: bool,
     hash: &Option<String>,
     actual: &super::steps::ResolvedAssertTarget,
     expected: Option<&Value>,
@@ -1672,24 +1665,43 @@ pub(super) fn assert_eq<P: ProcessManager>(
     if let ResolvedAssertTarget::Stdout = actual
         && let CommandStdin::Stream(input_stream) = cx.stdin.clone()
     {
-        let drained = drain_stdin_bounded(input_stream, "ASSERT_EQ")?;
+        let drained = drain_stdin_bounded(input_stream, verb)?;
         super::io::write_stdout(cx.out.clone(), |w| {
             w.write_all(&drained)?;
             Ok(())
         })?;
+        if let Some(sha) = hash {
+            // Hash form carries no positional expected: digest the
+            // drained stream and compare with the selected polarity.
+            let computed = sha256_hex(&drained);
+            let is_equal = computed.eq_ignore_ascii_case(sha);
+            if is_equal != expect_equal {
+                if expect_equal {
+                    bail!("{verb} --hash mismatch: expected {sha}, computed {computed}");
+                } else {
+                    bail!("{verb} --hash match: content matches {sha}");
+                }
+            }
+            return Ok(());
+        }
         let Some(want) = expected.and_then(|v| v.as_str()) else {
             bail!(
-                "ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                "{verb} stream mismatch\nexpected: {:?}\nactual:   {:?}",
                 expected,
                 String::from_utf8_lossy(&drained)
             );
         };
-        if drained != want.as_bytes() {
-            bail!(
-                "ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
-                want,
-                String::from_utf8_lossy(&drained)
-            );
+        let is_equal = drained == want.as_bytes();
+        if is_equal != expect_equal {
+            if expect_equal {
+                bail!(
+                    "{verb} stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                    want,
+                    String::from_utf8_lossy(&drained)
+                );
+            } else {
+                bail!("{verb} stream unexpectedly equal: {want:?}");
+            }
         }
         return Ok(());
     }
@@ -1698,81 +1710,98 @@ pub(super) fn assert_eq<P: ProcessManager>(
             ResolvedAssertTarget::Value(v) => match v.as_str() {
                 Some(s) => s.as_bytes().to_vec(),
                 None => {
-                    bail!("ASSERT_EQ --hash needs a string actual, found {:?}", v);
+                    bail!("{verb} --hash needs a string actual, found {v:?}");
                 }
             },
             ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
-            ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation)?,
+            ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, generation, verb)?,
             ResolvedAssertTarget::Stderr => {
-                bail!("ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...");
+                bail!(
+                    "{verb} over stderr is not supported; use {} stderr ...",
+                    Command::AssertContains.as_str()
+                );
             }
         };
-        let mut hasher = Sha256::new();
-        hasher.update(&actual_bytes);
-        let digest = hasher.finalize();
-        let bytes: &[u8] = digest.as_ref();
-        let computed: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        if !computed.eq_ignore_ascii_case(sha) {
-            bail!(
-                "ASSERT_EQ --hash mismatch: expected {}, computed {}",
-                sha,
-                computed
-            );
+        let computed = sha256_hex(&actual_bytes);
+        let is_equal = computed.eq_ignore_ascii_case(sha);
+        if is_equal != expect_equal {
+            if expect_equal {
+                bail!("{verb} --hash mismatch: expected {sha}, computed {computed}");
+            } else {
+                bail!("{verb} --hash match: content matches {sha}");
+            }
         }
         return Ok(());
     }
     match actual {
         ResolvedAssertTarget::Value(got) => {
             let Some(want) = expected else {
-                bail!("ASSERT_EQ requires an expected value");
+                bail!("{verb} requires an expected value");
             };
-            if got == want {
-                Ok(())
-            } else {
-                bail!(
-                    "ASSERT_EQ mismatch\nexpected: {:?}\nactual:   {:?}",
-                    want,
-                    got
-                );
+            let is_equal = got == want;
+            if is_equal != expect_equal {
+                if expect_equal {
+                    bail!("{verb} mismatch\nexpected: {:?}\nactual:   {:?}", want, got);
+                } else {
+                    bail!(
+                        "{verb} mismatch: values are equal\nexpected: {:?}\nactual:   {:?}",
+                        want,
+                        got
+                    )
+                }
             }
+            Ok(())
         }
         ResolvedAssertTarget::Stdout => {
-            let bytes = exact_stdout_bytes(cx, generation)?;
+            let bytes = exact_stdout_bytes(cx, generation, verb)?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
                 bail!(
-                    "ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                    "{verb} stream mismatch\nexpected: {:?}\nactual:   {:?}",
                     expected,
                     String::from_utf8_lossy(&bytes)
                 );
             };
-            if bytes != want.as_bytes() {
-                bail!(
-                    "ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
-                    want,
-                    String::from_utf8_lossy(&bytes)
-                );
+            let is_equal = bytes == want.as_bytes();
+            if is_equal != expect_equal {
+                if expect_equal {
+                    bail!(
+                        "{verb} stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                        want,
+                        String::from_utf8_lossy(&bytes)
+                    );
+                } else {
+                    bail!("{verb} stream unexpectedly equal: {want:?}");
+                }
             }
             Ok(())
         }
         ResolvedAssertTarget::Stderr => {
-            bail!("ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...");
+            bail!(
+                "{verb} over stderr is not supported; use {} stderr ...",
+                Command::AssertContains.as_str()
+            );
         }
         ResolvedAssertTarget::Pipe(bytes) => {
             let actual_str = String::from_utf8(bytes.clone())
-                .with_context(|| "ASSERT_EQ pipe content is not UTF-8".to_string())?;
+                .with_context(|| format!("{verb} pipe content is not UTF-8"))?;
             let Some(want) = expected.and_then(|v| v.as_str()) else {
                 bail!(
-                    "ASSERT_EQ pipe mismatch\nexpected: {:?}\nactual:   {:?}",
+                    "{verb} pipe mismatch\nexpected: {:?}\nactual:   {:?}",
                     expected,
                     actual_str
                 );
             };
-            if actual_str != want {
-                bail!(
-                    "ASSERT_EQ pipe mismatch\nexpected: {:?}\nactual:   {:?}",
-                    want,
-                    actual_str
-                );
+            let is_equal = actual_str == want;
+            if is_equal != expect_equal {
+                if expect_equal {
+                    bail!(
+                        "{verb} pipe mismatch\nexpected: {:?}\nactual:   {:?}",
+                        want,
+                        actual_str
+                    );
+                } else {
+                    bail!("{verb} pipe unexpectedly equal: {want:?}");
+                }
             }
             Ok(())
         }
@@ -1780,7 +1809,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
 }
 
 /// Drain a piped stdin fully while enforcing the exact-match byte cap.
-/// Shared by `ASSERT_EQ stdout` Mode 1.
+/// Shared by `ASSERT_EQ`/`ASSERT_NE stdout` Mode 1.
 fn drain_stdin_bounded(input_stream: SharedInput, verb: &str) -> Result<Vec<u8>> {
     let mut guard = input_stream
         .lock()
@@ -1809,6 +1838,7 @@ fn drain_stdin_bounded(input_stream: SharedInput, verb: &str) -> Result<Vec<u8>>
 fn exact_stdout_bytes<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
+    verb: &str,
 ) -> Result<Vec<u8>> {
     let captures = cx
         .state
@@ -1817,10 +1847,10 @@ fn exact_stdout_bytes<P: ProcessManager>(
         .map_err(|_| anyhow!("exact_stdout poisoned"))?;
     match captures.get(&generation) {
         Some(entry) if entry.overflowed => bail!(
-            "ASSERT_EQ stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
+            "{verb} stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
         ),
         Some(entry) => Ok(entry.bytes.clone()),
-        None => bail!("ASSERT_EQ stdout has no exact capture registered"),
+        None => bail!("{verb} stdout has no exact capture registered"),
     }
 }
 
@@ -1836,6 +1866,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
     needle: &Arg,
 ) -> Result<()> {
     use super::steps::ResolvedAssertTarget;
+    let verb = Command::AssertContains.as_str();
     let needle_str = super::args::resolve_arg(needle, cx)?;
     match haystack {
         ResolvedAssertTarget::Value(v) => {
@@ -1843,11 +1874,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 if hay.contains(needle_str.as_str()) {
                     return Ok(());
                 }
-                bail!(
-                    "ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
-                    needle_str,
-                    hay
-                );
+                bail!("{verb} did not contain '{}'; actual: {:?}", needle_str, hay);
             }
             if let Some(items) = v.as_list() {
                 if items
@@ -1856,20 +1883,16 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 {
                     return Ok(());
                 }
-                bail!(
-                    "ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
-                    needle_str,
-                    v
-                );
+                bail!("{verb} did not contain '{}'; actual: {:?}", needle_str, v);
             }
             if let Some(map) = v.as_map() {
                 if map.contains_key(needle_str.as_str()) {
                     return Ok(());
                 }
-                bail!("ASSERT_CONTAINS did not contain '{}'", needle_str);
+                bail!("{verb} did not contain '{}'", needle_str);
             }
             bail!(
-                "ASSERT_CONTAINS needs a string, list, or map haystack, found {:?}",
+                "{verb} needs a string, list, or map haystack, found {:?}",
                 v
             );
         }
@@ -1879,14 +1902,14 @@ pub(super) fn assert_contains<P: ProcessManager>(
             if let CommandStdin::Stream(input_stream) = cx.stdin.clone() {
                 let mut guard = input_stream
                     .lock()
-                    .map_err(|_| anyhow!("failed to lock stdin for ASSERT_CONTAINS"))?;
+                    .map_err(|_| anyhow!("failed to lock stdin for {verb}"))?;
                 let mut window = super::io::SlidingWindow::new(needle_str.as_bytes().to_vec());
                 let mut buf = [0u8; super::io::CHUNK_SIZE];
                 let mut read_any = false;
                 loop {
                     let n = guard
                         .read(&mut buf)
-                        .context("failed to read from stdin for ASSERT_CONTAINS")?;
+                        .context(format!("failed to read from stdin for {verb}"))?;
                     if n == 0 {
                         break;
                     }
@@ -1903,7 +1926,7 @@ pub(super) fn assert_contains<P: ProcessManager>(
                     }
                     let emitted = String::from_utf8_lossy(&window.ring_buffer()).into_owned();
                     bail!(
-                        "ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
+                        "{verb} did not contain '{}'; emitted:\n{}",
                         needle_str,
                         emitted.trim_end()
                     );
@@ -1920,12 +1943,12 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
                     bail!(
-                        "ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
+                        "{verb} did not contain '{}'; emitted:\n{}",
                         needle_str,
                         emitted.trim_end()
                     )
                 }
-                _ => bail!("ASSERT_CONTAINS did not contain '{}'", needle_str),
+                _ => bail!("{verb} did not contain '{}'", needle_str),
             }
         }
         ResolvedAssertTarget::Stderr => {
@@ -1941,22 +1964,22 @@ pub(super) fn assert_contains<P: ProcessManager>(
                 Some(w) => {
                     let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
                     bail!(
-                        "ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
+                        "{verb} did not contain '{}'; emitted:\n{}",
                         needle_str,
                         emitted.trim_end()
                     )
                 }
-                _ => bail!("ASSERT_CONTAINS did not contain '{}'", needle_str),
+                _ => bail!("{verb} did not contain '{}'", needle_str),
             }
         }
         ResolvedAssertTarget::Pipe(bytes) => {
             let hay = String::from_utf8(bytes.clone())
-                .with_context(|| "ASSERT_CONTAINS pipe content is not UTF-8".to_string())?;
+                .with_context(|| format!("{verb} pipe content is not UTF-8"))?;
             if hay.contains(needle_str.as_str()) {
                 Ok(())
             } else {
                 bail!(
-                    "ASSERT_CONTAINS did not contain '{}'; pipe held {:?}",
+                    "{verb} did not contain '{}'; pipe held {:?}",
                     needle_str,
                     hay
                 );
@@ -3531,54 +3554,50 @@ pub(super) fn prompt<P: ProcessManager>(
     message: &str,
     default: Option<&str>,
 ) -> Result<()> {
-    #[cfg(miri)]
-    {
-        let _ = (cx, var, message, default);
-        bail!("PROMPT unavailable under Miri (no terminal)");
-    }
-    #[cfg(not(miri))]
-    {
-        let clean_var = var.trim_start_matches('$').to_string();
-        // Interactivity needs both a host TTY and an unredirected
-        // stdin: a `WITH_IO [stdin=...]` pipe can never answer a
-        // prompt, so PROMPT short-circuits instead of blocking on it.
-        if !cx.process.stdin_is_terminal() || cx.stdin.is_redirected() {
-            match default {
-                Some(d) => {
-                    eprintln!("non-interactive: using default for {message}");
-                    let text = Value::string(d.to_string());
-                    bind_prompt_var(cx, &clean_var, text)?;
-                    return Ok(());
-                }
-                None => {
-                    bail!("PROMPT {message}: non-TTY stdin has no answer and no default",);
-                }
+    // No Miri special-case: `SyntheticProcessManager::stdin_is_terminal`
+    // reports false without touching a fd, so under Miri this always
+    // takes the non-interactive branch below (default binds, else
+    // bail). The terminal-reading tail is unreachable there.
+    let clean_var = var.trim_start_matches('$').to_string();
+    // Interactivity needs both a host TTY and an unredirected
+    // stdin: a `WITH_IO [stdin=...]` pipe can never answer a
+    // prompt, so PROMPT short-circuits instead of blocking on it.
+    if !cx.process.stdin_is_terminal() || cx.stdin.is_redirected() {
+        match default {
+            Some(d) => {
+                eprintln!("non-interactive: using default for {message}");
+                let text = Value::string(d.to_string());
+                bind_prompt_var(cx, &clean_var, text)?;
+                return Ok(());
+            }
+            None => {
+                bail!("PROMPT {message}: non-TTY stdin has no answer and no default",);
             }
         }
-        let rendered = format_prompt(message, default);
-        {
-            use std::io::Write;
-            let mut err = std::io::stderr().lock();
-            err.write_all(rendered.as_bytes())
-                .with_context(|| format!("PROMPT {message}: failed to write prompt"))?;
-            err.flush()
-                .with_context(|| format!("PROMPT {message}: failed to flush prompt"))?;
-        }
-        let mut line = String::new();
-        let n = std::io::stdin()
-            .read_line(&mut line)
-            .with_context(|| format!("PROMPT {message}: failed reading stdin"))?;
-        if n == 0 && line.is_empty() {
-            bail!("PROMPT {message}: EOF on stdin before any input",);
-        }
-        let trimmed = line
-            .strip_suffix("\r\n")
-            .or_else(|| line.strip_suffix('\n'))
-            .unwrap_or(&line);
-        let text = Value::string(apply_prompt_answer(trimmed, default));
-        bind_prompt_var(cx, &clean_var, text)?;
-        Ok(())
     }
+    let rendered = format_prompt(message, default);
+    {
+        use std::io::Write;
+        let mut err = std::io::stderr().lock();
+        err.write_all(rendered.as_bytes())
+            .with_context(|| format!("PROMPT {message}: failed to write prompt"))?;
+        err.flush()
+            .with_context(|| format!("PROMPT {message}: failed to flush prompt"))?;
+    }
+    let mut line = String::new();
+    let n = std::io::stdin()
+        .read_line(&mut line)
+        .with_context(|| format!("PROMPT {message}: failed reading stdin"))?;
+    if n == 0 && line.is_empty() {
+        bail!("PROMPT {message}: EOF on stdin before any input",);
+    }
+    let trimmed = line
+        .strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(&line);
+    let text = Value::string(apply_prompt_answer(trimmed, default));
+    bind_prompt_var(cx, &clean_var, text)?;
+    Ok(())
 }
 
 #[cfg_attr(miri, allow(dead_code))]
@@ -3766,6 +3785,30 @@ pub(crate) fn dispatch_expand<P: ProcessManager>(
     replace(cx, &path_resolved, &overrides_resolved)
 }
 
+fn dispatch_assert_equality<P: ProcessManager>(
+    hash: &Option<String>,
+    actual: &oxdock_parser::AssertTarget,
+    expected: &Option<Arg>,
+    cx: &mut StepCtx<'_, P>,
+    verb: &str,
+    expect_equal: bool,
+) -> Result<()> {
+    let target = super::steps::resolve_assert_target(actual, cx)?;
+    let expected_val = match expected {
+        Some(e) => Some(super::args::evaluate_assert_operand(e, cx)?),
+        None => None,
+    };
+    assert_equality(
+        cx,
+        0,
+        verb,
+        expect_equal,
+        hash,
+        &target,
+        expected_val.as_ref(),
+    )
+}
+
 pub(crate) fn dispatch_assert_eq<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -3778,12 +3821,29 @@ pub(crate) fn dispatch_assert_eq<P: ProcessManager>(
     else {
         unreachable!()
     };
-    let target = super::steps::resolve_assert_target(actual, cx)?;
-    let expected_val = match expected {
-        Some(e) => Some(super::args::evaluate_assert_operand(e, cx)?),
-        None => None,
+    dispatch_assert_equality(hash, actual, expected, cx, Command::AssertEq.as_str(), true)
+}
+
+pub(crate) fn dispatch_assert_ne<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::AssertNe {
+        hash,
+        actual,
+        expected,
+    } = step
+    else {
+        unreachable!()
     };
-    assert_eq(cx, 0, hash, &target, expected_val.as_ref())
+    dispatch_assert_equality(
+        hash,
+        actual,
+        expected,
+        cx,
+        Command::AssertNe.as_str(),
+        false,
+    )
 }
 
 pub(crate) fn dispatch_assert_contains<P: ProcessManager>(

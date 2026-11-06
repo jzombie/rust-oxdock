@@ -112,13 +112,22 @@ use std::path::Path;
 /// depending on `oxdock-fs` and creating a circular crate dependency.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub fn can_create_symlinks(target: &Path) -> bool {
-    #[cfg(unix)]
+    // The synthetic Miri filesystem has no symlinks: resolver links bail
+    // instead of creating them, so guarded tests skip the same way they
+    // do on hosts without symlink privilege.
+    #[cfg(miri)]
+    {
+        let _ = target;
+        false
+    }
+
+    #[cfg(all(unix, not(miri)))]
     {
         let _ = target;
         true
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, not(miri)))]
     {
         use std::fs;
         use std::os::windows::fs::symlink_dir;
@@ -132,7 +141,7 @@ pub fn can_create_symlinks(target: &Path) -> bool {
         ok
     }
 
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(any(unix, windows, miri)))]
     {
         let _ = target;
         false

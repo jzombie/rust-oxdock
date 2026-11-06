@@ -30,7 +30,7 @@ pub use self::engine::{Engine, EngineOutput};
 pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
     dispatch_append, dispatch_archive, dispatch_assert_contains, dispatch_assert_eq,
-    dispatch_assign, dispatch_assign_async_step, dispatch_assign_capture_step,
+    dispatch_assert_ne, dispatch_assign, dispatch_assign_async_step, dispatch_assign_capture_step,
     dispatch_async_block, dispatch_await_capture_step, dispatch_await_step, dispatch_break,
     dispatch_call, dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git,
     dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
@@ -92,7 +92,24 @@ pub const SNAPSHOT_PENDING_DISPLAY: &str = "<snapshot:pending>";
 /// lazy error path.
 pub const SNAPSHOT_TREE_UNAVAILABLE: &str = "<unavailable>";
 
-pub fn run_steps(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
+/// Execute the DSL with the CLI default: a lazily-created snapshot.
+/// No temporary directory exists until the first snapshot-targeted
+/// resolution. Reads of existing workspace files fall through to the
+/// build context, but directory listings (GLOB, LS) are snapshot-scoped,
+/// so workspace discovery belongs before the lazy run or under
+/// `WORKSPACE LOCAL`. Fire-and-forget form of
+/// [`run_steps_with_lazy_snapshot`]: for bindings and the snapshot
+/// handle, call that directly. For runs that must land exactly in a
+/// given root with no snapshot, use [`run_steps_without_snapshot`].
+pub fn run_steps(build_context: &GuardedPath, steps: &[Step], io: ExecIo) -> Result<()> {
+    run_steps_with_lazy_snapshot(build_context, steps, io).map(|_| ())
+}
+
+/// Without snapshot: execute directly against `fs_root` with no snapshot, so
+/// writes land exactly in the given root and read-backs observe them.
+/// Tests pinning on-disk state and hosts with caller-built filesystems
+/// want this; interactive runs want [`run_steps`].
+pub fn run_steps_without_snapshot(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
     run_steps_with_context(fs_root, fs_root, steps)
 }
 

@@ -1,7 +1,7 @@
 use indoc::{formatdoc, indoc};
 use oxdock_core::{
-    ExecIo, run_steps, run_steps_with_context, run_steps_with_context_result_with_io,
-    run_steps_with_fs,
+    ExecIo, run_steps_with_context, run_steps_with_context_result_with_io, run_steps_with_fs,
+    run_steps_without_snapshot,
 };
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, ensure_git_identity};
 use oxdock_parser::{IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
@@ -623,7 +623,7 @@ fn exit_stops_pipeline_and_reports_code() {
         },
     ];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("EXIT requested with code 9"),
         "error message should surface EXIT code"
@@ -639,7 +639,7 @@ fn accepts_semicolon_separated_commands() {
     let root = guard_root(&temp);
     let script = "WRITE one.txt 1; WRITE two.txt 2";
     let steps = oxdock_core::parse_script(script).unwrap();
-    run_steps(&root, &steps).unwrap();
+    run_steps_without_snapshot(&root, &steps).unwrap();
     assert_eq!(read_trimmed(&root.join("one.txt").unwrap()), "1");
     assert_eq!(read_trimmed(&root.join("two.txt").unwrap()), "2");
 }
@@ -656,7 +656,7 @@ fn write_cmd_captures_output() {
     };
     let capture = capture_pipeline("cap-write", "out.txt", *parse_one(cmd));
     let steps = capture.into_iter().collect::<Vec<_>>();
-    run_steps(&root, &steps).unwrap();
+    run_steps_without_snapshot(&root, &steps).unwrap();
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hello");
 }
 
@@ -682,7 +682,7 @@ fn capture_echo_interpolates_env() {
         *parse_one("ECHO \"value={{ env:FOO }}\""),
     ));
 
-    run_steps(&root, &steps).unwrap();
+    run_steps_without_snapshot(&root, &steps).unwrap();
     assert_eq!(read_trimmed(&root.join("echo.txt").unwrap()), "value=hi");
 }
 
@@ -706,7 +706,7 @@ fn capture_ls_lists_entries_with_header() {
     let mut steps = steps;
     steps.extend(capture_pipeline("cap-ls", "ls.txt", *parse_one("LS")));
 
-    run_steps(&root, &steps).unwrap();
+    run_steps_without_snapshot(&root, &steps).unwrap();
 
     let content = read_trimmed(&root.join("items/ls.txt").unwrap());
     let mut lines: Vec<_> = content.lines().map(str::to_string).collect();
@@ -730,7 +730,7 @@ fn capture_cat_emits_file_contents() {
 
     let steps = capture_pipeline("cap-cat", "out.txt", *parse_one("READ note.txt"));
 
-    run_steps(&root, &steps).unwrap();
+    run_steps_without_snapshot(&root, &steps).unwrap();
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hello note");
 }
 
@@ -968,7 +968,7 @@ fn env_exposes_git_commit_hash() {
         "#
     ))
     .unwrap();
-    run_steps(&repo, &steps).unwrap();
+    run_steps_without_snapshot(&repo, &steps).unwrap();
 
     assert_eq!(read_trimmed(&repo.join("out.txt").unwrap()), rev);
 }
@@ -987,7 +987,7 @@ fn workdir_cannot_escape_root() {
         col: 0,
     }];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("WORKDIR") && err.to_string().contains("escapes"),
         "expected WORKDIR escape error, got {}",
@@ -1011,7 +1011,7 @@ fn write_cannot_escape_root() {
         col: 0,
     }];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("WRITE") && err.to_string().contains("escapes"),
         "expected WRITE escape error, got {}",
@@ -1049,7 +1049,7 @@ fn read_cannot_escape_root() {
         col: 0,
     }];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("READ") && err.to_string().contains("escapes"),
         "expected READ escape error, got {}",
@@ -1105,7 +1105,7 @@ fn read_symlink_escape_is_blocked() {
         col: 0,
     }];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("READ") && err.to_string().contains("escapes"),
         "expected READ symlink escape error, got {}",
@@ -1222,7 +1222,7 @@ fn write_missing_path_cannot_escape_root() {
         col: 0,
     }];
 
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
     assert!(
         err.to_string().contains("WRITE") && err.to_string().contains("escapes"),
         "expected WRITE escape error for missing path, got {}",
@@ -1243,7 +1243,7 @@ fn workdir_creates_missing_dirs_within_root() {
         col: 0,
     }];
 
-    run_steps(&root, &steps).unwrap();
+    run_steps_without_snapshot(&root, &steps).unwrap();
 
     assert!(root.join("a/b/c").unwrap().exists());
 }
@@ -1263,7 +1263,7 @@ fn cat_reads_file_contents_without_error() {
     }];
 
     // This should succeed and emit contents to stdout; we only verify it does not error.
-    run_steps(&root, &steps).unwrap();
+    run_steps_without_snapshot(&root, &steps).unwrap();
 }
 
 #[test]
@@ -2047,6 +2047,106 @@ fn assert_eq_rejects_content_mismatch() {
 }
 
 #[test]
+fn assert_ne_accepts_differing_content() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            WRITE out.txt actual
+            LET $b: STRING = READ out.txt
+            ASSERT_NE $b "expected"
+        "#},
+    )
+    .expect("differing content passes");
+}
+
+#[test]
+fn assert_ne_rejects_equal_content() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            WRITE out.txt same
+            LET $b: STRING = READ out.txt
+            ASSERT_NE $b "same"
+        "#},
+    )
+    .expect_err("equality must fail");
+    assert!(err.to_string().contains("ASSERT_NE"), "{err}");
+}
+
+#[test]
+fn assert_ne_hash_mode_accepts_differing_digest() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            WRITE payload.bin stable-content
+            LET $body: STRING = READ payload.bin
+            ASSERT_NE --hash 0000000000000000000000000000000000000000000000000000000000000000 $body
+        "#},
+    )
+    .expect("differing digest passes");
+}
+
+#[test]
+fn assert_ne_hash_mode_rejects_matching_digest() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // sha256("stable-content")
+    let digest = "08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c";
+    let err = run_script(
+        &root,
+        &formatdoc! {r#"
+            WRITE payload.bin stable-content
+            LET $body: STRING = READ payload.bin
+            ASSERT_NE --hash {digest} $body
+        "#},
+    )
+    .expect_err("matching digest must fail");
+    assert!(err.to_string().contains("ASSERT_NE"), "{err}");
+}
+
+#[test]
+fn assert_ne_hash_mode_covers_piped_stdout() {
+    // Mode 1: WITH_IO [stdin=$p] makes stdin a stream, so the drained
+    // pipe bytes (not a positional expected) feed the digest comparison.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            LET $p: PIPE
+            WITH_IO [stdout=$p] ECHO "piped-bytes"
+            WITH_IO [stdin=$p] ASSERT_NE --hash 0000000000000000000000000000000000000000000000000000000000000000 stdout
+        "#},
+    )
+    .expect("differing piped digest passes");
+}
+
+#[test]
+fn assert_eq_hash_mode_covers_piped_stdout() {
+    // Mode 1 parity: the unified core digests the drained stream for EQ
+    // too (previously only the plain-value form worked here).
+    // sha256("piped-bytes\n"): ECHO appends the trailing newline.
+    let digest = "1cb21eddbef5728846864297cf1e542883eda384e004d3e330f95604ca30aa24";
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        &formatdoc! {r#"
+            LET $p: PIPE
+            WITH_IO [stdout=$p] ECHO "piped-bytes"
+            WITH_IO [stdin=$p] ASSERT_EQ --hash {digest} stdout
+        "#},
+    )
+    .expect("matching piped digest passes");
+}
+
+#[test]
 fn assert_eq_path_type_reports_absent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -2530,7 +2630,7 @@ fn run_exec_nonzero_status_bails_with_step_context() {
         RUN ["cargo", "--invalid-oxdock-flag-xyz"]
     "#})
     .unwrap();
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
     let msg = format!("{err:#}");
     // Foreground failures surface the manager's non-zero error wrapped in
     // step context : identical to shell `RUN` (the `exited with status`
@@ -2559,7 +2659,7 @@ fn failing_step_reports_source_line_and_column() {
         RUN ["cargo", "--invalid-oxdock-flag-xyz"]
     "#})
     .unwrap();
-    let err = run_steps(&root, &steps).unwrap_err();
+    let err = run_steps_without_snapshot(&root, &steps).unwrap_err();
     let msg = format!("{err:#}");
     assert!(
         msg.contains("step 2, line 2, col 1"),
@@ -2637,7 +2737,7 @@ fn grouped_numbers_survive_arithmetic_and_conversions() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let steps = oxdock_core::parse_script(script).unwrap();
-    run_steps(&root, &steps).unwrap();
+    run_steps_without_snapshot(&root, &steps).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -2667,14 +2767,14 @@ fn archive_interoperates_with_system_tar() {
         LET $has_tar: BOOL = IS_EXEC("tar")
         ASSERT_EQ $has_tar true
     "#};
-    run_steps(&root, &oxdock_core::parse_script(probe).unwrap()).unwrap();
+    run_steps_without_snapshot(&root, &oxdock_core::parse_script(probe).unwrap()).unwrap();
 
     let seed = indoc! {r#"
         WRITE bundle/app.txt app-payload
         WRITE bundle/nested/deep.txt deep-payload
         WRITE bundle/tool.sh tool-payload
     "#};
-    run_steps(&root, &oxdock_core::parse_script(seed).unwrap()).unwrap();
+    run_steps_without_snapshot(&root, &oxdock_core::parse_script(seed).unwrap()).unwrap();
 
     // Seed the executable bit through the resolver: the script cannot
     // pause mid-run, so modes stage between two runs over one root.
@@ -2693,7 +2793,7 @@ fn archive_interoperates_with_system_tar() {
         LET $deep: STRING = READ sys-out/nested/deep.txt
         ASSERT_EQ $deep "deep-payload"
     "#};
-    run_steps(&root, &oxdock_core::parse_script(pack).unwrap()).unwrap();
+    run_steps_without_snapshot(&root, &oxdock_core::parse_script(pack).unwrap()).unwrap();
 
     #[cfg(unix)]
     {
@@ -2716,7 +2816,7 @@ fn archive_interoperates_with_system_tar() {
         LET $note: STRING = READ dsl-out/note.txt
         ASSERT_EQ $note "sys-note"
     "#};
-    run_steps(&root, &oxdock_core::parse_script(unpack).unwrap()).unwrap();
+    run_steps_without_snapshot(&root, &oxdock_core::parse_script(unpack).unwrap()).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -2751,6 +2851,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Remove { .. } => {}
         StepKind::Expand { .. } => {}
         StepKind::AssertEq { .. } => {}
+        StepKind::AssertNe { .. } => {}
         StepKind::AssertContains { .. } => {}
         StepKind::WithIo { .. } => {}
         StepKind::WithIoBlock { .. } => {}
@@ -3129,7 +3230,10 @@ fn semaphore_cancel_releases_the_permit() {
 
 #[test]
 fn semaphore_worker_error_releases_the_permit() {
-    // The failing worker is never awaited, so its error surfaces at the
+    // Join on state, not on time: poll the worker to `finished` (a
+    // SLEEP-based join races the worker under Miri, where virtual
+    // time need not track worker progress), then re-acquire. The
+    // failing worker is never awaited, so its error surfaces at the
     // end-of-pipeline reap instead: the script fails overall, but the
     // marker written after re-acquire proves the permit dropped on the
     // error unwind first.
@@ -3144,7 +3248,16 @@ fn semaphore_worker_error_releases_the_permit() {
             WRITE holding.txt "yes"
             ASSERT_EQ 1 2
         }
-        SLEEP 2s
+        LET $running: BOOL = true
+        WHILE $running {
+            LET $p: MAP<ANY> = TASK_POLL($t)
+            IF $p.state == "finished" {
+                $running = false
+            }
+            IF $running {
+                SLEEP 10ms
+            }
+        }
         LET $re: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
         WRITE released.txt "{{ $re.held }}"
     "#};
@@ -4889,8 +5002,15 @@ fn static_exclusive_platform_guards_share_scope() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     for script in [
-        "[family:unix] LET $o: STRING = \"unix\"\n[family:windows] LET $o: STRING = \"windows\"\n",
-        "[os:macos] LET $o: STRING = \"macos\"\n[os:linux] LET $o: STRING = \"linux\"\nWRITE out.txt \"{{ $o }}\"\n",
+        indoc! {r#"
+            [family:unix] LET $o: STRING = "unix"
+            [family:windows] LET $o: STRING = "windows"
+        "#},
+        indoc! {r#"
+            [os:macos] LET $o: STRING = "macos"
+            [os:linux] LET $o: STRING = "linux"
+            [family:unix] WRITE out.txt "{{ $o }}"
+        "#},
     ] {
         run_script(&root, script).expect("exclusive guards share scope");
     }
@@ -4904,9 +5024,19 @@ fn static_overlapping_platform_guards_still_error() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     for guarded in [
-        "[os:macos] LET $o: STRING = \"m\"\n[family:unix] LET $o: STRING = \"u\"\n",
-        "[family:unix] LET $o: STRING = \"u\"\n[family:unix] LET $o: STRING = \"u2\"\n",
-        "[os:macos] LET $o: STRING = \"m\"\n[os:linux] LET $o: STRING = \"l\"\n[family:unix] LET $o: STRING = \"u\"\n",
+        indoc! {r#"
+            [os:macos] LET $o: STRING = "m"
+            [family:unix] LET $o: STRING = "u"
+        "#},
+        indoc! {r#"
+            [family:unix] LET $o: STRING = "u"
+            [family:unix] LET $o: STRING = "u2"
+        "#},
+        indoc! {r#"
+            [os:macos] LET $o: STRING = "m"
+            [os:linux] LET $o: STRING = "l"
+            [family:unix] LET $o: STRING = "u"
+        "#},
     ] {
         let err = run_script(&root, guarded).expect_err("overlapping must fail");
         assert!(err.to_string().contains("redeclaration error"), "{err}");
@@ -5394,13 +5524,14 @@ fn static_simple_command_args_participate_in_liveness() {
         WRITE out.txt prefix $val
     "#};
     run_script(&root, script).expect("live reads pass");
-    // Quoted `{{ }}` templates are runtime-total (missing names
-    // expand to empty, never error), so they stay unchecked by
-    // design: rejecting them would be a false positive.
+    // Quoted `{{ }}` templates are runtime-strict: a missing name is
+    // a hard error naming it, never empty. The static gate still
+    // skips interiors; the runtime reports the name.
     let script = indoc! {r#"
         WRITE out.txt "{{ $missing }}"
     "#};
-    run_script(&root, script).expect("plain-string templates stay unchecked");
+    let err = run_script(&root, script).expect_err("missing template name must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err:#}");
 }
 
 #[test]

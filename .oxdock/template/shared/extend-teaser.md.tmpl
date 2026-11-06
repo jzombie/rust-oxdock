@@ -63,7 +63,7 @@ fn main() -> anyhow::Result<()> {
         // `.with_state(...)`. These are stateless, so none.
         states: vec![],
     });
-    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let temp = oxdock::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
         modules: [DEMO],
@@ -72,7 +72,7 @@ fn main() -> anyhow::Result<()> {
         LET $n: INT = WORD_COUNT($s)
         ASSERT_EQ $n 3
     };
-    let run = engine.run_steps(&root, &steps)?;
+    let run = engine.run_steps_without_snapshot(&root, &steps)?;
     assert_eq!(format!("{}", run.bindings["s"]), "3 words, 17 chars");
     Ok(())
 }

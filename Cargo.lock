@@ -145,7 +145,7 @@ checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -321,7 +321,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -499,7 +499,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -666,7 +666,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "strsim",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -677,7 +677,7 @@ checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
 dependencies = [
  "darling_core",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -1022,7 +1022,7 @@ checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -1610,7 +1610,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxdock"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
@@ -1635,14 +1635,15 @@ dependencies = [
  "oxdock-parser",
  "oxdock-process",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "proc-macro2",
  "sha2",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
 name = "oxdock-cli"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1663,6 +1664,7 @@ dependencies = [
  "oxdock-remote-proto",
  "oxdock-ssh-plugin",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1670,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -1683,8 +1685,8 @@ dependencies = [
  "oxdock-pipe",
  "oxdock-process",
  "oxdock-pty",
- "oxdock-remote-proto",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "proptest",
  "rand",
  "regex",
@@ -1697,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-doc-tests"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1711,19 +1713,20 @@ dependencies = [
 
 [[package]]
 name = "oxdock-embed"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
+ "oxdock-utils",
  "proc-macro2",
  "quote",
  "sha2",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1734,7 +1737,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "cache-manager",
@@ -1749,17 +1752,17 @@ dependencies = [
 
 [[package]]
 name = "oxdock-func-macro"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "proc-macro2",
  "quote",
  "rand",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
 name = "oxdock-logic-tests"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -1777,6 +1780,7 @@ dependencies = [
  "oxdock-process",
  "oxdock-ssh-plugin",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "proc-macro2",
  "proptest",
  "serde_json",
@@ -1786,7 +1790,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -1798,12 +1802,12 @@ dependencies = [
  "oxdock-sys-test-utils",
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
 name = "oxdock-markdown-plugin"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1817,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-mcp"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1826,6 +1830,7 @@ dependencies = [
  "oxdock-parser",
  "oxdock-process",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "rmcp",
  "serde",
  "serde_json",
@@ -1836,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-net-plugin"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1854,6 +1859,7 @@ dependencies = [
  "oxdock-process",
  "oxdock-remote-proto",
  "oxdock-sys-test-utils",
+ "oxdock-utils",
  "serde_json",
  "sha2",
  "shell-words",
@@ -1863,7 +1869,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1873,12 +1879,12 @@ dependencies = [
  "proc-macro2",
  "pulldown-cmark",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
 name = "oxdock-pipe"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1886,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-process"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1900,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pty"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
  "libc",
@@ -1912,20 +1918,19 @@ dependencies = [
 
 [[package]]
 name = "oxdock-remote-proto"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "anyhow",
- "flate2",
  "muxio-rpc-service",
+ "oxdock-utils",
  "serde",
  "serde_json",
  "sha2",
- "tar",
 ]
 
 [[package]]
 name = "oxdock-ssh-plugin"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1950,7 +1955,17 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.34.0-alpha"
+version = "0.35.0-alpha"
+
+[[package]]
+name = "oxdock-utils"
+version = "0.35.0-alpha"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "sha2",
+ "tar",
+]
 
 [[package]]
 name = "p256"
@@ -2298,7 +2313,7 @@ checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2388,7 +2403,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_json",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2591,7 +2606,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_derive_internals",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2657,7 +2672,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2668,7 +2683,7 @@ checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2781,9 +2796,9 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-hook"
-version = "0.3.18"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+checksum = "49f7447afd772ca79ad17ae0a3972a6b0df0cb4b80990fd82707593e9e012a74"
 dependencies = [
  "libc",
  "signal-hook-registry",
@@ -2929,9 +2944,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.6"
+version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
+checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2999,7 +3014,7 @@ checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -3025,7 +3040,7 @@ checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -3285,7 +3300,7 @@ dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.9",
  "wasm-bindgen-shared",
 ]
 

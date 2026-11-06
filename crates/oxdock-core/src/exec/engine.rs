@@ -320,17 +320,41 @@ impl Engine<DefaultProcessManager> {
     /// and a resolver built from `root`.
     pub fn run_script(&self, root: &GuardedPath, script: &str) -> Result<EngineOutput> {
         let steps = crate::parse_script_with_modules(script, self.module_table())?;
-        self.run_steps(root, &steps)
+        self.run_steps_without_snapshot(root, &steps)
     }
 
     /// Run already parsed `steps` (for example from the `oxdock!` macro,
-    /// which builds the same DSL at compile time) with `root` as the
-    /// workspace and the registered host surface available. Uses the
-    /// default process manager and a resolver built from `root`.
-    pub fn run_steps(&self, root: &GuardedPath, steps: &[Step]) -> Result<EngineOutput> {
+    /// which builds the same DSL at compile time) directly against `root`
+    /// with the registered host surface available. Writes land exactly in
+    /// `root`; for the lazy snapshot default use [`Engine::run_steps`].
+    /// Uses the default process manager and a resolver built from `root`.
+    pub fn run_steps_without_snapshot(
+        &self,
+        root: &GuardedPath,
+        steps: &[Step],
+    ) -> Result<EngineOutput> {
         let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
         let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
         self.run_steps_on(fs, steps, default_process_manager())
+    }
+
+    /// Run already parsed `steps` with the CLI default: a lazily-created
+    /// snapshot. No temporary directory exists until the first
+    /// snapshot-targeted resolution; reads fall through to the build
+    /// context. Carries the engine's registered host surface, IO, and
+    /// types; for bindings and the snapshot handle see the output.
+    pub fn run_steps(
+        &self,
+        build_context: &GuardedPath,
+        steps: &[Step],
+    ) -> Result<super::LazyRunOutput> {
+        super::run_steps_with_lazy_snapshot_and_modules(
+            build_context,
+            steps,
+            self.io.clone(),
+            self.modules.clone(),
+            self.types.clone(),
+        )
     }
 }
 

@@ -1,6 +1,7 @@
 mod builder;
 pub mod builtin_env;
 mod child;
+pub mod clock;
 mod contract;
 pub mod env_policy;
 mod expand;
@@ -16,6 +17,7 @@ mod synthetic;
 pub use builder::{CommandBuilder, CommandOutput, CommandSnapshot, PipedChild};
 pub use builtin_env::BuiltinEnv;
 pub use child::ChildHandle;
+pub use clock::unix_now;
 pub use contract::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
     CommandStdin, CommandStdout, INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager,
