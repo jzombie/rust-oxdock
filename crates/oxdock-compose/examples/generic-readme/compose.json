@@ -6,7 +6,7 @@
   "generated": [],
   "vars": {
     "global": "docs_global",
-    "ctx": "docs_ctx",
-    "workspace_pkg": "workspace_pkg"
-  }
+    "ctx": "docs_ctx"
+  },
+  "staging_dir": "crates/oxdock-compose/examples/generic-readme/target/staging"
 }

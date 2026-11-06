@@ -54,12 +54,8 @@
   ],
   "lifecycle": {
     "plugins": [
-      {
-        "module": "OXDOCK",
-        "hooks": [
-          "SETUP"
-        ]
-      }
+      "crates/oxdock-compose/src/generic.oxfile",
+      "crates/oxdock-compose/plugins/oxdock.oxfile"
     ]
   },
   "vars": {

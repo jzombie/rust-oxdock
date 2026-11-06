@@ -9,7 +9,6 @@
 
 mod command_ref;
 mod env_contracts;
-mod setup;
 
 use anyhow::Result;
 use oxdock_core::{FuncMeta, HostModule, OxDockFn, TypeDescriptor, TypeTag, Value};
@@ -96,13 +95,7 @@ fn env_contracts() -> Result<Value> {
 /// known ones, the same strict UX as unknown placeholder calls.
 #[oxdock_func(pure, returns = TypeTag::String)]
 fn generated(key: String) -> Result<Value> {
-    generated_text(&key)
-}
-
-/// Key-to-call dispatch shared by the `GENERATED` placeholder and the
-/// run-once intake below: one table, never two.
-pub(crate) fn generated_text(key: &str) -> Result<Value> {
-    match key {
+    match key.as_str() {
         "command_index" => command_index(),
         "command_body" => command_body(),
         "value_types" => value_types(),
@@ -152,7 +145,6 @@ pub fn module<P: ProcessManager>() -> HostModule<P> {
             PluginFunctionReference::registration(),
             PluginTypeReference::registration(),
             Generated::registration(),
-            setup::Setup::registration(),
         ],
         types: vec![],
         record_schemas: vec![],

@@ -77,7 +77,6 @@ fn tracer_stages_run_through_pipe_in_order() {
     // binary; the output markers prove execution order.
     let parent = indoc::indoc! {r#"
         INHERIT_ENV [OXDOCK_WORKSPACE_ROOT]
-        IMPORT [TYPE CTX FROM "types.oxfile"]
         IMPORT [TYPE PLUGIN FROM "types.oxfile"]
         IMPORT ["compose.oxfile" AS C]
         LET $mod: STRING = """

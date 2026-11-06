@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use oxdock_core::{Engine, ExecIo, HostModule, OxDockFn, TypeTag, Value};
 use oxdock_fs::{EntryKind, GuardedPath, PathResolver, WorkspaceFs};
 use oxdock_func_macro::oxdock_func;
-use oxdock_process::default_process_manager;
+use oxdock_process::{ProcessManager, default_process_manager};
 #[allow(clippy::disallowed_types)]
 use std::path::Path;
 
@@ -267,11 +267,20 @@ pub fn run_with_plugins(
     let config_name =
         std::env::var("COMPOSE_CONFIG").or_else(|_| resolve_config_name(&fs_resolver, &root))?;
     io.insert_inherit_env("COMPOSE_CONFIG", config_name.clone());
+    io.insert_inherit_env(
+        "COMPOSE_PRINT_CHILD",
+        std::env::var("COMPOSE_PRINT_CHILD").unwrap_or_else(|_| "0".to_string()),
+    );
     // Binary-only repos have no checkout: lay the embedded pipeline
     // files down first (write-if-missing, customizations win), so the
     // entry read below and every DSL import resolve.
     provision_dist(&fs_resolver, &root).context("provision pipeline files")?;
     let engine = pipeline_full_engine(extra_modules, io);
+    // Every lifecycle plugin exposes the same methods; registration
+    // order is execution order. Fail fast here naming the outlier
+    // instead of mid-pipeline at first use.
+    check_plugin_uniformity(&fs_resolver, &root, &engine, &config_name)
+        .context("check plugin lifecycle methods")?;
     // The pipeline entry is one static script, byte-copied from the
     // tree: it reads the config, assembles the child from the plugin
     // registry, and pipes it through the interpreter. What runs is
@@ -311,32 +320,12 @@ fn embedded_dist() -> Vec<(&'static str, &'static str)> {
             include_str!("types.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/hooks/setup.oxfile",
-            include_str!("hooks/setup.oxfile"),
+            "crates/oxdock-compose/src/generic.oxfile",
+            include_str!("generic.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/hooks/ingest.oxfile",
-            include_str!("hooks/ingest.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/hooks/assemble.oxfile",
-            include_str!("hooks/assemble.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/hooks/render.oxfile",
-            include_str!("hooks/render.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/hooks/deferred.oxfile",
-            include_str!("hooks/deferred.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/hooks/write.oxfile",
-            include_str!("hooks/write.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/hooks/verify.oxfile",
-            include_str!("hooks/verify.oxfile"),
+            "crates/oxdock-compose/plugins/oxdock.oxfile",
+            include_str!("../plugins/oxdock.oxfile"),
         ),
     ]
 }
@@ -365,6 +354,94 @@ fn provision_dist(resolver: &PathResolver, root: &GuardedPath) -> Result<()> {
             Some(bytes) if bytes == contents.as_bytes() => {}
             Some(_) => {
                 eprintln!("compose: keeping customized '{rel}' (delete it to resync the default)");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The engine's default lifecycle provider: the generic plugin
+/// file. Used when the config names no plugins of its own.
+const GENERIC_PLUGIN: &str = "crates/oxdock-compose/src/generic.oxfile";
+
+/// Lifecycle plugin paths from the config, or the generic default
+/// when the config names none. Entries are plain paths: every
+/// plugin file exposes the same lifecycle methods, so there is
+/// nothing else to declare.
+fn configured_plugins(
+    resolver: &PathResolver,
+    root: &GuardedPath,
+    config_name: &str,
+) -> Result<Vec<String>> {
+    let path = root.join(config_name)?;
+    let raw = resolver
+        .read_to_string(&path)
+        .with_context(|| format!("read {config_name} for plugin list"))?;
+    let cfg: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parse {config_name} for plugin list"))?;
+    let plugins = match cfg.get("lifecycle").and_then(|lc| lc.get("plugins")) {
+        None => return Ok(vec![GENERIC_PLUGIN.to_string()]),
+        Some(plugins) => plugins,
+    };
+    let arr = plugins
+        .as_array()
+        .context("lifecycle plugins must be plugin file paths as strings")?;
+    arr.iter()
+        .map(|entry| {
+            entry.as_str().with_context(|| {
+                "lifecycle plugins must be plugin file paths as strings; the path-by-hooks registry is retired"
+            })
+        })
+        .map(|result| result.map(str::to_string))
+        .collect()
+}
+
+/// Every lifecycle plugin must expose the same methods: registration
+/// order decides execution order within a stage, so a missing method
+/// would silently skew one plugin. Parse each file with the
+/// production parser and require identical export sets, failing fast
+/// naming the outlier instead of mid-pipeline at first use.
+fn check_plugin_uniformity(
+    resolver: &PathResolver,
+    root: &GuardedPath,
+    engine: &Engine<impl ProcessManager>,
+    config_name: &str,
+) -> Result<()> {
+    let mut files = vec![GENERIC_PLUGIN.to_string()];
+    for plugin in configured_plugins(resolver, root, config_name)? {
+        if !files.contains(&plugin) {
+            files.push(plugin);
+        }
+    }
+    let table = engine.module_table();
+    let mut baseline: Option<Vec<String>> = None;
+    for rel in &files {
+        let path = root.join(rel)?;
+        let text = resolver
+            .read_to_string(&path)
+            .with_context(|| format!("read plugin '{rel}'"))?;
+        let parsed = oxdock_core::parse_script_with_modules_and_exports(&text, table.clone())
+            .with_context(|| format!("parse plugin '{rel}'"))?;
+        let mut names = parsed.func_exports;
+        names.sort();
+        match &baseline {
+            None => baseline = Some(names),
+            Some(first) => {
+                if first != &names {
+                    let missing: Vec<&str> = first
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|name| !names.iter().any(|other| other == name))
+                        .collect();
+                    let extra: Vec<&str> = names
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|name| !first.iter().any(|other| other == name))
+                        .collect();
+                    anyhow::bail!(
+                        "plugin '{rel}' exposes different lifecycle methods: missing {missing:?}, extra {extra:?}"
+                    );
+                }
             }
         }
     }

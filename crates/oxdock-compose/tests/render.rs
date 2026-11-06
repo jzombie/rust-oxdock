@@ -32,9 +32,9 @@ fn child_bin() -> String {
 }
 
 /// Checked-in DSL support files every run needs at repo-relative
-/// paths: the entry, the composer, the stage order, and the stage
-/// hooks. Tests seed them byte-identical so temp roots mirror the
-/// real tree.
+/// paths: the entry, the composer, the stage order, the generic
+/// lifecycle, and the OxDock docs plugin. Tests seed them
+/// byte-identical so temp roots mirror the real tree.
 fn support_files() -> Vec<(&'static str, &'static str)> {
     vec![
         (
@@ -42,8 +42,12 @@ fn support_files() -> Vec<(&'static str, &'static str)> {
             include_str!("../src/run.oxfile"),
         ),
         (
-            "crates/oxdock-compose/src/hooks/setup.oxfile",
-            include_str!("../src/hooks/setup.oxfile"),
+            "crates/oxdock-compose/src/generic.oxfile",
+            include_str!("../src/generic.oxfile"),
+        ),
+        (
+            "crates/oxdock-compose/plugins/oxdock.oxfile",
+            include_str!("../plugins/oxdock.oxfile"),
         ),
         (
             "crates/oxdock-compose/src/types.oxfile",
@@ -57,38 +61,14 @@ fn support_files() -> Vec<(&'static str, &'static str)> {
             "crates/oxdock-compose/src/stages.oxfile",
             include_str!("../src/stages.oxfile"),
         ),
-        (
-            "crates/oxdock-compose/src/hooks/ingest.oxfile",
-            include_str!("../src/hooks/ingest.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/hooks/assemble.oxfile",
-            include_str!("../src/hooks/assemble.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/hooks/render.oxfile",
-            include_str!("../src/hooks/render.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/hooks/deferred.oxfile",
-            include_str!("../src/hooks/deferred.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/hooks/write.oxfile",
-            include_str!("../src/hooks/write.oxfile"),
-        ),
-        (
-            "crates/oxdock-compose/src/hooks/verify.oxfile",
-            include_str!("../src/hooks/verify.oxfile"),
-        ),
     ]
 }
 
 /// Lifecycle override plus scope contract every fixture config gets:
-/// the SETUP intake via the OXDOCK host module; every other slot
-/// falls back to the engine's generic hooks. Scope key names and
-/// never hook code: fixtures declaring their own keep them, the rest
-/// get the docs-pipeline mapping.
+/// the OxDock docs plugin on top of the engine's generic lifecycle.
+/// Scope key names and the version env name are config data, never
+/// hook code: fixtures declaring their own keep them, the rest get
+/// the docs-pipeline mapping.
 fn with_lifecycle(cfg: &str) -> String {
     let mut v: serde_json::Value =
         serde_json::from_str(cfg).expect("fixture config is a JSON object");
@@ -113,7 +93,8 @@ fn with_lifecycle(cfg: &str) -> String {
     obj.insert(
         "lifecycle".to_string(),
         serde_json::json!({"plugins": [
-            {"module": "OXDOCK", "hooks": ["SETUP"]}
+            "crates/oxdock-compose/src/generic.oxfile",
+            "crates/oxdock-compose/plugins/oxdock.oxfile"
         ]}),
     );
     serde_json::to_string(&v).expect("serialize fixture config")

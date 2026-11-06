@@ -7,93 +7,62 @@
 # passes through a pipe that unescapes backslashes, so the backslash
 # gate fails fast naming the violator instead of a corrupted path.
 IMPORT [STD]
-IMPORT [TYPE CTX FROM "types.oxfile"]
 IMPORT [TYPE PLUGIN FROM "types.oxfile"]
 
-FUNC COMPOSE_ALL($plugins: LIST<PLUGIN>, $stages: LIST<STRING>, $types: STRING) {
+FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) {
     LET $clean: BOOL = STD::TEXT_CONTAINS($types, "\\")
     IF $clean {
         ECHO "types path '{{ $types }}' uses backslashes; use forward slashes"
         EXIT 1
     }
-    FOR $p: PLUGIN IN $plugins {
-        LET $has_path: BOOL = HAS_KEY($p, "path")
-        LET $has_mod: BOOL = HAS_KEY($p, "module")
-        IF $has_path == $has_mod {
-            ECHO "plugin entry needs exactly one of 'path' or 'module'"
+    LET $entries: LIST<PLUGIN> = []
+    FOR $path: STRING IN $plugins {
+        LET $bad: BOOL = STD::TEXT_CONTAINS($path, "\\")
+        IF $bad {
+            ECHO "plugin path '{{ $path }}' uses backslashes; use forward slashes"
             EXIT 1
         }
-        IF $has_path {
-            LET $okalias: BOOL = HAS_KEY($p, "alias")
-            IF $okalias == false {
-                ECHO "file plugin '{{ $p.path }}' needs an 'alias'"
-                EXIT 1
-            }
-            LET $okpath: BOOL = STD::TEXT_CONTAINS($p.path, "\\")
-            IF $okpath {
-                ECHO "hook path '{{ $p.path }}' uses backslashes; use forward slashes"
-                EXIT 1
+        LET $parts: LIST<STRING> = STD::TEXT_SPLIT($path, "/")
+        LET $stem: STRING = ""
+        FOR $part: STRING IN $parts {
+            $stem = $part
+        }
+        LET $bare: STRING = STD::TEXT_TRIM_SUFFIX($stem, ".oxfile")
+        LET $up: STRING = STD::TEXT_TO_UPPER($bare)
+        LET $qual: STRING = "{{ $up }}_HOOKS"
+        LET $dup: BOOL = false
+        LET $dupe: STRING = ""
+        FOR $e: PLUGIN IN $entries {
+            LET $eq: STRING = $e.as
+            IF $eq == $qual {
+                $dup = true
+                $dupe = $e.path
             }
         }
-        FOR $h: STRING IN $p.hooks {
-            LET $ok: BOOL = $h == "SETUP"
-            FOR $s: STRING IN $stages {
-                IF $h == $s {
-                    $ok = true
-                }
-            }
-            IF $ok == false {
-                ECHO "unknown hook '{{ $h }}'; stages come from STAGES()"
-                EXIT 1
-            }
+        IF $dup {
+            ECHO "plugins '{{ $dupe }}' and '{{ $path }}' share qualifier '{{ $qual }}'; rename one file"
+            EXIT 1
         }
+        LET $entry: PLUGIN = {as: $qual, path: $path}
+        LIST_APPEND $entries $entry
     }
     LET $imports: STRING = ""
-    LET $seen_mods: MAP<ANY> = {}
-    FOR $p: PLUGIN IN $plugins {
-        LET $has_path: BOOL = HAS_KEY($p, "path")
-        IF $has_path {
-            $imports = "{{ $imports }}IMPORT [\"{{ $p.path }}\" AS {{ $p.alias }}]\n"
-        } ELSE {
-            LET $m: STRING = $p.module
-            LET $done: BOOL = HAS_KEY($seen_mods, $m)
-            IF $done == false {
-                $imports = "{{ $imports }}IMPORT [{{ $m }}]\n"
-                $seen_mods = MAP_SET($seen_mods, $m, true)
-            }
-        }
+    FOR $e: PLUGIN IN $entries {
+        LET $ip: STRING = $e.path
+        LET $iq: STRING = $e.as
+        $imports = "{{ $imports }}IMPORT [\"{{ $ip }}\" AS {{ $iq }}]\n"
     }
     LET $per_target: STRING = ""
     FOR $stage: STRING IN $stages {
-        FOR $p: PLUGIN IN $plugins {
-            LET $has_path: BOOL = HAS_KEY($p, "path")
-            LET $qual: STRING = ""
-            IF $has_path {
-                $qual = $p.alias
-            } ELSE {
-                $qual = $p.module
-            }
-            FOR $h: STRING IN $p.hooks {
-                IF $h == $stage {
-                    $per_target = "{{ $per_target }}    $ctx = {{ $qual }}::{{ $h }}($ctx)\n"
-                }
-            }
+        FOR $e: PLUGIN IN $entries {
+            LET $tq: STRING = $e.as
+            $per_target = "{{ $per_target }}    $ctx = {{ $tq }}::{{ $stage }}($ctx)\n"
         }
     }
     LET $setup: STRING = ""
-    FOR $p: PLUGIN IN $plugins {
-        LET $has_path: BOOL = HAS_KEY($p, "path")
-        LET $qual: STRING = ""
-        IF $has_path {
-            $qual = $p.alias
-        } ELSE {
-            $qual = $p.module
-        }
-        FOR $h: STRING IN $p.hooks {
-            IF $h == "SETUP" {
-                $setup = "{{ $setup }}$run = {{ $qual }}::SETUP($run)\n"
-            }
-        }
+    FOR $e: PLUGIN IN $entries {
+        LET $sq: STRING = $e.as
+        $setup = "{{ $setup }}$run = {{ $sq }}::SETUP($run)\n"
     }
     LET $mod: STRING = """
         INHERIT_ENV [COMPOSE_CONFIG, OXDOCK_WORKSPACE_ROOT]
@@ -172,18 +141,21 @@ FUNC PIPE_RUN($mod: STRING, $wsroot: STRING, $cfgpath: STRING) {
 EXPORT COMPOSE_ALL
 EXPORT PIPE_RUN
 
-# The engine's own providers: the generic hook for every slot.
-# Configs override per hook name; what they omit stays generic.
-FUNC DEFAULT_PLUGINS() {
-    RETURN [
-        {path: "crates/oxdock-compose/src/hooks/setup.oxfile", alias: "G0", hooks: ["SETUP"]},
-        {path: "crates/oxdock-compose/src/hooks/ingest.oxfile", alias: "G1", hooks: ["INGEST"]},
-        {path: "crates/oxdock-compose/src/hooks/assemble.oxfile", alias: "G2", hooks: ["ASSEMBLE"]},
-        {path: "crates/oxdock-compose/src/hooks/render.oxfile", alias: "G3", hooks: ["RENDER"]},
-        {path: "crates/oxdock-compose/src/hooks/deferred.oxfile", alias: "G4", hooks: ["DEFERRED"]},
-        {path: "crates/oxdock-compose/src/hooks/write.oxfile", alias: "G5", hooks: ["WRITE_OUT"]},
-        {path: "crates/oxdock-compose/src/hooks/verify.oxfile", alias: "G6", hooks: ["VERIFY"]}
-    ]
+# Plugin paths from the config, or the engine's own lifecycle file
+# when the config names none. Entries stay plain paths: every plugin
+# file exposes the same lifecycle methods, so registration order is
+# execution order and there is nothing else to declare.
+FUNC PLUGIN_PATHS_WITH_DEFAULT($cfg: MAP<ANY>) {
+    LET $paths: LIST<STRING> = ["crates/oxdock-compose/src/generic.oxfile"]
+    LET $has_lc: BOOL = HAS_KEY($cfg, "lifecycle")
+    IF $has_lc {
+        LET $lc: MAP<ANY> = $cfg.lifecycle
+        LET $has_p: BOOL = HAS_KEY($lc, "plugins")
+        IF $has_p {
+            $paths = $lc.plugins
+        }
+    }
+    RETURN $paths
 }
 
 FUNC TYPES_WITH_DEFAULT($cfg: MAP<ANY>) {
@@ -200,43 +172,5 @@ FUNC TYPES_WITH_DEFAULT($cfg: MAP<ANY>) {
     RETURN $t
 }
 
-FUNC CONFIGURED_PLUGINS($cfg: MAP<ANY>) {
-    LET $over: LIST<PLUGIN> = []
-    LET $has_lc: BOOL = HAS_KEY($cfg, "lifecycle")
-    IF $has_lc {
-        LET $lc: MAP<ANY> = $cfg.lifecycle
-        LET $has_p: BOOL = HAS_KEY($lc, "plugins")
-        IF $has_p {
-            $over = $lc.plugins
-        }
-    }
-    RETURN $over
-}
-
-FUNC MERGE_PLUGINS($over: LIST<PLUGIN>, $defaults: LIST<PLUGIN>) {
-    LET $kept: LIST<PLUGIN> = []
-    FOR $d: PLUGIN IN $defaults {
-        LET $drop: BOOL = false
-        FOR $o: PLUGIN IN $over {
-            FOR $h: STRING IN $o.hooks {
-                FOR $dh: STRING IN $d.hooks {
-                    IF $h == $dh {
-                        $drop = true
-                    }
-                }
-            }
-        }
-        IF $drop == false {
-            LIST_APPEND $kept $d
-        }
-    }
-    FOR $o: PLUGIN IN $over {
-        LIST_APPEND $kept $o
-    }
-    RETURN $kept
-}
-
-EXPORT DEFAULT_PLUGINS
+EXPORT PLUGIN_PATHS_WITH_DEFAULT
 EXPORT TYPES_WITH_DEFAULT
-EXPORT CONFIGURED_PLUGINS
-EXPORT MERGE_PLUGINS

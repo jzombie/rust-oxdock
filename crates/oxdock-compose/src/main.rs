@@ -21,6 +21,14 @@ fn main() -> Result<()> {
             std::env::set_var("COMPOSE_CONFIG", config);
         }
     }
+    // Dry run: print the composed child instead of piping it through
+    // the interpreter. Shows the dynamic composition for debugging.
+    // SAFETY: same single-threaded startup as above.
+    if args.iter().any(|arg| arg == "--print-child") {
+        unsafe {
+            std::env::set_var("COMPOSE_PRINT_CHILD", "1");
+        }
+    }
     run(&repo_root)
 }
 
