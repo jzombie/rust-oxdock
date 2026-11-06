@@ -151,7 +151,7 @@ jobs:
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           LET $root: MAP<ANY> = LOAD_TOML("Cargo.toml")
-          LET $members: LIST<ANY> = $root.workspace.members
+          LET $members: LIST<STRING> = $root.workspace.members
           FOR $m: STRING IN $members {
             LET $manifest: MAP<ANY> = LOAD_TOML("{{ $m }}/Cargo.toml")
             IF HAS_KEY($manifest, "package") {
