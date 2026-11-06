@@ -75,6 +75,12 @@ fn tracer_stages_run_through_pipe_in_order() {
     // Hand-written child: imports the tracer hook, calls A then B,
     // echoes the trace. PIPE_RUN pipes it through the fresh child
     // binary; the output markers prove execution order.
+    //
+    // The child stays an `indoc` raw string, not an `oxdock!` block:
+    // it is data fed to the DSL unit under test (`PIPE_RUN`), and
+    // its inner quotes would need Rust-escaping inside macro tokens
+    // (`\"` on every quote), which reads worse than the one `\{{`
+    // escape the raw string needs.
     let parent = indoc::indoc! {r#"
         INHERIT_ENV [OXDOCK_WORKSPACE_ROOT]
         IMPORT [TYPE PLUGIN FROM "types.oxfile"]
