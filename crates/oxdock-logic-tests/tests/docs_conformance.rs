@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use line_ending::LineEnding;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, to_forward_slashes};
 use oxdock_logic_tests::mock_remote::MockRemoteRunner;
 use oxdock_parser::{COMMANDS, FencedBlock, base_name, extract_fenced_blocks};
 use std::collections::HashSet;
@@ -19,9 +19,10 @@ const ANCHOR_DOCUMENTS: &[&str] = &[README_NAME, OXDOCK_README_NAME, CRATE_DOCS_
 
 fn repo_root() -> Result<String> {
     // Normalize separators first: Windows CARGO_MANIFEST_DIR uses backslashes.
-    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
-        .context("CARGO_MANIFEST_DIR missing")?
-        .replace('\\', "/");
+    let manifest_dir = to_forward_slashes(
+        &std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
+            .context("CARGO_MANIFEST_DIR missing")?,
+    );
     Ok(manifest_dir
         .strip_suffix("crates/oxdock-logic-tests")
         .context("test must live under crates/oxdock-logic-tests")?

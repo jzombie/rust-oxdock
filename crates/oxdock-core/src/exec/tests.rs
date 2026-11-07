@@ -6401,11 +6401,7 @@ fn seeded_no_prelude_child_env_holds_boundary() {
         "credential-adjacent host names leaked: {got:?}"
     );
     // Substrate present: scratch target dir.
-    let target = got
-        .get("CARGO_TARGET_DIR")
-        .cloned()
-        .unwrap_or_default()
-        .replace('\\', "/");
+    let target = to_forward_slashes(&got.get("CARGO_TARGET_DIR").cloned().unwrap_or_default());
     assert!(
         target.ends_with("/target") && target.contains("oxdock-"),
         "CARGO_TARGET_DIR must bind the scratch target dir: {got:?}"
@@ -8516,8 +8512,7 @@ fn file_import_module_run_uses_module_dir() {
 )]
 fn workflow_inline_scripts_pass_static_gate() {
     let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR).expect("manifest dir");
-    let repo = manifest_dir
-        .replace('\\', "/")
+    let repo = to_forward_slashes(&manifest_dir)
         .strip_suffix("crates/oxdock-core")
         .expect("test must live under crates/oxdock-core")
         .trim_end_matches('/')

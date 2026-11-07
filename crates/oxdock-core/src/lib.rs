@@ -165,7 +165,7 @@ mod tests {
             legacy.display().to_string(),
             "CARGO_TARGET_DIR must not target the workspace tree"
         );
-        let normalized = seen.trim().replace('\\', "/");
+        let normalized = to_forward_slashes(seen.trim());
         assert!(
             normalized.ends_with("/target") && normalized.contains("oxdock-"),
             "CARGO_TARGET_DIR must point at the isolated scratch target dir, got {seen:?}"

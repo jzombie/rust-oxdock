@@ -1,15 +1,16 @@
 use anyhow::{Context, Result};
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, to_forward_slashes};
 #[cfg(feature = "markdown")]
 use oxdock_logic_tests::recording::{Call, RecordingManager, argv_calls, shell_calls};
 
 fn repo_root() -> Result<String> {
     // Same layout derivation as docs_conformance: normalize separators
     // first since Windows CARGO_MANIFEST_DIR uses backslashes.
-    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
-        .context("CARGO_MANIFEST_DIR missing")?
-        .replace('\\', "/");
+    let manifest_dir = to_forward_slashes(
+        &std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
+            .context("CARGO_MANIFEST_DIR missing")?,
+    );
     Ok(manifest_dir
         .strip_suffix("crates/oxdock-logic-tests")
         .context("test must live under crates/oxdock-logic-tests")?

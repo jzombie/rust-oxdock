@@ -3,7 +3,9 @@ use oxdock_core::{
     ExecIo, run_steps_with_context, run_steps_with_context_result_with_io, run_steps_with_fs,
     run_steps_without_snapshot,
 };
-use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, ensure_git_identity};
+use oxdock_fs::{
+    GuardedPath, GuardedTempDir, PathResolver, ensure_git_identity, to_forward_slashes,
+};
 use oxdock_parser::{IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
 use oxdock_process::CommandBuilder;
 use std::collections::BTreeMap;
@@ -167,7 +169,7 @@ fn system_source_root_resolves_absolute_host_paths() {
     let outside_dir = GuardedPath::tempdir().unwrap();
     let outside_file = outside_dir.as_guarded_path().join("probe.txt").unwrap();
     write_text(&outside_file, "host-bytes");
-    let outside_str = outside_file.as_path().to_string_lossy().replace('\\', "/");
+    let outside_str = to_forward_slashes(&outside_file.as_path().to_string_lossy());
 
     let script = indoc!(
         r#"

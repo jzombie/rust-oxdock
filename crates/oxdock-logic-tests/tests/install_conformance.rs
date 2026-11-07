@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use oxdock_core::{ExecIo, run_steps_with_manager_with_modules};
-use oxdock_fs::{GuardedPath, PathResolver, env as oxdock_env};
+use oxdock_fs::{GuardedPath, PathResolver, env as oxdock_env, to_forward_slashes};
 use oxdock_logic_tests::recording::{RecordingManager, argv_calls};
 
 /// sha256 of `INSTALL_PAYLOAD`, computed once and pinned beside it: if
@@ -10,9 +10,10 @@ const INSTALL_PAYLOAD: &[u8] = b"oxdock-install-fixture-payload-v1";
 const INSTALL_DIGEST: &str = "8e6873401de1e38cfc5b986fd9330e26d7299469509d968f0b49031a7cfa1734";
 
 fn repo_root() -> Result<String> {
-    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
-        .context("CARGO_MANIFEST_DIR missing")?
-        .replace('\\', "/");
+    let manifest_dir = to_forward_slashes(
+        &std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
+            .context("CARGO_MANIFEST_DIR missing")?,
+    );
     Ok(manifest_dir
         .strip_suffix("crates/oxdock-logic-tests")
         .context("test must live under crates/oxdock-logic-tests")?

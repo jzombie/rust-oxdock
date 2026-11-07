@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use oxdock_fs::EntryKind;
 use oxdock_fs::env as oxdock_env;
+use oxdock_fs::to_forward_slashes;
 use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, TypeTag, Value};
 use oxdock_pipe::{SharedInput, SharedOutput, SpillBuffer};
 use oxdock_process::{ProcessManager, format_value_for_string};
@@ -1363,8 +1364,7 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
     // Up-front sandbox gate (mirrors `GuardedPath::glob_paths`): patterns are
     // sandbox-root-relative, so any `..` component escapes. Return empty
     // without traversing : the same empty-on-no-match GLOB semantics.
-    if raw_pattern
-        .replace('\\', "/")
+    if to_forward_slashes(&raw_pattern)
         .split('/')
         .any(|seg| seg == "..")
     {
@@ -1384,7 +1384,7 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
         .filter_map(|p| {
             p.strip_prefix(&root_path)
                 .ok()
-                .map(|rel| Value::string(rel.to_string_lossy().replace('\\', "/")))
+                .map(|rel| Value::string(to_forward_slashes(&rel.to_string_lossy())))
         })
         .collect();
 
