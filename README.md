@@ -1902,18 +1902,19 @@ Mixed brackets:
   entry and no modules.
 
 Selective harvests:
-- Form: `IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
+- Form: `IMPORT [FOO FROM "x.oxdock"]`,
   optionally `AS ALIAS`. Only the named top-level
   functions register, bare or namespaced under the
   alias. Harvested names must be `EXPORT`ed.
 - Single name needs no inner brackets
   (`IMPORT [FOO FROM "x.oxdock"]`); several names from
   one file combine in one bracket with explicit kinds
-  (`IMPORT [TYPE A, TYPE B FROM "x.oxdock"]`). Bare
-  multi-names and multi-file harvests keep the inner
-  brackets (`IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
-  `IMPORT [[TYPE A FROM STD], [TYPE B FROM STD]]`),
-  file or host alike.
+  (`IMPORT [TYPE A, TYPE B FROM "x.oxdock"]`, file or
+  host alike: `IMPORT [FUNC FOO, FUNC BAR FROM
+  "x.oxdock"]`). Bare names always read as modules, so
+  a bare multi-name fails naming the explicit-kind
+  fix. Prefer one import per file over grouping
+  harvests.
 - Types and functions combine in one entry
   (`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`).
   Harvested types must be `EXPORT TYPE`d. Unaliased

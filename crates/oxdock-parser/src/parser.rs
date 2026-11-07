@@ -4405,8 +4405,23 @@ fn parse_import_statement(
         // `[TYPE A, TYPE B FROM "f"]` the first comma-part (`[TYPE A]`)
         // carries no FROM and is invalid alone, so the whole bracket
         // is one harvest (see `whole_file_harvest`).
+        // Bare-multi hint: `[FOO, BAR FROM "f"]` reads FOO as a
+        // module for back-compat (bare words stay modules in single
+        // brackets). If that word is not a known module but a harvest
+        // follows, fail fast naming the two valid spellings instead
+        // of the misleading unknown-module error.
+        let whole = whole_file_harvest(inner);
+        if whole.is_none()
+            && let Some(word) = single_bare_first_part(inner)
+            && !ctx.modules.modules.contains_key(word)
+            && has_top_level_from_after_comma(inner)
+        {
+            return Err(fail(format!(
+                "unknown module `{word}`; to harvest multiple names qualify each kind (`IMPORT [FUNC FOO, FUNC BAR FROM \"f\"]`)"
+            )));
+        }
         let mut parts: Vec<&[Tok]> = Vec::new();
-        if whole_file_harvest(inner).is_some() {
+        if whole.is_some() {
             parts.push(inner);
         } else {
             let mut start = 0;
@@ -4773,6 +4788,41 @@ fn parse_from_entry(inner: &[Tok]) -> Option<HarvestImport> {
         }
         _ => None,
     }
+}
+
+/// First comma-part of a bracket when it is exactly one bare
+/// uppercase word: the back-compat module reading. Anything else
+/// (prefixed names, groups, multiple words) is not a bare module.
+fn single_bare_first_part(inner: &[Tok]) -> Option<&str> {
+    let end = inner
+        .iter()
+        .position(|t| matches!(&t.kind, TokKind::Punct(',')))
+        .unwrap_or(inner.len());
+    let mut words = inner[..end]
+        .iter()
+        .filter(|t| !matches!(&t.kind, TokKind::Newline));
+    match (words.next(), words.next()) {
+        (Some(tok), None) => match &tok.kind {
+            TokKind::Word(w) if is_upper_ident(w) => Some(w.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a top-level `FROM` follows the first top-level comma:
+/// distinguishes a module-plus-harvest entry (`[STD, T FROM "f"]`)
+/// from a bare word the author meant as a harvest name.
+fn has_top_level_from_after_comma(inner: &[Tok]) -> bool {
+    let mut seen_comma = false;
+    for tok in inner {
+        match &tok.kind {
+            TokKind::Punct(',') => seen_comma = true,
+            TokKind::Word(w) if seen_comma && w == KEYWORD_FROM => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whole-bracket single-file harvest (`[TYPE A, TYPE B FROM "f"]`):

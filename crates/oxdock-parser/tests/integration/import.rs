@@ -1237,3 +1237,23 @@ fn file_import_single_bracket_bare_word_keeps_module_reading() {
     };
     assert_eq!(type_names, &["BETA".to_string()]);
 }
+
+#[test]
+fn file_import_bare_multi_harvest_suggests_explicit_kinds() {
+    let err = parse("IMPORT [FOO, BAR FROM \"lib.oxdock\"]\n").expect_err("bare multi must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("unknown module `FOO`"), "{msg}");
+    assert!(msg.contains("IMPORT [FUNC FOO, FUNC BAR FROM"), "{msg}");
+    assert!(!msg.contains("[["), "no double-bracket suggestion: {msg}");
+}
+
+#[test]
+fn file_import_known_module_plus_harvest_keeps_module_reading() {
+    let steps = parse("IMPORT [ALPHA, TYPE BETA FROM \"lib.oxdock\"]\n")
+        .expect("module plus harvest parses");
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepKind::ImportFuncs { type_names, .. } = &steps[0].kind else {
+        panic!("expected ImportFuncs, got {:?}", steps[0].kind);
+    };
+    assert_eq!(type_names, &["BETA".to_string()]);
+}
