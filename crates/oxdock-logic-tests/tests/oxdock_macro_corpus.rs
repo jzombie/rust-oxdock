@@ -85,6 +85,30 @@ fn macro_emitted_quoting_flags_survive() {
 }
 
 #[test]
+fn macro_append_line_emits_against_reexported_parser() {
+    // Emission fidelity for the line-append twin: the macro product
+    // must carry the AppendLine variant, and render back to a script
+    // that reparses identically (a missing Command::parse arm glued it
+    // onto the previous step, found by multistep fuzz as APPEND_LINE
+    // after SLEEP).
+    let steps: Vec<oxdock_parser::Step> = oxdock! {
+        SLEEP 2m
+        APPEND_LINE "a" "b"
+    };
+    match &steps[1].kind {
+        oxdock_parser::StepKind::AppendLine { path, contents } => {
+            assert_eq!(path, &oxdock_parser::Arg::String("a".to_string(), true));
+            assert_eq!(
+                contents,
+                &oxdock_parser::Arg::String("b".to_string(), true)
+            );
+        }
+        other => panic!("expected AppendLine, got {other:?}"),
+    }
+    assert_macro_string_roundtrip(&steps);
+}
+
+#[test]
 fn macro_assert_ne_emits_against_reexported_parser() {
     // Emission fidelity for the inequality twin: the macro product must
     // carry the NE variant with the quoted literal intact, and render
