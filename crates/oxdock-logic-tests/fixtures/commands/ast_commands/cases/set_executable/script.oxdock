@@ -1,0 +1,6 @@
+IMPORT [STD]
+WRITE tool.sh "echo hi"
+SET_EXECUTABLE tool.sh
+
+LET $t: STRING = PATH_TYPE("tool.sh")
+ASSERT_EQ $t "file"

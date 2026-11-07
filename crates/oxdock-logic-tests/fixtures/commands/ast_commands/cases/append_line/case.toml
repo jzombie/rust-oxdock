@@ -1,0 +1,4 @@
+name = "append_line"
+
+[expect]
+files = { "note.txt" = "line1line2\nline3\n" }
