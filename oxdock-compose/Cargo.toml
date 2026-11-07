@@ -10,6 +10,10 @@ description = "Composed artifacts, byte-identical: a general-purpose lifecycle r
 # Prototype crate; don't publish with this name
 publish = false
 
+# The pipe child is spawned by the parent, never run directly:
+# bare `cargo run -p oxdock-compose` means the composer.
+default-run = "oxdock-compose"
+
 [lib]
 name = "oxdock_compose"
 path = "src/lib.rs"
