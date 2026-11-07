@@ -1366,9 +1366,14 @@ File imports:
 - Only `EXPORT`ed top-level `FUNC`s cross the
   boundary. Unexported means private; variables are
   never exportable.
-- Types cross as bare globals (like host types). A
-  whole-file import persists every exported alias, so
-  `LET $p: PERSON` works after any import of its file.
+- Types cross qualified: a whole-file import exposes
+  every exported alias as `ALIAS::NAME` only
+  (`LET $p: LIB::PERSON` after
+  `IMPORT ["./lib.oxfile" AS LIB]`), mirroring func
+  views. Nothing bare leaks from an aliased import,
+  so same-named types in different files coexist;
+  harvests below stay the explicit way to request a
+  bare name.
 - Each file initializes once; every alias shares the
   module's top-level bindings.
 - The file must exist when the run starts. Generated
@@ -1389,14 +1394,19 @@ Selective harvests:
   functions register, bare or namespaced under the
   alias. Harvested names must be `EXPORT`ed.
 - Single name needs no inner brackets
-  (`IMPORT [FOO FROM "x.oxdock"]`); several keep
-  `[[F, G FROM ...]]`. Several harvests group the
-  same way (`IMPORT [[TYPE A FROM STD],
-  [TYPE B FROM STD]]`), file or host alike.
+  (`IMPORT [FOO FROM "x.oxdock"]`); several names from
+  one file combine in one bracket with explicit kinds
+  (`IMPORT [TYPE A, TYPE B FROM "x.oxdock"]`). Bare
+  multi-names and multi-file harvests keep the inner
+  brackets (`IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
+  `IMPORT [[TYPE A FROM STD], [TYPE B FROM STD]]`),
+  file or host alike.
 - Types and functions combine in one entry
   (`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`).
-  Harvested types must be `EXPORT TYPE`d and persist
-  bare globally, so `FUNC` signatures keep working.
+  Harvested types must be `EXPORT TYPE`d. Unaliased
+  harvests persist bare globally (collision-checked),
+  so `FUNC` signatures keep working; aliased harvests
+  persist qualified-only, like whole-file imports.
 - The file body never executes, so harvesting is
   side-effect free. The file's own nested imports
   still load. Harvests produce no value and never
