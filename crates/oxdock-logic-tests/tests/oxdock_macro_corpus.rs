@@ -98,10 +98,7 @@ fn macro_append_line_emits_against_reexported_parser() {
     match &steps[1].kind {
         oxdock_parser::StepKind::AppendLine { path, contents } => {
             assert_eq!(path, &oxdock_parser::Arg::String("a".to_string(), true));
-            assert_eq!(
-                contents,
-                &oxdock_parser::Arg::String("b".to_string(), true)
-            );
+            assert_eq!(contents, &oxdock_parser::Arg::String("b".to_string(), true));
         }
         other => panic!("expected AppendLine, got {other:?}"),
     }

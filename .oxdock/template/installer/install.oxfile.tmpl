@@ -15,15 +15,30 @@ WORKSPACE SYSTEM
 # tarball members.
 FUNC INSTALL_SELECTED($dir: STRING, $destname: STRING) {
     LET $members_raw: STRING = "\{{ env:OXDOCK_MEMBERS }}"
+    LET $want_raw: STRING = "\{{ env:OXDOCK_BINS }}"
     IF $members_raw == "" {
-        ECHO "release tarball held no binaries"
-        EXIT 1
+        # No inventory: local and prebuilt legs run this file directly
+        # against a binary instead of a tarball, so the bridged binary
+        # is the whole product. Selection needs an inventory to
+        # validate against, so it fails closed here instead.
+        IF $want_raw != "" {
+            ECHO "OXDOCK_BINS needs a tarball install: local builds bridge no member inventory"
+            EXIT 1
+        }
+        LET $local: BOOL = BOOL_OR("\{{ env:OXDOCK_SKIP_DOWNLOAD }}", false)
+        IF !$local {
+            ECHO "release tarball held no binaries"
+            EXIT 1
+        }
+        LET $bin: STRING = "\{{ env:OXDOCK_BIN }}"
+        LET $primary_dest: STRING = PATH_JOIN($dir, $destname)
+        INSTALL $bin $primary_dest
+        RETURN
     }
     LET $members: LIST<STRING> = TEXT_LINES($members_raw)
     LET $primary: STRING = "\{{ env:OXDOCK_PRIMARY }}"
     LET $bin: STRING = "\{{ env:OXDOCK_BIN }}"
     LET $sibdir: STRING = "\{{ env:OXDOCK_SIBLING_DIR }}"
-    LET $want_raw: STRING = "\{{ env:OXDOCK_BINS }}"
     IF $want_raw == "" {
         LET $primary_dest: STRING = PATH_JOIN($dir, $destname)
         INSTALL $bin $primary_dest

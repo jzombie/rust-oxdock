@@ -312,6 +312,48 @@ fn blank_bins_name_fails_closed() -> Result<()> {
     Ok(())
 }
 
+/// Local builds bridge no member inventory (no tarball involved): the
+/// bridged binary installs as the whole product.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn local_build_without_inventory_installs_primary() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    run.io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "true");
+    run.io.remove_inherit_env("OXDOCK_MEMBERS");
+    run.io.remove_inherit_env("OXDOCK_PRIMARY");
+    run.io.remove_inherit_env("OXDOCK_SIBLING_DIR");
+    run.execute()?;
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    #[cfg(unix)]
+    let placed = "dest/oxdock";
+    #[cfg(windows)]
+    let placed = "dest/oxdock.exe";
+    assert_eq!(
+        reader.read_file(&run.root.join(placed)?)?,
+        INSTALL_PAYLOAD,
+        "local build places the bridged binary"
+    );
+    Ok(())
+}
+
+/// A download-mode run without inventory fails instead of installing
+/// blind: only local builds may skip the member list.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn download_without_inventory_fails_closed() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    run.io.remove_inherit_env("OXDOCK_MEMBERS");
+    let err = run
+        .execute()
+        .expect_err("download without inventory must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "missing inventory exits the install: {rendered}"
+    );
+    Ok(())
+}
+
 /// Tampered bytes abort at the hash gate: the failure names the
 /// mismatch and no extract or install process ever spawns.
 #[test]
