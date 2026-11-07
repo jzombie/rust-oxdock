@@ -1,0 +1,43 @@
+# Product binary stager: copies every binary of one product package
+# into target/pkg-stage for the pack step. The product set varies per
+# package (sidecars ride along), resolved from the workspace metadata
+# like every other product list here; the matrix names its package,
+# target, and executable suffix through the environment. A package
+# with no binary targets fails naming the product instead of packing
+# an empty tarball. Runs on the checkout through GITHUB_WORKSPACE.
+
+INHERIT_ENV [GITHUB_WORKSPACE, OXDOCK_MATRIX_BIN, OXDOCK_MATRIX_TARGET, OXDOCK_MATRIX_EXE]
+IMPORT [STD, "helpers/ci-helpers.oxfile" AS CI_HELPERS]
+
+WORKSPACE SYSTEM
+WORKDIR "{{ env:GITHUB_WORKSPACE }}"
+
+LET $packages: LIST<MAP<ANY>> = CI_HELPERS::WORKSPACE_PACKAGES()
+LET $bin: STRING = "{{ env:OXDOCK_MATRIX_BIN }}"
+LET $target: STRING = "{{ env:OXDOCK_MATRIX_TARGET }}"
+LET $exe: STRING = "{{ env:OXDOCK_MATRIX_EXE }}"
+LET $names: LIST<STRING> = []
+LET $found: INT = 0
+FOR $p: MAP<ANY> IN $packages {
+    LET $pname: STRING = $p.name
+    IF $pname == $bin {
+        LET $targets: LIST<MAP<ANY>> = $p.targets
+        FOR $t: MAP<ANY> IN $targets {
+            LET $kinds: LIST<STRING> = $t.kind
+            FOR $k: STRING IN $kinds {
+                IF $k == "bin" {
+                    LIST_APPEND $names $t.name
+                    $found = $found + 1
+                }
+            }
+        }
+    }
+}
+IF $found == 0 {
+    ECHO "no binaries for product {{ $bin }}: check workspace.metadata.oxdock release_bins and the package's [[bin]] targets"
+    EXIT 1
+}
+MKDIR target/pkg-stage
+FOR $b: STRING IN $names {
+    COPY "target/{{ $target }}/release/{{ $b }}{{ $exe }}" "target/pkg-stage/"
+}

@@ -191,52 +191,12 @@ jobs:
       # ship notes only.
       - name: Resolve release products
         id: bins
-        shell: oxdock --script {0}
+        shell: bash
         env:
           OXDOCK_BINS_INPUT: ${{ inputs.bins }}
           OXDOCK_BINARIES: ${{ inputs.binaries }}
           GITHUB_WORKSPACE: ${{ github.workspace }}
-        run: |
-          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, OXDOCK_BINS_INPUT, OXDOCK_BINARIES]
-          IMPORT [STD]
-          # Unconfined: the outputs land outside the checkout
-          # (GITHUB_OUTPUT), and WORKSPACE LOCAL would rebase that
-          # absolute path back under the repo.
-          WORKSPACE SYSTEM
-          WORKDIR "{{ env:GITHUB_WORKSPACE }}"
-          LET $space: STRING = "{{ env:OXDOCK_BINS_INPUT }}"
-          IF $space == "" {
-              LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
-              IF HAS_KEY($manifest, "workspace") {
-                  LET $ws: MAP<ANY> = $manifest.workspace
-                  IF HAS_KEY($ws, "metadata") {
-                      LET $md: MAP<ANY> = $ws.metadata
-                      IF HAS_KEY($md, "oxdock") {
-                          LET $ox: MAP<ANY> = $md.oxdock
-                          IF HAS_KEY($ox, "release_bins") {
-                              LET $rb: LIST<STRING> = $ox.release_bins
-                              $space = TEXT_JOIN($rb, " ")
-                          }
-                      }
-                  }
-              }
-          }
-          LET $want: BOOL = BOOL_OR("{{ env:OXDOCK_BINARIES }}", true)
-          IF $space == "" {
-              IF $want {
-                  ECHO "no release products: set bins: or add workspace.metadata.oxdock release_bins to the root Cargo.toml"
-                  EXIT 1
-              }
-          }
-          LET $parts: LIST<STRING> = TEXT_FIELDS($space)
-          LET $quoted: LIST<STRING> = []
-          FOR $p: STRING IN $parts {
-              LIST_APPEND $quoted "\"{{ $p }}\""
-          }
-          LET $sep: STRING = ", "
-          LET $json: STRING = "[{{ STD::TEXT_JOIN($quoted, $sep) }}]"
-          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "bins_space={{ $space }}"
-          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "bins_json={{ $json }}"
+        run: oxdock ./.github/scripts/gha-rust-resolve.oxfile
 
   build:
     name: build ${{ matrix.bin }} (${{ matrix.target }})
@@ -340,32 +300,13 @@ jobs:
       # runs under the candidate engine, so the self-hosting proof
       # holds for every product.
       - name: Stage the product binaries
-        shell: oxdock --script {0}
-        run: |
-          INHERIT_ENV [GITHUB_WORKSPACE]
-          IMPORT [STD, ".github/scripts/helpers/ci-helpers.oxfile" AS CI_HELPERS]
-          WORKSPACE SYSTEM
-          WORKDIR "{{ env:GITHUB_WORKSPACE }}"
-          LET $packages: LIST<MAP<ANY>> = CI_HELPERS::WORKSPACE_PACKAGES()
-          LET $names: LIST<STRING> = []
-          FOR $p: MAP<ANY> IN $packages {
-              LET $pname: STRING = $p.name
-              IF $pname == "${{ matrix.bin }}" {
-                  LET $targets: LIST<MAP<ANY>> = $p.targets
-                  FOR $t: MAP<ANY> IN $targets {
-                      LET $kinds: LIST<STRING> = $t.kind
-                      FOR $k: STRING IN $kinds {
-                          IF $k == "bin" {
-                              LIST_APPEND $names $t.name
-                          }
-                      }
-                  }
-              }
-          }
-          MKDIR target/pkg-stage
-          FOR $b: STRING IN $names {
-              COPY "target/${{ matrix.target }}/release/{{ $b }}${{ matrix.exe }}" "target/pkg-stage/"
-          }
+        shell: bash
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          OXDOCK_MATRIX_BIN: ${{ matrix.bin }}
+          OXDOCK_MATRIX_TARGET: ${{ matrix.target }}
+          OXDOCK_MATRIX_EXE: ${{ matrix.exe }}
+        run: oxdock ./.github/scripts/gha-rust-stage.oxfile
 
       # NOTE: This intentionally reuses the candidate engine from the
       # step above instead of the binary from "Build the release
@@ -376,8 +317,8 @@ jobs:
         run: |
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
-          WORKDIR {{ env:GITHUB_WORKSPACE }}/target/${{ matrix.target }}/release
-          ARCHIVE pkg-stage {{ env:GITHUB_WORKSPACE }}/${{ matrix.bin }}-${{ matrix.target }}.tar.gz
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          ARCHIVE target/pkg-stage {{ env:GITHUB_WORKSPACE }}/${{ matrix.bin }}-${{ matrix.target }}.tar.gz
 
       - name: Upload the archive
         uses: actions/upload-artifact@v4

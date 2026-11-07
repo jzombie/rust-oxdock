@@ -1,0 +1,53 @@
+# Release product resolver: names the binaries the matrix builds.
+# inputs.bins wins when set (one-off override); else the workspace
+# metadata list (adding a product is one Cargo.toml entry). Nothing
+# else: with binaries on and neither source naming a product, this
+# fails naming the fix instead of guessing. Library-only runs
+# (binaries off) resolve empty and ship notes only. Outputs ride
+# GITHUB_OUTPUT as bins_space (space-separated) and bins_json (matrix
+# array), appended line-wise so no caller spells terminators.
+# Runs on the checkout or any synthetic root through GITHUB_WORKSPACE.
+
+INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, OXDOCK_BINS_INPUT, OXDOCK_BINARIES]
+IMPORT [STD]
+
+# Unconfined: the outputs land outside the checkout (GITHUB_OUTPUT),
+# and WORKSPACE LOCAL would rebase that absolute path back under the
+# repo, so the matrix would never reach downstream jobs.
+WORKSPACE SYSTEM
+WORKDIR "{{ env:GITHUB_WORKSPACE }}"
+
+LET $space: STRING = "{{ env:OXDOCK_BINS_INPUT }}"
+IF $space == "" {
+    LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+    IF HAS_KEY($manifest, "workspace") {
+        LET $ws: MAP<ANY> = $manifest.workspace
+        IF HAS_KEY($ws, "metadata") {
+            LET $md: MAP<ANY> = $ws.metadata
+            IF HAS_KEY($md, "oxdock") {
+                LET $ox: MAP<ANY> = $md.oxdock
+                IF HAS_KEY($ox, "release_bins") {
+                    LET $rb: LIST<STRING> = $ox.release_bins
+                    $space = TEXT_JOIN($rb, " ")
+                }
+            }
+        }
+    }
+}
+LET $want: BOOL = BOOL_OR("{{ env:OXDOCK_BINARIES }}", true)
+IF $space == "" {
+    IF $want {
+        ECHO "no release products: set bins: or add workspace.metadata.oxdock release_bins to the root Cargo.toml"
+        EXIT 1
+    }
+}
+LET $parts: LIST<STRING> = TEXT_FIELDS($space)
+LET $quoted: LIST<STRING> = []
+FOR $p: STRING IN $parts {
+    LIST_APPEND $quoted "\"{{ $p }}\""
+}
+LET $sep: STRING = ", "
+LET $json: STRING = "[{{ STD::TEXT_JOIN($quoted, $sep) }}]"
+LET $flat_sep: STRING = " "
+APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "bins_space={{ STD::TEXT_JOIN($parts, $flat_sep) }}"
+APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "bins_json={{ $json }}"
