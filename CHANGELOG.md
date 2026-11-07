@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- `oxdock-compose`: general-purpose artifact renderer replacing `docs-gen`. Renders any set of targets from templates, fragments, and generated content driven by a compose config, with pluggable lifecycle stages and support for custom source plugins and external host modules.
+- `SET_EXECUTABLE <path>` command: marks an existing file executable in place (owner `rwx` on Unix via shared `EXECUTABLE_MODE`, bit no-op elsewhere; a missing path fails on every platform). `INSTALL` shares the mode but keeps its atomic stage-and-rename path.
+- Single-bracket multi-name `IMPORT` harvests: `IMPORT [TYPE A, TYPE B FROM "f"]`, `IMPORT [FUNC FOO, FUNC BAR FROM "f"]`, and mixed `IMPORT [TYPE PERSON, FUNC FOO FROM "f"]` combine in one bracket, file or host alike. A bare multi-name (`IMPORT [FOO, BAR FROM "f"]`) fails fast naming the explicit-kinds fix, since bare words in single brackets always read as modules.
+- Namespaced file-import types: whole-file `IMPORT ["f" AS C]` exposes types qualified-only (`C::TYPE`, nothing bare leaks), bare `IMPORT [TYPE T FROM "f"]` harvests stay global collision-checked, and same-named types in different files coexist via per-file closure validation plus call-time owner merge. Files are self-sufficient: a file's own `TYPE` harvests resolve before its bodies validate and run, so importers never repeat entry imports.
+
+### Changed
+
+- `IMPORT` reference teaches single brackets only (one import per file preferred).
+
 ## [0.35.0-alpha] - 2026-11-05
 
 ### Fixed
