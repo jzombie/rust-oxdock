@@ -3,7 +3,6 @@ members = [
     "crates/docs-gen",
     "crates/oxdock-build",
     "crates/oxdock-cli",
-    "oxdock-compose",
     "crates/oxdock-core",
     "crates/oxdock-doc-tests",
     "crates/oxdock-embed",
@@ -25,6 +24,7 @@ members = [
     "crates/sys/oxdock-process",
     "crates/sys/oxdock-sys-test-utils",
     "oxdock",
+    "oxdock-compose",
 ]
 # Bare `cargo run` at the workspace root defaults to the `oxdock` binary.
 # `cargo build/test/...` with explicit `--workspace`/`-p` flags are unaffected.
