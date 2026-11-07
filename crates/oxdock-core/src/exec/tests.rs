@@ -1085,6 +1085,37 @@ fn write_interpolates_env_values() {
 }
 
 #[test]
+fn append_adds_no_terminator() {
+    let steps = crate::parse_script(indoc! {r#"
+        WRITE log.txt "line1"
+        APPEND log.txt "line2"
+    "#})
+    .expect("parse appends");
+    let (_cwd, files) = run_with_mock_fs(&steps);
+    let written = files
+        .iter()
+        .find(|(k, _)| k.ends_with("log.txt"))
+        .map(|(_, v)| String::from_utf8_lossy(v).to_string());
+    assert_eq!(written, Some("line1line2".into()));
+}
+
+#[test]
+fn append_line_terminates_each_append() {
+    let steps = crate::parse_script(indoc! {r#"
+        WRITE log.txt "line1"
+        APPEND_LINE log.txt "line2"
+        APPEND_LINE log.txt "line3"
+    "#})
+    .expect("parse append lines");
+    let (_cwd, files) = run_with_mock_fs(&steps);
+    let written = files
+        .iter()
+        .find(|(k, _)| k.ends_with("log.txt"))
+        .map(|(_, v)| String::from_utf8_lossy(v).to_string());
+    assert_eq!(written, Some("line1line2\nline3\n".into()));
+}
+
+#[test]
 fn for_int_key_binds_list_indices() {
     let steps = crate::parse_script(indoc! {r#"
         LET $items: LIST<STRING> = ["a", "b"]

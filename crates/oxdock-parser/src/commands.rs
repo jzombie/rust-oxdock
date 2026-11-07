@@ -726,6 +726,10 @@ impl StepKind {
                 walk_arg(path, f);
                 walk_opt(contents, f);
             }
+            StepKind::AppendLine { path, contents } => {
+                walk_arg(path, f);
+                walk_arg(contents, f);
+            }
             StepKind::Expand { path, overrides } => {
                 walk_opt(path, f);
                 for (_, value) in overrides {
@@ -856,6 +860,10 @@ impl StepKind {
                 walk_arg(path, f);
                 walk_opt(contents, f);
             }
+            StepKind::AppendLine { path, contents } => {
+                walk_arg(path, f);
+                walk_arg(contents, f);
+            }
             StepKind::Expand { path, overrides } => {
                 walk_opt(path, f);
                 for (_, value) in overrides {
@@ -961,6 +969,7 @@ impl StepKind {
             | StepKind::Prompt { .. }
             | StepKind::Write { .. }
             | StepKind::Append { .. }
+            | StepKind::AppendLine { .. }
             | StepKind::Remove { .. }
             | StepKind::Expand { .. }
             | StepKind::AssertEq { .. }
@@ -1927,7 +1936,7 @@ declare_commands! {
         variant: Write { path: Arg, contents: Option<Arg> },
         syntax: "WRITE <path> [<contents>]",
         summary: "Write to file.",
-        description: "Writes contents.",
+        description: "Writes contents. Bytes land exactly as given: no line-ending translation happens on any platform (LF stays LF, even on Windows), so the same script produces identical files everywhere.",
         args: &[
             ArgSpec { name: "path", arg_type: ArgType::Path, description: "File", io: IoDirection::Write, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "contents", arg_type: ArgType::Rest(&ArgType::String), description: "Content", io: IoDirection::Write, index: 1, required: false, fallback_stream: Some(Stream::Stdin) },
@@ -1953,7 +1962,7 @@ declare_commands! {
         variant: Append { path: Arg, contents: Option<Arg> },
         syntax: "APPEND <path> [<contents>]",
         summary: "Append to file.",
-        description: "Appends contents.",
+        description: "Appends contents with no separator and no line ending: bytes concatenate exactly, so `APPEND` never terminates the line (use `APPEND_LINE` for that). Bytes land exactly as given: no line-ending translation happens on any platform (LF stays LF, even on Windows), so the same script produces identical files everywhere.",
         args: &[
             ArgSpec { name: "path", arg_type: ArgType::Path, description: "File", io: IoDirection::Write, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "contents", arg_type: ArgType::Rest(&ArgType::String), description: "Content", io: IoDirection::Write, index: 1, required: false, fallback_stream: Some(Stream::Stdin) },
@@ -1964,7 +1973,8 @@ declare_commands! {
             WRITE log.txt line1
             APPEND log.txt line2
 
-            # APPEND concatenates with no separator.
+            # No separator or newline is added: the bytes concatenate
+            # exactly, so this asserts the unterminated form.
             LET $all: STRING = READ log.txt
             ASSERT_EQ $all "line1line2"
         "#} } ],
@@ -1974,6 +1984,36 @@ declare_commands! {
             let remaining: Vec<Arg> = it.collect();
             let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, "APPEND")?) };
             Ok(StepKind::Append { path, contents })
+        },
+    ],
+
+    AppendLine => [
+        name: "APPEND_LINE",
+        variant: AppendLine { path: Arg, contents: Arg },
+        syntax: "APPEND_LINE <path> <contents>",
+        summary: "Append one line to a file.",
+        description: "Appends contents plus exactly one trailing LF newline (`\\n`, never the platform newline), so callers never spell the terminator by hand and output bytes stay identical on every OS. Contents are required: unlike APPEND there is no stdin form, a line is a complete value, not a stream.",
+        args: &[
+            ArgSpec { name: "path", arg_type: ArgType::Path, description: "File", io: IoDirection::Write, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "contents", arg_type: ArgType::Rest(&ArgType::String), description: "Line content (the newline is added)", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
+        ],
+        flags: &[],
+        default_output: None,
+        examples: &[ Example { name: "append-line", fence_meta: None, code: indoc! {r#"
+            WRITE log.txt line1
+            APPEND_LINE log.txt line2
+            APPEND_LINE log.txt line3
+
+            # Each APPEND_LINE terminates its own write.
+            LET $all: STRING = READ log.txt
+            ASSERT_EQ $all "line1line2\nline3\n"
+        "#} } ],
+        lower: |_flags, args| {
+            let mut it = args.into_iter();
+            let path = it.next().ok_or_else(|| ParseError::validation("APPEND_LINE", "APPEND_LINE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let remaining: Vec<Arg> = it.collect();
+            let contents = join_value(remaining, "APPEND_LINE")?;
+            Ok(StepKind::AppendLine { path, contents })
         },
     ],
 
@@ -4237,6 +4277,14 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
+            StepKind::AppendLine { path, contents } => {
+                write!(
+                    f,
+                    "APPEND_LINE {} {}",
+                    fmt_value(path, quote_arg),
+                    fmt_value(contents, quote_msg)
+                )
+            }
             StepKind::Remove { path, recursive } => {
                 if *recursive {
                     write!(f, "REMOVE --recursive {}", fmt_value(path, quote_arg))
@@ -6334,6 +6382,7 @@ mod tests {
                 | StepKind::Prompt { .. }
                 | StepKind::Write { .. }
                 | StepKind::Append { .. }
+                | StepKind::AppendLine { .. }
                 | StepKind::Remove { .. }
                 | StepKind::Expand { .. }
                 | StepKind::AssertEq { .. }

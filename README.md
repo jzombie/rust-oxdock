@@ -538,6 +538,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`PROMPT`](#prompt) | `PROMPT $var <message> [<default>]` |
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
+| [`APPEND_LINE`](#append_line) | `APPEND_LINE <path> <contents>` |
 | [`REMOVE`](#remove) | `REMOVE [--recursive] <path>` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
 | [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ [--hash <sha256>] <actual> <expected>` |
@@ -3029,7 +3030,7 @@ Write to file.
 
 **Syntax:** `WRITE <path> [<contents>]`
 
-Writes contents.
+Writes contents. Bytes land exactly as given: no line-ending translation happens on any platform (LF stays LF, even on Windows), so the same script produces identical files everywhere.
 
 **Arguments:**
 
@@ -3055,7 +3056,7 @@ Append to file.
 
 **Syntax:** `APPEND <path> [<contents>]`
 
-Appends contents.
+Appends contents with no separator and no line ending: bytes concatenate exactly, so `APPEND` never terminates the line (use `APPEND_LINE` for that). Bytes land exactly as given: no line-ending translation happens on any platform (LF stays LF, even on Windows), so the same script produces identical files everywhere.
 
 **Arguments:**
 
@@ -3072,9 +3073,40 @@ Appends contents.
 WRITE log.txt line1
 APPEND log.txt line2
 
-# APPEND concatenates with no separator.
+# No separator or newline is added: the bytes concatenate
+# exactly, so this asserts the unterminated form.
 LET $all: STRING = READ log.txt
 ASSERT_EQ $all "line1line2"
+```
+
+
+### APPEND_LINE
+
+Append one line to a file.
+
+**Syntax:** `APPEND_LINE <path> <contents>`
+
+Appends contents plus exactly one trailing LF newline (`\n`, never the platform newline), so callers never spell the terminator by hand and output bytes stay identical on every OS. Contents are required: unlike APPEND there is no stdin form, a line is a complete value, not a stream.
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | [`PATH`](#value-type-path) | yes | File |
+| `contents` | [`STRING...`](#value-type-string) | yes | Line content (the newline is added) |
+
+**Examples:**
+
+**Example: append-line**
+
+```oxdock
+WRITE log.txt line1
+APPEND_LINE log.txt line2
+APPEND_LINE log.txt line3
+
+# Each APPEND_LINE terminates its own write.
+LET $all: STRING = READ log.txt
+ASSERT_EQ $all "line1line2\nline3\n"
 ```
 
 

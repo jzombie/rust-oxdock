@@ -122,7 +122,7 @@ pub const COMMANDS: &[Command] = &[
 /// reusing an existing category needs no change. Single-word commands
 /// carry no category and are unaffected.
 pub const COMMAND_CATEGORIES: &[&str] = &[
-    "INHERIT", "WITH", "COPY", "HASH", "READ", "ASSERT", "LIST", "SET",
+    "INHERIT", "WITH", "COPY", "HASH", "READ", "ASSERT", "LIST", "SET", "APPEND",
 ];
 
 impl Command {

@@ -342,6 +342,10 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     template_keys(&mut keys, body);
                 }
             }
+            StepKind::AppendLine { path, contents } => {
+                template_keys(&mut keys, path);
+                template_keys(&mut keys, contents);
+            }
             StepKind::Expand { path, overrides } => {
                 if let Some(p) = path {
                     template_keys(&mut keys, p);

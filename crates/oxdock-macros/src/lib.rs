@@ -1283,6 +1283,11 @@ fn emit_stepkind(
                 None => quote! { StepKind::Append { path: #p, contents: None } },
             }
         }
+        StepKind::AppendLine { path, contents } => {
+            let p = emit_arg(path, interp);
+            let c = emit_arg(contents, interp);
+            quote! { StepKind::AppendLine { path: #p, contents: #c } }
+        }
         StepKind::Remove { path, recursive } => {
             let p = emit_arg(path, interp);
             quote! { StepKind::Remove { path: #p, recursive: #recursive } }

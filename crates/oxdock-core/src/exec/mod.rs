@@ -29,16 +29,16 @@ pub use self::conformance::assert_module_returns_conformance;
 pub use self::engine::{Engine, EngineOutput};
 pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
-    dispatch_append, dispatch_archive, dispatch_assert_contains, dispatch_assert_eq,
-    dispatch_assert_ne, dispatch_assign, dispatch_assign_async_step, dispatch_assign_capture_step,
-    dispatch_async_block, dispatch_await_capture_step, dispatch_await_step, dispatch_break,
-    dispatch_call, dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git,
-    dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
-    dispatch_func_def, dispatch_if_then, dispatch_import_file, dispatch_import_funcs,
-    dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env, dispatch_isolated_step,
-    dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step, dispatch_read,
-    dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return, dispatch_run,
-    dispatch_run_exec, dispatch_set, dispatch_set_executable, dispatch_sleep_step,
+    dispatch_append, dispatch_append_line, dispatch_archive, dispatch_assert_contains,
+    dispatch_assert_eq, dispatch_assert_ne, dispatch_assign, dispatch_assign_async_step,
+    dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
+    dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
+    dispatch_copy, dispatch_copy_git, dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand,
+    dispatch_for_loop, dispatch_func_def, dispatch_if_then, dispatch_import_file,
+    dispatch_import_funcs, dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env,
+    dispatch_isolated_step, dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step,
+    dispatch_read, dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return,
+    dispatch_run, dispatch_run_exec, dispatch_set, dispatch_set_executable, dispatch_sleep_step,
     dispatch_symlink, dispatch_timeout_step, dispatch_unarchive, dispatch_while_loop,
     dispatch_with_io, dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
 };

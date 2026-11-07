@@ -3713,6 +3713,41 @@ pub(crate) fn dispatch_append<P: ProcessManager>(
     append(cx, &path_resolved, contents_resolved.as_deref())
 }
 
+pub(crate) fn dispatch_append_line<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::AppendLine { path, contents } = step else {
+        unreachable!()
+    };
+    let path_resolved = super::args::resolve_arg(path, cx)?;
+    let contents_resolved = super::args::resolve_arg(contents, cx)?;
+    append_line(cx, &path_resolved, &contents_resolved)
+}
+
+pub(super) fn append_line<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    path: &str,
+    contents: &str,
+) -> Result<()> {
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.effective_cwd(), path)
+        .with_context(|| format!("APPEND_LINE {path}"))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .with_context(|| format!("failed to create parent for {}", target.display()))?;
+    let mut line = contents.to_string();
+    line.push('\n');
+    cx.state
+        .fs
+        .append_file(&target, line.as_bytes())
+        .with_context(|| format!("failed to append to {}", target.display()))?;
+    Ok(())
+}
+
 pub(super) fn remove<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,

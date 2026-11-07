@@ -2849,6 +2849,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Prompt { .. } => {}
         StepKind::Write { .. } => {}
         StepKind::Append { .. } => {}
+        StepKind::AppendLine { .. } => {}
         StepKind::Remove { .. } => {}
         StepKind::Expand { .. } => {}
         StepKind::AssertEq { .. } => {}

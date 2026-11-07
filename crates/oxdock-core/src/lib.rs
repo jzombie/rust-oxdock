@@ -32,6 +32,7 @@ define_pipeline! {
     StepKind::Prompt { .. } => exec::dispatch_prompt,
     StepKind::Write { .. } => exec::dispatch_write,
     StepKind::Append { .. } => exec::dispatch_append,
+    StepKind::AppendLine { .. } => exec::dispatch_append_line,
     StepKind::Remove { .. } => exec::dispatch_remove,
     StepKind::Expand { .. } => exec::dispatch_expand,
     StepKind::AssertEq { .. } => exec::dispatch_assert_eq,

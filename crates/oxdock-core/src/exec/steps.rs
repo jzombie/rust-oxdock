@@ -962,6 +962,11 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
             handlers::append(&mut cx, &path_resolved, contents_resolved.as_deref())
         }
+        StepKind::AppendLine { path, contents } => {
+            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+            let contents_resolved = super::args::resolve_arg(contents, &mut cx)?;
+            handlers::append_line(&mut cx, &path_resolved, &contents_resolved)
+        }
         StepKind::Remove { path, recursive } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             handlers::remove(&mut cx, &path_resolved, *recursive)
@@ -1338,6 +1343,12 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     &path_resolved,
                                     contents_resolved.as_deref(),
                                 )
+                            }
+                            StepKind::AppendLine { path, contents } => {
+                                let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+                                let contents_resolved =
+                                    super::args::resolve_arg(contents, &mut cx)?;
+                                handlers::append_line(&mut cx, &path_resolved, &contents_resolved)
                             }
                             StepKind::Remove { path, recursive } => {
                                 let path_resolved = super::args::resolve_arg(path, &mut cx)?;
