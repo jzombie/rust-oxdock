@@ -6897,10 +6897,11 @@ fn file_import_from_aliased_harvest() {
 }
 
 #[test]
-fn file_import_type_whole_file_persists_for_signatures() {
-    // Lobotomy fix: lib defines TYPE plus a FUNC using it; whole-file
-    // import persists the exported alias so the entry can declare
-    // `LET $p: PERSON` and call `LIB::GREET($p)`.
+fn file_import_type_whole_file_persists_qualified_for_signatures() {
+    // Lib defines TYPE plus a FUNC using it; whole-file import exposes
+    // the exported alias only as `LIB::PERSON`: the entry declares
+    // `LET $p: LIB::PERSON` and calls `LIB::GREET($p)`. Nothing bare
+    // leaks from an aliased import.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -6916,7 +6917,7 @@ fn file_import_type_whole_file_persists_for_signatures() {
     );
     let steps = parse_entry(indoc! {r#"
         IMPORT ["lib.oxdock" AS LIB]
-        LET $p: PERSON = {name: "bob"}
+        LET $p: LIB::PERSON = {name: "bob"}
         LET $g: STRING = LIB::GREET($p)
     "#});
     let (_, _, bindings) = run_steps_with_manager(
@@ -7014,9 +7015,10 @@ fn file_import_type_harvest_unexported_fails() {
 }
 
 #[test]
-fn file_import_type_collision_fails() {
-    // Same TYPE name with different targets across files fails at
-    // import time, naming the collision.
+fn file_import_same_type_name_coexists_namespaced() {
+    // Same TYPE name with different targets across files coexists:
+    // full imports persist qualified only, so `A::PERSON` and
+    // `B::PERSON` resolve independently and nothing bare collides.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -7028,7 +7030,7 @@ fn file_import_type_collision_fails() {
     );
     seed_lib(
         &fs,
-        "b.oxdock",
+        "b.oxfile",
         indoc! {r#"
             TYPE PERSON = STRING
             EXPORT TYPE PERSON
@@ -7036,10 +7038,19 @@ fn file_import_type_collision_fails() {
     );
     let steps = parse_entry(indoc! {r#"
         IMPORT ["a.oxdock" AS A]
-        IMPORT ["b.oxdock" AS B]
+        IMPORT ["b.oxfile" AS B]
+        LET $a: A::PERSON = {name: "ann"}
+        LET $b: B::PERSON = "bob"
     "#});
-    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
-    assert!(format!("{err:#}").contains("collides"), "{err:#}");
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("namespaced same-name types coexist");
+    assert!(bindings.contains_key("a"));
+    assert!(bindings.contains_key("b"));
 }
 
 #[test]
@@ -8601,14 +8612,7 @@ fn workflow_inline_scripts_pass_static_gate() {
             state.validate_function_type_tags().expect("tags");
             let closure =
                 super::import::expand_import_closure(&mut state, &steps).expect("closure");
-            for file in &closure {
-                for (n, t) in
-                    super::typing::collect_type_aliases(&file.steps, &state).expect("aliases")
-                {
-                    state.type_aliases.insert(n, t);
-                }
-            }
-            super::static_check::validate_script_closure(&steps, &closure, &state)
+            super::static_check::validate_script_closure(&steps, &closure, &mut state)
                 .unwrap_or_else(|err| panic!("{label} static gate: {err:#}"));
         }
     }

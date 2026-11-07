@@ -529,17 +529,11 @@ fn finish_run<P: ProcessManager>(
     // can smuggle a type error past the entry gate.
     let saved_aliases = state.type_aliases.clone();
     let closure = self::import::expand_import_closure(&mut state, steps)?;
-    for file in &closure {
-        let aliases = self::typing::collect_type_aliases(&file.steps, &state)?;
-        // Validation is permissive (global) for v1: all file aliases
-        // merge bare, like host types. Runtime persistence stays strict
-        // (only exported + imported persist); static gating for
-        // harvests (unexported fails) lives in `collect_site`.
-        for (name, target) in &aliases {
-            state.type_aliases.insert(name.clone(), target.clone());
-        }
-    }
-    static_check::validate_script_closure(steps, &closure, &state)?;
+    // Per-file scoping lives inside the closure pass: every file is
+    // checked against exactly its own aliases plus the shared
+    // harvests, never another file's defs, so same-named types in
+    // different files coexist. Harvest collisions still fail loud.
+    static_check::validate_script_closure(steps, &closure, &mut state)?;
     state.type_aliases = saved_aliases;
     let assert_windows = Arc::clone(&state.assert_windows);
     let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);

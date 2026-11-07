@@ -2560,6 +2560,23 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             });
             cx.state.call_depth += 1;
             cx.state.push_scope();
+            // Module-owned bodies resolve their own file's TYPE aliases
+            // first, shadowing globals for the call: a file's bodies
+            // validate against the same view (see phase 1), so imports
+            // never leak bare names yet self-contained files keep
+            // working. Harvested types stay global by explicit request.
+            let owner_aliases: Vec<(String, String)> = module_key
+                .as_deref()
+                .and_then(|key| cx.state.modules.get(key))
+                .map(|record| super::typing::collect_type_aliases(&record.steps, cx.state))
+                .transpose()?
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            let saved_type_aliases = cx.state.type_aliases.clone();
+            for (name, target) in &owner_aliases {
+                cx.state.type_aliases.insert(name.clone(), target.clone());
+            }
             // Module-owned bodies execute with their module on the
             // context stack, so name resolution falls back to the
             // module's shared store; entry bodies push `None`, keeping
@@ -2620,6 +2637,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             let pop_res = cx.state.pop_scope();
             cx.state.call_depth -= 1;
             let _ = cx.state.module_stack.pop();
+            cx.state.type_aliases = saved_type_aliases;
             match (outcome, pop_res) {
                 (Ok(value), Ok(())) => Ok(value),
                 (Err(e), _) => Err(e),

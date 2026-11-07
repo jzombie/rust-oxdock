@@ -477,15 +477,23 @@ pub(crate) fn import_funcs<P: ProcessManager>(
 /// differing targets fail. Qualified `ALIAS::TYPE` spellings stay
 /// future work: whole-file func views namespace, but types merge
 /// globally so `LET $x: PERSON` works after any import.
-fn insert_imported_type<P: ProcessManager>(
+/// Persist one harvested or exported type under the importer's roof.
+/// Unaliased harvests land bare (explicit global request, collision
+/// checked); anything imported `AS C` persists only as `C::NAME`,
+/// mirroring func views, so no file ever leaks bare names into its
+/// importer. Same target re-imports are idempotent, differing targets
+/// fail naming both files.
+pub(crate) fn insert_imported_type<P: ProcessManager>(
     state: &mut ExecState<P>,
     name: &str,
     target: &str,
     alias: Option<&str>,
     path: &str,
 ) -> Result<()> {
-    let _ = alias;
-    let key = name.to_string();
+    let key = match alias {
+        Some(alias) => format!("{alias}::{name}"),
+        None => name.to_string(),
+    };
     if let Some(existing) = state.type_aliases.get(&key) {
         if existing != target {
             anyhow::bail!(
@@ -517,6 +525,85 @@ fn enter_alias_frame<P: ProcessManager>(state: &mut ExecState<P>) -> usize {
 /// skip execution and reuse the initialized module, binding the
 /// cached `RETURN` value for `LET`-capture. Returns the init body's
 /// `RETURN` value (`""` on fallthrough).
+/// Resolve a file's own top-level TYPE harvests into the global
+/// type directory (EXPORT-gated, collision-checked). Lets a file's
+/// declared dependencies satisfy its own signatures and bodies
+/// without every importer repeating them. Mirrors the `import_funcs`
+/// harvest path; harvested funcs and nested execution still happen
+/// later. Idempotent (same target) so validation, persistence, and
+/// re-import points can all share it. Pushes the file while resolving
+/// so nested paths join importer-relative, exactly like execution.
+fn resolve_own_type_harvests<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    steps: &[Step],
+    resolved: &GuardedPath,
+) -> Result<()> {
+    let pushed = if cx.state.import_stack.iter().any(|p| p == resolved) {
+        false
+    } else {
+        cx.state.import_stack.push(resolved.clone());
+        true
+    };
+    let outcome = resolve_own_type_harvests_inner(cx, steps);
+    if pushed {
+        let _ = cx.state.import_stack.pop();
+    }
+    outcome
+}
+
+fn resolve_own_type_harvests_inner<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    steps: &[Step],
+) -> Result<()> {
+    for step in steps {
+        let StepKind::ImportFuncs {
+            path: harvest_path,
+            alias: harvest_alias,
+            func_names: harvest_funcs,
+            type_names: harvest_types,
+        } = &step.kind
+        else {
+            continue;
+        };
+        if harvest_types.is_empty() {
+            continue;
+        }
+        if harvest_funcs.is_empty() {
+            let base = import_base(cx.state);
+            let resolved_opt = base.join(harvest_path).ok();
+            let file_exists = resolved_opt
+                .as_ref()
+                .is_some_and(|r| cx.state.fs.entry_kind(r).is_ok());
+            if !file_exists && cx.state.module_table.modules.contains_key(harvest_path) {
+                for name in harvest_types {
+                    cx.state.resolve_tag(name).map_err(|e| {
+                        anyhow::anyhow!("IMPORT `{harvest_path}` has no such TYPE `{name}`: {e:#}")
+                    })?;
+                }
+                continue;
+            }
+        }
+        let harvested = load_import(cx.state, harvest_path)?;
+        let file_aliases = super::typing::collect_type_aliases(&harvested.steps, cx.state)?;
+        for name in harvest_types {
+            if !harvested.type_exports.iter().any(|e| e == name) {
+                anyhow::bail!("IMPORT `{harvest_path}` does not export TYPE `{name}`");
+            }
+            let Some(target) = file_aliases.get(name) else {
+                anyhow::bail!("IMPORT `{harvest_path}` has no such TYPE `{name}`");
+            };
+            insert_imported_type(
+                cx.state,
+                name,
+                target,
+                harvest_alias.as_deref(),
+                harvest_path,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn import_file<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
@@ -541,6 +628,9 @@ pub(crate) fn import_file<P: ProcessManager>(
         for (name, target) in &aliases {
             cx.state.type_aliases.insert(name.clone(), target.clone());
         }
+        // Self-sufficiency: the file's own harvests satisfy its own
+        // signatures (see `resolve_own_type_harvests`).
+        resolve_own_type_harvests(cx, &steps, &resolved)?;
         // Entry parity: statically validate the imported body before its
         // first step runs. Nested imports validate when their own IMPORT
         // steps execute.
@@ -642,7 +732,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         for (name, target) in aliases {
             cx.state.type_aliases.insert(name, target);
         }
-        cx.state.import_stack.push(resolved);
+        cx.state.import_stack.push(resolved.clone());
         cx.state.push_scope();
         // Snapshot the pre-init env: the module's call-time env is the
         // seed plus only what this init body contributes. Values the
@@ -738,6 +828,13 @@ pub(crate) fn import_file<P: ProcessManager>(
         cx.state.import_alias_frame = None;
     }
     cx.state.type_aliases = saved_aliases;
+    // Re-apply the file's own harvests after the init restore: the
+    // restore drops everything but exports, while harvested funcs
+    // persist through the registry. Types persist like funcs do, so
+    // the file's bodies resolve at call time exactly as validated.
+    if outcome.is_ok() {
+        resolve_own_type_harvests(cx, &steps, &resolved)?;
+    }
     match (outcome, pop_res) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(e), _) => Err(e),
@@ -760,11 +857,14 @@ pub(super) struct ClosureSite {
 /// One file in the transitive import closure (#115): the resolved path
 /// plus the parsed body, with every site that loads it. Sites accumulate
 /// across the walk (diamonds), each validated once. `path` is the
-/// literal spelling from the first import statement, for error messages.
+/// literal spelling from the first import statement, for error messages;
+/// `dir` is the directory nested harvests resolve against (the file's
+/// own directory, so per-file validation needs no filesystem).
 #[derive(Debug, Clone)]
 pub(super) struct ClosureFile {
     pub key: String,
     pub path: String,
+    pub dir: GuardedPath,
     pub steps: Vec<Step>,
     pub func_exports: Vec<String>,
     pub type_exports: Vec<String>,
@@ -802,21 +902,17 @@ fn expand_walk<P: ProcessManager>(
         match &step.kind {
             StepKind::ImportFile { path, alias } => {
                 let target = expand_load(state, dir, stack, path)?;
-                let key = target.resolved.display();
-                stack.push(target.resolved);
                 record_site(
                     files,
-                    key,
+                    &target,
                     path.clone(),
-                    target.body.clone(),
-                    target.func_exports.clone(),
-                    target.type_exports.clone(),
                     ClosureSite {
                         alias: Some(alias.clone()),
                         func_names: None,
                         type_names: None,
                     },
                 );
+                stack.push(target.resolved);
                 expand_walk(state, &target.body, &target.nested, stack, files)?;
                 stack.pop();
             }
@@ -849,21 +945,17 @@ fn expand_walk<P: ProcessManager>(
                     }
                 }
                 let target = expand_load(state, dir, stack, path)?;
-                let key = target.resolved.display();
-                stack.push(target.resolved);
                 record_site(
                     files,
-                    key,
+                    &target,
                     path.clone(),
-                    target.body.clone(),
-                    target.func_exports.clone(),
-                    target.type_exports.clone(),
                     ClosureSite {
                         alias: alias.clone(),
                         func_names: Some(func_names.clone()),
                         type_names: Some(type_names.clone()),
                     },
                 );
+                stack.push(target.resolved);
                 expand_walk_top(state, &target.body, &target.nested, stack, files)?;
                 stack.pop();
             }
@@ -888,21 +980,17 @@ fn expand_walk_top<P: ProcessManager>(
         match &step.kind {
             StepKind::ImportFile { path, alias } => {
                 let target = expand_load(state, dir, stack, path)?;
-                let key = target.resolved.display();
-                stack.push(target.resolved);
                 record_site(
                     files,
-                    key,
+                    &target,
                     path.clone(),
-                    target.body.clone(),
-                    target.func_exports.clone(),
-                    target.type_exports.clone(),
                     ClosureSite {
                         alias: Some(alias.clone()),
                         func_names: None,
                         type_names: None,
                     },
                 );
+                stack.push(target.resolved);
                 expand_walk(state, &target.body, &target.nested, stack, files)?;
                 stack.pop();
             }
@@ -929,21 +1017,17 @@ fn expand_walk_top<P: ProcessManager>(
                     }
                 }
                 let target = expand_load(state, dir, stack, path)?;
-                let key = target.resolved.display();
-                stack.push(target.resolved);
                 record_site(
                     files,
-                    key,
+                    &target,
                     path.clone(),
-                    target.body.clone(),
-                    target.func_exports.clone(),
-                    target.type_exports.clone(),
                     ClosureSite {
                         alias: alias.clone(),
                         func_names: Some(func_names.clone()),
                         type_names: Some(type_names.clone()),
                     },
                 );
+                stack.push(target.resolved);
                 expand_walk_top(state, &target.body, &target.nested, stack, files)?;
                 stack.pop();
             }
@@ -972,7 +1056,7 @@ fn expand_walk_kind<P: ProcessManager>(
 /// Immediate child bodies of a step, shared by expansion and dry-run.
 /// Boxed sub-kinds unwrap one level; block bodies recurse per step by
 /// the callers.
-fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
+pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
     match kind {
         StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => child_bodies(cmd),
         StepKind::For { body, .. }
@@ -1007,13 +1091,11 @@ fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
 /// with the first site; every site loads the same parsed body.
 fn record_site(
     files: &mut Vec<ClosureFile>,
-    key: String,
+    target: &ExpandedImport,
     path: String,
-    steps: Vec<Step>,
-    func_exports: Vec<String>,
-    type_exports: Vec<String>,
     site: ClosureSite,
 ) {
+    let key = target.resolved.display();
     match files.iter_mut().find(|f| f.key == key) {
         Some(found) => {
             if !found.sites.iter().any(|s| {
@@ -1027,9 +1109,10 @@ fn record_site(
         None => files.push(ClosureFile {
             key,
             path,
-            steps,
-            func_exports,
-            type_exports,
+            dir: target.nested.clone(),
+            steps: target.body.clone(),
+            func_exports: target.func_exports.clone(),
+            type_exports: target.type_exports.clone(),
             sites: vec![site],
         }),
     }
@@ -1199,7 +1282,7 @@ fn load_file<P: ProcessManager>(
 /// workspace (CI runners materialize inline scripts in a temp dir)
 /// carries no source-tree context, so it resolves like stdin against
 /// the workspace root instead of the staging dir.
-fn import_base<P: ProcessManager>(state: &ExecState<P>) -> GuardedPath {
+pub(crate) fn import_base<P: ProcessManager>(state: &ExecState<P>) -> GuardedPath {
     if let Some(top) = state.import_stack.last() {
         if let Some(parent) = top.parent() {
             return parent;

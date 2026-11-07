@@ -83,7 +83,6 @@ fn tracer_stages_run_through_pipe_in_order() {
     // escape the raw string needs.
     let parent = indoc::indoc! {r#"
         INHERIT_ENV [OXDOCK_WORKSPACE_ROOT]
-        IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "types.oxfile"]
         IMPORT ["compose.oxfile" AS C]
         LET $mod: STRING = """
         INHERIT_ENV [COMPOSE_CONFIG, OXDOCK_WORKSPACE_ROOT]
