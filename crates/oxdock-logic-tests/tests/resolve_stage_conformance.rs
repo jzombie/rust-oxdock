@@ -169,6 +169,30 @@ fn resolve_empty_with_binaries_fails_closed() -> Result<()> {
     Ok(())
 }
 
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn resolve_blank_with_binaries_fails_closed() -> Result<()> {
+    let run = resolve_harness(
+        "[package]\nname = \"solo\"\nversion = \"0.1.0\"\n",
+        "   ",
+        "true",
+    )?;
+    let err = run_steps_with_context_result_with_io(&run.root, &run.root, &run.steps, run.io)
+        .map(|_| ())
+        .expect_err("blank products must fail resolution");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "blank products exit the resolver: {rendered}"
+    );
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    assert!(
+        reader.read_to_string(&run.out).is_err(),
+        "failed resolution writes no outputs file"
+    );
+    Ok(())
+}
+
 /// Empty products with binaries off resolve to the empty matrix: the
 /// release ships notes only.
 #[test]

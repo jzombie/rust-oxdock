@@ -258,8 +258,9 @@ fn bins_selection_places_only_named_members() -> Result<()> {
     Ok(())
 }
 
-/// Unknown selection names fail listing the tarball members, before
-/// anything lands.
+/// An unknown selection name fails before anything lands, and so
+/// does a whitespace-only selection: an empty pick list is user error,
+/// never a silent no-op install.
 #[test]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn unknown_bins_name_fails_listing_members() -> Result<()> {
@@ -274,6 +275,31 @@ fn unknown_bins_name_fails_listing_members() -> Result<()> {
         "unknown member exits the install: {rendered}"
     );
     // The gate fires before any INSTALL: the destination holds nothing.
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    #[cfg(unix)]
+    let primary = "dest/oxdock";
+    #[cfg(windows)]
+    let primary = "dest/oxdock.exe";
+    assert!(
+        reader.read_file(&run.root.join(primary)?).is_err(),
+        "failed selection places nothing"
+    );
+    Ok(())
+}
+
+/// A whitespace-only selection fails instead of placing nothing and
+/// reporting success.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn blank_bins_name_fails_closed() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    run.io.insert_inherit_env("OXDOCK_BINS", "   ");
+    let err = run.execute().expect_err("blank selection must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "blank selection exits the install: {rendered}"
+    );
     let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
     #[cfg(unix)]
     let primary = "dest/oxdock";

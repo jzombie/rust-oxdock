@@ -238,11 +238,14 @@ tar -xzf "$VDIR/$ASSET" -C "$tmp/x"
 
 chmod +x "$tmp"/x/"$PRODUCT"*
 
-# Exact primary plus every `-child` sidecar riding the same tarball
-# (two today, N tomorrow): globs would hand a sibling to the engine
-# slot, so resolve each path explicitly and fail closed when the
-# tarball held nothing expected.
+# Exact primary, tolerating the Windows `.exe` the tarball carries
+# under Git Bash/MSYS (extensionless probes must not leak into
+# PRIMARY, or the oxfile demotes the primary to a sidecar). Fail
+# closed when the tarball held nothing expected.
 BIN="$tmp/x/$PRODUCT"
+if [ -f "${BIN}.exe" ]; then
+  BIN="${BIN}.exe"
+fi
 
 [ -f "$BIN" ] || { echo "no binary unpacked from $ASSET" >&2; exit 1; }
 

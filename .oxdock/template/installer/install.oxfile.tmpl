@@ -37,6 +37,11 @@ FUNC INSTALL_SELECTED($dir: STRING, $destname: STRING) {
         RETURN
     }
     LET $want: LIST<STRING> = TEXT_FIELDS($want_raw)
+    LET $picked: STRING = TEXT_JOIN($want, " ")
+    IF $picked == "" {
+        ECHO "OXDOCK_BINS names no binaries: name tarball members or unset it to place the whole product"
+        EXIT 1
+    }
     LET $known: STRING = TEXT_JOIN($members, ", ")
     FOR $w: STRING IN $want {
         LET $matched: BOOL = false

@@ -179,9 +179,14 @@ jobs:
 
       # The resolver runs on the DSL itself: products come from the
       # manifest through LOAD_TOML, with no shell parsing and no
-      # second language in the pipeline.
+      # second language in the pipeline. Local bootstrap: the script
+      # may use unreleased vocabulary (APPEND_LINE), which the
+      # published engine predates, so the resolver builds from this
+      # checkout like every other branch-DSL leg.
       - name: Setup resolve engine
         uses: ./.github/actions/setup-oxdock
+        with:
+          source: local
 
       # inputs.bins wins when set (one-off override); else the
       # workspace metadata list (adding a product is one Cargo.toml

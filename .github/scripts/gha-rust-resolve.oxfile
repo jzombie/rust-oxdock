@@ -35,19 +35,20 @@ IF $space == "" {
     }
 }
 LET $want: BOOL = BOOL_OR("{{ env:OXDOCK_BINARIES }}", true)
-IF $space == "" {
+LET $parts: LIST<STRING> = TEXT_FIELDS($space)
+LET $flat_sep: STRING = " "
+LET $canon: STRING = TEXT_JOIN($parts, $flat_sep)
+IF $canon == "" {
     IF $want {
         ECHO "no release products: set bins: or add workspace.metadata.oxdock release_bins to the root Cargo.toml"
         EXIT 1
     }
 }
-LET $parts: LIST<STRING> = TEXT_FIELDS($space)
 LET $quoted: LIST<STRING> = []
 FOR $p: STRING IN $parts {
     LIST_APPEND $quoted "\"{{ $p }}\""
 }
 LET $sep: STRING = ", "
 LET $json: STRING = "[{{ STD::TEXT_JOIN($quoted, $sep) }}]"
-LET $flat_sep: STRING = " "
-APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "bins_space={{ STD::TEXT_JOIN($parts, $flat_sep) }}"
+APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "bins_space={{ $canon }}"
 APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "bins_json={{ $json }}"
