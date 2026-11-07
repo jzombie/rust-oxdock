@@ -12,6 +12,8 @@
   "net_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md",
   "markdown_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-markdown-plugin/README.md",
   "ci_url": "https://github.com/jzombie/rust-oxdock/actions/workflows/rust-checks.yml",
+  "miri_workflow_url": "https://github.com/jzombie/rust-oxdock/actions/workflows/miri-nightly.yml",
+  "miri_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fjzombie%2Frust-oxdock%2Fbadges%2Fmiri-coverage.json",
   "code_search_url": "https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock",
   "installer_cmd_sh": "curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash",
   "installer_cmd_ps1": "(irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex",

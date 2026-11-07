@@ -18,7 +18,7 @@
   <a href="https://coveralls.io/github/jzombie/rust-oxdock?branch=main">
     <img src="https://coveralls.io/repos/github/jzombie/rust-oxdock/badge.svg?branch=main" alt="Coverage Status" />
   </a>
-  <a href="#miri-coverage">
+  <a href="https://github.com/jzombie/rust-oxdock/actions/workflows/miri-nightly.yml">
     <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fjzombie%2Frust-oxdock%2Fbadges%2Fmiri-coverage.json" alt="Miri Coverage" />
   </a>
 </div>
