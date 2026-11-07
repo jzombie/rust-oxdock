@@ -22,8 +22,19 @@
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
 #
+# Pass OXDOCK_PRODUCT to choose the release product (default
+# `oxdock`; `oxdock-compose` installs the composer). The asset and
+# the installed stem both follow the product unless OXDOCK_BINARY_NAME
+# overrides the stem.
+#
+# Pass OXDOCK_BINS to choose which tarball members to place
+# (space-separated basenames, `.exe` optional on Windows; default
+# places the whole product). The primary takes the OXDOCK_BINARY_NAME
+# stem, companions keep their tarball names. Unknown names fail
+# listing the tarball members.
+#
 # Pass OXDOCK_BINARY_NAME to choose the installed stem (default
-# `oxdock`; the installer appends `.exe` on Windows). CI passes
+# follows the product; the installer appends `.exe` on Windows). CI passes
 # `oxdock-engine` to free the bare name for a binary under test.
 #
 # Point OXDOCK_ENGINE at a branch-built binary to run the installer
@@ -67,7 +78,15 @@ fi
 
 # Install name and expected version ride through untouched: the
 # single strip lives in install.oxfile (TEXT_TRIM_SUFFIX/PREFIX),
-# never here.
+# never here. The product selects the asset; the stem defaults to the
+# product so each release installs under its own name unless
+# OXDOCK_BINARY_NAME says otherwise.
+
+# Product-aware asset: every product ships one `<product>-<target>`
+# tarball holding all of its binaries (sidecars ride along), so the
+# download follows the product, never a hardcoded name.
+PRODUCT="${OXDOCK_PRODUCT:-oxdock}"
+RAW_NAME="${OXDOCK_BINARY_NAME:-$PRODUCT}"
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
@@ -109,7 +128,7 @@ esac
 # mistargeted download names its cause instead of surfacing as a bare 404.
 echo "platform: $(uname -s)-$(uname -m) target: $TARGET" >&2
 
-ASSET="oxdock-$TARGET.tar.gz"
+ASSET="$PRODUCT-$TARGET.tar.gz"
 
 VDIR="$CACHE_DIR/$VERSION"
 
@@ -131,9 +150,9 @@ verify_cached() {
 # stub, or by a release predating bundled installers, repopulates
 # instead of handing off to a file that is not there.
 if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/SHA256SUMS" ] && [ -f "$VDIR/install.oxfile" ] && [ -f "$VDIR/install.sh" ] && verify_cached; then
-  echo "using cached oxdock $VERSION" >&2
+  echo "using cached $PRODUCT $VERSION" >&2
 else
-  echo "downloading oxdock $VERSION" >&2
+  echo "downloading $PRODUCT $VERSION" >&2
 
   tmp=$(mktemp -d)
 
@@ -217,13 +236,34 @@ mkdir -p "$tmp/x"
 
 tar -xzf "$VDIR/$ASSET" -C "$tmp/x"
 
-chmod +x "$tmp"/x/oxdock*
+chmod +x "$tmp"/x/"$PRODUCT"*
 
-# Assignment words never glob-expand: resolve the unpacked binary
-# explicitly, and fail closed when the tarball held nothing expected.
-BIN=$(echo "$tmp"/x/oxdock*)
+# Exact primary plus every `-child` sidecar riding the same tarball
+# (two today, N tomorrow): globs would hand a sibling to the engine
+# slot, so resolve each path explicitly and fail closed when the
+# tarball held nothing expected.
+BIN="$tmp/x/$PRODUCT"
 
 [ -f "$BIN" ] || { echo "no binary unpacked from $ASSET" >&2; exit 1; }
+
+# The product tarball holds every binary of the product: bridge the
+# full member inventory (newline-separated basenames) plus the
+# primary's tarball name, so the installer places any subset by name
+# with no pattern assumptions. Newline-separated, so spaces in the
+# scratch path never split an entry.
+SIBLING_DIR="$tmp/x"
+PRIMARY=$(basename "$BIN")
+MEMBERS=""
+for f in "$tmp"/x/*; do
+  if [ -f "$f" ]; then
+    if [ -z "$MEMBERS" ]; then
+      MEMBERS=$(basename "$f")
+    else
+      MEMBERS="$MEMBERS
+$(basename "$f")"
+    fi
+  fi
+done
 
 # INSTALL_DIR passes through untouched (possibly unset): the name
 # mapping lives here because only the stub knows both sides.
@@ -346,6 +386,10 @@ fi
   OXDOCK_ASSET="$VDIR/$ASSET" \
   OXDOCK_SHA="$EXPECTED" \
   OXDOCK_BIN="$BIN" \
+  OXDOCK_PRODUCT="$PRODUCT" \
+  OXDOCK_SIBLING_DIR="$SIBLING_DIR" \
+  OXDOCK_MEMBERS="$MEMBERS" \
+  OXDOCK_PRIMARY="$PRIMARY" \
   OXDOCK_DIR="$OXDOCK_DIR" \
   OXDOCK_VERSION="$VERSION" \
   OXDOCK_BINARY_NAME="${OXDOCK_BINARY_NAME:-}" \
@@ -369,7 +413,7 @@ fi
 # in piped-run mode: nothing was placed there, so no fresh binary
 # exists. Off-runner installs skip silently either way.
 if [ -z "${OXDOCK_PIPED_SCRIPT:-}" ] && [ -n "${GITHUB_PATH:-}" ] && [ -f "$GITHUB_PATH" ]; then
-  RAW_NAME="${OXDOCK_BINARY_NAME:-oxdock}"
+  RAW_NAME="${OXDOCK_BINARY_NAME:-$PRODUCT}"
 
   case "$RAW_NAME" in
     *.exe) FRESH="$OXDOCK_DIR/$RAW_NAME" ;;
@@ -386,6 +430,10 @@ if [ -z "${OXDOCK_PIPED_SCRIPT:-}" ] && [ -n "${GITHUB_PATH:-}" ] && [ -f "$GITH
     OXDOCK_DIR="$OXDOCK_DIR" \
     OXDOCK_VERSION="$VERSION" \
     OXDOCK_BINARY_NAME="$RAW_NAME" \
+    OXDOCK_PRODUCT="$PRODUCT" \
+    OXDOCK_SIBLING_DIR="$SIBLING_DIR" \
+    OXDOCK_MEMBERS="$MEMBERS" \
+    OXDOCK_PRIMARY="$PRIMARY" \
     OXDOCK_EXPECTED_VERSION="$VERSION" \
     OXDOCK_SKIP_DOWNLOAD=true \
     "$FRESH" "$tmp/install.oxfile") || {

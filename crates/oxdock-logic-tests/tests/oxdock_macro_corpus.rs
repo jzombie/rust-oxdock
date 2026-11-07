@@ -740,6 +740,7 @@ fn kind_covered(kind: &oxdock_parser::StepKind) -> bool {
         | StepKind::Prompt { .. }
         | StepKind::Write { .. }
         | StepKind::Append { .. }
+        | StepKind::AppendLine { .. }
         | StepKind::Remove { .. }
         | StepKind::Expand { .. }
         | StepKind::AssertEq { .. }
@@ -884,6 +885,16 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
                 contents: cy,
             },
         ) => arg_content_eq(px, py) && opt_arg_eq(cx, cy),
+        (
+            StepKind::AppendLine {
+                path: px,
+                contents: cx,
+            },
+            StepKind::AppendLine {
+                path: py,
+                contents: cy,
+            },
+        ) => arg_content_eq(px, py) && arg_content_eq(cx, cy),
         (StepKind::Remove { path: x, .. }, StepKind::Remove { path: y, .. }) => {
             arg_content_eq(x, y)
         }

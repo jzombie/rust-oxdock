@@ -80,7 +80,7 @@ IF $failing {
 MKDIR badges
 WRITE miri-summary.txt "Miri runnable tests: {{ $run_cnt }}/{{ $total }}\nRunnable ratio: {{ $ratio_label }}\n"
 IF $failing {
-    APPEND "miri-summary.txt" "Miri result: failing (badge set to failing)\n"
+    APPEND_LINE "miri-summary.txt" "Miri result: failing (badge set to failing)"
 }
 WRITE miri-output.env "runnable_ratio={{ $ratio_label }}\n"
 LET $badge: MAP<ANY> = {schemaVersion: 1, label: "miri coverage", message: $message, color: $color}
@@ -89,16 +89,16 @@ WRITE badges/miri-coverage.json $badge_json
 
 LET $gh_out: STRING = "{{ env:GITHUB_OUTPUT }}"
 IF $gh_out != "" {
-    APPEND $gh_out "runnable_ratio={{ $ratio_label }}\n"
+    APPEND_LINE $gh_out "runnable_ratio={{ $ratio_label }}"
 } ELSE {
     ECHO "runnable_ratio={{ $ratio_label }}"
 }
 
 LET $gh_sum: STRING = "{{ env:GITHUB_STEP_SUMMARY }}"
 IF $gh_sum != "" {
-    APPEND $gh_sum "### Miri coverage\n\nMiri runnable tests: {{ $run_cnt }}/{{ $total }}\nRunnable ratio: {{ $ratio_label }}\n"
+    APPEND_LINE $gh_sum "### Miri coverage\n\nMiri runnable tests: {{ $run_cnt }}/{{ $total }}\nRunnable ratio: {{ $ratio_label }}"
     IF $failing {
-        APPEND $gh_sum "Miri result: failing (badge set to failing)\n"
+        APPEND_LINE $gh_sum "Miri result: failing (badge set to failing)"
     }
 } ELSE {
     ECHO "### Miri coverage"

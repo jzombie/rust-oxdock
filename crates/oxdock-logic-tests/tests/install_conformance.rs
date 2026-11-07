@@ -60,7 +60,7 @@ fn install_script_parses() -> Result<()> {
 fn install_script_uses_atomic_install_with_interactive_branch() -> Result<()> {
     let text = load_install_script()?;
     for marker in [
-        "INSTALL $bin $dest",
+        "INSTALL_SELECTED($dir, $filename)",
         "PROMPT $dir",
         "OXDOCK_INTERACTIVE",
         "PATH_WRITABLE",
@@ -110,6 +110,13 @@ fn install_harness(payload: &[u8], digest: &str, dir: Option<&str>) -> Result<In
         "OXDOCK_BIN",
         root.join("x/oxdock")?.as_path().display().to_string(),
     );
+    io.insert_inherit_env("OXDOCK_PRODUCT", "oxdock");
+    io.insert_inherit_env(
+        "OXDOCK_SIBLING_DIR",
+        root.join("x")?.as_path().display().to_string(),
+    );
+    io.insert_inherit_env("OXDOCK_MEMBERS", "oxdock");
+    io.insert_inherit_env("OXDOCK_PRIMARY", "oxdock");
     if let Some(dir) = dir {
         io.insert_inherit_env(
             "OXDOCK_DIR",
@@ -188,6 +195,93 @@ fn verified_asset_installs_bytes() -> Result<()> {
     assert_eq!(
         body, INSTALL_PAYLOAD,
         "placed file holds the verified bytes"
+    );
+    Ok(())
+}
+
+/// Companion members install beside the primary: the whole product
+/// lands under the destination, the primary under the configured stem
+/// and companions under their tarball names.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn companion_members_install_beside_primary() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    let setup = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    setup.write_file(&run.root.join("x/sidecar")?, INSTALL_PAYLOAD)?;
+    run.io
+        .insert_inherit_env("OXDOCK_MEMBERS", "oxdock\nsidecar");
+    run.execute()?;
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    #[cfg(unix)]
+    let placed = "dest/oxdock";
+    #[cfg(windows)]
+    let placed = "dest/oxdock.exe";
+    assert_eq!(
+        reader.read_file(&run.root.join(placed)?)?,
+        INSTALL_PAYLOAD,
+        "primary holds the verified bytes"
+    );
+    assert_eq!(
+        reader.read_file(&run.root.join("dest/sidecar")?)?,
+        INSTALL_PAYLOAD,
+        "companion keeps its tarball name beside the primary"
+    );
+    Ok(())
+}
+
+/// OXDOCK_BINS selects a subset: only named members land, everything
+/// else stays out of the destination.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn bins_selection_places_only_named_members() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    let setup = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    setup.write_file(&run.root.join("x/sidecar")?, INSTALL_PAYLOAD)?;
+    run.io
+        .insert_inherit_env("OXDOCK_MEMBERS", "oxdock\nsidecar");
+    run.io.insert_inherit_env("OXDOCK_BINS", "sidecar");
+    run.execute()?;
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    assert_eq!(
+        reader.read_file(&run.root.join("dest/sidecar")?)?,
+        INSTALL_PAYLOAD,
+        "selected companion lands"
+    );
+    #[cfg(unix)]
+    let primary = "dest/oxdock";
+    #[cfg(windows)]
+    let primary = "dest/oxdock.exe";
+    assert!(
+        reader.read_file(&run.root.join(primary)?).is_err(),
+        "unselected primary stays out"
+    );
+    Ok(())
+}
+
+/// Unknown selection names fail listing the tarball members, before
+/// anything lands.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn unknown_bins_name_fails_listing_members() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    run.io.insert_inherit_env("OXDOCK_BINS", "nope");
+    let err = run
+        .execute()
+        .expect_err("unknown member must fail selection");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "unknown member exits the install: {rendered}"
+    );
+    // The gate fires before any INSTALL: the destination holds nothing.
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    #[cfg(unix)]
+    let primary = "dest/oxdock";
+    #[cfg(windows)]
+    let primary = "dest/oxdock.exe";
+    assert!(
+        reader.read_file(&run.root.join(primary)?).is_err(),
+        "failed selection places nothing"
     );
     Ok(())
 }

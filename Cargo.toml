@@ -39,6 +39,16 @@ license = "Apache-2.0"
 repository = "https://github.com/jzombie/rust-oxdock"
 publish = true
 
+# Release products: every package here ships its binaries on every
+# release (one `<package>-<target>.tar.gz` per target holding all of
+# the package's bins, so sidecars like `oxdock-compose-child` ride
+# with their primary automatically). The release workflow and script
+# read this list, so adding a product is one entry with no workflow
+# or script change; repos without it fall back to the single `binary`
+# input.
+[workspace.metadata.oxdock]
+release_bins = ["oxdock", "oxdock-compose"]
+
 [workspace.dependencies]
 aes-gcm = { version = "0.11.1", features = ["rand_core"] }
 anyhow = "1.0.104"

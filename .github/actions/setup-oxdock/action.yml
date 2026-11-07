@@ -57,6 +57,7 @@ runs:
       env:
         OXDOCK_BIN: ${{ github.workspace }}/target/release/oxdock${{ runner.os == 'Windows' && '.exe' || '' }}
         OXDOCK_OXFILE: ${{ github.workspace }}/install.oxfile
+        OXDOCK_PRODUCT: oxdock
         OXDOCK_DIR: ${{ runner.temp }}/oxdock-engine
         OXDOCK_VERSION: local
         OXDOCK_BINARY_NAME: ${{ inputs.binary-name }}

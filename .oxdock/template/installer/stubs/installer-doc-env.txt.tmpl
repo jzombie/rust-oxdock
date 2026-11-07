@@ -1,8 +1,19 @@
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
 #
+# Pass OXDOCK_PRODUCT to choose the release product (default
+# `oxdock`; `oxdock-compose` installs the composer). The asset and
+# the installed stem both follow the product unless OXDOCK_BINARY_NAME
+# overrides the stem.
+#
+# Pass OXDOCK_BINS to choose which tarball members to place
+# (space-separated basenames, `.exe` optional on Windows; default
+# places the whole product). The primary takes the OXDOCK_BINARY_NAME
+# stem, companions keep their tarball names. Unknown names fail
+# listing the tarball members.
+#
 # Pass OXDOCK_BINARY_NAME to choose the installed stem (default
-# `oxdock`; the installer appends `.exe` on Windows). CI passes
+# follows the product; the installer appends `.exe` on Windows). CI passes
 # `oxdock-engine` to free the bare name for a binary under test.
 #
 # Point OXDOCK_ENGINE at a branch-built binary to run the installer

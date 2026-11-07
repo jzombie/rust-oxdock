@@ -21,8 +21,19 @@
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
 #
+# Pass OXDOCK_PRODUCT to choose the release product (default
+# `oxdock`; `oxdock-compose` installs the composer). The asset and
+# the installed stem both follow the product unless OXDOCK_BINARY_NAME
+# overrides the stem.
+#
+# Pass OXDOCK_BINS to choose which tarball members to place
+# (space-separated basenames, `.exe` optional on Windows; default
+# places the whole product). The primary takes the OXDOCK_BINARY_NAME
+# stem, companions keep their tarball names. Unknown names fail
+# listing the tarball members.
+#
 # Pass OXDOCK_BINARY_NAME to choose the installed stem (default
-# `oxdock`; the installer appends `.exe` on Windows). CI passes
+# follows the product; the installer appends `.exe` on Windows). CI passes
 # `oxdock-engine` to free the bare name for a binary under test.
 #
 # Point OXDOCK_ENGINE at a branch-built binary to run the installer
@@ -54,7 +65,12 @@ if (-not $Version -or $Version -eq 'latest') {
 }
 
 # Install name and expected version ride through untouched: the
-# single strip lives in install.oxfile, never here.
+# single strip lives in install.oxfile, never here. The product
+# selects the asset; the stem defaults to the product so each release
+# installs under its own name unless OXDOCK_BINARY_NAME says
+# otherwise.
+$Product = if ($env:OXDOCK_PRODUCT) { $env:OXDOCK_PRODUCT } else { 'oxdock' }
+$RawName = if ($env:OXDOCK_BINARY_NAME) { $env:OXDOCK_BINARY_NAME } else { $Product }
 
 $ArchTarget = switch ($env:PROCESSOR_ARCHITECTURE) {
   'AMD64' { 'x86_64-pc-windows-msvc' }
@@ -65,7 +81,7 @@ $ArchTarget = switch ($env:PROCESSOR_ARCHITECTURE) {
 
 }
 
-$Asset = "oxdock-$ArchTarget.tar.gz"
+$Asset = "$Product-$ArchTarget.tar.gz"
 
 $VDir = Join-Path $CacheRoot $Version
 
@@ -99,9 +115,9 @@ function Test-CachedAsset {
 # writes: Write-Warning follows stdout when stdout is redirected, so
 # pipe captures would miss the announcement.
 if (Test-CachedAsset) {
-  [Console]::Error.WriteLine("using cached oxdock $VERSION")
+  [Console]::Error.WriteLine("using cached $PRODUCT $VERSION")
 } else {
-  [Console]::Error.WriteLine("downloading oxdock $VERSION")
+  [Console]::Error.WriteLine("downloading $PRODUCT $VERSION")
 
   $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
 
@@ -246,7 +262,15 @@ try {
 
   $env:OXDOCK_ASSET = (Join-Path $VDir $Asset)
 
-  $env:OXDOCK_BIN = (Join-Path $tmp 'x\oxdock.exe')
+  # The product tarball holds every binary of the product: bridge the
+  # full member inventory plus the primary's tarball name, so the
+  # installer places any subset by name with no pattern assumptions.
+  # Fail closed when the tarball held nothing expected.
+  $env:OXDOCK_BIN = (Join-Path $tmp "x\$Product.exe")
+  if (-not (Test-Path $env:OXDOCK_BIN -PathType Leaf)) { throw "no binary unpacked from $Asset" }
+  $env:OXDOCK_SIBLING_DIR = (Join-Path $tmp 'x')
+  $env:OXDOCK_MEMBERS = ((Get-ChildItem (Join-Path $tmp 'x\*') -File | ForEach-Object { $_.Name }) -join "`n")
+  $env:OXDOCK_PRIMARY = (Split-Path $env:OXDOCK_BIN -Leaf)
 
   # Destination default lives here in native shell; empty keeps the
   # installer's loud gate. The engine normalizes separators itself.
@@ -255,6 +279,10 @@ try {
   $env:OXDOCK_SHA = $Expected
 
   $env:OXDOCK_VERSION = $Version
+
+  $env:OXDOCK_BINARY_NAME = $RawName
+
+  $env:OXDOCK_PRODUCT = $Product
 
   $env:OXDOCK_EXPECTED_VERSION = $Version
 
@@ -266,7 +294,7 @@ try {
   # Resolve relative to the caller's directory: execution below runs
   # from the scratch dir, where a relative path would no longer point
   # at the engine.
-  $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } else { (Join-Path $tmp 'x\oxdock.exe') }
+  $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } else { (Join-Path $tmp "x\$Product.exe") }
 
   if (-not (Test-Path $Engine)) { throw "installer engine missing: $Engine" }
 
@@ -290,7 +318,7 @@ try {
     # there, so no fresh binary exists. Off-runner installs skip
     # silently either way.
     if (-not $env:OXDOCK_PIPED_SCRIPT -and $env:GITHUB_PATH -and (Test-Path $env:GITHUB_PATH -PathType Leaf)) {
-      $RawName = if ($env:OXDOCK_BINARY_NAME) { $env:OXDOCK_BINARY_NAME } else { 'oxdock' }
+      $RawName = if ($env:OXDOCK_BINARY_NAME) { $env:OXDOCK_BINARY_NAME } else { $Product }
 
       if ($RawName -like '*.exe') {
         $Fresh = Join-Path $env:OXDOCK_DIR $RawName

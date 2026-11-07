@@ -796,6 +796,10 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             path: path.into(),
             contents: Some(contents.into()),
         }),
+        (safe_string(), any_msg()).prop_map(|(path, contents)| StepKind::AppendLine {
+            path: path.into(),
+            contents: contents.into(),
+        }),
         (
             prop::option::of(safe_string()),
             prop::collection::vec((safe_string(), any_msg()), 0..=2),
@@ -1278,6 +1282,23 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 lc.as_ref().map(|a| a.as_str()),
                 rc.as_ref().map(|a| a.as_str()),
                 "Append contents mismatch: {}",
+                msg
+            );
+        }
+        (
+            StepKind::AppendLine {
+                path: lp,
+                contents: lc,
+            },
+            StepKind::AppendLine {
+                path: rp,
+                contents: rc,
+            },
+        ) => {
+            assert!(arg_content_eq(lp, rp), "AppendLine path mismatch: {}", msg);
+            assert!(
+                arg_content_eq(lc, rc),
+                "AppendLine contents mismatch: {}",
                 msg
             );
         }
@@ -1993,6 +2014,10 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             path: "coverage.txt".into(),
             contents: Some("covered".into()),
         },
+        StepKind::AppendLine {
+            path: "coverage.txt".into(),
+            contents: "covered".into(),
+        },
         StepKind::Expand {
             path: None,
             overrides: vec![(
@@ -2277,6 +2302,7 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         // Overrides render `KEY=value` lines needing assignment-aware
         // comparison, not plain content equality.
         StepKind::Append { .. } => true,
+        StepKind::AppendLine { .. } => true,
         StepKind::Expand { .. } => true,
     }
 }

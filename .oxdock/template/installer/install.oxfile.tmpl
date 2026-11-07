@@ -3,9 +3,64 @@
 
 IMPORT [STD]
 
-INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION, OXDOCK_PIPED_SCRIPT, OXDOCK_INTERACTIVE, OXDOCK_BINARY_NAME, OXDOCK_EXPECTED_VERSION, GITHUB_PATH, GITHUB_ENV, OXDOCK_SKIP_DOWNLOAD]
+INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_PRODUCT, OXDOCK_SIBLING_DIR, OXDOCK_MEMBERS, OXDOCK_PRIMARY, OXDOCK_BINS, OXDOCK_DIR, OXDOCK_VERSION, OXDOCK_PIPED_SCRIPT, OXDOCK_INTERACTIVE, OXDOCK_BINARY_NAME, OXDOCK_EXPECTED_VERSION, GITHUB_PATH, GITHUB_ENV, OXDOCK_SKIP_DOWNLOAD]
 
 WORKSPACE SYSTEM
+
+# Which tarball members to place: OXDOCK_BINS names a
+# space-separated subset (basenames, `.exe` optional on Windows);
+# empty means the whole product. The primary takes the configured
+# stem, companions keep their tarball names, so any subset installs
+# by name with no special cases. Unknown names fail listing the
+# tarball members.
+FUNC INSTALL_SELECTED($dir: STRING, $destname: STRING) {
+    LET $members_raw: STRING = "\{{ env:OXDOCK_MEMBERS }}"
+    IF $members_raw == "" {
+        ECHO "release tarball held no binaries"
+        EXIT 1
+    }
+    LET $members: LIST<STRING> = TEXT_LINES($members_raw)
+    LET $primary: STRING = "\{{ env:OXDOCK_PRIMARY }}"
+    LET $bin: STRING = "\{{ env:OXDOCK_BIN }}"
+    LET $sibdir: STRING = "\{{ env:OXDOCK_SIBLING_DIR }}"
+    LET $want_raw: STRING = "\{{ env:OXDOCK_BINS }}"
+    IF $want_raw == "" {
+        LET $primary_dest: STRING = PATH_JOIN($dir, $destname)
+        INSTALL $bin $primary_dest
+        FOR $m: STRING IN $members {
+            IF $m != $primary {
+                LET $src: STRING = PATH_JOIN($sibdir, $m)
+                LET $dst: STRING = PATH_JOIN($dir, $m)
+                INSTALL $src $dst
+            }
+        }
+        RETURN
+    }
+    LET $want: LIST<STRING> = TEXT_FIELDS($want_raw)
+    LET $known: STRING = TEXT_JOIN($members, ", ")
+    FOR $w: STRING IN $want {
+        LET $matched: BOOL = false
+        FOR $m: STRING IN $members {
+            LET $stem: STRING = TEXT_TRIM_SUFFIX($m, ".exe")
+            IF $w == $m || $w == $stem {
+                IF $m == $primary {
+                    LET $primary_dest: STRING = PATH_JOIN($dir, $destname)
+                    INSTALL $bin $primary_dest
+                } ELSE {
+                    LET $src: STRING = PATH_JOIN($sibdir, $m)
+                    LET $dst: STRING = PATH_JOIN($dir, $m)
+                    INSTALL $src $dst
+                }
+                $matched = true
+            }
+        }
+        IF !$matched {
+            ECHO "unknown binary \{{ $w }}: tarball holds \{{ $known }}"
+            EXIT 1
+        }
+    }
+    RETURN
+}
 
 # Piped input runs under this interpreter.
 LET $piped: STRING = "\{{ env:OXDOCK_PIPED_SCRIPT }}"
@@ -90,7 +145,7 @@ IF $has_piped {
         LET $has_bin: BOOL = $bin != ""
 
         IF $has_bin {
-            INSTALL $bin $dest
+            INSTALL_SELECTED($dir, $filename)
         }
 
         ECHO $summary
@@ -104,7 +159,13 @@ IF $has_piped {
             LET $ghkind: STRING = PATH_TYPE($ghpath)
             LET $is_ghfile: BOOL = $ghkind == "file"
 
-            IF $is_ghfile {
+            # Only the interpreter implements --version: the product
+            # rides in from the stubs (or the local-build caller), and
+            # other products publish PATH with no version gate.
+            LET $product: STRING = "\{{ env:OXDOCK_PRODUCT }}"
+            LET $checks_version: BOOL = $product == "oxdock"
+            IF $checks_version {
+                IF $is_ghfile {
                 # Expected version, one rule: a `v`-tagged bridge wins
                 # (real tags gate hard); anything else derives from the
                 # placed binary itself. Legs ride fictitious versions,
@@ -133,7 +194,7 @@ IF $has_piped {
                     WITH_IO [stdin=$v] READ_LINE $reported
                     ASSERT_EQ $reported "oxdock \{{ $expected }}"
 
-                    APPEND "\{{ env:GITHUB_PATH }}" "\{{ $dir }}\n"
+                    APPEND_LINE "\{{ env:GITHUB_PATH }}" "\{{ $dir }}"
 
                     LET $ghenv: STRING = "\{{ env:GITHUB_ENV }}"
                     LET $has_ghenv: BOOL = $ghenv != ""
@@ -143,17 +204,22 @@ IF $has_piped {
                         LET $is_envfile: BOOL = $envkind == "file"
 
                         IF $is_envfile {
-                            APPEND "\{{ env:GITHUB_ENV }}" "OXDOCK_ENGINE_DIR=\{{ $dir }}\n"
+                            APPEND_LINE "\{{ env:GITHUB_ENV }}" "OXDOCK_ENGINE_DIR=\{{ $dir }}"
                         }
                     }
                 }
+            } ELSE {
+                IF $is_ghfile {
+                    APPEND_LINE "\{{ env:GITHUB_PATH }}" "\{{ $dir }}"
+                }
             }
         }
+    }
     } ELSE {
         LET $actual: STRING = HASH_SHA256($asset)
         ASSERT_EQ $actual "\{{ $want }}"
 
-        INSTALL $bin $dest
+        INSTALL_SELECTED($dir, $filename)
 
         ECHO $summary
     }

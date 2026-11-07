@@ -135,5 +135,5 @@ LET $matrix: STRING = "[{{ STD::TEXT_JOIN($entries, $sep) }}]"
 ECHO "Miri shards: {{ $index }}"
 
 LET $gh_out: STRING = "{{ env:GITHUB_OUTPUT }}"
-APPEND $gh_out "matrix={{ $matrix }}\n"
-APPEND $gh_out "cache_key=miri-ubuntu-latest-{{ $rustc }}-{{ $lock }}\n"
+APPEND_LINE $gh_out "matrix={{ $matrix }}"
+APPEND_LINE $gh_out "cache_key=miri-ubuntu-latest-{{ $rustc }}-{{ $lock }}"
