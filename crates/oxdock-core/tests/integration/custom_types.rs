@@ -161,6 +161,49 @@ fn aliased_same_name_types_coexist_per_file() {
         )
         .expect("same-name types coexist namespaced");
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "a b q");
+    // Reversed import order behaves identically: scoping is per-file,
+    // never last-wins, so order cannot change the result.
+    let temp_rev = GuardedPath::tempdir().unwrap();
+    let root_rev = guard_root(&temp_rev);
+    for (rel, contents) in [
+        (
+            "d.oxfile",
+            indoc! {r#"
+                TYPE THING = MAP<x: STRING>
+                FUNC MK($x: STRING) {
+                    LET $t: THING = {x: $x}
+                    RETURN $t.x
+                }
+                EXPORT [TYPE THING, FUNC MK]
+            "#},
+        ),
+        (
+            "e.oxfile",
+            indoc! {r#"
+                TYPE THING = MAP<y: STRING>
+                FUNC MK($y: STRING) {
+                    LET $t: THING = {y: $y}
+                    RETURN $t.y
+                }
+                EXPORT [TYPE THING, FUNC MK]
+            "#},
+        ),
+    ] {
+        write_lib(&root_rev, rel, contents);
+    }
+    Engine::new()
+        .run_script(
+            &root_rev,
+            indoc! {r#"
+                IMPORT ["e.oxfile" AS E]
+                IMPORT ["d.oxfile" AS D]
+                LET $a: STRING = D::MK("a")
+                LET $b: STRING = E::MK("b")
+                WRITE out.txt "{{ $a }} {{ $b }}"
+            "#},
+        )
+        .expect("reversed import order behaves identically");
+    assert_eq!(read_trimmed(&root_rev.join("out.txt").unwrap()), "a b");
 }
 
 /// Bare harvests of the same name with different targets fail loud
