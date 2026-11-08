@@ -2,23 +2,25 @@
   "targets": [
     {
       "name": "resume-md",
-      "out": "oxdock-compose/examples/resume/resume.md",
-      "values": "oxdock-compose/examples/resume/values.json",
-      "template": "oxdock-compose/examples/resume/resume.md.tmpl",
+      "base": "oxdock-compose/examples/resume",
+      "out": "resume.md",
+      "values": "values.json",
+      "template": "resume.md.tmpl",
       "fragments": {
         "sec": [
-          "oxdock-compose/examples/resume/fragments/sec/*.md.tmpl"
+          "fragments/sec/*.md.tmpl"
         ]
       }
     },
     {
       "name": "resume-jsonld",
-      "out": "oxdock-compose/examples/resume/resume.jsonld",
-      "values": "oxdock-compose/examples/resume/values.json",
-      "template": "oxdock-compose/examples/resume/resume.jsonld.tmpl",
+      "base": "oxdock-compose/examples/resume",
+      "out": "resume.jsonld",
+      "values": "values.json",
+      "template": "resume.jsonld.tmpl",
       "fragments": {
         "data": [
-          "oxdock-compose/examples/resume/fragments/data/*.tmpl"
+          "fragments/data/*.tmpl"
         ]
       }
     }

@@ -130,10 +130,55 @@ FUNC COMPOSE_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) 
                     LET $template: STRING = $t.template
                     LET $out: STRING = $t.out
                     LET $values: STRING = $t.values
+                    LET $fragments: MAP<ANY> = $t.fragments
+                    # Explicit per-target base: when set, relative
+                    # template, values, fragment patterns, and out all
+                    # resolve under it (base itself stays
+                    # wsroot-relative). Wsroot-anchored paths
+                    # (`.oxdock/...`, `/...`) stay as-is so shared
+                    # fragments keep working. No base means no prefix,
+                    # exactly the old behavior.
+                    LET $base: STRING = ""
+                    IF HAS_KEY($t, "base") {
+                        $base = $t.base
+                    }
+                    IF $base != "" {
+                        LET $babs: STRING = "\{{ $wsroot }}/\{{ $base }}"
+                        LET $bkind: STRING = PATH_TYPE($babs)
+                        IF $bkind != "dir" {
+                            ECHO "target '\{{ $tname }}' base '\{{ $base }}' is not a directory (found: \{{ $bkind }})"
+                            EXIT 1
+                        }
+                        LET $rooted_t: BOOL = STD::TEXT_STARTS_WITH($template, ".oxdock/") || STD::TEXT_STARTS_WITH($template, "/")
+                        IF $rooted_t == false {
+                            $template = "\{{ $base }}/\{{ $template }}"
+                        }
+                        LET $rooted_v: BOOL = STD::TEXT_STARTS_WITH($values, ".oxdock/") || STD::TEXT_STARTS_WITH($values, "/")
+                        IF $rooted_v == false {
+                            $values = "\{{ $base }}/\{{ $values }}"
+                        }
+                        LET $rooted_o: BOOL = STD::TEXT_STARTS_WITH($out, ".oxdock/") || STD::TEXT_STARTS_WITH($out, "/")
+                        IF $rooted_o == false {
+                            $out = "\{{ $base }}/\{{ $out }}"
+                        }
+                        LET $prefixed: MAP<ANY> = {}
+                        FOR $group: STRING, $patterns: LIST<STRING> IN $fragments {
+                            LET $plist: LIST<STRING> = []
+                            FOR $pattern: STRING IN $patterns {
+                                LET $rooted: BOOL = STD::TEXT_STARTS_WITH($pattern, ".oxdock/") || STD::TEXT_STARTS_WITH($pattern, "/")
+                                IF $rooted {
+                                    LIST_APPEND $plist $pattern
+                                } ELSE {
+                                    LIST_APPEND $plist "\{{ $base }}/\{{ $pattern }}"
+                                }
+                            }
+                            $prefixed = MAP_SET($prefixed, $group, $plist)
+                        }
+                        $fragments = $prefixed
+                    }
                     LET $tabs: STRING = "\{{ $wsroot }}/\{{ $template }}"
                     LET $oabs: STRING = "\{{ $wsroot }}/\{{ $out }}"
                     LET $vabs: STRING = "\{{ $wsroot }}/\{{ $values }}"
-                    LET $fragments: MAP<ANY> = $t.fragments
                     LET $fjson: STRING = TO_JSON($fragments)
                     LET $ctx: CTX = {wsroot: $wsroot, config: $cfgpath, staging: $staging, globals: "\{{ $staging }}/_globals.json", target: $name, template: $tabs, out: $oabs, values: $vabs, fragments: $fjson, exec: $exec}
                     ECHO "rendering \{{ $name }} -> \{{ $out }}"

@@ -391,6 +391,84 @@ fn export_type_single_and_list_forms() {
 }
 
 #[test]
+fn export_lists_span_lines() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            FUNC FOO() {
+                RETURN "x"
+            }
+            FUNC BAR() {
+                RETURN "y"
+            }
+            TYPE A = STRING
+            TYPE B = INT
+            EXPORT [
+                FOO,
+                BAR
+            ]
+            EXPORT TYPE [
+                A,
+                B
+            ]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("multi-line EXPORT lists parse");
+    assert_eq!(
+        parsed.func_exports,
+        vec!["FOO".to_string(), "BAR".to_string()]
+    );
+    assert_eq!(parsed.type_exports, vec!["A".to_string(), "B".to_string()]);
+
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            TYPE PERSON = MAP<name: STRING>
+            FUNC MAKE() {
+                RETURN "x"
+            }
+            EXPORT [
+                TYPE PERSON,
+                MAKE
+            ]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("multi-line mixed EXPORT parses");
+    assert_eq!(parsed.func_exports, vec!["MAKE".to_string()]);
+    assert_eq!(parsed.type_exports, vec!["PERSON".to_string()]);
+
+    // A trailing comma leaves an empty final entry; it carries no
+    // name and must not fail the list (single- or multi-line).
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            FUNC FOO() {
+                RETURN "x"
+            }
+            FUNC BAR() {
+                RETURN "y"
+            }
+            EXPORT [
+                FOO,
+                BAR,
+            ]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("trailing comma in multi-line EXPORT parses");
+    assert_eq!(
+        parsed.func_exports,
+        vec!["FOO".to_string(), "BAR".to_string()]
+    );
+}
+
+#[test]
 fn export_mixed_type_and_func_list_parses() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let parsed = parse_script_with_modules_and_exports(

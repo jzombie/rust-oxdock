@@ -2,34 +2,37 @@
   "targets": [
     {
       "name": "tiny-readme",
-      "out": "oxdock-compose/examples/generic-readme/README.md",
-      "values": "oxdock-compose/examples/generic-readme/values.json",
-      "template": "oxdock-compose/examples/generic-readme/README.md.tmpl",
+      "base": "oxdock-compose/examples/generic-readme",
+      "out": "README.md",
+      "values": "values.json",
+      "template": "README.md.tmpl",
       "fragments": {
         "sec": [
-          "oxdock-compose/examples/generic-readme/fragments/sec/*.md.tmpl"
+          "fragments/sec/*.md.tmpl"
         ]
       }
     },
     {
       "name": "tiny-llms",
-      "out": "oxdock-compose/examples/generic-readme/llms.txt",
-      "values": "oxdock-compose/examples/generic-readme/values.json",
-      "template": "oxdock-compose/examples/generic-readme/llms.txt.tmpl",
+      "base": "oxdock-compose/examples/generic-readme",
+      "out": "llms.txt",
+      "values": "values.json",
+      "template": "llms.txt.tmpl",
       "fragments": {
         "sec": [
-          "oxdock-compose/examples/generic-readme/fragments/sec/*.md.tmpl"
+          "fragments/sec/*.md.tmpl"
         ]
       }
     },
     {
       "name": "tiny-llms-full",
-      "out": "oxdock-compose/examples/generic-readme/llms-full.txt",
-      "values": "oxdock-compose/examples/generic-readme/values.json",
-      "template": "oxdock-compose/examples/generic-readme/llms-full.txt.tmpl",
+      "base": "oxdock-compose/examples/generic-readme",
+      "out": "llms-full.txt",
+      "values": "values.json",
+      "template": "llms-full.txt.tmpl",
       "fragments": {
         "sec": [
-          "oxdock-compose/examples/generic-readme/fragments/sec/*.md.tmpl"
+          "fragments/sec/*.md.tmpl"
         ]
       }
     }

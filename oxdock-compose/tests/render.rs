@@ -529,6 +529,122 @@ fn slim_and_full_share_fragments_with_split_content() {
     assert!(!slim.contains("{{"), "no placeholders survive slim: {slim}");
     assert!(!full.contains("{{"), "no placeholders survive full: {full}");
 }
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn base_prefix_resolves_inputs_under_base() {
+    // Explicit per-target base: relative template, values, and
+    // fragment patterns resolve under it, and out does too; base
+    // itself stays wsroot-relative. Wsroot-anchored patterns
+    // (`.oxdock/...`) stay as-is.
+    let tree = vec![
+        ("Cargo.toml".to_string(), MANIFEST.to_string()),
+        (
+            "compose.json".to_string(),
+            r#"{"global_values": "values.json", "scopes": ["."], "generated": []}"#.to_string(),
+        ),
+        ("values.json".to_string(), VALUES.to_string()),
+        (
+            "target.json".to_string(),
+            r#"{"targets": [{"name": "t", "base": "sub", "out": "out.md", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"]}}]}"#.to_string(),
+        ),
+        ("sub/values.json".to_string(), VALUES.to_string()),
+        (
+            "sub/master.md.tmpl".to_string(),
+            "# {{ $docs_ctx.n }}\n{{ $files.sec.a }}\n".to_string(),
+        ),
+        (
+            "sub/fragments/sec/a.md.tmpl".to_string(),
+            "hello A".to_string(),
+        ),
+    ];
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    oxdock_compose::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "sub/out.md");
+    assert!(
+        out.contains("hello A"),
+        "fragment under base renders: {out}"
+    );
+    assert!(!out.contains("{{"), "no placeholders survive: {out}");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn base_leaves_shared_patterns_at_wsroot() {
+    // Wsroot-anchored patterns (`.oxdock/...`) stay as-is under
+    // base so shared fragments keep working; relative ones prefix.
+    let tree = vec![
+        ("Cargo.toml".to_string(), MANIFEST.to_string()),
+        (
+            "compose.json".to_string(),
+            r#"{"global_values": "values.json", "scopes": ["."], "generated": []}"#.to_string(),
+        ),
+        ("values.json".to_string(), VALUES.to_string()),
+        (
+            "target.json".to_string(),
+            r#"{"targets": [{"name": "t", "base": "sub", "out": "out.md", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"], "shared": [".oxdock/template/shared/*.md.tmpl"]}}]}"#.to_string(),
+        ),
+        ("sub/values.json".to_string(), VALUES.to_string()),
+        (
+            "sub/master.md.tmpl".to_string(),
+            "# {{ $docs_ctx.n }}\n{{ $files.sec.a }}{{ $files.shared.s }}\n".to_string(),
+        ),
+        (
+            "sub/fragments/sec/a.md.tmpl".to_string(),
+            "hello A".to_string(),
+        ),
+        (
+            ".oxdock/template/shared/s.md.tmpl".to_string(),
+            "shared S".to_string(),
+        ),
+    ];
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    oxdock_compose::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "sub/out.md");
+    assert!(
+        out.contains("hello A") && out.contains("shared S"),
+        "local prefixed, shared untouched: {out}"
+    );
+    assert!(!out.contains("{{"), "no placeholders survive: {out}");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn base_not_a_directory_fails_closed() {
+    // A base naming a missing entry (or a file) fails naming the
+    // target and what was found there instead of rendering elsewhere.
+    let tree = vec![
+        ("Cargo.toml".to_string(), MANIFEST.to_string()),
+        (
+            "compose.json".to_string(),
+            r#"{"global_values": "values.json", "scopes": ["."], "generated": []}"#.to_string(),
+        ),
+        ("values.json".to_string(), VALUES.to_string()),
+        (
+            "target.json".to_string(),
+            r#"{"targets": [{"name": "t", "base": "no-such-dir", "out": "out.md", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"]}}]}"#.to_string(),
+        ),
+        (
+            "master.md.tmpl".to_string(),
+            "# {{ $docs_ctx.n }}\n".to_string(),
+        ),
+    ];
+    let (_temp, root, _resolver) = fixture(&as_refs(&tree));
+    let err = err_text(oxdock_compose::run(root.as_path()).expect_err("bad base must fail"));
+    assert!(
+        err.contains("failed with status"),
+        "error proves the child boundary failed it: {err}"
+    );
+}
+
 #[oxdock_func(pure, returns = TypeTag::String)]
 fn ping(value: String) -> anyhow::Result<Value> {
     Ok(Value::string(format!("PONG:{value}")))
