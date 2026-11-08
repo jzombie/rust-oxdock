@@ -32,7 +32,6 @@ base64.workspace = true
 oxdock-core.workspace = true
 oxdock-fs.workspace = true
 oxdock-func-macro.workspace = true
-oxdock-macros.workspace = true
 oxdock-markdown-plugin.workspace = true
 # Plugin crates are linked so their HostModules can be introspected
 # in-process (static linking requires the edge). The docs path only
