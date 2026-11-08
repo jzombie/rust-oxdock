@@ -39,6 +39,11 @@ use lifecycle::{check_plugin_uniformity, provision_dist, read_support};
 /// scripts are byte-copied from the tree (see [`lifecycle`]);
 /// sequencing and all writes live in the DSL while Rust owns only
 /// the boundaries above.
+///
+/// Trust boundary: this executes repo-controlled templates,
+/// fragments, and lifecycle files, like a build script. Only run on
+/// checkouts you would already build, and keep automation at
+/// contents read with no secrets in scope.
 #[allow(clippy::disallowed_types)]
 pub fn run(repo_root: &Path) -> Result<()> {
     run_with_plugins(repo_root, vec![])

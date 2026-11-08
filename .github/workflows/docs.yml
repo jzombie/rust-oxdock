@@ -23,8 +23,13 @@
 #
 # Every run builds the workspace (so proc-macro outputs are fresh),
 # renders, and then fails on drift, so generated docs can never go
-# stale silently. No secrets, no environment; writes stay within the
-# rendered tree plus the gitignored build cache.
+# stale silently.
+#
+# Trust boundary: the render executes repo-controlled templates,
+# fragments, and lifecycle files, like a build script. Keep this job
+# at contents: read, pass no secrets or environments into it, and do
+# not convert it to pull_request_target. The checkout being rendered
+# is already trusted code execution.
 
 name: docs
 
