@@ -165,17 +165,10 @@ if (Test-CachedAsset) {
 
     Invoke-WebRequest "$base/$Asset" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'asset.tar.gz')
 
-    # Ephemeral interpreter for non-interpreter products, verified and
-    # cached beside the product below. Never placed: only executed.
+    # Ephemeral interpreter for non-interpreter products, cached
+    # beside the product below. Never placed: only executed.
     if ($NeedsEngine) {
       Invoke-WebRequest "$base/$EngineAsset" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'engine.tar.gz')
-
-      $engineLine = (Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match "$EngineAsset" } | Select-Object -First 1
-      if (-not $engineLine) { throw "asset $EngineAsset missing from SHA256SUMS" }
-      $engineExpected = ($engineLine -split '\s+')[0]
-
-      $engineActual = (Get-FileHash (Join-Path $tmp 'engine.tar.gz') -Algorithm SHA256).Hash
-      if ($engineExpected.ToLowerInvariant() -ne $engineActual.ToLowerInvariant()) { throw "checksum mismatch for $EngineAsset" }
     }
 
     Invoke-WebRequest "$base/SHA256SUMS" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'SHA256SUMS')
@@ -186,6 +179,17 @@ if (Test-CachedAsset) {
 
     $actual = (Get-FileHash (Join-Path $tmp 'asset.tar.gz') -Algorithm SHA256).Hash
     if ($expected.ToLowerInvariant() -ne $actual.ToLowerInvariant()) { throw "checksum mismatch for $Asset" }
+
+    # The engine tarball verifies against the same checksums file,
+    # which is why this runs after its download above.
+    if ($NeedsEngine) {
+      $engineLine = (Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match "$EngineAsset" } | Select-Object -First 1
+      if (-not $engineLine) { throw "asset $EngineAsset missing from SHA256SUMS" }
+      $engineExpected = ($engineLine -split '\s+')[0]
+
+      $engineActual = (Get-FileHash (Join-Path $tmp 'engine.tar.gz') -Algorithm SHA256).Hash
+      if ($engineExpected.ToLowerInvariant() -ne $engineActual.ToLowerInvariant()) { throw "checksum mismatch for $EngineAsset" }
+    }
 
     # Installer logic rides with the release bundle. An explicit
     # OXDOCK_OXFILE_URL wins over the bundle (pre-merge testing,
