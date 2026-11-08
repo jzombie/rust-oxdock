@@ -1282,6 +1282,7 @@ jobs:
           [family:windows] LET $srcbin: STRING = PATH_JOIN($work, "oxdock.exe")
           ENV OXDOCK_BIN="{{ $srcbin }}"
           LET $prebuiltbindir: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-prebuilt-bin")
+          ENV OXDOCK_PRODUCT="oxdock"
           ENV OXDOCK_DIR="{{ $prebuiltbindir }}"
           ENV OXDOCK_VERSION="local-test"
           ENV OXDOCK_BINARY_NAME="oxdock-prebuilt"

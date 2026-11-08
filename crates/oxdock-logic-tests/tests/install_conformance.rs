@@ -377,6 +377,29 @@ fn tampered_asset_aborts_before_place() -> Result<()> {
     Ok(())
 }
 
+/// Missing product fails closed at the gate: direct callers must
+/// bridge OXDOCK_PRODUCT explicitly (the stubs default it to `oxdock`
+/// before bridging, so the oxfile never guesses). The gate ECHOs the
+/// variable name on stdout, then EXITs; the harness asserts the exit.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn empty_product_fails_naming_the_variable() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    run.io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "true");
+    run.io.insert_inherit_env(
+        "GITHUB_PATH",
+        run.root.join("ghpath")?.as_path().display().to_string(),
+    );
+    run.io.remove_inherit_env("OXDOCK_PRODUCT");
+    let err = run.execute().expect_err("no product must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "failure exits at the gate: {rendered}"
+    );
+    Ok(())
+}
+
 /// Missing destination fails naming the override: the stubs own the
 /// defaults now, so the oxfile only gates on an empty dir, whatever
 /// the homes hold.

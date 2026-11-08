@@ -7,6 +7,14 @@ INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_PRODUCT, OXDOCK_SIBLIN
 
 WORKSPACE SYSTEM
 
+# Which products gate on --version: only the interpreter
+# implements it, so only it asserts the placed binary reports back.
+# Extend here when a new product gains a version probe; callers
+# never inline the list.
+FUNC PRODUCT_CHECKS_VERSION($product: STRING) {
+    RETURN $product == "oxdock"
+}
+
 # Which tarball members to place: OXDOCK_BINS names a
 # space-separated subset (basenames, `.exe` optional on Windows);
 # empty means the whole product. The primary takes the configured
@@ -179,56 +187,62 @@ IF $has_piped {
             LET $ghkind: STRING = PATH_TYPE($ghpath)
             LET $is_ghfile: BOOL = $ghkind == "file"
 
-            # Only the interpreter implements --version: the product
-            # rides in from the stubs (or the local-build caller), and
-            # other products publish PATH with no version gate.
+            # Only the interpreter implements --version: it takes the
+            # gated branch above, other products publish PATH with no
+            # version gate. Extend PRODUCT_CHECKS_VERSION and the branch
+            # below when a new product arrives.
             LET $product: STRING = "\{{ env:OXDOCK_PRODUCT }}"
-            LET $checks_version: BOOL = $product == "oxdock"
+            IF $product == "" {
+                ECHO "OXDOCK_PRODUCT is unset: bridge the product name (example: oxdock)"
+                EXIT 1
+            }
+            LET $checks_version: BOOL = PRODUCT_CHECKS_VERSION($product)
             IF $checks_version {
                 IF $is_ghfile {
-                # Expected version, one rule: a `v`-tagged bridge wins
-                # (real tags gate hard); anything else derives from the
-                # placed binary itself. Legs ride fictitious versions,
-                # so only real tags assert.
-                LET $bridge: STRING = "\{{ env:OXDOCK_EXPECTED_VERSION }}"
-                LET $use_bridge: BOOL = TEXT_STARTS_WITH($bridge, "v")
-                LET $expected: STRING = ""
+                    # Expected version, one rule: a `v`-tagged bridge wins
+                    # (real tags gate hard); anything else derives from the
+                    # placed binary itself. Legs ride fictitious versions,
+                    # so only real tags assert.
+                    LET $bridge: STRING = "\{{ env:OXDOCK_EXPECTED_VERSION }}"
+                    LET $use_bridge: BOOL = TEXT_STARTS_WITH($bridge, "v")
+                    LET $expected: STRING = ""
 
-                IF $use_bridge {
-                    $expected = TEXT_TRIM_PREFIX($bridge, "v")
-                } ELSE {
-                    LET $bv: PIPE
-                    WITH_IO [stdout=$bv] RUN ["\{{ $dest }}", "--version"]
-                    WITH_IO [stdin=$bv] READ_LINE $rawver
-                    $expected = TEXT_TRIM_PREFIX($rawver, "oxdock ")
-                }
+                    IF $use_bridge {
+                        $expected = TEXT_TRIM_PREFIX($bridge, "v")
+                    } ELSE {
+                        LET $bv: PIPE
+                        WITH_IO [stdout=$bv] RUN ["\{{ $dest }}", "--version"]
+                        WITH_IO [stdin=$bv] READ_LINE $rawver
+                        $expected = TEXT_TRIM_PREFIX($rawver, "oxdock ")
+                    }
 
-                LET $has_expected: BOOL = $expected != ""
+                    LET $has_expected: BOOL = $expected != ""
 
-                IF $has_expected {
-                    LET $tailkind: STRING = PATH_TYPE("\{{ $dest }}")
-                    ASSERT_EQ $tailkind "file"
+                    IF $has_expected {
+                        LET $tailkind: STRING = PATH_TYPE("\{{ $dest }}")
+                        ASSERT_EQ $tailkind "file"
 
-                    LET $v: PIPE
-                    WITH_IO [stdout=$v] RUN ["\{{ $dest }}", "--version"]
-                    WITH_IO [stdin=$v] READ_LINE $reported
-                    ASSERT_EQ $reported "oxdock \{{ $expected }}"
+                        LET $v: PIPE
+                        WITH_IO [stdout=$v] RUN ["\{{ $dest }}", "--version"]
+                        WITH_IO [stdin=$v] READ_LINE $reported
+                        ASSERT_EQ $reported "oxdock \{{ $expected }}"
 
-                    APPEND_LINE "\{{ env:GITHUB_PATH }}" "\{{ $dir }}"
+                        APPEND_LINE "\{{ env:GITHUB_PATH }}" "\{{ $dir }}"
 
-                    LET $ghenv: STRING = "\{{ env:GITHUB_ENV }}"
-                    LET $has_ghenv: BOOL = $ghenv != ""
+                        LET $ghenv: STRING = "\{{ env:GITHUB_ENV }}"
+                        LET $has_ghenv: BOOL = $ghenv != ""
 
-                    IF $has_ghenv {
-                        LET $envkind: STRING = PATH_TYPE($ghenv)
-                        LET $is_envfile: BOOL = $envkind == "file"
+                        IF $has_ghenv {
+                            LET $envkind: STRING = PATH_TYPE($ghenv)
+                            LET $is_envfile: BOOL = $envkind == "file"
 
-                        IF $is_envfile {
-                            APPEND_LINE "\{{ env:GITHUB_ENV }}" "OXDOCK_ENGINE_DIR=\{{ $dir }}"
+                            IF $is_envfile {
+                                APPEND_LINE "\{{ env:GITHUB_ENV }}" "OXDOCK_ENGINE_DIR=\{{ $dir }}"
+                            }
                         }
                     }
-                }
-            } ELSE {
+            }
+            IF !PRODUCT_CHECKS_VERSION($product) {
                 IF $is_ghfile {
                     APPEND_LINE "\{{ env:GITHUB_PATH }}" "\{{ $dir }}"
                 }
