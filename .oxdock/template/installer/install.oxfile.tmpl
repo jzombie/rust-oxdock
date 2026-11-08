@@ -241,14 +241,13 @@ IF $has_piped {
                             }
                         }
                     }
-            }
-            IF !PRODUCT_CHECKS_VERSION($product) {
+                }
+            } ELSE {
                 IF $is_ghfile {
                     APPEND_LINE "\{{ env:GITHUB_PATH }}" "\{{ $dir }}"
                 }
             }
         }
-    }
     } ELSE {
         LET $actual: STRING = HASH_SHA256($asset)
         ASSERT_EQ $actual "\{{ $want }}"

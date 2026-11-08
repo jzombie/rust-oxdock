@@ -400,6 +400,34 @@ fn empty_product_fails_naming_the_variable() -> Result<()> {
     Ok(())
 }
 
+/// A non-oxdock product publishes PATH with no version gate: with
+/// GITHUB_PATH bridged to a real file, the run succeeds and the file
+/// holds the destination dir, proving the branch executes (a test
+/// that only checks parsing would miss a dead branch here).
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn sidecar_product_publishes_path_without_version_gate() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    let setup = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    let ghpath = run.root.join("ghpath")?;
+    setup.write_file(&ghpath, b"")?;
+    run.io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "true");
+    run.io
+        .insert_inherit_env("GITHUB_PATH", ghpath.as_path().display().to_string());
+    run.io.insert_inherit_env("OXDOCK_PRODUCT", "sidecar");
+    run.execute()?;
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    let body = reader.read_file(&ghpath)?;
+    let published = String::from_utf8(body).context("GITHUB_PATH must stay UTF-8")?;
+    let dest = run.root.join("dest")?.as_path().display().to_string();
+    assert_eq!(
+        published.trim(),
+        dest,
+        "non-oxdock product publishes the destination dir"
+    );
+    Ok(())
+}
+
 /// Missing destination fails naming the override: the stubs own the
 /// defaults now, so the oxfile only gates on an empty dir, whatever
 /// the homes hold.
