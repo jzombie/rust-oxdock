@@ -79,9 +79,14 @@ jobs:
       # the working directory, so without it the pipeline would render
       # its own tree instead of the caller's. Proven by the fixture
       # smoke test during development.
+      # The --bins build is load-bearing too: the parent spawns the
+      # pipe child from beside its own executable, and `cargo run`
+      # builds only the default-run bin, so without this the child
+      # is missing and the render fails locating it.
       - name: Render and check for drift
         shell: bash
         run: |
           set -euo pipefail
+          cargo build --manifest-path pipeline/oxdock-compose/Cargo.toml --bins
           cargo run --manifest-path pipeline/oxdock-compose/Cargo.toml -- --root "$GITHUB_WORKSPACE"
           git diff --exit-code -- . ':!target'
