@@ -1071,13 +1071,13 @@ mod tests {
     fn glob_verbatim_rooted_absolute_pattern_lists_members() {
         let temp = GuardedPath::tempdir().expect("tempdir");
         let root = temp.as_guarded_path().clone();
-        std::fs::create_dir_all(root.as_path().join("fragments/sec")).expect("dirs");
-        std::fs::write(root.as_path().join("fragments/sec/a.md.tmpl"), "A").expect("file");
-        let verbatim = to_forward_slashes(
-            &std::fs::canonicalize(root.as_path())
-                .expect("canonicalize")
-                .to_string_lossy(),
-        );
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+        let dir = root.join("fragments/sec").expect("join");
+        resolver.create_dir_all(&dir).expect("dirs");
+        let file = root.join("fragments/sec/a.md.tmpl").expect("join");
+        resolver.write_file(&file, b"A").expect("file");
+        let canonical = resolver.canonicalize(&root).expect("canonicalize");
+        let verbatim = to_forward_slashes(&canonical.as_path().to_string_lossy());
         assert!(
             verbatim.starts_with("//?/"),
             "canonicalized tempdir must carry the verbatim prefix on Windows: {verbatim}"
