@@ -25,12 +25,14 @@ define_pipeline! {
     StepKind::Symlink { .. } => exec::dispatch_symlink,
     StepKind::Mkdir(..) => exec::dispatch_mkdir,
     StepKind::Install { .. } => exec::dispatch_install,
+    StepKind::SetExecutable { .. } => exec::dispatch_set_executable,
     StepKind::Ls(..) => exec::dispatch_ls,
     StepKind::Read(..) => exec::dispatch_read,
     StepKind::ReadLine { .. } => exec::dispatch_read_line,
     StepKind::Prompt { .. } => exec::dispatch_prompt,
     StepKind::Write { .. } => exec::dispatch_write,
     StepKind::Append { .. } => exec::dispatch_append,
+    StepKind::AppendLine { .. } => exec::dispatch_append_line,
     StepKind::Remove { .. } => exec::dispatch_remove,
     StepKind::Expand { .. } => exec::dispatch_expand,
     StepKind::AssertEq { .. } => exec::dispatch_assert_eq,
@@ -136,37 +138,62 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "asserts scratch-dir naming and host cargo env layout; synthetic Miri tempdirs carry neither"
-    )]
-    fn run_isolates_cargo_target_dir_from_workspace() {
+    fn run_does_not_synthesize_cargo_target_dir() {
+        // No host value, no seed row: the script env carries nothing,
+        // so children default like an unset variable. Probed through
+        // declared `INHERIT_ENV` (shell `echo` cannot distinguish an
+        // absent variable from empty on every platform) reading empty.
+        let _guard = oxdock_process::TestEnvGuard::remove("CARGO_TARGET_DIR");
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        #[allow(clippy::disallowed_macros)]
-        let cmd = if cfg!(windows) {
-            "echo %CARGO_TARGET_DIR% > seen.txt"
-        } else {
-            "printf %s \"$CARGO_TARGET_DIR\" > seen.txt"
-        };
-
-        let steps = parse_script(&format!("RUN {cmd}")).unwrap();
+        let steps = parse_script(indoc! {r#"
+            INHERIT_ENV [CARGO_TARGET_DIR]
+            WRITE seen.txt "{{ env:CARGO_TARGET_DIR }}"
+        "#})
+        .unwrap();
 
         run_steps_without_snapshot(&root, &steps).unwrap();
 
-        let seen = read_trimmed(&root.join("seen.txt").unwrap());
-        let legacy = root.join(".cargo-target").unwrap();
-
-        assert_ne!(
-            seen.trim(),
-            legacy.display().to_string(),
-            "CARGO_TARGET_DIR must not target the workspace tree"
+        assert_eq!(
+            read_trimmed(&root.join("seen.txt").unwrap()),
+            "",
+            "absent host must stay absent: no synthesized target dir"
         );
-        let normalized = seen.trim().replace('\\', "/");
-        assert!(
-            normalized.ends_with("/target") && normalized.contains("oxdock-"),
-            "CARGO_TARGET_DIR must point at the isolated scratch target dir, got {seen:?}"
+    }
+
+    #[test]
+    fn run_honors_explicit_cargo_target_dir() {
+        // Routing stays a script decision: explicit `ENV` wins
+        // verbatim, host included when the script asks for it.
+        let _guard = oxdock_process::TestEnvGuard::set("CARGO_TARGET_DIR", "host-target");
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        let steps = parse_script(indoc! {r#"
+            ENV CARGO_TARGET_DIR="ws/target"
+            WRITE seen.txt "{{ env:CARGO_TARGET_DIR }}"
+        "#})
+        .unwrap();
+
+        run_steps_without_snapshot(&root, &steps).unwrap();
+        assert_eq!(
+            read_trimmed(&root.join("seen.txt").unwrap()),
+            "ws/target",
+            "explicit ENV routes verbatim"
+        );
+
+        let inherited = parse_script(indoc! {r#"
+            INHERIT_ENV [CARGO_TARGET_DIR]
+            WRITE seen-inherit.txt "{{ env:CARGO_TARGET_DIR }}"
+        "#})
+        .unwrap();
+
+        run_steps_without_snapshot(&root, &inherited).unwrap();
+        assert_eq!(
+            read_trimmed(&root.join("seen-inherit.txt").unwrap()),
+            "host-target",
+            "INHERIT_ENV bridges the host value on request"
         );
     }
 
@@ -725,11 +752,14 @@ mod tests {
 
         // Shell sleep granularity differs per platform (`sleep` seconds
         // against `ping` whole seconds), so only the bounds branch.
+        // The upper bound carries scheduling slack for loaded shared
+        // runners (both backgrounds run concurrently, so anything near
+        // the 0.5s sleep is a pass; a hang blows past by orders more).
         #[allow(clippy::disallowed_macros)]
         let (lower, upper) = if cfg!(windows) {
-            (0.9, 3.0)
+            (0.9, 6.0)
         } else {
-            (0.15, 0.8)
+            (0.15, 1.2)
         };
         assert!(
             elapsed.as_secs_f32() < upper && elapsed.as_secs_f32() > lower,

@@ -1,0 +1,69 @@
+## Pipeline
+
+Each run performs the same steps, in order:
+
+1. Load `render.json`: global values, which files to scan,
+   generated inputs, and naming rules.
+2. Copy the pipeline's own script files into place and check every
+   plugin implements the same stages, failing fast with the
+   offender named instead of halfway through a target.
+3. Build the run script: one step per stage per plugin, in
+   registration order (`SETUP` once up front, then each stage per
+   target), piped through a fresh interpreter that never touches
+   disk.
+4. Per target: check the target declaration, expand the fragments
+   into the master template, and write the output file. The docs
+   plugin first refreshes generated inputs and re-reads workspace
+   metadata.
+5. Restore executable bits declared by targets (so regenerating
+   `install.sh` keeps its executable bit), then report. Zero
+   discovered targets fails the run.
+
+The pipeline itself runs on OxDock scripts shipped inside the
+binary: static `.oxfile` sources plus one lifecycle file per
+pipeline participant, with the run script built fresh every run.
+Step order and all file writes live in those scripts as named
+stages; Rust only handles what the scripts cannot (workspace
+metadata, strict encoding, filename rules).
+
+### Modules
+
+Behavior arrives through plugin modules linked into the binary:
+
+- `RENDER_ENGINE`: filename and template-expansion helpers.
+- `OXDOCK`: command and function reference data used by the
+  generated docs.
+- `RUST`: Cargo workspace facts (members, versions, and package
+  metadata) used for version stamps and citations.
+
+Each pipeline participant also ships one lifecycle script
+(`src/lifecycle/*.oxfile`) implementing the same stages; the
+config lists them in run order. Leave the list out and a generic
+default runs every stage alone.
+
+External modules join through `run_with_plugins(root, extras)`,
+so templates can call them with no other changes.
+
+### Fetch, parse, render
+
+Remote data enters through the same calls scripts use:
+`NET::NET_FETCH($url)` fetches a URL to text, and the pure
+`STD::PARSE_JSON` / `STD::PARSE_TOML` parsers turn that text into
+template values exactly as file loading would. Fetching never
+touches the filesystem and parsing never touches the network, so
+each side stays testable alone.
+
+## Values
+
+Each target names a values file holding its display `name` and
+`description`. Every run re-reads both from the owning crate's
+manifest: `description` always comes from the manifest, while a
+committed `name` wins as a display override (`OxDock` vs the
+package name `oxdock`). Crates without a manifest keep static
+values files. Sync writes values only: templates, fragments, and
+target declarations are the author's and are never rewritten.
+Shared strings live in the global values file under scope keys
+(e.g. `\{{ $docs_global.* }}`).
+Workspace-wide facts travel alongside under their own keys: the
+workspace version and the workspace package record (author,
+license, repository) used for citations.

@@ -699,6 +699,7 @@ impl StepKind {
                 walk_arg(from, f);
                 walk_arg(to, f);
             }
+            StepKind::SetExecutable { path } => walk_arg(path, f),
             StepKind::Unarchive {
                 src,
                 dst,
@@ -724,6 +725,10 @@ impl StepKind {
             StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
                 walk_arg(path, f);
                 walk_opt(contents, f);
+            }
+            StepKind::AppendLine { path, contents } => {
+                walk_arg(path, f);
+                walk_arg(contents, f);
             }
             StepKind::Expand { path, overrides } => {
                 walk_opt(path, f);
@@ -828,6 +833,7 @@ impl StepKind {
                 walk_arg(from, f);
                 walk_arg(to, f);
             }
+            StepKind::SetExecutable { path } => walk_arg(path, f),
             StepKind::Unarchive {
                 src,
                 dst,
@@ -853,6 +859,10 @@ impl StepKind {
             StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
                 walk_arg(path, f);
                 walk_opt(contents, f);
+            }
+            StepKind::AppendLine { path, contents } => {
+                walk_arg(path, f);
+                walk_arg(contents, f);
             }
             StepKind::Expand { path, overrides } => {
                 walk_opt(path, f);
@@ -951,6 +961,7 @@ impl StepKind {
             | StepKind::Archive { .. }
             | StepKind::Unarchive { .. }
             | StepKind::Install { .. }
+            | StepKind::SetExecutable { .. }
             | StepKind::Mkdir(_)
             | StepKind::Ls(_)
             | StepKind::Read(_)
@@ -958,6 +969,7 @@ impl StepKind {
             | StepKind::Prompt { .. }
             | StepKind::Write { .. }
             | StepKind::Append { .. }
+            | StepKind::AppendLine { .. }
             | StepKind::Remove { .. }
             | StepKind::Expand { .. }
             | StepKind::AssertEq { .. }
@@ -1650,6 +1662,27 @@ declare_commands! {
         },
     ],
 
+    SetExecutable => [
+        name: "SET_EXECUTABLE",
+        variant: SetExecutable { path: Arg },
+        syntax: "SET_EXECUTABLE <path>",
+        summary: "Mark a file executable.",
+        description: "Sets the executable bit on an existing file without moving it. Owner rwx on Unix, bit no-op elsewhere, so the same script runs on every platform; a missing path fails everywhere. `INSTALL` stages, marks, and renames in one atomic step; this command only flips the bit where the file already lives.",
+        args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "File to mark executable", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
+        flags: &[],
+        default_output: None,
+        examples: &[ Example { name: "set-executable", fence_meta: Some("roots:unified"), code: indoc! {r#"
+            # Mark a rendered script executable in place.
+            IMPORT [STD]
+            WRITE tool.sh "echo hi"
+            SET_EXECUTABLE tool.sh
+
+            LET $t: STRING = PATH_TYPE("tool.sh")
+            ASSERT_EQ $t "file"
+        "#} } ],
+        lower: |_flags, args| Ok(StepKind::SetExecutable { path: args.into_iter().next().ok_or_else(|| ParseError::validation("SET_EXECUTABLE", "SET_EXECUTABLE requires a path".to_string(), &SpanContext::line_only(0)))? }),
+    ],
+
     Archive => [
         name: "ARCHIVE",
         variant: Archive { src: Arg, dst: Arg, raw: bool },
@@ -1903,7 +1936,7 @@ declare_commands! {
         variant: Write { path: Arg, contents: Option<Arg> },
         syntax: "WRITE <path> [<contents>]",
         summary: "Write to file.",
-        description: "Writes contents.",
+        description: "Writes contents. Bytes land exactly as given: no line-ending translation happens on any platform (LF stays LF, even on Windows), so the same script produces identical files everywhere.",
         args: &[
             ArgSpec { name: "path", arg_type: ArgType::Path, description: "File", io: IoDirection::Write, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "contents", arg_type: ArgType::Rest(&ArgType::String), description: "Content", io: IoDirection::Write, index: 1, required: false, fallback_stream: Some(Stream::Stdin) },
@@ -1929,7 +1962,7 @@ declare_commands! {
         variant: Append { path: Arg, contents: Option<Arg> },
         syntax: "APPEND <path> [<contents>]",
         summary: "Append to file.",
-        description: "Appends contents.",
+        description: "Appends contents with no separator and no line ending: bytes concatenate exactly, so `APPEND` never terminates the line (use `APPEND_LINE` for that). Bytes land exactly as given: no line-ending translation happens on any platform (LF stays LF, even on Windows), so the same script produces identical files everywhere.",
         args: &[
             ArgSpec { name: "path", arg_type: ArgType::Path, description: "File", io: IoDirection::Write, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "contents", arg_type: ArgType::Rest(&ArgType::String), description: "Content", io: IoDirection::Write, index: 1, required: false, fallback_stream: Some(Stream::Stdin) },
@@ -1940,7 +1973,8 @@ declare_commands! {
             WRITE log.txt line1
             APPEND log.txt line2
 
-            # APPEND concatenates with no separator.
+            # No separator or newline is added: the bytes concatenate
+            # exactly, so this asserts the unterminated form.
             LET $all: STRING = READ log.txt
             ASSERT_EQ $all "line1line2"
         "#} } ],
@@ -1950,6 +1984,36 @@ declare_commands! {
             let remaining: Vec<Arg> = it.collect();
             let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, "APPEND")?) };
             Ok(StepKind::Append { path, contents })
+        },
+    ],
+
+    AppendLine => [
+        name: "APPEND_LINE",
+        variant: AppendLine { path: Arg, contents: Arg },
+        syntax: "APPEND_LINE <path> <contents>",
+        summary: "Append one line to a file.",
+        description: "Appends contents plus exactly one trailing LF newline (`\\n`, never the platform newline), so callers never spell the terminator by hand and output bytes stay identical on every OS. Contents are required: unlike APPEND there is no stdin form, a line is a complete value, not a stream.",
+        args: &[
+            ArgSpec { name: "path", arg_type: ArgType::Path, description: "File", io: IoDirection::Write, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "contents", arg_type: ArgType::Rest(&ArgType::String), description: "Line content (the newline is added)", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
+        ],
+        flags: &[],
+        default_output: None,
+        examples: &[ Example { name: "append-line", fence_meta: None, code: indoc! {r#"
+            WRITE log.txt line1
+            APPEND_LINE log.txt line2
+            APPEND_LINE log.txt line3
+
+            # Each APPEND_LINE terminates its own write.
+            LET $all: STRING = READ log.txt
+            ASSERT_EQ $all "line1line2\nline3\n"
+        "#} } ],
+        lower: |_flags, args| {
+            let mut it = args.into_iter();
+            let path = it.next().ok_or_else(|| ParseError::validation("APPEND_LINE", "APPEND_LINE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let remaining: Vec<Arg> = it.collect();
+            let contents = join_value(remaining, "APPEND_LINE")?;
+            Ok(StepKind::AppendLine { path, contents })
         },
     ],
 
@@ -2624,7 +2688,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
-                    name: "logical condition composition",
+                    name: "logical condition combination",
                     fence_meta: None,
                     code: indoc! {r#"
                 IMPORT [STD]
@@ -3200,7 +3264,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 A blocking foreground process is killed.
 
-                ASYNC composes in either nesting order with order-dependent deadline
+                ASYNC nests in either order with order-dependent deadline
                 semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
                 the deadline inside the background thread (a later `AWAIT $task`
                 surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
@@ -3288,7 +3352,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 writes are visible to another.
 
                 Blocks nest (each level re-seeds from the same seed, so
-                nesting only narrows through the allowlists) and compose
+                nesting only narrows through the allowlists) and combine
                 with `ASYNC` and `FUNC`. Scope exit restores the prior
                 environment.
             "#},
@@ -3779,9 +3843,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 - Only `EXPORT`ed top-level `FUNC`s cross the
                   boundary. Unexported means private; variables are
                   never exportable.
-                - Types cross as bare globals (like host types). A
-                  whole-file import persists every exported alias, so
-                  `LET $p: PERSON` works after any import of its file.
+                - Types cross qualified: a whole-file import exposes
+                  every exported alias as `ALIAS::NAME` only
+                  (`LET $p: LIB::PERSON` after
+                  `IMPORT ["./lib.oxfile" AS LIB]`), mirroring func
+                  views. Nothing bare leaks from an aliased import,
+                  so same-named types in different files coexist;
+                  harvests below stay the explicit way to request a
+                  bare name.
                 - Each file initializes once; every alias shares the
                   module's top-level bindings.
                 - The file must exist when the run starts. Generated
@@ -3797,19 +3866,25 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   entry and no modules.
 
                 Selective harvests:
-                - Form: `IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
+                - Form: `IMPORT [FOO FROM "x.oxdock"]`,
                   optionally `AS ALIAS`. Only the named top-level
                   functions register, bare or namespaced under the
                   alias. Harvested names must be `EXPORT`ed.
                 - Single name needs no inner brackets
-                  (`IMPORT [FOO FROM "x.oxdock"]`); several keep
-                  `[[F, G FROM ...]]`. Several harvests group the
-                  same way (`IMPORT [[TYPE A FROM STD],
-                  [TYPE B FROM STD]]`), file or host alike.
+                  (`IMPORT [FOO FROM "x.oxdock"]`); several names from
+                  one file combine in one bracket with explicit kinds
+                  (`IMPORT [TYPE A, TYPE B FROM "x.oxdock"]`, file or
+                  host alike: `IMPORT [FUNC FOO, FUNC BAR FROM
+                  "x.oxdock"]`). Bare names always read as modules, so
+                  a bare multi-name fails naming the explicit-kind
+                  fix. Prefer one import per file over grouping
+                  harvests.
                 - Types and functions combine in one entry
                   (`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`).
-                  Harvested types must be `EXPORT TYPE`d and persist
-                  bare globally, so `FUNC` signatures keep working.
+                  Harvested types must be `EXPORT TYPE`d. Unaliased
+                  harvests persist bare globally (collision-checked),
+                  so `FUNC` signatures keep working; aliased harvests
+                  persist qualified-only, like whole-file imports.
                 - The file body never executes, so harvesting is
                   side-effect free. The file's own nested imports
                   still load. Harvests produce no value and never
@@ -3834,7 +3909,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   Entry code keeps resolving against the run cwd.
                 - Missing files fail before the first step runs.
                   Write-then-import in one script is rejected; check
-                  libraries into the tree, or compose them at runtime
+                  libraries into the tree, or combine them at runtime
                   and run a child interpreter (see the child run
                   examples below).
 
@@ -3973,10 +4048,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
-                    name: "run composed modules in a child",
+                    name: "run rendered modules in a child",
                     fence_meta: Some("roots:unified"),
                     code: indoc! {r#"
-                # Dynamic composition with files: the parent writes a
+                # Dynamic assembly with files: the parent writes a
                 # library and an entry script, then runs the entry in a
                 # fresh interpreter. Child-side {{ }} stays escaped so
                 # the parent does not interpolate it while writing. The
@@ -3999,10 +4074,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
-                    name: "dynamic module composition",
+                    name: "dynamic module assembly",
                     fence_meta: Some("roots:unified"),
                     code: indoc! {r#"
-                # A function that composes a module: MAKE_GREETER bakes
+                # A function that assembles a module: MAKE_GREETER bakes
                 # its argument into a generated file with a bare {{ }},
                 # then a child run imports the result. Bare {{ }} injects
                 # parent values at write time; escaped \{{ }} survives for
@@ -4010,7 +4085,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # {{ }} placeholders resolve pure functions only.
                 IMPORT [STD]
 
-                # The composer: parent values land in the module source.
+                # The renderer: parent values land in the module source.
                 FUNC MAKE_GREETER($who: STRING) {
                     WRITE greeter.oxfile """
                         FUNC GREET() { RETURN "hi {{ $who }}" }
@@ -4019,14 +4094,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     RETURN "greeter.oxfile"
                 }
 
-                # The entry: imports the composed module by its path.
+                # The entry: imports the rendered module by its path.
                 WRITE main.oxfile """
                     IMPORT ["greeter.oxfile" AS G]
                     LET $g: STRING = G::GREET()
                     ECHO "says \{{ $g }}"
                     """
 
-                # Compose, then run the entry in a fresh interpreter.
+                # Assemble, then run the entry in a fresh interpreter.
                 LET $made: STRING = MAKE_GREETER("Ada")
                 ASSERT_EQ $made "greeter.oxfile"
                 LET $exe: STRING = INTERPRETER()
@@ -4126,6 +4201,9 @@ impl fmt::Display for StepKind {
                 fmt_value(from, quote_arg),
                 fmt_value(to, quote_arg)
             ),
+            StepKind::SetExecutable { path } => {
+                write!(f, "SET_EXECUTABLE {}", fmt_value(path, quote_arg))
+            }
             StepKind::Archive { src, dst, raw } => {
                 if *raw {
                     write!(
@@ -4198,6 +4276,14 @@ impl fmt::Display for StepKind {
                     write!(f, " {}", fmt_value(b, quote_msg))?;
                 }
                 Ok(())
+            }
+            StepKind::AppendLine { path, contents } => {
+                write!(
+                    f,
+                    "APPEND_LINE {} {}",
+                    fmt_value(path, quote_arg),
+                    fmt_value(contents, quote_msg)
+                )
             }
             StepKind::Remove { path, recursive } => {
                 if *recursive {
@@ -5040,7 +5126,7 @@ pub(crate) fn collect_remote_kind_symbols(
 /// and numeric classification. The parser calls
 /// these directly, so folding and overflow behavior are single-sourced.
 /// Reject a staged `UnsignedIntBoundary` in any position where unary `-`
-/// cannot consume it (every composite constructor calls this on children).
+/// cannot consume it (every compound constructor calls this on children).
 /// Expression lowering core (promoted verbatim from the retired pest
 /// backend): operates on `Expr`, never on token pairs.
 pub(crate) fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {
@@ -6289,12 +6375,14 @@ mod tests {
                 | StepKind::Archive { .. }
                 | StepKind::Unarchive { .. }
                 | StepKind::Install { .. }
+                | StepKind::SetExecutable { .. }
                 | StepKind::Ls(_)
                 | StepKind::Read(_)
                 | StepKind::ReadLine { .. }
                 | StepKind::Prompt { .. }
                 | StepKind::Write { .. }
                 | StepKind::Append { .. }
+                | StepKind::AppendLine { .. }
                 | StepKind::Remove { .. }
                 | StepKind::Expand { .. }
                 | StepKind::AssertEq { .. }

@@ -64,6 +64,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
+use oxdock_fs::GuardedPath;
 use oxdock_parser::{
     CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag, Value,
     render_structural,
@@ -353,6 +354,105 @@ fn module_lets<P: ProcessManager>(
     Ok(out)
 }
 
+/// Run `f` with `aliases` merged into the global type directory,
+/// restoring the previous bindings afterward (stack discipline, so
+/// nested scopes combine). The closure pass checks every file with
+/// exactly its own aliases plus the shared harvests visible, never
+/// another file's defs.
+fn with_scope_aliases<P: ProcessManager, R>(
+    exec: &mut ExecState<P>,
+    aliases: &[(String, String)],
+    f: impl FnOnce(&mut ExecState<P>) -> Result<R>,
+) -> Result<R> {
+    let saved: Vec<(String, Option<String>)> = aliases
+        .iter()
+        .map(|(name, _)| (name.clone(), exec.type_aliases.get(name).cloned()))
+        .collect();
+    for (name, target) in aliases {
+        exec.type_aliases.insert(name.clone(), target.clone());
+    }
+    let outcome = f(&mut *exec);
+    for (name, prev) in saved {
+        match prev {
+            Some(target) => {
+                exec.type_aliases.insert(name, target);
+            }
+            None => {
+                exec.type_aliases.remove(&name);
+            }
+        }
+    }
+    outcome
+}
+
+/// Merge one `IMPORT [TYPE ...]` harvest into the global directory:
+/// resolve the path against the importing file's directory through
+/// the closure (no filesystem; expansion already loaded everything),
+/// EXPORT-gate each name, collision-checked loud like the runtime.
+/// Harvests are explicit global requests, so they merge globally;
+/// file-local defs never do. Host-module harvests validate globally
+/// and record nothing.
+fn merge_harvest<P: ProcessManager>(
+    exec: &mut ExecState<P>,
+    files: &[ClosureFile],
+    dir: &GuardedPath,
+    path: &str,
+    alias: Option<&str>,
+    type_names: &[String],
+) -> Result<()> {
+    let resolved = dir
+        .join(path)
+        .map_err(|err| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {err}"))?;
+    let key = resolved.display();
+    let Some(file) = files.iter().find(|f| f.key == key) else {
+        if exec.module_table.modules.contains_key(path) {
+            for name in type_names {
+                exec.resolve_tag(name).map_err(|err| {
+                    anyhow::anyhow!("IMPORT `{path}` has no such TYPE `{name}`: {err:#}")
+                })?;
+            }
+            return Ok(());
+        }
+        anyhow::bail!("IMPORT `{path}` cannot be read: not in the import closure");
+    };
+    let aliases = super::typing::collect_type_aliases(&file.steps, exec)?;
+    for name in type_names {
+        if !file.type_exports.iter().any(|e| e == name) {
+            anyhow::bail!("IMPORT `{path}` does not export TYPE `{name}`");
+        }
+        let Some(target) = aliases.get(name) else {
+            anyhow::bail!("IMPORT `{path}` has no such TYPE `{name}`");
+        };
+        super::import::insert_imported_type(exec, name, target, alias, path)?;
+    }
+    Ok(())
+}
+
+/// Merge every `IMPORT [TYPE ...]` harvest in `steps` (including
+/// nested bodies: validation is conservative, like expansion).
+fn merge_harvests_in<P: ProcessManager>(
+    exec: &mut ExecState<P>,
+    files: &[ClosureFile],
+    dir: &GuardedPath,
+    steps: &[Step],
+) -> Result<()> {
+    for step in steps {
+        if let StepKind::ImportFuncs {
+            path,
+            alias,
+            type_names,
+            ..
+        } = &step.kind
+            && !type_names.is_empty()
+        {
+            merge_harvest(exec, files, dir, path, alias.as_deref(), type_names)?;
+        }
+        for body in super::import::child_bodies(&step.kind) {
+            merge_harvests_in(exec, files, dir, body)?;
+        }
+    }
+    Ok(())
+}
 /// Run the static pass over the entry script plus the entire import
 /// closure (#115). Every transitively imported file is collected and
 /// checked before the first step executes: cross-file calls resolve
@@ -360,15 +460,17 @@ fn module_lets<P: ProcessManager>(
 /// at the call site), and nested files cannot smuggle type errors past
 /// the entry gate. Cycles, depth overflow, and parse failures surface
 /// during expansion, also before any step runs.
+///
+/// Scoping is per-file: every check runs with exactly its own file's
+/// aliases plus the shared harvests visible, never another file's
+/// defs, so same-named types in different files coexist. Harvests are
+/// explicit global requests (collision-checked loud); a bare `IMPORT`
+/// of a file exposes its exports only as `ALIAS::NAME`.
 pub fn validate_script_closure<P: ProcessManager>(
     entry: &[Step],
     files: &[super::import::ClosureFile],
-    exec: &ExecState<P>,
+    exec: &mut ExecState<P>,
 ) -> Result<()> {
-    // Every file's `EXPORT TYPE` list must name a locally defined alias
-    // in v1 (no lib-level re-exports): entry re-exports are validated
-    // by the MCP host against the closure, since `finish_run` drops
-    // entry export metadata (steps only).
     for file in files {
         let mut local = std::collections::HashSet::new();
         for step in &file.steps {
@@ -385,22 +487,145 @@ pub fn validate_script_closure<P: ProcessManager>(
             }
         }
     }
-    let mut checker = Checker::new(exec);
-    checker.build_env_unions(entry, files);
-    checker.collect(entry)?;
-    for file in files {
-        for site in &file.sites {
-            checker.collect_site(site, file)?;
+    // Global harvests first: every `IMPORT [TYPE ...]` across entry and
+    // files resolves through the closure (host modules validate
+    // globally), EXPORT-gated, collision-checked loud. Explicit
+    // harvests are global requests; file-local defs stay per-file
+    // below, so same-named types in different files coexist.
+    let saved_global = exec.type_aliases.clone();
+    let outcome: Result<()> = (|| {
+        let entry_base = super::import::import_base(exec);
+        merge_harvests_in(exec, files, &entry_base, entry)?;
+        for file in files {
+            merge_harvests_in(exec, files, &file.dir, &file.steps)?;
         }
-    }
-    checker.check_top_level(entry)?;
-    for file in files {
-        checker.check_import_body(&file.key, &file.steps, Some(&file.key))?;
-    }
-    for key in checker.func_keys() {
-        checker.func_return(&key, 0)?;
-    }
-    Ok(())
+        // Qualified exports: a bare `IMPORT ["f" AS C]` exposes the
+        // file's EXPORTed types only as `C::NAME`, mirroring func
+        // views, so nothing bare leaks into the importer. Same-name
+        // types in different files coexist; collisions fail loud.
+        for file in files {
+            let full = file.sites.iter().any(|site| {
+                site.alias.is_some() && site.func_names.is_none() && site.type_names.is_none()
+            });
+            if !full {
+                continue;
+            }
+            let defs = super::typing::collect_type_aliases(&file.steps, exec)?;
+            for site in &file.sites {
+                if site.alias.is_none() || site.func_names.is_some() || site.type_names.is_some() {
+                    continue;
+                }
+                for name in &file.type_exports {
+                    if let Some(target) = defs.get(name) {
+                        super::import::insert_imported_type(
+                            exec,
+                            name,
+                            target,
+                            site.alias.as_deref(),
+                            &file.path,
+                        )?;
+                    }
+                }
+            }
+        }
+        // Collect funcs per unit so params resolve in the defining
+        // file's scope. Harvested funcs land under their import alias
+        // (bare harvests stay bare); bodies check below.
+        let mut all_funcs = HashMap::new();
+        let mut all_lets: HashMap<String, Vec<(String, TypeTag)>> = HashMap::new();
+        let entry_defs: Vec<(String, String)> = super::typing::collect_type_aliases(entry, exec)?
+            .into_iter()
+            .collect();
+        with_scope_aliases(exec, &entry_defs, |exec| {
+            let mut checker = Checker::new(exec);
+            checker.collect(entry)?;
+            all_funcs.extend(checker.funcs);
+            Ok(())
+        })?;
+        for file in files {
+            let defs: Vec<(String, String)> =
+                super::typing::collect_type_aliases(&file.steps, exec)?
+                    .into_iter()
+                    .collect();
+            with_scope_aliases(exec, &defs, |exec| {
+                let mut checker = Checker::new(exec);
+                for site in &file.sites {
+                    checker.collect_site(site, file)?;
+                }
+                all_funcs.extend(checker.funcs);
+                all_lets.insert(file.key.clone(), module_lets(&file.steps, exec)?);
+                Ok(())
+            })?;
+        }
+        // Infer every collected function under its owner's scope
+        // FIRST, into one shared memo, so call sites reuse
+        // owner-checked signatures instead of inferring in whatever
+        // scope happens to be current. Sorted for determinism.
+        let mut inferred: HashMap<String, StaticTy> = HashMap::new();
+        let mut keys: Vec<String> = all_funcs.keys().cloned().collect();
+        keys.sort();
+        for key in keys {
+            let owner = all_funcs.get(&key).and_then(|info| info.module.clone());
+            let defs: Vec<(String, String)> = match owner {
+                None => entry_defs.clone(),
+                Some(module) => files
+                    .iter()
+                    .find(|f| f.key == module)
+                    .map(|file| {
+                        super::typing::collect_type_aliases(&file.steps, exec)
+                            .map(|aliases| aliases.into_iter().collect())
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
+            };
+            with_scope_aliases(exec, &defs, |exec| {
+                let mut checker =
+                    seeded_checker(exec, &all_funcs, &all_lets, &inferred, entry, files);
+                let ty = checker.func_return(&key, 0)?;
+                inferred.insert(key.clone(), ty);
+                Ok(())
+            })?;
+        }
+        // Check every body with exactly its own scope visible: entry
+        // defs for the entry, file defs for each file. Calls resolve
+        // against the pre-inferred signatures; bodies never see
+        // another file's defs.
+        /// Fresh checker seeded with the collected functions, module lets,
+        /// and environment unions. Built per scope so every check runs with
+        /// exactly its own file's aliases plus the shared harvests visible.
+        fn seeded_checker<'a, P: ProcessManager>(
+            exec: &'a mut ExecState<P>,
+            funcs: &HashMap<String, FuncInfo>,
+            lets: &HashMap<String, Vec<(String, TypeTag)>>,
+            inferred: &HashMap<String, StaticTy>,
+            entry: &[Step],
+            files: &[ClosureFile],
+        ) -> Checker<'a, P> {
+            let mut checker = Checker::new(exec);
+            checker.funcs = funcs.clone();
+            checker.module_lets = lets.clone();
+            checker.inferred = inferred.clone();
+            checker.build_env_unions(entry, files);
+            checker
+        }
+        with_scope_aliases(exec, &entry_defs, |exec| {
+            seeded_checker(exec, &all_funcs, &all_lets, &inferred, entry, files)
+                .check_top_level(entry)
+        })?;
+        for file in files {
+            let defs: Vec<(String, String)> =
+                super::typing::collect_type_aliases(&file.steps, exec)?
+                    .into_iter()
+                    .collect();
+            with_scope_aliases(exec, &defs, |exec| {
+                seeded_checker(exec, &all_funcs, &all_lets, &inferred, entry, files)
+                    .check_import_body(&file.key, &file.steps, Some(&file.key))
+            })?;
+        }
+        Ok(())
+    })();
+    exec.type_aliases = saved_global;
+    outcome
 }
 
 /// Same pass returning the visit count, for the linearity test: the
@@ -2074,7 +2299,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         if tags_equal(expected, &actual) {
             return Ok(());
         }
-        // Union admission is subset-based and order-free, composing
+        // Union admission is subset-based and order-free, combining
         // with the pairs below (a `STRING` actual still reaches the
         // `INT` pair through the `STRING` member, never around it).
         // Actual-union goes first: every member must be admitted

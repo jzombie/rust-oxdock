@@ -109,6 +109,232 @@ fn read_trimmed(path: &GuardedPath) -> String {
         .to_string()
 }
 
+fn write_lib(root: &GuardedPath, rel: &str, contents: &str) {
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).unwrap();
+    let path = root.join(rel).unwrap();
+    resolver.write_file(&path, contents.as_bytes()).unwrap();
+}
+
+/// Full imports namespace types: `["d" AS D]` and `["e" AS E]` can
+/// both export `THING` with different shapes. Each file's body
+/// checks against its own defs, qualified references resolve, and
+/// nothing bare leaks between them.
+#[test]
+fn aliased_same_name_types_coexist_per_file() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "d.oxfile",
+        indoc! {r#"
+            TYPE THING = MAP<x: STRING>
+            FUNC MK($x: STRING) {
+                LET $t: THING = {x: $x}
+                RETURN $t.x
+            }
+            EXPORT [TYPE THING, FUNC MK]
+        "#},
+    );
+    write_lib(
+        &root,
+        "e.oxfile",
+        indoc! {r#"
+            TYPE THING = MAP<y: STRING>
+            FUNC MK($y: STRING) {
+                LET $t: THING = {y: $y}
+                RETURN $t.y
+            }
+            EXPORT [TYPE THING, FUNC MK]
+        "#},
+    );
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["d.oxfile" AS D]
+                IMPORT ["e.oxfile" AS E]
+                LET $a: STRING = D::MK("a")
+                LET $b: STRING = E::MK("b")
+                LET $t: D::THING = {x: "q"}
+                WRITE out.txt "{{ $a }} {{ $b }} {{ $t.x }}"
+            "#},
+        )
+        .expect("same-name types coexist namespaced");
+    assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "a b q");
+    // Reversed import order behaves identically: scoping is per-file,
+    // never last-wins, so order cannot change the result.
+    let temp_rev = GuardedPath::tempdir().unwrap();
+    let root_rev = guard_root(&temp_rev);
+    for (rel, contents) in [
+        (
+            "d.oxfile",
+            indoc! {r#"
+                TYPE THING = MAP<x: STRING>
+                FUNC MK($x: STRING) {
+                    LET $t: THING = {x: $x}
+                    RETURN $t.x
+                }
+                EXPORT [TYPE THING, FUNC MK]
+            "#},
+        ),
+        (
+            "e.oxfile",
+            indoc! {r#"
+                TYPE THING = MAP<y: STRING>
+                FUNC MK($y: STRING) {
+                    LET $t: THING = {y: $y}
+                    RETURN $t.y
+                }
+                EXPORT [TYPE THING, FUNC MK]
+            "#},
+        ),
+    ] {
+        write_lib(&root_rev, rel, contents);
+    }
+    Engine::new()
+        .run_script(
+            &root_rev,
+            indoc! {r#"
+                IMPORT ["e.oxfile" AS E]
+                IMPORT ["d.oxfile" AS D]
+                LET $a: STRING = D::MK("a")
+                LET $b: STRING = E::MK("b")
+                WRITE out.txt "{{ $a }} {{ $b }}"
+            "#},
+        )
+        .expect("reversed import order behaves identically");
+    assert_eq!(read_trimmed(&root_rev.join("out.txt").unwrap()), "a b");
+}
+
+/// Bare harvests of the same name with different targets fail loud
+/// naming both files instead of silently picking one.
+#[test]
+fn bare_harvest_type_collision_fails_closed() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "d.oxfile",
+        indoc! {r#"
+            TYPE THING = MAP<x: STRING>
+            EXPORT [TYPE THING]
+        "#},
+    );
+    write_lib(
+        &root,
+        "e.oxfile",
+        indoc! {r#"
+            TYPE THING = MAP<y: STRING>
+            EXPORT [TYPE THING]
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [TYPE THING FROM "d.oxfile"]
+                IMPORT [TYPE THING FROM "e.oxfile"]
+                ECHO "ok"
+            "#},
+        )
+        .expect_err("different-target harvest collision must fail");
+    assert!(
+        err.to_string().contains("collides"),
+        "collision names the conflict: {err}"
+    );
+}
+/// Nothing bare leaks from an aliased import: `["d" AS D]` exposes
+/// `D::THING` only. A bare `THING` in the importer fails naming the
+/// unknown type.
+#[test]
+fn aliased_import_exposes_types_only_qualified() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "d.oxfile",
+        indoc! {r#"
+            TYPE THING = MAP<x: STRING>
+            FUNC MK($x: STRING) {
+                LET $t: THING = {x: $x}
+                RETURN $t.x
+            }
+            EXPORT [TYPE THING, FUNC MK]
+        "#},
+    );
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["d.oxfile" AS D]
+                LET $t: D::THING = {x: "hi"}
+                LET $y: STRING = D::MK("yo")
+                WRITE out.txt "{{ $t.x }} {{ $y }}"
+            "#},
+        )
+        .expect("qualified type resolves");
+    assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hi yo");
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["d.oxfile" AS D]
+                LET $t: THING = {x: "hi"}
+                WRITE out2.txt "nope"
+            "#},
+        )
+        .expect_err("bare use of an aliased import must fail");
+    assert!(
+        err.to_string().contains("unknown type 'THING'"),
+        "bare name stays unknown: {err}"
+    );
+}
+
+/// A library's own TYPE harvest satisfies its own file: importing
+/// `lib.oxfile` (which harvests POINT from `types.oxfile`) needs no
+/// entry-side TYPE import, neither for the import gate nor when its
+/// functions run.
+#[test]
+fn aliased_file_own_type_harvest_covers_signatures_and_bodies() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "types.oxfile",
+        indoc! {r#"
+            TYPE POINT = MAP<x: STRING, y?: STRING>
+            EXPORT [TYPE POINT]
+        "#},
+    );
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [TYPE POINT FROM "types.oxfile"]
+            FUNC MAKE($x: STRING) {
+                LET $p: POINT = {x: $x}
+                RETURN $p.x
+            }
+            FUNC SHOW($p: POINT) {
+                RETURN $p.x
+            }
+            EXPORT [MAKE, SHOW]
+        "#},
+    );
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["lib.oxfile" AS L]
+                LET $y: STRING = L::MAKE("hi")
+                LET $z: STRING = L::SHOW({x: "yo"})
+                WRITE out.txt "{{ $y }}::{{ $z }}"
+            "#},
+        )
+        .expect("own harvest covers validation and execution");
+    assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hi::yo");
+}
+
 #[test]
 fn custom_type_flows_through_declare_and_hosts() {
     let temp = GuardedPath::tempdir().unwrap();

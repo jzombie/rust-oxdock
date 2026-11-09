@@ -1,0 +1,29 @@
+## Overview
+
+`oxdock-render` generates text files from templates and data files, so generated files never drift from their sources. Its first job is this workspace's own docs: every `README.md`, the install scripts, and the CI action are rendered from templates under `.oxdock/template/`, and CI fails if a generated file does not match a fresh render. The same engine generates any text artifacts, not just Markdown: one config lists targets, and each target names its output file, its template, its data, and its fragment folders.
+
+Render this workspace:
+
+```sh
+cargo run -p oxdock-render
+```
+
+Render another checkout with its own pipeline:
+
+```sh
+oxdock-render --root /path/to/repo --config render.json
+```
+
+See what would run without writing anything:
+
+```sh
+oxdock-render --root /path/to/repo --print-child
+```
+
+Flags: `--root <path>` (workspace root, default: discovered),
+`--config <path>` (pipeline config, default: `render.json`),
+`--print-child` (print the generated script, skip the run).
+
+Fail-closed throughout: duplicate target names, zero discovered
+targets, misspelled placeholders, and unknown values fail the run
+instead of writing wrong outputs.

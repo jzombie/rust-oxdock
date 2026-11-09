@@ -297,7 +297,15 @@ impl PathResolver {
         }
         #[cfg(not(unix))]
         {
-            let _ = path;
+            // Parity probe: Unix stats the file through set_permissions
+            // and fails on a missing path, so the no-op must stat too.
+            // Only the bit is platform-specific; a ghost fails
+            // everywhere with the same context.
+            let guarded = self
+                .check_access(path.as_path(), AccessMode::Write)
+                .with_context(|| format!("set_permissions denied for {}", path.display()))?;
+            std::fs::metadata(guarded.as_path())
+                .with_context(|| format!("failed to set permissions on {}", guarded.display()))?;
             let _ = mode;
         }
         Ok(())

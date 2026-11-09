@@ -112,6 +112,11 @@ jobs:
 
           RUN ["cargo", "build", "--release", "-p", "oxdock", "--all-features"]
 
+          # Same release build for the renderer: the render legs
+          # install this product through the stub, which fetches the
+          # interpreter tarball above as its ephemeral engine.
+          RUN ["cargo", "build", "--release", "-p", "oxdock-render", "--all-features"]
+
           # Identity: the binary must report the manifest version it
           # was built from. Skew fails here, before anything stages.
           LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
@@ -149,6 +154,21 @@ jobs:
           COPY install.sh {{ $stage }}/install.sh
           COPY install.ps1 {{ $stage }}/install.ps1
           COPY install.oxfile {{ $stage }}/install.oxfile
+          # Renderer product, staged like the release: every binary of
+          # the package at the tarball top level, sidecar included.
+          # Members stay relative to this dir so the stub's flat
+          # inventory matches the real asset layout.
+          [family:unix] LET $cbin: STRING = "oxdock-render"
+          [family:windows] LET $cbin: STRING = "oxdock-render.exe"
+          [family:unix] LET $cchild: STRING = "oxdock-render-child"
+          [family:windows] LET $cchild: STRING = "oxdock-render-child.exe"
+          LET $casset: STRING = "oxdock-render-{{ $target }}.tar.gz"
+          LET $cpkg: STRING = PATH_JOIN($stage, "render-pkg")
+          MKDIR {{ $cpkg }}
+          LET $cb1: STRING = PATH_JOIN($cpkg, $cbin)
+          LET $cb2: STRING = PATH_JOIN($cpkg, $cchild)
+          COPY target/release/{{ $cbin }} {{ $cb1 }}
+          COPY target/release/{{ $cchild }} {{ $cb2 }}
           WORKDIR {{ $stage }}
 
           # Self-hosted pack: the pinned engine carries ARCHIVE, so
@@ -156,6 +176,8 @@ jobs:
           # tar, whose `D:`-as-remote-tape quirk on Windows forced
           # this relative dance originally.
           ARCHIVE {{ $assetbin }} {{ $asset }}
+          ARCHIVE render-pkg {{ $casset }}
+          REMOVE --recursive render-pkg
 
           # Native hashing: HASH_SHA256 digests each bundled file
           # identically on every platform, so the forged checksums never
@@ -164,10 +186,11 @@ jobs:
           # entry per bundled file, canonical two-space separator, bare
           # installer names exactly as the release writes them.
           LET $h_asset: STRING = HASH_SHA256($asset)
+          LET $h_casset: STRING = HASH_SHA256($casset)
           LET $h_sh: STRING = HASH_SHA256("install.sh")
           LET $h_ps1: STRING = HASH_SHA256("install.ps1")
           LET $h_ox: STRING = HASH_SHA256("install.oxfile")
-          WRITE SHA256SUMS "{{ $h_asset }}  {{ $asset }}\n{{ $h_sh }}  install.sh\n{{ $h_ps1 }}  install.ps1\n{{ $h_ox }}  install.oxfile\n"
+          WRITE SHA256SUMS "{{ $h_asset }}  {{ $asset }}\n{{ $h_casset }}  {{ $casset }}\n{{ $h_sh }}  install.sh\n{{ $h_ps1 }}  install.ps1\n{{ $h_ox }}  install.oxfile\n"
 
       # No bare-binary artifact: artifact zips strip the Unix execute
       # bit in transit, and a harness chmod would silently repair a
@@ -385,6 +408,98 @@ jobs:
           WITH_IO [stdin=$p] RUN ["oxdock", "--script", "-"]
           AWAIT $t
           ASSERT_CONTAINS stdout "via-stdin"
+
+          CANCEL $srv
+
+  render:
+    name: render (${{ matrix.os }})
+    needs: [parse, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-26.04-arm, macos-latest, windows-latest, windows-11-arm]
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download staged release
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-stage-${{ matrix.os }}
+          path: ${{ runner.temp }}/oxdock-stage
+
+      # Bootstrap interpreter only: installed as `oxdock-engine` so
+      # bare names stay free for the binaries under test. Pinned, so
+      # legs stay within a stable vocabulary.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          source: ${{ env.OXDOCK_ENGINE_SOURCE }}
+          binary-name: oxdock-engine
+
+      # Non-interpreter product through the stub: the oxdock tarball
+      # serves as the ephemeral engine (downloaded, verified, and
+      # unpacked by the stub, never placed), and only the renderer
+      # members land. Own port, isolated destination, cold cache.
+      - name: Install renderer
+        shell: oxdock-engine --script {0}
+        env:
+          # product: always-local: installs the staged branch build.
+          VERSION: local-test
+          SMOKE_PORT: 18736
+          INSTALL_DIR_NIX: ${{ runner.temp }}/oxbin-render
+          INSTALL_DIR_WIN: ${{ runner.temp }}\oxbin-render
+          # Legs exercise the branch's own installer logic, not whatever
+          # main happens to carry. Kept off the job env so the pinned
+          # bootstrap stays on the release's own oxfile.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, INSTALL_DIR_NIX, INSTALL_DIR_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, GITHUB_PATH, GITHUB_ENV]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV INSTALL_DIR="{{ env:INSTALL_DIR_NIX }}"
+          [family:windows] ENV INSTALL_DIR="{{ env:INSTALL_DIR_WIN }}"
+          ENV OXDOCK_PRODUCT="oxdock-render"
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
+
+          # Bounded readiness wait in shell: the DSL has no try/retry
+          # (see #243), so a slow listener gets 30s and a dead one fails
+          # with listener state in the log instead of a bare connect timeout.
+          [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
+
+          LET $o: PIPE
+          [family:unix] WITH_IO [stdout=$o] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [stdout=$o] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          ASSERT_CONTAINS $o "installed oxdock-render local-test to "
+
+          # Placement proof: the renderer and its sidecar land, and the
+          # ephemeral interpreter does not. Suffix rides the platform
+          # the same way the stub names it.
+          [family:unix] LET $exe: STRING = ""
+          [family:windows] LET $exe: STRING = ".exe"
+          LET $dir: STRING = "{{ env:INSTALL_DIR }}"
+          LET $k1: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock-render{{ $exe }}"))
+          ASSERT_EQ $k1 "file"
+          LET $k2: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock-render-child{{ $exe }}"))
+          ASSERT_EQ $k2 "file"
+          LET $k3: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock{{ $exe }}"))
+          ASSERT_EQ $k3 "absent"
+
+          # PATH publish proof: the sidecar branch appends the
+          # destination without any version gate.
+          LET $gp: STRING = "{{ env:GITHUB_PATH }}"
+          LET $gb: STRING = READ $gp
+          ASSERT_CONTAINS $gb $dir
 
           CANCEL $srv
 
@@ -1282,6 +1397,7 @@ jobs:
           [family:windows] LET $srcbin: STRING = PATH_JOIN($work, "oxdock.exe")
           ENV OXDOCK_BIN="{{ $srcbin }}"
           LET $prebuiltbindir: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-prebuilt-bin")
+          ENV OXDOCK_PRODUCT="oxdock"
           ENV OXDOCK_DIR="{{ $prebuiltbindir }}"
           ENV OXDOCK_VERSION="local-test"
           ENV OXDOCK_BINARY_NAME="oxdock-prebuilt"

@@ -92,13 +92,7 @@ impl<P: ProcessManager> McpSession<P> {
         state.validate_function_type_tags()?;
         let saved_aliases = state.type_aliases.clone();
         let closure = super::import::expand_import_closure(&mut state, &parsed.steps)?;
-        for file in &closure {
-            let aliases = super::typing::collect_type_aliases(&file.steps, &state)?;
-            for (name, target) in &aliases {
-                state.type_aliases.insert(name.clone(), target.clone());
-            }
-        }
-        super::static_check::validate_script_closure(&parsed.steps, &closure, &state)?;
+        super::static_check::validate_script_closure(&parsed.steps, &closure, &mut state)?;
         // Entry `EXPORT TYPE` names must be locally defined or re-exported
         // from the closure (bare re-exports only in v1; qualified stays
         // future). MCP skips types for tools, but typos still fail here.

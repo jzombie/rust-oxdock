@@ -71,12 +71,12 @@ jobs:
 
           LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
+          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}"
 
           LET $report: STRING = RUN ["rustc", "-Vv"]
           LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
           ECHO "rustc: {{ $rustc }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
+          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}"
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -134,6 +134,45 @@ jobs:
           LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["cargo", "sort", "--workspace", "--check"]
+
+      # Publish guard: any crate named `docs-gen` must stay
+      # `publish = false` (the old pipeline name and the compat
+      # pointer both). A missing key or any truthy value fails naming
+      # the member, so the name can never become public API by
+      # accident. Reads every workspace member manifest; no cargo
+      # metadata needed.
+      - name: Check docs-gen publish guard
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
+          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
+          LET $root: MAP<ANY> = LOAD_TOML("Cargo.toml")
+          LET $members: LIST<STRING> = $root.workspace.members
+          FOR $m: STRING IN $members {
+            LET $manifest: MAP<ANY> = LOAD_TOML("{{ $m }}/Cargo.toml")
+            IF HAS_KEY($manifest, "package") {
+              LET $pkg: MAP<ANY> = $manifest.package
+              IF $pkg.name == "docs-gen" {
+                IF !HAS_KEY($pkg, "publish") {
+                  ECHO "member '{{ $m }}' is named docs-gen but sets no publish flag; it must stay publish = false"
+                  EXIT 1
+                }
+                IF TYPE_OF($pkg.publish) != "BOOL" {
+                  ECHO "member '{{ $m }}' is named docs-gen with a non-boolean publish flag; it must stay publish = false"
+                  EXIT 1
+                }
+                IF $pkg.publish {
+                  ECHO "member '{{ $m }}' is named docs-gen but is publishable; it must stay publish = false"
+                  EXIT 1
+                }
+              }
+            }
+          }
+          ECHO "publish guard holds: every docs-gen crate is publish = false"
 
       - name: Check formatting
         shell: oxdock --script {0}
@@ -224,11 +263,11 @@ jobs:
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
+          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}"
           LET $report: STRING = RUN ["rustc", "-Vv"]
           LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
           ECHO "rustc: {{ $rustc }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
+          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}"
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -317,11 +356,11 @@ jobs:
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
+          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}"
           LET $report: STRING = RUN ["rustc", "-Vv"]
           LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
           ECHO "rustc: {{ $rustc }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
+          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}"
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -402,11 +441,11 @@ jobs:
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           LET $lock: STRING = CI_HELPERS::LOCKFILE_HASH()
           ECHO "lockfile: {{ $lock }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
+          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}"
           LET $report: STRING = RUN ["rustc", "-Vv"]
           LET $rustc: STRING = CI_HELPERS::RUSTC_HASH($report)
           ECHO "rustc: {{ $rustc }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}\n"
+          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $rustc }}"
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -471,8 +510,8 @@ jobs:
             $pct = TEXT_TRIM_SUFFIX($fields.9, "%")
           }
           ECHO "line coverage: {{ $pct }}"
-          APPEND "{{ env:GITHUB_OUTPUT }}" "line_percent={{ $pct }}\n"
-          APPEND "{{ env:GITHUB_STEP_SUMMARY }}" "### Coverage summary\n\n{{ $summary }}\n"
+          APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "line_percent={{ $pct }}"
+          APPEND_LINE "{{ env:GITHUB_STEP_SUMMARY }}" "### Coverage summary\n\n{{ $summary }}"
 
       - name: Upload to Coveralls
         uses: coverallsapp/github-action@v2

@@ -478,6 +478,14 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         &self.state.cwd
     }
 
+    /// Run root (guarded): the workspace the run was launched over.
+    /// Unlike [`cwd`](Self::cwd), this never follows module-scope
+    /// directories, so host helpers that read run-level files resolve
+    /// identically from entry and hook scope.
+    pub fn workspace_root(&self) -> &GuardedPath {
+        self.state.fs.root()
+    }
+
     /// Shared snapshot of every registered pure function, keyed by
     /// qualified name. Lets host-driven expansion resolve
     /// `{{ MODULE::FUNC(args) }}` through the live registry instead of
@@ -915,6 +923,10 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let to_resolved = super::args::resolve_arg(to, &mut cx)?;
             handlers::install(&mut cx, &from_resolved, &to_resolved)
         }
+        StepKind::SetExecutable { path } => {
+            let resolved = super::args::resolve_arg(path, &mut cx)?;
+            handlers::set_executable(&mut cx, &resolved)
+        }
         StepKind::Ls(arg) => {
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
             handlers::ls(&mut cx, &resolved)
@@ -949,6 +961,11 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
             handlers::append(&mut cx, &path_resolved, contents_resolved.as_deref())
+        }
+        StepKind::AppendLine { path, contents } => {
+            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+            let contents_resolved = super::args::resolve_arg(contents, &mut cx)?;
+            handlers::append_line(&mut cx, &path_resolved, &contents_resolved)
         }
         StepKind::Remove { path, recursive } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
@@ -1273,6 +1290,10 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 let to_resolved = super::args::resolve_arg(to, &mut cx)?;
                                 handlers::install(&mut cx, &from_resolved, &to_resolved)
                             }
+                            StepKind::SetExecutable { path } => {
+                                let resolved = super::args::resolve_arg(path, &mut cx)?;
+                                handlers::set_executable(&mut cx, &resolved)
+                            }
                             StepKind::Ls(arg) => {
                                 let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
                                 handlers::ls(&mut cx, &resolved)
@@ -1322,6 +1343,12 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                     &path_resolved,
                                     contents_resolved.as_deref(),
                                 )
+                            }
+                            StepKind::AppendLine { path, contents } => {
+                                let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+                                let contents_resolved =
+                                    super::args::resolve_arg(contents, &mut cx)?;
+                                handlers::append_line(&mut cx, &path_resolved, &contents_resolved)
                             }
                             StepKind::Remove { path, recursive } => {
                                 let path_resolved = super::args::resolve_arg(path, &mut cx)?;

@@ -16,13 +16,26 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v0.35.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
+#   $env:VERSION = 'v0.36.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
 #
+# Pass OXDOCK_PRODUCT to choose the release product (default
+# `oxdock`; `oxdock-render` installs the renderer). The asset and
+# the installed stem both follow the product unless OXDOCK_BINARY_NAME
+# overrides the stem. Non-interpreter products fetch the `oxdock`
+# asset as an ephemeral engine; it runs the installer and is never
+# placed.
+#
+# Pass OXDOCK_BINS to choose which tarball members to place
+# (space-separated basenames, `.exe` optional on Windows; default
+# places the whole product). The primary takes the OXDOCK_BINARY_NAME
+# stem, companions keep their tarball names. Unknown names fail
+# listing the tarball members.
+#
 # Pass OXDOCK_BINARY_NAME to choose the installed stem (default
-# `oxdock`; the installer appends `.exe` on Windows). CI passes
+# follows the product; the installer appends `.exe` on Windows). CI passes
 # `oxdock-engine` to free the bare name for a binary under test.
 #
 # Point OXDOCK_ENGINE at a branch-built binary to run the installer
@@ -54,7 +67,12 @@ if (-not $Version -or $Version -eq 'latest') {
 }
 
 # Install name and expected version ride through untouched: the
-# single strip lives in install.oxfile, never here.
+# single strip lives in install.oxfile, never here. The product
+# selects the asset; the stem defaults to the product so each release
+# installs under its own name unless OXDOCK_BINARY_NAME says
+# otherwise.
+$Product = if ($env:OXDOCK_PRODUCT) { $env:OXDOCK_PRODUCT } else { 'oxdock' }
+$RawName = if ($env:OXDOCK_BINARY_NAME) { $env:OXDOCK_BINARY_NAME } else { $Product }
 
 $ArchTarget = switch ($env:PROCESSOR_ARCHITECTURE) {
   'AMD64' { 'x86_64-pc-windows-msvc' }
@@ -65,7 +83,16 @@ $ArchTarget = switch ($env:PROCESSOR_ARCHITECTURE) {
 
 }
 
-$Asset = "oxdock-$ArchTarget.tar.gz"
+$Asset = "$Product-$ArchTarget.tar.gz"
+
+# Non-interpreter products cannot run the installer logic themselves:
+# the interpreter tarball rides along as an ephemeral engine. It is
+# unpacked to scratch and executed, never placed: only the product
+# members land in the destination. An explicit OXDOCK_ENGINE wins and
+# skips this download. Mirrors install.oxfile PRODUCT_CHECKS_VERSION:
+# only "oxdock" interprets.
+$EngineAsset = "oxdock-$ArchTarget.tar.gz"
+$NeedsEngine = ($Product -ne 'oxdock') -and (-not $env:OXDOCK_ENGINE)
 
 $VDir = Join-Path $CacheRoot $Version
 
@@ -89,8 +116,35 @@ function Test-CachedAsset {
   if (-not $expected) { return $false }
   $actual = (Get-FileHash $path -Algorithm SHA256).Hash
 
-  return $expected.ToLowerInvariant() -eq $actual.ToLowerInvariant()
+  if ($expected.ToLowerInvariant() -ne $actual.ToLowerInvariant()) { return $false }
 
+  # Warm only when every needed asset verifies: warm runs never touch
+  # network, so a missing or corrupt interpreter asset repopulates
+  # like the product one.
+  if ($NeedsEngine) {
+    $enginePath = Join-Path $VDir $EngineAsset
+    if (-not (Test-Path $enginePath)) { return $false }
+    $engineExpected = ((Get-Content $sums) | Where-Object { $_ -match "$EngineAsset" } | Select-Object -First 1) -split '\s+' | Select-Object -First 1
+    if (-not $engineExpected) { return $false }
+    $engineActual = (Get-FileHash $enginePath -Algorithm SHA256).Hash
+    if ($engineExpected.ToLowerInvariant() -ne $engineActual.ToLowerInvariant()) { return $false }
+  }
+
+  return $true
+
+}
+
+# One unpack shape for product and engine alike: stage into a fresh
+# dir and resolve the named exe. The tarballs carry `.exe`
+# names, so the stem plus extension is the probe. Fails closed when
+# the tarball held nothing expected.
+function Expand-TarballExe {
+  param([string]$Asset, [string]$Dest, [string]$Stem, [string]$Label)
+  New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+  tar.exe -xzf (Join-Path $VDir $Asset) -C $Dest
+  $candidate = Join-Path $Dest "$Stem.exe"
+  if (-not (Test-Path $candidate -PathType Leaf)) { throw "no $Label unpacked from $Asset" }
+  return $candidate
 }
 
 # Same hash as last time means same bytes: reuse the cached tarball
@@ -99,9 +153,9 @@ function Test-CachedAsset {
 # writes: Write-Warning follows stdout when stdout is redirected, so
 # pipe captures would miss the announcement.
 if (Test-CachedAsset) {
-  [Console]::Error.WriteLine("using cached oxdock $VERSION")
+  [Console]::Error.WriteLine("using cached $PRODUCT $VERSION")
 } else {
-  [Console]::Error.WriteLine("downloading oxdock $VERSION")
+  [Console]::Error.WriteLine("downloading $PRODUCT $VERSION")
 
   $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
 
@@ -111,6 +165,12 @@ if (Test-CachedAsset) {
 
     Invoke-WebRequest "$base/$Asset" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'asset.tar.gz')
 
+    # Ephemeral interpreter for non-interpreter products, cached
+    # beside the product below. Never placed: only executed.
+    if ($NeedsEngine) {
+      Invoke-WebRequest "$base/$EngineAsset" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'engine.tar.gz')
+    }
+
     Invoke-WebRequest "$base/SHA256SUMS" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'SHA256SUMS')
 
     $line = (Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1
@@ -119,6 +179,17 @@ if (Test-CachedAsset) {
 
     $actual = (Get-FileHash (Join-Path $tmp 'asset.tar.gz') -Algorithm SHA256).Hash
     if ($expected.ToLowerInvariant() -ne $actual.ToLowerInvariant()) { throw "checksum mismatch for $Asset" }
+
+    # The engine tarball verifies against the same checksums file,
+    # which is why this runs after its download above.
+    if ($NeedsEngine) {
+      $engineLine = (Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match "$EngineAsset" } | Select-Object -First 1
+      if (-not $engineLine) { throw "asset $EngineAsset missing from SHA256SUMS" }
+      $engineExpected = ($engineLine -split '\s+')[0]
+
+      $engineActual = (Get-FileHash (Join-Path $tmp 'engine.tar.gz') -Algorithm SHA256).Hash
+      if ($engineExpected.ToLowerInvariant() -ne $engineActual.ToLowerInvariant()) { throw "checksum mismatch for $EngineAsset" }
+    }
 
     # Installer logic rides with the release bundle. An explicit
     # OXDOCK_OXFILE_URL wins over the bundle (pre-merge testing,
@@ -140,6 +211,10 @@ if (Test-CachedAsset) {
     Invoke-WebRequest "$base/install.sh" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.sh')
 
     Move-Item (Join-Path $tmp 'asset.tar.gz') (Join-Path $VDir $Asset) -Force
+
+    if ($NeedsEngine) {
+      Move-Item (Join-Path $tmp 'engine.tar.gz') (Join-Path $VDir $EngineAsset) -Force
+    }
 
     Move-Item (Join-Path $tmp 'SHA256SUMS') (Join-Path $VDir 'SHA256SUMS') -Force
 
@@ -246,7 +321,20 @@ try {
 
   $env:OXDOCK_ASSET = (Join-Path $VDir $Asset)
 
-  $env:OXDOCK_BIN = (Join-Path $tmp 'x\oxdock.exe')
+  # The product tarball holds every binary of the product: bridge the
+  # full member inventory plus the primary's tarball name, so the
+  # installer places any subset by name with no pattern assumptions.
+  # Fail closed when the tarball held nothing expected.
+  $env:OXDOCK_BIN = Expand-TarballExe $Asset (Join-Path $tmp 'x') $Product 'binary'
+  $env:OXDOCK_SIBLING_DIR = (Join-Path $tmp 'x')
+  $env:OXDOCK_MEMBERS = ((Get-ChildItem (Join-Path $tmp 'x\*') -File | ForEach-Object { $_.Name }) -join "`n")
+  $env:OXDOCK_PRIMARY = (Split-Path $env:OXDOCK_BIN -Leaf)
+
+  # Ephemeral interpreter for non-interpreter products: unpacked
+  # beside the product, executed below, never placed.
+  if ($NeedsEngine) {
+    $EngineCandidate = Expand-TarballExe $EngineAsset (Join-Path $tmp 'engine') 'oxdock' 'interpreter'
+  }
 
   # Destination default lives here in native shell; empty keeps the
   # installer's loud gate. The engine normalizes separators itself.
@@ -256,17 +344,22 @@ try {
 
   $env:OXDOCK_VERSION = $Version
 
+  $env:OXDOCK_BINARY_NAME = $RawName
+
+  $env:OXDOCK_PRODUCT = $Product
+
   $env:OXDOCK_EXPECTED_VERSION = $Version
 
   $env:OXDOCK_SKIP_DOWNLOAD = 'false'
 
   # An explicit OXDOCK_ENGINE runs the installer instead of the
   # unpacked release; it must name an existing file, and fails closed
-  # otherwise.
+  # otherwise. A non-interpreter product without one runs under the
+  # ephemeral interpreter unpacked above.
   # Resolve relative to the caller's directory: execution below runs
   # from the scratch dir, where a relative path would no longer point
   # at the engine.
-  $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } else { (Join-Path $tmp 'x\oxdock.exe') }
+  $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } elseif ($NeedsEngine) { $EngineCandidate } else { $env:OXDOCK_BIN }
 
   if (-not (Test-Path $Engine)) { throw "installer engine missing: $Engine" }
 
@@ -282,27 +375,33 @@ try {
 
     if ($code -ne 0) { throw "installer failed with exit code $code" }
 
-    # CI tail under the fresh binary: the oxfile above verified and
-    # placed under the old engine; re-running the same file with SKIP=1
-    # proves the fresh binary runs DSL before its directory lands on
-    # PATH. Gated here on the PATH file alone (the oxfile owns the
-    # version gate), and never in piped-run mode: nothing was placed
-    # there, so no fresh binary exists. Off-runner installs skip
-    # silently either way.
+    # CI tail under the proof binary: the oxfile above verified and
+    # placed; re-running the same file with SKIP=1 verifies placement
+    # and publishes PATH before the directory lands on it. The proof
+    # binary is the fresh install when it interprets (oxdock), else
+    # the ephemeral engine that placed the product. Gated here on the
+    # PATH file as well (the oxfile owns the version gate), and never
+    # in piped-run mode: nothing was placed there, so no fresh binary
+    # exists. Off-runner installs skip silently either way.
     if (-not $env:OXDOCK_PIPED_SCRIPT -and $env:GITHUB_PATH -and (Test-Path $env:GITHUB_PATH -PathType Leaf)) {
-      $RawName = if ($env:OXDOCK_BINARY_NAME) { $env:OXDOCK_BINARY_NAME } else { 'oxdock' }
+      $TailBin = $Engine
+      if ($Product -eq 'oxdock') {
+        $RawName = if ($env:OXDOCK_BINARY_NAME) { $env:OXDOCK_BINARY_NAME } else { $Product }
 
-      if ($RawName -like '*.exe') {
-        $Fresh = Join-Path $env:OXDOCK_DIR $RawName
-      } else {
-        $Fresh = Join-Path $env:OXDOCK_DIR "$RawName.exe"
+        if ($RawName -like '*.exe') {
+          $Fresh = Join-Path $env:OXDOCK_DIR $RawName
+        } else {
+          $Fresh = Join-Path $env:OXDOCK_DIR "$RawName.exe"
+        }
+
+        $TailBin = $Fresh
       }
 
       $env:OXDOCK_EXPECTED_VERSION = $Version
       $env:OXDOCK_SKIP_DOWNLOAD = 'true'
 
       try {
-        & $Fresh (Join-Path $tmp 'install.oxfile')
+        & $TailBin (Join-Path $tmp 'install.oxfile')
 
         $freshCode = $LASTEXITCODE
 

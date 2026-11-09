@@ -189,6 +189,69 @@ impl PartialEq for Stmt {
 
 impl Eq for Stmt {}
 
+/// True when a newline continues the statement for a multi-line
+/// generic: the body opens a type-carrying statement (TYPE/LET/FOR)
+/// and holds an unclosed `<...>` shape. Only a joint `<` after an
+/// uppercase word opens (never `<=`, never `$VAR<`), so spaced
+/// comparisons keep ending the statement as before. FUNC needs no
+/// gate: parameter types ride inside the atomic paren group, and the
+/// grammar defines no return-type position after the group.
+fn type_continuation_rides(body: &[Tok], next: Option<&Tok>) -> bool {
+    if !matches!(
+        body.first().map(|t| &t.kind),
+        Some(TokKind::Word(w)) if w == KEYWORD_TYPE || w == KEYWORD_LET || w == KEYWORD_FOR
+    ) {
+        return false;
+    }
+    open_generic_depth(body, next) > 0
+}
+
+/// Unclosed `<...>` depth over a statement body: a joint `<` after
+/// an uppercase word opens (generic instantiation), `>` closes.
+fn open_generic_depth(body: &[Tok], next: Option<&Tok>) -> usize {
+    let mut depth = 0usize;
+    for (idx, tok) in body.iter().enumerate() {
+        if !matches!(&tok.kind, TokKind::Punct('<')) {
+            if matches!(&tok.kind, TokKind::Punct('>')) && depth > 0 {
+                depth -= 1;
+            }
+            continue;
+        }
+        if !tok.joint {
+            continue;
+        }
+        if idx == 0 {
+            continue;
+        }
+        if !matches!(
+            body.get(idx - 1).map(|t| &t.kind),
+            Some(TokKind::Word(w)) if is_upper_ident(w)
+        ) {
+            continue;
+        }
+        // `$VAR<` is a comparison, never a generic.
+        if idx >= 2
+            && body.get(idx - 1).is_some_and(|t| t.joint)
+            && matches!(
+                body.get(idx - 2).map(|t| &t.kind),
+                Some(TokKind::Punct('$'))
+            )
+        {
+            continue;
+        }
+        // `<=` is a comparison lead, never a generic open.
+        let followed_by_eq = matches!(
+            body.get(idx + 1).map(|t| &t.kind),
+            Some(TokKind::Punct('='))
+        ) || (idx + 1 == body.len()
+            && matches!(next.map(|t| &t.kind), Some(TokKind::Punct('='))));
+        if !followed_by_eq {
+            depth += 1;
+        }
+    }
+    depth
+}
+
 /// Grammar-state boundary decision: does this `Newline`/`Semicolon`
 /// end the statement? Groups are atomic, so every statement fits one
 /// logical token line; every keyword-headed statement (commands,
@@ -604,6 +667,16 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
                     // following brace matters (see `brace_detached`).
                     detached = true;
                     line += 1;
+                    i += 1;
+                    continue;
+                }
+                // Multi-line generics: a newline inside an unclosed
+                // `<...>` rides into the body, so `MAP<...>` shapes may
+                // span lines. Anything else ends here as before.
+                if type_continuation_rides(&body, toks.get(i + 1)) {
+                    line += 1;
+                    body.push(tok.clone());
+                    detached = false;
                     i += 1;
                     continue;
                 }
@@ -3724,25 +3797,41 @@ fn peek_dollar_var(toks: &[Tok], pos: usize) -> Option<(String, usize)> {
     }
 }
 
+/// Skip statement-level newlines (multi-line `<...>` shapes ride
+/// them into the body) before the next type token. Narrower than
+/// `gap_nl` on purpose: comments keep failing here exactly like
+/// single-line shapes, so only the separator moves.
+fn skip_type_nl(toks: &[Tok], mut p: usize) -> usize {
+    while matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Newline)) {
+        p += 1;
+    }
+    p
+}
+
 /// Maximal `type_tag` match over toks (non-atomic: gaps free
 /// everywhere): atoms with `<>` args, `|` unions, `name?:` fields.
 /// Returns the exclusive end index, or `None` on shape miss.
 fn parse_type_shape(toks: &[Tok], pos: usize) -> Option<usize> {
-    let mut p = parse_type_atom(toks, pos)?;
-    while matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('|'))) {
-        p = parse_type_atom(toks, p + 1)?;
+    let mut p = parse_type_atom(toks, skip_type_nl(toks, pos))?;
+    loop {
+        let q = skip_type_nl(toks, p);
+        if !matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Punct('|'))) {
+            return Some(p);
+        }
+        p = parse_type_atom(toks, skip_type_nl(toks, q + 1))?;
     }
-    Some(p)
 }
 
 fn parse_type_atom(toks: &[Tok], pos: usize) -> Option<usize> {
+    let pos = skip_type_nl(toks, pos);
     match toks.get(pos).map(|t| &t.kind) {
         Some(TokKind::Word(w)) if is_upper_ident(w) => {}
         _ => return None,
     }
-    let mut p = pos + 1;
+    let mut p = skip_type_nl(toks, pos + 1);
     if matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('<'))) {
-        p = parse_type_args(toks, p + 1)?;
+        p = parse_type_args(toks, skip_type_nl(toks, p + 1))?;
+        p = skip_type_nl(toks, p);
         if !matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('>'))) {
             return None;
         }
@@ -3752,26 +3841,29 @@ fn parse_type_atom(toks: &[Tok], pos: usize) -> Option<usize> {
 }
 
 fn parse_type_args(toks: &[Tok], pos: usize) -> Option<usize> {
-    let mut p = parse_type_field(toks, pos)?;
-    while matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct(','))) {
-        p = parse_type_field(toks, p + 1)?;
+    let mut p = parse_type_field(toks, skip_type_nl(toks, pos))?;
+    loop {
+        let q = skip_type_nl(toks, p);
+        if !matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Punct(','))) {
+            return Some(p);
+        }
+        p = parse_type_field(toks, skip_type_nl(toks, q + 1))?;
     }
-    Some(p)
 }
 
 fn parse_type_field(toks: &[Tok], pos: usize) -> Option<usize> {
-    let mut p = pos;
+    let mut p = skip_type_nl(toks, pos);
     // Optional `name?:` prefix (lowercase names only, like the
     // grammar's `field_name`).
     if let Some(TokKind::Word(w)) = toks.get(p).map(|t| &t.kind)
         && is_lower_ident(w)
     {
-        let mut q = p + 1;
+        let mut q = skip_type_nl(toks, p + 1);
         if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Punct('?'))) {
-            q += 1;
+            q = skip_type_nl(toks, q + 1);
         }
         if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Punct(':'))) {
-            p = q + 1;
+            p = skip_type_nl(toks, q + 1);
         }
     }
     parse_type_shape(toks, p)
@@ -4401,15 +4493,38 @@ fn parse_import_statement(
     {
         // Comma-separated entries, `ws` gaps (newlines ok inside and
         // around entries, comments MISS — `ws` admits neither).
-        let mut parts: Vec<&[Tok]> = Vec::new();
-        let mut start = 0;
-        for (i, tok) in inner.iter().enumerate() {
-            if matches!(&tok.kind, TokKind::Punct(',')) {
-                parts.push(&inner[start..i]);
-                start = i + 1;
-            }
+        // Single-file multi-name harvests skip the split: in
+        // `[TYPE A, TYPE B FROM "f"]` the first comma-part (`[TYPE A]`)
+        // carries no FROM and is invalid alone, so the whole bracket
+        // is one harvest (see `whole_file_harvest`).
+        // Bare-multi hint: `[FOO, BAR FROM "f"]` reads FOO as a
+        // module for back-compat (bare words stay modules in single
+        // brackets). If that word is not a known module but a harvest
+        // follows, fail fast naming the two valid spellings instead
+        // of the misleading unknown-module error.
+        let whole = whole_file_harvest(inner);
+        if whole.is_none()
+            && let Some(word) = single_bare_first_part(inner)
+            && !ctx.modules.modules.contains_key(word)
+            && has_top_level_from_after_comma(inner)
+        {
+            return Err(fail(format!(
+                "unknown module `{word}`; to harvest multiple names qualify each kind (`IMPORT [FUNC FOO, FUNC BAR FROM \"f\"]`)"
+            )));
         }
-        parts.push(&inner[start..]);
+        let mut parts: Vec<&[Tok]> = Vec::new();
+        if whole.is_some() {
+            parts.push(inner);
+        } else {
+            let mut start = 0;
+            for (i, tok) in inner.iter().enumerate() {
+                if matches!(&tok.kind, TokKind::Punct(',')) {
+                    parts.push(&inner[start..i]);
+                    start = i + 1;
+                }
+            }
+            parts.push(&inner[start..]);
+        }
         for part in parts {
             let dense: Vec<&Tok> = part
                 .iter()
@@ -4767,6 +4882,89 @@ fn parse_from_entry(inner: &[Tok]) -> Option<HarvestImport> {
     }
 }
 
+/// First comma-part of a bracket when it is exactly one bare
+/// uppercase word: the back-compat module reading. Anything else
+/// (prefixed names, groups, multiple words) is not a bare module.
+fn single_bare_first_part(inner: &[Tok]) -> Option<&str> {
+    let end = inner
+        .iter()
+        .position(|t| matches!(&t.kind, TokKind::Punct(',')))
+        .unwrap_or(inner.len());
+    let mut words = inner[..end]
+        .iter()
+        .filter(|t| !matches!(&t.kind, TokKind::Newline));
+    match (words.next(), words.next()) {
+        (Some(tok), None) => match &tok.kind {
+            TokKind::Word(w) if is_upper_ident(w) => Some(w.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a top-level `FROM` follows the first top-level comma:
+/// distinguishes a module-plus-harvest entry (`[STD, T FROM "f"]`)
+/// from a bare word the author meant as a harvest name.
+fn has_top_level_from_after_comma(inner: &[Tok]) -> bool {
+    let mut seen_comma = false;
+    for tok in inner {
+        match &tok.kind {
+            TokKind::Punct(',') => seen_comma = true,
+            TokKind::Word(w) if seen_comma && w == KEYWORD_FROM => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whole-bracket single-file harvest (`[TYPE A, TYPE B FROM "f"]`):
+/// the comma-split would orphan `[TYPE A]` (no FROM, invalid alone),
+/// so the entire bracket parses as one harvest. Only explicitly
+/// prefixed names qualify: a bare word keeps its legacy module
+/// reading, so `[STD, TYPE T FROM "f"]` still splits into a module
+/// plus a harvest instead of harvesting STD as a function.
+fn whole_file_harvest(inner: &[Tok]) -> Option<HarvestImport> {
+    let owned: Vec<Tok> = inner.to_vec();
+    let harvest = parse_from_entry(&owned)?;
+    let dense: Vec<&Tok> = inner
+        .iter()
+        .filter(|t| !matches!(&t.kind, TokKind::Newline))
+        .collect();
+    let from = dense
+        .iter()
+        .position(|t| matches!(&t.kind, TokKind::Word(w) if w == KEYWORD_FROM))?;
+    let mut start = 0;
+    for (i, tok) in dense[..from].iter().enumerate() {
+        if matches!(&tok.kind, TokKind::Punct(',')) {
+            if !is_prefixed_name(&dense[start..i]) {
+                return None;
+            }
+            start = i + 1;
+        }
+    }
+    if !is_prefixed_name(&dense[start..from]) {
+        return None;
+    }
+    Some(harvest)
+}
+
+/// One explicitly prefixed name (`TYPE NAME` / `FUNC NAME`): the name
+/// stays gapped from its kind; the kind may joint to `[` or `,`.
+fn is_prefixed_name(part: &[&Tok]) -> bool {
+    match part {
+        [kind_tok, name_tok] if !name_tok.joint => {
+            matches!(
+                (&kind_tok.kind, &name_tok.kind),
+                (
+                    TokKind::Word(kind),
+                    TokKind::Word(_)
+                ) if kind == KEYWORD_TYPE || kind == KEYWORD_FUNC
+            )
+        }
+        _ => false,
+    }
+}
+
 /// Validate an `IMPORT` alias: hard errors (never shape misses) plus
 /// registration into the innermost import frame.
 fn validate_import_alias(alias: &str, ctx: &ParseCtx) -> Result<String, String> {
@@ -4922,6 +5120,18 @@ fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(ExportNames, usize)> {
             let mut func_names = Vec::new();
             let mut type_names = Vec::new();
             for part in split_bracket_entries(inner) {
+                let mut part = part;
+                while matches!(part.first().map(|t| &t.kind), Some(TokKind::Newline)) {
+                    part = &part[1..];
+                }
+                while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
+                    part = &part[..part.len() - 1];
+                }
+                // A trailing comma leaves an empty final entry; it
+                // carries no name and must not fail the list.
+                if part.is_empty() {
+                    continue;
+                }
                 let (name, used) = parse_export_name(part, 0)?;
                 if used != part.len() {
                     return None;
@@ -4986,6 +5196,11 @@ fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(ExportNames, usize)> {
             }
             while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
                 part = &part[..part.len() - 1];
+            }
+            // A trailing comma leaves an empty final entry; it
+            // carries no name and must not fail the list.
+            if part.is_empty() {
+                continue;
             }
             // Optional per-entry `TYPE`/`FUNC` prefix for mixed lists:
             // `EXPORT [TYPE A, FUNC B, C]` (bare stays func). The name
@@ -5976,6 +6191,11 @@ fn find_assign_eq(body: &[Tok]) -> Option<usize> {
 fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
     let mut out = String::new();
     for tok in toks {
+        // Ridden newlines from multi-line `<...>` shapes carry no
+        // output, so the shape canonicalizes exactly like one line.
+        if matches!(&tok.kind, TokKind::Newline) {
+            continue;
+        }
         if !tok.joint && !out.is_empty() {
             out.push(' ');
         }
@@ -8207,6 +8427,54 @@ mod tests {
         ] {
             assert_parity(text);
         }
+    }
+
+    #[test]
+    fn multi_line_generics_match_single_line_shape() {
+        // Multi-line `<...>` shapes parse, and canonicalize exactly
+        // like their single-line spelling.
+        for (single, multi) in [
+            (
+                "TYPE R = MAP<name: STRING, value: INT>",
+                "TYPE R = MAP<name: STRING,\nvalue: INT>",
+            ),
+            (
+                "TYPE R = MAP<name: STRING, value: LIST<INT>>",
+                "TYPE R = MAP<name: STRING,\nvalue: LIST<INT>>",
+            ),
+            (
+                "TYPE R = MAP<name: STRING, value: INT>",
+                "TYPE R = MAP<\nname: STRING,\nvalue: INT\n>",
+            ),
+            (
+                "LET $m: MAP<name: STRING, value: INT> = {}",
+                "LET $m: MAP<name: STRING,\nvalue: INT> = {}",
+            ),
+            (
+                "FOR $x: LIST<INT> IN [1] { ECHO hi }",
+                "FOR $x: LIST<\nINT> IN [1] { ECHO hi }",
+            ),
+            ("TYPE R = MAP<x: A | B>", "TYPE R = MAP<x: A |\nB>"),
+        ] {
+            assert_parity(multi);
+            let want = crate::parse_script(single, lower)
+                .unwrap_or_else(|e| panic!("single-line shape must parse {single:?}: {e}"));
+            let got = crate::parse_script(multi, lower)
+                .unwrap_or_else(|e| panic!("multi-line shape must parse {multi:?}: {e}"));
+            assert_eq!(
+                got, want,
+                "multi-line must canonicalize like one line: {multi:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spaced_comparisons_still_end_the_statement() {
+        // A spaced `<` is a comparison, never a generic open: the
+        // newline still ends the statement.
+        let steps = crate::parse_script("LET $b: BOOL = $a < $b\nECHO hi", lower)
+            .expect("comparison plus follower must parse");
+        assert_eq!(steps.len(), 2, "newline ends the comparison statement");
     }
 
     #[test]

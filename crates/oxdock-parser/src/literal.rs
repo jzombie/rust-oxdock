@@ -48,7 +48,7 @@ pub fn escape_dsl_string(raw: &str) -> String {
 }
 
 /// Render one value to a DSL literal. Tight set: scalars plus `LIST` /
-/// `MAP` composed of scalars. `DURATION` renders quoted in its `30s`
+/// `MAP` rendered of scalars. `DURATION` renders quoted in its `30s`
 /// shape; a nested duration arrives as `STRING` on reparse (only a
 /// top-level `LET $d: DURATION` declaration drives coercion), which the
 /// renderer documents rather than hides. Everything else bails naming
@@ -66,7 +66,7 @@ pub fn render_dsl_literal(value: &Value) -> Result<String> {
         _ if value.as_list().is_some() => {
             let mut items = Vec::new();
             for item in value.as_list().unwrap_or(&Vec::new()) {
-                items.push(render_composite_item(item)?);
+                items.push(render_compound_item(item)?);
             }
             Ok(format!("[{}]", items.join(", ")))
         }
@@ -76,7 +76,7 @@ pub fn render_dsl_literal(value: &Value) -> Result<String> {
                 entries.push(format!(
                     "{}: {}",
                     render_quoted(key),
-                    render_composite_item(item)?
+                    render_compound_item(item)?
                 ));
             }
             Ok(format!("{{{}}}", entries.join(", ")))
@@ -110,7 +110,7 @@ pub fn render_quoted(raw: &str) -> String {
     format!("\"{}\"", escape_dsl_string(raw))
 }
 
-fn render_composite_item(value: &Value) -> Result<String> {
+fn render_compound_item(value: &Value) -> Result<String> {
     if value.as_duration().is_some() {
         let text = format_duration(&value.as_duration().unwrap_or(Duration::from_secs(0)));
         return Ok(render_quoted(&text));
@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn render_scalars_and_composites() {
+    fn render_scalars_and_compounds() {
         assert_eq!(render_dsl_literal(&Value::int(7)).unwrap(), "7");
         assert_eq!(
             render_dsl_literal(&Value::string("hi".to_string())).unwrap(),

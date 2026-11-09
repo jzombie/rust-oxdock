@@ -147,7 +147,7 @@ pub type NativeFn<P> = Arc<dyn Fn(&mut StepCtx<P>, Vec<Value>) -> Result<Value> 
 /// a generated symbol.
 pub trait OxDockFn<P: ProcessManager> {
     /// The registry entry deriving from the Rust signature plus doc
-    /// comments: name, metadata, and entry point, composed.
+    /// comments: name, metadata, and entry point, rendered.
     fn registration() -> HostRegistration<P>;
 }
 
@@ -305,6 +305,34 @@ impl<P: ProcessManager> Clone for ScopeFrame<P> {
 /// Nested so placeholder dispatch looks up `table[module][func]` with
 /// zero allocation; rebuilt only when native entries register.
 pub type PureTable = HashMap<String, HashMap<String, PureFn>>;
+
+/// Shared `{{ MODULE::FUNC(args) }}` dispatch over a pure-function table.
+///
+/// Single implementation for every expansion path (script `EXPAND`,
+/// string interpolation, host-driven fragment expansion): nested
+/// module then function lookup with zero allocation, unknown names
+/// failing with the sorted known-functions listing. Callers keep
+/// their own arg resolution and output handling; only dispatch and
+/// its error shape live here.
+pub fn placeholder_resolver(table: Arc<PureTable>) -> oxdock_process::PlaceholderCall {
+    Arc::new(move |module, func, args| {
+        let callee = table
+            .get(module)
+            .and_then(|entries| entries.get(func))
+            .ok_or_else(|| {
+                let mut known: Vec<String> = table
+                    .iter()
+                    .flat_map(|(m, entries)| entries.keys().map(move |f| format!("{m}::{f}")))
+                    .collect();
+                known.sort();
+                anyhow::anyhow!(
+                    "unknown placeholder function '{module}::{func}'; known functions: {}",
+                    known.join(", ")
+                )
+            })?;
+        callee(args)
+    })
+}
 
 pub struct FunctionRegistry<P: ProcessManager> {
     entries: HashMap<String, FuncEntry<P>>,
@@ -1870,11 +1898,11 @@ fn type_describe<P: ProcessManager>(
     "###
 )]
 #[example(
-    name = "dynamic composition",
+    name = "dynamic assembly",
     code = r###"
-    # Compose the child script dynamically: the parent interpolates
+    # Assemble the child script dynamically: the parent interpolates
     # its own bindings into the pipe, then runs the interpreter on it.
-    # Unescaped {{ }} bakes in at compose time; \{{ }} stays literal
+    # Unescaped {{ }} bakes in at render time; \{{ }} stays literal
     # so the child expands it with its own bindings.
     # The pipe delivers EOF when the producer step ends, so the child
     # reads exactly one script.
@@ -3786,6 +3814,37 @@ impl<P: ProcessManager> ExecState<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placeholder_resolver_dispatches_table_entries() {
+        // Single dispatch implementation for every expansion path:
+        // known names route to the entry, unknown names fail with
+        // the sorted known-functions listing.
+        let echo: PureFn = Arc::new(|args| {
+            args.into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("ECHO needs 1 arg"))
+        });
+        let mut entries = HashMap::new();
+        entries.insert("ECHO".to_string(), echo);
+        let mut table = PureTable::new();
+        table.insert("T".to_string(), entries);
+        let resolve = placeholder_resolver(Arc::new(table));
+        let out = resolve("T", "ECHO", vec![Value::string("hi".to_string())]).expect("dispatch");
+        assert_eq!(out.as_str().expect("string"), "hi");
+        let err = format!(
+            "{:#}",
+            resolve("T", "NOPE", vec![]).expect_err("unknown must fail")
+        );
+        assert!(
+            err.contains("unknown placeholder function 'T::NOPE'"),
+            "names the call: {err}"
+        );
+        assert!(
+            err.contains("known functions: T::ECHO"),
+            "lists known names: {err}"
+        );
+    }
 
     #[test]
     fn describe_entry_renders_union_spellings() {

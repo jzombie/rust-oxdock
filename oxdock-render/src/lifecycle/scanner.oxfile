@@ -1,0 +1,135 @@
+# Default source plugin: file discovery plus fragment expansion.
+#
+# Every lifecycle plugin exposes these same methods; registration
+# order decides which plugin runs first within a stage. Only SCAN
+# does work here: GLOB every fragment pattern, mint stems through
+# RENDER_ENGINE, fail closed on duplicate stems, expand each file
+# once, and stage the manifest as `<target>.source.json` for
+# ASSEMBLE to promote. A pipeline with its own source (in-memory,
+# git-tree, code-AST) ships its own plugin file writing the same
+# staging path instead of this one. INGEST validates the target
+# descriptor before any glob runs, so a typo fails without touching
+# the filesystem.
+IMPORT [STD, RENDER_ENGINE]
+IMPORT [TYPE CTX, TYPE VARS, TYPE WORKSPACE_SNAPSHOT FROM "../types.oxfile"]
+
+# Run-once intake: generic passthrough, no source state to create.
+FUNC SETUP($ctx: CTX) {
+    RETURN $ctx
+}
+
+# Descriptor check: passthrough, INGEST lives in generic.
+FUNC INGEST($ctx: CTX) {
+    RETURN $ctx
+}
+
+# SCAN hook: expand every fragment once into the staging source manifest.
+FUNC SCAN($ctx: CTX) {
+    LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)
+    LET $has_vars: BOOL = HAS_KEY($cfg, "vars")
+    IF $has_vars == false {
+        ECHO "scan: config needs a 'vars' map declaring scope key names"
+        EXIT 1
+    }
+    LET $vars: VARS = $cfg.vars
+    LET $has_global: BOOL = HAS_KEY($vars, "global")
+    IF $has_global == false {
+        ECHO "scan: config 'vars' needs a 'global' scope key name"
+        EXIT 1
+    }
+    LET $vglobal: STRING = $vars.global
+    LET $has_vctx: BOOL = HAS_KEY($vars, "ctx")
+    IF $has_vctx == false {
+        ECHO "scan: config 'vars' needs a 'ctx' scope key name"
+        EXIT 1
+    }
+    LET $vctx: STRING = $vars.ctx
+    LET $wspt: STRING = PATH_TYPE("{{ $ctx.staging }}/_workspace.json")
+    LET $has_ws: BOOL = $wspt == "file"
+    LET $vkey: STRING = ""
+    LET $vpkg: STRING = ""
+    IF $has_ws {
+        LET $has_vkey: BOOL = HAS_KEY($cfg, "version_key")
+        IF $has_vkey == false {
+            ECHO "scan: staging snapshot present but config lacks 'version_key'"
+            EXIT 1
+        }
+        $vkey = $cfg.version_key
+        LET $has_vpkg: BOOL = HAS_KEY($vars, "workspace_pkg")
+        IF $has_vpkg == false {
+            ECHO "scan: staging snapshot present but config 'vars' lacks 'workspace_pkg'"
+            EXIT 1
+        }
+        $vpkg = $vars.workspace_pkg
+    }
+    # Open user data: globals plus values carry pipeline-defined keys,
+    # so no record spelling admits them; scope, manifest, and group
+    # maps key on config names plus filesystem stems, dynamic likewise.
+    LET $docs_global: MAP<ANY> = LOAD_JSON($ctx.globals)
+    LET $docs_ctx: MAP<ANY> = LOAD_JSON($ctx.values)
+    LET $ws_version: STRING = ""
+    LET $ws_pkg: MAP<ANY> = {}
+    IF $has_ws {
+        LET $ws: WORKSPACE_SNAPSHOT = LOAD_JSON("{{ $ctx.staging }}/_workspace.json")
+        $ws_version = $ws.version
+        $ws_pkg = $ws.package
+    }
+    LET $manifest: MAP<ANY> = {}
+    LET $fragments: MAP<ANY> = PARSE_JSON($ctx.fragments)
+    FOR $group: STRING, $patterns: LIST<STRING> IN $fragments {
+        LET $group_map: MAP<ANY> = {}
+        FOR $pattern: STRING IN $patterns {
+            LET $abs: STRING = "{{ $ctx.wsroot }}/{{ $pattern }}"
+            FOR $file_rel: STRING IN GLOB($abs) {
+                LET $stem: STRING = RENDER_ENGINE::FILE_STEM($file_rel)
+                LET $dup: BOOL = HAS_KEY($group_map, $stem)
+                IF $dup {
+                    ECHO "target '{{ $ctx.target }}': '{{ $stem }}' matches more than one file; placeholders must resolve to exactly one"
+                    EXIT 1
+                }
+                LET $raw: STRING = READ "{{ $ctx.wsroot }}/{{ $file_rel }}"
+                LET $scope: MAP<ANY> = {}
+                $scope = MAP_SET($scope, $vglobal, $docs_global)
+                $scope = MAP_SET($scope, $vctx, $docs_ctx)
+                LET $envmap: MAP<ANY> = {}
+                IF $has_ws {
+                    $scope = MAP_SET($scope, $vpkg, $ws_pkg)
+                    $envmap = MAP_SET($envmap, $vkey, $ws_version)
+                }
+                LET $expanded: STRING = RENDER_ENGINE::EXPAND_TEMPLATE($raw, $scope, $envmap)
+                $group_map = MAP_SET($group_map, $stem, $expanded)
+            }
+        }
+        $manifest = MAP_SET($manifest, $group, $group_map)
+    }
+    LET $json: STRING = TO_JSON($manifest)
+    WRITE "{{ $ctx.staging }}/{{ $ctx.target }}.source.json" $json
+    RETURN $ctx
+}
+
+# Manifest promotion lives in generic: passthrough here.
+FUNC ASSEMBLE($ctx: CTX) {
+    RETURN $ctx
+}
+
+# Master expansion lives in generic: passthrough here.
+FUNC RENDER($ctx: CTX) {
+    RETURN $ctx
+}
+
+# Deferred pass lives in generic: passthrough here.
+FUNC DEFERRED($ctx: CTX) {
+    RETURN $ctx
+}
+
+# Output write lives in generic: passthrough here.
+FUNC WRITE_OUT($ctx: CTX) {
+    RETURN $ctx
+}
+
+# Determinism check lives in generic: passthrough here.
+FUNC VERIFY($ctx: CTX) {
+    RETURN $ctx
+}
+
+EXPORT [SETUP, INGEST, SCAN, ASSEMBLE, RENDER, DEFERRED, WRITE_OUT, VERIFY]

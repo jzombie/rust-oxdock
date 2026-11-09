@@ -41,7 +41,7 @@ pub enum TokKind {
     /// `lower_block_string` at parse time.
     BlockStr(String),
     /// Single punctuation char (`=`, `$`, `:`, `!`, `<`, `>`, `,`, `|`,
-    /// `&`, `@`). Multi-char operators compose in the parser using
+    /// `&`, `@`). Multi-char operators combine in the parser using
     /// `joint`.
     Punct(char),
     /// Delimited group with recursively lexed contents. `open_joint`

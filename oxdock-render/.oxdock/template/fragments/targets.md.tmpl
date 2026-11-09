@@ -1,0 +1,37 @@
+## Targets
+
+A target is declared by a `target.json` file with an output path, a
+values file, a master template, and grouped discovery patterns (never
+per-file lists):
+
+```json
+{"name": "readme", "out": "README.md", "values": ".../values.json", "template": ".../README.md.tmpl", "fragments": {"local": [".../fragments/*"], "shared": [".../shared/*"]}}
+```
+
+The master template is an ordinary Markdown file whose section
+order is the output order. Wherever it names a section with a
+`\{{ $files.<group>.<stem> }}` placeholder, the matching fragment
+renders there: `\{{ $files.shared.intro }}` pulls in
+`shared/intro.md.tmpl`. To add a section, drop the file in a
+discovered directory and name it from the master with one placeholder
+line. To reorder, move the placeholder lines.
+
+Names are file stems (the name up to the first dot) limited to
+letters, numbers, `_`, and `-`. A misspelled placeholder, two files
+sharing one name, or an unreadable values file fails the run instead
+of rendering wrong docs.
+
+Two formatting rules keep output exact: keep fragments
+newline-terminated with placeholders on their own lines, and escape
+literal placeholder examples natively (`\{{ ... }}`) so they pass
+through untouched.
+
+A target whose output executes directly declares `"executable":
+true` beside `out`: the pipeline re-applies `0755` after every render,
+so regenerating `install.sh` cannot silently drop the executable
+bit. Omitted everywhere else; a present-but-not-boolean flag fails
+the run instead of rendering.
+
+One values file can feed several masters: the generic example renders
+a human `README.md`, a slim agent pointer `llms.txt`, and a full
+carrier `llms-full.txt` from the same values through shared fragments.

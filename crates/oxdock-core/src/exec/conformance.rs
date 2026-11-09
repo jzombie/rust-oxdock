@@ -476,7 +476,7 @@ fn option_cases(param: &FuncParam) -> Vec<Value> {
 
 /// One sample word for a tag, or `None` when sampling cannot mint it
 /// (handles, permits, custom payloads). Unions sample their first
-/// valid member, so composites holding unions (`LIST<INT|STRING>`,
+/// valid member, so compounds holding unions (`LIST<INT|STRING>`,
 /// records with union fields) still construct instead of dropping
 /// the whole function off the sampling path.
 fn sample_tag(tag: &TypeTag) -> Option<Value> {

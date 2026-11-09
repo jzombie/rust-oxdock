@@ -100,14 +100,17 @@ pub enum EntryKind {
     Symlink,
 }
 
-/// Reserved `CARGO_TARGET_DIR` location (issue #131).
+/// Reserved session scratch root (issue #131).
 ///
-/// Cargo gets dedicated handling because OxDock runs inside the Cargo build
-/// lifecycle: `build.rs` scripts, procedural macros, and Cargo workflows.
-/// DSL scripts frequently invoke `cargo` inside `RUN` steps, and without
-/// explicit redirection a nested `cargo` writes into the host `target/`
-/// directory. That risks `Cargo.lock` contention, build deadlocks, and
-/// corruption of the host compilation state.
+/// Nested `cargo` inside `RUN` steps shares the host build environment
+/// with the OxDock host process itself, so an explicit
+/// `CARGO_TARGET_DIR` (script `ENV`, `INHERIT_ENV` from a host that
+/// sets it, or a harness bridge) is the supported way to redirect it:
+/// without redirection a nested `cargo` writes into the host `target/`
+/// directory, risking `Cargo.lock` contention, build deadlocks, and
+/// corruption of the host compilation state. The interpreter never
+/// synthesizes a value: a host without the variable leaves it absent
+/// and `cargo` defaults to `./target` under the child cwd.
 ///
 /// `cargo` natively honors `CARGO_TARGET_DIR` as a global override across
 /// every subcommand (`build`, `check`, `test`), so redirecting through this
@@ -116,7 +119,7 @@ pub enum EntryKind {
 /// `node_modules/` hierarchy, `pip` resolves into virtual environments or
 /// site packages, and `go` defaults to user level caches outside the project
 /// root. Only `cargo` shares the host build environment with the OxDock host
-/// process itself, so only `cargo` needs this isolation. Non cargo tools
+/// process itself, so only `cargo` needs this documented escape hatch. Non cargo tools
 /// follow root selection as usual: under `WORKSPACE LOCAL` their artifacts
 /// land in the live tree, under `WORKSPACE SNAPSHOT` in the isolated
 /// snapshot directory.
@@ -124,9 +127,8 @@ pub enum EntryKind {
 /// Opaque by design: the inner guarded root is not exposed, so neither
 /// snapshot style `ensure()` creation nor `create_dir_all` can name it.
 /// Passing a `CargoScratch` where a `&GuardedPath` is required is a compile
-/// error. The only operations are rendering subpaths for the child
-/// environment (`display`/`command_path` for `CARGO_TARGET_DIR`,
-/// `tmp_command_path` for seeded temp) and recording it in test doubles
+/// error. The only operations are materializing the temp hierarchy for
+/// child writes and recording the root in test doubles
 /// (`to_path_buf`). The root materializes lazily: construction performs
 /// no filesystem I/O, so interpretive-only sessions never touch disk.
 #[derive(Clone)]
@@ -156,67 +158,17 @@ impl CargoScratch {
         Ok(tmp)
     }
 
-    /// Render for `CARGO_TARGET_DIR` environment bindings: the `target`
-    /// subpath, owned by cargo alone.
-    pub fn display(&self) -> String {
-        self.target()
-            .map(|t| t.display())
-            .unwrap_or_else(|_| String::new())
-    }
-
-    /// Platform-adjusted `target` subpath for process spawning
-    /// (verbatim-prefix stripping on Windows), mirroring
-    /// [`command_path`].
-    pub fn command_path(&self) -> std::path::PathBuf {
-        // `ensure()` only fails on host I/O errors; fall back to an
-        // empty path rather than panicking in rendering positions.
-        match self.target() {
-            Ok(t) => command_path(&t).into_owned(),
-            Err(_) => std::path::PathBuf::new(),
-        }
-    }
-
-    /// Platform-adjusted `tmp` subpath for seeded temp bindings,
-    /// created on first use (native only; synthetic under Miri).
-    pub fn tmp_command_path(&self) -> std::path::PathBuf {
-        match self.tmp() {
-            Ok(t) => command_path(&t).into_owned(),
-            Err(_) => std::path::PathBuf::new(),
-        }
-    }
-
-    /// Lexical `<scratch>/tmp` display path for seed bindings: the
-    /// pre-computed candidate, no filesystem I/O. The spawn path
-    /// materializes it through [`CargoScratch::ensure_materialized`]
-    /// before any child observes it.
-    pub fn tmp_seed_display(&self) -> String {
-        self.seed_display("tmp")
-    }
-
-    /// Lexical `<scratch>/target` display path for seed bindings: the
-    /// pre-computed candidate, no filesystem I/O. Cargo creates the
-    /// directory on demand; the engine never ensures it.
-    pub fn target_seed_display(&self) -> String {
-        self.seed_display("target")
-    }
-
-    fn seed_display(&self, leaf: &str) -> String {
-        let path = self.root.candidate_path().join(leaf);
-        path::GuardedPath::from_guarded_parts(path.clone(), path).display()
-    }
-
     /// Materialize the scratch hierarchy before spawn: root plus `tmp`
     /// (native; flag flip under Miri). Called in `command_ctx`, the
     /// choke point every real spawn flows through, so seeded
-    /// `HOME`/`TMPDIR` paths exist when children write them. `target`
-    /// stays uncreated: cargo owns it on demand.
+    /// `HOME`/`TMPDIR` paths exist when children write them.
     pub fn ensure_materialized(&self) -> Result<()> {
         self.root.ensure().map(|_| ())?;
         self.tmp().map(|_| ())?;
         Ok(())
     }
 
-    /// Owned raw `target` path for test-double recording. Must never be
+    /// Owned raw scratch root for test-double recording. Must never be
     /// created through; it exists so mocks can assert on the value.
     pub fn to_path_buf(&self) -> std::path::PathBuf {
         self.target().map(|t| t.to_path_buf()).unwrap_or_default()
@@ -418,7 +370,7 @@ impl PathResolver {
     /// Override the cache application identity after construction (issue
     /// #163). Recomputes the cache guard with no filesystem I/O; pass the
     /// consuming application's name (for example its crate name) so the
-    /// persistent cache is namespaced per project. Composition roots that
+    /// persistent cache is namespaced per project. Entry points that
     /// know their identity should prefer this over the auto-detected chain.
     pub fn with_cache_app(mut self, app: &str) -> Self {
         self.cache_app = cache::sanitize_app_name(app);

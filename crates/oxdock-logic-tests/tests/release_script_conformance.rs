@@ -1,15 +1,16 @@
 use anyhow::{Context, Result};
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, to_forward_slashes};
 #[cfg(feature = "markdown")]
 use oxdock_logic_tests::recording::{Call, RecordingManager, argv_calls, shell_calls};
 
 fn repo_root() -> Result<String> {
     // Same layout derivation as docs_conformance: normalize separators
     // first since Windows CARGO_MANIFEST_DIR uses backslashes.
-    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
-        .context("CARGO_MANIFEST_DIR missing")?
-        .replace('\\', "/");
+    let manifest_dir = to_forward_slashes(
+        &std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
+            .context("CARGO_MANIFEST_DIR missing")?,
+    );
     Ok(manifest_dir
         .strip_suffix("crates/oxdock-logic-tests")
         .context("test must live under crates/oxdock-logic-tests")?
@@ -286,7 +287,7 @@ fn release_notes_extract_for_tree_version() -> Result<()> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn release_gate_rejects_mismatched_confirmation() -> Result<()> {
-    let run = release_harness("0.0.0-nope", "true", "true", &fixture_changelog())?;
+    let run = release_harness("0.0.0-nope", "true", "true", "demo", &fixture_changelog())?;
     let err = run
         .execute()
         .expect_err("mismatched confirmation must fail");
@@ -361,6 +362,7 @@ fn release_harness(
     confirm: &str,
     dry_run: &str,
     binaries: &str,
+    bins: &str,
     changelog: &str,
 ) -> Result<ReleaseRun> {
     let text = load_release_script()?;
@@ -380,7 +382,7 @@ fn release_harness(
     let mut io = ExecIo::new();
     io.insert_inherit_env("RELEASE_CONFIRM", confirm);
     io.insert_inherit_env("RELEASE_DRY_RUN", dry_run);
-    io.insert_inherit_env("RELEASE_BINARY", "demo");
+    io.insert_inherit_env("RELEASE_BINS", bins);
     io.insert_inherit_env("RELEASE_BINARIES", binaries);
     io.insert_inherit_env("GITHUB_WORKSPACE", root.as_path().display().to_string());
     // Declared-but-absent reads as empty: the script falls back to
@@ -429,7 +431,13 @@ impl ReleaseRun {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn dry_run_runs_only_the_dry_publish() -> Result<()> {
-    let run = release_harness(FIXTURE_VERSION, "true", "true", &fixture_changelog())?;
+    let run = release_harness(
+        FIXTURE_VERSION,
+        "true",
+        "true",
+        "demo",
+        &fixture_changelog(),
+    )?;
     run.execute()?;
     assert_eq!(
         run.calls(),
@@ -460,7 +468,7 @@ fn dry_run_runs_only_the_dry_publish() -> Result<()> {
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn tbd_section_date_fails_before_any_publish() -> Result<()> {
     let tbd = "# Changelog\n\n## [9.9.9-t] - TBD\n\n### Added\n\n- Thing.\n";
-    let run = release_harness(FIXTURE_VERSION, "true", "true", tbd)?;
+    let run = release_harness(FIXTURE_VERSION, "true", "true", "demo", tbd)?;
     run.execute()
         .expect_err("TBD shipping date must fail the release");
     assert!(
@@ -480,7 +488,13 @@ fn tbd_section_date_fails_before_any_publish() -> Result<()> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn real_run_with_binaries_runs_the_full_pipeline() -> Result<()> {
-    let run = release_harness(FIXTURE_VERSION, "false", "true", &fixture_changelog())?;
+    let run = release_harness(
+        FIXTURE_VERSION,
+        "false",
+        "true",
+        "demo",
+        &fixture_changelog(),
+    )?;
     script_registry(&run, &["demo-a"]);
     run.manager.respond("cargo publish --workspace", "");
     run.execute()?;
@@ -528,33 +542,31 @@ fn real_run_with_binaries_runs_the_full_pipeline() -> Result<()> {
             .any(|s| s.contains("gh release delete") && s.contains(FIXTURE_TAG)),
         "stale release cleanup runs: {shells:?}"
     );
-    let argvs = argv_calls(&calls);
-    let creates: Vec<&Vec<String>> = argvs
+    let creates: Vec<&&str> = shells
         .iter()
-        .filter(|argv| argv.first().is_some_and(|exe| exe == "gh"))
+        .filter(|shell| shell.contains("gh release create"))
         .collect();
-    assert_eq!(
-        creates,
-        vec![&vec![
-            "gh".to_string(),
-            "release".to_string(),
-            "create".to_string(),
-            FIXTURE_TAG.to_string(),
-            "--title".to_string(),
-            FIXTURE_VERSION.to_string(),
-            "--notes-file".to_string(),
-            "target/release-notes.md".to_string(),
-            "target/artifacts/demo-x86_64-unknown-linux-musl.tar.gz".to_string(),
-            "target/artifacts/demo-aarch64-unknown-linux-musl.tar.gz".to_string(),
-            "target/artifacts/demo-aarch64-apple-darwin.tar.gz".to_string(),
-            "target/artifacts/demo-x86_64-pc-windows-msvc.tar.gz".to_string(),
-            "target/artifacts/demo-aarch64-pc-windows-msvc.tar.gz".to_string(),
-            "target/artifacts/SHA256SUMS".to_string(),
-            "target/artifacts/install.sh".to_string(),
-            "target/artifacts/install.ps1".to_string(),
-            "target/artifacts/install.oxfile".to_string(),
-        ]],
-        "creation carries notes, every asset, checksums, and installers"
+    assert_eq!(creates.len(), 1, "one creation: {shells:?}");
+    let cmd = creates[0];
+    for asset in [
+        "target/artifacts/demo-x86_64-unknown-linux-musl.tar.gz",
+        "target/artifacts/demo-aarch64-unknown-linux-musl.tar.gz",
+        "target/artifacts/demo-aarch64-apple-darwin.tar.gz",
+        "target/artifacts/demo-x86_64-pc-windows-msvc.tar.gz",
+        "target/artifacts/demo-aarch64-pc-windows-msvc.tar.gz",
+        "target/artifacts/SHA256SUMS",
+        "target/artifacts/install.sh",
+        "target/artifacts/install.ps1",
+        "target/artifacts/install.oxfile",
+    ] {
+        assert!(cmd.contains(asset), "creation carries {asset}: {cmd}");
+    }
+    assert!(
+        !calls.iter().any(|call| match call {
+            Call::Argv(argv) => argv.iter().any(|arg| arg == "gh"),
+            Call::Shell(_) => false,
+        }),
+        "creation runs as one shell invocation, not argv: {calls:?}"
     );
     Ok(())
 }
@@ -567,7 +579,13 @@ fn real_run_with_binaries_runs_the_full_pipeline() -> Result<()> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn real_run_without_binaries_creates_notes_only() -> Result<()> {
-    let run = release_harness(FIXTURE_VERSION, "false", "false", &fixture_changelog())?;
+    let run = release_harness(
+        FIXTURE_VERSION,
+        "false",
+        "false",
+        "demo",
+        &fixture_changelog(),
+    )?;
     script_registry(&run, &["demo-a", "demo-b"]);
     run.execute()?;
     let calls = run.calls();
@@ -614,7 +632,13 @@ fn real_run_without_binaries_creates_notes_only() -> Result<()> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn all_landed_with_binaries_skips_publish() -> Result<()> {
-    let run = release_harness(FIXTURE_VERSION, "false", "true", &fixture_changelog())?;
+    let run = release_harness(
+        FIXTURE_VERSION,
+        "false",
+        "true",
+        "demo",
+        &fixture_changelog(),
+    )?;
     script_registry(&run, &["demo-a", "demo-b"]);
     run.execute()?;
     let calls = run.calls();
@@ -625,14 +649,13 @@ fn all_landed_with_binaries_skips_publish() -> Result<()> {
             .any(|shell| shell.contains("cargo publish --workspace")),
         "publish skipped when nothing is missing: {shells:?}"
     );
-    let argvs = argv_calls(&calls);
-    let creates: Vec<&Vec<String>> = argvs
+    let creates: Vec<&&str> = shells
         .iter()
-        .filter(|argv| argv.first().is_some_and(|exe| exe == "gh"))
+        .filter(|shell| shell.contains("gh release create"))
         .collect();
     assert_eq!(creates.len(), 1, "one creation: {creates:?}");
     assert!(
-        creates[0].iter().any(|arg| arg.contains(".tar.gz")),
+        creates[0].contains(".tar.gz"),
         "assets still attached: {creates:?}"
     );
     Ok(())
@@ -646,7 +669,13 @@ fn all_landed_with_binaries_skips_publish() -> Result<()> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn publish_retries_failed_round_then_converges() -> Result<()> {
-    let run = release_harness(FIXTURE_VERSION, "false", "true", &fixture_changelog())?;
+    let run = release_harness(
+        FIXTURE_VERSION,
+        "false",
+        "true",
+        "demo",
+        &fixture_changelog(),
+    )?;
     script_registry(&run, &["demo-a"]);
     run.manager
         .respond_once("cargo publish --workspace", "OXDOCK_PUBLISH_ROUND_FAILED");
@@ -667,6 +696,80 @@ fn publish_retries_failed_round_then_converges() -> Result<()> {
     assert!(
         shells.iter().any(|shell| shell.starts_with("cat ")),
         "failure diagnostics surface: {shells:?}"
+    );
+    Ok(())
+}
+
+/// Two products attach two full asset sets: every platform tarball of
+/// each product rides one creation, with the checksums and installers
+/// attached once.
+#[test]
+#[cfg(feature = "markdown")]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn real_run_with_two_bins_attaches_both_sets() -> Result<()> {
+    let run = release_harness(
+        FIXTURE_VERSION,
+        "false",
+        "true",
+        "alpha beta",
+        &fixture_changelog(),
+    )?;
+    script_registry(&run, &["demo-a"]);
+    run.manager.respond("cargo publish --workspace", "");
+    run.execute()?;
+    let calls = run.calls();
+    let shells = shell_calls(&calls);
+    let creates: Vec<&&str> = shells
+        .iter()
+        .filter(|shell| shell.contains("gh release create"))
+        .collect();
+    assert_eq!(creates.len(), 1, "one creation: {shells:?}");
+    let cmd = creates[0];
+    for bin in ["alpha", "beta"] {
+        for target in [
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "aarch64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
+        ] {
+            let asset = format!("target/artifacts/{bin}-{target}.tar.gz");
+            assert!(cmd.contains(&asset), "creation carries {asset}: {cmd}");
+        }
+    }
+    for shared in [
+        "target/artifacts/SHA256SUMS",
+        "target/artifacts/install.sh",
+        "target/artifacts/install.ps1",
+        "target/artifacts/install.oxfile",
+    ] {
+        assert!(
+            cmd.matches(shared).count() == 1,
+            "shared file {shared} attached exactly once: {cmd}"
+        );
+    }
+    Ok(())
+}
+
+/// Empty product list with binaries on fails naming the fix: no
+/// silent single-product guess, and no tag, push, or release after
+/// the date gate.
+#[test]
+#[cfg(feature = "markdown")]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn empty_bins_fails_naming_the_fix() -> Result<()> {
+    let run = release_harness(FIXTURE_VERSION, "false", "true", "", &fixture_changelog())?;
+    script_registry(&run, &["demo-a", "demo-b"]);
+    let err = run.execute().expect_err("empty bins must fail the release");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "empty bins exits the release: {rendered}"
+    );
+    let calls = run.calls();
+    assert!(
+        calls.is_empty(),
+        "resolution fails before anything spawns: {calls:?}"
     );
     Ok(())
 }
@@ -697,7 +800,7 @@ fn missing_section_fails_naming_the_needle() -> Result<()> {
     let mut io = ExecIo::new();
     io.insert_inherit_env("RELEASE_CONFIRM", FIXTURE_VERSION);
     io.insert_inherit_env("RELEASE_DRY_RUN", "true");
-    io.insert_inherit_env("RELEASE_BINARY", "demo");
+    io.insert_inherit_env("RELEASE_BINS", "demo");
     io.insert_inherit_env("RELEASE_BINARIES", "true");
     io.insert_inherit_env("GITHUB_WORKSPACE", root.as_path().display().to_string());
     let modules = vec![oxdock_markdown_plugin::module_with::<RecordingManager>()];

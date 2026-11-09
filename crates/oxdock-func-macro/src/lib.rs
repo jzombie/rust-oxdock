@@ -292,7 +292,7 @@ enum ParamKind {
     /// members: a `STRING` word never arrives as `INT`. Members are
     /// scalar names (`String`, `Int`, `Path`, ...), bare words
     /// (`List`, `Map`), or nestings (`List<Map>`, `Map<Any>`) that
-    /// compose through the shared shaped constructors.
+    /// combine through the shared shaped constructors.
     Union(Vec<Type>),
     /// Union over list elements on a `Vec<Value>` parameter
     /// (`#[union(...)]` on `Vec<Value>`): the tag is
@@ -315,7 +315,7 @@ struct RecordField {
     optional: bool,
 }
 
-/// Compose a record tag from field specs: the same tree the
+/// Build a record tag from field specs: the same tree the
 /// extractor checks, so metadata and enforcement share one source.
 /// Unknown field types fail at the definition site, never at runtime.
 fn record_tag(fields: &[RecordField]) -> TokenStream2 {
@@ -342,8 +342,8 @@ fn record_tag(fields: &[RecordField]) -> TokenStream2 {
 }
 
 /// Map one `#[union(...)]` member type to its tag expression. Scalars
-/// name their word; `List<T>`/`Vec<T>` compose `LIST<...>` and
-/// `Map<T>`/`BTreeMap<String, T>` compose `MAP<...>` recursively, so
+/// name their word; `List<T>`/`Vec<T>` build `LIST<...>` and
+/// `Map<T>`/`BTreeMap<String, T>` build `MAP<...>` recursively, so
 /// `List<Map>` spells `LIST<MAP>` with no hand-written string. `Any`
 /// (spelled `Any` or `Value`) is allowed only nested: top-level it
 /// would absorb the set and the union would promise nothing.
@@ -463,7 +463,7 @@ fn union_member_tag(ty: &Type, nested: bool) -> syn::Result<TokenStream2> {
     }
 }
 
-/// A composable shape: leaves are words, composites nest freely.
+/// A nestable shape: leaves are words, compounds nest freely.
 /// Resolution is recursive over the Rust spelling, so no combination
 /// is ever enumerated: `Vec<Vec<BTreeMap<String, Value>>>` works the
 /// day someone writes it. Scalar numerics never nest (their
@@ -510,7 +510,7 @@ impl ParamKind {
                 let tag = Self::shape_tag(shape);
                 quote! { Some(#tag) }
             }
-            // Members compose through the shared constructor: the
+            // Members combine through the shared constructor: the
             // spelling derives from the members, so no hand-written
             // string exists and metadata matches the extractor below.
             // Unknown members fail at parse time, so the expect here
@@ -549,7 +549,7 @@ impl ParamKind {
         }
     }
 
-    /// Metadata tag for a shape, composed recursively: the same tree
+    /// Metadata tag for a shape, rendered recursively: the same tree
     /// the extractor checks, so documentation and enforcement share
     /// one source by construction. Emits a value; check sites borrow
     /// it. Payloads share through `Arc`, so generated registrations
@@ -923,7 +923,7 @@ fn param_kind(ty: &Type) -> syn::Result<ParamKind> {
 }
 
 /// Resolve `Vec<...>` to a shape: `Vec<Value>` collapses to bare
-/// `List` (nothing to check below the word), anything else composes
+/// `List` (nothing to check below the word), anything else combines
 /// `ListOf` over the element shape. Scalar numerics are rejected:
 /// their extractors coerce, which has no meaning inside strict shape
 /// checking.
@@ -1043,7 +1043,7 @@ fn doc_lines(attrs: &[syn::Attribute]) -> Vec<String> {
 
 /// Map one `#[options(...)]` value type name to its tag expression.
 /// Options values are data (scalars and one-level collections);
-/// handles never hide inside option maps. `|` composes an admission
+/// handles never hide inside option maps. `|` forms an admission
 /// set (`DURATION|STRING`); `MAP<SCALAR>` and `LIST<SCALAR>` shape one
 /// level of collection. Members reuse the single-type grammar below,
 /// so unions and collections spell no new names.
@@ -1106,7 +1106,7 @@ fn option_single_value_type(name: &str) -> syn::Result<TokenStream2> {
 /// specs. A `?` suffix marks optional fields; anything else fails
 /// naming the expected `name[?]: TYPE` shape. Types parse as Rust
 /// type names (`String`, `Int`, `List<Map>`, unions nest through the
-/// same member grammar), so record fields compose exactly like union
+/// same member grammar), so record fields combine exactly like union
 /// members.
 fn parse_record_attr(attr: &syn::Attribute) -> syn::Result<Vec<RecordField>> {
     let items =
@@ -1610,7 +1610,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                         }
                     });
                 }
-                // Lazy static: option values compose unions at runtime
+                // Lazy static: option values combine into unions at runtime
                 // (`TypeTag::union` allocates), which a plain `static`
                 // array cannot hold. Deref coercion still yields the
                 // `&[ParamOption]` slice the metadata and the key check
@@ -2135,7 +2135,7 @@ mod tests {
         assert!(!fields[0].optional);
         assert_eq!(fields[1].name, "count");
         assert!(fields[1].optional);
-        // Nested field types compose through the member grammar.
+        // Nested field types combine through the member grammar.
         let nested =
             parse_record_attr(&record_attr(&["items: List<Map>"])).expect("nested record field");
         assert_eq!(nested.len(), 1);

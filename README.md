@@ -18,14 +18,14 @@
   <a href="https://coveralls.io/github/jzombie/rust-oxdock?branch=main">
     <img src="https://coveralls.io/repos/github/jzombie/rust-oxdock/badge.svg?branch=main" alt="Coverage Status" />
   </a>
-  <a href="#miri-coverage">
+  <a href="https://github.com/jzombie/rust-oxdock/actions/workflows/miri-nightly.yml">
     <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fjzombie%2Frust-oxdock%2Fbadges%2Fmiri-coverage.json" alt="Miri Coverage" />
   </a>
 </div>
 
 **OxDock is a Dockerfile-inspired DSL for native builds, multi-node pipelines, and sealed remote execution.**
 
-Bash gives you strings and exit codes. OxDock gives you [typed values](https://github.com/jzombie/rust-oxdock#value-types), [guarded paths](https://github.com/jzombie/rust-oxdock#workspaces--filesystem), [managed pipes](https://github.com/jzombie/rust-oxdock#transport-pipes), and identical behavior on Linux/macOS/Windows (the things you'd re-implement badly in every growing bash script). And with hot-loading [MCP tooling](https://github.com/jzombie/rust-oxdock#mcp-hosting), *English-to-OxDock* just skips the boilerplate of getting there. [Workspaces](https://github.com/jzombie/rust-oxdock#workspaces--filesystem) (`SNAPSHOT`, `LOCAL`, `CACHE`, `SYSTEM`) and [scoped blocks](https://github.com/jzombie/rust-oxdock#guards-and-scoped-blocks) with [selective environment inheritance](https://github.com/jzombie/rust-oxdock#selective-environment-inheritance) give every run an isolated root that reverts on scope exit. When plain shell is the right tool, [`RUN`](https://github.com/jzombie/rust-oxdock#run) still reaches it, and [platform guards](https://github.com/jzombie/rust-oxdock#platform-guards) keep the OS-specific bits fenced: the two compose instead of competing.
+Bash gives you strings and exit codes. OxDock gives you [typed values](https://github.com/jzombie/rust-oxdock#value-types), [guarded paths](https://github.com/jzombie/rust-oxdock#workspaces--filesystem), [managed pipes](https://github.com/jzombie/rust-oxdock#transport-pipes), and identical behavior on Linux/macOS/Windows (the things you'd re-implement badly in every growing bash script). And with hot-loading [MCP tooling](https://github.com/jzombie/rust-oxdock#mcp-hosting), *English-to-OxDock* just skips the boilerplate of getting there. [Workspaces](https://github.com/jzombie/rust-oxdock#workspaces--filesystem) (`SNAPSHOT`, `LOCAL`, `CACHE`, `SYSTEM`) and [scoped blocks](https://github.com/jzombie/rust-oxdock#guards-and-scoped-blocks) with [selective environment inheritance](https://github.com/jzombie/rust-oxdock#selective-environment-inheritance) give every run an isolated root that reverts on scope exit. When plain shell is the right tool, [`RUN`](https://github.com/jzombie/rust-oxdock#run) still reaches it, and [platform guards](https://github.com/jzombie/rust-oxdock#platform-guards) keep the OS-specific bits fenced: the two combine instead of competing.
 
 Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on Linux, macOS, and Windows. Execute scripts on bare metal, inside containers, or dispatched across remote machines simultaneously. No daemons. No hypervisors.
 
@@ -33,7 +33,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.35.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.36.0-alpha/oxdock/)
 
 Jump to the [Command Reference](#command-reference) below for the full
 command list with runnable examples, or view the standard library
@@ -66,11 +66,11 @@ Installs to `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH. Set `$env:I
 For a reproducible install, pin an explicit release:
 
 ```sh
-(export VERSION=v0.35.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
+(export VERSION=v0.36.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
 ```
 
 ```powershell
-$env:VERSION = 'v0.35.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
+$env:VERSION = 'v0.36.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 ```
 
 </details>
@@ -85,7 +85,7 @@ release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 From the registry:
 
 ```sh
-cargo install oxdock@0.35.0-alpha
+cargo install oxdock@0.36.0-alpha
 ```
 
 From a local checkout:
@@ -99,7 +99,7 @@ cargo install --path oxdock
 ### Add to Rust project
 
 ```sh
-cargo add oxdock@0.35.0-alpha
+cargo add oxdock@0.36.0-alpha
 ```
 
 ### Run a script with the CLI
@@ -153,7 +153,7 @@ Scripts are sequences of instructions, one per line (`;` separates two; quoted s
 
 ### Declared variable types
 
-Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: scalars (`STRING`, `INT`, `FLOAT`, `BOOL`, `DURATION`, `PATH`), handles (`PIPE`, `HANDLE`, `SEMAPHORE`, `PERMIT`), `ANY`, and composed shapes (`LIST<STRING>`, `MAP<name: STRING, age: INT>`, arbitrary nesting, spacing insignificant). Bare `LIST` and `MAP` are runtime words, never declarations: unknown collections declare `LIST<ANY>` and `MAP<ANY>`. A field with a `?` suffix is optional (`MAP<held: BOOL, permit?: PERMIT>`): missing optional keys pass, missing required keys fail. `TYPE NAME = <shape>` binds one immutable name per run that every declaration form accepts.
+Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: scalars (`STRING`, `INT`, `FLOAT`, `BOOL`, `DURATION`, `PATH`), handles (`PIPE`, `HANDLE`, `SEMAPHORE`, `PERMIT`), `ANY`, and rendered shapes (`LIST<STRING>`, `MAP<name: STRING, age: INT>`, arbitrary nesting, spacing insignificant). Bare `LIST` and `MAP` are runtime words, never declarations: unknown collections declare `LIST<ANY>` and `MAP<ANY>`. A field with a `?` suffix is optional (`MAP<held: BOOL, permit?: PERMIT>`): missing optional keys pass, missing required keys fail. `TYPE NAME = <shape>` binds one immutable name per run that every declaration form accepts.
 
 ```oxdock
 LET $count: INT = 1
@@ -405,7 +405,7 @@ ASSERT_EQ $ran 1
 ASSERT_CONTAINS stdout "arch-detected"
 ```
 
-### Negation, disjunction, and composition
+### Negation, disjunction, and combination
 
 ```oxdock env:OXDOCK_DOC_FEATURE_A=enabled
 // Bring the runner-injected value into the script environment.
@@ -424,9 +424,9 @@ ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 [any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
 ASSERT_CONTAINS stdout "or-matched-a-branch"
 
-// Comma composes with AND: (A or linux) AND A: true here on every OS.
-[any(env:OXDOCK_DOC_FEATURE_A, os:linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
-ASSERT_CONTAINS stdout "composed-and-or-guard"
+// Comma combines with AND: (A or linux) AND A: true here on every OS.
+[any(env:OXDOCK_DOC_FEATURE_A, os:linux), env:OXDOCK_DOC_FEATURE_A] ECHO rendered-and-or-guard
+ASSERT_CONTAINS stdout "rendered-and-or-guard"
 ```
 
 ### Multi-line guards
@@ -529,6 +529,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`SYMLINK`](#symlink) | `SYMLINK [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
 | [`INSTALL`](#install) | `INSTALL <source> <dest>` |
+| [`SET_EXECUTABLE`](#set_executable) | `SET_EXECUTABLE <path>` |
 | [`ARCHIVE`](#archive) | `ARCHIVE [--raw] <src> <dst>` |
 | [`UNARCHIVE`](#unarchive) | `UNARCHIVE <src> <dst> [--max-bytes <bytes>]` |
 | [`LS`](#ls) | `LS [<path>]` |
@@ -537,6 +538,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`PROMPT`](#prompt) | `PROMPT $var <message> [<default>]` |
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
+| [`APPEND_LINE`](#append_line) | `APPEND_LINE <path> <contents>` |
 | [`REMOVE`](#remove) | `REMOVE [--recursive] <path>` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
 | [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ [--hash <sha256>] <actual> <expected>` |
@@ -774,7 +776,7 @@ LET $t: STRING = PATH_TYPE("skipped.txt")
 ASSERT_EQ $t "absent"
 ```
 
-**Example: logical condition composition**
+**Example: logical condition combination**
 
 ```oxdock
 IMPORT [STD]
@@ -1323,7 +1325,7 @@ duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
 
 A blocking foreground process is killed.
 
-ASYNC composes in either nesting order with order-dependent deadline
+ASYNC nests in either order with order-dependent deadline
 semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
 the deadline inside the background thread (a later `AWAIT $task`
 surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
@@ -1406,7 +1408,7 @@ same directory with no per-block overlay, so one block's
 writes are visible to another.
 
 Blocks nest (each level re-seeds from the same seed, so
-nesting only narrows through the allowlists) and compose
+nesting only narrows through the allowlists) and combine
 with `ASYNC` and `FUNC`. Scope exit restores the prior
 environment.
 
@@ -1878,9 +1880,14 @@ File imports:
 - Only `EXPORT`ed top-level `FUNC`s cross the
   boundary. Unexported means private; variables are
   never exportable.
-- Types cross as bare globals (like host types). A
-  whole-file import persists every exported alias, so
-  `LET $p: PERSON` works after any import of its file.
+- Types cross qualified: a whole-file import exposes
+  every exported alias as `ALIAS::NAME` only
+  (`LET $p: LIB::PERSON` after
+  `IMPORT ["./lib.oxfile" AS LIB]`), mirroring func
+  views. Nothing bare leaks from an aliased import,
+  so same-named types in different files coexist;
+  harvests below stay the explicit way to request a
+  bare name.
 - Each file initializes once; every alias shares the
   module's top-level bindings.
 - The file must exist when the run starts. Generated
@@ -1896,19 +1903,25 @@ Mixed brackets:
   entry and no modules.
 
 Selective harvests:
-- Form: `IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
+- Form: `IMPORT [FOO FROM "x.oxdock"]`,
   optionally `AS ALIAS`. Only the named top-level
   functions register, bare or namespaced under the
   alias. Harvested names must be `EXPORT`ed.
 - Single name needs no inner brackets
-  (`IMPORT [FOO FROM "x.oxdock"]`); several keep
-  `[[F, G FROM ...]]`. Several harvests group the
-  same way (`IMPORT [[TYPE A FROM STD],
-  [TYPE B FROM STD]]`), file or host alike.
+  (`IMPORT [FOO FROM "x.oxdock"]`); several names from
+  one file combine in one bracket with explicit kinds
+  (`IMPORT [TYPE A, TYPE B FROM "x.oxdock"]`, file or
+  host alike: `IMPORT [FUNC FOO, FUNC BAR FROM
+  "x.oxdock"]`). Bare names always read as modules, so
+  a bare multi-name fails naming the explicit-kind
+  fix. Prefer one import per file over grouping
+  harvests.
 - Types and functions combine in one entry
   (`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`).
-  Harvested types must be `EXPORT TYPE`d and persist
-  bare globally, so `FUNC` signatures keep working.
+  Harvested types must be `EXPORT TYPE`d. Unaliased
+  harvests persist bare globally (collision-checked),
+  so `FUNC` signatures keep working; aliased harvests
+  persist qualified-only, like whole-file imports.
 - The file body never executes, so harvesting is
   side-effect free. The file's own nested imports
   still load. Harvests produce no value and never
@@ -1933,7 +1946,7 @@ Paths:
   Entry code keeps resolving against the run cwd.
 - Missing files fail before the first step runs.
   Write-then-import in one script is rejected; check
-  libraries into the tree, or compose them at runtime
+  libraries into the tree, or combine them at runtime
   and run a child interpreter (see the child run
   examples below).
 
@@ -2071,10 +2084,10 @@ LET $d: DURATION = "5s"
 LET $files: LIST<STRING> = GLOB("*.oxdock")
 ```
 
-**Example: run composed modules in a child**
+**Example: run rendered modules in a child**
 
 ```oxdock roots:unified
-# Dynamic composition with files: the parent writes a
+# Dynamic assembly with files: the parent writes a
 # library and an entry script, then runs the entry in a
 # fresh interpreter. Child-side {{ }} stays escaped so
 # the parent does not interpolate it while writing. The
@@ -2096,10 +2109,10 @@ LET $out: STRING = RUN [$exe, "main.oxfile"]
 ASSERT_CONTAINS $out "says hi Ada"
 ```
 
-**Example: dynamic module composition**
+**Example: dynamic module assembly**
 
 ```oxdock roots:unified
-# A function that composes a module: MAKE_GREETER bakes
+# A function that assembles a module: MAKE_GREETER bakes
 # its argument into a generated file with a bare {{ }},
 # then a child run imports the result. Bare {{ }} injects
 # parent values at write time; escaped \{{ }} survives for
@@ -2107,7 +2120,7 @@ ASSERT_CONTAINS $out "says hi Ada"
 # {{ }} placeholders resolve pure functions only.
 IMPORT [STD]
 
-# The composer: parent values land in the module source.
+# The renderer: parent values land in the module source.
 FUNC MAKE_GREETER($who: STRING) {
     WRITE greeter.oxfile """
         FUNC GREET() { RETURN "hi {{ $who }}" }
@@ -2116,14 +2129,14 @@ FUNC MAKE_GREETER($who: STRING) {
     RETURN "greeter.oxfile"
 }
 
-# The entry: imports the composed module by its path.
+# The entry: imports the rendered module by its path.
 WRITE main.oxfile """
     IMPORT ["greeter.oxfile" AS G]
     LET $g: STRING = G::GREET()
     ECHO "says \{{ $g }}"
     """
 
-# Compose, then run the entry in a fresh interpreter.
+# Assemble, then run the entry in a fresh interpreter.
 LET $made: STRING = MAKE_GREETER("Ada")
 ASSERT_EQ $made "greeter.oxfile"
 LET $exe: STRING = INTERPRETER()
@@ -2724,6 +2737,35 @@ ASSERT_EQ $t "file"
 ```
 
 
+### SET_EXECUTABLE
+
+Mark a file executable.
+
+**Syntax:** `SET_EXECUTABLE <path>`
+
+Sets the executable bit on an existing file without moving it. Owner rwx on Unix, bit no-op elsewhere, so the same script runs on every platform; a missing path fails everywhere. `INSTALL` stages, marks, and renames in one atomic step; this command only flips the bit where the file already lives.
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | [`PATH`](#value-type-path) | yes | File to mark executable |
+
+**Examples:**
+
+**Example: set-executable**
+
+```oxdock roots:unified
+# Mark a rendered script executable in place.
+IMPORT [STD]
+WRITE tool.sh "echo hi"
+SET_EXECUTABLE tool.sh
+
+LET $t: STRING = PATH_TYPE("tool.sh")
+ASSERT_EQ $t "file"
+```
+
+
 ### ARCHIVE
 
 Pack a file or directory into a tarball.
@@ -2988,7 +3030,7 @@ Write to file.
 
 **Syntax:** `WRITE <path> [<contents>]`
 
-Writes contents.
+Writes contents. Bytes land exactly as given: no line-ending translation happens on any platform (LF stays LF, even on Windows), so the same script produces identical files everywhere.
 
 **Arguments:**
 
@@ -3014,7 +3056,7 @@ Append to file.
 
 **Syntax:** `APPEND <path> [<contents>]`
 
-Appends contents.
+Appends contents with no separator and no line ending: bytes concatenate exactly, so `APPEND` never terminates the line (use `APPEND_LINE` for that). Bytes land exactly as given: no line-ending translation happens on any platform (LF stays LF, even on Windows), so the same script produces identical files everywhere.
 
 **Arguments:**
 
@@ -3031,9 +3073,40 @@ Appends contents.
 WRITE log.txt line1
 APPEND log.txt line2
 
-# APPEND concatenates with no separator.
+# No separator or newline is added: the bytes concatenate
+# exactly, so this asserts the unterminated form.
 LET $all: STRING = READ log.txt
 ASSERT_EQ $all "line1line2"
+```
+
+
+### APPEND_LINE
+
+Append one line to a file.
+
+**Syntax:** `APPEND_LINE <path> <contents>`
+
+Appends contents plus exactly one trailing LF newline (`\n`, never the platform newline), so callers never spell the terminator by hand and output bytes stay identical on every OS. Contents are required: unlike APPEND there is no stdin form, a line is a complete value, not a stream.
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | [`PATH`](#value-type-path) | yes | File |
+| `contents` | [`STRING...`](#value-type-string) | yes | Line content (the newline is added) |
+
+**Examples:**
+
+**Example: append-line**
+
+```oxdock
+WRITE log.txt line1
+APPEND_LINE log.txt line2
+APPEND_LINE log.txt line3
+
+# Each APPEND_LINE terminates its own write.
+LET $all: STRING = READ log.txt
+ASSERT_EQ $all "line1line2\nline3\n"
 ```
 
 
@@ -4104,12 +4177,12 @@ LET $nonempty: BOOL = $exe != ""
 ASSERT_EQ $nonempty true
 ```
 
-**Example: dynamic composition**
+**Example: dynamic assembly**
 
 ```oxdock
-# Compose the child script dynamically: the parent interpolates
+# Assemble the child script dynamically: the parent interpolates
 # its own bindings into the pipe, then runs the interpreter on it.
-# Unescaped {{ }} bakes in at compose time; \{{ }} stays literal
+# Unescaped {{ }} bakes in at render time; \{{ }} stays literal
 # so the child expands it with its own bindings.
 # The pipe delivers EOF when the producer step ends, so the child
 # reads exactly one script.
@@ -6583,8 +6656,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.35.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.35.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.36.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.36.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -6596,7 +6669,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.35.0-alpha"
+    "alpha OxDock 0.36.0-alpha"
 );
 ```
 
@@ -7265,13 +7338,13 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 
 ## Citation
 
-If you use OxDock in published work, cite version `0.35.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+If you use OxDock in published work, cite version `0.36.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
 
 ```bibtex
 @software{oxdock,
   author = "Jeremy Harris",
   title = "OxDock",
-  version = "0.35.0-alpha",
+  version = "0.36.0-alpha",
   url = "https://github.com/jzombie/rust-oxdock",
   license = "Apache-2.0"
 }

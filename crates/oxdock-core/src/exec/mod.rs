@@ -29,18 +29,18 @@ pub use self::conformance::assert_module_returns_conformance;
 pub use self::engine::{Engine, EngineOutput};
 pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
-    dispatch_append, dispatch_archive, dispatch_assert_contains, dispatch_assert_eq,
-    dispatch_assert_ne, dispatch_assign, dispatch_assign_async_step, dispatch_assign_capture_step,
-    dispatch_async_block, dispatch_await_capture_step, dispatch_await_step, dispatch_break,
-    dispatch_call, dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git,
-    dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
-    dispatch_func_def, dispatch_if_then, dispatch_import_file, dispatch_import_funcs,
-    dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env, dispatch_isolated_step,
-    dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step, dispatch_read,
-    dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return, dispatch_run,
-    dispatch_run_exec, dispatch_set, dispatch_sleep_step, dispatch_symlink, dispatch_timeout_step,
-    dispatch_unarchive, dispatch_while_loop, dispatch_with_io, dispatch_with_io_block,
-    dispatch_workdir, dispatch_workspace, dispatch_write,
+    dispatch_append, dispatch_append_line, dispatch_archive, dispatch_assert_contains,
+    dispatch_assert_eq, dispatch_assert_ne, dispatch_assign, dispatch_assign_async_step,
+    dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
+    dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
+    dispatch_copy, dispatch_copy_git, dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand,
+    dispatch_for_loop, dispatch_func_def, dispatch_if_then, dispatch_import_file,
+    dispatch_import_funcs, dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env,
+    dispatch_isolated_step, dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step,
+    dispatch_read, dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return,
+    dispatch_run, dispatch_run_exec, dispatch_set, dispatch_set_executable, dispatch_sleep_step,
+    dispatch_symlink, dispatch_timeout_step, dispatch_unarchive, dispatch_while_loop,
+    dispatch_with_io, dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
 };
 pub use self::import::{DryRunStep, dry_run_closure};
 pub use self::io::ExecIo;
@@ -51,7 +51,8 @@ pub use self::mcp::{McpCallOutput, McpSession};
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
     OxDockFn, ParamOption, PreRunCheck, PureFn, PureTable, RecordSchema, builtin_function_metas,
-    builtin_function_names, fill_optional_args, required_arity, std_module_table,
+    builtin_function_names, fill_optional_args, placeholder_resolver, required_arity,
+    std_module_table,
 };
 pub use self::state::ExecState;
 pub use self::state::MAX_RUNNING_TASKS;
@@ -88,7 +89,7 @@ use self::steps::execute_steps;
 pub const SNAPSHOT_PENDING_DISPLAY: &str = "<snapshot:pending>";
 
 /// Fallback tree body used when a materialized snapshot cannot be described
-/// while composing a run error (issue #131). Single source of truth for the
+/// while building a run error (issue #131). Single source of truth for the
 /// lazy error path.
 pub const SNAPSHOT_TREE_UNAVAILABLE: &str = "<unavailable>";
 
@@ -149,16 +150,16 @@ pub fn run_steps_with_context_result_with_io(
                 fs_root.display(),
                 tree
             );
-            Err(compose_error_with_snapshot(err, snapshot))
+            Err(error_with_snapshot(err, snapshot))
         }
     }
 }
 
-/// Compose a single error message with the top cause plus a caller-provided
+/// Build a single error message with the top cause plus a caller-provided
 /// filesystem-snapshot section. Shared by the eager and lazy runners so both
 /// render identical chains and only differ in the snapshot section.
-fn compose_error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> anyhow::Error {
-    // Compose a single error message with the top cause plus a compact fs snapshot.
+fn error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> anyhow::Error {
+    // Build a single error message with the top cause plus a compact fs snapshot.
     let chain = err.chain().map(|e| e.to_string()).collect::<Vec<_>>();
     let mut primary = chain
         .first()
@@ -182,7 +183,7 @@ fn compose_error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> 
         String::new()
     };
     let msg = format!("{}{}\n{}", primary, rest, snapshot_section);
-    // The snapshot composer flattens the chain into one message for CLI
+    // The snapshot renderer flattens the chain into one message for CLI
     // rendering. Re-attach a relayed EXIT code as the inner error under
     // that message: the text stays byte-identical while the code stays
     // machine readable (context values are invisible to chain traversal,
@@ -288,7 +289,7 @@ pub fn run_steps_with_lazy_snapshot_and_modules_and_entry(
 /// Error enrichment for lazy runs: a materialized snapshot gets the same
 /// filesystem-snapshot treatment as eager runs; a pending one reports that
 /// no snapshot directory was ever created instead of describing a tree.
-/// Chain rendering is identical to the eager path (shared composer).
+/// Chain rendering is identical to the eager path (shared renderer).
 pub fn enrich_lazy_error(
     snapshot: &Arc<LazyGuardedTempDir>,
     build_context: &GuardedPath,
@@ -305,9 +306,9 @@ pub fn enrich_lazy_error(
                 concrete.display(),
                 tree
             );
-            compose_error_with_snapshot(err, snapshot_msg)
+            error_with_snapshot(err, snapshot_msg)
         }
-        None => compose_error_with_snapshot(
+        None => error_with_snapshot(
             err,
             String::from(
                 "filesystem snapshot: never materialized (no snapshot directory was created)",
@@ -418,10 +419,7 @@ pub(crate) fn new_state<P: ProcessManager>(
     // layers win (BuiltinEnv sanctions, `io` overrides route host
     // entries). The pure seed is stored alongside for `ISOLATED`
     // resets and transport sanitize.
-    let seed = Arc::new(oxdock_process::seed_defaults(
-        &cargo_scratch.tmp_seed_display(),
-        &cargo_scratch.target_seed_display(),
-    ));
+    let seed = Arc::new(oxdock_process::seed_defaults());
     let mut envs = (*seed).clone();
     envs.extend(BuiltinEnv::collect(&build_context).into_envs());
     for (key, value) in io.inherit_env_overrides() {
@@ -528,17 +526,11 @@ fn finish_run<P: ProcessManager>(
     // can smuggle a type error past the entry gate.
     let saved_aliases = state.type_aliases.clone();
     let closure = self::import::expand_import_closure(&mut state, steps)?;
-    for file in &closure {
-        let aliases = self::typing::collect_type_aliases(&file.steps, &state)?;
-        // Validation is permissive (global) for v1: all file aliases
-        // merge bare, like host types. Runtime persistence stays strict
-        // (only exported + imported persist); static gating for
-        // harvests (unexported fails) lives in `collect_site`.
-        for (name, target) in &aliases {
-            state.type_aliases.insert(name.clone(), target.clone());
-        }
-    }
-    static_check::validate_script_closure(steps, &closure, &state)?;
+    // Per-file scoping lives inside the closure pass: every file is
+    // checked against exactly its own aliases plus the shared
+    // harvests, never another file's defs, so same-named types in
+    // different files coexist. Harvest collisions still fail loud.
+    static_check::validate_script_closure(steps, &closure, &mut state)?;
     state.type_aliases = saved_aliases;
     let assert_windows = Arc::clone(&state.assert_windows);
     let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);

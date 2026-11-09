@@ -702,8 +702,8 @@ fn ssh_pump<P: ProcessManager>(
 ///
 /// `WITH_IO [tty]` shares the same pump core and covers terminal
 /// runs with host or static sizing and step-local reporting. This
-/// function covers the two session-bound cases a script composition
-/// cannot reproduce: a composed run with static geometry observes
+/// function covers the two session-bound cases a script assembly
+/// cannot reproduce: a rendered run with static geometry observes
 /// the opener but never an outer resize (no script primitive
 /// subscribes a running pty to the session cell), and a failing DSL
 /// `RUN` aborts its task before any script-level status report could

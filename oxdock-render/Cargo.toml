@@ -1,0 +1,51 @@
+[package]
+name = "oxdock-render"
+description = "Generate text files from templates and data: READMEs, docs, installers, and other release artifacts, rendered deterministically from a single pipeline config."
+categories = ["command-line-utilities", "development-tools::build-utils"]
+keywords = ["oxdock", "render", "templates", "artifacts", "docs"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The pipe child is spawned by the parent, never run directly:
+# bare `cargo run -p oxdock-render` means the renderer.
+default-run = "oxdock-render"
+
+[lib]
+name = "oxdock_render"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxdock-render"
+path = "src/main.rs"
+
+[[bin]]
+name = "oxdock-render-child"
+path = "src/bin/child.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+oxdock-core.workspace = true
+oxdock-fs.workspace = true
+oxdock-func-macro.workspace = true
+oxdock-markdown-plugin.workspace = true
+# Plugin crates are linked so their HostModules can be introspected
+# in-process (static linking requires the edge). The docs path only
+# reads metadata; it never serves, connects, or binds.
+oxdock-net-plugin.workspace = true
+oxdock-parser.workspace = true
+oxdock-process.workspace = true
+oxdock-ssh-plugin.workspace = true
+serde_json.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true
+oxdock-macros.workspace = true
+
+[lints]
+workspace = true

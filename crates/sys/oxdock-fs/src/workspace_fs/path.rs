@@ -239,7 +239,16 @@ impl GuardedPath {
         } else {
             pattern
         };
-        let posix = clean.replace('\\', "/");
+        // Verbatim disk roots (`\\?\C:\...`, slash-normalized below to
+        // `//?/C:/...`) compare in plain drive form like the search root
+        // below, so an absolute pattern under a verbatim root strips
+        // against it. Without this, the strip misses, the fallback
+        // trims the pattern into garbage, the glob matches nothing, and
+        // callers read the miss as empty results (assemble SCAN staging
+        // empty fragment groups on Windows, failing every `$files`
+        // lookup at render).
+        let slashed = to_forward_slashes(clean);
+        let posix = strip_verbatim_prefix(&slashed).to_string();
         if posix.split('/').any(|segment| segment == "..") {
             return Ok(Vec::new());
         }
@@ -251,13 +260,13 @@ impl GuardedPath {
         // drive form (same location) and rebase results onto the guarded
         // root, which keeps `strip_prefix` callers working unchanged.
         let root_str =
-            strip_verbatim_prefix(&self.root.to_string_lossy().replace('\\', "/")).to_string();
+            strip_verbatim_prefix(&to_forward_slashes(&self.root.to_string_lossy())).to_string();
         let search_root = Path::new(&root_str);
 
         let rel_pattern = if path_pattern.is_absolute() {
             path_pattern
                 .strip_prefix(search_root)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .map(|p| to_forward_slashes(&p.to_string_lossy()))
                 .unwrap_or_else(|_| posix.trim_start_matches('/').to_string())
         } else {
             posix.trim_start_matches('/').to_string()
@@ -638,7 +647,7 @@ impl LazyGuardedTempDir {
         }
     }
 
-    /// Force physical creation without borrowing the path. Composition roots
+    /// Force physical creation without borrowing the path. Entry points
     /// only (e.g. interactive shell entry, which must hand a concrete
     /// directory to an external consumer). Step handlers must resolve through
     /// `PathResolver` instead of calling this.
@@ -1049,6 +1058,42 @@ mod tests {
         let parent = child.parent().expect("parent");
         assert_eq!(parent.as_path(), root.as_path().join("child"));
         assert_eq!(child.root(), root.root());
+    }
+
+    // Assemble SCAN globs from absolute patterns under a verbatim workspace
+    // root (child --root tempdirs canonicalize to `\\?\` on Windows):
+    // the pattern must strip to the same plain drive form as the
+    // search root, or the glob matches nothing and fragment groups
+    // read empty at render. Windows-only: verbatim prefixes only
+    // arise from canonicalization there.
+    #[test]
+    #[cfg(windows)]
+    fn glob_verbatim_rooted_absolute_pattern_lists_members() {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+        let dir = root.join("fragments/sec").expect("join");
+        resolver.create_dir_all(&dir).expect("dirs");
+        let file = root.join("fragments/sec/a.md.tmpl").expect("join");
+        resolver.write_file(&file, b"A").expect("file");
+        let canonical = resolver.canonicalize(&root).expect("canonicalize");
+        let verbatim = to_forward_slashes(&canonical.as_path().to_string_lossy());
+        assert!(
+            verbatim.starts_with("//?/"),
+            "canonicalized tempdir must carry the verbatim prefix on Windows: {verbatim}"
+        );
+        let pattern = format!("{verbatim}/fragments/sec/*.md.tmpl");
+        let hits = root.glob_paths(&pattern).expect("glob");
+        assert_eq!(
+            hits.len(),
+            1,
+            "verbatim-rooted pattern must list the member: {pattern}"
+        );
+        assert!(
+            to_forward_slashes(&hits[0].to_string_lossy()).ends_with("fragments/sec/a.md.tmpl"),
+            "unexpected hit: {:?}",
+            hits[0]
+        );
     }
 
     #[test]

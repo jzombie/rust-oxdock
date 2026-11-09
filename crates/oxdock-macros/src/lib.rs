@@ -1107,6 +1107,10 @@ fn emit_stepkind(
             let t = emit_arg(to, interp);
             quote! { StepKind::Install { from: #f, to: #t } }
         }
+        StepKind::SetExecutable { path } => {
+            let t = emit_arg(path, interp);
+            quote! { StepKind::SetExecutable { path: #t } }
+        }
         StepKind::Archive { src, dst, raw } => {
             let s = emit_arg(src, interp);
             let d = emit_arg(dst, interp);
@@ -1278,6 +1282,11 @@ fn emit_stepkind(
                 }
                 None => quote! { StepKind::Append { path: #p, contents: None } },
             }
+        }
+        StepKind::AppendLine { path, contents } => {
+            let p = emit_arg(path, interp);
+            let c = emit_arg(contents, interp);
+            quote! { StepKind::AppendLine { path: #p, contents: #c } }
         }
         StepKind::Remove { path, recursive } => {
             let p = emit_arg(path, interp);

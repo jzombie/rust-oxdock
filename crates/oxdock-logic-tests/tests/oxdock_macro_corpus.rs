@@ -85,6 +85,27 @@ fn macro_emitted_quoting_flags_survive() {
 }
 
 #[test]
+fn macro_append_line_emits_against_reexported_parser() {
+    // Emission fidelity for the line-append twin: the macro product
+    // must carry the AppendLine variant, and render back to a script
+    // that reparses identically (a missing Command::parse arm glued it
+    // onto the previous step, found by multistep fuzz as APPEND_LINE
+    // after SLEEP).
+    let steps: Vec<oxdock_parser::Step> = oxdock! {
+        SLEEP 2m
+        APPEND_LINE "a" "b"
+    };
+    match &steps[1].kind {
+        oxdock_parser::StepKind::AppendLine { path, contents } => {
+            assert_eq!(path, &oxdock_parser::Arg::String("a".to_string(), true));
+            assert_eq!(contents, &oxdock_parser::Arg::String("b".to_string(), true));
+        }
+        other => panic!("expected AppendLine, got {other:?}"),
+    }
+    assert_macro_string_roundtrip(&steps);
+}
+
+#[test]
 fn macro_assert_ne_emits_against_reexported_parser() {
     // Emission fidelity for the inequality twin: the macro product must
     // carry the NE variant with the quoted literal intact, and render
@@ -731,6 +752,7 @@ fn kind_covered(kind: &oxdock_parser::StepKind) -> bool {
         | StepKind::CopyGit { .. }
         | StepKind::Symlink { .. }
         | StepKind::Install { .. }
+        | StepKind::SetExecutable { .. }
         | StepKind::Archive { .. }
         | StepKind::Unarchive { .. }
         | StepKind::Ls(..)
@@ -739,6 +761,7 @@ fn kind_covered(kind: &oxdock_parser::StepKind) -> bool {
         | StepKind::Prompt { .. }
         | StepKind::Write { .. }
         | StepKind::Append { .. }
+        | StepKind::AppendLine { .. }
         | StepKind::Remove { .. }
         | StepKind::Expand { .. }
         | StepKind::AssertEq { .. }
@@ -829,6 +852,9 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
         (StepKind::Install { from: fx, to: tx }, StepKind::Install { from: fy, to: ty }) => {
             arg_content_eq(fx, fy) && arg_content_eq(tx, ty)
         }
+        (StepKind::SetExecutable { path: px }, StepKind::SetExecutable { path: py }) => {
+            arg_content_eq(px, py)
+        }
         (
             StepKind::Archive {
                 src: sx, dst: dx, ..
@@ -880,6 +906,16 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
                 contents: cy,
             },
         ) => arg_content_eq(px, py) && opt_arg_eq(cx, cy),
+        (
+            StepKind::AppendLine {
+                path: px,
+                contents: cx,
+            },
+            StepKind::AppendLine {
+                path: py,
+                contents: cy,
+            },
+        ) => arg_content_eq(px, py) && arg_content_eq(cx, cy),
         (StepKind::Remove { path: x, .. }, StepKind::Remove { path: y, .. }) => {
             arg_content_eq(x, y)
         }

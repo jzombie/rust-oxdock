@@ -58,10 +58,10 @@ const TASK_TAIL_CAP: usize = 64 * 1024;
 /// scope, recursion-budget, and task invariants cannot be broken from outside.
 pub struct ExecState<P: ProcessManager> {
     pub(super) fs: Box<dyn WorkspaceFs>,
-    /// Pre-reserved guarded scratch name for `CARGO_TARGET_DIR` (issue #131).
-    /// Opaque [`CargoScratch`]: renderable for the child environment but not
-    /// nameable as a `&GuardedPath`, so host code cannot `ensure()` or
-    /// `create_dir_all` it. The child `cargo` creates it on demand.
+    /// Pre-reserved guarded scratch dir (session temp for child
+    /// writes). Opaque [`CargoScratch`]: renderable for the child
+    /// environment but not nameable as a `&GuardedPath`, so host code
+    /// cannot `ensure()` or `create_dir_all` it. The child `cargo` creates it on demand.
     pub(super) cargo_scratch: CargoScratch,
     /// Pure session seed from [`oxdock_process::seed_defaults`], stored at
     /// init alongside the layered `envs`. `ISOLATED` resets clone this
@@ -869,16 +869,7 @@ impl<P: ProcessManager> ExecState<P> {
             .iter()
             .rev()
             .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
-            .or_else(|| {
-                self.current_module().and_then(|module| {
-                    self.modules.get(&module).and_then(|record| {
-                        record
-                            .init
-                            .as_ref()
-                            .and_then(|init| init.vars.get(key).map(|(k, _)| k.clone()))
-                    })
-                })
-            })
+            .or_else(|| self.module_var(key).map(|(k, _)| k.clone()))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "undeclared variable ${key}: declare it first with LET ${key}: TYPE = ..."
@@ -893,12 +884,8 @@ impl<P: ProcessManager> ExecState<P> {
         }
         // Not a lexical binding: update the owning module's shared
         // store in place, so every alias observes the mutation.
-        if let Some(module) = self.current_module()
-            && let Some(record) = self.modules.get_mut(&module)
-            && let Some(init) = record.init.as_mut()
-            && let Some(slot) = init.vars.get_mut(key)
-        {
-            slot.1 = coerced;
+        if let Some((_, stored)) = self.module_var_mut(key) {
+            *stored = coerced;
             return Ok(());
         }
         anyhow::bail!("undeclared variable ${key}");
@@ -916,6 +903,7 @@ impl<P: ProcessManager> ExecState<P> {
             .iter()
             .rev()
             .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
+            .or_else(|| self.module_var(key).map(|(k, _)| k.clone()))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "undeclared variable ${key}: declare it first with LET ${key}: LIST<...> = ..."
@@ -944,6 +932,23 @@ impl<P: ProcessManager> ExecState<P> {
                 return Ok(());
             }
         }
+        // Not a lexical binding: append to the owning module's shared
+        // store in place, so module-global lists stay appendable from
+        // module-owned functions with no importer visibility.
+        if let Some((_, value)) = self.module_var_mut(key) {
+            let list = value.as_list_mut().ok_or_else(|| {
+                anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
+            })?;
+            if let Some(expected) = element {
+                oxdock_parser::check_value_at(
+                    &expected,
+                    &item,
+                    &format!("${key}[{}]", list.len()),
+                )?;
+            }
+            list.push(item);
+            return Ok(());
+        }
         anyhow::bail!("undeclared variable ${key}");
     }
 
@@ -957,11 +962,7 @@ impl<P: ProcessManager> ExecState<P> {
         // Module-owned code falls back to the owning module's shared
         // store (#115): one file's functions share one global state.
         // Entry code never sees it (its boundary pushes `None`).
-        if let Some(module) = self.current_module()
-            && let Some(record) = self.modules.get(&module)
-            && let Some(init) = record.init.as_ref()
-            && let Some((_, value)) = init.vars.get(key)
-        {
+        if let Some((_, value)) = self.module_var(key) {
             return Some(value.clone());
         }
         None
@@ -973,11 +974,7 @@ impl<P: ProcessManager> ExecState<P> {
                 return Some(entry.clone());
             }
         }
-        if let Some(module) = self.current_module()
-            && let Some(record) = self.modules.get(&module)
-            && let Some(init) = record.init.as_ref()
-            && let Some(entry) = init.vars.get(key)
-        {
+        if let Some(entry) = self.module_var(key) {
             return Some(entry.clone());
         }
         None
@@ -993,6 +990,21 @@ impl<P: ProcessManager> ExecState<P> {
             Some(Some(key)) => Some(key.clone()),
             _ => None,
         }
+    }
+
+    /// One lookup for the owning module's shared store (#115): the
+    /// single fallback every variable accessor uses after its lexical
+    /// walk misses, so module-global visibility lives in exactly one
+    /// place. Entry code never reaches here (its boundary pushes
+    /// `None`, and `current_module` yields nothing then).
+    fn module_var(&self, key: &str) -> Option<&(TypeTag, Value)> {
+        self.module_store()?.get(key)
+    }
+
+    /// Mutable twin of [`ExecState::module_var`], for the two
+    /// accessors that write through to the store in place.
+    fn module_var_mut(&mut self, key: &str) -> Option<&mut (TypeTag, Value)> {
+        self.module_store_mut()?.get_mut(key)
     }
 
     /// Base directory relative paths resolve against (#115): the
@@ -1024,15 +1036,35 @@ impl<P: ProcessManager> ExecState<P> {
                 result.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
-        if let Some(module) = self.current_module()
-            && let Some(record) = self.modules.get(&module)
-            && let Some(init) = record.init.as_ref()
-        {
-            for (k, (_, v)) in &init.vars {
+        if let Some(store) = self.module_store() {
+            for (k, (_, v)) in store {
                 result.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
         result
+    }
+
+    /// Borrow the owning module's shared store, if any. The single
+    /// map behind [`ExecState::module_var`], exposed whole for the
+    /// one accessor that flattens every binding.
+    fn module_store(&self) -> Option<&HashMap<String, (TypeTag, Value)>> {
+        let module = self.current_module()?;
+        self.modules
+            .get(&module)?
+            .init
+            .as_ref()
+            .map(|init| &init.vars)
+    }
+
+    /// Mutable twin of [`ExecState::module_store`], for the accessors
+    /// that write through to the store in place.
+    fn module_store_mut(&mut self) -> Option<&mut HashMap<String, (TypeTag, Value)>> {
+        let module = self.current_module()?;
+        self.modules
+            .get_mut(&module)?
+            .init
+            .as_mut()
+            .map(|init| &mut init.vars)
     }
 }
 

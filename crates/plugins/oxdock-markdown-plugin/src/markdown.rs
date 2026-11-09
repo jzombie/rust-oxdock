@@ -291,7 +291,7 @@ pub struct Heading {
 /// `{format: "inline"}` means the `min_level` layer instead of an
 /// unforced multi-level failure.
 pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Result<TocOptions> {
-    // Compositional reads: one shape check per key, then direct
+    // Per-key reads: one shape check per key, then direct
     // narrowing. Bounds and cross-key rules below are domain logic.
     let min_level = match map.get("min_level") {
         Some(value) => {

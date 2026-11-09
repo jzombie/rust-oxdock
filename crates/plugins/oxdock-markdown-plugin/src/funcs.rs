@@ -72,7 +72,7 @@ fn toc(
 
 /// Parse markdown headings into a structured list.
 ///
-/// Immediate helper for composition and tests: returns one MAP per
+/// Immediate helper for assembly and tests: returns one MAP per
 /// heading with `level`, `text`, and `anchor` keys.
 #[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::Any)))]
 #[example(
