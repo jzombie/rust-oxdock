@@ -18,8 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-oxdock-render.workspace = true
 oxdock-fs.workspace = true
+oxdock-render.workspace = true
 
 [lints]
 workspace = true

@@ -75,7 +75,6 @@ oxdock = { path = "oxdock", version = "0.36.0-alpha" }
 oxdock-build = { path = "crates/oxdock-build", version = "0.36.0-alpha" }
 # Dependents opt into `oxdock-cli` features explicitly.
 oxdock-cli = { path = "crates/oxdock-cli", version = "0.36.0-alpha", default-features = false }
-oxdock-render = { path = "oxdock-render", version = "0.36.0-alpha" }
 oxdock-core = { path = "crates/oxdock-core", version = "0.36.0-alpha" }
 oxdock-embed = { path = "crates/oxdock-embed", version = "0.36.0-alpha" }
 oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.36.0-alpha" }
@@ -91,6 +90,7 @@ oxdock-pipe = { path = "crates/sys/oxdock-pipe", version = "0.36.0-alpha" }
 oxdock-process = { path = "crates/sys/oxdock-process", version = "0.36.0-alpha" }
 oxdock-pty = { path = "crates/oxdock-pty", version = "0.36.0-alpha" }
 oxdock-remote-proto = { path = "crates/oxdock-remote-proto", version = "0.36.0-alpha" }
+oxdock-render = { path = "oxdock-render", version = "0.36.0-alpha" }
 oxdock-ssh-plugin = { path = "crates/plugins/oxdock-ssh-plugin", version = "0.36.0-alpha" }
 oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.36.0-alpha" }
 oxdock-utils = { path = "crates/oxdock-utils", version = "0.36.0-alpha" }
