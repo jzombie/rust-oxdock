@@ -139,20 +139,19 @@ mod tests {
 
     #[test]
     fn run_does_not_synthesize_cargo_target_dir() {
-        // No host value, no seed row: the child observes nothing, so
-        // plain `cargo` defaults to `./target` under its own cwd.
+        // No host value, no seed row: the script env carries nothing,
+        // so children default like an unset variable. Probed through
+        // declared `INHERIT_ENV` (shell `echo` cannot distinguish an
+        // absent variable from empty on every platform) reading empty.
         let _guard = oxdock_process::TestEnvGuard::remove("CARGO_TARGET_DIR");
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        #[allow(clippy::disallowed_macros)]
-        let cmd = if cfg!(windows) {
-            "echo %CARGO_TARGET_DIR% > seen.txt"
-        } else {
-            "printf %s \"$CARGO_TARGET_DIR\" > seen.txt"
-        };
-
-        let steps = parse_script(&format!("RUN {cmd}")).unwrap();
+        let steps = parse_script(indoc! {r#"
+            INHERIT_ENV [CARGO_TARGET_DIR]
+            WRITE seen.txt "{{ env:CARGO_TARGET_DIR }}"
+        "#})
+        .unwrap();
 
         run_steps_without_snapshot(&root, &steps).unwrap();
 
@@ -753,11 +752,14 @@ mod tests {
 
         // Shell sleep granularity differs per platform (`sleep` seconds
         // against `ping` whole seconds), so only the bounds branch.
+        // The upper bound carries scheduling slack for loaded shared
+        // runners (both backgrounds run concurrently, so anything near
+        // the 0.5s sleep is a pass; a hang blows past by orders more).
         #[allow(clippy::disallowed_macros)]
         let (lower, upper) = if cfg!(windows) {
             (0.9, 3.0)
         } else {
-            (0.15, 0.8)
+            (0.15, 1.2)
         };
         assert!(
             elapsed.as_secs_f32() < upper && elapsed.as_secs_f32() > lower,

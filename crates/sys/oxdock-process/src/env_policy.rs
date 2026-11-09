@@ -312,7 +312,10 @@ pub fn seed_defaults() -> HashMap<String, String> {
 /// tests can stub the host hermetically; production passes
 /// [`host_var`]. A name the host lacks is omitted, never fatal. No
 /// variable enters the map undefined.
-fn interpret_seed_table(names: &[&str], host: &dyn Fn(&str) -> Option<String>) -> HashMap<String, String> {
+fn interpret_seed_table(
+    names: &[&str],
+    host: &dyn Fn(&str) -> Option<String>,
+) -> HashMap<String, String> {
     let mut seed = HashMap::with_capacity(names.len());
     for name in names {
         if let Some(mirrored) = host(name) {
@@ -473,10 +476,7 @@ mod tests {
         // An empty stub host (Miri, bare `env -i`): every row stays
         // absent. No synthesis, no scratch fallback.
         let seed = interpret_seed_table(&platform_seed_names(), &|_: &str| None::<String>);
-        assert!(
-            seed.is_empty(),
-            "empty host must seed nothing: {seed:?}"
-        );
+        assert!(seed.is_empty(), "empty host must seed nothing: {seed:?}");
     }
 
     #[test]
