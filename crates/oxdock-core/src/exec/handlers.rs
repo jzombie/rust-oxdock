@@ -2565,10 +2565,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // Own-module bindings stay visible through the
             // module-store fallback in every accessor, so this only
             // cuts importer frames, never module state.
-            let saved_vars = if module_ctx
-                .as_ref()
-                .is_some_and(|(_, init)| init.is_some())
-            {
+            let saved_vars = if module_ctx.as_ref().is_some_and(|(_, init)| init.is_some()) {
                 Some(std::mem::take(&mut cx.state.var_scopes))
             } else {
                 None

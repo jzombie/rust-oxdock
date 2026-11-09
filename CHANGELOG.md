@@ -19,12 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Multi-line `EXPORT` name lists: `EXPORT [...]`, `EXPORT TYPE [...]`, `EXPORT FUNC [...]`, and mixed `EXPORT [TYPE A, FUNC B, ...]` may all span lines; entries trim surrounding newlines exactly like single-line lists, and a trailing comma leaves an empty final entry that carries no name instead of failing.
 - Compose per-target `base`: a target in `target.json` may declare `"base"` (a wsroot-relative directory); relative template, values, fragment patterns, and out then resolve under it instead of repeating the shared prefix, and no `base` keeps the old wsroot-relative behavior exactly. Wsroot-anchored paths (`.oxdock/...`, `/...`) stay as-is so shared fragments keep working. A `base` that is not a directory fails the render naming the target, the base, and what was found there.
 - Installer runs non-interpreter products through an ephemeral `oxdock` engine: installing e.g. `oxdock-compose` downloads and verifies the interpreter tarball beside the product tarball, unpacks it to scratch, and executes the installer with it. The interpreter is never placed; only the product members land, and the CI tail proof binary follows the product (fresh install for `oxdock`, ephemeral engine otherwise). A smoke leg now installs `oxdock-compose` end to end asserting both binaries land, the interpreter does not, and the directory reaches `GITHUB_PATH`.
+- Module-call variable isolation for file imports (#115): a module-owned function sees only its own bindings plus its module's store, never the importer's `LET`s. Same-named mutations land in the module store, caller intact; `LIST_APPEND` from a function targets the module-global list. Eight regression tests pin every channel (arguments in, `RETURN` out, nested imports keep working).
 
 ### Changed
 
 - `IMPORT` reference teaches single brackets only (one import per file preferred).
 - [breaking] Release pipeline callers name products with `bins:` (or the workspace metadata list): the single-product `binary:` input is gone, with no fallback. Update one-line callers from `binary: mytool` to `bins: mytool`.
 - File writes document the line-ending contract: `WRITE`/`APPEND`/`APPEND_LINE` state that bytes land exactly as given with no line-ending translation on any platform (LF stays LF, even on Windows; `APPEND` adds no terminator, `APPEND_LINE` adds exactly one LF). `APPEND`'s no-terminator behavior is pinned by an explicit test, and existing manual-`"\n"` append sites migrate to `APPEND_LINE`.
+- [breaking] The session seed no longer synthesizes `CARGO_TARGET_DIR`: unset hosts leave it absent and `cargo` defaults to `./target` under the child cwd. Route it explicitly per run (`ENV`/`INHERIT_ENV`); every CI leg already does. `ENV_CONTRACTS.md` regenerates without the row.
 
 ## [0.35.0-alpha] - 2026-11-05
 

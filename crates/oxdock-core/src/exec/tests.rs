@@ -6713,11 +6713,7 @@ fn file_import_function_read_of_caller_var_fails() {
         LET $carrier: STRING = "importer-secret"
         LET $got: STRING = LIB::SNIFF()
     "#});
-    let err = run_expect_err(
-        Box::new(fs),
-        &steps,
-        MockProcessManager::default(),
-    );
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
         format!("{err:?}").contains("undefined variable $carrier"),
         "fails naming the unobservable variable: {err:?}"
@@ -6915,11 +6911,7 @@ fn file_import_module_body_cannot_call_importer_function() {
         IMPORT ["lib.oxdock" AS LIB]
         LET $r: STRING = LIB::SNEAKY()
     "#});
-    let err = run_expect_err(
-        Box::new(fs),
-        &steps,
-        MockProcessManager::default(),
-    );
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
         format!("{err:?}").contains("HELPER"),
         "fails naming the importer-only function: {err:?}"
@@ -6942,14 +6934,50 @@ fn file_import_init_cannot_see_caller_vars() {
         IMPORT ["lib.oxdock" AS LIB]
         LET $caller_var: STRING = "importer-secret"
     "#});
-    let err = run_expect_err(
-        Box::new(fs),
-        &steps,
-        MockProcessManager::default(),
-    );
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
         format!("{err:?}").contains("undefined variable $caller_var"),
         "fails naming the unobservable variable: {err:?}"
+    );
+}
+
+/// Module law, vars/template leg: bare `{{ key }}` placeholders read
+/// through the same store as `$vars`, so the firewall covers them too.
+#[test]
+fn file_import_function_template_reads_module_store() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                LET $shared: STRING = "module-value"
+                FUNC SHOW() {
+                    RETURN "{{ shared }}"
+                }
+                EXPORT SHOW
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $shared: STRING = "caller-value"
+        LET $r: STRING = LIB::SHOW()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("import runs");
+    assert_eq!(
+        bindings.get("r").and_then(|v| v.as_str()),
+        Some("module-value"),
+        "template expansion observes the module store, never the caller"
+    );
+    assert_eq!(
+        bindings.get("shared").and_then(|v| v.as_str()),
+        Some("caller-value"),
+        "caller binding intact"
     );
 }
 
