@@ -1,14 +1,14 @@
 [package]
 name = "oxdock-render"
+description = "Rendered artifacts, byte-identical: a general-purpose lifecycle renderer turning one context into deterministic outputs."
+categories = ["command-line-utilities", "development-tools::build-utils"]
+keywords = ["oxdock", "render", "templates", "artifacts", "docs"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Rendered artifacts, byte-identical: a general-purpose lifecycle renderer turning one context into deterministic outputs."
-
-# Prototype crate; don't publish with this name
-publish = false
+publish.workspace = true
 
 # The pipe child is spawned by the parent, never run directly:
 # bare `cargo run -p oxdock-render` means the renderer.
