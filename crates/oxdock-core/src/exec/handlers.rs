@@ -2559,6 +2559,20 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                 })
             });
             cx.state.call_depth += 1;
+            // Module-owned calls observe nothing of the importer: the
+            // whole variable stack swaps for a fresh one before the
+            // call frame pushes, and restores after it pops (#115).
+            // Own-module bindings stay visible through the
+            // module-store fallback in every accessor, so this only
+            // cuts importer frames, never module state.
+            let saved_vars = if module_ctx
+                .as_ref()
+                .is_some_and(|(_, init)| init.is_some())
+            {
+                Some(std::mem::take(&mut cx.state.var_scopes))
+            } else {
+                None
+            };
             cx.state.push_scope();
             // Module-owned bodies resolve their own file's TYPE aliases
             // first, shadowing globals for the call: a file's bodies
@@ -2635,6 +2649,9 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                 }
             })();
             let pop_res = cx.state.pop_scope();
+            if let Some(saved) = saved_vars {
+                cx.state.var_scopes = saved;
+            }
             cx.state.call_depth -= 1;
             let _ = cx.state.module_stack.pop();
             cx.state.type_aliases = saved_type_aliases;

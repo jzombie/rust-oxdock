@@ -49,7 +49,6 @@ absent; explicit script values win.
 | [`COMSPEC`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+COMSPEC&type=code) | windows |
 | [`SystemDrive`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+SystemDrive&type=code) | windows |
 | [`PROCESSOR_ARCHITECTURE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+PROCESSOR_ARCHITECTURE&type=code) | windows |
-| [`CARGO_TARGET_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_TARGET_DIR&type=code) | unix, windows |
 
 ### Explicit routing
 

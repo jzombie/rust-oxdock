@@ -726,6 +726,10 @@ pub(crate) fn import_file<P: ProcessManager>(
         return Ok(value);
     }
     // Phase 2 (init): runs once per file. Pushes unwind below.
+    // The init body observes nothing of the importer either: the
+    // whole variable stack swaps for a fresh one, exactly like a
+    // module-owned call, and restores after the scope pops.
+    let saved_vars = std::mem::take(&mut cx.state.var_scopes);
     let saved_aliases = cx.state.type_aliases.clone();
     let outcome: Result<Value> = (|| {
         let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
@@ -823,6 +827,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         Ok(value)
     })();
     let pop_res = cx.state.pop_scope();
+    cx.state.var_scopes = saved_vars;
     let _ = cx.state.import_stack.pop();
     if cx.state.import_stack.is_empty() {
         cx.state.import_alias_frame = None;

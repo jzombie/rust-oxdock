@@ -419,10 +419,7 @@ pub(crate) fn new_state<P: ProcessManager>(
     // layers win (BuiltinEnv sanctions, `io` overrides route host
     // entries). The pure seed is stored alongside for `ISOLATED`
     // resets and transport sanitize.
-    let seed = Arc::new(oxdock_process::seed_defaults(
-        &cargo_scratch.tmp_seed_display(),
-        &cargo_scratch.target_seed_display(),
-    ));
+    let seed = Arc::new(oxdock_process::seed_defaults());
     let mut envs = (*seed).clone();
     envs.extend(BuiltinEnv::collect(&build_context).into_envs());
     for (key, value) in io.inherit_env_overrides() {

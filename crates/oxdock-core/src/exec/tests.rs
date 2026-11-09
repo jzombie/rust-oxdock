@@ -6380,14 +6380,9 @@ fn seeded_no_prelude_child_env_holds_boundary() {
         }
     }
     // Seed-derived assertions: every declared row mirrors the host or
-    // stays absent. Only the engine-owned target dir binds scratch
-    // (proven below). Adding a seed row needs no edit here.
+    // stays absent. Adding a seed row needs no edit here.
     for entry in oxdock_process::env_policy::current_platform_seed() {
-        let name = entry.name;
-        if name == oxdock_fs::env::cargo::TARGET_DIR {
-            continue;
-        }
-        assert_seeded(&got, name);
+        assert_seeded(&got, entry.name);
     }
     // No ambient secrets anywhere, on any platform.
     assert!(
@@ -6400,11 +6395,11 @@ fn seeded_no_prelude_child_env_holds_boundary() {
             && !got.contains_key("SSH_AUTH_SOCK"),
         "credential-adjacent host names leaked: {got:?}"
     );
-    // Substrate present: scratch target dir.
-    let target = to_forward_slashes(&got.get("CARGO_TARGET_DIR").cloned().unwrap_or_default());
+    // No synthesized cargo routing: the target dir is not seeded at
+    // all. Scripts that need it declare it explicitly.
     assert!(
-        target.ends_with("/target") && target.contains("oxdock-"),
-        "CARGO_TARGET_DIR must bind the scratch target dir: {got:?}"
+        !got.contains_key("CARGO_TARGET_DIR"),
+        "CARGO_TARGET_DIR must not seed: {got:?}"
     );
 }
 
@@ -6644,6 +6639,363 @@ fn file_import_isolates_bindings_and_env() {
     assert!(!state.var_scopes.iter().any(|s| s.contains_key("inner")));
     // Script env reverts to the caller's.
     assert_eq!(state.get_env("FOO"), Some("entry"));
+}
+
+/// Module law, vars/mutate leg: a module function mutating a name
+/// declared in BOTH files must hit the module store, never the
+/// caller. Both files pass validation (each declares its own `$m`),
+/// so only the runtime boundary decides.
+#[test]
+fn file_import_function_mutation_stays_in_module_store() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                LET $m: STRING = "module-orig"
+                FUNC TOUCH() {
+                    $m = "touched-by-function"
+                    RETURN $m
+                }
+                FUNC READ() {
+                    RETURN $m
+                }
+                EXPORT TOUCH
+                EXPORT READ
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $m: STRING = "caller-orig"
+        LET $r: STRING = LIB::TOUCH()
+        LET $again: STRING = LIB::READ()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("import runs");
+    assert_eq!(
+        bindings.get("r").and_then(|v| v.as_str()),
+        Some("touched-by-function")
+    );
+    assert_eq!(
+        bindings.get("again").and_then(|v| v.as_str()),
+        Some("touched-by-function"),
+        "module store holds the mutation across calls"
+    );
+    assert_eq!(
+        bindings.get("m").and_then(|v| v.as_str()),
+        Some("caller-orig"),
+        "caller binding intact: callee mutated its own store"
+    );
+}
+
+/// Module law, vars/read leg: a module function naming a
+/// caller-only variable fails closed instead of observing it.
+#[test]
+fn file_import_function_read_of_caller_var_fails() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC SNIFF() {
+                    RETURN $carrier
+                }
+                EXPORT SNIFF
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $carrier: STRING = "importer-secret"
+        LET $got: STRING = LIB::SNIFF()
+    "#});
+    let err = run_expect_err(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:?}").contains("undefined variable $carrier"),
+        "fails naming the unobservable variable: {err:?}"
+    );
+}
+
+/// Module law, vars/append leg: `LIST_APPEND` from a module function
+/// targets the module-global list, never a same-named caller list.
+#[test]
+fn file_import_function_appends_own_module_list() {
+    fn strings(v: Option<&Value>) -> Vec<String> {
+        v.and_then(|v| v.as_list())
+            .map(|l| {
+                l.iter()
+                    .map(|i| i.as_str().unwrap_or("?").to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                LET $items: LIST<STRING> = ["a"]
+                FUNC ADD($x: STRING) {
+                    LIST_APPEND $items $x
+                    RETURN $items
+                }
+                EXPORT ADD
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $items: LIST<STRING> = ["caller"]
+        LET $r: LIST<STRING> = LIB::ADD("b")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("import runs");
+    assert_eq!(strings(bindings.get("r")), vec!["a", "b"]);
+    assert_eq!(
+        strings(bindings.get("items")),
+        vec!["caller"],
+        "caller list untouched by module append"
+    );
+}
+
+/// Module law, env leg, importer-to-module direction: caller `ENV`
+/// never flows into module functions. The lib declares the name via
+/// its own `INHERIT_ENV` (host-only channel); with no host value
+/// present the read must fail instead of observing the caller.
+#[test]
+fn file_import_function_env_ignores_caller() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                INHERIT_ENV [OXDOCK_TEST_ISOLATION_PROBE_QZX9]
+                FUNC READENV() {
+                    RETURN "{{ env:OXDOCK_TEST_ISOLATION_PROBE_QZX9 }}"
+                }
+                EXPORT READENV
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        ENV OXDOCK_TEST_ISOLATION_PROBE_QZX9=caller-value
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $v: STRING = LIB::READENV()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("import runs");
+    assert_eq!(
+        bindings.get("v").and_then(|v| v.as_str()),
+        Some(""),
+        "declared-but-host-absent env reads empty; the caller value must not leak in"
+    );
+}
+
+/// Module law, env leg, module-to-importer direction: `ENV` set
+/// inside a module function does not leak back into the caller.
+#[test]
+fn file_import_function_env_does_not_leak_out() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC SETIT() {
+                    ENV OXDOCK_TEST_ISOLATION_PROBE_QZX9=callee-value
+                    RETURN "done"
+                }
+                EXPORT SETIT
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        ENV OXDOCK_TEST_ISOLATION_PROBE_QZX9=entry-value
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $d: STRING = LIB::SETIT()
+        LET $after: STRING = "{{ env:OXDOCK_TEST_ISOLATION_PROBE_QZX9 }}"
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("import runs");
+    assert_eq!(
+        bindings.get("after").and_then(|v| v.as_str()),
+        Some("entry-value"),
+        "caller env intact after module call"
+    );
+}
+
+/// Module law, cwd leg: no matter where the caller `WORKDIR`s, a
+/// module function observes its defining file's directory.
+#[test]
+fn file_import_function_cwd_is_module_dir() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                IMPORT [STD]
+                FUNC WHERE() {
+                    LET $c: STRING = CWD()
+                    RETURN $c
+                }
+                EXPORT WHERE
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD]
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $root_cwd: STRING = CWD()
+        MKDIR sub
+        WORKDIR sub
+        LET $here: STRING = CWD()
+        LET $there: STRING = LIB::WHERE()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("import runs");
+    let root_cwd = bindings
+        .get("root_cwd")
+        .and_then(|v| v.as_str())
+        .expect("root cwd bound");
+    let here = bindings
+        .get("here")
+        .and_then(|v| v.as_str())
+        .expect("caller cwd bound");
+    assert_ne!(here, root_cwd, "caller really moved into sub");
+    assert_eq!(
+        bindings.get("there").and_then(|v| v.as_str()),
+        Some(root_cwd),
+        "module function still observes its own directory"
+    );
+}
+
+/// Module law, function-namespace leg: a module body cannot name
+/// the importer's functions at all — resolution is per defining
+/// file, so the import fails naming the unknown function.
+#[test]
+fn file_import_module_body_cannot_call_importer_function() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC SNEAKY() {
+                    RETURN HELPER()
+                }
+                EXPORT SNEAKY
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        FUNC HELPER() {
+            RETURN "importer-only"
+        }
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $r: STRING = LIB::SNEAKY()
+    "#});
+    let err = run_expect_err(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:?}").contains("HELPER"),
+        "fails naming the importer-only function: {err:?}"
+    );
+}
+
+/// Module law, init leg: the module init body runs with the same
+/// firewall as its functions — importer bindings are not visible.
+#[test]
+fn file_import_init_cannot_see_caller_vars() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                LET $x: STRING = $caller_var
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $caller_var: STRING = "importer-secret"
+    "#});
+    let err = run_expect_err(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:?}").contains("undefined variable $caller_var"),
+        "fails naming the unobservable variable: {err:?}"
+    );
+}
+
+/// Explicit channels keep working through the firewall: arguments
+/// flow in, `RETURN` flows out, and nested imports still resolve —
+/// isolation cuts ambient inheritance, never declared inputs.
+#[test]
+fn file_import_nested_module_call_keeps_working() {
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "nested.oxdock",
+        indoc! {r#"
+                LET $tag: STRING = "nested-tag"
+                FUNC MARK($x: STRING) {
+                    RETURN "{{ $tag }}:{{ $x }}"
+                }
+                EXPORT MARK
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                IMPORT ["nested.oxdock" AS N2]
+                FUNC WRAP($x: STRING) {
+                    RETURN N2::MARK($x)
+                }
+                EXPORT WRAP
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $r: STRING = LIB::WRAP("hi")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("nested import runs");
+    assert_eq!(
+        bindings.get("r").and_then(|v| v.as_str()),
+        Some("nested-tag:hi")
+    );
 }
 
 #[test]

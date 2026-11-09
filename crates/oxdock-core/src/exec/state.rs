@@ -58,10 +58,10 @@ const TASK_TAIL_CAP: usize = 64 * 1024;
 /// scope, recursion-budget, and task invariants cannot be broken from outside.
 pub struct ExecState<P: ProcessManager> {
     pub(super) fs: Box<dyn WorkspaceFs>,
-    /// Pre-reserved guarded scratch name for `CARGO_TARGET_DIR` (issue #131).
-    /// Opaque [`CargoScratch`]: renderable for the child environment but not
-    /// nameable as a `&GuardedPath`, so host code cannot `ensure()` or
-    /// `create_dir_all` it. The child `cargo` creates it on demand.
+    /// Pre-reserved guarded scratch dir (session temp for child
+    /// writes). Opaque [`CargoScratch`]: renderable for the child
+    /// environment but not nameable as a `&GuardedPath`, so host code
+    /// cannot `ensure()` or `create_dir_all` it. The child `cargo` creates it on demand.
     pub(super) cargo_scratch: CargoScratch,
     /// Pure session seed from [`oxdock_process::seed_defaults`], stored at
     /// init alongside the layered `envs`. `ISOLATED` resets clone this
@@ -916,6 +916,16 @@ impl<P: ProcessManager> ExecState<P> {
             .iter()
             .rev()
             .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
+            .or_else(|| {
+                self.current_module().and_then(|module| {
+                    self.modules.get(&module).and_then(|record| {
+                        record
+                            .init
+                            .as_ref()
+                            .and_then(|init| init.vars.get(key).map(|(k, _)| k.clone()))
+                    })
+                })
+            })
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "undeclared variable ${key}: declare it first with LET ${key}: LIST<...> = ..."
@@ -943,6 +953,27 @@ impl<P: ProcessManager> ExecState<P> {
                 list.push(item);
                 return Ok(());
             }
+        }
+        // Not a lexical binding: append to the owning module's shared
+        // store in place, so module-global lists stay appendable from
+        // module-owned functions with no importer visibility.
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get_mut(&module)
+            && let Some(init) = record.init.as_mut()
+            && let Some((_, value)) = init.vars.get_mut(key)
+        {
+            let list = value.as_list_mut().ok_or_else(|| {
+                anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
+            })?;
+            if let Some(expected) = element {
+                oxdock_parser::check_value_at(
+                    &expected,
+                    &item,
+                    &format!("${key}[{}]", list.len()),
+                )?;
+            }
+            list.push(item);
+            return Ok(());
         }
         anyhow::bail!("undeclared variable ${key}");
     }

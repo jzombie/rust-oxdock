@@ -138,11 +138,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "asserts scratch-dir naming and host cargo env layout; synthetic Miri tempdirs carry neither"
-    )]
-    fn run_isolates_cargo_target_dir_from_workspace() {
+    fn run_does_not_synthesize_cargo_target_dir() {
+        // No host value, no seed row: the child observes nothing, so
+        // plain `cargo` defaults to `./target` under its own cwd.
+        let _guard = oxdock_process::TestEnvGuard::remove("CARGO_TARGET_DIR");
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
@@ -157,18 +156,45 @@ mod tests {
 
         run_steps_without_snapshot(&root, &steps).unwrap();
 
-        let seen = read_trimmed(&root.join("seen.txt").unwrap());
-        let legacy = root.join(".cargo-target").unwrap();
-
-        assert_ne!(
-            seen.trim(),
-            legacy.display().to_string(),
-            "CARGO_TARGET_DIR must not target the workspace tree"
+        assert_eq!(
+            read_trimmed(&root.join("seen.txt").unwrap()),
+            "",
+            "absent host must stay absent: no synthesized target dir"
         );
-        let normalized = to_forward_slashes(seen.trim());
-        assert!(
-            normalized.ends_with("/target") && normalized.contains("oxdock-"),
-            "CARGO_TARGET_DIR must point at the isolated scratch target dir, got {seen:?}"
+    }
+
+    #[test]
+    fn run_honors_explicit_cargo_target_dir() {
+        // Routing stays a script decision: explicit `ENV` wins
+        // verbatim, host included when the script asks for it.
+        let _guard = oxdock_process::TestEnvGuard::set("CARGO_TARGET_DIR", "host-target");
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        let steps = parse_script(indoc! {r#"
+            ENV CARGO_TARGET_DIR="ws/target"
+            WRITE seen.txt "{{ env:CARGO_TARGET_DIR }}"
+        "#})
+        .unwrap();
+
+        run_steps_without_snapshot(&root, &steps).unwrap();
+        assert_eq!(
+            read_trimmed(&root.join("seen.txt").unwrap()),
+            "ws/target",
+            "explicit ENV routes verbatim"
+        );
+
+        let inherited = parse_script(indoc! {r#"
+            INHERIT_ENV [CARGO_TARGET_DIR]
+            WRITE seen-inherit.txt "{{ env:CARGO_TARGET_DIR }}"
+        "#})
+        .unwrap();
+
+        run_steps_without_snapshot(&root, &inherited).unwrap();
+        assert_eq!(
+            read_trimmed(&root.join("seen-inherit.txt").unwrap()),
+            "host-target",
+            "INHERIT_ENV bridges the host value on request"
         );
     }
 
