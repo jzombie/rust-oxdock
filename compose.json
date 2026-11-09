@@ -1,0 +1,69 @@
+{
+  "global_values": ".oxdock/template/_global/values.json",
+  "scopes": [
+    ".oxdock",
+    "oxdock-compose",
+    "crates",
+    "oxdock",
+    "tests"
+  ],
+  "generated": [
+    {
+      "key": "command_index",
+      "out": ".oxdock/template/readme/generated/command-reference.md.tmpl"
+    },
+    {
+      "key": "command_body",
+      "out": ".oxdock/template/readme/generated/command-body.md.tmpl"
+    },
+    {
+      "key": "value_types",
+      "out": ".oxdock/template/readme/generated/value-types.md.tmpl"
+    },
+    {
+      "key": "function_reference",
+      "out": ".oxdock/template/readme/generated/function-reference.md.tmpl"
+    },
+    {
+      "key": "context_reference",
+      "out": ".oxdock/template/readme/generated/context-reference.md.tmpl"
+    },
+    {
+      "key": "ssh_function_reference",
+      "out": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-function-reference.md.tmpl"
+    },
+    {
+      "key": "ssh_type_reference",
+      "out": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-type-reference.md.tmpl"
+    },
+    {
+      "key": "net_function_reference",
+      "out": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-function-reference.md.tmpl"
+    },
+    {
+      "key": "net_type_reference",
+      "out": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-type-reference.md.tmpl"
+    },
+    {
+      "key": "markdown_function_reference",
+      "out": "crates/plugins/oxdock-markdown-plugin/.oxdock/template/generated/markdown-function-reference.md.tmpl"
+    },
+    {
+      "key": "env_contracts",
+      "out": ".oxdock/template/envcontracts/generated/env_contracts.md.tmpl"
+    }
+  ],
+  "lifecycle": {
+    "files": [
+      "oxdock-compose/src/lifecycle/scanner.oxfile",
+      "oxdock-compose/src/lifecycle/generic.oxfile",
+      "oxdock-compose/src/lifecycle/oxdock.oxfile"
+    ]
+  },
+  "vars": {
+    "global": "docs_global",
+    "ctx": "docs_ctx",
+    "workspace_pkg": "workspace_pkg"
+  },
+  "version_key": "CRATE_VERSION"
+}

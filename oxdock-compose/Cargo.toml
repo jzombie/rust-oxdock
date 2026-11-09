@@ -1,0 +1,51 @@
+[package]
+name = "oxdock-compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Composed artifacts, byte-identical: a general-purpose lifecycle renderer turning one context into deterministic outputs."
+
+# Prototype crate; don't publish with this name
+publish = false
+
+# The pipe child is spawned by the parent, never run directly:
+# bare `cargo run -p oxdock-compose` means the composer.
+default-run = "oxdock-compose"
+
+[lib]
+name = "oxdock_compose"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxdock-compose"
+path = "src/main.rs"
+
+[[bin]]
+name = "oxdock-compose-child"
+path = "src/bin/child.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+oxdock-core.workspace = true
+oxdock-fs.workspace = true
+oxdock-func-macro.workspace = true
+oxdock-markdown-plugin.workspace = true
+# Plugin crates are linked so their HostModules can be introspected
+# in-process (static linking requires the edge). The docs path only
+# reads metadata; it never serves, connects, or binds.
+oxdock-net-plugin.workspace = true
+oxdock-parser.workspace = true
+oxdock-process.workspace = true
+oxdock-ssh-plugin.workspace = true
+serde_json.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true
+oxdock-macros.workspace = true
+
+[lints]
+workspace = true

@@ -16,6 +16,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`SYMLINK`](#symlink) | `SYMLINK [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
 | [`INSTALL`](#install) | `INSTALL <source> <dest>` |
+| [`SET_EXECUTABLE`](#set_executable) | `SET_EXECUTABLE <path>` |
 | [`ARCHIVE`](#archive) | `ARCHIVE [--raw] <src> <dst>` |
 | [`UNARCHIVE`](#unarchive) | `UNARCHIVE <src> <dst> [--max-bytes <bytes>]` |
 | [`LS`](#ls) | `LS [<path>]` |
@@ -24,6 +25,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`PROMPT`](#prompt) | `PROMPT $var <message> [<default>]` |
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
+| [`APPEND_LINE`](#append_line) | `APPEND_LINE <path> <contents>` |
 | [`REMOVE`](#remove) | `REMOVE [--recursive] <path>` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
 | [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ [--hash <sha256>] <actual> <expected>` |
@@ -1365,9 +1367,14 @@ File imports:
 - Only `EXPORT`ed top-level `FUNC`s cross the
   boundary. Unexported means private; variables are
   never exportable.
-- Types cross as bare globals (like host types). A
-  whole-file import persists every exported alias, so
-  `LET $p: PERSON` works after any import of its file.
+- Types cross qualified: a whole-file import exposes
+  every exported alias as `ALIAS::NAME` only
+  (`LET $p: LIB::PERSON` after
+  `IMPORT ["./lib.oxfile" AS LIB]`), mirroring func
+  views. Nothing bare leaks from an aliased import,
+  so same-named types in different files coexist;
+  harvests below stay the explicit way to request a
+  bare name.
 - Each file initializes once; every alias shares the
   module's top-level bindings.
 - The file must exist when the run starts. Generated
@@ -1383,19 +1390,25 @@ Mixed brackets:
   entry and no modules.
 
 Selective harvests:
-- Form: `IMPORT [[FOO, BAR FROM "x.oxdock"]]`,
+- Form: `IMPORT [FOO FROM "x.oxdock"]`,
   optionally `AS ALIAS`. Only the named top-level
   functions register, bare or namespaced under the
   alias. Harvested names must be `EXPORT`ed.
 - Single name needs no inner brackets
-  (`IMPORT [FOO FROM "x.oxdock"]`); several keep
-  `[[F, G FROM ...]]`. Several harvests group the
-  same way (`IMPORT [[TYPE A FROM STD],
-  [TYPE B FROM STD]]`), file or host alike.
+  (`IMPORT [FOO FROM "x.oxdock"]`); several names from
+  one file combine in one bracket with explicit kinds
+  (`IMPORT [TYPE A, TYPE B FROM "x.oxdock"]`, file or
+  host alike: `IMPORT [FUNC FOO, FUNC BAR FROM
+  "x.oxdock"]`). Bare names always read as modules, so
+  a bare multi-name fails naming the explicit-kind
+  fix. Prefer one import per file over grouping
+  harvests.
 - Types and functions combine in one entry
   (`IMPORT [TYPE PERSON, FUNC FOO FROM "x.oxdock"]`).
-  Harvested types must be `EXPORT TYPE`d and persist
-  bare globally, so `FUNC` signatures keep working.
+  Harvested types must be `EXPORT TYPE`d. Unaliased
+  harvests persist bare globally (collision-checked),
+  so `FUNC` signatures keep working; aliased harvests
+  persist qualified-only, like whole-file imports.
 - The file body never executes, so harvesting is
   side-effect free. The file's own nested imports
   still load. Harvests produce no value and never
@@ -2211,6 +2224,35 @@ ASSERT_EQ $t "file"
 ```
 
 
+### SET_EXECUTABLE
+
+Mark a file executable.
+
+**Syntax:** `SET_EXECUTABLE <path>`
+
+Sets the executable bit on an existing file without moving it. Owner rwx on Unix, bit no-op elsewhere, so the same script runs on every platform; a missing path fails everywhere. `INSTALL` stages, marks, and renames in one atomic step; this command only flips the bit where the file already lives.
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | [`PATH`](#value-type-path) | yes | File to mark executable |
+
+**Examples:**
+
+**Example: set-executable**
+
+```oxdock roots:unified
+# Mark a rendered script executable in place.
+IMPORT [STD]
+WRITE tool.sh "echo hi"
+SET_EXECUTABLE tool.sh
+
+LET $t: STRING = PATH_TYPE("tool.sh")
+ASSERT_EQ $t "file"
+```
+
+
 ### ARCHIVE
 
 Pack a file or directory into a tarball.
@@ -2475,7 +2517,7 @@ Write to file.
 
 **Syntax:** `WRITE <path> [<contents>]`
 
-Writes contents.
+Writes contents. Bytes land exactly as given: no line-ending translation happens on any platform (LF stays LF, even on Windows), so the same script produces identical files everywhere.
 
 **Arguments:**
 
@@ -2501,7 +2543,7 @@ Append to file.
 
 **Syntax:** `APPEND <path> [<contents>]`
 
-Appends contents.
+Appends contents with no separator and no line ending: bytes concatenate exactly, so `APPEND` never terminates the line (use `APPEND_LINE` for that). Bytes land exactly as given: no line-ending translation happens on any platform (LF stays LF, even on Windows), so the same script produces identical files everywhere.
 
 **Arguments:**
 
@@ -2518,9 +2560,40 @@ Appends contents.
 WRITE log.txt line1
 APPEND log.txt line2
 
-# APPEND concatenates with no separator.
+# No separator or newline is added: the bytes concatenate
+# exactly, so this asserts the unterminated form.
 LET $all: STRING = READ log.txt
 ASSERT_EQ $all "line1line2"
+```
+
+
+### APPEND_LINE
+
+Append one line to a file.
+
+**Syntax:** `APPEND_LINE <path> <contents>`
+
+Appends contents plus exactly one trailing LF newline (`\n`, never the platform newline), so callers never spell the terminator by hand and output bytes stay identical on every OS. Contents are required: unlike APPEND there is no stdin form, a line is a complete value, not a stream.
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | [`PATH`](#value-type-path) | yes | File |
+| `contents` | [`STRING...`](#value-type-string) | yes | Line content (the newline is added) |
+
+**Examples:**
+
+**Example: append-line**
+
+```oxdock
+WRITE log.txt line1
+APPEND_LINE log.txt line2
+APPEND_LINE log.txt line3
+
+# Each APPEND_LINE terminates its own write.
+LET $all: STRING = READ log.txt
+ASSERT_EQ $all "line1line2\nline3\n"
 ```
 
 

@@ -1,0 +1,33 @@
+## Overview
+
+`oxdock-compose` renders composed artifacts from separately authored
+inputs through an ordered lifecycle: one context in, byte-identical
+outputs out. Markdown docs are the first pipeline, not the
+boundary: the same engine composes any text artifacts a repo's
+plugins describe.
+
+Render this workspace:
+
+```sh
+cargo run -p oxdock-compose
+```
+
+Render another checkout with its own pipeline:
+
+```sh
+oxdock-compose --root /path/to/repo --config compose.json
+```
+
+Inspect the composition without running it:
+
+```sh
+oxdock-compose --root /path/to/repo --print-child
+```
+
+Flags: `--root <path>` (workspace root, default: discovered),
+`--config <path>` (pipeline config, default: `compose.json`),
+`--print-child` (print the composed child script, skip the run).
+
+Fail-closed throughout: duplicate target names, zero discovered
+targets, misspelled placeholders, and unknown values fail the run
+instead of rendering wrong outputs.

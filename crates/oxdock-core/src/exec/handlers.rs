@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use oxdock_fs::CopySourceRoot;
+use oxdock_fs::EXECUTABLE_MODE;
 use oxdock_fs::EntryKind;
 use oxdock_fs::GuardedPath;
 use oxdock_fs::PathResolver;
@@ -1248,6 +1249,19 @@ pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> R
     Ok(())
 }
 
+pub(super) fn set_executable<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> Result<()> {
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.effective_cwd(), path)
+        .with_context(|| format!("SET_EXECUTABLE {path}"))?;
+    cx.state
+        .fs
+        .set_executable(&target)
+        .with_context(|| format!("SET_EXECUTABLE {path}"))?;
+    Ok(())
+}
+
 pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String>) -> Result<()> {
     let target_dir = if let Some(p) = arg {
         cx.state
@@ -1553,28 +1567,11 @@ pub(super) fn replace<P: ProcessManager>(
     let ctx = cx.state.command_ctx()?;
     let vars = cx.state.all_vars();
     // Dispatch `{{ MODULE::FUNC(args) }}` through the shared pure table:
-    // one `Arc` clone per EXPAND, nested lookup per call with zero
-    // allocation, known-names listing built only on failure. Stateful,
-    // script, and pipe backed entries never appear here: placeholders
-    // evaluate without a step context and must stay side effect free.
-    let table = cx.state.pure_function_table();
-    let calls: oxdock_process::PlaceholderCall = Arc::new(move |module, func, args| {
-        let callee = table
-            .get(module)
-            .and_then(|entries| entries.get(func))
-            .ok_or_else(|| {
-                let mut known: Vec<String> = table
-                    .iter()
-                    .flat_map(|(m, entries)| entries.keys().map(move |f| format!("{m}::{f}")))
-                    .collect();
-                known.sort();
-                anyhow!(
-                    "unknown placeholder function '{module}::{func}'; known functions: {}",
-                    known.join(", ")
-                )
-            })?;
-        callee(args)
-    });
+    // one `Arc` clone per EXPAND. Stateful, script, and pipe backed
+    // entries never appear here: placeholders evaluate without a step
+    // context and must stay side effect free. Lookup and the
+    // unknown-name error live in [`super::native::placeholder_resolver`].
+    let calls = super::native::placeholder_resolver(cx.state.pure_function_table());
 
     let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs())
         .with_vars(&vars)
@@ -2562,7 +2559,35 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                 })
             });
             cx.state.call_depth += 1;
+            // Module-owned calls observe nothing of the importer: the
+            // whole variable stack swaps for a fresh one before the
+            // call frame pushes, and restores after it pops (#115).
+            // Own-module bindings stay visible through the
+            // module-store fallback in every accessor, so this only
+            // cuts importer frames, never module state.
+            let saved_vars = if module_ctx.as_ref().is_some_and(|(_, init)| init.is_some()) {
+                Some(std::mem::take(&mut cx.state.var_scopes))
+            } else {
+                None
+            };
             cx.state.push_scope();
+            // Module-owned bodies resolve their own file's TYPE aliases
+            // first, shadowing globals for the call: a file's bodies
+            // validate against the same view (see phase 1), so imports
+            // never leak bare names yet self-contained files keep
+            // working. Harvested types stay global by explicit request.
+            let owner_aliases: Vec<(String, String)> = module_key
+                .as_deref()
+                .and_then(|key| cx.state.modules.get(key))
+                .map(|record| super::typing::collect_type_aliases(&record.steps, cx.state))
+                .transpose()?
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            let saved_type_aliases = cx.state.type_aliases.clone();
+            for (name, target) in &owner_aliases {
+                cx.state.type_aliases.insert(name.clone(), target.clone());
+            }
             // Module-owned bodies execute with their module on the
             // context stack, so name resolution falls back to the
             // module's shared store; entry bodies push `None`, keeping
@@ -2621,8 +2646,12 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                 }
             })();
             let pop_res = cx.state.pop_scope();
+            if let Some(saved) = saved_vars {
+                cx.state.var_scopes = saved;
+            }
             cx.state.call_depth -= 1;
             let _ = cx.state.module_stack.pop();
+            cx.state.type_aliases = saved_type_aliases;
             match (outcome, pop_res) {
                 (Ok(value), Ok(())) => Ok(value),
                 (Err(e), _) => Err(e),
@@ -3477,7 +3506,7 @@ pub(super) fn install<P: ProcessManager>(
         .with_context(|| format!("INSTALL {from} {to}"))?;
     cx.state
         .fs
-        .install_file_atomic(&from_abs, &to_abs, 0o755)
+        .install_file_atomic(&from_abs, &to_abs, EXECUTABLE_MODE)
         .with_context(|| format!("INSTALL {from} {to}"))?;
     Ok(())
 }
@@ -3492,6 +3521,17 @@ pub(crate) fn dispatch_install<P: ProcessManager>(
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
     install(cx, &from_resolved, &to_resolved)
+}
+
+pub(crate) fn dispatch_set_executable<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::SetExecutable { path } = step else {
+        unreachable!()
+    };
+    let resolved = super::args::resolve_arg(path, cx)?;
+    set_executable(cx, &resolved)
 }
 
 pub(crate) fn dispatch_ls<P: ProcessManager>(
@@ -3685,6 +3725,41 @@ pub(crate) fn dispatch_append<P: ProcessManager>(
     let path_resolved = super::args::resolve_arg(path, cx)?;
     let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
     append(cx, &path_resolved, contents_resolved.as_deref())
+}
+
+pub(crate) fn dispatch_append_line<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::AppendLine { path, contents } = step else {
+        unreachable!()
+    };
+    let path_resolved = super::args::resolve_arg(path, cx)?;
+    let contents_resolved = super::args::resolve_arg(contents, cx)?;
+    append_line(cx, &path_resolved, &contents_resolved)
+}
+
+pub(super) fn append_line<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    path: &str,
+    contents: &str,
+) -> Result<()> {
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.effective_cwd(), path)
+        .with_context(|| format!("APPEND_LINE {path}"))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .with_context(|| format!("failed to create parent for {}", target.display()))?;
+    let mut line = contents.to_string();
+    line.push('\n');
+    cx.state
+        .fs
+        .append_file(&target, line.as_bytes())
+        .with_context(|| format!("failed to append to {}", target.display()))?;
+    Ok(())
 }
 
 pub(super) fn remove<P: ProcessManager>(

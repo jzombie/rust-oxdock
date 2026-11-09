@@ -49,6 +49,12 @@ pub use workspace_fs::UnguardedPath;
 #[cfg(feature = "mock-fs")]
 pub use workspace_fs::mock::MockFs;
 
+/// Mode applied whenever the DSL marks a file executable (`INSTALL`,
+/// `SET_EXECUTABLE`): owner rwx, group/others r-x on Unix; the bit is
+/// a no-op elsewhere but a missing path fails on every platform
+/// (see `set_permissions_mode_unix`).
+pub const EXECUTABLE_MODE: u32 = 0o755;
+
 /// Trait implemented by both `GuardedPath` and `UnguardedPath` so callers can
 /// rely on a consistent set of path helper methods. This includes a small set
 /// of constructors and a `root` accessor so code that needs to treat either
@@ -229,6 +235,15 @@ pub trait WorkspaceFs: Send + Sync {
     fn set_permissions_mode_unix(&self, path: &GuardedPath, mode: u32) -> Result<()>;
     #[allow(clippy::disallowed_types)]
     fn set_permissions_mode_unix_unguarded(&self, path: &UnguardedPath, mode: u32) -> Result<()>;
+
+    /// Mark `path` executable (`EXECUTABLE_MODE` on Unix, bit no-op
+    /// elsewhere). Shared by `INSTALL`'s staging step and the
+    /// `SET_EXECUTABLE` command so both name the intent instead of
+    /// repeating the mode. A missing path fails everywhere: only the
+    /// bit is platform-specific.
+    fn set_executable(&self, path: &GuardedPath) -> Result<()> {
+        self.set_permissions_mode_unix(path, EXECUTABLE_MODE)
+    }
 
     fn resolve_workdir(&self, current: &GuardedPath, new_dir: &str) -> Result<GuardedPath>;
     fn resolve_read(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath>;

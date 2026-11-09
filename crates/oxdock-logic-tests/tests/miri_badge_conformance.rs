@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, to_forward_slashes};
 
 fn repo_root() -> Result<String> {
-    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
-        .context("CARGO_MANIFEST_DIR missing")?
-        .replace('\\', "/");
+    let manifest_dir = to_forward_slashes(
+        &std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
+            .context("CARGO_MANIFEST_DIR missing")?,
+    );
     Ok(manifest_dir
         .strip_suffix("crates/oxdock-logic-tests")
         .context("test must live under crates/oxdock-logic-tests")?

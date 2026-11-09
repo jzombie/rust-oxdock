@@ -1,0 +1,81 @@
+# OxDock docs lifecycle: the run-once intake plus passthroughs.
+#
+# Every lifecycle plugin exposes these same methods; registration
+# order decides which plugin runs first within a stage.
+#
+# Only SETUP does work here: refresh generated inputs, snapshot
+# workspace version plus package into staging for downstream stages
+# to read as plain JSON, and sync per-member values files.
+# Idempotent: reruns rewrite identical bytes.
+#
+# The values path below is the OxDock workspace convention; a
+# different layout ships its own plugin file instead of this one.
+IMPORT [STD, RUST, OXDOCK]
+IMPORT [TYPE CTX, TYPE GENERATED_ENTRY, TYPE WORKSPACE_PACKAGE FROM "../types.oxfile"]
+
+FUNC SETUP($ctx: CTX) {
+    LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)
+    LET $gen: LIST<ANY> = $cfg.generated
+    FOR $entry: GENERATED_ENTRY IN $gen {
+        LET $key: STRING = $entry.key
+        LET $text: STRING = OXDOCK::GENERATED($key)
+        LET $gout: STRING = "{{ $ctx.wsroot }}/{{ $entry.out }}"
+        WRITE $gout $text
+    }
+    LET $version: STRING = RUST::WORKSPACE_VERSION()
+    LET $wspkg: WORKSPACE_PACKAGE = RUST::WORKSPACE_PACKAGE()
+    LET $wsmap: MAP<ANY> = {}
+    $wsmap = MAP_SET($wsmap, "version", $version)
+    $wsmap = MAP_SET($wsmap, "package", $wspkg)
+    LET $wsjson: STRING = TO_JSON($wsmap)
+    WRITE "{{ $ctx.staging }}/_workspace.json" $wsjson
+    FOR $member: STRING IN RUST::WORKSPACE_MEMBERS() {
+        ECHO "syncing values for {{ $member }}"
+        LET $pkg: MAP<name: STRING, description: STRING> = RUST::CARGO_PACKAGE($member)
+        IF $pkg.name != "" {
+            LET $values_path: STRING = "{{ $ctx.wsroot }}/{{ $member }}/.oxdock/template/values.json"
+            LET $pt: STRING = PATH_TYPE($values_path)
+            IF $pt == "file" {
+                LET $existing: MAP<ANY> = LOAD_JSON($values_path)
+                LET $json: STRING = RUST::PACKAGE_VALUES_JSON($pkg, $existing)
+                WRITE $values_path $json
+            } ELSE {
+                LET $empty: MAP<ANY> = {}
+                LET $fresh: STRING = RUST::PACKAGE_VALUES_JSON($pkg, $empty)
+                WRITE $values_path $fresh
+            }
+        }
+    }
+    RETURN $ctx
+}
+
+FUNC INGEST($ctx: CTX) {
+    RETURN $ctx
+}
+
+# Source discovery lives in the scanner plugin: passthrough here.
+FUNC SCAN($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC ASSEMBLE($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC RENDER($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC DEFERRED($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC WRITE_OUT($ctx: CTX) {
+    RETURN $ctx
+}
+
+FUNC VERIFY($ctx: CTX) {
+    RETURN $ctx
+}
+
+EXPORT [SETUP, INGEST, SCAN, ASSEMBLE, RENDER, DEFERRED, WRITE_OUT, VERIFY]

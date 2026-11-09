@@ -9,12 +9,13 @@
 use anyhow::{Context, Result};
 #[cfg(unix)]
 use oxdock_core::{ExecIo, run_steps_with_manager_with_modules};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, to_forward_slashes};
 
 fn repo_root() -> Result<String> {
-    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
-        .context("CARGO_MANIFEST_DIR missing")?
-        .replace('\\', "/");
+    let manifest_dir = to_forward_slashes(
+        &std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
+            .context("CARGO_MANIFEST_DIR missing")?,
+    );
     Ok(manifest_dir
         .strip_suffix("crates/oxdock-logic-tests")
         .context("test must live under crates/oxdock-logic-tests")?
@@ -66,10 +67,10 @@ fn install_script_pins_single_path() -> Result<()> {
         "TEXT_TRIM_PREFIX",
         "LET $has_ghpath: BOOL",
         "LET $has_expected: BOOL",
-        "INSTALL $bin $dest",
+        "INSTALL_SELECTED($dir, $filename)",
         "\"--version\"",
         "ASSERT_EQ $reported \"oxdock {{ $expected }}\"",
-        "APPEND \"{{ env:GITHUB_PATH }}\"",
+        "APPEND_LINE \"{{ env:GITHUB_PATH }}\"",
         "OXDOCK_ENGINE_DIR=",
     ] {
         assert!(
@@ -125,6 +126,10 @@ fn ci_tail_harness() -> Result<CiTailRun> {
     io.insert_inherit_env("OXDOCK_ASSET", "");
     io.insert_inherit_env("OXDOCK_SHA", "");
     io.insert_inherit_env("OXDOCK_BIN", src.as_path().display().to_string());
+    io.insert_inherit_env("OXDOCK_PRODUCT", "oxdock");
+    io.insert_inherit_env("OXDOCK_SIBLING_DIR", root.as_path().display().to_string());
+    io.insert_inherit_env("OXDOCK_MEMBERS", "srcbin");
+    io.insert_inherit_env("OXDOCK_PRIMARY", "srcbin");
     io.insert_inherit_env("OXDOCK_DIR", engine_dir.as_path().display().to_string());
     io.insert_inherit_env("OXDOCK_VERSION", "0.0.0-test");
     io.insert_inherit_env("OXDOCK_BINARY_NAME", bin);

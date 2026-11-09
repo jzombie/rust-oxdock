@@ -1,0 +1,28 @@
+{
+  "targets": [
+    {
+      "name": "resume-md",
+      "base": "oxdock-compose/examples/resume",
+      "out": "resume.md",
+      "values": "values.json",
+      "template": "resume.md.tmpl",
+      "fragments": {
+        "sec": [
+          "fragments/sec/*.md.tmpl"
+        ]
+      }
+    },
+    {
+      "name": "resume-jsonld",
+      "base": "oxdock-compose/examples/resume",
+      "out": "resume.jsonld",
+      "values": "values.json",
+      "template": "resume.jsonld.tmpl",
+      "fragments": {
+        "data": [
+          "fragments/data/*.tmpl"
+        ]
+      }
+    }
+  ]
+}

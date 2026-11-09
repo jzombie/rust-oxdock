@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use oxdock_fs::to_forward_slashes;
 use oxdock_parser::{Arg, ArgPart, AssertTarget, Expr, GuardExpr, MathOp, Step, StepKind};
 
 /// Extract `{{ env:KEY }}` placeholder names from a template string.
@@ -44,7 +45,7 @@ fn push_path_entry(entries: &mut BTreeSet<String>, arg: &Arg) {
         return;
     }
     if !text.contains("{{") {
-        entries.insert(text.replace('\\', "/"));
+        entries.insert(to_forward_slashes(text));
     } else {
         // Conservative fallback: watch the literal directory head so edits
         // near the dynamic name still invalidate the build.
@@ -59,7 +60,7 @@ fn push_path_entry(entries: &mut BTreeSet<String>, arg: &Arg) {
                 None => head,
             };
             if !head.is_empty() && !head.contains("{{") {
-                entries.insert(head.replace('\\', "/"));
+                entries.insert(to_forward_slashes(head));
             }
         }
     }
@@ -309,6 +310,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 template_keys(&mut keys, from);
                 template_keys(&mut keys, to);
             }
+            StepKind::SetExecutable { path } => template_keys(&mut keys, path),
             StepKind::Archive { src, dst, .. } => {
                 template_keys(&mut keys, src);
                 template_keys(&mut keys, dst);
@@ -340,6 +342,10 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 if let Some(body) = contents {
                     template_keys(&mut keys, body);
                 }
+            }
+            StepKind::AppendLine { path, contents } => {
+                template_keys(&mut keys, path);
+                template_keys(&mut keys, contents);
             }
             StepKind::Expand { path, overrides } => {
                 if let Some(p) = path {

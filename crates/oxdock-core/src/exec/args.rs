@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use oxdock_fs::EntryKind;
 use oxdock_fs::env as oxdock_env;
+use oxdock_fs::to_forward_slashes;
 use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, TypeTag, Value};
 use oxdock_pipe::{SharedInput, SharedOutput, SpillBuffer};
 use oxdock_process::{ProcessManager, format_value_for_string};
@@ -1363,8 +1364,7 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
     // Up-front sandbox gate (mirrors `GuardedPath::glob_paths`): patterns are
     // sandbox-root-relative, so any `..` component escapes. Return empty
     // without traversing : the same empty-on-no-match GLOB semantics.
-    if raw_pattern
-        .replace('\\', "/")
+    if to_forward_slashes(&raw_pattern)
         .split('/')
         .any(|seg| seg == "..")
     {
@@ -1384,7 +1384,7 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
         .filter_map(|p| {
             p.strip_prefix(&root_path)
                 .ok()
-                .map(|rel| Value::string(rel.to_string_lossy().replace('\\', "/")))
+                .map(|rel| Value::string(to_forward_slashes(&rel.to_string_lossy())))
         })
         .collect();
 
@@ -1696,32 +1696,19 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         // `{{ MODULE::FUNC(args) }}` through the shared
                         // pure table: the same registry EXPAND
                         // templates resolve, so ordinary strings and
-                        // file templates agree. Unknown functions and
-                        // bad args fail here; anything else falls
-                        // through to the missing-key error below.
-                        let table = state.pure_function_table();
-                        let callee = table
-                                .get(module.as_str())
-                                .and_then(|entries| entries.get(func.as_str()))
-                                .ok_or_else(|| {
-                                    let mut known: Vec<String> = table
-                                        .iter()
-                                        .flat_map(|(m, entries)| {
-                                            entries.keys().map(move |f| format!("{m}::{f}"))
-                                        })
-                                        .collect();
-                                    known.sort();
-                                    anyhow::anyhow!(
-                                        "unknown placeholder function '{module}::{func}'; known functions: {}",
-                                        known.join(", ")
-                                    )
-                                })?;
+                        // file templates agree. Dispatch and the
+                        // unknown-name error live in
+                        // [`super::native::placeholder_resolver`];
+                        // anything else falls through to the
+                        // missing-key error below.
+                        let resolve =
+                            super::native::placeholder_resolver(state.pure_function_table());
                         let vars = state.all_vars();
                         let mut args = Vec::with_capacity(args_src.len());
                         for src in args_src {
                             args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
                         }
-                        let result = callee(args)?;
+                        let result = resolve(module.as_str(), func.as_str(), args)?;
                         output.push_str(&format_value_for_string(&result)?);
                     } else {
                         // Bare key not in DSL vars → hard error: missing

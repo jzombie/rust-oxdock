@@ -9,9 +9,14 @@
 #     with:
 #       confirm_version: 1.2.3
 #       dry_run: true
-#       binary: mytool
+#       bins: mytool
 #     secrets: inherit
 # ```
+#
+# Products come from `bins:` when set, else the caller's
+# `workspace.metadata.oxdock` `release_bins` list. No single-product
+# fallback exists: with binaries on and neither source naming a
+# product, resolution fails naming the fix.
 #
 # The pipeline pin derives from the call itself
 # (`github.workflow_ref` carries the `uses:` ref), so logic and
@@ -27,14 +32,21 @@
 # tag carries the product version.
 #
 # Explicit behavior contract:
-# - `binaries` defaults to true. Exactly one binary (the `binary`
-#   input) builds with all features on five platforms (linux x86_64,
-#   linux arm64, macOS arm64, Windows x86_64, Windows arm64) and
-#   attaches to the release. Downloads and registry installs carry
-#   the same module surface now that default features enable every
-#   module; `--all-features` stays explicit here so test-only extras
-#   (mocks, harnesses) ride along too.
-#   Multi-binary products are not supported: one input, one binary.
+# - `bins` (space-separated) selects the release products, defaulting
+#   to the workspace metadata list (`workspace.metadata.oxdock`
+#   `release_bins` in the root `Cargo.toml`, read from `cargo
+#   metadata`), so adding a product is one manifest entry with no
+#   workflow or script change. With binaries on and neither source
+#   naming a product, resolution fails naming the fix instead of
+#   guessing. Each product builds with all features on five platforms
+#   (linux x86_64, linux arm64, macOS arm64, Windows x86_64, Windows
+#   arm64) and attaches one `<product>-<target>.tar.gz` per target
+#   holding all of the product package's binaries (sidecars like
+#   `oxdock-compose-child` ride with their primary automatically).
+#   Downloads and registry installs carry the same module surface now
+#   that default features enable every module; `--all-features` stays
+#   explicit here so test-only extras (mocks, harnesses) ride along
+#   too.
 # - `binaries: false` (library-only products) skips the build matrix
 #   and artifact download entirely; the release ships notes only.
 #   Nothing else changes: version gate, publish, tag, and resume
@@ -59,10 +71,10 @@ on:
         required: false
         default: true
         type: boolean
-      binary:
-        description: "Binary and package name to build and ship"
+      bins:
+        description: "Space-separated release products (defaults to the workspace metadata release_bins list)"
         required: false
-        default: "oxdock"
+        default: ""
         type: string
       binaries:
         description: "Build and attach binaries (false for library-only products)"
@@ -80,10 +92,10 @@ on:
         required: false
         default: true
         type: boolean
-      binary:
-        description: "Binary and package name to build and ship"
+      bins:
+        description: "Space-separated release products (defaults to the workspace metadata release_bins list)"
         required: false
-        default: "oxdock"
+        default: ""
         type: string
       binaries:
         description: "Build and attach binaries (false for library-only products)"
@@ -153,10 +165,48 @@ jobs:
             cargo run --manifest-path rust-release/Cargo.toml -p oxdock -- rust-release/.github/scripts/gha-rust-validate.oxfile
           fi
 
+  resolve:
+    name: resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      bins_json: ${{ steps.bins.outputs.bins_json }}
+      bins_space: ${{ steps.bins.outputs.bins_space }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # The resolver runs on the DSL itself: products come from the
+      # manifest through LOAD_TOML, with no shell parsing and no
+      # second language in the pipeline. Local bootstrap: the script
+      # may use unreleased vocabulary (APPEND_LINE), which the
+      # published engine predates, so the resolver builds from this
+      # checkout like every other branch-DSL leg.
+      - name: Setup resolve engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          source: local
+
+      # inputs.bins wins when set (one-off override); else the
+      # workspace metadata list (adding a product is one Cargo.toml
+      # entry). Nothing else: with binaries on and neither source
+      # naming a product, this fails naming the fix instead of
+      # guessing. Library-only runs (binaries off) resolve empty and
+      # ship notes only.
+      - name: Resolve release products
+        id: bins
+        shell: bash
+        env:
+          OXDOCK_BINS_INPUT: ${{ inputs.bins }}
+          OXDOCK_BINARIES: ${{ inputs.binaries }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: oxdock ./.github/scripts/gha-rust-resolve.oxfile
+
   build:
-    name: build (${{ matrix.target }})
+    name: build ${{ matrix.bin }} (${{ matrix.target }})
     if: ${{ inputs.binaries }}
-    needs: [validate]
+    needs: [validate, resolve]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -164,25 +214,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        bin: ${{ fromJson(needs.resolve.outputs.bins_json) }}
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
             exe: ""
             cc: musl-gcc
-          - os: ubuntu-26.04-arm
-            target: aarch64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-26.04-arm
             exe: ""
             cc: musl-gcc
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
+            os: macos-latest
             exe: ""
             cc: ""
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
             exe: ".exe"
             cc: ""
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
             exe: ".exe"
             cc: ""
     steps:
@@ -209,7 +266,7 @@ jobs:
       # default `cargo install` builds now match it. `--all-features`
       # stays explicit here so test-only extras (mocks, harnesses)
       # ride along too.
-      - name: Build the release binary
+      - name: Build the release binaries
         shell: bash
         env:
           # Static CRT on MSVC so downloaders need no VCRedist:
@@ -224,7 +281,7 @@ jobs:
             cc_var="CC_$(echo '${{ matrix.target }}' | tr '-' '_')"
             export "${cc_var}=${{ matrix.cc }}"
           fi
-          cargo build --release --target ${{ matrix.target }} -p ${{ inputs.binary }} --all-features
+          cargo build --release --target ${{ matrix.target }} -p ${{ matrix.bin }} --all-features
 
       # NOTE: This step is intentionally kept (see next step).
       #
@@ -232,41 +289,56 @@ jobs:
       # builds the caller's checkout (source: local), so the packer
       # carries the very ARCHIVE under release. A broken ARCHIVE fails
       # this pack before anything publishes: the release proves its own
-      # engine. Membership matches the historical pack exactly
-      # (one top-level binary, modes kept); a broken pack fails the
-      # runner self-extract below before anything publishes. The
-      # duplicate build is an intentional self-hosting proof, not
-      # a candidate for reuse of the step above.
+      # engine. Membership matches the historical pack exactly (every
+      # binary of the product package at top level, modes kept); a
+      # broken pack fails the runner self-extract below before anything
+      # publishes. The duplicate build is an intentional self-hosting
+      # proof, not a candidate for reuse of the step above.
       - name: Setup pack engine
         uses: ./.github/actions/setup-oxdock
         with:
           source: local
 
+      # Stage first in DSL: the product set varies per package
+      # (sidecars ride along), resolved from the workspace metadata
+      # like every other product list here. The ARCHIVE itself still
+      # runs under the candidate engine, so the self-hosting proof
+      # holds for every product.
+      - name: Stage the product binaries
+        shell: bash
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          OXDOCK_MATRIX_BIN: ${{ matrix.bin }}
+          OXDOCK_MATRIX_TARGET: ${{ matrix.target }}
+          OXDOCK_MATRIX_EXE: ${{ matrix.exe }}
+        run: oxdock ./.github/scripts/gha-rust-stage.oxfile
+
       # NOTE: This intentionally reuses the candidate engine from the
-      # step above instead of the binary from "Build the release binary":
-      # the duplicate build validates the candidate engine by
-      # self-hosting the archive step.
-      - name: Archive the binary
+      # step above instead of the binary from "Build the release
+      # binaries": the duplicate build validates the candidate engine
+      # by self-hosting the archive step.
+      - name: Archive the product
         shell: oxdock --script {0}
         run: |
           INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
-          WORKDIR {{ env:GITHUB_WORKSPACE }}/target/${{ matrix.target }}/release
-          ARCHIVE ${{ inputs.binary }}${{ matrix.exe }} {{ env:GITHUB_WORKSPACE }}/${{ inputs.binary }}-${{ matrix.target }}.tar.gz
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          ARCHIVE target/pkg-stage {{ env:GITHUB_WORKSPACE }}/${{ matrix.bin }}-${{ matrix.target }}.tar.gz
 
       - name: Upload the archive
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.binary }}-${{ matrix.target }}.tar.gz
-          path: ${{ inputs.binary }}-${{ matrix.target }}.tar.gz
+          name: ${{ matrix.bin }}-${{ matrix.target }}.tar.gz
+          path: ${{ matrix.bin }}-${{ matrix.target }}.tar.gz
 
   release:
     name: release
-    # Runs when validation passed and the build succeeded or was skipped
-    # (binaries off): a failed or cancelled build still stops everything.
-    if: ${{ always() && needs.validate.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    # Runs when validation and resolution passed and the build succeeded
+    # or was skipped (binaries off): a failed or cancelled build still
+    # stops everything.
+    if: ${{ always() && needs.validate.result == 'success' && needs.resolve.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
-    needs: [validate, build]
+    needs: [validate, resolve, build]
     environment: release
     permissions:
       contents: write
@@ -300,7 +372,7 @@ jobs:
         if: ${{ inputs.binaries }}
         uses: actions/download-artifact@v4
         with:
-          pattern: "${{ inputs.binary }}-*"
+          pattern: "*-*.tar.gz"
           merge-multiple: true
           path: target/artifacts
 
@@ -331,20 +403,35 @@ jobs:
           (cd target/artifacts && sha256sum ./*.tar.gz install.sh install.ps1 install.oxfile > SHA256SUMS)
           cat target/artifacts/SHA256SUMS
 
-      # Unpack the linux archive for the self-run step below. The
-      # binary's baked manifest directory points at the build runner,
-      # so that step overrides the workspace root back to this tree.
-      # Shell tar on purpose: no engine is on hand yet at this point,
-      # which usefully doubles as the system-reader side of the
-      # interop proof against the DSL-packed asset above.
+      # Bootstrap engine for the DSL steps below: the release job has
+      # no engine of its own yet, and the runner binary is still inside
+      # its tarball. Built from this checkout like every other job, so
+      # new DSL stays usable here.
+      - name: Setup extract engine
+        if: ${{ inputs.binaries }}
+        uses: ./.github/actions/setup-oxdock
+        with:
+          source: local
+
+      # Unpack the linux archive for the self-run step below with the
+      # checkout's own engine: UNARCHIVE reads the DSL-packed asset
+      # and SET_EXECUTABLE guarantees the runner bit, the pack step in
+      # reverse. The binary's baked manifest directory points at the
+      # build runner, so the self-run step overrides the workspace root
+      # back to this tree. System-tar interop stays proven where it
+      # matters: the installer stubs unpack every release tarball with
+      # the host tar on all five platforms. The runner is always
+      # oxdock: it alone carries the MARKDOWN the release script
+      # imports, and every product list includes it.
       - name: Extract the release runner
         if: ${{ inputs.binaries }}
-        shell: bash
+        shell: oxdock --script {0}
         run: |
-          set -euo pipefail
-          mkdir -p target/runner
-          tar -xzf "target/artifacts/${{ inputs.binary }}-x86_64-unknown-linux-musl.tar.gz" -C target/runner
-          chmod +x "target/runner/${{ inputs.binary }}"
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          UNARCHIVE target/artifacts/oxdock-x86_64-unknown-linux-musl.tar.gz target/runner
+          SET_EXECUTABLE target/runner/oxdock
 
       # Self release with artifacts: the fresh matrix binary runs the
       # dispatched branch's script in place. Only this repo qualifies:
@@ -356,13 +443,13 @@ jobs:
           OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
           RELEASE_CONFIRM: ${{ inputs.confirm_version }}
           RELEASE_DRY_RUN: ${{ inputs.dry_run }}
-          RELEASE_BINARY: ${{ inputs.binary }}
+          RELEASE_BINS: ${{ needs.resolve.outputs.bins_space }}
           RELEASE_BINARIES: ${{ inputs.binaries }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          ./target/runner/${{ inputs.binary }} ./.github/scripts/gha-rust-release.oxfile
+          ./target/runner/oxdock ./.github/scripts/gha-rust-release.oxfile
 
       # Everything else runs the central script with the central runner:
       # published binary at the derived pin if the ref has a release,
@@ -376,7 +463,7 @@ jobs:
           OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
           RELEASE_CONFIRM: ${{ inputs.confirm_version }}
           RELEASE_DRY_RUN: ${{ inputs.dry_run }}
-          RELEASE_BINARY: ${{ inputs.binary }}
+          RELEASE_BINS: ${{ needs.resolve.outputs.bins_space }}
           RELEASE_BINARIES: ${{ inputs.binaries }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

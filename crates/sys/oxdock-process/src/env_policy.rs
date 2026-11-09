@@ -266,9 +266,6 @@ define_env_contract! {
         oxdock_env::os::windows::COMSPEC, [windows];
         oxdock_env::os::windows::SYSTEM_DRIVE, [windows];
         oxdock_env::os::windows::PROCESSOR_ARCHITECTURE, [windows];
-        // Engine-owned, not a host mirror: the interpreter binds the
-        // session cargo scratch instead of reading the host.
-        oxdock_env::cargo::TARGET_DIR, [unix, windows];
     }
     reads {
         oxdock_env::os::unix::SHELL, "oxdock_process::shell::shell_program";
@@ -284,9 +281,7 @@ define_env_contract! {
 /// current platform's declared names mirrored from the host, nothing
 /// else. A host lacking a name leaves it absent: no fallbacks, no
 /// synthesis. Explicit script `ENV`/`INHERIT_ENV` overwrite these like
-/// any other variable. `scratch_target` binds the single engine-owned
-/// row (`CARGO_TARGET_DIR`); `scratch_tmp` is unused and retained only
-/// for the call signature. Narrow by name, never wholesale: only the
+/// any other variable. Narrow by name, never wholesale: only the
 /// declared rows read the host, so ambient secrets and harness
 /// internals still stay out unless explicitly routed.
 /// Every name the session seed may inject into the initial script
@@ -305,14 +300,12 @@ pub fn seeded_env_names() -> Vec<&'static str> {
         .iter()
         .map(|entry| entry.name)
         .collect();
-    names.push(oxdock_fs::env::cargo::TARGET_DIR);
     names.push(crate::builtin_env::BuiltinEnv::WORKSPACE_GIT_COMMIT);
     names
 }
 
-pub fn seed_defaults(scratch_tmp: &str, scratch_target: &str) -> HashMap<String, String> {
-    let _ = scratch_tmp;
-    interpret_seed_table(&platform_seed_names(), scratch_target, &host_var)
+pub fn seed_defaults() -> HashMap<String, String> {
+    interpret_seed_table(&platform_seed_names(), &host_var)
 }
 
 /// Interpret one name list into a map. `host` supplies host values so
@@ -321,17 +314,10 @@ pub fn seed_defaults(scratch_tmp: &str, scratch_target: &str) -> HashMap<String,
 /// variable enters the map undefined.
 fn interpret_seed_table(
     names: &[&str],
-    scratch_target: &str,
     host: &dyn Fn(&str) -> Option<String>,
 ) -> HashMap<String, String> {
-    let mut seed = HashMap::with_capacity(names.len() + 1);
+    let mut seed = HashMap::with_capacity(names.len());
     for name in names {
-        // The single engine-owned row: session cargo scratch, not a
-        // host mirror. Everything else mirrors or omits.
-        if *name == oxdock_env::cargo::TARGET_DIR {
-            seed.insert((*name).to_string(), scratch_target.to_string());
-            continue;
-        }
         if let Some(mirrored) = host(name) {
             seed.insert((*name).to_string(), mirrored);
         }
@@ -385,9 +371,7 @@ fn transport_names() -> Vec<&'static str> {
 /// Whether a request entry survives transport sanitize: true when the
 /// session seed lacks the name or holds a different value. Key
 /// comparison uses [`names_eq`], so Windows casing differences cannot
-/// bypass the filter. Seeded scratch values drop (the transport must
-/// not bind session scratch); explicitly routed values that differ
-/// survive.
+/// bypass the filter. Explicitly routed values that differ survive.
 pub fn seed_differs(seed: &HashMap<String, String>, key: &str, value: &str) -> bool {
     match seed.iter().find(|(k, _)| names_eq(k, key)) {
         Some((_, seeded)) => seeded != value,
@@ -468,49 +452,31 @@ mod tests {
 
     #[test]
     fn seed_mirrors_host_essentials() {
-        // Every declared name mirrors the stub host; the engine-owned
-        // row binds scratch. Derived from the declaration, so adding a
-        // row needs no edit here.
+        // Every declared name mirrors the stub host, no exceptions.
+        // Derived from the declaration, so adding a row needs no
+        // edit here.
         let stub: HashMap<String, String> = current_platform_seed()
             .iter()
             .map(|entry| (entry.name.to_string(), format!("host-{}", entry.name)))
             .collect();
         let lookup = |name: &str| stub.get(name).cloned();
-        let seed = interpret_seed_table(&platform_seed_names(), "/scratch/target", &lookup);
+        let seed = interpret_seed_table(&platform_seed_names(), &lookup);
         for entry in current_platform_seed() {
-            if entry.name == oxdock_env::cargo::TARGET_DIR {
-                assert_eq!(
-                    seed.get(entry.name).map(String::as_str),
-                    Some("/scratch/target"),
-                    "engine-owned row must bind scratch"
-                );
-            } else {
-                assert_eq!(
-                    seed.get(entry.name).map(String::as_str),
-                    stub.get(entry.name).map(String::as_str),
-                    "{} must mirror the host",
-                    entry.name
-                );
-            }
+            assert_eq!(
+                seed.get(entry.name).map(String::as_str),
+                stub.get(entry.name).map(String::as_str),
+                "{} must mirror the host",
+                entry.name
+            );
         }
     }
 
     #[test]
     fn seed_omits_all_without_host() {
-        // An empty stub host (Miri, bare `env -i`): every mirror row
-        // stays absent; only the engine-owned row binds scratch.
-        let seed = interpret_seed_table(&platform_seed_names(), "/scratch/target", &|_: &str| {
-            None::<String>
-        });
-        assert_eq!(
-            seed.len(),
-            1,
-            "empty host must seed only the engine-owned row: {seed:?}"
-        );
-        assert_eq!(
-            seed.get(oxdock_env::cargo::TARGET_DIR).map(String::as_str),
-            Some("/scratch/target")
-        );
+        // An empty stub host (Miri, bare `env -i`): every row stays
+        // absent. No synthesis, no scratch fallback.
+        let seed = interpret_seed_table(&platform_seed_names(), &|_: &str| None::<String>);
+        assert!(seed.is_empty(), "empty host must seed nothing: {seed:?}");
     }
 
     #[test]
@@ -522,7 +488,7 @@ mod tests {
             ("HOST_HOME_PROBE", "/nowhere"),
         ]);
         let lookup = |name: &str| stub.get(name).cloned();
-        let seed = interpret_seed_table(&platform_seed_names(), "/scratch/target", &lookup);
+        let seed = interpret_seed_table(&platform_seed_names(), &lookup);
         assert!(
             !seed.contains_key("HOST_HOME_PROBE"),
             "unlisted names never seed: {seed:?}"
@@ -532,7 +498,7 @@ mod tests {
             Some("/host/bin")
         );
         for entry in current_platform_seed() {
-            if entry.name == oxdock_env::os::PATH || entry.name == oxdock_env::cargo::TARGET_DIR {
+            if entry.name == oxdock_env::os::PATH {
                 continue;
             }
             assert!(
@@ -549,7 +515,7 @@ mod tests {
         // Miri there is no host to read at all).
         let stub = stub_host(&[(oxdock_env::os::PATH, "/host/bin")]);
         let lookup = |name: &str| stub.get(name).cloned();
-        let seed = interpret_seed_table(&platform_seed_names(), "/scratch/target", &lookup);
+        let seed = interpret_seed_table(&platform_seed_names(), &lookup);
         assert!(!seed_differs(&seed, oxdock_env::os::PATH, "/host/bin"));
         assert!(seed_differs(&seed, oxdock_env::os::PATH, "/custom/bin"));
         assert!(seed_differs(&seed, "OXDOCK_CUSTOM_UNSEEDED", "1"));
@@ -570,9 +536,10 @@ mod tests {
     }
 
     #[test]
-    fn transport_seed_holds_no_scratch() {
-        // Transports never bind session scratch: only the engine-owned
-        // session row does, and transports do not carry it.
+    fn transport_seed_holds_no_target_dir() {
+        // Transports mirror only the host names they need, and the
+        // target dir is not one of them: routing `cargo` on a remote
+        // is the script's explicit job, never ambient.
         let stub: HashMap<String, String> = transport_names()
             .iter()
             .map(|name| (name.to_string(), format!("host-{name}")))
@@ -581,7 +548,7 @@ mod tests {
         let staged = transport_seed(&lookup);
         assert!(
             !staged.contains_key(oxdock_env::cargo::TARGET_DIR),
-            "transports must not bind session scratch: {staged:?}"
+            "transports must not carry a target dir: {staged:?}"
         );
         for name in transport_names() {
             assert_eq!(
@@ -661,7 +628,7 @@ mod tests {
             .map(|entry| (entry.name.to_string(), format!("host-{}", entry.name)))
             .collect();
         let lookup = |name: &str| stub.get(name).cloned();
-        let seed = interpret_seed_table(&platform_seed_names(), "/scratch/target", &lookup);
+        let seed = interpret_seed_table(&platform_seed_names(), &lookup);
         for name in platform_seed_names() {
             assert!(seed.contains_key(name), "declared {name} never seeds");
         }

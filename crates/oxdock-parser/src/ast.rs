@@ -61,6 +61,7 @@ pub enum Command {
     Symlink,
     Mkdir,
     Install,
+    SetExecutable,
     Archive,
     Unarchive,
     Ls,
@@ -69,6 +70,7 @@ pub enum Command {
     Prompt,
     Write,
     Append,
+    AppendLine,
     Remove,
     Expand,
     AssertEq,
@@ -95,6 +97,7 @@ pub const COMMANDS: &[Command] = &[
     Command::Symlink,
     Command::Mkdir,
     Command::Install,
+    Command::SetExecutable,
     Command::Archive,
     Command::Unarchive,
     Command::Ls,
@@ -103,6 +106,7 @@ pub const COMMANDS: &[Command] = &[
     Command::Prompt,
     Command::Write,
     Command::Append,
+    Command::AppendLine,
     Command::Remove,
     Command::Expand,
     Command::AssertEq,
@@ -119,8 +123,9 @@ pub const COMMANDS: &[Command] = &[
 /// segment). A new `CATEGORY_ACTION` command registers its prefix here;
 /// reusing an existing category needs no change. Single-word commands
 /// carry no category and are unaffected.
-pub const COMMAND_CATEGORIES: &[&str] =
-    &["INHERIT", "WITH", "COPY", "HASH", "READ", "ASSERT", "LIST"];
+pub const COMMAND_CATEGORIES: &[&str] = &[
+    "INHERIT", "WITH", "COPY", "HASH", "READ", "ASSERT", "LIST", "SET", "APPEND",
+];
 
 impl Command {
     pub const fn as_str(self) -> &'static str {
@@ -137,6 +142,7 @@ impl Command {
             Command::Symlink => "SYMLINK",
             Command::Mkdir => "MKDIR",
             Command::Install => "INSTALL",
+            Command::SetExecutable => "SET_EXECUTABLE",
             Command::Archive => "ARCHIVE",
             Command::Unarchive => "UNARCHIVE",
             Command::Ls => "LS",
@@ -145,6 +151,7 @@ impl Command {
             Command::Prompt => "PROMPT",
             Command::Write => "WRITE",
             Command::Append => "APPEND",
+            Command::AppendLine => "APPEND_LINE",
             Command::Remove => "REMOVE",
             Command::Expand => "EXPAND",
             Command::AssertEq => "ASSERT_EQ",
@@ -175,6 +182,7 @@ impl Command {
             }
             Command::Mkdir => "MKDIR <path>",
             Command::Install => "INSTALL <source> <dest>",
+            Command::SetExecutable => "SET_EXECUTABLE <path>",
             Command::Archive => "ARCHIVE [--raw] <src> <dst>",
             Command::Unarchive => "UNARCHIVE <src> <dst> [--max-bytes <bytes>]",
             Command::Ls => "LS [<path>]",
@@ -183,6 +191,7 @@ impl Command {
             Command::Prompt => "PROMPT $var <message> [<default>]",
             Command::Write => "WRITE <path> [<contents>]",
             Command::Append => "APPEND <path> [<contents>]",
+            Command::AppendLine => "APPEND_LINE <path> <contents>",
             Command::Remove => "REMOVE [--recursive] <path>",
             Command::Expand => "EXPAND [<path>] [<KEY=val> ...]",
             Command::AssertEq => "ASSERT_EQ [--hash <sha256>] <actual> <expected>",
@@ -222,6 +231,7 @@ impl Command {
             "SYMLINK" => Some(Command::Symlink),
             "MKDIR" => Some(Command::Mkdir),
             "INSTALL" => Some(Command::Install),
+            "SET_EXECUTABLE" => Some(Command::SetExecutable),
             "ARCHIVE" => Some(Command::Archive),
             "UNARCHIVE" => Some(Command::Unarchive),
             "LS" => Some(Command::Ls),
@@ -230,6 +240,7 @@ impl Command {
             "PROMPT" => Some(Command::Prompt),
             "WRITE" => Some(Command::Write),
             "APPEND" => Some(Command::Append),
+            "APPEND_LINE" => Some(Command::AppendLine),
             "REMOVE" => Some(Command::Remove),
             "EXPAND" => Some(Command::Expand),
             "ASSERT_EQ" => Some(Command::AssertEq),
@@ -1521,6 +1532,27 @@ mod tests {
             assert!(
                 COMMAND_CATEGORIES.contains(&prefix),
                 "command {name} introduces unregistered category {prefix}; add it to COMMAND_CATEGORIES"
+            );
+        }
+    }
+
+    /// Registry/parse parity: every indexed command name must resolve
+    /// through `Command::parse` (or be a structural keyword). The
+    /// token-stream splitter consults `parse`, never the metadata
+    /// table, so a registry-only command glues onto the previous line
+    /// and its arguments misparse as the neighbor's. Structural names
+    /// take the keyword path instead, and doc-only entries (`in_index:
+    /// false`, like `MUTATION`) are not parseable heads by design.
+    #[test]
+    fn registry_commands_all_parse() {
+        for meta in crate::all_metadata() {
+            if !meta.in_index || STRUCTURAL_KEYWORDS.contains(&meta.name) {
+                continue;
+            }
+            assert!(
+                Command::parse(meta.name).is_some(),
+                "registry command {} has no Command::parse arm",
+                meta.name
             );
         }
     }

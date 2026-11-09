@@ -731,7 +731,8 @@ mod synthetic_backend_tests {
         assert_eq!(expand_env("cost $$5", &ctx), "cost $$5");
         assert_eq!(expand_env("[${MISSING_XYZ}]", &ctx), "[]");
 
-        // The seed carries CARGO_TARGET_DIR in the map; expansion reads it there.
+        // An explicitly routed CARGO_TARGET_DIR reads back verbatim:
+        // the map carries what the caller staged, never a synthesis.
         let target = expand_env("${CARGO_TARGET_DIR}", &ctx);
         assert_eq!(target, "/scratch/target");
     }

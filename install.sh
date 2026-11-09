@@ -17,13 +17,26 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   (export VERSION=v0.35.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
+#   (export VERSION=v0.36.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
 #
+# Pass OXDOCK_PRODUCT to choose the release product (default
+# `oxdock`; `oxdock-compose` installs the composer). The asset and
+# the installed stem both follow the product unless OXDOCK_BINARY_NAME
+# overrides the stem. Non-interpreter products fetch the `oxdock`
+# asset as an ephemeral engine; it runs the installer and is never
+# placed.
+#
+# Pass OXDOCK_BINS to choose which tarball members to place
+# (space-separated basenames, `.exe` optional on Windows; default
+# places the whole product). The primary takes the OXDOCK_BINARY_NAME
+# stem, companions keep their tarball names. Unknown names fail
+# listing the tarball members.
+#
 # Pass OXDOCK_BINARY_NAME to choose the installed stem (default
-# `oxdock`; the installer appends `.exe` on Windows). CI passes
+# follows the product; the installer appends `.exe` on Windows). CI passes
 # `oxdock-engine` to free the bare name for a binary under test.
 #
 # Point OXDOCK_ENGINE at a branch-built binary to run the installer
@@ -67,7 +80,15 @@ fi
 
 # Install name and expected version ride through untouched: the
 # single strip lives in install.oxfile (TEXT_TRIM_SUFFIX/PREFIX),
-# never here.
+# never here. The product selects the asset; the stem defaults to the
+# product so each release installs under its own name unless
+# OXDOCK_BINARY_NAME says otherwise.
+
+# Product-aware asset: every product ships one `<product>-<target>`
+# tarball holding all of its binaries (sidecars ride along), so the
+# download follows the product, never a hardcoded name.
+PRODUCT="${OXDOCK_PRODUCT:-oxdock}"
+RAW_NAME="${OXDOCK_BINARY_NAME:-$PRODUCT}"
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
@@ -109,19 +130,50 @@ esac
 # mistargeted download names its cause instead of surfacing as a bare 404.
 echo "platform: $(uname -s)-$(uname -m) target: $TARGET" >&2
 
-ASSET="oxdock-$TARGET.tar.gz"
+ASSET="$PRODUCT-$TARGET.tar.gz"
+
+# Non-interpreter products cannot run the installer logic themselves:
+# the interpreter tarball rides along as an ephemeral engine. It is
+# unpacked to scratch and executed, never placed: only the product
+# members land in the destination. An explicit OXDOCK_ENGINE wins and
+# skips this download. Mirrors install.oxfile PRODUCT_CHECKS_VERSION:
+# only "oxdock" interprets.
+ENGINE_ASSET="oxdock-$TARGET.tar.gz"
+NEEDS_ENGINE=false
+if [ "$PRODUCT" != "oxdock" ] && [ -z "${OXDOCK_ENGINE:-}" ]; then
+  NEEDS_ENGINE=true
+fi
 
 VDIR="$CACHE_DIR/$VERSION"
 
 mkdir -p "$VDIR"
 
-verify_cached() {
+verify_asset() {
+  asset="$1"
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$VDIR" && grep "$ASSET\$" SHA256SUMS 2>/dev/null | sha256sum -c - >/dev/null 2>&1)
+    (cd "$VDIR" && grep "$asset\$" SHA256SUMS 2>/dev/null | sha256sum -c - >/dev/null 2>&1)
   else
-    (cd "$VDIR" && grep "$ASSET\$" SHA256SUMS 2>/dev/null | shasum -a 256 -c - >/dev/null 2>&1)
+    (cd "$VDIR" && grep "$asset\$" SHA256SUMS 2>/dev/null | shasum -a 256 -c - >/dev/null 2>&1)
 
   fi
+}
+
+# One unpack shape for product and engine alike: stage into a fresh
+# dir, mark executable, resolve the named exe (tolerating the
+# Windows `.exe` the tarball carries). Fails closed when the tarball
+# held nothing expected.
+unpack_tarball_exe() {
+  local asset="$1" dest="$2" stem="$3" label="$4"
+  local candidate
+  mkdir -p "$dest"
+  tar -xzf "$VDIR/$asset" -C "$dest"
+  chmod +x "$dest"/"$stem"*
+  candidate="$dest/$stem"
+  if [ -f "${candidate}.exe" ]; then
+    candidate="${candidate}.exe"
+  fi
+  [ -f "$candidate" ] || { echo "no $label unpacked from $asset" >&2; exit 1; }
+  printf '%s' "$candidate"
 }
 
 # Same hash as last time means same bytes: reuse the cached tarball
@@ -130,10 +182,24 @@ verify_cached() {
 # stub itself is part of the warm contract: a cache warmed by the other
 # stub, or by a release predating bundled installers, repopulates
 # instead of handing off to a file that is not there.
-if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/SHA256SUMS" ] && [ -f "$VDIR/install.oxfile" ] && [ -f "$VDIR/install.sh" ] && verify_cached; then
-  echo "using cached oxdock $VERSION" >&2
+# Warm only when every needed asset verifies: warm runs never touch
+# network, so a missing or corrupt interpreter asset repopulates like
+# the product one.
+engine_cached=true
+if [ "$NEEDS_ENGINE" = true ]; then
+  engine_cached=false
+  if [ -f "$VDIR/$ENGINE_ASSET" ] && verify_asset "$ENGINE_ASSET"; then
+    engine_cached=true
+  fi
+fi
+
+if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/SHA256SUMS" ] && [ -f "$VDIR/install.oxfile" ] && [ -f "$VDIR/install.sh" ] && verify_asset "$ASSET" && [ "$engine_cached" = true ]; then
+  echo "using cached $PRODUCT $VERSION" >&2
 else
-  echo "downloading oxdock $VERSION" >&2
+  echo "downloading $PRODUCT $VERSION" >&2
+  if [ "$NEEDS_ENGINE" = true ]; then
+    echo "downloading ephemeral interpreter for $PRODUCT install" >&2
+  fi
 
   tmp=$(mktemp -d)
 
@@ -146,6 +212,12 @@ else
   # Download under the release filename: `sha256sum -c` resolves names
   # from the checksums file, so a renamed download would never verify.
   gh_curl "$base/$ASSET" -o "$tmp/$ASSET"
+
+  # Ephemeral interpreter for non-interpreter products, verified and
+  # cached beside the product below. Never placed: only executed.
+  if [ "$NEEDS_ENGINE" = true ]; then
+    gh_curl "$base/$ENGINE_ASSET" -o "$tmp/$ENGINE_ASSET"
+  fi
 
   gh_curl "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
 
@@ -174,7 +246,20 @@ else
 
   fi
 
+  if [ "$NEEDS_ENGINE" = true ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      (cd "$tmp" && grep "$ENGINE_ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null)
+    else
+      (cd "$tmp" && grep "$ENGINE_ASSET\$" SHA256SUMS | shasum -a 256 -c - >/dev/null)
+
+    fi
+  fi
+
   mv "$tmp/$ASSET" "$VDIR/$ASSET"
+
+  if [ "$NEEDS_ENGINE" = true ]; then
+    mv "$tmp/$ENGINE_ASSET" "$VDIR/$ENGINE_ASSET"
+  fi
 
   mv "$tmp/SHA256SUMS" "$VDIR/SHA256SUMS"
 
@@ -213,17 +298,35 @@ trap 'rm -rf "$tmp"' EXIT
 
 cp "$VDIR/install.oxfile" "$tmp/install.oxfile"
 
-mkdir -p "$tmp/x"
+# Exact primary, tolerating the Windows `.exe` the tarball carries
+# under Git Bash/MSYS (extensionless probes must not leak into
+# PRIMARY, or the oxfile demotes the primary to a sidecar).
+BIN=$(unpack_tarball_exe "$ASSET" "$tmp/x" "$PRODUCT" "binary")
 
-tar -xzf "$VDIR/$ASSET" -C "$tmp/x"
+# The product tarball holds every binary of the product: bridge the
+# full member inventory (newline-separated basenames) plus the
+# primary's tarball name, so the installer places any subset by name
+# with no pattern assumptions. Newline-separated, so spaces in the
+# scratch path never split an entry.
+SIBLING_DIR="$tmp/x"
+PRIMARY=$(basename "$BIN")
+MEMBERS=""
+for f in "$tmp"/x/*; do
+  if [ -f "$f" ]; then
+    if [ -z "$MEMBERS" ]; then
+      MEMBERS=$(basename "$f")
+    else
+      MEMBERS="$MEMBERS
+$(basename "$f")"
+    fi
+  fi
+done
 
-chmod +x "$tmp"/x/oxdock*
-
-# Assignment words never glob-expand: resolve the unpacked binary
-# explicitly, and fail closed when the tarball held nothing expected.
-BIN=$(echo "$tmp"/x/oxdock*)
-
-[ -f "$BIN" ] || { echo "no binary unpacked from $ASSET" >&2; exit 1; }
+# Ephemeral interpreter for non-interpreter products: unpacked
+# beside the product, executed below, never placed.
+if [ "$NEEDS_ENGINE" = true ]; then
+  ENGINE_CANDIDATE=$(unpack_tarball_exe "$ENGINE_ASSET" "$tmp/engine" "oxdock" "interpreter")
+fi
 
 # INSTALL_DIR passes through untouched (possibly unset): the name
 # mapping lives here because only the stub knows both sides.
@@ -240,6 +343,8 @@ if [ -n "${OXDOCK_ENGINE:-}" ]; then
 
     *) ENGINE="$PWD/$OXDOCK_ENGINE" ;;
   esac
+elif [ "$NEEDS_ENGINE" = true ]; then
+  ENGINE="$ENGINE_CANDIDATE"
 fi
 
 [ -x "$ENGINE" ] || { echo "installer engine is not executable: $ENGINE" >&2; exit 1; }
@@ -346,9 +451,13 @@ fi
   OXDOCK_ASSET="$VDIR/$ASSET" \
   OXDOCK_SHA="$EXPECTED" \
   OXDOCK_BIN="$BIN" \
+  OXDOCK_PRODUCT="$PRODUCT" \
+  OXDOCK_SIBLING_DIR="$SIBLING_DIR" \
+  OXDOCK_MEMBERS="$MEMBERS" \
+  OXDOCK_PRIMARY="$PRIMARY" \
   OXDOCK_DIR="$OXDOCK_DIR" \
   OXDOCK_VERSION="$VERSION" \
-  OXDOCK_BINARY_NAME="${OXDOCK_BINARY_NAME:-}" \
+  OXDOCK_BINARY_NAME="$RAW_NAME" \
   OXDOCK_EXPECTED_VERSION="$VERSION" \
   OXDOCK_SKIP_DOWNLOAD=false \
   OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" \
@@ -362,33 +471,44 @@ fi
 
 }
 
-# CI tail under the fresh binary: the oxfile above verified and placed
-# under the old engine; re-running the same file with SKIP=1 proves the
-# fresh binary runs DSL before its directory lands on PATH. Gated here
-# on the PATH file alone (the oxfile owns the version gate), and never
-# in piped-run mode: nothing was placed there, so no fresh binary
-# exists. Off-runner installs skip silently either way.
+# CI tail under the proof binary: the oxfile above verified and
+# placed; re-running the same file with SKIP=1 verifies placement and
+# publishes PATH before the directory lands on it. The proof binary is
+# the fresh install when it interprets (oxdock), else the ephemeral
+# engine that placed the product. Gated here on the PATH file as well
+# (the oxfile owns the version gate), and never in piped-run mode:
+# nothing was placed there, so no fresh binary exists. Off-runner
+# installs skip silently either way.
 if [ -z "${OXDOCK_PIPED_SCRIPT:-}" ] && [ -n "${GITHUB_PATH:-}" ] && [ -f "$GITHUB_PATH" ]; then
-  RAW_NAME="${OXDOCK_BINARY_NAME:-oxdock}"
+  TAIL_BIN="$ENGINE"
+  if [ "$PRODUCT" = "oxdock" ]; then
+    RAW_NAME="${OXDOCK_BINARY_NAME:-$PRODUCT}"
 
-  case "$RAW_NAME" in
-    *.exe) FRESH="$OXDOCK_DIR/$RAW_NAME" ;;
-    *)
-      FRESH="$OXDOCK_DIR/$RAW_NAME"
+    case "$RAW_NAME" in
+      *.exe) FRESH="$OXDOCK_DIR/$RAW_NAME" ;;
+      *)
+        FRESH="$OXDOCK_DIR/$RAW_NAME"
 
-      case "$(uname -s)" in
-        MINGW64*|MSYS*|CYGWIN*) FRESH="$FRESH.exe" ;;
-      esac
-      ;;
-  esac
+        case "$(uname -s)" in
+          MINGW64*|MSYS*|CYGWIN*) FRESH="$FRESH.exe" ;;
+        esac
+        ;;
+    esac
+
+    TAIL_BIN="$FRESH"
+  fi
 
   (cd "$tmp" && \
     OXDOCK_DIR="$OXDOCK_DIR" \
     OXDOCK_VERSION="$VERSION" \
     OXDOCK_BINARY_NAME="$RAW_NAME" \
+    OXDOCK_PRODUCT="$PRODUCT" \
+    OXDOCK_SIBLING_DIR="$SIBLING_DIR" \
+    OXDOCK_MEMBERS="$MEMBERS" \
+    OXDOCK_PRIMARY="$PRIMARY" \
     OXDOCK_EXPECTED_VERSION="$VERSION" \
     OXDOCK_SKIP_DOWNLOAD=true \
-    "$FRESH" "$tmp/install.oxfile") || {
+    "$TAIL_BIN" "$tmp/install.oxfile") || {
     code=$?
 
     echo "installer failed with exit code $code (fresh tail)" >&2

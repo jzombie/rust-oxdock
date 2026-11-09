@@ -57,6 +57,7 @@ runs:
       env:
         OXDOCK_BIN: ${{ github.workspace }}/target/release/oxdock${{ runner.os == 'Windows' && '.exe' || '' }}
         OXDOCK_OXFILE: ${{ github.workspace }}/install.oxfile
+        OXDOCK_PRODUCT: oxdock
         OXDOCK_DIR: ${{ runner.temp }}/oxdock-engine
         OXDOCK_VERSION: local
         OXDOCK_BINARY_NAME: ${{ inputs.binary-name }}
@@ -64,4 +65,10 @@ runs:
       run: |
         $ErrorActionPreference='Stop'
         cargo build --release -p oxdock
+        # Local builds stage no tarball, so there is no member
+        # inventory to extract: bridge the single built binary as the
+        # whole product instead.
+        $env:OXDOCK_SIBLING_DIR = (Split-Path $env:OXDOCK_BIN -Parent)
+        $env:OXDOCK_MEMBERS = (Split-Path $env:OXDOCK_BIN -Leaf)
+        $env:OXDOCK_PRIMARY = $env:OXDOCK_MEMBERS
         & $env:OXDOCK_BIN $env:OXDOCK_OXFILE

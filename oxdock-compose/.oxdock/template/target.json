@@ -1,0 +1,19 @@
+{
+  "targets": [
+    {
+      "name": "oxdock-compose-readme",
+      "out": "oxdock-compose/README.md",
+      "values": "oxdock-compose/.oxdock/template/values.json",
+      "template": "oxdock-compose/.oxdock/template/README.md.tmpl",
+      "fragments": {
+        "local": [
+          "oxdock-compose/.oxdock/template/fragments/*"
+        ],
+        "shared": [
+          ".oxdock/template/shared/header.md.tmpl",
+          ".oxdock/template/shared/footer.md.tmpl"
+        ]
+      }
+    }
+  ]
+}

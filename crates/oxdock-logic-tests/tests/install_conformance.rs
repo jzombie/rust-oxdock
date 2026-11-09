@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use oxdock_core::{ExecIo, run_steps_with_manager_with_modules};
-use oxdock_fs::{GuardedPath, PathResolver, env as oxdock_env};
+use oxdock_fs::{GuardedPath, PathResolver, env as oxdock_env, to_forward_slashes};
 use oxdock_logic_tests::recording::{RecordingManager, argv_calls};
 
 /// sha256 of `INSTALL_PAYLOAD`, computed once and pinned beside it: if
@@ -10,9 +10,10 @@ const INSTALL_PAYLOAD: &[u8] = b"oxdock-install-fixture-payload-v1";
 const INSTALL_DIGEST: &str = "8e6873401de1e38cfc5b986fd9330e26d7299469509d968f0b49031a7cfa1734";
 
 fn repo_root() -> Result<String> {
-    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
-        .context("CARGO_MANIFEST_DIR missing")?
-        .replace('\\', "/");
+    let manifest_dir = to_forward_slashes(
+        &std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
+            .context("CARGO_MANIFEST_DIR missing")?,
+    );
     Ok(manifest_dir
         .strip_suffix("crates/oxdock-logic-tests")
         .context("test must live under crates/oxdock-logic-tests")?
@@ -60,7 +61,7 @@ fn install_script_parses() -> Result<()> {
 fn install_script_uses_atomic_install_with_interactive_branch() -> Result<()> {
     let text = load_install_script()?;
     for marker in [
-        "INSTALL $bin $dest",
+        "INSTALL_SELECTED($dir, $filename)",
         "PROMPT $dir",
         "OXDOCK_INTERACTIVE",
         "PATH_WRITABLE",
@@ -110,6 +111,13 @@ fn install_harness(payload: &[u8], digest: &str, dir: Option<&str>) -> Result<In
         "OXDOCK_BIN",
         root.join("x/oxdock")?.as_path().display().to_string(),
     );
+    io.insert_inherit_env("OXDOCK_PRODUCT", "oxdock");
+    io.insert_inherit_env(
+        "OXDOCK_SIBLING_DIR",
+        root.join("x")?.as_path().display().to_string(),
+    );
+    io.insert_inherit_env("OXDOCK_MEMBERS", "oxdock");
+    io.insert_inherit_env("OXDOCK_PRIMARY", "oxdock");
     if let Some(dir) = dir {
         io.insert_inherit_env(
             "OXDOCK_DIR",
@@ -192,6 +200,161 @@ fn verified_asset_installs_bytes() -> Result<()> {
     Ok(())
 }
 
+/// Companion members install beside the primary: the whole product
+/// lands under the destination, the primary under the configured stem
+/// and companions under their tarball names.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn companion_members_install_beside_primary() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    let setup = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    setup.write_file(&run.root.join("x/sidecar")?, INSTALL_PAYLOAD)?;
+    run.io
+        .insert_inherit_env("OXDOCK_MEMBERS", "oxdock\nsidecar");
+    run.execute()?;
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    #[cfg(unix)]
+    let placed = "dest/oxdock";
+    #[cfg(windows)]
+    let placed = "dest/oxdock.exe";
+    assert_eq!(
+        reader.read_file(&run.root.join(placed)?)?,
+        INSTALL_PAYLOAD,
+        "primary holds the verified bytes"
+    );
+    assert_eq!(
+        reader.read_file(&run.root.join("dest/sidecar")?)?,
+        INSTALL_PAYLOAD,
+        "companion keeps its tarball name beside the primary"
+    );
+    Ok(())
+}
+
+/// OXDOCK_BINS selects a subset: only named members land, everything
+/// else stays out of the destination.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn bins_selection_places_only_named_members() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    let setup = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    setup.write_file(&run.root.join("x/sidecar")?, INSTALL_PAYLOAD)?;
+    run.io
+        .insert_inherit_env("OXDOCK_MEMBERS", "oxdock\nsidecar");
+    run.io.insert_inherit_env("OXDOCK_BINS", "sidecar");
+    run.execute()?;
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    assert_eq!(
+        reader.read_file(&run.root.join("dest/sidecar")?)?,
+        INSTALL_PAYLOAD,
+        "selected companion lands"
+    );
+    #[cfg(unix)]
+    let primary = "dest/oxdock";
+    #[cfg(windows)]
+    let primary = "dest/oxdock.exe";
+    assert!(
+        reader.read_file(&run.root.join(primary)?).is_err(),
+        "unselected primary stays out"
+    );
+    Ok(())
+}
+
+/// An unknown selection name fails before anything lands, and so
+/// does a whitespace-only selection: an empty pick list is user error,
+/// never a silent no-op install.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn unknown_bins_name_fails_listing_members() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    run.io.insert_inherit_env("OXDOCK_BINS", "nope");
+    let err = run
+        .execute()
+        .expect_err("unknown member must fail selection");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "unknown member exits the install: {rendered}"
+    );
+    // The gate fires before any INSTALL: the destination holds nothing.
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    #[cfg(unix)]
+    let primary = "dest/oxdock";
+    #[cfg(windows)]
+    let primary = "dest/oxdock.exe";
+    assert!(
+        reader.read_file(&run.root.join(primary)?).is_err(),
+        "failed selection places nothing"
+    );
+    Ok(())
+}
+
+/// A whitespace-only selection fails instead of placing nothing and
+/// reporting success.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn blank_bins_name_fails_closed() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    run.io.insert_inherit_env("OXDOCK_BINS", "   ");
+    let err = run.execute().expect_err("blank selection must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "blank selection exits the install: {rendered}"
+    );
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    #[cfg(unix)]
+    let primary = "dest/oxdock";
+    #[cfg(windows)]
+    let primary = "dest/oxdock.exe";
+    assert!(
+        reader.read_file(&run.root.join(primary)?).is_err(),
+        "failed selection places nothing"
+    );
+    Ok(())
+}
+
+/// Local builds bridge no member inventory (no tarball involved): the
+/// bridged binary installs as the whole product.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn local_build_without_inventory_installs_primary() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    run.io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "true");
+    run.io.remove_inherit_env("OXDOCK_MEMBERS");
+    run.io.remove_inherit_env("OXDOCK_PRIMARY");
+    run.io.remove_inherit_env("OXDOCK_SIBLING_DIR");
+    run.execute()?;
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    #[cfg(unix)]
+    let placed = "dest/oxdock";
+    #[cfg(windows)]
+    let placed = "dest/oxdock.exe";
+    assert_eq!(
+        reader.read_file(&run.root.join(placed)?)?,
+        INSTALL_PAYLOAD,
+        "local build places the bridged binary"
+    );
+    Ok(())
+}
+
+/// A download-mode run without inventory fails instead of installing
+/// blind: only local builds may skip the member list.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn download_without_inventory_fails_closed() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    run.io.remove_inherit_env("OXDOCK_MEMBERS");
+    let err = run
+        .execute()
+        .expect_err("download without inventory must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "missing inventory exits the install: {rendered}"
+    );
+    Ok(())
+}
+
 /// Tampered bytes abort at the hash gate: the failure names the
 /// mismatch and no extract or install process ever spawns.
 #[test]
@@ -210,6 +373,57 @@ fn tampered_asset_aborts_before_place() -> Result<()> {
         run.calls().is_empty(),
         "no process spawned after a failed verify: {:?}",
         run.calls()
+    );
+    Ok(())
+}
+
+/// Missing product fails closed at the gate: direct callers must
+/// bridge OXDOCK_PRODUCT explicitly (the stubs default it to `oxdock`
+/// before bridging, so the oxfile never guesses). The gate ECHOs the
+/// variable name on stdout, then EXITs; the harness asserts the exit.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn empty_product_fails_naming_the_variable() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    run.io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "true");
+    run.io.insert_inherit_env(
+        "GITHUB_PATH",
+        run.root.join("ghpath")?.as_path().display().to_string(),
+    );
+    run.io.remove_inherit_env("OXDOCK_PRODUCT");
+    let err = run.execute().expect_err("no product must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "failure exits at the gate: {rendered}"
+    );
+    Ok(())
+}
+
+/// A non-oxdock product publishes PATH with no version gate: with
+/// GITHUB_PATH bridged to a real file, the run succeeds and the file
+/// holds the destination dir, proving the branch executes (a test
+/// that only checks parsing would miss a dead branch here).
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn sidecar_product_publishes_path_without_version_gate() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    let setup = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    let ghpath = run.root.join("ghpath")?;
+    setup.write_file(&ghpath, b"")?;
+    run.io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "true");
+    run.io
+        .insert_inherit_env("GITHUB_PATH", ghpath.as_path().display().to_string());
+    run.io.insert_inherit_env("OXDOCK_PRODUCT", "sidecar");
+    run.execute()?;
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    let body = reader.read_file(&ghpath)?;
+    let published = String::from_utf8(body).context("GITHUB_PATH must stay UTF-8")?;
+    let dest = run.root.join("dest")?.as_path().display().to_string();
+    assert_eq!(
+        published.trim(),
+        dest,
+        "non-oxdock product publishes the destination dir"
     );
     Ok(())
 }

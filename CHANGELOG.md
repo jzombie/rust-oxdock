@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.36.0-alpha] - TBD
+
+### Added
+
+- `oxdock-compose`: general-purpose artifact renderer replacing `docs-gen`. Renders any set of targets from templates, fragments, and generated content driven by a compose config, with pluggable lifecycle stages and support for custom source plugins and external host modules.
+- `SET_EXECUTABLE <path>` command: marks an existing file executable in place (owner `rwx` on Unix via shared `EXECUTABLE_MODE`, bit no-op elsewhere; a missing path fails on every platform). `INSTALL` shares the mode but keeps its atomic stage-and-rename path.
+- Single-bracket multi-name `IMPORT` harvests: `IMPORT [TYPE A, TYPE B FROM "f"]`, `IMPORT [FUNC FOO, FUNC BAR FROM "f"]`, and mixed `IMPORT [TYPE PERSON, FUNC FOO FROM "f"]` combine in one bracket, file or host alike. A bare multi-name (`IMPORT [FOO, BAR FROM "f"]`) fails fast naming the explicit-kinds fix, since bare words in single brackets always read as modules.
+- Namespaced file-import types: whole-file `IMPORT ["f" AS C]` exposes types qualified-only (`C::TYPE`, nothing bare leaks), bare `IMPORT [TYPE T FROM "f"]` harvests stay global collision-checked, and same-named types in different files coexist via per-file closure validation plus call-time owner merge. Files are self-sufficient: a file's own `TYPE` harvests resolve before its bodies validate and run, so importers never repeat entry imports.
+- `APPEND_LINE <path> <contents>`: appends contents plus exactly one trailing LF newline, so scripts stop hand-placing `"\n"` terminators (workflow `GITHUB_OUTPUT` appends, installer PATH publishes). Contents are required: unlike `APPEND` there is no stdin form, a line is a complete value, not a stream.
+- Multi-binary releases: `workspace.metadata.oxdock release_bins` in the root `Cargo.toml` names the release products (currently `oxdock` and `oxdock-compose`); the workflow resolves them in-DSL from the manifest (`bins:` overrides for one-offs) and builds, archives, and attaches one `<product>-<target>.tar.gz` per product per platform, each holding all of that package's binaries so sidecars like `oxdock-compose-child` ride with their primary. Empty product lists with binaries on fail naming the fix instead of guessing. Installers follow the product (`OXDOCK_PRODUCT` selects the asset and default stem) and place any tarball subset by name (`OXDOCK_BINS`, default all; unknown names fail listing members); only the `oxdock` product runs the `--version` CI gate, other products place and publish `PATH` with no version check.
+- Multi-line generic type shapes: a `<...>` shape in a type-carrying statement (`TYPE`/`LET`/`FOR`) may span lines; a newline inside an unclosed bracket rides into the statement instead of ending it, and the shape canonicalizes exactly like its single-line spelling. Only a joint `<` after an uppercase word opens (never `<=`, never `$VAR<`), so spaced comparisons keep ending the statement as before.
+- Multi-line `EXPORT` name lists: `EXPORT [...]`, `EXPORT TYPE [...]`, `EXPORT FUNC [...]`, and mixed `EXPORT [TYPE A, FUNC B, ...]` may all span lines; entries trim surrounding newlines exactly like single-line lists, and a trailing comma leaves an empty final entry that carries no name instead of failing.
+- Compose per-target `base`: a target in `target.json` may declare `"base"` (a wsroot-relative directory); relative template, values, fragment patterns, and out then resolve under it instead of repeating the shared prefix, and no `base` keeps the old wsroot-relative behavior exactly. Wsroot-anchored paths (`.oxdock/...`, `/...`) stay as-is so shared fragments keep working. A `base` that is not a directory fails the render naming the target, the base, and what was found there.
+- Installer runs non-interpreter products through an ephemeral `oxdock` engine: installing e.g. `oxdock-compose` downloads and verifies the interpreter tarball beside the product tarball, unpacks it to scratch, and executes the installer with it. The interpreter is never placed; only the product members land, and the CI tail proof binary follows the product (fresh install for `oxdock`, ephemeral engine otherwise). A smoke leg now installs `oxdock-compose` end to end asserting both binaries land, the interpreter does not, and the directory reaches `GITHUB_PATH`.
+- Module-call variable isolation for file imports (#115): a module-owned function sees only its own bindings plus its module's store, never the importer's `LET`s. Same-named mutations land in the module store, caller intact; `LIST_APPEND` from a function targets the module-global list. Eight regression tests pin every channel (arguments in, `RETURN` out, nested imports keep working).
+
+### Changed
+
+- `IMPORT` reference teaches single brackets only (one import per file preferred).
+- [breaking] Release pipeline callers name products with `bins:` (or the workspace metadata list): the single-product `binary:` input is gone, with no fallback. Update one-line callers from `binary: mytool` to `bins: mytool`.
+- File writes document the line-ending contract: `WRITE`/`APPEND`/`APPEND_LINE` state that bytes land exactly as given with no line-ending translation on any platform (LF stays LF, even on Windows; `APPEND` adds no terminator, `APPEND_LINE` adds exactly one LF). `APPEND`'s no-terminator behavior is pinned by an explicit test, and existing manual-`"\n"` append sites migrate to `APPEND_LINE`.
+- [breaking] The session seed no longer synthesizes `CARGO_TARGET_DIR`: unset hosts leave it absent and `cargo` defaults to `./target` under the child cwd. Route it explicitly per run (`ENV`/`INHERIT_ENV`); every CI leg already does. `ENV_CONTRACTS.md` regenerates without the row.
+
 ## [0.35.0-alpha] - 2026-11-05
 
 ### Fixed

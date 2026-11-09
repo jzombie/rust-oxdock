@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, to_forward_slashes};
 
 fn repo_root() -> Result<String> {
-    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
-        .context("CARGO_MANIFEST_DIR missing")?
-        .replace('\\', "/");
+    let manifest_dir = to_forward_slashes(
+        &std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
+            .context("CARGO_MANIFEST_DIR missing")?,
+    );
     Ok(manifest_dir
         .strip_suffix("crates/oxdock-logic-tests")
         .context("test must live under crates/oxdock-logic-tests")?
@@ -244,7 +245,7 @@ fn release_targets_all_have_smoke_legs() -> Result<()> {
         );
     }
 
-    // Smoke side: every `os:` matrix (build plus ten legs) carries the
+    // Smoke side: every `os:` matrix (build plus eleven legs) carries the
     // full runner set, in order. A leg dropping an architecture fails
     // here instead of silently untesting it.
     let runners: Vec<&str> = coverage.iter().map(|(_, runner, _, _)| *runner).collect();
@@ -264,8 +265,8 @@ fn release_targets_all_have_smoke_legs() -> Result<()> {
         }
     }
     assert_eq!(
-        matrices, 11,
-        "expected build plus ten leg matrices, found {matrices}"
+        matrices, 12,
+        "expected build plus eleven leg matrices, found {matrices}"
     );
 
     // DSL side: each mapping's arch branch and asset name resolve in the
