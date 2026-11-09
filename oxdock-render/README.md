@@ -1,16 +1,12 @@
 # oxdock-render
 
-Rendered artifacts, byte-identical: a general-purpose lifecycle renderer turning one context into deterministic outputs.
+Generate text files from templates and data: READMEs, docs, installers, and other release artifacts, rendered deterministically from a single pipeline config.
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
 
 ## Overview
 
-`oxdock-render` renders rendered artifacts from separately authored
-inputs through an ordered lifecycle: one context in, byte-identical
-outputs out. Markdown docs are the first pipeline, not the
-boundary: the same engine renders any text artifacts a repo's
-plugins describe.
+`oxdock-render` generates text files from templates and data files, so generated files never drift from their sources. Its first job is this workspace's own docs: every `README.md`, the install scripts, and the CI action are rendered from templates under `.oxdock/template/`, and CI fails if a generated file does not match a fresh render. The same engine generates any text artifacts, not just Markdown: one config lists targets, and each target names its output file, its template, its data, and its fragment folders.
 
 Render this workspace:
 
@@ -24,7 +20,7 @@ Render another checkout with its own pipeline:
 oxdock-render --root /path/to/repo --config render.json
 ```
 
-Inspect the output without running it:
+See what would run without writing anything:
 
 ```sh
 oxdock-render --root /path/to/repo --print-child
@@ -32,92 +28,83 @@ oxdock-render --root /path/to/repo --print-child
 
 Flags: `--root <path>` (workspace root, default: discovered),
 `--config <path>` (pipeline config, default: `render.json`),
-`--print-child` (print the rendered child script, skip the run).
+`--print-child` (print the generated script, skip the run).
 
 Fail-closed throughout: duplicate target names, zero discovered
 targets, misspelled placeholders, and unknown values fail the run
-instead of rendering wrong outputs.
+instead of writing wrong outputs.
 
 ## Pipeline
 
 Each run performs the same steps, in order:
 
-1. Load `render.json` (global values, scopes, generated inputs,
-   scope key aliases, version key, staging dir).
-2. Provision the embedded pipeline files and check every plugin
-   file exposes the same lifecycle methods, failing fast naming
-   any outlier instead of mid-run at first use.
-3. Assemble the child script: one qualified call per stage per
-   plugin, in registration order (`SETUP` once up front, then the
-   six stages per target), piped through a fresh interpreter that
-   never touches disk.
-4. Per target: validate the descriptor, expand fragments into a
-   staging manifest, expand the master template, expand deferred
-   sentinels, write the output, byte-compare disk against pipe.
-   The docs plugin's `SETUP` additionally refreshes generated
-   inputs, snapshots workspace metadata, and syncs member values.
-5. Re-apply executable bits from `target.json` declarations, then
-   report. Zero discovered targets fails the run.
+1. Load `render.json`: global values, which files to scan,
+   generated inputs, and naming rules.
+2. Copy the pipeline's own script files into place and check every
+   plugin implements the same stages, failing fast with the
+   offender named instead of halfway through a target.
+3. Build the run script: one step per stage per plugin, in
+   registration order (`SETUP` once up front, then each stage per
+   target), piped through a fresh interpreter that never touches
+   disk.
+4. Per target: check the target declaration, expand the fragments
+   into the master template, and write the output file. The docs
+   plugin first refreshes generated inputs and re-reads workspace
+   metadata.
+5. Restore executable bits declared by targets (so regenerating
+   `install.sh` keeps its executable bit), then report. Zero
+   discovered targets fails the run.
 
-The pipeline itself is OxDock: static `.oxfile` sources byte-copied
-from the tree, entry plus renderer plus per-stage lifecycle files,
-with the child rendered fresh every run and piped through a fresh
-interpreter. Sequencing and all writes live in the DSL as named
-`FUNC` stages; rendering, expansion, and encoding helpers live in
-Rust only where the DSL has no primitives (registry rendering,
-TOML metadata, strict JSON encoding, placeholder-safe stems).
+The pipeline itself runs on OxDock scripts shipped inside the
+binary: static `.oxfile` sources plus one lifecycle file per
+pipeline participant, with the run script built fresh every run.
+Step order and all file writes live in those scripts as named
+stages; Rust only handles what the scripts cannot (workspace
+metadata, strict encoding, filename rules).
 
 ### Modules
 
-Plugin modules arrive linked into the binary and registered by `run()`:
-the core language never sees them.
+Behavior arrives through plugin modules linked into the binary:
 
-- `RENDER_ENGINE` builtins: `FILE_STEM` and generic
-  `EXPAND_TEMPLATE(raw, vars, env)`. Layered values merge through
-  the pure `STD::MERGE_MAPS` builtin instead of engine code.
-- `OXDOCK` registry introspection with config-driven `GENERATED(key)`
-  dispatch.
-- `RUST` Cargo workspace content: members, versions, and package
-  metadata for stamps and citations.
+- `RENDER_ENGINE`: filename and template-expansion helpers.
+- `OXDOCK`: command and function reference data used by the
+  generated docs.
+- `RUST`: Cargo workspace facts (members, versions, and package
+  metadata) used for version stamps and citations.
 
-Lifecycle files are DSL, not plugin modules: one file per
-pipeline participant under `src/`, every file exposing the same
-lifecycle methods, registered by path in the config's `files`
-list in execution order. Omit the list and the engine's own
-`src/lifecycle/generic.oxfile` runs every stage alone.
+Each pipeline participant also ships one lifecycle script
+(`src/lifecycle/*.oxfile`) implementing the same stages; the
+config lists them in run order. Leave the list out and a generic
+default runs every stage alone.
 
-Third-party plugin modules join through `run_with_plugins(root, extras)`,
-which registers external modules so template placeholders resolve them
-with no header changes.
+External modules join through `run_with_plugins(root, extras)`,
+so templates can call them with no other changes.
 
 ### Fetch, parse, render
 
-Remote values enter through the same stream shape scripts use:
-`NET::NET_FETCH($url)` fetches a URL to text (Stateful, `https` with
-loopback-only `http`), and the pure `STD::PARSE_JSON` /
-`STD::PARSE_TOML` parsers turn that text into template values with the
-exact conversion file loading uses. Fetching never touches the
-filesystem and parsing never touches the network, so either side stays
-testable alone.
+Remote data enters through the same calls scripts use:
+`NET::NET_FETCH($url)` fetches a URL to text, and the pure
+`STD::PARSE_JSON` / `STD::PARSE_TOML` parsers turn that text into
+template values exactly as file loading would. Fetching never
+touches the filesystem and parsing never touches the network, so
+each side stays testable alone.
 
 ## Values
 
-Each target declares a `values` file holding its display `name` and
-`description`. Every run re-derives both from the owning member's
-manifest: `description` always flows from the manifest, while a
-committed `name` wins as a display override (`OxDock` vs the package
-name `oxdock`). Members without a manifest keep static values files.
-Sync writes values only: masters, fragments, and target declarations
-are the author's and are never rewritten.
-Shared strings stay in the global values file and are referenced
-under the configured scope keys (e.g. `{{ $docs_global.* }}`).
-Manifest-wide facts ride alongside under their own scope keys:
-the workspace version (`version_key`) and the workspace package
-record (`vars.workspace_pkg`) carrying author, license, and
-repository for citations. Both names come from the config and are
-required whenever the workspace snapshot exists.
+Each target names a values file holding its display `name` and
+`description`. Every run re-reads both from the owning crate's
+manifest: `description` always comes from the manifest, while a
+committed `name` wins as a display override (`OxDock` vs the
+package name `oxdock`). Crates without a manifest keep static
+values files. Sync writes values only: templates, fragments, and
+target declarations are the author's and are never rewritten.
+Shared strings live in the global values file under scope keys
+(e.g. `{{ $docs_global.* }}`).
+Workspace-wide facts travel alongside under their own keys: the
+workspace version and the workspace package record (author,
+license, repository) used for citations.
 
-## Targets and assemblies
+## Targets
 
 A target is declared by a `target.json` file with an output path, a
 values file, a master template, and grouped discovery patterns (never
@@ -140,16 +127,16 @@ letters, numbers, `_`, and `-`. A misspelled placeholder, two files
 sharing one name, or an unreadable values file fails the run instead
 of rendering wrong docs.
 
-Two formatting rules keep assembly exact: keep fragments
+Two formatting rules keep output exact: keep fragments
 newline-terminated with placeholders on their own lines, and escape
 literal placeholder examples natively (`{{ ... }}`) so they pass
 through untouched.
 
 A target whose output executes directly declares `"executable":
 true` beside `out`: the pipeline re-applies `0755` after every render,
-so regenerating `install.sh` cannot silently drop the bit the smoke
-workflow needs to execute it. Omitted everywhere else; a
-present-but-not-boolean flag fails the run instead of rendering.
+so regenerating `install.sh` cannot silently drop the executable
+bit. Omitted everywhere else; a present-but-not-boolean flag fails
+the run instead of rendering.
 
 One values file can feed several masters: the generic example renders
 a human `README.md`, a slim agent pointer `llms.txt`, and a full

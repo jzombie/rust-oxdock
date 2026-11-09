@@ -1,6 +1,6 @@
 [package]
 name = "oxdock-render"
-description = "Rendered artifacts, byte-identical: a general-purpose lifecycle renderer turning one context into deterministic outputs."
+description = "Generate text files from templates and data: READMEs, docs, installers, and other release artifacts, rendered deterministically from a single pipeline config."
 categories = ["command-line-utilities", "development-tools::build-utils"]
 keywords = ["oxdock", "render", "templates", "artifacts", "docs"]
 version.workspace = true
