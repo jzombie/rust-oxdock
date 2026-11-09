@@ -3,7 +3,7 @@ name = "docs-gen"
 version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Compatibility pointer to oxdock-compose; all logic lives there."
+description = "Compatibility pointer to oxdock-render; all logic lives there."
 
 # Compatibility shim; never publish under this name
 publish = false
@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-oxdock-compose.workspace = true
+oxdock-render.workspace = true
 oxdock-fs.workspace = true
 
 [lints]

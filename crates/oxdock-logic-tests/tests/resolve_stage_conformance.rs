@@ -104,14 +104,14 @@ fn manifest_with_bins(bins: &str) -> String {
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn resolve_reads_metadata_list() -> Result<()> {
     let run = resolve_harness(
-        &manifest_with_bins("\"oxdock\", \"oxdock-compose\""),
+        &manifest_with_bins("\"oxdock\", \"oxdock-render\""),
         "",
         "true",
     )?;
     run_steps_with_context_result_with_io(&run.root, &run.root, &run.steps, run.io.clone())?;
     assert_eq!(
         read_out(&run)?,
-        "bins_space=oxdock oxdock-compose\nbins_json=[\"oxdock\", \"oxdock-compose\"]\n",
+        "bins_space=oxdock oxdock-render\nbins_json=[\"oxdock\", \"oxdock-render\"]\n",
     );
     Ok(())
 }

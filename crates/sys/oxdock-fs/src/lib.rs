@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 /// `oxdock-*` tempdirs (PID-lock based). Idempotent; cheap after the first
 /// call; errors are logged, never fatal.
 ///
-/// Composition roots (CLI binaries, build scripts) call this early instead
+/// Entry points (CLI binaries, build scripts) call this early instead
 /// of relying on constructors to sweep implicitly.
 pub fn init_temp_gc() {
     workspace_fs::path::run_temp_cleanup_once();

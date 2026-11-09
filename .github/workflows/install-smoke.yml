@@ -112,10 +112,10 @@ jobs:
 
           RUN ["cargo", "build", "--release", "-p", "oxdock", "--all-features"]
 
-          # Same release build for the composer: the compose legs
+          # Same release build for the renderer: the render legs
           # install this product through the stub, which fetches the
           # interpreter tarball above as its ephemeral engine.
-          RUN ["cargo", "build", "--release", "-p", "oxdock-compose", "--all-features"]
+          RUN ["cargo", "build", "--release", "-p", "oxdock-render", "--all-features"]
 
           # Identity: the binary must report the manifest version it
           # was built from. Skew fails here, before anything stages.
@@ -154,16 +154,16 @@ jobs:
           COPY install.sh {{ $stage }}/install.sh
           COPY install.ps1 {{ $stage }}/install.ps1
           COPY install.oxfile {{ $stage }}/install.oxfile
-          # Composer product, staged like the release: every binary of
+          # Renderer product, staged like the release: every binary of
           # the package at the tarball top level, sidecar included.
           # Members stay relative to this dir so the stub's flat
           # inventory matches the real asset layout.
-          [family:unix] LET $cbin: STRING = "oxdock-compose"
-          [family:windows] LET $cbin: STRING = "oxdock-compose.exe"
-          [family:unix] LET $cchild: STRING = "oxdock-compose-child"
-          [family:windows] LET $cchild: STRING = "oxdock-compose-child.exe"
-          LET $casset: STRING = "oxdock-compose-{{ $target }}.tar.gz"
-          LET $cpkg: STRING = PATH_JOIN($stage, "compose-pkg")
+          [family:unix] LET $cbin: STRING = "oxdock-render"
+          [family:windows] LET $cbin: STRING = "oxdock-render.exe"
+          [family:unix] LET $cchild: STRING = "oxdock-render-child"
+          [family:windows] LET $cchild: STRING = "oxdock-render-child.exe"
+          LET $casset: STRING = "oxdock-render-{{ $target }}.tar.gz"
+          LET $cpkg: STRING = PATH_JOIN($stage, "render-pkg")
           MKDIR {{ $cpkg }}
           LET $cb1: STRING = PATH_JOIN($cpkg, $cbin)
           LET $cb2: STRING = PATH_JOIN($cpkg, $cchild)
@@ -176,8 +176,8 @@ jobs:
           # tar, whose `D:`-as-remote-tape quirk on Windows forced
           # this relative dance originally.
           ARCHIVE {{ $assetbin }} {{ $asset }}
-          ARCHIVE compose-pkg {{ $casset }}
-          REMOVE --recursive compose-pkg
+          ARCHIVE render-pkg {{ $casset }}
+          REMOVE --recursive render-pkg
 
           # Native hashing: HASH_SHA256 digests each bundled file
           # identically on every platform, so the forged checksums never
@@ -411,8 +411,8 @@ jobs:
 
           CANCEL $srv
 
-  compose:
-    name: compose (${{ matrix.os }})
+  render:
+    name: render (${{ matrix.os }})
     needs: [parse, build]
     runs-on: ${{ matrix.os }}
     strategy:
@@ -445,16 +445,16 @@ jobs:
 
       # Non-interpreter product through the stub: the oxdock tarball
       # serves as the ephemeral engine (downloaded, verified, and
-      # unpacked by the stub, never placed), and only the composer
+      # unpacked by the stub, never placed), and only the renderer
       # members land. Own port, isolated destination, cold cache.
-      - name: Install composer
+      - name: Install renderer
         shell: oxdock-engine --script {0}
         env:
           # product: always-local: installs the staged branch build.
           VERSION: local-test
           SMOKE_PORT: 18736
-          INSTALL_DIR_NIX: ${{ runner.temp }}/oxbin-compose
-          INSTALL_DIR_WIN: ${{ runner.temp }}\oxbin-compose
+          INSTALL_DIR_NIX: ${{ runner.temp }}/oxbin-render
+          INSTALL_DIR_WIN: ${{ runner.temp }}\oxbin-render
           # Legs exercise the branch's own installer logic, not whatever
           # main happens to carry. Kept off the job env so the pinned
           # bootstrap stays on the release's own oxfile.
@@ -466,7 +466,7 @@ jobs:
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV INSTALL_DIR="{{ env:INSTALL_DIR_NIX }}"
           [family:windows] ENV INSTALL_DIR="{{ env:INSTALL_DIR_WIN }}"
-          ENV OXDOCK_PRODUCT="oxdock-compose"
+          ENV OXDOCK_PRODUCT="oxdock-render"
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
           LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
@@ -480,17 +480,17 @@ jobs:
           LET $o: PIPE
           [family:unix] WITH_IO [stdout=$o] RUN ["bash", "./install.sh"]
           [family:windows] WITH_IO [stdout=$o] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
-          ASSERT_CONTAINS $o "installed oxdock-compose local-test to "
+          ASSERT_CONTAINS $o "installed oxdock-render local-test to "
 
-          # Placement proof: the composer and its sidecar land, and the
+          # Placement proof: the renderer and its sidecar land, and the
           # ephemeral interpreter does not. Suffix rides the platform
           # the same way the stub names it.
           [family:unix] LET $exe: STRING = ""
           [family:windows] LET $exe: STRING = ".exe"
           LET $dir: STRING = "{{ env:INSTALL_DIR }}"
-          LET $k1: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock-compose{{ $exe }}"))
+          LET $k1: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock-render{{ $exe }}"))
           ASSERT_EQ $k1 "file"
-          LET $k2: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock-compose-child{{ $exe }}"))
+          LET $k2: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock-render-child{{ $exe }}"))
           ASSERT_EQ $k2 "file"
           LET $k3: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock{{ $exe }}"))
           ASSERT_EQ $k3 "absent"

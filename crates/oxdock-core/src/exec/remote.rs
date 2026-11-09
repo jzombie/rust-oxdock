@@ -208,7 +208,7 @@ fn collect_transfer_decls(body: &[Step]) -> Vec<TransferDecl> {
             });
         }
         // Control flow nests conditionally; a constant-false position
-        // prunes the whole subtree. Guards compose: an inner static-false
+        // prunes the whole subtree. Guards combine: an inner static-false
         // under any outer guard stays dead.
         match kind {
             oxdock_parser::StepKind::If {

@@ -42,7 +42,7 @@
 #   (linux x86_64, linux arm64, macOS arm64, Windows x86_64, Windows
 #   arm64) and attaches one `<product>-<target>.tar.gz` per target
 #   holding all of the product package's binaries (sidecars like
-#   `oxdock-compose-child` ride with their primary automatically).
+#   `oxdock-render-child` ride with their primary automatically).
 #   Downloads and registry installs carry the same module surface now
 #   that default features enable every module; `--all-features` stays
 #   explicit here so test-only extras (mocks, harnesses) ride along

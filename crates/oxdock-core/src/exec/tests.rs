@@ -4828,7 +4828,7 @@ fn resolve_tag_unions_admit_member_sets() {
         state.resolve_tag("STRING|ANY").expect("absorb"),
         TypeTag::Any
     ));
-    // Shapes compose as members.
+    // Shapes combine as members.
     let shaped = state
         .resolve_tag("LIST<STRING>|PIPE")
         .expect("shaped member");
@@ -4846,7 +4846,7 @@ fn resolve_tag_unions_admit_member_sets() {
         "STRING|PIPE|LIST<ANY>|MAP<ANY>"
     );
     // Bare LIST and MAP reject as members exactly like top level:
-    // unions compose spellings, never relax them.
+    // unions combine spellings, never relax them.
     let err = state
         .resolve_tag("STRING|LIST")
         .expect_err("bare LIST member fails");
@@ -4869,7 +4869,7 @@ fn resolve_tag_unions_admit_member_sets() {
         format!("{err:#}").contains("unknown type 'NOPE'"),
         "{err:#}"
     );
-    // Unions compose inside generics: members resolve as siblings.
+    // Unions combine inside generics: members resolve as siblings.
     let nested = state
         .resolve_tag("LIST<STRING|PIPE>")
         .expect("nested union resolves");
@@ -4969,7 +4969,7 @@ fn int_params_reject_unconverted_words() {
 
 #[test]
 fn union_nests_inside_generics() {
-    // Unions compose inside every generic, record, and alias
+    // Unions combine inside every generic, record, and alias
     // position through the shared resolve path: spellings derive
     // from the members, and identical spellings intern once.
     use oxdock_parser::render_structural;
@@ -4994,14 +4994,14 @@ fn union_nests_inside_generics() {
             "shared interned entry for {spelling}"
         );
     }
-    // Alias-indirected unions compose too.
+    // Alias-indirected unions combine too.
     let mut aliased = create_exec_state(MockFs::new());
     aliased
         .type_aliases
         .insert("U".to_string(), "INT|STRING".to_string());
-    let tag = aliased.resolve_tag("LIST<U>").expect("alias leaf composes");
+    let tag = aliased.resolve_tag("LIST<U>").expect("alias leaf combines");
     assert_eq!(render_structural(&tag), "LIST<INT|STRING>");
-    // Value shapes compose at the constructor level: a union member
+    // Value shapes combine at the constructor level: a union member
     // inside `MAP<...>` renders structurally and checks element-wise.
     let valued = TypeTag::MapOf(std::sync::Arc::new(oxdock_parser::union_tag!(Int, String)));
     assert_eq!(render_structural(&valued), "MAP<INT|STRING>");
@@ -5245,7 +5245,7 @@ fn func_bare_return_fails_non_string_slot() {
 }
 
 #[test]
-fn resolve_tag_composes_schema_and_alias_leaves() {
+fn resolve_tag_combines_schema_and_alias_leaves() {
     use oxdock_parser::Field;
     let fs = MockFs::new();
     let mut state = create_exec_state(fs);
@@ -5261,11 +5261,11 @@ fn resolve_tag_composes_schema_and_alias_leaves() {
         .insert("PERSON".to_string(), "MAP<name: STRING>".to_string());
     let tag = state
         .resolve_tag("LIST<PERSON>")
-        .expect("alias leaf composes");
+        .expect("alias leaf combines");
     assert!(matches!(tag, TypeTag::ListOf(_)));
     let tag = state
         .resolve_tag("LIST<EMP>")
-        .expect("schema leaf composes");
+        .expect("schema leaf combines");
     assert!(matches!(tag, TypeTag::ListOf(_)));
     let err = state
         .resolve_tag("LIST<MISSING>")

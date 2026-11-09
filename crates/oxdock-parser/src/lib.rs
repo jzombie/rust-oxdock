@@ -61,7 +61,7 @@ pub use parser::{
 pub use strip_flags::strip_flags;
 pub use tag::{
     ANY_TAG, Field, LIST_TAG, MAP_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, TypeTag,
-    canonicalize_spelling, check_value, check_value_at, intern_composed, lookup_composed,
+    canonicalize_spelling, check_value, check_value_at, intern_rendered, lookup_rendered,
     parse_spelling, render_structural,
 };
 #[cfg(feature = "proc-macro-api")]
@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_or_and_and_compose_as_expected() {
+    fn guard_or_and_and_combine_as_expected() {
         let script = indoc! {r#"
             [env:A]
             [any(env:B, env:C)]

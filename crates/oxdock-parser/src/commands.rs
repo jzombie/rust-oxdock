@@ -2688,7 +2688,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
-                    name: "logical condition composition",
+                    name: "logical condition combination",
                     fence_meta: None,
                     code: indoc! {r#"
                 IMPORT [STD]
@@ -3264,7 +3264,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 A blocking foreground process is killed.
 
-                ASYNC composes in either nesting order with order-dependent deadline
+                ASYNC nests in either order with order-dependent deadline
                 semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
                 the deadline inside the background thread (a later `AWAIT $task`
                 surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
@@ -3352,7 +3352,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 writes are visible to another.
 
                 Blocks nest (each level re-seeds from the same seed, so
-                nesting only narrows through the allowlists) and compose
+                nesting only narrows through the allowlists) and combine
                 with `ASYNC` and `FUNC`. Scope exit restores the prior
                 environment.
             "#},
@@ -3909,7 +3909,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   Entry code keeps resolving against the run cwd.
                 - Missing files fail before the first step runs.
                   Write-then-import in one script is rejected; check
-                  libraries into the tree, or compose them at runtime
+                  libraries into the tree, or combine them at runtime
                   and run a child interpreter (see the child run
                   examples below).
 
@@ -4048,10 +4048,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
-                    name: "run composed modules in a child",
+                    name: "run rendered modules in a child",
                     fence_meta: Some("roots:unified"),
                     code: indoc! {r#"
-                # Dynamic composition with files: the parent writes a
+                # Dynamic assembly with files: the parent writes a
                 # library and an entry script, then runs the entry in a
                 # fresh interpreter. Child-side {{ }} stays escaped so
                 # the parent does not interpolate it while writing. The
@@ -4074,10 +4074,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
-                    name: "dynamic module composition",
+                    name: "dynamic module assembly",
                     fence_meta: Some("roots:unified"),
                     code: indoc! {r#"
-                # A function that composes a module: MAKE_GREETER bakes
+                # A function that assembles a module: MAKE_GREETER bakes
                 # its argument into a generated file with a bare {{ }},
                 # then a child run imports the result. Bare {{ }} injects
                 # parent values at write time; escaped \{{ }} survives for
@@ -4085,7 +4085,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # {{ }} placeholders resolve pure functions only.
                 IMPORT [STD]
 
-                # The composer: parent values land in the module source.
+                # The renderer: parent values land in the module source.
                 FUNC MAKE_GREETER($who: STRING) {
                     WRITE greeter.oxfile """
                         FUNC GREET() { RETURN "hi {{ $who }}" }
@@ -4094,14 +4094,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     RETURN "greeter.oxfile"
                 }
 
-                # The entry: imports the composed module by its path.
+                # The entry: imports the rendered module by its path.
                 WRITE main.oxfile """
                     IMPORT ["greeter.oxfile" AS G]
                     LET $g: STRING = G::GREET()
                     ECHO "says \{{ $g }}"
                     """
 
-                # Compose, then run the entry in a fresh interpreter.
+                # Assemble, then run the entry in a fresh interpreter.
                 LET $made: STRING = MAKE_GREETER("Ada")
                 ASSERT_EQ $made "greeter.oxfile"
                 LET $exe: STRING = INTERPRETER()
@@ -5126,7 +5126,7 @@ pub(crate) fn collect_remote_kind_symbols(
 /// and numeric classification. The parser calls
 /// these directly, so folding and overflow behavior are single-sourced.
 /// Reject a staged `UnsignedIntBoundary` in any position where unary `-`
-/// cannot consume it (every composite constructor calls this on children).
+/// cannot consume it (every compound constructor calls this on children).
 /// Expression lowering core (promoted verbatim from the retired pest
 /// backend): operates on `Expr`, never on token pairs.
 pub(crate) fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {

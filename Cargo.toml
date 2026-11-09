@@ -24,7 +24,7 @@ members = [
     "crates/sys/oxdock-process",
     "crates/sys/oxdock-sys-test-utils",
     "oxdock",
-    "oxdock-compose",
+    "oxdock-render",
 ]
 # Bare `cargo run` at the workspace root defaults to the `oxdock` binary.
 # `cargo build/test/...` with explicit `--workspace`/`-p` flags are unaffected.
@@ -41,13 +41,13 @@ publish = true
 
 # Release products: every package here ships its binaries on every
 # release (one `<package>-<target>.tar.gz` per target holding all of
-# the package's bins, so sidecars like `oxdock-compose-child` ride
+# the package's bins, so sidecars like `oxdock-render-child` ride
 # with their primary automatically). The release workflow and script
 # read this list, so adding a product is one entry with no workflow
 # or script change; repos without it fall back to the single `binary`
 # input.
 [workspace.metadata.oxdock]
-release_bins = ["oxdock", "oxdock-compose"]
+release_bins = ["oxdock", "oxdock-render"]
 
 [workspace.dependencies]
 aes-gcm = { version = "0.11.1", features = ["rand_core"] }
@@ -75,7 +75,7 @@ oxdock = { path = "oxdock", version = "0.36.0-alpha" }
 oxdock-build = { path = "crates/oxdock-build", version = "0.36.0-alpha" }
 # Dependents opt into `oxdock-cli` features explicitly.
 oxdock-cli = { path = "crates/oxdock-cli", version = "0.36.0-alpha", default-features = false }
-oxdock-compose = { path = "oxdock-compose", version = "0.36.0-alpha" }
+oxdock-render = { path = "oxdock-render", version = "0.36.0-alpha" }
 oxdock-core = { path = "crates/oxdock-core", version = "0.36.0-alpha" }
 oxdock-embed = { path = "crates/oxdock-embed", version = "0.36.0-alpha" }
 oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.36.0-alpha" }

@@ -89,7 +89,7 @@ use self::steps::execute_steps;
 pub const SNAPSHOT_PENDING_DISPLAY: &str = "<snapshot:pending>";
 
 /// Fallback tree body used when a materialized snapshot cannot be described
-/// while composing a run error (issue #131). Single source of truth for the
+/// while building a run error (issue #131). Single source of truth for the
 /// lazy error path.
 pub const SNAPSHOT_TREE_UNAVAILABLE: &str = "<unavailable>";
 
@@ -150,16 +150,16 @@ pub fn run_steps_with_context_result_with_io(
                 fs_root.display(),
                 tree
             );
-            Err(compose_error_with_snapshot(err, snapshot))
+            Err(error_with_snapshot(err, snapshot))
         }
     }
 }
 
-/// Compose a single error message with the top cause plus a caller-provided
+/// Build a single error message with the top cause plus a caller-provided
 /// filesystem-snapshot section. Shared by the eager and lazy runners so both
 /// render identical chains and only differ in the snapshot section.
-fn compose_error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> anyhow::Error {
-    // Compose a single error message with the top cause plus a compact fs snapshot.
+fn error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> anyhow::Error {
+    // Build a single error message with the top cause plus a compact fs snapshot.
     let chain = err.chain().map(|e| e.to_string()).collect::<Vec<_>>();
     let mut primary = chain
         .first()
@@ -183,7 +183,7 @@ fn compose_error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> 
         String::new()
     };
     let msg = format!("{}{}\n{}", primary, rest, snapshot_section);
-    // The snapshot composer flattens the chain into one message for CLI
+    // The snapshot renderer flattens the chain into one message for CLI
     // rendering. Re-attach a relayed EXIT code as the inner error under
     // that message: the text stays byte-identical while the code stays
     // machine readable (context values are invisible to chain traversal,
@@ -289,7 +289,7 @@ pub fn run_steps_with_lazy_snapshot_and_modules_and_entry(
 /// Error enrichment for lazy runs: a materialized snapshot gets the same
 /// filesystem-snapshot treatment as eager runs; a pending one reports that
 /// no snapshot directory was ever created instead of describing a tree.
-/// Chain rendering is identical to the eager path (shared composer).
+/// Chain rendering is identical to the eager path (shared renderer).
 pub fn enrich_lazy_error(
     snapshot: &Arc<LazyGuardedTempDir>,
     build_context: &GuardedPath,
@@ -306,9 +306,9 @@ pub fn enrich_lazy_error(
                 concrete.display(),
                 tree
             );
-            compose_error_with_snapshot(err, snapshot_msg)
+            error_with_snapshot(err, snapshot_msg)
         }
-        None => compose_error_with_snapshot(
+        None => error_with_snapshot(
             err,
             String::from(
                 "filesystem snapshot: never materialized (no snapshot directory was created)",

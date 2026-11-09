@@ -356,7 +356,7 @@ fn module_lets<P: ProcessManager>(
 
 /// Run `f` with `aliases` merged into the global type directory,
 /// restoring the previous bindings afterward (stack discipline, so
-/// nested scopes compose). The closure pass checks every file with
+/// nested scopes combine). The closure pass checks every file with
 /// exactly its own aliases plus the shared harvests visible, never
 /// another file's defs.
 fn with_scope_aliases<P: ProcessManager, R>(
@@ -2299,7 +2299,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         if tags_equal(expected, &actual) {
             return Ok(());
         }
-        // Union admission is subset-based and order-free, composing
+        // Union admission is subset-based and order-free, combining
         // with the pairs below (a `STRING` actual still reaches the
         // `INT` pair through the `STRING` member, never around it).
         // Actual-union goes first: every member must be admitted

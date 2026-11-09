@@ -1,0 +1,78 @@
+## Pipeline
+
+Each run performs the same steps, in order:
+
+1. Load `render.json` (global values, scopes, generated inputs,
+   scope key aliases, version key, staging dir).
+2. Provision the embedded pipeline files and check every plugin
+   file exposes the same lifecycle methods, failing fast naming
+   any outlier instead of mid-run at first use.
+3. Assemble the child script: one qualified call per stage per
+   plugin, in registration order (`SETUP` once up front, then the
+   six stages per target), piped through a fresh interpreter that
+   never touches disk.
+4. Per target: validate the descriptor, expand fragments into a
+   staging manifest, expand the master template, expand deferred
+   sentinels, write the output, byte-compare disk against pipe.
+   The docs plugin's `SETUP` additionally refreshes generated
+   inputs, snapshots workspace metadata, and syncs member values.
+5. Re-apply executable bits from `target.json` declarations, then
+   report. Zero discovered targets fails the run.
+
+The pipeline itself is OxDock: static `.oxfile` sources byte-copied
+from the tree, entry plus renderer plus per-stage lifecycle files,
+with the child rendered fresh every run and piped through a fresh
+interpreter. Sequencing and all writes live in the DSL as named
+`FUNC` stages; rendering, expansion, and encoding helpers live in
+Rust only where the DSL has no primitives (registry rendering,
+TOML metadata, strict JSON encoding, placeholder-safe stems).
+
+### Modules
+
+Plugin modules arrive linked into the binary and registered by `run()`:
+the core language never sees them.
+
+- `RENDER_ENGINE` builtins: `FILE_STEM` and generic
+  `EXPAND_TEMPLATE(raw, vars, env)`. Layered values merge through
+  the pure `STD::MERGE_MAPS` builtin instead of engine code.
+- `OXDOCK` registry introspection with config-driven `GENERATED(key)`
+  dispatch.
+- `RUST` Cargo workspace content: members, versions, and package
+  metadata for stamps and citations.
+
+Lifecycle files are DSL, not plugin modules: one file per
+pipeline participant under `src/`, every file exposing the same
+lifecycle methods, registered by path in the config's `files`
+list in execution order. Omit the list and the engine's own
+`src/lifecycle/generic.oxfile` runs every stage alone.
+
+Third-party plugin modules join through `run_with_plugins(root, extras)`,
+which registers external modules so template placeholders resolve them
+with no header changes.
+
+### Fetch, parse, render
+
+Remote values enter through the same stream shape scripts use:
+`NET::NET_FETCH($url)` fetches a URL to text (Stateful, `https` with
+loopback-only `http`), and the pure `STD::PARSE_JSON` /
+`STD::PARSE_TOML` parsers turn that text into template values with the
+exact conversion file loading uses. Fetching never touches the
+filesystem and parsing never touches the network, so either side stays
+testable alone.
+
+## Values
+
+Each target declares a `values` file holding its display `name` and
+`description`. Every run re-derives both from the owning member's
+manifest: `description` always flows from the manifest, while a
+committed `name` wins as a display override (`OxDock` vs the package
+name `oxdock`). Members without a manifest keep static values files.
+Sync writes values only: masters, fragments, and target declarations
+are the author's and are never rewritten.
+Shared strings stay in the global values file and are referenced
+under the configured scope keys (e.g. `\{{ $docs_global.* }}`).
+Manifest-wide facts ride alongside under their own scope keys:
+the workspace version (`version_key`) and the workspace package
+record (`vars.workspace_pkg`) carrying author, license, and
+repository for citations. Both names come from the config and are
+required whenever the workspace snapshot exists.

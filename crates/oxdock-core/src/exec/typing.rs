@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, bail};
 use oxdock_parser::{
     ANY_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, Step, StepKind, canonicalize_spelling,
-    intern_composed, lookup_composed, parse_spelling,
+    intern_rendered, lookup_rendered, parse_spelling,
 };
 use oxdock_process::ProcessManager;
 
@@ -135,7 +135,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// Resolve a source-level type name to its tag: builtins by closed
     /// match, customs through the type directory, named schemas through
     /// the schema directory, script aliases through the alias directory,
-    /// generic spellings (`LIST<MAP>`, `MAP<name: STRING>`) composed
+    /// generic spellings (`LIST<MAP>`, `MAP<name: STRING>`) rendered
     /// structurally, and unions (`STRING|PIPE`, including inside
     /// generics) with one interned entry per distinct spelling.
     /// Anything else bails listing every known type, schema, and alias.
@@ -152,7 +152,7 @@ impl<P: ProcessManager> ExecState<P> {
 
     /// Resolve one bare name through every directory. Alias targets
     /// loop back through the spelling path, so `LIST<PERSON>`
-    /// composes; each alias hop costs 1 of the shared depth budget
+    /// combines; each alias hop costs 1 of the shared depth budget
     /// and repeats bail naming the cycle.
     fn resolve_named(
         &self,
@@ -211,23 +211,23 @@ impl<P: ProcessManager> ExecState<P> {
         resolving: &mut Vec<String>,
         depth: usize,
     ) -> Result<TypeTag> {
-        if let Some(hit) = lookup_composed(canonical) {
+        if let Some(hit) = lookup_rendered(canonical) {
             return Ok(hit);
         }
         let spelled = parse_spelling(canonical)
             .map_err(|err| anyhow::anyhow!("invalid type spelling: {err}"))?;
-        let tag = self.build_composed(&spelled, resolving, depth)?;
-        Ok(intern_composed(canonical.to_string(), tag))
+        let tag = self.build_rendered(&spelled, resolving, depth)?;
+        Ok(intern_rendered(canonical.to_string(), tag))
     }
 
-    /// Compose a parsed spelling into its structural tag. `LIST`
+    /// Build a parsed spelling into its structural tag. `LIST`
     /// takes exactly one bare argument, `MAP` takes named fields;
     /// anything else with arguments (or `MAP` with bare ones)
     /// bails naming the rule. Leaves resolve through the full
     /// directory, so schema and alias names nest freely. Union
     /// members resolve the same way, so unions nest inside aliases,
     /// generics, and each other through one shared normalizer.
-    fn build_composed(
+    fn build_rendered(
         &self,
         spelled: &Spelled,
         resolving: &mut Vec<String>,
@@ -244,20 +244,20 @@ impl<P: ProcessManager> ExecState<P> {
             Spelled::Union(members) => {
                 let mut resolved = Vec::with_capacity(members.len());
                 for member in members {
-                    resolved.push(self.build_composed(member, resolving, depth)?);
+                    resolved.push(self.build_rendered(member, resolving, depth)?);
                 }
                 finish_union(resolved)
             }
         }
     }
 
-    /// Compose one generic application. `LIST` takes exactly one
+    /// Build one generic application. `LIST` takes exactly one
     /// bare argument, `MAP` takes named fields; any other head
     /// resolves bare first so the error names the real problem
     /// (`unknown type` vs. arguments on a scalar, custom,
-    /// schema, or alias target). Leaf homes leak like the composed
+    /// schema, or alias target). Leaf homes leak like the rendered
     /// entry itself (one per distinct spelling; see
-    /// `intern_composed`), localized here for the same reason.
+    /// `intern_rendered`), localized here for the same reason.
     #[allow(clippy::disallowed_methods)]
     fn build_generic(
         &self,
@@ -281,7 +281,7 @@ impl<P: ProcessManager> ExecState<P> {
             else {
                 bail!("LIST takes exactly one bare type argument");
             };
-            let element = self.build_composed(element, resolving, depth + 1)?;
+            let element = self.build_rendered(element, resolving, depth + 1)?;
             return Ok(TypeTag::ListOf(std::sync::Arc::new(element)));
         }
         if name == "MAP"
@@ -304,7 +304,7 @@ impl<P: ProcessManager> ExecState<P> {
             let Some(field_name) = arg.name.as_ref() else {
                 bail!("MAP fields require 'name: TYPE'; '{name}' takes no bare arguments");
             };
-            let ty = self.build_composed(&arg.ty, resolving, depth + 1)?;
+            let ty = self.build_rendered(&arg.ty, resolving, depth + 1)?;
             fields.push(Field {
                 name: field_name.clone(),
                 ty,

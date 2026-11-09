@@ -755,8 +755,8 @@ name = "docs-gen"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "oxdock-compose",
  "oxdock-fs",
+ "oxdock-render",
 ]
 
 [[package]]
@@ -1660,26 +1660,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxdock-compose"
-version = "0.36.0-alpha"
-dependencies = [
- "anyhow",
- "base64",
- "indoc",
- "oxdock-core",
- "oxdock-fs",
- "oxdock-func-macro",
- "oxdock-macros",
- "oxdock-markdown-plugin",
- "oxdock-net-plugin",
- "oxdock-parser",
- "oxdock-process",
- "oxdock-ssh-plugin",
- "serde_json",
- "toml_edit",
-]
-
-[[package]]
 name = "oxdock-core"
 version = "0.36.0-alpha"
 dependencies = [
@@ -1935,6 +1915,26 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "oxdock-render"
+version = "0.36.0-alpha"
+dependencies = [
+ "anyhow",
+ "base64",
+ "indoc",
+ "oxdock-core",
+ "oxdock-fs",
+ "oxdock-func-macro",
+ "oxdock-macros",
+ "oxdock-markdown-plugin",
+ "oxdock-net-plugin",
+ "oxdock-parser",
+ "oxdock-process",
+ "oxdock-ssh-plugin",
+ "serde_json",
+ "toml_edit",
 ]
 
 [[package]]

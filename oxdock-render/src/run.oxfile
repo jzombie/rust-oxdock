@@ -1,0 +1,23 @@
+# Pipeline entry: read the config, assemble the child, pipe it.
+#
+# The engine knows its own lifecycle file; the config only names
+# extra plugin files in execution order, or nothing at all.
+INHERIT_ENV [RENDER_CONFIG, OXDOCK_WORKSPACE_ROOT, RENDER_PRINT_CHILD]
+IMPORT [STD]
+IMPORT ["oxdock-render/src/render.oxfile" AS C]
+IMPORT ["oxdock-render/src/stages.oxfile" AS STAGES]
+
+LET $cfgpath: STRING = "{{ env:RENDER_CONFIG }}"
+LET $wsroot: STRING = "{{ env:OXDOCK_WORKSPACE_ROOT }}"
+LET $cfg: MAP<ANY> = LOAD_JSON($cfgpath)
+LET $types: STRING = C::TYPES_WITH_DEFAULT($cfg)
+LET $plugins: LIST<STRING> = C::LIFECYCLE_FILES_WITH_DEFAULT($cfg)
+LET $stages: LIST<STRING> = STAGES::STAGES()
+LET $mod: STRING = C::RENDER_ALL($plugins, $stages, $types)
+LET $pc: STRING = "{{ env:RENDER_PRINT_CHILD }}"
+IF $pc == "1" {
+    ECHO $mod
+} ELSE {
+    LET $log: STRING = C::PIPE_RUN($mod, $wsroot, $cfgpath)
+    ECHO "{{ $log }}"
+}

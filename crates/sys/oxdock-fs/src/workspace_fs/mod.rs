@@ -370,7 +370,7 @@ impl PathResolver {
     /// Override the cache application identity after construction (issue
     /// #163). Recomputes the cache guard with no filesystem I/O; pass the
     /// consuming application's name (for example its crate name) so the
-    /// persistent cache is namespaced per project. Composition roots that
+    /// persistent cache is namespaced per project. Entry points that
     /// know their identity should prefer this over the auto-detected chain.
     pub fn with_cache_app(mut self, app: &str) -> Self {
         self.cache_app = cache::sanitize_app_name(app);

@@ -2,7 +2,7 @@
 
 **OxDock is a Dockerfile-inspired DSL for native builds, multi-node pipelines, and sealed remote execution.**
 
-Bash gives you strings and exit codes. OxDock gives you [typed values](https://github.com/jzombie/rust-oxdock#value-types), [guarded paths](https://github.com/jzombie/rust-oxdock#workspaces--filesystem), [managed pipes](https://github.com/jzombie/rust-oxdock#transport-pipes), and identical behavior on Linux/macOS/Windows (the things you'd re-implement badly in every growing bash script). And with hot-loading [MCP tooling](https://github.com/jzombie/rust-oxdock#mcp-hosting), *English-to-OxDock* just skips the boilerplate of getting there. [Workspaces](https://github.com/jzombie/rust-oxdock#workspaces--filesystem) (`SNAPSHOT`, `LOCAL`, `CACHE`, `SYSTEM`) and [scoped blocks](https://github.com/jzombie/rust-oxdock#guards-and-scoped-blocks) with [selective environment inheritance](https://github.com/jzombie/rust-oxdock#selective-environment-inheritance) give every run an isolated root that reverts on scope exit. When plain shell is the right tool, [`RUN`](https://github.com/jzombie/rust-oxdock#run) still reaches it, and [platform guards](https://github.com/jzombie/rust-oxdock#platform-guards) keep the OS-specific bits fenced: the two compose instead of competing.
+Bash gives you strings and exit codes. OxDock gives you [typed values](https://github.com/jzombie/rust-oxdock#value-types), [guarded paths](https://github.com/jzombie/rust-oxdock#workspaces--filesystem), [managed pipes](https://github.com/jzombie/rust-oxdock#transport-pipes), and identical behavior on Linux/macOS/Windows (the things you'd re-implement badly in every growing bash script). And with hot-loading [MCP tooling](https://github.com/jzombie/rust-oxdock#mcp-hosting), *English-to-OxDock* just skips the boilerplate of getting there. [Workspaces](https://github.com/jzombie/rust-oxdock#workspaces--filesystem) (`SNAPSHOT`, `LOCAL`, `CACHE`, `SYSTEM`) and [scoped blocks](https://github.com/jzombie/rust-oxdock#guards-and-scoped-blocks) with [selective environment inheritance](https://github.com/jzombie/rust-oxdock#selective-environment-inheritance) give every run an isolated root that reverts on scope exit. When plain shell is the right tool, [`RUN`](https://github.com/jzombie/rust-oxdock#run) still reaches it, and [platform guards](https://github.com/jzombie/rust-oxdock#platform-guards) keep the OS-specific bits fenced: the two combine instead of competing.
 
 Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on Linux, macOS, and Windows. Execute scripts on bare metal, inside containers, or dispatched across remote machines simultaneously. No daemons. No hypervisors.
 
@@ -48,7 +48,7 @@ Scripts are sequences of instructions, one per line (`;` separates two; quoted s
 
 ### Declared variable types
 
-Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: scalars (`STRING`, `INT`, `FLOAT`, `BOOL`, `DURATION`, `PATH`), handles (`PIPE`, `HANDLE`, `SEMAPHORE`, `PERMIT`), `ANY`, and composed shapes (`LIST<STRING>`, `MAP<name: STRING, age: INT>`, arbitrary nesting, spacing insignificant). Bare `LIST` and `MAP` are runtime words, never declarations: unknown collections declare `LIST<ANY>` and `MAP<ANY>`. A field with a `?` suffix is optional (`MAP<held: BOOL, permit?: PERMIT>`): missing optional keys pass, missing required keys fail. `TYPE NAME = <shape>` binds one immutable name per run that every declaration form accepts.
+Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: scalars (`STRING`, `INT`, `FLOAT`, `BOOL`, `DURATION`, `PATH`), handles (`PIPE`, `HANDLE`, `SEMAPHORE`, `PERMIT`), `ANY`, and rendered shapes (`LIST<STRING>`, `MAP<name: STRING, age: INT>`, arbitrary nesting, spacing insignificant). Bare `LIST` and `MAP` are runtime words, never declarations: unknown collections declare `LIST<ANY>` and `MAP<ANY>`. A field with a `?` suffix is optional (`MAP<held: BOOL, permit?: PERMIT>`): missing optional keys pass, missing required keys fail. `TYPE NAME = <shape>` binds one immutable name per run that every declaration form accepts.
 
 ```oxdock
 LET $count: INT = 1
@@ -300,7 +300,7 @@ ASSERT_EQ $ran 1
 ASSERT_CONTAINS stdout "arch-detected"
 ```
 
-### Negation, disjunction, and composition
+### Negation, disjunction, and combination
 
 ```oxdock env:OXDOCK_DOC_FEATURE_A=enabled
 // Bring the runner-injected value into the script environment.
@@ -319,9 +319,9 @@ ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 [any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
 ASSERT_CONTAINS stdout "or-matched-a-branch"
 
-// Comma composes with AND: (A or linux) AND A: true here on every OS.
-[any(env:OXDOCK_DOC_FEATURE_A, os:linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
-ASSERT_CONTAINS stdout "composed-and-or-guard"
+// Comma combines with AND: (A or linux) AND A: true here on every OS.
+[any(env:OXDOCK_DOC_FEATURE_A, os:linux), env:OXDOCK_DOC_FEATURE_A] ECHO rendered-and-or-guard
+ASSERT_CONTAINS stdout "rendered-and-or-guard"
 ```
 
 ### Multi-line guards

@@ -1,0 +1,12 @@
+{
+  "global_values": "oxdock-render/examples/generic-readme/values.json",
+  "scopes": [
+    "oxdock-render/examples/generic-readme"
+  ],
+  "generated": [],
+  "vars": {
+    "global": "docs_global",
+    "ctx": "docs_ctx"
+  },
+  "staging_dir": "oxdock-render/examples/generic-readme/target/staging"
+}

@@ -244,7 +244,7 @@ impl GuardedPath {
         // below, so an absolute pattern under a verbatim root strips
         // against it. Without this, the strip misses, the fallback
         // trims the pattern into garbage, the glob matches nothing, and
-        // callers read the miss as empty results (compose SCAN staging
+        // callers read the miss as empty results (assemble SCAN staging
         // empty fragment groups on Windows, failing every `$files`
         // lookup at render).
         let slashed = to_forward_slashes(clean);
@@ -647,7 +647,7 @@ impl LazyGuardedTempDir {
         }
     }
 
-    /// Force physical creation without borrowing the path. Composition roots
+    /// Force physical creation without borrowing the path. Entry points
     /// only (e.g. interactive shell entry, which must hand a concrete
     /// directory to an external consumer). Step handlers must resolve through
     /// `PathResolver` instead of calling this.
@@ -1060,7 +1060,7 @@ mod tests {
         assert_eq!(child.root(), root.root());
     }
 
-    // Compose SCAN globs absolute patterns under a verbatim workspace
+    // Assemble SCAN globs from absolute patterns under a verbatim workspace
     // root (child --root tempdirs canonicalize to `\\?\` on Windows):
     // the pattern must strip to the same plain drive form as the
     // search root, or the glob matches nothing and fragment groups

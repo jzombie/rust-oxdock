@@ -147,7 +147,7 @@ pub type NativeFn<P> = Arc<dyn Fn(&mut StepCtx<P>, Vec<Value>) -> Result<Value> 
 /// a generated symbol.
 pub trait OxDockFn<P: ProcessManager> {
     /// The registry entry deriving from the Rust signature plus doc
-    /// comments: name, metadata, and entry point, composed.
+    /// comments: name, metadata, and entry point, rendered.
     fn registration() -> HostRegistration<P>;
 }
 
@@ -1898,11 +1898,11 @@ fn type_describe<P: ProcessManager>(
     "###
 )]
 #[example(
-    name = "dynamic composition",
+    name = "dynamic assembly",
     code = r###"
-    # Compose the child script dynamically: the parent interpolates
+    # Assemble the child script dynamically: the parent interpolates
     # its own bindings into the pipe, then runs the interpreter on it.
-    # Unescaped {{ }} bakes in at compose time; \{{ }} stays literal
+    # Unescaped {{ }} bakes in at render time; \{{ }} stays literal
     # so the child expands it with its own bindings.
     # The pipe delivers EOF when the producer step ends, so the child
     # reads exactly one script.

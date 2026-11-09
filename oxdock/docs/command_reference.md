@@ -263,7 +263,7 @@ LET $t: STRING = PATH_TYPE("skipped.txt")
 ASSERT_EQ $t "absent"
 ```
 
-**Example: logical condition composition**
+**Example: logical condition combination**
 
 ```oxdock
 IMPORT [STD]
@@ -812,7 +812,7 @@ duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
 
 A blocking foreground process is killed.
 
-ASYNC composes in either nesting order with order-dependent deadline
+ASYNC nests in either order with order-dependent deadline
 semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
 the deadline inside the background thread (a later `AWAIT $task`
 surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
@@ -895,7 +895,7 @@ same directory with no per-block overlay, so one block's
 writes are visible to another.
 
 Blocks nest (each level re-seeds from the same seed, so
-nesting only narrows through the allowlists) and compose
+nesting only narrows through the allowlists) and combine
 with `ASYNC` and `FUNC`. Scope exit restores the prior
 environment.
 
@@ -1433,7 +1433,7 @@ Paths:
   Entry code keeps resolving against the run cwd.
 - Missing files fail before the first step runs.
   Write-then-import in one script is rejected; check
-  libraries into the tree, or compose them at runtime
+  libraries into the tree, or combine them at runtime
   and run a child interpreter (see the child run
   examples below).
 
@@ -1571,10 +1571,10 @@ LET $d: DURATION = "5s"
 LET $files: LIST<STRING> = GLOB("*.oxdock")
 ```
 
-**Example: run composed modules in a child**
+**Example: run rendered modules in a child**
 
 ```oxdock roots:unified
-# Dynamic composition with files: the parent writes a
+# Dynamic assembly with files: the parent writes a
 # library and an entry script, then runs the entry in a
 # fresh interpreter. Child-side {{ }} stays escaped so
 # the parent does not interpolate it while writing. The
@@ -1596,10 +1596,10 @@ LET $out: STRING = RUN [$exe, "main.oxfile"]
 ASSERT_CONTAINS $out "says hi Ada"
 ```
 
-**Example: dynamic module composition**
+**Example: dynamic module assembly**
 
 ```oxdock roots:unified
-# A function that composes a module: MAKE_GREETER bakes
+# A function that assembles a module: MAKE_GREETER bakes
 # its argument into a generated file with a bare {{ }},
 # then a child run imports the result. Bare {{ }} injects
 # parent values at write time; escaped \{{ }} survives for
@@ -1607,7 +1607,7 @@ ASSERT_CONTAINS $out "says hi Ada"
 # {{ }} placeholders resolve pure functions only.
 IMPORT [STD]
 
-# The composer: parent values land in the module source.
+# The renderer: parent values land in the module source.
 FUNC MAKE_GREETER($who: STRING) {
     WRITE greeter.oxfile """
         FUNC GREET() { RETURN "hi {{ $who }}" }
@@ -1616,14 +1616,14 @@ FUNC MAKE_GREETER($who: STRING) {
     RETURN "greeter.oxfile"
 }
 
-# The entry: imports the composed module by its path.
+# The entry: imports the rendered module by its path.
 WRITE main.oxfile """
     IMPORT ["greeter.oxfile" AS G]
     LET $g: STRING = G::GREET()
     ECHO "says \{{ $g }}"
     """
 
-# Compose, then run the entry in a fresh interpreter.
+# Assemble, then run the entry in a fresh interpreter.
 LET $made: STRING = MAKE_GREETER("Ada")
 ASSERT_EQ $made "greeter.oxfile"
 LET $exe: STRING = INTERPRETER()
@@ -3664,12 +3664,12 @@ LET $nonempty: BOOL = $exe != ""
 ASSERT_EQ $nonempty true
 ```
 
-**Example: dynamic composition**
+**Example: dynamic assembly**
 
 ```oxdock
-# Compose the child script dynamically: the parent interpolates
+# Assemble the child script dynamically: the parent interpolates
 # its own bindings into the pipe, then runs the interpreter on it.
-# Unescaped {{ }} bakes in at compose time; \{{ }} stays literal
+# Unescaped {{ }} bakes in at render time; \{{ }} stays literal
 # so the child expands it with its own bindings.
 # The pipe delivers EOF when the producer step ends, so the child
 # reads exactly one script.

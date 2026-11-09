@@ -94,7 +94,7 @@ pub enum TypeTag {
     Union(Arc<str>, Arc<[TypeTag]>),
 }
 
-/// The `ANY` word for composed tags: one shared instance so generic
+/// The `ANY` word for rendered tags: one shared instance so generic
 /// spellings like `MAP<ANY>` never mint competing statics.
 pub const ANY_TAG: TypeTag = TypeTag::Any;
 
@@ -149,7 +149,7 @@ impl TypeTag {
     }
 
     /// Display name: the builtin label, the custom descriptor name, or
-    /// the coarse word kind for shaped composites. Field detail renders
+    /// the coarse word kind for shaped compounds. Field detail renders
     /// structurally, never through this string. Borrowed in every
     /// case: literals for words, the stored spelling for unions.
     pub fn name(&self) -> &str {
@@ -345,7 +345,7 @@ fn parse_spelled_one(text: &str, depth: usize) -> Result<(Spelled, &str), String
         return Ok((first, rest));
     }
     // Union tail: `A|B|C` accumulates sibling shapes at any level, so
-    // unions compose inside generic arguments as well as at top
+    // unions combine inside generic arguments as well as at top
     // level. Members share the depth budget (siblings, not nesting);
     // every piece consumes input, so the loop always terminates.
     let mut members = vec![first];
@@ -440,34 +440,34 @@ fn parse_spelled_field_name(text: &str) -> (Option<String>, bool, &str) {
     }
 }
 
-/// Process-global intern table for composed tags: one shared
+/// Process-global intern table for rendered tags: one shared
 /// `&'static TypeTag` per distinct canonical spelling. The lock is
 /// held only for lookup/insert; leaf resolution happens outside it
 /// in the caller.
-static COMPOSED_TAGS: OnceLock<Mutex<HashMap<String, TypeTag>>> = OnceLock::new();
+static RENDERD_TAGS: OnceLock<Mutex<HashMap<String, TypeTag>>> = OnceLock::new();
 
-fn composed_table() -> &'static Mutex<HashMap<String, TypeTag>> {
-    COMPOSED_TAGS.get_or_init(|| Mutex::new(HashMap::new()))
+fn rendered_table() -> &'static Mutex<HashMap<String, TypeTag>> {
+    RENDERD_TAGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Look up an already-interned spelling. Resolution checks this
 /// before building, so identical spellings share one `Arc` payload
 /// family (pointer identity holds across clones).
-pub fn lookup_composed(canonical: &str) -> Option<TypeTag> {
-    composed_table()
+pub fn lookup_rendered(canonical: &str) -> Option<TypeTag> {
+    rendered_table()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(canonical)
         .cloned()
 }
 
-/// Intern one composed tag under its canonical spelling: a raced
+/// Intern one rendered tag under its canonical spelling: a raced
 /// build stores once (the loser drops its duplicate, still bounded
 /// by distinct spellings per process). The table owns every entry
 /// (reachable, freed with the process like any cache): clones share
 /// payloads through `Arc`, so identity holds without leaks.
-pub fn intern_composed(canonical: String, tag: TypeTag) -> TypeTag {
-    let mut table = composed_table()
+pub fn intern_rendered(canonical: String, tag: TypeTag) -> TypeTag {
+    let mut table = rendered_table()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(hit) = table.get(&canonical) {
@@ -871,16 +871,16 @@ mod tests {
 
     #[test]
     fn identical_spellings_share_one_interned_payload() {
-        let first = intern_composed(
+        let first = intern_rendered(
             "LIST<MAP>".to_string(),
             TypeTag::ListOf(Arc::new(TypeTag::Map)),
         );
-        let second = intern_composed(
+        let second = intern_rendered(
             "LIST<MAP>".to_string(),
             TypeTag::ListOf(Arc::new(TypeTag::Map)),
         );
         let (TypeTag::ListOf(a), TypeTag::ListOf(b)) = (first, second) else {
-            panic!("composed tags keep their shape");
+            panic!("rendered tags keep their shape");
         };
         assert!(
             Arc::ptr_eq(&a, &b),

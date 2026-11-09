@@ -530,12 +530,12 @@ LET $nonempty: BOOL = $exe != ""
 ASSERT_EQ $nonempty true
 ```
 
-**Example: dynamic composition**
+**Example: dynamic assembly**
 
 ```oxdock
-# Compose the child script dynamically: the parent interpolates
+# Assemble the child script dynamically: the parent interpolates
 # its own bindings into the pipe, then runs the interpreter on it.
-# Unescaped \{{ }} bakes in at compose time; \\\{{ }} stays literal
+# Unescaped \{{ }} bakes in at render time; \\\{{ }} stays literal
 # so the child expands it with its own bindings.
 # The pipe delivers EOF when the producer step ends, so the child
 # reads exactly one script.

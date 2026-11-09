@@ -102,7 +102,7 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
     // Exact conformance first: passthrough when the value already
     // satisfies the tag, including shaped records and typed lists.
     // A shaped violation returns here with its indexed path: no
-    // scalar or string ever coerces into a composite, so the shape
+    // scalar or string ever coerces into a compound, so the shape
     // error is the honest one (call boundaries already report it
     // through `check_value_at`; declarations match them now).
     if let Err(err) = oxdock_parser::check_value(expected, &value) {

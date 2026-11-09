@@ -25,7 +25,7 @@
 
 **OxDock is a Dockerfile-inspired DSL for native builds, multi-node pipelines, and sealed remote execution.**
 
-Bash gives you strings and exit codes. OxDock gives you [typed values](https://github.com/jzombie/rust-oxdock#value-types), [guarded paths](https://github.com/jzombie/rust-oxdock#workspaces--filesystem), [managed pipes](https://github.com/jzombie/rust-oxdock#transport-pipes), and identical behavior on Linux/macOS/Windows (the things you'd re-implement badly in every growing bash script). And with hot-loading [MCP tooling](https://github.com/jzombie/rust-oxdock#mcp-hosting), *English-to-OxDock* just skips the boilerplate of getting there. [Workspaces](https://github.com/jzombie/rust-oxdock#workspaces--filesystem) (`SNAPSHOT`, `LOCAL`, `CACHE`, `SYSTEM`) and [scoped blocks](https://github.com/jzombie/rust-oxdock#guards-and-scoped-blocks) with [selective environment inheritance](https://github.com/jzombie/rust-oxdock#selective-environment-inheritance) give every run an isolated root that reverts on scope exit. When plain shell is the right tool, [`RUN`](https://github.com/jzombie/rust-oxdock#run) still reaches it, and [platform guards](https://github.com/jzombie/rust-oxdock#platform-guards) keep the OS-specific bits fenced: the two compose instead of competing.
+Bash gives you strings and exit codes. OxDock gives you [typed values](https://github.com/jzombie/rust-oxdock#value-types), [guarded paths](https://github.com/jzombie/rust-oxdock#workspaces--filesystem), [managed pipes](https://github.com/jzombie/rust-oxdock#transport-pipes), and identical behavior on Linux/macOS/Windows (the things you'd re-implement badly in every growing bash script). And with hot-loading [MCP tooling](https://github.com/jzombie/rust-oxdock#mcp-hosting), *English-to-OxDock* just skips the boilerplate of getting there. [Workspaces](https://github.com/jzombie/rust-oxdock#workspaces--filesystem) (`SNAPSHOT`, `LOCAL`, `CACHE`, `SYSTEM`) and [scoped blocks](https://github.com/jzombie/rust-oxdock#guards-and-scoped-blocks) with [selective environment inheritance](https://github.com/jzombie/rust-oxdock#selective-environment-inheritance) give every run an isolated root that reverts on scope exit. When plain shell is the right tool, [`RUN`](https://github.com/jzombie/rust-oxdock#run) still reaches it, and [platform guards](https://github.com/jzombie/rust-oxdock#platform-guards) keep the OS-specific bits fenced: the two combine instead of competing.
 
 Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on Linux, macOS, and Windows. Execute scripts on bare metal, inside containers, or dispatched across remote machines simultaneously. No daemons. No hypervisors.
 
@@ -153,7 +153,7 @@ Scripts are sequences of instructions, one per line (`;` separates two; quoted s
 
 ### Declared variable types
 
-Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: scalars (`STRING`, `INT`, `FLOAT`, `BOOL`, `DURATION`, `PATH`), handles (`PIPE`, `HANDLE`, `SEMAPHORE`, `PERMIT`), `ANY`, and composed shapes (`LIST<STRING>`, `MAP<name: STRING, age: INT>`, arbitrary nesting, spacing insignificant). Bare `LIST` and `MAP` are runtime words, never declarations: unknown collections declare `LIST<ANY>` and `MAP<ANY>`. A field with a `?` suffix is optional (`MAP<held: BOOL, permit?: PERMIT>`): missing optional keys pass, missing required keys fail. `TYPE NAME = <shape>` binds one immutable name per run that every declaration form accepts.
+Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: scalars (`STRING`, `INT`, `FLOAT`, `BOOL`, `DURATION`, `PATH`), handles (`PIPE`, `HANDLE`, `SEMAPHORE`, `PERMIT`), `ANY`, and rendered shapes (`LIST<STRING>`, `MAP<name: STRING, age: INT>`, arbitrary nesting, spacing insignificant). Bare `LIST` and `MAP` are runtime words, never declarations: unknown collections declare `LIST<ANY>` and `MAP<ANY>`. A field with a `?` suffix is optional (`MAP<held: BOOL, permit?: PERMIT>`): missing optional keys pass, missing required keys fail. `TYPE NAME = <shape>` binds one immutable name per run that every declaration form accepts.
 
 ```oxdock
 LET $count: INT = 1
@@ -405,7 +405,7 @@ ASSERT_EQ $ran 1
 ASSERT_CONTAINS stdout "arch-detected"
 ```
 
-### Negation, disjunction, and composition
+### Negation, disjunction, and combination
 
 ```oxdock env:OXDOCK_DOC_FEATURE_A=enabled
 // Bring the runner-injected value into the script environment.
@@ -424,9 +424,9 @@ ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 [any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
 ASSERT_CONTAINS stdout "or-matched-a-branch"
 
-// Comma composes with AND: (A or linux) AND A: true here on every OS.
-[any(env:OXDOCK_DOC_FEATURE_A, os:linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
-ASSERT_CONTAINS stdout "composed-and-or-guard"
+// Comma combines with AND: (A or linux) AND A: true here on every OS.
+[any(env:OXDOCK_DOC_FEATURE_A, os:linux), env:OXDOCK_DOC_FEATURE_A] ECHO rendered-and-or-guard
+ASSERT_CONTAINS stdout "rendered-and-or-guard"
 ```
 
 ### Multi-line guards
@@ -776,7 +776,7 @@ LET $t: STRING = PATH_TYPE("skipped.txt")
 ASSERT_EQ $t "absent"
 ```
 
-**Example: logical condition composition**
+**Example: logical condition combination**
 
 ```oxdock
 IMPORT [STD]
@@ -1325,7 +1325,7 @@ duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
 
 A blocking foreground process is killed.
 
-ASYNC composes in either nesting order with order-dependent deadline
+ASYNC nests in either order with order-dependent deadline
 semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
 the deadline inside the background thread (a later `AWAIT $task`
 surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
@@ -1408,7 +1408,7 @@ same directory with no per-block overlay, so one block's
 writes are visible to another.
 
 Blocks nest (each level re-seeds from the same seed, so
-nesting only narrows through the allowlists) and compose
+nesting only narrows through the allowlists) and combine
 with `ASYNC` and `FUNC`. Scope exit restores the prior
 environment.
 
@@ -1946,7 +1946,7 @@ Paths:
   Entry code keeps resolving against the run cwd.
 - Missing files fail before the first step runs.
   Write-then-import in one script is rejected; check
-  libraries into the tree, or compose them at runtime
+  libraries into the tree, or combine them at runtime
   and run a child interpreter (see the child run
   examples below).
 
@@ -2084,10 +2084,10 @@ LET $d: DURATION = "5s"
 LET $files: LIST<STRING> = GLOB("*.oxdock")
 ```
 
-**Example: run composed modules in a child**
+**Example: run rendered modules in a child**
 
 ```oxdock roots:unified
-# Dynamic composition with files: the parent writes a
+# Dynamic assembly with files: the parent writes a
 # library and an entry script, then runs the entry in a
 # fresh interpreter. Child-side {{ }} stays escaped so
 # the parent does not interpolate it while writing. The
@@ -2109,10 +2109,10 @@ LET $out: STRING = RUN [$exe, "main.oxfile"]
 ASSERT_CONTAINS $out "says hi Ada"
 ```
 
-**Example: dynamic module composition**
+**Example: dynamic module assembly**
 
 ```oxdock roots:unified
-# A function that composes a module: MAKE_GREETER bakes
+# A function that assembles a module: MAKE_GREETER bakes
 # its argument into a generated file with a bare {{ }},
 # then a child run imports the result. Bare {{ }} injects
 # parent values at write time; escaped \{{ }} survives for
@@ -2120,7 +2120,7 @@ ASSERT_CONTAINS $out "says hi Ada"
 # {{ }} placeholders resolve pure functions only.
 IMPORT [STD]
 
-# The composer: parent values land in the module source.
+# The renderer: parent values land in the module source.
 FUNC MAKE_GREETER($who: STRING) {
     WRITE greeter.oxfile """
         FUNC GREET() { RETURN "hi {{ $who }}" }
@@ -2129,14 +2129,14 @@ FUNC MAKE_GREETER($who: STRING) {
     RETURN "greeter.oxfile"
 }
 
-# The entry: imports the composed module by its path.
+# The entry: imports the rendered module by its path.
 WRITE main.oxfile """
     IMPORT ["greeter.oxfile" AS G]
     LET $g: STRING = G::GREET()
     ECHO "says \{{ $g }}"
     """
 
-# Compose, then run the entry in a fresh interpreter.
+# Assemble, then run the entry in a fresh interpreter.
 LET $made: STRING = MAKE_GREETER("Ada")
 ASSERT_EQ $made "greeter.oxfile"
 LET $exe: STRING = INTERPRETER()
@@ -4177,12 +4177,12 @@ LET $nonempty: BOOL = $exe != ""
 ASSERT_EQ $nonempty true
 ```
 
-**Example: dynamic composition**
+**Example: dynamic assembly**
 
 ```oxdock
-# Compose the child script dynamically: the parent interpolates
+# Assemble the child script dynamically: the parent interpolates
 # its own bindings into the pipe, then runs the interpreter on it.
-# Unescaped {{ }} bakes in at compose time; \{{ }} stays literal
+# Unescaped {{ }} bakes in at render time; \{{ }} stays literal
 # so the child expands it with its own bindings.
 # The pipe delivers EOF when the producer step ends, so the child
 # reads exactly one script.
