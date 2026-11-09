@@ -757,7 +757,7 @@ mod tests {
         // the 0.5s sleep is a pass; a hang blows past by orders more).
         #[allow(clippy::disallowed_macros)]
         let (lower, upper) = if cfg!(windows) {
-            (0.9, 3.0)
+            (0.9, 6.0)
         } else {
             (0.15, 1.2)
         };

@@ -28,6 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - File writes document the line-ending contract: `WRITE`/`APPEND`/`APPEND_LINE` state that bytes land exactly as given with no line-ending translation on any platform (LF stays LF, even on Windows; `APPEND` adds no terminator, `APPEND_LINE` adds exactly one LF). `APPEND`'s no-terminator behavior is pinned by an explicit test, and existing manual-`"\n"` append sites migrate to `APPEND_LINE`.
 - [breaking] The session seed no longer synthesizes `CARGO_TARGET_DIR`: unset hosts leave it absent and `cargo` defaults to `./target` under the child cwd. Route it explicitly per run (`ENV`/`INHERIT_ENV`); every CI leg already does. `ENV_CONTRACTS.md` regenerates without the row.
 
+### Dependencies
+
+- Bump `rmcp` / `rmcp-macros` 3.8.0 → 3.9.0 (RUSTSEC-2026-0462).
+
 ## [0.35.0-alpha] - 2026-11-05
 
 ### Fixed
