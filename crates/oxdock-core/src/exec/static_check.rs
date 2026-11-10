@@ -2608,6 +2608,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         if coercible_pair(&actual, expected) {
             return Ok(());
         }
+        // Handles delegate to the canonical relation so the gates
+        // cannot drift: shaped satisfies bare by payload (VOID never
+        // flows); bare satisfies only bare or ANY-payload. See
+        // is_compatible.
+        if matches!(expected, TypeTag::Handle | TypeTag::HandleOf(_))
+            && matches!(actual, TypeTag::Handle | TypeTag::HandleOf(_))
+        {
+            return match is_compatible(&actual, expected) {
+                true => Ok(()),
+                false => Err(exact_mismatch(ctx, expected, &actual)),
+            };
+        }
         if matches!(
             (&actual, expected),
             (TypeTag::ListOf(_), TypeTag::ListOf(_))
@@ -2636,6 +2648,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         match (actual, expected) {
             (TypeTag::ListOf(a), TypeTag::ListOf(e)) | (TypeTag::MapOf(a), TypeTag::MapOf(e)) => {
                 Self::check_exact(e, a, ctx)
+            }
+            (TypeTag::HandleOf(a), TypeTag::HandleOf(e)) => Self::check_exact(e, a, ctx),
+            (TypeTag::HandleOf(a), TypeTag::Handle) => {
+                if matches!(a.as_ref(), TypeTag::Void) {
+                    return Err(exact_mismatch(ctx, expected, actual));
+                }
+                Ok(())
+            }
+            // Bare satisfies only bare or ANY-payload, mirroring
+            // is_compatible so element checks cannot drift either.
+            (TypeTag::Handle, TypeTag::HandleOf(e)) => {
+                if matches!(e.as_ref(), TypeTag::Any) {
+                    Ok(())
+                } else {
+                    Err(exact_mismatch(ctx, expected, actual))
+                }
             }
             (TypeTag::Record(a_fields), TypeTag::Record(e_fields)) => {
                 for field in e_fields.iter() {
@@ -3429,6 +3457,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 mod tests {
     use super::*;
     use oxdock_parser::Guard;
+    use oxdock_process::MockProcessManager;
 
     fn static_bool(value: &str) -> GuardExpr {
         GuardExpr::Predicate(Guard::Attr {
@@ -3478,5 +3507,234 @@ mod tests {
             &TypeTag::Any
         ));
         assert!(unify(TypeTag::Int, TypeTag::String, "t").is_err());
+    }
+
+    /// Single source of truth for test coverage of every TypeTag
+    /// constructor. Each line names a constructor pattern and its
+    /// canonical test representative, and expands to BOTH:
+    /// - variant_inventory(): the representatives vec feeding the laws;
+    /// - anchor_exhaustive(): an exhaustive no-wildcard match over the
+    ///   enum itself. Adding a constructor WITHOUT extending this list
+    ///   breaks compilation at the invocation below, so coverage can
+    ///   never silently lag the enum: one line per constructor serves
+    ///   both, atomically. (Compiler-enforced visit + atomic update =
+    ///   the geometric lock. A std::mem::variant_count cross-check
+    ///   would be ideal but is unstable (rust-lang/rust#73662).)
+    macro_rules! tag_coverage {
+        ( $( $pat:pat => $rep:expr ),* $(,)? ) => {
+            fn variant_inventory() -> Vec<TypeTag> {
+                vec![ $($rep),* ]
+            }
+            fn anchor_exhaustive(tag: &TypeTag) {
+                match tag {
+                    $( $pat => {} ),*
+                }
+            }
+        };
+    }
+    tag_coverage! {
+        TypeTag::String => TypeTag::String,
+        TypeTag::Int => TypeTag::Int,
+        TypeTag::Float => TypeTag::Float,
+        TypeTag::Bool => TypeTag::Bool,
+        TypeTag::List => TypeTag::List,
+        TypeTag::Map => TypeTag::Map,
+        TypeTag::Pipe => TypeTag::Pipe,
+        TypeTag::Handle => TypeTag::Handle,
+        TypeTag::Void => TypeTag::Void,
+        TypeTag::HandleOf(_) => TypeTag::HandleOf(std::sync::Arc::new(TypeTag::String)),
+        TypeTag::Duration => TypeTag::Duration,
+        TypeTag::Path => TypeTag::Path,
+        TypeTag::Semaphore => TypeTag::Semaphore,
+        TypeTag::Permit => TypeTag::Permit,
+        TypeTag::Any => TypeTag::Any,
+        TypeTag::Custom(_) => TypeTag::Custom(oxdock_parser::startup_descriptors()[0].1),
+        TypeTag::ListOf(_) => TypeTag::ListOf(std::sync::Arc::new(TypeTag::Int)),
+        TypeTag::Record(_) => TypeTag::Record(
+            vec![oxdock_parser::Field {
+                name: "name".to_string(),
+                ty: TypeTag::String,
+                docs: "",
+                optional: false,
+            }]
+            .into(),
+        ),
+        TypeTag::MapOf(_) => TypeTag::MapOf(std::sync::Arc::new(TypeTag::String)),
+        TypeTag::Union(..) => TypeTag::union(vec![TypeTag::Int, TypeTag::String])
+    }
+
+    /// Tag universe for the subtyping laws: the full constructor
+    /// inventory (macro-generated above) plus representative
+    /// compounds (VOID payloads, nested containers, wider unions).
+    fn law_universe() -> Vec<TypeTag> {
+        use std::sync::Arc;
+        let mut universe = variant_inventory();
+        universe.extend([
+            TypeTag::HandleOf(Arc::new(TypeTag::Void)),
+            TypeTag::HandleOf(Arc::new(TypeTag::Any)),
+            TypeTag::HandleOf(Arc::new(TypeTag::Int)),
+            TypeTag::ListOf(Arc::new(TypeTag::Union(
+                "INT|STRING".into(),
+                vec![TypeTag::Int, TypeTag::String].into(),
+            ))),
+            TypeTag::Union(
+                "INT|STRING|BOOL".into(),
+                vec![TypeTag::Int, TypeTag::String, TypeTag::Bool].into(),
+            ),
+        ]);
+        universe
+    }
+
+    #[test]
+    fn universe_has_no_duplicate_constructors() {
+        // Copy-paste guard for the single list above: two lines for
+        // one constructor would silently overweight it in the laws.
+        // (Omission is impossible: the anchor match would fail
+        // compilation. This covers the remaining failure mode.)
+        use std::collections::HashSet;
+        let discriminants: HashSet<_> = variant_inventory()
+            .iter()
+            .map(std::mem::discriminant)
+            .collect();
+        assert_eq!(
+            discriminants.len(),
+            variant_inventory().len(),
+            "variant_inventory lists a constructor twice"
+        );
+        for tag in variant_inventory() {
+            anchor_exhaustive(&tag);
+        }
+    }
+
+    #[test]
+    fn subtyping_is_reflexive() {
+        for tag in law_universe() {
+            assert!(
+                is_compatible(&tag, &tag),
+                "must admit itself: {}",
+                render_structural(&tag)
+            );
+        }
+    }
+
+    #[test]
+    fn void_is_bottom() {
+        // VOID unifies only with VOID: it never flows into a value
+        // slot, not even ANY.
+        for tag in law_universe() {
+            let is_void = matches!(tag, TypeTag::Void);
+            assert_eq!(
+                is_compatible(&TypeTag::Void, &tag),
+                is_void,
+                "VOID actual vs {}",
+                render_structural(&tag)
+            );
+            assert_eq!(
+                is_compatible(&tag, &TypeTag::Void),
+                is_void,
+                "{} actual vs VOID",
+                render_structural(&tag)
+            );
+        }
+    }
+
+    #[test]
+    fn any_declared_is_top_for_values() {
+        for tag in law_universe() {
+            if matches!(tag, TypeTag::Void) {
+                continue;
+            }
+            assert!(
+                is_compatible(&tag, &TypeTag::Any),
+                "{} must flow into ANY",
+                render_structural(&tag)
+            );
+        }
+    }
+
+    #[test]
+    fn any_actual_admits_nothing_concrete() {
+        // An untyped value never satisfies a concrete contract (the
+        // LET-gate rule); only ANY itself admits it.
+        for tag in law_universe() {
+            assert_eq!(
+                is_compatible(&TypeTag::Any, &tag),
+                matches!(tag, TypeTag::Any),
+                "ANY actual vs {}",
+                render_structural(&tag)
+            );
+        }
+    }
+
+    #[test]
+    fn handle_bare_is_any_payload() {
+        // The isomorphism both ways, VOID exclusion included: bare
+        // HANDLE behaves exactly as HANDLE<ANY>.
+        use std::sync::Arc;
+        for payload in [TypeTag::String, TypeTag::Int, TypeTag::Void, TypeTag::Any] {
+            let shaped = TypeTag::HandleOf(Arc::new(payload));
+            assert_eq!(
+                is_compatible(&shaped, &TypeTag::Handle),
+                is_compatible(&shaped, &TypeTag::HandleOf(Arc::new(TypeTag::Any))),
+                "shaped->bare must equal shaped->HANDLE<ANY>: {}",
+                render_structural(&shaped)
+            );
+            assert!(
+                !is_compatible(
+                    &TypeTag::HandleOf(Arc::new(TypeTag::Void)),
+                    &TypeTag::Handle
+                ),
+                "HANDLE<VOID> must never erase to HANDLE"
+            );
+        }
+        assert!(is_compatible(
+            &TypeTag::Handle,
+            &TypeTag::HandleOf(Arc::new(TypeTag::Any))
+        ));
+        assert!(!is_compatible(
+            &TypeTag::Handle,
+            &TypeTag::HandleOf(Arc::new(TypeTag::String))
+        ));
+    }
+
+    #[test]
+    fn union_subtyping_is_covariant() {
+        let narrow = TypeTag::Union(
+            "INT|STRING".into(),
+            vec![TypeTag::Int, TypeTag::String].into(),
+        );
+        let wide = TypeTag::Union(
+            "INT|STRING|BOOL".into(),
+            vec![TypeTag::Int, TypeTag::String, TypeTag::Bool].into(),
+        );
+        assert!(is_compatible(&TypeTag::Int, &narrow));
+        assert!(is_compatible(&TypeTag::String, &narrow));
+        assert!(!is_compatible(&TypeTag::Bool, &narrow));
+        assert!(is_compatible(&narrow, &wide));
+        assert!(!is_compatible(&wide, &narrow));
+        assert!(!is_compatible(&narrow, &TypeTag::Int));
+    }
+
+    #[test]
+    fn check_exact_handles_mirror_compatible() {
+        // The element gate agrees with the canonical relation:
+        // shaped satisfies bare unless VOID; bare satisfies only
+        // bare or ANY-payload. One documented divergence: ANY
+        // payloads defer to the runtime walk (expected ANY or actual
+        // ANY passes), exactly like LIST<ANY> vs LIST<STRING> — the
+        // strict top-down checker (is_compatible) has no such
+        // deferral by design.
+        use std::sync::Arc;
+        type C = Checker<'static, MockProcessManager>;
+        let string_handle = || TypeTag::HandleOf(Arc::new(TypeTag::String));
+        let void_handle = || TypeTag::HandleOf(Arc::new(TypeTag::Void));
+        let any_handle = || TypeTag::HandleOf(Arc::new(TypeTag::Any));
+        assert!(C::check_exact(&TypeTag::Handle, &string_handle(), "t").is_ok());
+        assert!(C::check_exact(&TypeTag::Handle, &void_handle(), "t").is_err());
+        assert!(C::check_exact(&string_handle(), &string_handle(), "t").is_ok());
+        assert!(C::check_exact(&string_handle(), &any_handle(), "t").is_ok());
+        assert!(C::check_exact(&any_handle(), &TypeTag::Handle, "t").is_ok());
+        assert!(C::check_exact(&string_handle(), &TypeTag::Handle, "t").is_err());
+        assert!(C::check_exact(&void_handle(), &TypeTag::Handle, "t").is_err());
     }
 }

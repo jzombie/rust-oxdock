@@ -4880,7 +4880,6 @@ fn ungated_any_argument_fails_naming_the_gate() {
     run_script(&root, script).expect("gated ANY runs");
 }
 
-
 #[test]
 fn func_return_only_inside_loop_fails() {
     // Loops may trip zero times: a RETURN solely inside FOR leaves
@@ -5073,6 +5072,51 @@ fn async_func_handle_task_passes() {
         ASSERT_EQ $s "hi"
     "#};
     run_script(&root, script).expect("async func runs");
+}
+
+#[test]
+fn func_handle_params_agree_across_gates() {
+    // Call-site args use the same handle semantics as declared
+    // returns: shaped satisfies bare by payload (VOID never flows),
+    // bare satisfies only bare or ANY-payload. A drift here would
+    // be a silent soundness hole, so this pins all four flows
+    // end to end.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC TAKES($t: HANDLE): VOID {
+            AWAIT $t
+        }
+        FUNC TAKES_TYPED($t: HANDLE<STRING>): STRING {
+            LET $s: STRING = AWAIT $t
+            RETURN $s
+        }
+        LET $shaped: HANDLE<STRING> = ASYNC { RETURN "hi" }
+        LET $shaped2: HANDLE<STRING> = ASYNC { RETURN "hi" }
+        LET $bare: HANDLE = ASYNC { RETURN "hi" }
+        TAKES($shaped)
+        LET $out: STRING = TAKES_TYPED($shaped2)
+        ASSERT_EQ $out "hi"
+        LET $any_typed: HANDLE<ANY> = $bare
+        TAKES($any_typed)
+        WRITE out.txt "done"
+    "#};
+    run_script(&root, script).expect("handle params agree");
+    for (script, want) in [
+        (
+            "FUNC TAKES($t: HANDLE): VOID {\n    AWAIT $t\n}\nLET $v: HANDLE<VOID> = ASYNC { ECHO hi }\nTAKES($v)\n",
+            "got HANDLE<VOID>",
+        ),
+        (
+            "FUNC TAKES_TYPED($t: HANDLE<STRING>): VOID {\n    AWAIT $t\n}\nLET $v: HANDLE = ASYNC { RETURN \"hi\" }\nTAKES_TYPED($v)\n",
+            "expected HANDLE<STRING>, got HANDLE",
+        ),
+    ] {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+        let err = run_script(&root, script).expect_err("handle mismatch must fail");
+        assert!(err.to_string().contains(want), "{want}: {err}");
+    }
 }
 
 #[test]
