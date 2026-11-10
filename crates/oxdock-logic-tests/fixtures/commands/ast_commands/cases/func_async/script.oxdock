@@ -1,4 +1,4 @@
-FUNC WORK($job: STRING) {
+FUNC WORK($job: STRING): STRING {
     RETURN "did-{{ $job }}"
 }
 LET $t: HANDLE = ASYNC WORK("job")

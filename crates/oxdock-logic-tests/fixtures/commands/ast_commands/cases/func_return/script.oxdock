@@ -1,4 +1,4 @@
-FUNC PICK($flag: BOOL) {
+FUNC PICK($flag: BOOL): STRING {
     IF $flag {
         RETURN "yes"
     }
