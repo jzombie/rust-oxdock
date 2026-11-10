@@ -1433,7 +1433,7 @@ fn func_return_capture_and_while_loop() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC DOUBLE($n: INT) {
+        FUNC DOUBLE($n: INT): INT {
             RETURN $n
         }
         LET $r: INT = DOUBLE(21)
@@ -4768,13 +4768,14 @@ fn sleep_undefined_variable_errors_at_runtime() {
 }
 
 #[test]
+#[test]
 fn func_missing_return_fails_at_run_start() {
     // A RETURN on some path with reachable fallthrough fails before
-    // the first step executes.
+    // the first step executes. Non-VOID gets no admits-empty carve-out.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC MAYBE($c: BOOL) {
+        FUNC MAYBE($c: BOOL): STRING {
             IF $c {
                 RETURN "yes"
             }
@@ -4786,15 +4787,17 @@ fn func_missing_return_fails_at_run_start() {
         err.to_string().contains("may fall through with no RETURN"),
         "{err}"
     );
+    assert!(err.to_string().contains("declares STRING"), "{err}");
 }
 
 #[test]
-fn func_disjoint_branch_types_fail_unification() {
-    // Terminal INT vs STRING paths cannot unify.
+fn func_mismatched_branch_types_fail_naming_site() {
+    // Top-down, no unification: each terminal RETURN checks against
+    // the declared type, naming function, expected type, and site.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC PICK($c: BOOL) {
+        FUNC PICK($c: BOOL): INT {
             IF $c {
                 RETURN 1
             } ELSE {
@@ -4802,21 +4805,48 @@ fn func_disjoint_branch_types_fail_unification() {
             }
         }
     "#};
-    let err = run_script(&root, script).expect_err("disjoint returns must fail");
-    assert!(err.to_string().contains("cannot unify"), "{err}");
-    assert!(err.to_string().contains("INT"), "{err}");
-    assert!(err.to_string().contains("STRING"), "{err}");
+    let err = run_script(&root, script).expect_err("mismatched returns must fail");
+    let text = err.to_string();
+    assert!(text.contains("declares INT"), "{text}");
+    assert!(text.contains("line 5"), "{text}");
+    assert!(text.contains("yields STRING"), "{text}");
 }
 
 #[test]
-fn func_any_return_widens_unification() {
-    // INT unifies with ANY (from PARSE_JSON) to ANY; the function
+fn func_union_return_admits_declared_members() {
+    // A union-declared function admits every member on every path,
+    // including union-typed call results (covariance both ways).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        FUNC PICK($c: BOOL): INT|STRING {
+            IF $c {
+                RETURN 1
+            } ELSE {
+                RETURN "one"
+            }
+        }
+        FUNC FORWARD($c: BOOL): INT|STRING {
+            RETURN PICK($c)
+        }
+        LET $a: INT|STRING = PICK(true)
+        LET $b: INT|STRING = FORWARD(false)
+        ASSERT_EQ $a 1
+        ASSERT_EQ $b "one"
+    "#};
+    run_script(&root, script).expect("union returns run");
+}
+
+#[test]
+fn func_any_return_admits_all_branches() {
+    // Declared ANY admits every terminal type top-down; the function
     // still runs and both paths execute.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD]
-        FUNC WIDE($c: BOOL) {
+        FUNC WIDE($c: BOOL): ANY {
             IF $c {
                 RETURN 1
             } ELSE {
@@ -4829,7 +4859,6 @@ fn func_any_return_widens_unification() {
     "#};
     run_script(&root, script).expect("widened returns run");
 }
-
 #[test]
 fn ungated_any_argument_fails_naming_the_gate() {
     // An ANY value straight into a MAP parameter fails statically;
@@ -4851,6 +4880,7 @@ fn ungated_any_argument_fails_naming_the_gate() {
     run_script(&root, script).expect("gated ANY runs");
 }
 
+
 #[test]
 fn func_return_only_inside_loop_fails() {
     // Loops may trip zero times: a RETURN solely inside FOR leaves
@@ -4858,8 +4888,8 @@ fn func_return_only_inside_loop_fails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC FIRST($xs: LIST<ANY>) {
-            FOR $x: ANY IN $xs {
+        FUNC FIRST($xs: LIST<ANY>): INT {
+            FOR $x: INT IN $xs {
                 RETURN $x
             }
         }
@@ -4879,7 +4909,7 @@ fn func_guarded_return_without_fallback_fails() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         ENV STATIC_CHECK_DEMO_GUARD=1
-        FUNC MAYBE() {
+        FUNC MAYBE(): STRING {
             [env:STATIC_CHECK_DEMO_GUARD] RETURN "yes"
         }
     "#};
@@ -4888,6 +4918,223 @@ fn func_guarded_return_without_fallback_fails() {
         err.to_string().contains("may fall through with no RETURN"),
         "{err}"
     );
+}
+
+#[test]
+fn func_without_return_annotation_fails_at_parse() {
+    // #287: the annotation is mandatory. Missing `: TYPE` is a parse
+    // error naming the fix, raised before any step executes.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for script in [
+        "FUNC FOO() { RETURN 1 }\n",
+        "FUNC FOO($x: INT) { RETURN $x }\n",
+        "ASYNC FUNC FETCH() { RETURN $t }\n",
+    ] {
+        let err = oxdock_core::parse_script(script).expect_err("missing : TYPE must fail");
+        assert!(err.to_string().contains("requires a return type"), "{err}");
+    }
+}
+
+#[test]
+fn func_wrong_return_type_names_function_expected_and_site() {
+    // Every terminal RETURN checks top-down against the declaration.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC ADD($a: INT, $b: INT): INT {
+            RETURN "nope"
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("wrong return must fail");
+    let text = err.to_string();
+    assert!(text.contains("declares INT"), "{text}");
+    assert!(text.contains("line 2"), "{text}");
+    assert!(text.contains("yields STRING"), "{text}");
+}
+
+#[test]
+fn func_bare_return_in_non_void_fails() {
+    // Bare RETURN is the void exit: it never satisfies a value type,
+    // not even STRING.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC S(): STRING {
+            RETURN
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("bare return must fail");
+    assert!(err.to_string().contains("bare RETURN"), "{err}");
+}
+
+#[test]
+fn func_void_with_value_return_fails() {
+    // Any RETURN <expr> inside a VOID function is a static error.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC V(): VOID {
+            RETURN "oops"
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("value in VOID must fail");
+    assert!(err.to_string().contains("declares VOID"), "{err}");
+}
+
+#[test]
+fn func_void_fallthrough_and_bare_pass() {
+    // VOID alone admits fallthrough and bare RETURN.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC QUIET(): VOID {
+            ECHO hi
+        }
+        FUNC STILL(): VOID {
+            RETURN
+        }
+        QUIET()
+        STILL()
+        WRITE out.txt "done"
+    "#};
+    run_script(&root, script).expect("void exits run");
+}
+
+#[test]
+fn func_void_used_as_value_fails() {
+    // A VOID call used as a value is a static error naming the void.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC V(): VOID {
+            ECHO hi
+        }
+        LET $x: INT = V()
+    "#};
+    let err = run_script(&root, script).expect_err("void as value must fail");
+    assert!(err.to_string().contains("no value to bind"), "{err}");
+}
+
+#[test]
+fn async_func_non_handle_declared_type_fails() {
+    // ASYNC FUNC must declare exactly HANDLE or HANDLE<T>: root-level
+    // unions and every non-HANDLE spelling are rejected up front.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for (decl, want) in [
+        ("VOID", "declares VOID"),
+        ("STRING", "declares STRING"),
+        (
+            "HANDLE<INT> | HANDLE<STRING>",
+            "HANDLE<INT> | HANDLE<STRING>",
+        ),
+    ] {
+        let script = format!(
+            "ASYNC FUNC FETCH(): {decl} {{\n    ECHO hi\n}}\n",
+            decl = decl,
+        );
+        let err = run_script(&root, &script).expect_err("non-handle ASYNC must fail");
+        assert!(
+            err.to_string().contains("must declare HANDLE"),
+            "{want}: {err}"
+        );
+    }
+}
+
+#[test]
+fn async_func_non_handle_path_fails() {
+    // Every path of an ASYNC FUNC must RETURN a real handle.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        ASYNC FUNC FETCH(): HANDLE<STRING> {
+            RETURN 1
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("non-handle path must fail");
+    let text = err.to_string();
+    assert!(text.contains("HANDLE<STRING>"), "{text}");
+    assert!(text.contains("line 2"), "{text}");
+}
+
+#[test]
+fn async_func_handle_task_passes() {
+    // The happy path: spawn a typed task, return its handle, await it.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        ASYNC FUNC FETCH(): HANDLE<STRING> {
+            LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+            RETURN $t
+        }
+        LET $h: HANDLE<STRING> = FETCH()
+        LET $s: STRING = AWAIT $h
+        ASSERT_EQ $s "hi"
+    "#};
+    run_script(&root, script).expect("async func runs");
+}
+
+#[test]
+fn func_generic_return_checks() {
+    // Containers recurse structurally: matching payloads pass,
+    // mismatched payloads fail naming the site.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        FUNC FIRST($xs: LIST<INT>): INT {
+            FOR $x: INT IN $xs {
+                RETURN $x
+            }
+            RETURN 0
+        }
+        LET $v: INT = FIRST([1, 2])
+        ASSERT_EQ $v 1
+    "#};
+    run_script(&root, script).expect("generic returns run");
+    let script = indoc! {r#"
+        FUNC FIRST($xs: LIST<STRING>): STRING {
+            RETURN 1
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("mismatched generic must fail");
+    let text = err.to_string();
+    assert!(text.contains("declares STRING"), "{text}");
+    assert!(text.contains("yields INT"), "{text}");
+}
+
+#[test]
+fn await_void_task_capture_fails_but_join_passes() {
+    // HANDLE<VOID> tasks join with bare AWAIT; capturing into a
+    // variable is a static error (no silent-0).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $t: HANDLE<VOID> = ASYNC { ECHO hi }
+        LET $o: STRING = AWAIT $t
+    "#};
+    let err = run_script(&root, script).expect_err("void capture must fail");
+    assert!(err.to_string().contains("HANDLE<VOID>"), "{err}");
+    let script = indoc! {r#"
+        LET $t: HANDLE<VOID> = ASYNC { ECHO hi }
+        AWAIT $t
+        WRITE out.txt "done"
+    "#};
+    run_script(&root, script).expect("void join runs");
+}
+
+#[test]
+fn assign_async_non_handle_decl_rejected() {
+    // Every ASYNC position is HANDLE-headed: VOID, INT, and STRING
+    // declarations fail naming the variable and the offending decl.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for decl in ["VOID", "INT", "STRING"] {
+        let script = format!("LET $t: {decl} = ASYNC {{ ECHO hi }}\n", decl = decl,);
+        let err = run_script(&root, &script).expect_err("non-handle ASYNC must fail");
+        assert!(err.to_string().contains("not HANDLE"), "{decl}: {err}");
+    }
 }
 
 #[test]

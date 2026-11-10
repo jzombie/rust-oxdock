@@ -5147,7 +5147,7 @@ fn func_loop_only_return_fails() {
     // Loops may trip zero times, so a `RETURN` inside a loop body
     // never satisfies the contract: the trailing path must return.
     let steps = crate::parse_script(indoc! {r#"
-        FUNC F($xs: LIST<INT>) {
+        FUNC F($xs: LIST<INT>): INT {
             FOR $x: INT IN $xs {
                 RETURN $x
             }
@@ -5167,7 +5167,7 @@ fn func_branch_missing_return_fails() {
     // An `ELSE`-less `IF` leaves the fallthrough path open: a
     // `RETURN` on the taken branch alone fails validation.
     let steps = crate::parse_script(indoc! {r#"
-        FUNC F($flag: BOOL) {
+        FUNC F($flag: BOOL): INT {
             IF $flag {
                 RETURN 1
             }
@@ -5187,7 +5187,7 @@ fn func_trailing_return_after_loop_passes() {
     // The same loop with a trailing `RETURN` closes every path and
     // runs end to end.
     let steps = crate::parse_script(indoc! {r#"
-        FUNC FIRST($xs: LIST<INT>) {
+        FUNC FIRST($xs: LIST<INT>): INT {
             FOR $x: INT IN $xs {
                 RETURN $x
             }
@@ -5224,10 +5224,10 @@ fn describe_spells_union_sets() {
 
 #[test]
 fn func_bare_return_fails_non_string_slot() {
-    // A bare `RETURN` yields the empty string: it type-checks only
-    // against a `STRING` slot and fails every other contract.
+    // Bare `RETURN` is the void exit: it never satisfies a value
+    // type, not even `STRING`.
     let steps = crate::parse_script(indoc! {r#"
-        FUNC F($flag: BOOL) {
+        FUNC F($flag: BOOL): INT {
             IF $flag {
                 RETURN 1
             }
@@ -5239,8 +5239,8 @@ fn func_bare_return_fails_non_string_slot() {
     let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
     let err = run_expect_err(fs, &steps, MockProcessManager::default());
     assert!(
-        format!("{err:#}").contains("cannot unify"),
-        "bare return mismatches INT: {err:#}"
+        format!("{err:#}").contains("bare RETURN"),
+        "bare return never satisfies INT: {err:#}"
     );
 }
 

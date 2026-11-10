@@ -55,7 +55,7 @@ fn type_alias_parses_to_name_and_target() {
 
 #[test]
 fn type_alias_rejects_nested_and_guarded_positions() {
-    assert!(parse_script("FUNC F() {\nTYPE X = MAP\n}\n", mock_lower).is_err());
+    assert!(parse_script("FUNC F(): VOID {\nTYPE X = MAP\n}\n", mock_lower).is_err());
     assert!(parse_script("IF true {\nTYPE X = MAP\n}\n", mock_lower).is_err());
     assert!(parse_script("[bool:true]\nTYPE X = MAP\n", mock_lower).is_err());
 }
@@ -74,7 +74,7 @@ fn generic_for_key_still_hits_the_pin() {
 
 #[test]
 fn func_params_accept_generic_spellings() {
-    let steps = parse_script("FUNC F($p: LIST<MAP>) {\n}\n", mock_lower).expect("parses");
+    let steps = parse_script("FUNC F($p: LIST<MAP>): VOID {\n}\n", mock_lower).expect("parses");
     match &steps[0].kind {
         StepKind::FuncDef { params, .. } => {
             assert_eq!(params.len(), 1);

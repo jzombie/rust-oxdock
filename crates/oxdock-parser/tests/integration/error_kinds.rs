@@ -869,3 +869,64 @@ fn valid_nested_blocks_still_parse() {
     .expect("balanced nesting must parse");
     assert_eq!(steps.len(), 2);
 }
+
+#[test]
+fn func_missing_return_annotation_fails_at_parse() {
+    // #287: the return annotation is mandatory. A `FUNC` header with
+    // name and parens matched but no `: TYPE` is a hard parse error
+    // naming the fix, never a silent miss to generic.
+    for script in [
+        "FUNC FOO() { RETURN 1 }\n",
+        "FUNC FOO($x: INT) { RETURN $x }\n",
+        "ASYNC FUNC FETCH() { RETURN $t }\n",
+    ] {
+        let err = parse_script(script, mock_lower).expect_err("missing : TYPE must fail");
+        assert!(
+            matches!(
+                err.kind(),
+                ParseErrorKind::Validation { command } if command == "FUNC"
+            ),
+            "unexpected kind for {script:?}: {:?}",
+            err.kind()
+        );
+        let text = err_text(&err);
+        assert!(
+            text.contains("requires a return type"),
+            "must name the fix, got: {text}"
+        );
+    }
+}
+
+#[test]
+fn func_return_annotation_parses_into_ast() {
+    // The annotation rides the AST verbatim; `ASYNC FUNC` sets the
+    // flag with no constraint validation (the checker owns that).
+    let steps = parse_script("FUNC FOO(): INT { RETURN 1 }\n", mock_lower).expect("parses");
+    match &steps[0].kind {
+        oxdock_parser::StepKind::FuncDef {
+            return_type,
+            is_async,
+            ..
+        } => {
+            assert_eq!(return_type, "INT");
+            assert!(!is_async);
+        }
+        other => panic!("expected FuncDef, got {other:?}"),
+    }
+    let steps = parse_script(
+        "ASYNC FUNC FETCH(): HANDLE<STRING> { RETURN $t }\n",
+        mock_lower,
+    )
+    .expect("parses");
+    match &steps[0].kind {
+        oxdock_parser::StepKind::FuncDef {
+            return_type,
+            is_async,
+            ..
+        } => {
+            assert_eq!(return_type, "HANDLE<STRING>");
+            assert!(*is_async);
+        }
+        other => panic!("expected FuncDef, got {other:?}"),
+    }
+}
