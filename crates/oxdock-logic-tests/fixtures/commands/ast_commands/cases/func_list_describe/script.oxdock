@@ -1,5 +1,5 @@
 IMPORT [STD]
-FUNC HELLO($name: STRING) {
+FUNC HELLO($name: STRING): STRING {
     RETURN $name
 }
 LET $names: LIST<STRING> = FUNCTIONS()
@@ -10,3 +10,4 @@ LET $d: MAP<ANY> = DESCRIBE("STD::GLOB")
 WRITE kind.txt "{{ $d.kind }}"
 LET $h: MAP<ANY> = DESCRIBE("SCRIPT::HELLO")
 WRITE hello-kind.txt "{{ $h.kind }}"
+WRITE hello-returns.txt "{{ $h.returns }}"

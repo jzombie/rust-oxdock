@@ -807,6 +807,9 @@ fn is_compatible(actual: &TypeTag, declared: &TypeTag) -> bool {
     match (actual, declared) {
         (TypeTag::ListOf(a), TypeTag::ListOf(e)) => is_compatible(a, e),
         (TypeTag::MapOf(a), TypeTag::MapOf(e)) => is_compatible(a, e),
+        (TypeTag::Record(a_fields), TypeTag::MapOf(e)) => {
+            a_fields.iter().all(|field| is_compatible(&field.ty, e))
+        }
         (TypeTag::HandleOf(a), TypeTag::HandleOf(e)) => is_compatible(a, e),
         (TypeTag::Record(a_fields), TypeTag::Record(e_fields)) => {
             e_fields

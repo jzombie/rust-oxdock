@@ -44,7 +44,7 @@ fn type_exports_skip_tools_but_resolve_signatures() {
     // (no lobotomy) and serve.
     let session = init_session(indoc! {r#"
         TYPE PERSON = MAP<name: STRING>
-        FUNC GREET($p: PERSON) {
+        FUNC GREET($p: PERSON): STRING {
             RETURN "hi"
         }
         EXPORT GREET
@@ -78,16 +78,16 @@ fn handler_config(script: &str) -> (McpServerConfig, GuardedPath) {
 const DEMO: &str = indoc! {r#"
     ENV APP_NAME=oxdock-demo
     # Adds two integers. Returns the sum.
-    FUNC ADD($a: INT, $b: INT) {
+    FUNC ADD($a: INT, $b: INT): INT {
       RETURN $a + $b
     }
     # Echoes, then returns the name unchanged.
-    FUNC GREET($name: STRING) {
+    FUNC GREET($name: STRING): STRING {
       ECHO "hello"
       RETURN $name
     }
     # Returns the ambient app name. Proves linear init ran.
-    FUNC APP_NAME() {
+    FUNC APP_NAME(): STRING {
       RETURN env:APP_NAME
     }
     EXPORT [ADD, GREET, APP_NAME]
@@ -129,14 +129,14 @@ fn call_dispatches_math_and_truncates_captures() {
 
 const STREAM_DEMO: &str = indoc! {r#"
     # Says two lines, then returns. Both lines stream live.
-    FUNC CHATTY() {
+    FUNC CHATTY(): STRING {
       ECHO "one"
       ECHO "two"
       RETURN "done"
     }
     # Writes only into a pipe: nothing default-routed, so nothing
     # streams. Redirected bytes stay silent by construction.
-    FUNC QUIET() {
+    FUNC QUIET(): STRING {
       LET $p: PIPE
       WITH_IO [stdout=$p] ECHO "into pipe"
       RETURN "done"
@@ -193,7 +193,7 @@ fn bare_run_output_streams_through_the_pump() {
     // `echo` via sh keeps this platform-gated to non-Windows; the
     // ECHO test above covers the shared tee path everywhere.
     let script = indoc! {r#"
-        FUNC LOUD() {
+        FUNC LOUD(): STRING {
           RUN ["sh", "-c", "echo loud"]
           RETURN "done"
         }
@@ -255,7 +255,7 @@ fn qualified_host_export_serves_with_registry_docs() {
 #[test]
 fn missing_export_list_fails_fast() {
     let (config, _root) = handler_config(indoc! {r#"
-        FUNC FOO() {
+        FUNC FOO(): STRING {
           RETURN "x"
         }
     "#});
@@ -265,7 +265,7 @@ fn missing_export_list_fails_fast() {
 #[test]
 fn opaque_export_fails_before_serving() {
     let (config, _root) = handler_config(indoc! {r#"
-        FUNC P($p: PIPE) {
+        FUNC P($p: PIPE): STRING {
           RETURN "x"
         }
         EXPORT P
@@ -387,7 +387,7 @@ fn reload_swaps_tools_and_keeps_old_on_broken_edit() {
     handler
         .reload(
             indoc! {r#"
-            FUNC SOLO() {
+            FUNC SOLO(): STRING {
               RETURN "one"
             }
             EXPORT SOLO
@@ -450,7 +450,7 @@ fn status_reports_generation_and_failure() {
 #[test]
 fn status_tool_name_is_reserved() {
     let (config, _root) = handler_config(indoc! {r#"
-        FUNC MCP_STATUS() {
+        FUNC MCP_STATUS(): STRING {
           RETURN "spoof"
         }
         EXPORT MCP_STATUS
@@ -461,17 +461,17 @@ fn status_tool_name_is_reserved() {
 const HANDLE_DEMO: &str = indoc! {r#"
     IMPORT [STD]
     # Spawns a sleeper and returns its handle for polling.
-    FUNC SPAWN_SLOW() {
+    FUNC SPAWN_SLOW(): HANDLE {
       LET $t: HANDLE = ASYNC { SLEEP 30s }
       RETURN $t
     }
     # Spawns a fast task and returns its handle for polling.
-    FUNC SPAWN_FAST() {
+    FUNC SPAWN_FAST(): HANDLE {
       LET $t: HANDLE = ASYNC { ECHO "hi"; RETURN "done" }
       RETURN $t
     }
     # Polls any task handle by value.
-    FUNC POLL_WRAP($t: HANDLE) {
+    FUNC POLL_WRAP($t: HANDLE): MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> {
       RETURN TASK_POLL($t)
     }
     EXPORT [SPAWN_SLOW, SPAWN_FAST, POLL_WRAP, STD::TASK_POLL]
@@ -599,7 +599,7 @@ fn task_poll_rejects_non_handle() {
 const BG_WORKSPACE_DEMO: &str = indoc! {r#"
     IMPORT [STD]
     # Detaches a directory read under a workspace switch.
-    FUNC BG_WHERE() {
+    FUNC BG_WHERE(): HANDLE {
       LET $t: HANDLE = ASYNC {
         WORKSPACE LOCAL
         LET $d: STRING = CWD
@@ -641,7 +641,7 @@ fn async_block_supports_workspace_switch_and_handle_return() {
 fn async_block_runs_child_processes() {
     let mut session = init_session(indoc! {r#"
         IMPORT [STD]
-        FUNC BG_RUN() {
+        FUNC BG_RUN(): HANDLE {
           LET $t: HANDLE = ASYNC {
             LET $o: STRING = RUN ["echo", "bg-hi"]
             RETURN TEXT_TRIM($o)
@@ -682,7 +682,7 @@ fn reexported_import_serves_as_tool() {
     let lib = fs.root().join("lib.oxdock").expect("lib path");
     fs.write_file(
         &lib,
-        b"LET $n: INT = 0\nFUNC COUNT() {\n $n = $n + 1\n RETURN $n\n}\nEXPORT COUNT\n",
+        b"LET $n: INT = 0\nFUNC COUNT(): INT {\n $n = $n + 1\n RETURN $n\n}\nEXPORT COUNT\n",
     )
     .expect("seed lib");
     let engine = Engine::new();

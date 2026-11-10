@@ -111,6 +111,7 @@ fn schema_rejects_opaque_types() {
         TypeTag::Path,
         TypeTag::Semaphore,
         TypeTag::Permit,
+        TypeTag::Void,
     ] {
         schema_for_tag(&tag).expect_err(format!("{tag:?} must fail").as_str());
         assert!(!is_json_compatible(&tag));
@@ -133,6 +134,13 @@ fn schema_projects_handle_as_task_id_object() {
     assert!(is_json_compatible(&TypeTag::ListOf(Arc::new(
         TypeTag::Handle
     ))));
+    // Parameterized handles project identically: the payload is
+    // phantom on the wire, so HANDLE<T> serves like HANDLE.
+    let shaped = TypeTag::HandleOf(Arc::new(TypeTag::String));
+    assert!(is_json_compatible(&shaped));
+    let schema = schema_for_tag(&shaped).expect("HANDLE<T> schema");
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["properties"]["task_id"]["type"], "integer");
 }
 
 #[test]
@@ -257,6 +265,16 @@ fn output_envelope_is_always_an_object() {
     // Opaque returns fail here, before the reactor opens.
     returns_int.returns = Some(TypeTag::Pipe);
     output_schema_for(&returns_int).expect_err("opaque returns must fail");
+
+    // VOID has no value to project: tools must not serve it.
+    returns_int.returns = Some(TypeTag::Void);
+    output_schema_for(&returns_int).expect_err("VOID returns must fail");
+
+    // HANDLE payloads project as task-id objects, VOID included only
+    // in the shape sense (a void task still yields a joinable handle).
+    returns_int.returns = Some(TypeTag::HandleOf(Arc::new(TypeTag::String)));
+    let typed = output_schema_for(&returns_int).expect("HANDLE<T> output schema");
+    assert_eq!(typed["properties"]["result"]["type"], "object");
 }
 
 #[test]

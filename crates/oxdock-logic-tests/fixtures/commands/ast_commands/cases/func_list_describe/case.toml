@@ -1,4 +1,4 @@
 name = "func_list_describe"
 
 [expect]
-files = { "kind.txt" = "host", "hello-kind.txt" = "script" }
+files = { "kind.txt" = "host", "hello-kind.txt" = "script", "hello-returns.txt" = "STRING" }

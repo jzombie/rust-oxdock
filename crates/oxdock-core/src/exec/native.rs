@@ -3908,6 +3908,31 @@ mod tests {
     }
 
     #[test]
+    fn describe_entry_renders_handle_payload() {
+        // Shaped handles render structurally (HANDLE<STRING>, not
+        // bare HANDLE): script ASYNC FUNC declarations surface their
+        // payload through DESCRIBE exactly as declared.
+        let meta = FuncMeta {
+            name: "SCRIPT::FETCH".to_string(),
+            module: "SCRIPT".to_string(),
+            kind: FuncKind::Script,
+            params: Some(vec![]),
+            returns: Some(TypeTag::HandleOf(std::sync::Arc::new(TypeTag::String))),
+            rpn: false,
+            summary: "test-only",
+            docs: "test-only",
+            examples: &[],
+        };
+        let value = meta_to_value(&meta);
+        let map = value.as_map().expect("describe value is a map");
+        assert_eq!(
+            map.get("returns").and_then(Value::as_str),
+            Some("HANDLE<STRING>"),
+            "returns render the payload"
+        );
+    }
+
+    #[test]
     fn describe_entry_carries_optional_flag() {
         // The `optional` key on params entries is the machine-readable
         // half of the `?` rendering: pin both values through the same
