@@ -16,13 +16,22 @@
 //!
 //! The rules, in full:
 //!
-//! - Every terminal `RETURN` path of a `FUNC` body must unify to one
-//!   type (`T` + `T` = `T`; anything + `ANY` = `ANY`; disjoint
-//!   concrete types fail naming both). `EXIT` ends a path without
-//!   contributing a type.
+//! - Every terminal `RETURN` checks top-down against the declared
+//!   return type via structural subtyping (`is_compatible`): unions
+//!   widen only by membership on the declared side and narrow by
+//!   containment on the actual side, containers recurse, and
+//!   `VOID` unifies only with itself. There is no bottom-up
+//!   unification on the script-function path. `EXIT` ends a path
+//!   without contributing a type.
 //! - A body with a `RETURN` on some live path but reachable
-//!   fallthrough fails with `MissingReturn`. A body with no live
-//!   `RETURN` is `VOID`; `VOID` never defaults to `STRING`.
+//!   fallthrough fails with `MissingReturn` unless the declared
+//!   type is `VOID`. A body with no live `RETURN` is `VOID` only
+//!   when declared `VOID`; `VOID` never defaults to `STRING`.
+//! - Bare `RETURN` is the void exit: legal only in `VOID` bodies,
+//!   a `MissingReturn`-family error everywhere else.
+//! - `VOID` is position-locked: legal only as a bare function
+//!   return or as the direct payload of `HANDLE`. Every other
+//!   declaration position rejects it naming the site.
 //! - Guards classify statically: absent or `[bool:true]` is
 //!   unconditional; `[bool:false]` is statically unreachable and
 //!   excluded from classification, unification, completeness, and
@@ -1277,16 +1286,16 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 .exec
                 .resolve_tag(ptype)
                 .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-            if matches!(tag, TypeTag::Void) {
-                bail!(
-                    "function `{name}` declares VOID parameter `${pname}`: VOID is only a return annotation"
-                );
-            }
+            self.exec
+                .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
             resolved.push((clean_var(pname), tag));
         }
         let declared = self
             .exec
             .resolve_tag(return_type)
+            .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+        self.exec
+            .check_return_tag(&format!("function `{name}` returns"), &declared)
             .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
         for key in keys {
             self.funcs.insert(
@@ -1938,16 +1947,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         .exec
                         .resolve_tag(ptype)
                         .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-                    if matches!(tag, TypeTag::Void) {
-                        bail!(
-                            "function `{name}` declares VOID parameter `${pname}`: VOID is only a return annotation"
-                        );
-                    }
+                    self.exec.check_declaration_tag(
+                        &format!("function `{name}` param `${pname}`"),
+                        &tag,
+                    )?;
                     resolved.push((clean_var(pname), tag));
                 }
                 let declared = self
                     .exec
                     .resolve_tag(return_type)
+                    .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+                self.exec
+                    .check_return_tag(&format!("function `{name}` returns"), &declared)
                     .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
                 let info = FuncInfo {
                     params: resolved,
@@ -1979,12 +1990,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                if matches!(tag, TypeTag::Void) {
-                    bail!(
-                        "step {}: VOID is only a return annotation, not a variable type",
-                        idx + 1
-                    );
-                }
+                self.exec
+                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
                 let key = clean_var(var);
                 env.declare(key, tag, step.guard.as_ref(), idx)?;
                 Ok(live)
@@ -2001,12 +2008,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                if matches!(tag, TypeTag::Void) {
-                    bail!(
-                        "step {}: VOID is only a return annotation, not a variable type",
-                        idx + 1
-                    );
-                }
+                self.exec
+                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
                 let key = clean_var(var);
                 env.declare(key, tag, step.guard.as_ref(), idx)?;
                 Ok(live)
@@ -2038,12 +2041,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .exec
                     .resolve_tag(out_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                if matches!(tag, TypeTag::Void) {
-                    bail!(
-                        "step {}: VOID is only a return annotation, not a variable type",
-                        idx + 1
-                    );
-                }
+                self.exec
+                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
                 let payload = match handle_tag {
                     TypeTag::Handle => TypeTag::Any,
                     TypeTag::HandleOf(inner) => (*inner).clone(),
@@ -2126,6 +2125,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+                // HANDLE-headed first (the async rule owns that
+                // message), then the shared position rule for nested
+                // VOID (HANDLE<LIST<VOID>> and friends).
                 let payload = match &tag {
                     TypeTag::Handle => TypeTag::Any,
                     TypeTag::HandleOf(inner_tag) => (**inner_tag).clone(),
@@ -2136,6 +2138,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         render_structural(&tag)
                     ),
                 };
+                self.exec
+                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)
+                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
                 if inner.bare_return && !matches!(payload, TypeTag::Void) {
                     bail!(
                         "step {}: ASYNC `${}` declares {} but task has a bare RETURN; bare RETURN is only a void exit",
@@ -3510,57 +3515,73 @@ mod tests {
     }
 
     /// Single source of truth for test coverage of every TypeTag
-    /// constructor. Each line names a constructor pattern and its
-    /// canonical test representative, and expands to BOTH:
-    /// - variant_inventory(): the representatives vec feeding the laws;
-    /// - anchor_exhaustive(): an exhaustive no-wildcard match over the
-    ///   enum itself. Adding a constructor WITHOUT extending this list
-    ///   breaks compilation at the invocation below, so coverage can
-    ///   never silently lag the enum: one line per constructor serves
-    ///   both, atomically. (Compiler-enforced visit + atomic update =
-    ///   the geometric lock. A std::mem::variant_count cross-check
-    ///   would be ideal but is unstable (rust-lang/rust#73662).)
+    /// constructor. The grammar is deliberately ident-only: `_` is
+    /// not an ident, so a wildcard arm is SYNTACTICALLY
+    /// inexpressible here -- the bypass an LLM would otherwise reach
+    /// for (the compiler even suggests it for E0004) cannot be
+    /// written. Representatives are DERIVED from the names, not
+    /// authored, so a bogus representative is equally inexpressible.
+    /// Each line expands to BOTH an inventory entry and an anchor
+    /// match arm, atomically:
+    /// - `units`: bare constructors; pattern and representative are
+    ///   the constructor itself.
+    /// - `shaped`: single-payload constructors with one representative
+    ///   payload each; pattern ignores the payload, representative
+    ///   wraps it.
+    /// - `special`: multi-field constructors with hand-fixed shapes
+    ///   (Custom carries a descriptor, Record a field table, Union two
+    ///   slots); patterns and representatives are hardcoded in the
+    ///   macro body. A new multi-field constructor forces a visible
+    ///   macro-body edit.
+    /// Adding any constructor without extending this list breaks
+    /// compilation at the invocation below (non-exhaustive anchor),
+    /// so coverage can never silently lag the enum. Deleting or
+    /// hollowing the anchor is review-visible sabotage, not drift:
+    /// it shows up as test deletion in the diff.
     macro_rules! tag_coverage {
-        ( $( $pat:pat => $rep:expr ),* $(,)? ) => {
+        (
+            units: [ $($unit:ident),* $(,)? ],
+            shaped: [ $($shaped:ident ( $payload:ident )),* $(,)? ],
+            special: [ $($special:ident),* $(,)? ]
+        ) => {
             fn variant_inventory() -> Vec<TypeTag> {
-                vec![ $($rep),* ]
+                vec![
+                    $( TypeTag::$unit ),*,
+                    $( TypeTag::$shaped(std::sync::Arc::new(TypeTag::$payload)) ),*,
+                    $( special_representative(stringify!($special)) ),*
+                ]
             }
             fn anchor_exhaustive(tag: &TypeTag) {
                 match tag {
-                    $( $pat => {} ),*
+                    $( TypeTag::$unit => {} ),*,
+                    $( TypeTag::$shaped(_) => {} ),*,
+                    TypeTag::Custom(_) => {},
+                    TypeTag::Record(_) => {},
+                    TypeTag::Union(..) => {},
                 }
             }
         };
     }
+    fn special_representative(which: &str) -> TypeTag {
+        match which {
+            "Custom" => TypeTag::Custom(oxdock_parser::startup_descriptors()[0].1),
+            "Record" => TypeTag::Record(
+                vec![oxdock_parser::Field {
+                    name: "name".to_string(),
+                    ty: TypeTag::String,
+                    docs: "",
+                    optional: false,
+                }]
+                .into(),
+            ),
+            "Union" => TypeTag::union(vec![TypeTag::Int, TypeTag::String]),
+            _ => unreachable!("tag_coverage special must name Custom, Record, or Union"),
+        }
+    }
     tag_coverage! {
-        TypeTag::String => TypeTag::String,
-        TypeTag::Int => TypeTag::Int,
-        TypeTag::Float => TypeTag::Float,
-        TypeTag::Bool => TypeTag::Bool,
-        TypeTag::List => TypeTag::List,
-        TypeTag::Map => TypeTag::Map,
-        TypeTag::Pipe => TypeTag::Pipe,
-        TypeTag::Handle => TypeTag::Handle,
-        TypeTag::Void => TypeTag::Void,
-        TypeTag::HandleOf(_) => TypeTag::HandleOf(std::sync::Arc::new(TypeTag::String)),
-        TypeTag::Duration => TypeTag::Duration,
-        TypeTag::Path => TypeTag::Path,
-        TypeTag::Semaphore => TypeTag::Semaphore,
-        TypeTag::Permit => TypeTag::Permit,
-        TypeTag::Any => TypeTag::Any,
-        TypeTag::Custom(_) => TypeTag::Custom(oxdock_parser::startup_descriptors()[0].1),
-        TypeTag::ListOf(_) => TypeTag::ListOf(std::sync::Arc::new(TypeTag::Int)),
-        TypeTag::Record(_) => TypeTag::Record(
-            vec![oxdock_parser::Field {
-                name: "name".to_string(),
-                ty: TypeTag::String,
-                docs: "",
-                optional: false,
-            }]
-            .into(),
-        ),
-        TypeTag::MapOf(_) => TypeTag::MapOf(std::sync::Arc::new(TypeTag::String)),
-        TypeTag::Union(..) => TypeTag::union(vec![TypeTag::Int, TypeTag::String])
+        units: [String, Int, Float, Bool, List, Map, Pipe, Handle, Void, Duration, Path, Semaphore, Permit, Any],
+        shaped: [HandleOf(String), HandleOf(Int), HandleOf(Void), HandleOf(Any), ListOf(Int), MapOf(String)],
+        special: [Custom, Record, Union]
     }
 
     /// Tag universe for the subtyping laws: the full constructor
@@ -3573,34 +3594,67 @@ mod tests {
             TypeTag::HandleOf(Arc::new(TypeTag::Void)),
             TypeTag::HandleOf(Arc::new(TypeTag::Any)),
             TypeTag::HandleOf(Arc::new(TypeTag::Int)),
+            TypeTag::HandleOf(Arc::new(TypeTag::ListOf(Arc::new(TypeTag::Int)))),
+            TypeTag::HandleOf(Arc::new(TypeTag::Union(
+                "INT|STRING".into(),
+                vec![TypeTag::Int, TypeTag::String].into(),
+            ))),
             TypeTag::ListOf(Arc::new(TypeTag::Union(
                 "INT|STRING".into(),
                 vec![TypeTag::Int, TypeTag::String].into(),
             ))),
+            TypeTag::ListOf(Arc::new(TypeTag::ListOf(Arc::new(TypeTag::Int)))),
+            TypeTag::MapOf(Arc::new(TypeTag::Union(
+                "INT|STRING".into(),
+                vec![TypeTag::Int, TypeTag::String].into(),
+            ))),
+            TypeTag::Record(
+                vec![
+                    oxdock_parser::Field {
+                        name: "req".to_string(),
+                        ty: TypeTag::ListOf(Arc::new(TypeTag::String)),
+                        docs: "",
+                        optional: false,
+                    },
+                    oxdock_parser::Field {
+                        name: "opt".to_string(),
+                        ty: TypeTag::Int,
+                        docs: "",
+                        optional: true,
+                    },
+                ]
+                .into(),
+            ),
             TypeTag::Union(
                 "INT|STRING|BOOL".into(),
                 vec![TypeTag::Int, TypeTag::String, TypeTag::Bool].into(),
+            ),
+            TypeTag::Union(
+                "LIST<INT>|MAP<STRING>".into(),
+                vec![
+                    TypeTag::ListOf(Arc::new(TypeTag::Int)),
+                    TypeTag::MapOf(Arc::new(TypeTag::String)),
+                ]
+                .into(),
             ),
         ]);
         universe
     }
 
+    // NOTE: no duplicates test here on purpose. The macro above makes
+    // omission impossible (anchor fails compilation) and duplication
+    // harmless (laws are universal quantifications; running one twice
+    // changes nothing). Payload variety inside `shaped` (VOID/ANY
+    // payloads) is intentional and pinned by the dedicated handle
+    // laws below, which hardcode their tags rather than relying on
+    // inventory membership -- so eroding the list cannot silently
+    // weaken them. What remains is review-visible diff, not drift.
     #[test]
-    fn universe_has_no_duplicate_constructors() {
-        // Copy-paste guard for the single list above: two lines for
-        // one constructor would silently overweight it in the laws.
-        // (Omission is impossible: the anchor match would fail
-        // compilation. This covers the remaining failure mode.)
-        use std::collections::HashSet;
-        let discriminants: HashSet<_> = variant_inventory()
-            .iter()
-            .map(std::mem::discriminant)
-            .collect();
-        assert_eq!(
-            discriminants.len(),
-            variant_inventory().len(),
-            "variant_inventory lists a constructor twice"
-        );
+    fn anchor_covers_inventory() {
+        // Ties the two macro outputs together at runtime: every
+        // inventoried tag passes through the exhaustive anchor.
+        // (Compile-time exhaustiveness is what forces future arms;
+        // this asserts the pairing stays live.)
         for tag in variant_inventory() {
             anchor_exhaustive(&tag);
         }
@@ -3695,6 +3749,39 @@ mod tests {
             &TypeTag::Handle,
             &TypeTag::HandleOf(Arc::new(TypeTag::String))
         ));
+    }
+
+    #[test]
+    fn subtyping_is_transitive() {
+        // Fuzz the preorder law over the whole universe: if a admits
+        // into b and b into c, a must admit into c. A blind `=> true`
+        // arm or a misplaced ANY check breaks this combinatorically,
+        // so inconsistent admission rules cannot hide behind a few
+        // hand-picked cases. VOID is excluded only as an endpoint the
+        // bottom law already pins (VOID admits nothing, nothing
+        // admits VOID except VOID).
+        let universe = law_universe();
+        for a in &universe {
+            for b in &universe {
+                if !is_compatible(a, b) {
+                    continue;
+                }
+                for c in &universe {
+                    if !is_compatible(b, c) {
+                        continue;
+                    }
+                    assert!(
+                        is_compatible(a, c),
+                        "transitivity violated: {} <: {} <: {} but {} !<: {}",
+                        render_structural(a),
+                        render_structural(b),
+                        render_structural(c),
+                        render_structural(a),
+                        render_structural(c)
+                    );
+                }
+            }
+        }
     }
 
     #[test]

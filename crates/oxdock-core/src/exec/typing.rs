@@ -181,7 +181,7 @@ impl<P: ProcessManager> ExecState<P> {
         }
         if let Some(fields) = self.record_schemas.get(name) {
             let tag = TypeTag::Record(fields.clone());
-            self.check_tag_known("declaration", &tag)?;
+            self.check_tag_known("declaration", &tag, false)?;
             return Ok(tag);
         }
         if let Some(target) = self.type_aliases.get(name) {
@@ -418,7 +418,16 @@ impl<P: ProcessManager> ExecState<P> {
     /// registered descriptor, shaped tags recurse into fields and
     /// elements, builtins are variants and cannot be misspelled.
     /// Unknown names bail naming the use site and every known type.
-    fn check_tag_known(&self, what: &str, tag: &TypeTag) -> Result<()> {
+    /// Single choke for declaration validity: known customs plus
+    /// the VOID position rule. VOID is legal only as a bare function
+    /// return (`top_void` covers exactly that call) or as the direct
+    /// payload of HANDLE (`HANDLE<VOID>`); every other position --
+    /// variable, parameter, record field, union member, container
+    /// element, or anything nested deeper -- is a static error naming
+    /// the site. One recursion serves all declaration sites, so the
+    /// rule cannot drift between LET, params, returns, schemas, and
+    /// aliases: resolve first, then validate here.
+    fn check_tag_known(&self, what: &str, tag: &TypeTag, top_void: bool) -> Result<()> {
         match tag {
             TypeTag::Custom(descriptor) => {
                 if !self.types.contains_key(descriptor.name) {
@@ -429,19 +438,28 @@ impl<P: ProcessManager> ExecState<P> {
                     );
                 }
             }
-            TypeTag::ListOf(element) => self.check_tag_known(what, element)?,
-            TypeTag::HandleOf(payload) => self.check_tag_known(what, payload)?,
-            TypeTag::MapOf(values) => self.check_tag_known(what, values)?,
+            TypeTag::Void if !top_void => {
+                bail!(
+                    "{what} declares VOID outside a return annotation: VOID is only a return type (or HANDLE<VOID> payload)"
+                );
+            }
+            TypeTag::Void => {}
+            TypeTag::ListOf(element) => self.check_tag_known(what, element, false)?,
+            TypeTag::HandleOf(payload) => self.check_tag_known(what, payload, true)?,
+            TypeTag::MapOf(values) => self.check_tag_known(what, values, false)?,
             TypeTag::Record(fields) => {
                 for field in fields.iter() {
-                    self.check_tag_known(what, &field.ty)?;
+                    self.check_tag_known(what, &field.ty, false)?;
                 }
             }
             // Union members recurse like shaped tags: every member
             // must name a known type, so no unknown hides in a set.
+            // A VOID member is never admitted: unions of handles stay
+            // inside the payload (HANDLE<INT|STRING>), never at the
+            // root or beside a value type.
             TypeTag::Union(_, members) => {
                 for member in members.iter() {
-                    self.check_tag_known(what, member)?;
+                    self.check_tag_known(what, member, false)?;
                 }
             }
             // Bare words are variants and cannot be misspelled: every
@@ -455,7 +473,6 @@ impl<P: ProcessManager> ExecState<P> {
             | TypeTag::Map
             | TypeTag::Pipe
             | TypeTag::Handle
-            | TypeTag::Void
             | TypeTag::Duration
             | TypeTag::Path
             | TypeTag::Semaphore
@@ -463,6 +480,21 @@ impl<P: ProcessManager> ExecState<P> {
             | TypeTag::Any => {}
         }
         Ok(())
+    }
+
+    /// Declaration-site gate for everything that is not a function
+    /// return: LET bindings, parameters, schemas, aliases at use.
+    /// Single choke so the VOID position rule cannot drift between
+    /// the static checker and runtime definition paths.
+    pub fn check_declaration_tag(&self, what: &str, tag: &TypeTag) -> Result<()> {
+        self.check_tag_known(what, tag, false)
+    }
+
+    /// Return-position gate: bare VOID is legal here (and only
+    /// here, besides HANDLE payloads). Same single recursion as
+    /// every other declaration site.
+    pub fn check_return_tag(&self, what: &str, tag: &TypeTag) -> Result<()> {
+        self.check_tag_known(what, tag, true)
     }
 
     /// Fail fast when any registered function declares param or return
@@ -480,7 +512,7 @@ impl<P: ProcessManager> ExecState<P> {
                 for (position, param) in params.iter().enumerate() {
                     if let Some(expected) = param.param_type.as_ref() {
                         let what = format!("param '{}' of '{}'", param.name, meta.name);
-                        Self::check_tag_known(self, &what, expected)?;
+                        Self::check_tag_known(self, &what, expected, false)?;
                     }
                     if param.param_type.is_none() && param.allowed.is_some() {
                         anyhow::bail!(
@@ -513,7 +545,7 @@ impl<P: ProcessManager> ExecState<P> {
             }
             if let Some(returns) = meta.returns.as_ref() {
                 let what = format!("return of '{}'", meta.name);
-                Self::check_tag_known(self, &what, returns)?;
+                Self::check_tag_known(self, &what, returns, true)?;
             }
         }
         Ok(())

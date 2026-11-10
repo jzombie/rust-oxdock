@@ -2479,14 +2479,13 @@ pub(crate) fn define_func<P: ProcessManager>(
     let mut resolved = Vec::with_capacity(params.len());
     for (pname, ptype) in params {
         let tag = cx.state.resolve_tag(ptype)?;
-        if matches!(tag, TypeTag::Void) {
-            anyhow::bail!(
-                "FUNC {name} declares VOID parameter ${pname}: VOID is only a return annotation"
-            );
-        }
+        cx.state
+            .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
         resolved.push((pname.clone(), tag));
     }
     let return_tag = cx.state.resolve_tag(return_type)?;
+    cx.state
+        .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
     // Runtime counterpart of the parse-time scope validation; the single
     // registry owns the reserved, duplicate, and shadowing rules. The
     // owner is the innermost module on the stack (lexically enclosing

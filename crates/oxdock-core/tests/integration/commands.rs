@@ -5120,6 +5120,50 @@ fn func_handle_params_agree_across_gates() {
 }
 
 #[test]
+fn void_outside_return_or_handle_payload_fails() {
+    // VOID is position-locked: bare function returns and direct
+    // HANDLE payloads only. Every other spelling -- variables,
+    // parameters, fields, union members, container elements, alias
+    // uses -- fails naming the site, no matter how deeply nested.
+    let cases = [
+        "LET $x: VOID = 1\n",
+        "LET $x: LIST<VOID> = []\n",
+        "LET $x: MAP<f: VOID> = {}\n",
+        "LET $x: INT|VOID = 1\n",
+        "FUNC F($p: LIST<VOID>): INT {\n    RETURN 0\n}\n",
+        "FUNC F(): LIST<VOID> {\n    RETURN []\n}\n",
+        "TYPE T = LIST<VOID>\nLET $x: T = []\n",
+        "TYPE U = INT|VOID\nLET $x: U = 1\n",
+        "LET $t: HANDLE<LIST<VOID>> = ASYNC { ECHO hi }\n",
+    ];
+    for script in cases {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+        let err = run_script(&root, script).expect_err("misplaced VOID must fail");
+        assert!(err.to_string().contains("VOID"), "{script:?}: {err}");
+    }
+}
+
+#[test]
+fn handle_void_return_and_join_pass() {
+    // The two legal VOID positions, end to end: a plain FUNC may
+    // declare HANDLE<VOID> and hand the task out for a bare join.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC M(): HANDLE<VOID> {
+            LET $t: HANDLE<VOID> = ASYNC { ECHO hi }
+            RETURN $t
+        }
+        LET $h: HANDLE<VOID> = M()
+        AWAIT $h
+        WRITE out.txt "done"
+    "#};
+    run_script(&root, script).expect("void handle round-trips");
+    assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "done");
+}
+
+#[test]
 fn func_generic_return_checks() {
     // Containers recurse structurally: matching payloads pass,
     // mismatched payloads fail naming the site.

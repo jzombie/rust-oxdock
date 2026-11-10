@@ -370,9 +370,14 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             };
             let mut resolved_params = Vec::with_capacity(def.0.len());
             for (pname, ptype) in &def.0 {
-                resolved_params.push((pname.clone(), cx.state.resolve_tag(ptype)?));
+                let tag = cx.state.resolve_tag(ptype)?;
+                cx.state
+                    .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
+                resolved_params.push((pname.clone(), tag));
             }
             let return_tag = cx.state.resolve_tag(&def.1)?;
+            cx.state
+                .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
             // Owner-tagged with the module: calls resolve names against
             // the shared store. Re-imports skip already-registered
             // names, so shared views stay idempotent.
@@ -668,9 +673,16 @@ pub(crate) fn import_file<P: ProcessManager>(
                 if cx.state.functions.get(&qualified).is_none() {
                     let mut resolved_params = Vec::with_capacity(params.len());
                     for (pname, ptype) in params {
-                        resolved_params.push((pname.clone(), cx.state.resolve_tag(ptype)?));
+                        let tag = cx.state.resolve_tag(ptype)?;
+                        cx.state.check_declaration_tag(
+                            &format!("function `{name}` param `${pname}`"),
+                            &tag,
+                        )?;
+                        resolved_params.push((pname.clone(), tag));
                     }
                     let return_tag = cx.state.resolve_tag(return_type)?;
+                    cx.state
+                        .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
                     cx.state.functions.define_aliased_in(
                         alias_frame,
                         alias,
