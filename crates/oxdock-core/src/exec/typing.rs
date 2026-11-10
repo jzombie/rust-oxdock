@@ -266,9 +266,23 @@ impl<P: ProcessManager> ExecState<P> {
         resolving: &mut Vec<String>,
         depth: usize,
     ) -> Result<TypeTag> {
-        if name != "LIST" && name != "MAP" {
+        if name != "LIST" && name != "MAP" && name != "HANDLE" {
             self.resolve_named(name, resolving, depth)?;
             bail!("'{name}' takes no type arguments");
+        }
+        if name == "HANDLE" {
+            let [
+                SpelledField {
+                    name: None,
+                    ty: payload,
+                    ..
+                },
+            ] = args
+            else {
+                bail!("HANDLE takes exactly one bare type argument");
+            };
+            let payload = self.build_rendered(payload, resolving, depth + 1)?;
+            return Ok(TypeTag::HandleOf(std::sync::Arc::new(payload)));
         }
         if name == "LIST" {
             let [
@@ -416,6 +430,7 @@ impl<P: ProcessManager> ExecState<P> {
                 }
             }
             TypeTag::ListOf(element) => self.check_tag_known(what, element)?,
+            TypeTag::HandleOf(payload) => self.check_tag_known(what, payload)?,
             TypeTag::MapOf(values) => self.check_tag_known(what, values)?,
             TypeTag::Record(fields) => {
                 for field in fields.iter() {
@@ -440,6 +455,7 @@ impl<P: ProcessManager> ExecState<P> {
             | TypeTag::Map
             | TypeTag::Pipe
             | TypeTag::Handle
+            | TypeTag::Void
             | TypeTag::Duration
             | TypeTag::Path
             | TypeTag::Semaphore

@@ -1418,7 +1418,7 @@ pub(super) fn inspect_var_map<P: ProcessManager>(
             map.insert("readers".to_string(), Value::int(info.readers as i64));
             map.insert("writers".to_string(), Value::int(info.writers as i64));
         }
-        (TypeTag::Handle, _) => {
+        (TypeTag::Handle | TypeTag::HandleOf(_), _) => {
             if let Some(task_id) = value.as_handle() {
                 map.insert("name".to_string(), Value::string(clean_var.clone()));
                 map.insert(
@@ -2469,23 +2469,38 @@ pub(crate) fn define_func<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     name: &str,
     params: &[(String, String)],
+    return_type: &str,
+    is_async: bool,
     body: &[Step],
 ) -> Result<()> {
-    // Resolve param type names where the directory lives, so the
+    // Resolve param and return type names where the directory lives, so the
     // registry only ever holds tags. Unknown names fail here naming
     // the function and every known type and schema.
     let mut resolved = Vec::with_capacity(params.len());
     for (pname, ptype) in params {
-        resolved.push((pname.clone(), cx.state.resolve_tag(ptype)?));
+        let tag = cx.state.resolve_tag(ptype)?;
+        if matches!(tag, TypeTag::Void) {
+            anyhow::bail!(
+                "FUNC {name} declares VOID parameter ${pname}: VOID is only a return annotation"
+            );
+        }
+        resolved.push((pname.clone(), tag));
     }
+    let return_tag = cx.state.resolve_tag(return_type)?;
     // Runtime counterpart of the parse-time scope validation; the single
     // registry owns the reserved, duplicate, and shadowing rules. The
     // owner is the innermost module on the stack (lexically enclosing
     // file), or `None` for entry definitions, which stay params-only.
     let owner = cx.state.current_module();
-    cx.state
-        .functions
-        .define_script(name, &resolved, body, owner.as_deref())
+    cx.state.functions.define_script(
+        name,
+        &resolved,
+        return_tag,
+        return_type,
+        is_async,
+        body,
+        owner.as_deref(),
+    )
 }
 
 /// Invoke a function by UPPERCASE name and return its value. One lookup
@@ -2653,7 +2668,10 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             let _ = cx.state.module_stack.pop();
             cx.state.type_aliases = saved_type_aliases;
             match (outcome, pop_res) {
-                (Ok(value), Ok(())) => Ok(value),
+                (Ok(value), Ok(())) => {
+                    let _ = (&def.return_type, &def.return_spelling, def.is_async);
+                    Ok(value)
+                }
                 (Err(e), _) => Err(e),
                 (Ok(_), Err(e)) => Err(e),
             }
@@ -4057,12 +4075,17 @@ pub(crate) fn dispatch_func_def<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
     let StepKind::FuncDef {
-        name, params, body, ..
+        name,
+        params,
+        return_type,
+        is_async,
+        body,
+        ..
     } = step
     else {
         unreachable!()
     };
-    define_func(cx, name, params, body)
+    define_func(cx, name, params, return_type, *is_async, body)
 }
 
 pub(crate) fn dispatch_import_file<P: ProcessManager>(
@@ -4105,7 +4128,7 @@ pub(crate) fn dispatch_return<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::Return { expr } = step else {
+    let StepKind::Return { expr, .. } = step else {
         unreachable!()
     };
     top_level_flow(handle_return(cx, 0, expr)?)

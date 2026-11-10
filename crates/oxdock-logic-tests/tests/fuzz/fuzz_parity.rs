@@ -772,7 +772,8 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         ],
         ("[a-z][a-zA-Z0-9_]*", arb_expr()).prop_map(|(var, expr)| StepKind::Set { var, expr }),
         arb_expr().prop_map(|expr| StepKind::Return {
-            expr: Box::new(expr)
+            expr: Box::new(expr),
+            is_bare: false,
         }),
         Just(StepKind::Break),
         Just(StepKind::Continue),
@@ -826,6 +827,8 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         ("FUZZ[A-Z0-9_]*", arb_body()).prop_map(|(name, body)| StepKind::FuncDef {
             name,
             params: vec![("coverage".to_string(), "STRING".to_string())],
+            return_type: "STRING".to_string(),
+            is_async: false,
             body,
             docs: None,
         }),
@@ -1476,8 +1479,18 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_eq!(lv, rv, "Set var mismatch: {}", msg);
             assert!(expr_image_eq(le, re), "Set expr mismatch: {}", msg);
         }
-        (StepKind::Return { expr: le }, StepKind::Return { expr: re }) => {
+        (
+            StepKind::Return {
+                expr: le,
+                is_bare: lb,
+            },
+            StepKind::Return {
+                expr: re,
+                is_bare: rb,
+            },
+        ) => {
             assert!(expr_image_eq(le, re), "Return expr mismatch: {}", msg);
+            assert_eq!(lb, rb, "Return bare mismatch: {}", msg);
         }
         (StepKind::Break, StepKind::Break) => {}
         (StepKind::Continue, StepKind::Continue) => {}
@@ -1532,18 +1545,24 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             StepKind::FuncDef {
                 name: ln,
                 params: lp,
+                return_type: lret,
+                is_async: lasync,
                 body: lb,
                 docs: ld,
             },
             StepKind::FuncDef {
                 name: rn,
                 params: rp,
+                return_type: rret,
+                is_async: rasync,
                 body: rb,
                 docs: rd,
             },
         ) => {
             assert_eq!(ln, rn, "FuncDef name mismatch: {}", msg);
             assert_eq!(lp, rp, "FuncDef params mismatch: {}", msg);
+            assert_eq!(lret, rret, "FuncDef return mismatch: {}", msg);
+            assert_eq!(lasync, rasync, "FuncDef async mismatch: {}", msg);
             assert_eq!(ld, rd, "FuncDef docs mismatch: {}", msg);
             assert_bodies_eq(lb, rb, msg);
         }
@@ -1984,6 +2003,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         },
         StepKind::Return {
             expr: Box::new(Expr::Literal(Value::bool(true))),
+            is_bare: false,
         },
         StepKind::ImportFile {
             path: "coverage.oxdock".to_string(),
@@ -2074,6 +2094,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 guard: None,
                 kind: StepKind::Return {
                     expr: Box::new(Expr::Literal(Value::string("covered".to_string()))),
+                    is_bare: false,
                 },
                 scope_enter: 0,
                 scope_exit: 0,
@@ -2108,6 +2129,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         StepKind::FuncDef {
             name: "COVERAGEFUNC".to_string(),
             params: vec![("coverage".to_string(), "STRING".to_string())],
+            return_type: "STRING".to_string(),
+            is_async: false,
             body: vec![Step {
                 guard: None,
                 kind: StepKind::Echo("coverage echo".into()),
@@ -2419,6 +2442,7 @@ fn sample_covered_exprs() -> Vec<Expr> {
             guard: None,
             kind: StepKind::Return {
                 expr: Box::new(Expr::Literal(Value::string("covered".to_string()))),
+                is_bare: false,
             },
             scope_enter: 0,
             scope_exit: 0,

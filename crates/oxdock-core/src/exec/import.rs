@@ -357,9 +357,13 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 StepKind::FuncDef {
                     name: def_name,
                     params,
+                    return_type,
+                    is_async,
                     body,
                     ..
-                } if def_name == name => Some((params.clone(), body.clone())),
+                } if def_name == name => {
+                    Some((params.clone(), return_type.clone(), *is_async, body.clone()))
+                }
                 _ => None,
             }) else {
                 bail!("IMPORT `{path}` has no such function `{name}`");
@@ -368,6 +372,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             for (pname, ptype) in &def.0 {
                 resolved_params.push((pname.clone(), cx.state.resolve_tag(ptype)?));
             }
+            let return_tag = cx.state.resolve_tag(&def.1)?;
             // Owner-tagged with the module: calls resolve names against
             // the shared store. Re-imports skip already-registered
             // names, so shared views stay idempotent.
@@ -380,7 +385,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                             alias,
                             name,
                             &resolved_params,
+                            return_tag.clone(),
                             &def.1,
+                            def.2,
+                            &def.3,
                             Some(&key),
                         )?;
                     }
@@ -390,7 +398,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                         cx.state.functions.define_script(
                             name,
                             &resolved_params,
+                            return_tag.clone(),
                             &def.1,
+                            def.2,
+                            &def.3,
                             Some(&key),
                         )?;
                     }
@@ -644,7 +655,12 @@ pub(crate) fn import_file<P: ProcessManager>(
             func_exports.iter().map(|e| e.as_str()).collect();
         for step in &steps {
             if let StepKind::FuncDef {
-                name, params, body, ..
+                name,
+                params,
+                return_type,
+                is_async,
+                body,
+                ..
             } = &step.kind
                 && func_exported.contains(name.as_str())
             {
@@ -654,11 +670,15 @@ pub(crate) fn import_file<P: ProcessManager>(
                     for (pname, ptype) in params {
                         resolved_params.push((pname.clone(), cx.state.resolve_tag(ptype)?));
                     }
+                    let return_tag = cx.state.resolve_tag(return_type)?;
                     cx.state.functions.define_aliased_in(
                         alias_frame,
                         alias,
                         name,
                         &resolved_params,
+                        return_tag,
+                        return_type,
+                        *is_async,
                         body,
                         Some(&key),
                     )?;

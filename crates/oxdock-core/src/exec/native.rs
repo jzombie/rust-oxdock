@@ -220,12 +220,15 @@ impl<P: ProcessManager> HostRegistration<P> {
     }
 }
 
-/// One user-defined function body (`FUNC NAME($p: TYPE, ...) { ... }`).
-/// Param types resolve to tags at definition time, where the type
+/// One user-defined function body (`FUNC NAME($p: TYPE, ...): RET { ... }`).
+/// Param and return types resolve to tags at definition time, where the type
 /// directory is in scope; the registry never holds raw type strings.
 #[derive(Debug, Clone)]
 pub(super) struct FuncDefData {
     pub(super) params: Vec<(String, TypeTag)>,
+    pub(super) return_type: TypeTag,
+    pub(super) return_spelling: String,
+    pub(super) is_async: bool,
     pub(super) body: Vec<Step>,
     /// Owning file module (#115, resolved display path): module-owned
     /// `FUNC`s resolve names against the module's shared store after
@@ -570,6 +573,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         &mut self,
         name: &str,
         params: &[(String, TypeTag)],
+        return_type: TypeTag,
+        return_spelling: &str,
+        is_async: bool,
         body: &[Step],
         module: Option<&str>,
     ) -> Result<()> {
@@ -618,7 +624,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                             })
                             .collect(),
                     ),
-                    returns: None,
+                    returns: Some(return_type.clone()),
                     rpn: false,
                     summary: "DSL-defined function.",
                     docs: "Defined via FUNC in script.",
@@ -626,6 +632,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 },
                 body: FuncBody::Script(FuncDefData {
                     params: params.to_vec(),
+                    return_type,
+                    return_spelling: return_spelling.to_string(),
+                    is_async,
                     body: body.to_vec(),
                     module: module.map(|m| m.to_string()),
                 }),
@@ -653,6 +662,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         alias: &str,
         name: &str,
         params: &[(String, TypeTag)],
+        return_type: TypeTag,
+        return_spelling: &str,
+        is_async: bool,
         body: &[Step],
         module: Option<&str>,
     ) -> Result<()> {
@@ -707,7 +719,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                             })
                             .collect(),
                     ),
-                    returns: None,
+                    returns: Some(return_type.clone()),
                     rpn: false,
                     summary: "DSL-defined function.",
                     docs: "Defined via FUNC in an imported script.",
@@ -715,6 +727,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 },
                 body: FuncBody::Script(FuncDefData {
                     params: params.to_vec(),
+                    return_type,
+                    return_spelling: return_spelling.to_string(),
+                    is_async,
                     body: body.to_vec(),
                     module: module.map(|m| m.to_string()),
                 }),

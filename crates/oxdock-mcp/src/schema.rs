@@ -46,7 +46,7 @@ pub fn schema_for_tag(tag: &TypeTag) -> Result<Value> {
             Ok(Value::Object(map))
         }
         TypeTag::Any => Ok(Value::Object(Map::new())),
-        TypeTag::Handle => {
+        TypeTag::Handle | TypeTag::HandleOf(_) => {
             let mut id = Map::new();
             id.insert("type".to_string(), Value::String("integer".to_string()));
             id.insert("minimum".to_string(), Value::Number(1.into()));
@@ -101,6 +101,7 @@ pub fn schema_for_tag(tag: &TypeTag) -> Result<Value> {
             Ok(Value::Object(map))
         }
         TypeTag::Pipe
+        | TypeTag::Void
         | TypeTag::Duration
         | TypeTag::Path
         | TypeTag::Semaphore
@@ -124,11 +125,12 @@ fn tag_name(tag: &TypeTag) -> String {
         TypeTag::List => "LIST".to_string(),
         TypeTag::Map => "MAP".to_string(),
         TypeTag::Pipe => "PIPE".to_string(),
-        TypeTag::Handle => "HANDLE".to_string(),
+        TypeTag::Handle | TypeTag::HandleOf(_) => "HANDLE".to_string(),
         TypeTag::Duration => "DURATION".to_string(),
         TypeTag::Path => "PATH".to_string(),
         TypeTag::Semaphore => "SEMAPHORE".to_string(),
         TypeTag::Permit => "PERMIT".to_string(),
+        TypeTag::Void => "VOID".to_string(),
         TypeTag::Any => "ANY".to_string(),
         TypeTag::Custom(descriptor) => descriptor.name.to_string(),
         TypeTag::ListOf(element) => format!("LIST<{}>", tag_name(element)),
@@ -163,12 +165,14 @@ pub fn is_json_compatible(tag: &TypeTag) -> bool {
         | TypeTag::List
         | TypeTag::Map
         | TypeTag::Any
-        | TypeTag::Handle => true,
+        | TypeTag::Handle
+        | TypeTag::HandleOf(_) => true,
         TypeTag::ListOf(element) => is_json_compatible(element),
         TypeTag::MapOf(values) => is_json_compatible(values),
         TypeTag::Record(fields) => fields.iter().all(|field| is_json_compatible(&field.ty)),
         TypeTag::Union(_, members) => members.iter().all(is_json_compatible),
         TypeTag::Pipe
+        | TypeTag::Void
         | TypeTag::Duration
         | TypeTag::Path
         | TypeTag::Semaphore

@@ -37,7 +37,7 @@ oxdock_embed! {
     name: UsageAssets,
     script: {
         INHERIT_ENV [CARGO_PKG_VERSION, CARGO_PKG_DESCRIPTION]
-        FUNC EMIT_BODY($is_net: BOOL) {
+        FUNC EMIT_BODY($is_net: BOOL): VOID {
             LET $net_flags: STRING = """
               --offline          open no sockets (endpoint flags require the `net` feature)
             """

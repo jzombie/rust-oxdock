@@ -4227,7 +4227,9 @@ fn parse_func_at(
     pos: usize,
     stmt: usize,
     ctx: &ParseCtx,
+    is_async: bool,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let keyword = if is_async { "ASYNC FUNC" } else { KEYWORD_FUNC };
     let fail = |msg: String| TokenError {
         stmt,
         msg,
@@ -4303,8 +4305,41 @@ fn parse_func_at(
             }
         }
     }
+    // Mandatory return annotation: FUNC NAME(...): RET { ... }.
+    // After paren group, require gap-optional colon then type shape.
+    // Missing colon after matched name+parens is a hard parse error
+    // (no legacy fallback). Non-block tails (neither colon nor brace)
+    // miss to generic (probed FUNC FOO() ECHO hi).
+    let is_colon = matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct(':')));
+    if !is_colon {
+        let is_brace = matches!(
+            toks.get(p).map(|t| &t.kind),
+            Some(TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            })
+        ) && toks.get(p).is_some_and(|t| !is_template_brace(t));
+        if is_brace {
+            return Err(fail(format!(
+                "{keyword} {def_name} requires a return type : TYPE (e.g. : VOID, : STRING)"
+            )));
+        }
+        return Ok(None);
+    }
+    let Some(ret_end) = parse_type_shape(toks, p + 1) else {
+        return Err(fail(format!(
+            "{keyword} {def_name} requires a return type : TYPE after ':'"
+        )));
+    };
+    let return_type = render_type_region(&toks[p + 1..ret_end], stmt).map_err(|_| {
+        fail(format!(
+            "{keyword} {def_name} requires a return type : TYPE after ':'"
+        ))
+    })?;
+    let return_type = crate::canonicalize_spelling(&return_type);
+    p = ret_end;
     // Block at any gap (never a template); missing blocks miss to
-    // generic (probed `FUNC FOO() ECHO hi`).
+    // generic (probed FUNC FOO() ECHO hi).
     let block_ok = matches!(
         toks.get(p).map(|t| &t.kind),
         Some(TokKind::Group {
@@ -4343,6 +4378,8 @@ fn parse_func_at(
     let kind = StepKind::FuncDef {
         name: def_name,
         params,
+        return_type,
+        is_async,
         body,
         docs: None,
     };
@@ -6851,6 +6888,7 @@ fn parse_return_body(
         return Ok((
             StepKind::Return {
                 expr: Box::new(Expr::Literal(Value::string(String::new()))),
+                is_bare: true,
             },
             cur.pos,
         ));
@@ -6859,6 +6897,7 @@ fn parse_return_body(
     Ok((
         StepKind::Return {
             expr: Box::new(expr),
+            is_bare: false,
         },
         cur.pos,
     ))
@@ -7236,7 +7275,7 @@ fn parse_element_at(
             }
         }
         Some(KEYWORD_FUNC) => {
-            if let Some((kind, used)) = parse_func_at(toks, pos, stmt, ctx)? {
+            if let Some((kind, used)) = parse_func_at(toks, pos, stmt, ctx, false)? {
                 return Ok((vec![step(kind)], used));
             }
         }
@@ -7263,6 +7302,14 @@ fn parse_element_at(
             }
         }
         Some(KEYWORD_ASYNC) => {
+            // ASYNC FUNC definition form: prefix, parser records is_async
+            // with no type-constraint validation (checker owns HANDLE rule).
+            if matches!(toks.get(pos + 1).map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_FUNC)
+            {
+                if let Some((kind, used)) = parse_func_at(toks, pos + 1, stmt, ctx, true)? {
+                    return Ok((vec![step(kind)], 1 + used));
+                }
+            }
             if let Some((kind, used)) = parse_async_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
@@ -8374,12 +8421,12 @@ mod tests {
             "WHILE true{ ECHO hi }",
             "TIMEOUT 10s WHILE true { ECHO hi }",
             "ASYNC WHILE true { ECHO hi }",
-            "FUNC FOO() { RETURN 1 }",
-            "FUNC FOO(){ RETURN 1 }",
-            "FUNC FOO($x: INT) { RETURN $x }",
-            "FUNC FOO($x: INT, $y: STRING) { RETURN $x }",
-            "FUNC FOO() { FUNC FOO() { RETURN 1 } }",
-            "FUNC FOO() { RETURN 1 }\nFUNC BAR() { FOO() }\nBAR()",
+            "FUNC FOO(): INT { RETURN 1 }",
+            "FUNC FOO(): INT { RETURN 1 }",
+            "FUNC FOO($x: INT): INT { RETURN $x }",
+            "FUNC FOO($x: INT, $y: STRING): INT { RETURN $x }",
+            "FUNC FOO(): INT { FUNC FOO(): INT { RETURN 1 } }",
+            "FUNC FOO(): INT { RETURN 1 }\nFUNC BAR(): VOID { FOO() }\nBAR()",
             "TYPE PERSON = MAP<name: STRING>",
             "TYPE A=B",
             "TYPE A = B | C",

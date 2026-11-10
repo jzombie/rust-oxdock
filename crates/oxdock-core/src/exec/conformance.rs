@@ -508,6 +508,11 @@ fn sample_tag(tag: &TypeTag) -> Option<Value> {
             }
             Some(Value::map(entries))
         }
-        TypeTag::Handle | TypeTag::Semaphore | TypeTag::Permit | TypeTag::Custom(_) => None,
+        TypeTag::Handle
+        | TypeTag::HandleOf(_)
+        | TypeTag::Void
+        | TypeTag::Semaphore
+        | TypeTag::Permit
+        | TypeTag::Custom(_) => None,
     }
 }

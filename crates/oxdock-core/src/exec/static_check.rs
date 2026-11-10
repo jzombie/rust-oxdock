@@ -106,6 +106,8 @@ enum StaticTy {
 #[derive(Clone)]
 struct FuncInfo {
     params: Vec<(String, TypeTag)>,
+    declared: TypeTag,
+    is_async: bool,
     body: Vec<Step>,
     module: Option<String>,
 }
@@ -293,15 +295,21 @@ pub(crate) fn harvest_touches_module<P: ProcessManager>(
         .module_env_unions
         .insert(module.to_string(), file_env_union(steps));
     for name in names {
-        let Some((params, body)) = steps.iter().find_map(|step| match &step.kind {
-            StepKind::FuncDef {
-                name: def_name,
-                params,
-                body,
-                ..
-            } if def_name == name => Some((params.clone(), body.clone())),
-            _ => None,
-        }) else {
+        let Some((params, return_type, is_async, body)) =
+            steps.iter().find_map(|step| match &step.kind {
+                StepKind::FuncDef {
+                    name: def_name,
+                    params,
+                    return_type,
+                    is_async,
+                    body,
+                    ..
+                } if def_name == name => {
+                    Some((params.clone(), return_type.clone(), *is_async, body.clone()))
+                }
+                _ => None,
+            })
+        else {
             continue;
         };
         let probe_key = format!("__probe__::{name}");
@@ -309,6 +317,8 @@ pub(crate) fn harvest_touches_module<P: ProcessManager>(
             &probe_key,
             vec![probe_key.clone()],
             &params,
+            &return_type,
+            is_async,
             &body,
             Some(module),
         )?;
@@ -669,6 +679,7 @@ pub(super) fn tags_equal(left: &TypeTag, right: &TypeTag) -> bool {
         | TypeTag::Map
         | TypeTag::Pipe
         | TypeTag::Handle
+        | TypeTag::Void
         | TypeTag::Duration
         | TypeTag::Path
         | TypeTag::Semaphore
@@ -682,6 +693,12 @@ pub(super) fn tags_equal(left: &TypeTag, right: &TypeTag) -> bool {
         }
         TypeTag::ListOf(a) => {
             let TypeTag::ListOf(b) = right else {
+                return false;
+            };
+            tags_equal(a, b)
+        }
+        TypeTag::HandleOf(a) => {
+            let TypeTag::HandleOf(b) = right else {
                 return false;
             };
             tags_equal(a, b)
@@ -758,6 +775,48 @@ fn is_maplike(tag: &TypeTag) -> bool {
 /// List-kind tags, mirroring [`is_maplike`] for nested lists.
 fn is_listlike(tag: &TypeTag) -> bool {
     matches!(tag, TypeTag::List | TypeTag::ListOf(_))
+}
+
+/// Top-down declared-return compatibility: recursive structural subtyping.
+/// ANY as declared admits anything. Union actual requires every member
+/// compatible with declared. Union declared admits when actual matches
+/// some member. Generic containers recurse structurally. Otherwise exact
+/// equality via tags_equal. VOID never admits a value (call-site rejects).
+fn is_compatible(actual: &TypeTag, declared: &TypeTag) -> bool {
+    if matches!(actual, TypeTag::Void) || matches!(declared, TypeTag::Void) {
+        return matches!(actual, TypeTag::Void) && matches!(declared, TypeTag::Void);
+    }
+    if matches!(declared, TypeTag::Any) {
+        return true;
+    }
+    if let TypeTag::Union(_, members) = actual {
+        return members.iter().all(|m| is_compatible(m, declared));
+    }
+    if let TypeTag::Union(_, members) = declared {
+        return members.iter().any(|m| is_compatible(actual, m));
+    }
+    match (actual, declared) {
+        (TypeTag::ListOf(a), TypeTag::ListOf(e)) => is_compatible(a, e),
+        (TypeTag::MapOf(a), TypeTag::MapOf(e)) => is_compatible(a, e),
+        (TypeTag::HandleOf(a), TypeTag::HandleOf(e)) => is_compatible(a, e),
+        (TypeTag::Record(a_fields), TypeTag::Record(e_fields)) => {
+            e_fields
+                .iter()
+                .all(|ef| match a_fields.iter().find(|af| af.name == ef.name) {
+                    Some(af) => is_compatible(&af.ty, &ef.ty),
+                    None => ef.optional,
+                })
+                && a_fields
+                    .iter()
+                    .all(|af| e_fields.iter().any(|ef| ef.name == af.name))
+        }
+        (TypeTag::Record(_), TypeTag::Map) => true,
+        (TypeTag::MapOf(_), TypeTag::Map) => true,
+        (TypeTag::ListOf(_), TypeTag::List) => true,
+        (TypeTag::HandleOf(a), TypeTag::Handle) => is_compatible(a, &TypeTag::Any),
+        (TypeTag::Handle, TypeTag::HandleOf(e)) => is_compatible(&TypeTag::Any, e),
+        _ => tags_equal(actual, declared),
+    }
 }
 
 /// Unify two terminal types: equal stays, any `ANY` widens to `ANY`
@@ -854,7 +913,8 @@ struct Callee {
 struct WalkOut {
     falls_through: bool,
     has_return: bool,
-    types: Vec<TypeTag>,
+    bare_return: bool,
+    types: Vec<(TypeTag, usize, usize)>,
 }
 
 /// Union of env names declared by direct top-level steps (never
@@ -1206,6 +1266,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         name: &str,
         keys: Vec<String>,
         params: &[(String, String)],
+        return_type: &str,
+        is_async: bool,
         body: &[Step],
         module: Option<&str>,
     ) -> Result<()> {
@@ -1215,20 +1277,29 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 .exec
                 .resolve_tag(ptype)
                 .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+            if matches!(tag, TypeTag::Void) {
+                bail!(
+                    "function `{name}` declares VOID parameter `${pname}`: VOID is only a return annotation"
+                );
+            }
             resolved.push((clean_var(pname), tag));
         }
+        let declared = self
+            .exec
+            .resolve_tag(return_type)
+            .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
         for key in keys {
             self.funcs.insert(
                 key,
                 FuncInfo {
                     params: resolved.clone(),
+                    declared: declared.clone(),
+                    is_async,
                     body: body.to_vec(),
                     module: module.map(|m| m.to_string()),
                 },
             );
         }
-        // Nested definitions register if execution reaches them;
-        // collect their bodies too, under the same owner.
         let nested = body.to_vec();
         self.collect_owned(&nested, module)?;
         Ok(())
@@ -1237,12 +1308,19 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     fn collect_step(&mut self, step: &Step, module: Option<&str>) -> Result<()> {
         match &step.kind {
             StepKind::FuncDef {
-                name, params, body, ..
+                name,
+                params,
+                return_type,
+                is_async,
+                body,
+                ..
             } => {
                 self.define_collected(
                     name,
                     vec![name.clone(), format!("SCRIPT::{name}")],
                     params,
+                    return_type,
+                    *is_async,
                     body,
                     module,
                 )?;
@@ -1338,7 +1416,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 continue;
             }
             if let StepKind::FuncDef {
-                name, params, body, ..
+                name,
+                params,
+                return_type,
+                is_async,
+                body,
+                ..
             } = &step.kind
             {
                 if !func_exported.contains(name.as_str()) {
@@ -1355,6 +1438,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             name,
                             vec![format!("{alias}::{name}")],
                             params,
+                            return_type,
+                            *is_async,
                             body,
                             Some(module),
                         )?;
@@ -1364,6 +1449,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             name,
                             vec![name.clone(), format!("SCRIPT::{name}")],
                             params,
+                            return_type,
+                            *is_async,
                             body,
                             Some(module),
                         )?;
@@ -1540,23 +1627,60 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             idx: 0,
         };
         let out = self.walk_body(&info.body, &mut env, &scope, depth + 1)?;
-        if out.has_return && out.falls_through {
+        let declared = &info.declared;
+        let is_void = matches!(declared, TypeTag::Void);
+        if info.is_async && !matches!(declared, TypeTag::Handle | TypeTag::HandleOf(_)) {
             bail!(
-                "function `{key}` may fall through with no RETURN on some path; \
-                 add an unconditional RETURN or EXIT"
+                "function `{key}` declares {}, but ASYNC FUNC must declare HANDLE or HANDLE<T>",
+                render_structural(declared)
+            );
+        }
+        if out.has_return && out.falls_through && !is_void {
+            bail!(
+                "function `{key}` declares {} but may fall through with no RETURN on some path",
+                render_structural(declared)
             );
         }
         if !out.has_return {
+            if is_void {
+                return Ok(StaticTy::Void);
+            }
+            bail!(
+                "function `{key}` declares {} but has no RETURN on any path",
+                render_structural(declared)
+            );
+        }
+        if out.bare_return && !is_void {
+            bail!(
+                "function `{key}` declares {} but has a bare RETURN on some path; bare RETURN is only a void exit",
+                render_structural(declared)
+            );
+        }
+        if is_void {
+            if let Some((ty, line, _col)) = out.types.first() {
+                bail!(
+                    "function `{key}` declares VOID but RETURN at line {line} yields {}",
+                    render_structural(ty)
+                );
+            }
             return Ok(StaticTy::Void);
         }
-        let mut unified: Option<TypeTag> = None;
-        for ty in out.types {
-            unified = Some(match unified {
-                None => ty,
-                Some(acc) => unify(acc, ty, &format!("function `{key}`"))?,
-            });
+        if out.types.is_empty() {
+            bail!(
+                "function `{key}` declares {} but has no value RETURN on any path",
+                render_structural(declared)
+            );
         }
-        Ok(StaticTy::Ty(unified.expect("has_return implies a type")))
+        for (ty, line, _col) in &out.types {
+            if !is_compatible(ty, declared) {
+                bail!(
+                    "function `{key}` declares {} but RETURN at line {line} yields {}",
+                    render_structural(declared),
+                    render_structural(ty)
+                );
+            }
+        }
+        Ok(StaticTy::Ty(declared.clone()))
     }
 
     /// Walk one body sequentially. A conditionally-guarded step keeps
@@ -1581,6 +1705,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let mut out = WalkOut {
             falls_through: true,
             has_return: false,
+            bare_return: false,
             types: Vec::new(),
         };
         for (idx, step) in steps.iter().enumerate() {
@@ -1629,11 +1754,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 GuardClass::Conditional => {
                     let inner = self.walk_step(step, env, scope, idx, depth)?;
                     out.has_return |= inner.has_return;
+                    out.bare_return |= inner.bare_return;
                     out.types.extend(inner.types);
                 }
                 GuardClass::Unconditional => {
                     let inner = self.walk_step(step, env, scope, idx, depth)?;
                     out.has_return |= inner.has_return;
+                    out.bare_return |= inner.bare_return;
                     out.types.extend(inner.types);
                     if !inner.falls_through {
                         out.falls_through = false;
@@ -1669,10 +1796,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let live = WalkOut {
             falls_through: true,
             has_return: false,
+            bare_return: false,
             types: Vec::new(),
         };
         match &step.kind {
-            StepKind::Return { expr } => {
+            StepKind::Return { expr, is_bare } => {
                 match &scope.ret {
                     RetCtx::Func(_) | RetCtx::Block | RetCtx::AsyncValue => {}
                     RetCtx::Top => {
@@ -1685,12 +1813,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         bail!("step {}: RETURN cannot cross ASYNC boundary", idx + 1);
                     }
                 }
+                // Bare RETURN is the void exit, never a value. It marks the
+                // path as returning without contributing a value type.
+                if *is_bare {
+                    let mut out = live;
+                    out.has_return = true;
+                    out.falls_through = false;
+                    out.bare_return = true;
+                    return Ok(out);
+                }
                 let ty = self.infer_expr(expr, env, scope, idx, depth + 1)?;
                 let mut out = live;
                 out.has_return = true;
                 out.falls_through = false;
                 if let StaticTy::Ty(tag) = ty {
-                    out.types.push(tag);
+                    out.types.push((tag, scope.line, scope.col));
                 }
                 Ok(out)
             }
@@ -1701,6 +1838,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 Ok(WalkOut {
                     falls_through: false,
                     has_return: false,
+                    bare_return: false,
                     types: Vec::new(),
                 })
             }
@@ -1722,6 +1860,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     let mut fork = env.fork();
                     let arm_out = self.walk_body(arm, &mut fork, scope, depth + 1)?;
                     out.has_return |= arm_out.has_return;
+                    out.bare_return |= arm_out.bare_return;
                     out.types.extend(arm_out.types);
                     arms_terminal &= !arm_out.falls_through;
                 }
@@ -1730,6 +1869,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         let mut fork = env.fork();
                         let arm_out = self.walk_body(arm, &mut fork, scope, depth + 1)?;
                         out.has_return |= arm_out.has_return;
+                        out.bare_return |= arm_out.bare_return;
                         out.types.extend(arm_out.types);
                         arms_terminal &= !arm_out.falls_through;
                     }
@@ -1767,9 +1907,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 inner_scope.loops += 1;
                 let body_out = self.walk_body(body, &mut fork, &inner_scope, depth + 1)?;
                 let mut out = live;
-                // Loops may trip zero times: fallthrough always
-                // survives, but body returns are live paths.
                 out.has_return = body_out.has_return;
+                out.bare_return = body_out.bare_return;
                 out.types = body_out.types;
                 Ok(out)
             }
@@ -1781,11 +1920,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let body_out = self.walk_body(body, &mut fork, &inner_scope, depth + 1)?;
                 let mut out = live;
                 out.has_return = body_out.has_return;
+                out.bare_return = body_out.bare_return;
                 out.types = body_out.types;
                 Ok(out)
             }
             StepKind::FuncDef {
-                name, params, body, ..
+                name,
+                params,
+                return_type,
+                is_async,
+                body,
+                ..
             } => {
                 let mut resolved = Vec::with_capacity(params.len());
                 for (pname, ptype) in params {
@@ -1793,10 +1938,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         .exec
                         .resolve_tag(ptype)
                         .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+                    if matches!(tag, TypeTag::Void) {
+                        bail!(
+                            "function `{name}` declares VOID parameter `${pname}`: VOID is only a return annotation"
+                        );
+                    }
                     resolved.push((clean_var(pname), tag));
                 }
+                let declared = self
+                    .exec
+                    .resolve_tag(return_type)
+                    .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
                 let info = FuncInfo {
                     params: resolved,
+                    declared,
+                    is_async: *is_async,
                     body: body.clone(),
                     module: env.module.as_ref().map(|scope| scope.key.clone()),
                 };
@@ -1823,6 +1979,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+                if matches!(tag, TypeTag::Void) {
+                    bail!(
+                        "step {}: VOID is only a return annotation, not a variable type",
+                        idx + 1
+                    );
+                }
                 let key = clean_var(var);
                 env.declare(key, tag, step.guard.as_ref(), idx)?;
                 Ok(live)
@@ -1839,6 +2001,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+                if matches!(tag, TypeTag::Void) {
+                    bail!(
+                        "step {}: VOID is only a return annotation, not a variable type",
+                        idx + 1
+                    );
+                }
                 let key = clean_var(var);
                 env.declare(key, tag, step.guard.as_ref(), idx)?;
                 Ok(live)
@@ -1865,11 +2033,56 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 task_var,
             } => {
                 // The handle resolves before the output declares.
-                Self::check_name_read(env, task_var, scope, idx)?;
+                let handle_tag = Self::check_name_read(env, task_var, scope, idx)?;
                 let tag = self
                     .exec
                     .resolve_tag(out_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+                if matches!(tag, TypeTag::Void) {
+                    bail!(
+                        "step {}: VOID is only a return annotation, not a variable type",
+                        idx + 1
+                    );
+                }
+                let payload = match handle_tag {
+                    TypeTag::Handle => TypeTag::Any,
+                    TypeTag::HandleOf(inner) => (*inner).clone(),
+                    other => bail!(
+                        "step {}: AWAIT ${} is {}, not HANDLE",
+                        idx + 1,
+                        clean_var(task_var),
+                        render_structural(&other)
+                    ),
+                };
+                if matches!(payload, TypeTag::Void) {
+                    bail!(
+                        "step {}: AWAIT ${} is HANDLE<VOID>: no value to bind to `${}`; use bare AWAIT for join",
+                        idx + 1,
+                        clean_var(task_var),
+                        clean_var(out_var)
+                    );
+                }
+                if !is_compatible(&payload, &tag) && !is_compatible(&tag, &payload) {
+                    // Top-down: capture type must accept the task payload.
+                    // Allow coercible pairs via check_arg shape.
+                    if self
+                        .check_arg(
+                            &tag,
+                            StaticTy::Ty(payload.clone()),
+                            &format!("step {}", idx + 1),
+                        )
+                        .is_err()
+                    {
+                        bail!(
+                            "step {}: AWAIT ${} yields {} but `${}` declares {}",
+                            idx + 1,
+                            clean_var(task_var),
+                            render_structural(&payload),
+                            clean_var(out_var),
+                            render_structural(&tag)
+                        );
+                    }
+                }
                 let key = clean_var(out_var);
                 env.declare(key, tag, step.guard.as_ref(), idx)?;
                 Ok(live)
@@ -1897,7 +2110,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             } => {
                 // `LET $o = ASYNC` bodies publish through `AWAIT`;
                 // returns belong to the task, never the enclosing
-                // function.
+                // function. Every ASYNC position is HANDLE-headed.
                 let mut fork = env.fork();
                 let task = Scope {
                     label: scope.label,
@@ -1908,11 +2121,59 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     col: scope.col,
                     idx: scope.idx,
                 };
-                self.walk_body(body, &mut fork, &task, depth + 1)?;
+                let inner = self.walk_body(body, &mut fork, &task, depth + 1)?;
                 let tag = self
                     .exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+                let payload = match &tag {
+                    TypeTag::Handle => TypeTag::Any,
+                    TypeTag::HandleOf(inner_tag) => (**inner_tag).clone(),
+                    _ => bail!(
+                        "step {}: ASYNC `${}` declares {}, not HANDLE; every ASYNC position is HANDLE-headed",
+                        idx + 1,
+                        clean_var(var),
+                        render_structural(&tag)
+                    ),
+                };
+                if inner.bare_return && !matches!(payload, TypeTag::Void) {
+                    bail!(
+                        "step {}: ASYNC `${}` declares {} but task has a bare RETURN; bare RETURN is only a void exit",
+                        idx + 1,
+                        clean_var(var),
+                        render_structural(&tag)
+                    );
+                }
+                if matches!(payload, TypeTag::Void) {
+                    if let Some((ty, line, _col)) = inner.types.first() {
+                        bail!(
+                            "step {}: HANDLE<VOID> task RETURN at line {line} yields {}",
+                            idx + 1,
+                            render_structural(ty)
+                        );
+                    }
+                } else if inner.types.is_empty() {
+                    if !matches!(payload, TypeTag::Any) {
+                        bail!(
+                            "step {}: ASYNC `${}` declares {} but task has no value RETURN",
+                            idx + 1,
+                            clean_var(var),
+                            render_structural(&tag)
+                        );
+                    }
+                } else {
+                    for (ty, line, _col) in &inner.types {
+                        if !is_compatible(ty, &payload) {
+                            bail!(
+                                "step {}: ASYNC `${}` declares {} but task RETURN at line {line} yields {}",
+                                idx + 1,
+                                clean_var(var),
+                                render_structural(&tag),
+                                render_structural(ty)
+                            );
+                        }
+                    }
+                }
                 let key = clean_var(var);
                 env.insert_top(key, tag, step.guard.as_ref());
                 Ok(live)
@@ -1925,6 +2186,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // TIMEOUT bounds execution in place: a `RETURN`
                 // inside still returns from the enclosing function.
                 out.has_return = inner.has_return;
+                out.bare_return = inner.bare_return;
                 out.types = inner.types;
                 out.falls_through = inner.falls_through;
                 if !inner.falls_through {
@@ -1953,6 +2215,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.isolated_depth -= 1;
                 let mut out = live;
                 out.has_return = inner.has_return;
+                out.bare_return = inner.bare_return;
                 out.types = inner.types;
                 out.falls_through = inner.falls_through;
                 if !inner.falls_through {
@@ -2100,6 +2363,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             | TypeTag::Map
                             | TypeTag::Pipe
                             | TypeTag::Handle
+                            | TypeTag::HandleOf(_)
+                            | TypeTag::Void
                             | TypeTag::Duration
                             | TypeTag::Path
                             | TypeTag::Semaphore
@@ -2231,6 +2496,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             return Ok(WalkOut {
                 falls_through: true,
                 has_return: false,
+                bare_return: false,
                 types: Vec::new(),
             });
         }
@@ -2640,10 +2906,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 bail!("{pat} must be one of: {}, got {text:?}", allowed.join(", "));
             }
         }
-        match ret {
-            StaticTy::Void => Ok(StaticTy::Ty(TypeTag::String)),
-            other => Ok(other.clone()),
-        }
+        Ok(ret.clone())
     }
 }
 
@@ -2946,8 +3209,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 if !out.has_return {
                     return Ok(StaticTy::Void);
                 }
+                if out.types.is_empty() {
+                    return Ok(StaticTy::Void);
+                }
                 let mut unified: Option<TypeTag> = None;
-                for ty in out.types {
+                for (ty, _, _) in out.types {
                     unified = Some(match unified {
                         None => ty,
                         Some(acc) => unify(acc, ty, &at())?,

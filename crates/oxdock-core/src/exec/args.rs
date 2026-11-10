@@ -170,6 +170,8 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
             | TypeTag::List
             | TypeTag::Map
             | TypeTag::Handle
+            | TypeTag::HandleOf(_)
+            | TypeTag::Void
             | TypeTag::Semaphore
             | TypeTag::Permit
             | TypeTag::Any

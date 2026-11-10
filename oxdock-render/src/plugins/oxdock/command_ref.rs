@@ -663,7 +663,9 @@ pub(crate) fn render_plugin_types(descriptors: &[&TypeDescriptor], metas: &[Func
 fn tag_mentions(tag: &TypeTag, descriptor: &TypeDescriptor) -> bool {
     match tag {
         TypeTag::Custom(other) => std::ptr::eq(*other, descriptor),
-        TypeTag::ListOf(inner) | TypeTag::MapOf(inner) => tag_mentions(inner, descriptor),
+        TypeTag::ListOf(inner) | TypeTag::MapOf(inner) | TypeTag::HandleOf(inner) => {
+            tag_mentions(inner, descriptor)
+        }
         TypeTag::Record(fields) => fields
             .iter()
             .any(|field| tag_mentions(&field.ty, descriptor)),
@@ -678,6 +680,7 @@ fn tag_mentions(tag: &TypeTag, descriptor: &TypeDescriptor) -> bool {
         | TypeTag::Map
         | TypeTag::Pipe
         | TypeTag::Handle
+        | TypeTag::Void
         | TypeTag::Duration
         | TypeTag::Path
         | TypeTag::Semaphore
