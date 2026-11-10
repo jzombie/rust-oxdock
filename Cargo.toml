@@ -73,7 +73,6 @@ muxio-sync-rpc-client = "0.17.0-alpha"
 muxio-sync-rpc-server = "0.17.0-alpha"
 oxdock = { path = "oxdock", version = "0.36.0-alpha" }
 oxdock-build = { path = "crates/oxdock-build", version = "0.36.0-alpha" }
-# Dependents opt into `oxdock-cli` features explicitly.
 oxdock-cli = { path = "crates/oxdock-cli", version = "0.36.0-alpha", default-features = false }
 oxdock-core = { path = "crates/oxdock-core", version = "0.36.0-alpha" }
 oxdock-embed = { path = "crates/oxdock-embed", version = "0.36.0-alpha" }
