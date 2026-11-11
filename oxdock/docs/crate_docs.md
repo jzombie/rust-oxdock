@@ -1737,9 +1737,10 @@ Mutate a declared variable.
 **Syntax:** `$var = <expr>`
 
 Reassigns an existing variable, converting the new value to
-the type declared at LET time. The explicit annotation is
-what authorizes string-to-number conversion here (`$n = "42"`
-binds 42 for an INT); a non-numeric string is an error.
+the type declared at LET time through the same narrow
+coercion pairs as declaration. Strings never parse to
+numbers implicitly: `$n = "42"` is a TypeMismatch for an
+INT, write `$n = INT("42")` instead.
 Expressions never convert: `"100" + 1` is a Type Error, use
 `INT()` / `FLOAT()` to cross that boundary explicitly.
 
@@ -2348,7 +2349,7 @@ Return a value from a function, task, or inline block.
 **Syntax:** `RETURN [<expr>]`
 
 Ends the nearest enclosing boundary with a value: a function
-call, an `ASYNC` task (bound by `LET $o = AWAIT $t`), or an
+call, an `ASYNC` task (bound by `LET $out: STRING = AWAIT $t`), or an
 inline `LET` block. Bare `RETURN` with no expression yields
 `""`.
 
@@ -6815,7 +6816,7 @@ let script = indoc! {"
 let err = oxdock_parser::parse_script(script, oxdock_parser::lower_command)
     .expect_err("must fail");
 let expected = indoc! {"
-    invalid syntax for command LET: LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE<T> = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = { ... }` (inline block); got `$x = 1`.
+    LET requires explicit types: LET $var: TYPE = <expr>
       --> line 1, col 1-10
       1 | LET $x = 1
         | ^^^^^^^^^^

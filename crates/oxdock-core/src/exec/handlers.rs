@@ -2763,7 +2763,7 @@ pub(crate) fn block_value<P: ProcessManager>(
 }
 
 /// Evaluate `RETURN <expr>` to the enclosing boundary's value: a function
-/// call, an `ASYNC` task (bound by `LET $o = AWAIT $t`), or an inline
+/// call, an `ASYNC` task (bound by `LET $out: STRING = AWAIT $t`), or an inline
 /// `LET` block. A `RETURN` with no enclosing boundary is rejected where
 /// the flow reaches the pipeline top. Uniform everywhere.
 pub(crate) fn handle_return<P: ProcessManager>(
@@ -4284,7 +4284,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let stdin = cx.stdin.clone();
     let expose_stdin = cx.expose_stdin;
     // Tasks share the parent writer: output streams live, exactly like the
-    // main flow. A task's *value* (for `LET $o = AWAIT $t`) travels only
+    // main flow. A task's *value* (for `LET $out: STRING = AWAIT $t`) travels only
     // through an explicit `RETURN`, like a function call. A copy of every
     // default-routed byte also lands in the task's tail ring for
     // `TASK_POLL`. Stderr keeps parent wiring. Live pipe backends ride
@@ -4309,7 +4309,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     // Spawn the task thread. Leftover guards unpin at thread termination.
     // Every body runs the block path below: a task publishes a value
     // only through an explicit `RETURN`, which the entry records for
-    // `LET $o = AWAIT $t`. A body with no `RETURN` yields `INT` 0 on
+    // `LET $out: STRING = AWAIT $t`. A body with no `RETURN` yields `INT` 0 on
     // success; a body that can return but fell off the end fails its
     // capture loudly. Control flow never crosses the thread boundary:
     // stray BREAK/CONTINUE become errors here.
@@ -4353,7 +4353,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
             }
             Flow::Return { value, .. } => {
                 // Only an explicit `RETURN` publishes a task value;
-                // there is no stdout sniffing. `LET $o = AWAIT $t`
+                // there is no stdout sniffing. `LET $out: STRING = AWAIT $t`
                 // binds this value.
                 entry
                     .state
@@ -4578,7 +4578,7 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
     // A LIST of HANDLEs awaits every member in order, so worker pools
     // collected with PUSH join as a group; an empty LIST is a no-op. The
     // first failing member bails like sequential single AWAITs would.
-    // `LET $o = AWAIT $t` stays single-handle: capture needs one output.
+    // `LET $out: STRING = AWAIT $t` stays single-handle: capture needs one output.
     // Bare AWAIT is join-only: task output already streamed live during
     // the run, so there is nothing to forward.
     if let Some(items) = val.as_list().cloned() {

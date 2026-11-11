@@ -242,7 +242,7 @@ fn arb_expr() -> BoxedStrategy<Expr> {
 }
 
 /// Block bodies stay flat and command-safe: the coverage target is the
-/// `Block` shape itself (inline `LET $x = { ... }` round-trip), not
+/// `Block` shape itself (inline `LET $x: STRING = { ... }` round-trip), not
 /// nesting inside evaluation scopes.
 fn arb_flat_block_body() -> impl Strategy<Value = Vec<Step>> {
     prop::collection::vec(

@@ -144,7 +144,7 @@ impl oxdock_process::ProcessManager for RecordingManager {
         options: oxdock_process::CommandOptions,
     ) -> Result<oxdock_process::CommandResult<Self::Handle>> {
         self.record(Call::Shell(script.to_string()), ctx);
-        // Scripted stdout feeds the capture sink behind `LET $x = RUN`:
+        // Scripted stdout feeds the capture sink behind `LET $x: STRING = RUN`:
         // the engine binds sink bytes, never the result value, so the
         // response must be written into the provided writer. Unmatched
         // invocations keep the historical empty behavior.

@@ -2159,7 +2159,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 decl_type,
                 body,
             } => {
-                // `LET $o = ASYNC` bodies publish through `AWAIT`;
+                // `LET $t: HANDLE<VOID> = ASYNC ...` bodies publish through `AWAIT`;
                 // returns belong to the task, never the enclosing
                 // function. Every ASYNC position is HANDLE-headed.
                 let mut fork = env.fork();

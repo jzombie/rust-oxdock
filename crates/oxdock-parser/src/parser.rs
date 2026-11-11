@@ -6329,9 +6329,19 @@ fn parse_let_body(
     };
     // The header allows gaps (comments, never newlines).
     cur.skip_gap();
-    // No `:`: no `LET` form can match (miss, like `LET $x = 1`).
+    // No `:`: untyped LET is rejected outright. Every binding is
+    // typed; the old miss-to-generic path only hid that behind a
+    // rambling "invalid syntax" message. (FOR already does this.)
     if !cur.eat_punct(':') {
-        return Ok(None);
+        return Err(TokenError {
+            stmt,
+            msg: "LET requires explicit types: LET $var: TYPE = <expr>".to_string(),
+            line: 0,
+            col: 0,
+            kind: Some(ParseErrorKind::InvalidSyntax {
+                command: "LET".to_string(),
+            }),
+        });
     }
     // Type region runs to the assignment `=`; it cannot contain one.
     let type_start = cur.pos;
@@ -6492,7 +6502,7 @@ fn parse_let_rhs(
         }
     }
     // File `IMPORT ["path" AS ALIAS]` (#115) captures the imported
-    // pipeline's `RETURN` value like a call (`LET $r = IMPORT ...`
+    // pipeline's `RETURN` value like a call (`LET $r: STRING = IMPORT ...`
     // lowers to `AssignCapture`): exactly one file entry, no modules.
     // Anything else shaped like an import is a hard error; shape misses
     // fall through to generic below, which fails them in lowering.
@@ -6613,7 +6623,7 @@ fn try_let_with_io_rhs(
     let Some(first) = rest.first() else {
         // Bare bracket: the grammar's committed validation error.
         return Err(fail(
-            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
                 .to_string(),
         ));
     };
@@ -6621,7 +6631,7 @@ fn try_let_with_io_rhs(
         // The inner rides after a `sep`: joint followers miss the
         // shape and fail validation like the grammar's bare bracket.
         return Err(fail(
-            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
                 .to_string(),
         ));
     }
@@ -6698,7 +6708,7 @@ fn try_let_with_io_rhs(
             // Joint followers miss the inner `sep`: same validation
             // error as the bare bracket.
             return Err(fail(
-                "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+                "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
                     .to_string(),
             ));
         }
@@ -6747,7 +6757,7 @@ fn try_let_with_io_rhs(
     ) {
         // A brace is no sync command: same validation error (probed).
         return Err(fail(
-            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
                 .to_string(),
         ));
     }
@@ -7111,7 +7121,7 @@ fn parse_elements(
     let mut pending_guard: Option<GuardExpr> = guard;
     while pos < toks.len() {
         // Trailing gap comments between elements (`} #c`, `F("a")
-        // /*c*/ ECHO`, `LET $x = 1 //c` — the pair ended, so the
+        // /*c*/ ECHO`, `LET $x: INT = 1 //c` — the pair ended, so the
         // comment is silent like the grammar, never payload):
         // `#` and lexer `Comment` markers run to the run end, `//`
         // likewise (line comments eat `;` too, and runs hold no
@@ -8563,6 +8573,47 @@ mod tests {
                 got, want,
                 "multi-line must canonicalize like one line: {multi:?}"
             );
+        }
+    }
+
+    #[test]
+    fn untyped_let_fails_in_every_rhs_shape() {
+        // The everything-typed rule: a missing `:` is a hard error
+        // carrying the explicit-types message, regardless of what
+        // follows the `=`. Every binding shape is covered, so no
+        // untyped position can slip back in unnoticed.
+        for text in [
+            "LET $x = 1\n",
+            "LET $x = \"hi\"\n",
+            "LET $x = $y\n",
+            "LET $x = [\"a\", \"b\"]\n",
+            "LET $x = [\"a\",\n\"b\"]\n",
+            "LET $x = ECHO hi\n",
+            "LET $x = AWAIT $t\n",
+            "LET $x = ASYNC ECHO hi\n",
+            "LET $x = {\nRETURN 1\n}\n",
+            "LET $x = WITH_IO [stdin=$p] ASYNC ECHO hi\n",
+        ] {
+            let err =
+                crate::parse_script(text, lower).expect_err("untyped LET must fail");
+            assert!(
+                err.to_string().contains("LET requires explicit types"),
+                "wrong error for {text:?}: {err}"
+            );
+        }
+        // Typed spellings of the same shapes keep parsing through
+        // every lexer frontend.
+        for text in [
+            "LET $x: INT = 1\n",
+            "LET $x: STRING = \"hi\"\n",
+            "LET $x: LIST<STRING> = [\"a\", \"b\"]\n",
+            "LET $x: LIST<STRING> = [\"a\",\n\"b\"]\n",
+            "LET $x: STRING = ECHO hi\n",
+            "LET $x: STRING = AWAIT $t\n",
+            "LET $x: HANDLE<VOID> = ASYNC ECHO hi\n",
+            "LET $x: INT = {\nRETURN 1\n}\n",
+        ] {
+            assert_parity(text);
         }
     }
 

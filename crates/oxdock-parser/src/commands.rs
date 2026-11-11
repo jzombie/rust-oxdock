@@ -3044,9 +3044,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             summary: "Mutate a declared variable.",
             description: indoc! {r#"
                 Reassigns an existing variable, converting the new value to
-                the type declared at LET time. The explicit annotation is
-                what authorizes string-to-number conversion here (`$n = "42"`
-                binds 42 for an INT); a non-numeric string is an error.
+                the type declared at LET time through the same narrow
+                coercion pairs as declaration. Strings never parse to
+                numbers implicitly: `$n = "42"` is a TypeMismatch for an
+                INT, write `$n = INT("42")` instead.
                 Expressions never convert: `"100" + 1` is a Type Error, use
                 `INT()` / `FLOAT()` to cross that boundary explicitly.
 
@@ -3690,7 +3691,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             summary: "Return a value from a function, task, or inline block.",
             description: indoc! {r#"
                 Ends the nearest enclosing boundary with a value: a function
-                call, an `ASYNC` task (bound by `LET $o = AWAIT $t`), or an
+                call, an `ASYNC` task (bound by `LET $out: STRING = AWAIT $t`), or an
                 inline `LET` block. Bare `RETURN` with no expression yields
                 `""`.
 
@@ -5510,8 +5511,8 @@ mod tests {
     #[test]
     fn bare_let_without_type_points_at_typed_syntax() {
         let err = parse_err("LET $x = 1\n");
-        assert!(err.contains("invalid syntax for command LET"), "{err}");
-        assert!(err.contains("LET $name: STRING = <expr>"), "{err}");
+        assert!(err.contains("LET requires explicit types"), "{err}");
+        assert!(err.contains("LET $var: TYPE = <expr>"), "{err}");
     }
 
     #[test]
