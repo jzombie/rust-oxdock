@@ -2601,18 +2601,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     }
 
     /// Yield type of a `LET $x: T = <command>` capture, mirroring
-    /// runtime `assign_capture`: a `Call` (under `WithIo` layers only)
-    /// binds the callee's `RETURN` type; an `ImportFile` binds a
-    /// pipeline value the checker cannot spell, so it defers (`None`);
-    /// anything else — plain commands and `TIMEOUT`-wrapped bodies —
-    /// binds captured stdout `TEXT`. `TIMEOUT` is deliberately not
-    /// peeled: at runtime a `TIMEOUT`-wrapped call goes down the
-    /// stdout-sink path, never the call-value path.
+    /// runtime `assign_capture`: a `Call` (under `WithIo`/`TIMEOUT`
+    /// layers, single-command bodies only) binds the callee's
+    /// `RETURN` type; an `ImportFile` binds a pipeline value the
+    /// checker cannot spell, so it defers (`None`); anything else
+    /// binds captured stdout `TEXT`. `TIMEOUT` peels exactly where
+    /// the runtime peels, so a deadline never changes the checked
+    /// type — only whether the binding happens before it fires.
     fn capture_yield(&mut self, cmd: &StepKind, depth: usize) -> Result<Option<TypeTag>> {
         let mut current = cmd;
         loop {
             match current {
                 StepKind::WithIo { cmd, .. } => current = cmd,
+                StepKind::Timeout { body, .. } if body.len() == 1 => {
+                    current = &body[0].kind;
+                }
                 StepKind::Call { name, .. } => {
                     let callee = self.resolve_call(name, depth)?;
                     return Ok(match callee.ret {

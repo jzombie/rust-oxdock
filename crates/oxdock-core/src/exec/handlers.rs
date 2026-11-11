@@ -2262,62 +2262,83 @@ fn resolve_pipe_handle<P: ProcessManager>(
     }
 }
 
-/// If `cmd` is a bare `NAME(...)` call possibly nested under `WITH_IO` layers, return the
-/// merged bindings (outermost first, inner wins per stream) plus the call
-/// name and args. Used by `LET`-capture so
-/// `WITH_IO [stdin=$tx] FOO()` binds the `RETURN` value instead
-/// of swallowing stdout into a capture sink.
-fn extract_call(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &[Expr])> {
-    let mut layers: Vec<&Vec<IoBinding>> = Vec::new();
-    let mut current = cmd;
-    loop {
-        match current {
-            StepKind::Call { name, args } => {
-                let mut merged: Vec<IoBinding> = Vec::new();
-                for layer in &layers {
-                    for binding in layer.iter() {
-                        match merged.iter_mut().find(|m| m.stream == binding.stream) {
-                            Some(slot) => *slot = binding.clone(),
-                            None => merged.push(binding.clone()),
-                        }
-                    }
-                }
-                return Some((merged, name, args));
-            }
-            StepKind::WithIo { bindings, cmd } => {
-                layers.push(bindings);
-                current = cmd;
-            }
-            _ => return None,
-        }
-    }
+/// Peel a `LET $x: T = <command>` capture body to its value source,
+/// mirroring the runtime binding rule: a `Call` (or single `IMPORT`)
+/// binds its `RETURN` value; anything else binds captured stdout
+/// text. `WITH_IO` layers merge outermost-first (inner wins per
+/// stream); `TIMEOUT` layers peel through single-command bodies with
+/// the tightest deadline winning, so a `TIMEOUT`-wrapped command
+/// captures exactly what the bare command captures — the deadline
+/// bounds the wait, never the value. Multi-step bodies stop the
+/// peel and take the stdout-sink path with the `TIMEOUT` step
+/// intact (deadline enforced there).
+enum PeeledCapture<'a> {
+    Call {
+        bindings: Vec<IoBinding>,
+        name: &'a str,
+        args: &'a [Expr],
+        deadline: Option<std::time::Duration>,
+    },
+    Import {
+        bindings: Vec<IoBinding>,
+        path: &'a str,
+        alias: &'a str,
+        deadline: Option<std::time::Duration>,
+    },
+    Sink,
 }
 
-/// Peel `WITH_IO` layers off an `IMPORT ["path" AS ALIAS]` capture body
-/// (#115), mirroring [`extract_call`]: merged bindings plus path/alias.
-/// `None` for any other shape (the stdout-capture path owns those).
-fn extract_import(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &str)> {
+fn merge_io_layers(layers: &[&Vec<IoBinding>]) -> Vec<IoBinding> {
+    let mut merged: Vec<IoBinding> = Vec::new();
+    for layer in layers {
+        for binding in layer.iter() {
+            match merged.iter_mut().find(|m| m.stream == binding.stream) {
+                Some(slot) => *slot = binding.clone(),
+                None => merged.push(binding.clone()),
+            }
+        }
+    }
+    merged
+}
+
+fn peel_capture_command<'a, P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    cmd: &'a StepKind,
+) -> Result<PeeledCapture<'a>> {
     let mut layers: Vec<&Vec<IoBinding>> = Vec::new();
+    let mut deadline: Option<std::time::Duration> = None;
     let mut current = cmd;
     loop {
         match current {
-            StepKind::ImportFile { path, alias } => {
-                let mut merged: Vec<IoBinding> = Vec::new();
-                for layer in &layers {
-                    for binding in layer.iter() {
-                        match merged.iter_mut().find(|m| m.stream == binding.stream) {
-                            Some(slot) => *slot = binding.clone(),
-                            None => merged.push(binding.clone()),
-                        }
-                    }
-                }
-                return Some((merged, path, alias));
-            }
             StepKind::WithIo { bindings, cmd } => {
                 layers.push(bindings);
                 current = cmd;
             }
-            _ => return None,
+            StepKind::Timeout { duration, body } if body.len() == 1 => {
+                let dur = super::args::resolve_arg_as_duration(duration, cx)?;
+                deadline = Some(match deadline {
+                    Some(d) => d.min(dur),
+                    None => dur,
+                });
+                current = &body[0].kind;
+            }
+            StepKind::Call { name, args } => {
+                return Ok(PeeledCapture::Call {
+                    bindings: merge_io_layers(&layers),
+                    name,
+                    args,
+                    deadline,
+                });
+            }
+            StepKind::ImportFile { path, alias } => {
+                return Ok(PeeledCapture::Import {
+                    bindings: merge_io_layers(&layers),
+                    path,
+                    alias,
+                    deadline,
+                });
+            }
+            _ => return Ok(PeeledCapture::Sink),
         }
     }
 }
@@ -2835,6 +2856,8 @@ pub(crate) fn set_var_value<P: ProcessManager>(
 /// the callee's stdout keeps the active routing (observable via
 /// `ASSERT_CONTAINS stdout`/pipes) and the bound value is the function's `RETURN`
 /// payload (or `""` on fallthrough), coerced to the declared type.
+/// A `TIMEOUT`-wrapped single command captures exactly what the bare
+/// command captures, with the tightest deadline enforced around it.
 pub(crate) fn assign_capture<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
@@ -2845,88 +2868,107 @@ pub(crate) fn assign_capture<P: ProcessManager>(
 ) -> Result<Flow> {
     use std::sync::Arc;
 
-    if let Some((bindings, path, alias)) = extract_import(cmd) {
-        // `IMPORT` (possibly under `WITH_IO` layers): no capture sink.
-        // The imported pipeline's stdout keeps its routed streams; the
-        // bound value is the `RETURN` payload, exactly like `CALL`.
-        if bindings
-            .iter()
-            .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
-        {
-            bail!(
-                "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
-            );
-        }
-        let value = if bindings.is_empty() {
-            super::import::import_file(cx, path, alias)?
-        } else {
-            let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
-                resolve_io_streams(cx, &bindings, cmd)?;
-            let state = &mut *cx.state;
-            let process = &mut *cx.process;
-            let mut sub_cx = super::steps::StepCtx {
-                state,
-                process,
-                stdin: step_stdin,
-                expose_stdin,
-                out: step_stdout,
-                err: step_stderr,
-                out_pipe,
-                stdin_pipe,
-                // `IMPORT` layers never carry a terminal: lowering rejects
-                // `tty` outside `RUN` before execution reaches them.
-                tty: None,
+    match peel_capture_command(cx, cmd)? {
+        PeeledCapture::Import {
+            bindings,
+            path,
+            alias,
+            deadline,
+        } => {
+            // `IMPORT` (possibly under `WITH_IO`/`TIMEOUT` layers): no
+            // capture sink. The imported pipeline's stdout keeps its
+            // routed streams; the bound value is the `RETURN` payload,
+            // exactly like `CALL`.
+            if bindings
+                .iter()
+                .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
+            {
+                bail!(
+                    "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+                );
+            }
+            let guard = arm_deadline(cx, deadline);
+            let result = if bindings.is_empty() {
+                super::import::import_file(cx, path, alias)
+            } else {
+                (|| {
+                    let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
+                        resolve_io_streams(cx, &bindings, cmd)?;
+                    let state = &mut *cx.state;
+                    let process = &mut *cx.process;
+                    let mut sub_cx = super::steps::StepCtx {
+                        state,
+                        process,
+                        stdin: step_stdin,
+                        expose_stdin,
+                        out: step_stdout,
+                        err: step_stderr,
+                        out_pipe,
+                        stdin_pipe,
+                        // `IMPORT` layers never carry a terminal: lowering rejects
+                        // `tty` outside `RUN` before execution reaches them.
+                        tty: None,
+                    };
+                    super::import::import_file(&mut sub_cx, path, alias)
+                })()
             };
-            super::import::import_file(&mut sub_cx, path, alias)?
-        };
-        let clean_var = var.trim_start_matches('$').to_string();
-        let tag = cx.state.resolve_tag(&decl_type)?;
-        cx.state.declare_var(clean_var, tag, value)?;
-        return Ok(Flow::Done);
-    }
-    if let Some((bindings, name, args)) = extract_call(cmd) {
-        // `CALL` (possibly under `WITH_IO` layers): no capture sink. The
-        // callee's stdout keeps its routed streams (observable via
-        // `ASSERT_CONTAINS stdout`/pipes); the bound value is the `RETURN` payload.
-        if bindings
-            .iter()
-            .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
-        {
-            bail!(
-                "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
-            );
-        }
-        if bindings.is_empty() {
-            let value = call_func_value(cx, name, args)?;
+            let value = disarm_deadline(cx, guard, deadline, result)?;
             let clean_var = var.trim_start_matches('$').to_string();
             let tag = cx.state.resolve_tag(&decl_type)?;
             cx.state.declare_var(clean_var, tag, value)?;
             return Ok(Flow::Done);
         }
-        let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
-            resolve_io_streams(cx, &bindings, cmd)?;
-        // Reborrow state/process for the sub-context; `cx` is unused below.
-        let state = &mut *cx.state;
-        let process = &mut *cx.process;
-        let mut sub_cx = super::steps::StepCtx {
-            state,
-            process,
-            stdin: step_stdin,
-            expose_stdin,
-            out: step_stdout,
-            err: step_stderr,
-            out_pipe,
-            stdin_pipe,
-            // `CALL` layers never carry a terminal: lowering rejects
-            // `tty` outside `RUN` before execution reaches them.
-            tty: None,
-        };
-        let value = call_func_value(&mut sub_cx, name, args)?;
-        let tag = sub_cx.state.resolve_tag(&decl_type)?;
-        sub_cx
-            .state
-            .declare_var(var.trim_start_matches('$').to_string(), tag, value)?;
-        return Ok(Flow::Done);
+        PeeledCapture::Call {
+            bindings,
+            name,
+            args,
+            deadline,
+        } => {
+            // `CALL` (possibly under `WITH_IO`/`TIMEOUT` layers): no
+            // capture sink. The callee's stdout keeps its routed streams
+            // (observable via `ASSERT_CONTAINS stdout`/pipes); the bound
+            // value is the `RETURN` payload.
+            if bindings
+                .iter()
+                .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
+            {
+                bail!(
+                    "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+                );
+            }
+            let guard = arm_deadline(cx, deadline);
+            let result = if bindings.is_empty() {
+                call_func_value(cx, name, args)
+            } else {
+                (|| {
+                    let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
+                        resolve_io_streams(cx, &bindings, cmd)?;
+                    // Reborrow state/process for the sub-context; `cx` is unused below.
+                    let state = &mut *cx.state;
+                    let process = &mut *cx.process;
+                    let mut sub_cx = super::steps::StepCtx {
+                        state,
+                        process,
+                        stdin: step_stdin,
+                        expose_stdin,
+                        out: step_stdout,
+                        err: step_stderr,
+                        out_pipe,
+                        stdin_pipe,
+                        // `CALL` layers never carry a terminal: lowering rejects
+                        // `tty` outside `RUN` before execution reaches them.
+                        tty: None,
+                    };
+                    call_func_value(&mut sub_cx, name, args)
+                })()
+            };
+            let value = disarm_deadline(cx, guard, deadline, result)?;
+            let clean_var = var.trim_start_matches('$').to_string();
+            let tag = cx.state.resolve_tag(&decl_type)?;
+            cx.state.declare_var(clean_var, tag, value)?;
+            return Ok(Flow::Done);
+        }
+        PeeledCapture::Sink => {}
     }
     let sink = Arc::new(super::capture::new_spill_buffer());
     let capture_out = Some(StreamHandle::Stream(sink.writer()));
@@ -4759,32 +4801,43 @@ pub(crate) fn dispatch_isolated_step<P: ProcessManager>(
     top_level_flow(isolated(cx, body)?)
 }
 
-/// Dispatch `TIMEOUT <duration> <body>`: run `body` on the current thread
-/// with a deadline. If the deadline elapses first, cancel the state,
-/// `kill()` the active foreground process (when one is registered), and
-/// return a deadline error wrapping the body result; a body error with
-/// time still left returns unwrapped.
-///
-/// `idx` is the 0-based step index used for error attribution.
-pub(crate) fn timeout<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    duration: &std::time::Duration,
-    body: &[Step],
-) -> Result<Flow> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+/// Owned deadline watch shared by `TIMEOUT` steps and deadline-bound
+/// captures: arming spawns the watchdog, marks the state cancellable,
+/// and floors the task-id counter so the scope-end reaper joins only
+/// workers this scope spawns; disarming joins the watchdog and
+/// restores everything, turning a fired deadline into the standard
+/// deadline error even when the guarded operation succeeded.
+struct DeadlineGuard {
+    done: Arc<std::sync::atomic::AtomicBool>,
+    fired: Arc<std::sync::atomic::AtomicBool>,
+    watcher: Option<std::thread::JoinHandle<()>>,
+    prev_cancellable: bool,
+    prev_floor: Option<u64>,
+    initial_cancel: bool,
+}
 
+/// Arm a deadline watch around the work that follows. `None` is a
+/// no-op returning `None`, so call sites with an optional deadline
+/// need no branching.
+fn arm_deadline<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    duration: Option<std::time::Duration>,
+) -> Option<DeadlineGuard> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    let duration = duration?;
     let initial_cancel = cx.state.cancel_token.load(Ordering::SeqCst);
-    let deadline = Instant::now() + *duration;
+    let deadline = Instant::now() + duration;
     let done = Arc::new(AtomicBool::new(false));
     let fired = Arc::new(AtomicBool::new(false));
     let cancel_token = Arc::clone(&cx.state.cancel_token);
     let cancel_hub = Arc::clone(&cx.state.cancel_hub);
     let active_process = Arc::clone(&cx.state.active_process);
 
-    // Deadline watcher: enforces the timeout while the body runs on this
-    // thread. Exits as soon as `done` is set; joined below, so no thread
-    // outlives this call.
+    // Deadline watcher: enforces the timeout while the guarded work
+    // runs on this thread. Exits as soon as `done` is set; joined on
+    // disarm, so no thread outlives the guard.
     let watcher_done = Arc::clone(&done);
     let watcher_fired = Arc::clone(&fired);
     let watcher = std::thread::spawn(move || {
@@ -4803,25 +4856,99 @@ pub(crate) fn timeout<P: ProcessManager>(
                 }
                 return;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     });
 
-    // Deadline enforcement for nested RUNs: spawn cancellable so a blocking
-    // foreground process registers in active_process, where the watcher can
-    // reach it. Restored afterwards (nesting-safe: an outer TIMEOUT already
-    // sets this, and the restore preserves it).
+    // Deadline enforcement for nested RUNs: a blocking foreground
+    // process registers in active_process, where the watcher can
+    // reach it. Restored afterwards (nesting-safe: an outer TIMEOUT
+    // already sets this, and the restore preserves it).
     //
     // Scope-bounded join: snapshot the task-id counter so the scope-end
-    // reaper joins only workers this body spawns. A worker the body leaves
-    // running gets up to the deadline, then the fail-fast teardown stops
-    // it. Pre-existing tasks keep running past the scope instead of
-    // holding it open: without the floor, a long-lived server task turns
-    // every later TIMEOUT into a wait for its deadline.
+    // reaper joins only workers this scope spawns. A worker the scope
+    // leaves running gets up to the deadline, then the fail-fast
+    // teardown stops it. Pre-existing tasks keep running past the scope
+    // instead of holding it open: without the floor, a long-lived
+    // server task turns every later TIMEOUT into a wait for its
+    // deadline.
     let prev_cancellable = cx.state.cancellable;
     cx.state.cancellable = true;
     let floor = cx.state.next_task_id.load(Ordering::SeqCst);
     let prev_floor = cx.state.reap_floor.replace(floor);
+    Some(DeadlineGuard {
+        done,
+        fired,
+        watcher: Some(watcher),
+        prev_cancellable,
+        prev_floor,
+        initial_cancel,
+    })
+}
+
+/// Disarm a deadline watch, joining the watchdog and restoring state.
+/// A fired deadline becomes the standard deadline error, wrapping the
+/// guarded result when it erred. `None` passes the result through, so
+/// deadline-free call sites share the same code path.
+fn disarm_deadline<T, P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    mut guard: Option<DeadlineGuard>,
+    duration: Option<std::time::Duration>,
+    result: Result<T>,
+) -> Result<T> {
+    use std::sync::atomic::Ordering;
+
+    let Some(guard) = guard.as_mut() else {
+        return result;
+    };
+    cx.state.cancellable = guard.prev_cancellable;
+    cx.state.reap_floor = guard.prev_floor.take();
+
+    guard.done.store(true, Ordering::SeqCst);
+    if let Some(watcher) = guard.watcher.take() {
+        let _ = watcher.join();
+    }
+
+    // Restore pre-existing cancellation state if deadline watcher did not fire
+    if !guard.fired.load(Ordering::SeqCst) {
+        cx.state
+            .cancel_token
+            .store(guard.initial_cancel, Ordering::SeqCst);
+    }
+
+    let budget = oxdock_parser::command::format_duration(
+        &duration.expect("disarm with a guard always carries a duration"),
+    );
+    match result {
+        Ok(value) => {
+            if guard.fired.load(Ordering::SeqCst) {
+                bail!("TIMEOUT after {} — deadline exceeded", budget);
+            }
+            Ok(value)
+        }
+        Err(err) => {
+            if guard.fired.load(Ordering::SeqCst) {
+                Err(err).with_context(|| format!("TIMEOUT after {} — deadline exceeded", budget))
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+/// Dispatch `TIMEOUT <duration> <body>`: run `body` on the current thread
+/// with a deadline. If the deadline elapses first, cancel the state,
+/// `kill()` the active foreground process (when one is registered), and
+/// return a deadline error wrapping the body result; a body error with
+/// time still left returns unwrapped.
+///
+/// `idx` is the 0-based step index used for error attribution.
+pub(crate) fn timeout<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    duration: &std::time::Duration,
+    body: &[Step],
+) -> Result<Flow> {
+    let guard = arm_deadline(cx, Some(*duration));
     let result = super::steps::execute_scoped_steps(
         cx.state,
         cx.process,
@@ -4834,41 +4961,7 @@ pub(crate) fn timeout<P: ProcessManager>(
         cx.stdin_pipe.clone(),
         true,
     );
-    cx.state.cancellable = prev_cancellable;
-    cx.state.reap_floor = prev_floor;
-
-    done.store(true, Ordering::SeqCst);
-    let _ = watcher.join();
-
-    // Restore pre-existing cancellation state if deadline watcher did not fire
-    if !fired.load(Ordering::SeqCst) {
-        cx.state
-            .cancel_token
-            .store(initial_cancel, Ordering::SeqCst);
-    }
-
-    let budget = oxdock_parser::command::format_duration(duration);
-    match result {
-        Ok(Flow::Done) => {
-            if fired.load(Ordering::SeqCst) {
-                bail!("TIMEOUT after {} — deadline exceeded", budget);
-            }
-            Ok(Flow::Done)
-        }
-        Ok(flow) => {
-            if fired.load(Ordering::SeqCst) {
-                bail!("TIMEOUT after {} — deadline exceeded", budget);
-            }
-            Ok(flow)
-        }
-        Err(err) => {
-            if fired.load(Ordering::SeqCst) {
-                Err(err).with_context(|| format!("TIMEOUT after {} — deadline exceeded", budget))
-            } else {
-                Err(err)
-            }
-        }
-    }
+    disarm_deadline(cx, guard, Some(*duration), result)
 }
 
 /// RAII scope for `ISOLATED` bodies: snapshots the script env, clears it,

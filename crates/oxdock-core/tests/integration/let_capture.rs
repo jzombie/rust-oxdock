@@ -322,6 +322,43 @@ fn capture_checks_command_yield_against_decl() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "TIMEOUT watchdog Zhang real background threads")]
+fn timeout_capture_binds_inner_call_value() {
+    // TIMEOUT is transparent in capture: a TIMEOUT-wrapped single
+    // call binds exactly what the bare call binds, with the
+    // deadline enforced around it.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC THREE(): INT {
+            RETURN 3
+        }
+        LET $x: INT = TIMEOUT 30s THREE()
+        ASSERT_EQ $x 3
+    "#};
+    run_script(&root, script).expect("timeout capture binds call value");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "TIMEOUT watchdog Zhang real background threads")]
+fn timeout_capture_still_enforces_deadline() {
+    // Transparency cuts both ways: the value path above binds, but
+    // a hung call under the deadline fails with TIMEOUT instead of
+    // hanging on the value.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC HANG(): INT {
+            SLEEP 30s
+            RETURN 1
+        }
+        LET $x: INT = TIMEOUT 50ms HANG()
+    "#};
+    let err = run_script(&root, script).expect_err("hung call must time out");
+    assert!(err.to_string().contains("TIMEOUT"), "{err}");
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
 fn await_capture_missing_fallback_branch_errors() {
     // A body that can RETURN on some path but falls off the end on the

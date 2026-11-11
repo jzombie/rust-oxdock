@@ -908,8 +908,9 @@ fn run_cancel_with_orphan_stdout_returns_promptly() {
             LET $to_child: PIPE
             LET $from_child: PIPE
             LET $err: PIPE
-            LET $run: HANDLE<STRING> = ASYNC { LET $c: STRING = TIMEOUT 8s SSH_RUN($dq.session, ["sh", "-c", "sleep 20 >&1 &"], $to_child, $from_child, $err); RETURN $c }
-            AWAIT $run
+            LET $run: HANDLE<INT> = ASYNC { LET $c: INT = TIMEOUT 8s SSH_RUN($dq.session, ["sh", "-c", "sleep 20 >&1 &"], $to_child, $from_child, $err); RETURN $c }
+            LET $code: INT = AWAIT $run
+            ASSERT_EQ $code 0
         }
         AWAIT $h
         SSH_CLOSE($m.server)
