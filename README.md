@@ -3629,7 +3629,14 @@ equality is handle identity, never byte comparison.
 
 ### Value type: HANDLE
 
-Background ASYNC task handle for AWAIT/CANCEL.
+Background task handle minted by `LET $t: HANDLE<T> = ASYNC ...`.
+The payload names what `AWAIT` binds: `HANDLE<T>` yields `T` on
+capture, `HANDLE<VOID>` is join-only (bare `AWAIT`/`CANCEL` only).
+The handle itself is just a task id and carries no data: observe
+the task through `AWAIT`, `CANCEL`, or `TASK_POLL`, never through
+the handle. Copying it aliases the same task, and joining twice
+fails. Bare `HANDLE` is not a declaration type: write the payload
+or explicit `HANDLE<ANY>`.
 
 ### Value type: SEMAPHORE
 
