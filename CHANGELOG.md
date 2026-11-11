@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [0.37.0-alpha] - TBD
 
+### Added
+
+- Multi-line `FUNC` parameter lists: params may span lines with one entry per line, including generic shapes (`MAP<...>`, nested `LIST<MAP<...>>`), parsed and validated exactly like the single-line spelling through the shared `gap_nl` helper. A trailing newline before `)` rides along; outer header newlines (between `)` and `:`) stay single line.
+
+### Fixed
+
+- `--dry-run` runs the shared static validation before printing the closure, so it fails exactly where execution and `--mcp` would instead of reporting a passing preview for a statically invalid script. `finish_run`, `McpSession::init`, and both dry-run paths funnel through one `validate_closure_for_run` helper.
+
 ### Changed
 
 - [breaking] Scripts are affected: `FUNC` requires an explicit return type (`FUNC NAME(...): RET`, `ASYNC FUNC NAME(...): HANDLE<T>`). Missing `: TYPE` is a parse error; every `RETURN` checks top-down against the declaration with no inference. Fallthrough and bare `RETURN` are `VOID`-only; non-`VOID` functions must `RETURN` a matching value on every path (#287).
