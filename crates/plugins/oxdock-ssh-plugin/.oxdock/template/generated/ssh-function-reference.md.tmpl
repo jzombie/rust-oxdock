@@ -14,7 +14,7 @@ The server sends first: the client side never EOFs its input, so
 the reply cannot race teardown.
 
 
-**Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL, command: STRING>`
+**Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE): MAP<closed: BOOL, command: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -63,7 +63,7 @@ Shut a server down and join its runtime thread (bounded).
 Idempotent.
 
 
-**Signature:** `SSH_CLOSE($server: SSH_SERVER) -> BOOL`
+**Signature:** `SSH_CLOSE($server: SSH_SERVER): BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -94,7 +94,7 @@ the pump tasks. Under `--offline` the dial bails before any
 socket work. The result MAP carries `exit_status`, or -1 when the
 server sent none.
 
-**Signature:** `SSH_CONNECT($target: STRING, $username: STRING, $password: STRING, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP`
+**Signature:** `SSH_CONNECT($target: STRING, $username: STRING, $password: STRING, $in_pipe: PIPE, $out_pipe: PIPE): MAP`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -144,7 +144,7 @@ The server sends first: the client side never EOFs its input, so a
 synthetic reply cannot race teardown.
 
 
-**Signature:** `SSH_DEQUEUE($server: SSH_SERVER) -> MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
+**Signature:** `SSH_DEQUEUE($server: SSH_SERVER): MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -215,7 +215,7 @@ learns its exit status and reports `truncated`. A timeout kills
 the wait and returns whatever arrived with `timed_out`. `exit` is
 -1 when the server never sent a status.
 
-**Signature:** `SSH_EXEC($target: STRING, $username: STRING, $password: STRING, $argv: LIST<STRING>, $options: MAP<timeout?: DURATION|STRING, max_bytes?: INT>) -> MAP`
+**Signature:** `SSH_EXEC($target: STRING, $username: STRING, $password: STRING, $argv: LIST<STRING>, $options: MAP<timeout?: DURATION|STRING, max_bytes?: INT>): MAP`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -289,7 +289,7 @@ credential: mint at runtime, hand the value to both sides, drop
 it after. Pure (no step context), so it runs anywhere a STRING
 binds, including option maps and placeholders.
 
-**Signature:** `SSH_GENERATE_PASSWORD() -> STRING`
+**Signature:** `SSH_GENERATE_PASSWORD(): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -359,7 +359,7 @@ session-driven sizing or reaper-ordered reporting, that is the
 point to revisit unifying the two.
 
 
-**Signature:** `SSH_PTY_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $rows: INT, $cols: INT, $in_pipe: PIPE, $out_pipe: PIPE) -> INT`
+**Signature:** `SSH_PTY_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $rows: INT, $cols: INT, $in_pipe: PIPE, $out_pipe: PIPE): INT`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -419,7 +419,7 @@ Copy one pipe into another until EOF, then close the target.
 Either task placement works, as long as the other end is live.
 
 
-**Signature:** `SSH_PUMP($from_pipe: PIPE, $to_pipe: PIPE) -> INT`
+**Signature:** `SSH_PUMP($from_pipe: PIPE, $to_pipe: PIPE): INT`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -455,7 +455,7 @@ closes. Must run inside `ASYNC`. Pump ends take once: a second
 pump bails instead of splitting bytes.
 
 
-**Signature:** `SSH_PUMP_CHANNEL($session: SSH_SESSION, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL>`
+**Signature:** `SSH_PUMP_CHANNEL($session: SSH_SESSION, $in_pipe: PIPE, $out_pipe: PIPE): MAP<closed: BOOL>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -522,7 +522,7 @@ exactly `argv`. `cmd /c` is the exception (its tail is a command,
 not `argv`): route command text via `ENV SSH_COMMAND="..."` with
 `["cmd", "/c", "%SSH_COMMAND%"]` instead.
 
-**Signature:** `SSH_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $in_pipe: PIPE, $out_pipe: PIPE, $err_pipe: PIPE) -> INT`
+**Signature:** `SSH_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $in_pipe: PIPE, $out_pipe: PIPE, $err_pipe: PIPE): INT`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -577,7 +577,7 @@ ahead of the channel close. Survives the take-once pump ends, so
 call it before the pump drains. `SSH_PTY_RUN` reports by itself;
 this covers other legs (`RUN`, synthetic replies).
 
-**Signature:** `SSH_SEND_EXIT_STATUS($session: SSH_SESSION, $code: INT) -> BOOL`
+**Signature:** `SSH_SEND_EXIT_STATUS($session: SSH_SESSION, $code: INT): BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -629,7 +629,7 @@ load-or-create; blank keeps the ephemeral key) and the optional
 `idle_timeout` DURATION (quiet-connection kill, default 5m; zero
 disables it for persistent sessions).
 
-**Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING, idle_timeout?: DURATION|STRING>) -> MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
+**Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING, idle_timeout?: DURATION|STRING>): MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 

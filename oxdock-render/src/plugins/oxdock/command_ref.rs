@@ -352,7 +352,7 @@ pub(crate) fn render_body() -> Result<String> {
 }
 
 /// Render one function signature from its derived metadata:
-/// `NAME($param: TYPE, ...) -> RET`. Every parameter renders its
+/// `NAME($param: TYPE, ...): RET`. Every parameter renders its
 /// type (bare `Value` is `ANY`, never a hole); absent return types
 /// render no arrow. Closed `#[values]` sets render after the type
 /// (`$policy: STRING = "a" | "b"`), quoted because callers pass
@@ -393,7 +393,7 @@ fn render_signature(meta: &FuncMeta) -> String {
     let returns = meta
         .returns
         .as_ref()
-        .map(|tag| format!(" -> {}", render_tag(tag)))
+        .map(|tag| format!(": {}", render_tag(tag)))
         .unwrap_or_default();
     format!("{}({}){}", meta.name, params, returns)
 }
@@ -815,7 +815,7 @@ mod tests {
             "signature nests the set: {signature}"
         );
         assert!(
-            signature.contains("-> MAP<target: STRING|PATH>"),
+            signature.contains(": MAP<target: STRING|PATH>"),
             "returns name the set: {signature}"
         );
         let params = render_parameters(&meta);
