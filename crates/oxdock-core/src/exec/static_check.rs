@@ -2045,23 +2045,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // capture_yield): without it a TIMEOUT-wrapped (or any
                 // non-call) command sails through with an incompatible
                 // declaration and fails only at runtime coercion.
-                if let Some(yield_tag) = self.capture_yield(cmd, depth)? {
-                    if self
+                if let Some(yield_tag) = self.capture_yield(cmd, depth)?
+                    && self
                         .check_arg(
                             &tag,
                             StaticTy::Ty(yield_tag.clone()),
                             &format!("step {}", idx + 1),
                         )
                         .is_err()
-                    {
-                        bail!(
-                            "step {}: LET ${} captures {} but declares {}",
-                            idx + 1,
-                            clean_var(var),
-                            render_structural(&yield_tag),
-                            render_structural(&tag)
-                        );
-                    }
+                {
+                    bail!(
+                        "step {}: LET ${} captures {} but declares {}",
+                        idx + 1,
+                        clean_var(var),
+                        render_structural(&yield_tag),
+                        render_structural(&tag)
+                    );
                 }
                 let key = clean_var(var);
                 env.declare(key, tag, step.guard.as_ref(), idx)?;
