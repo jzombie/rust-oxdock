@@ -111,6 +111,48 @@ pub const LIST_TAG: TypeTag = TypeTag::List;
 /// sites compare against this instead of a literal, so the spelling
 /// lives once beside the tag it names.
 pub const HANDLE_TYPE_NAME: &str = "HANDLE";
+
+/// The canonical source spelling of the list word, matching
+/// [`HANDLE_TYPE_NAME`]: generic heads compare against this.
+pub const LIST_TYPE_NAME: &str = "LIST";
+
+/// The canonical source spelling of the map word, matching
+/// [`HANDLE_TYPE_NAME`].
+pub const MAP_TYPE_NAME: &str = "MAP";
+
+/// The canonical source spelling of the any word, matching
+/// [`HANDLE_TYPE_NAME`].
+pub const ANY_TYPE_NAME: &str = "ANY";
+
+/// The canonical source spelling of the string word.
+pub const STRING_TYPE_NAME: &str = "STRING";
+
+/// The canonical source spelling of the int word.
+pub const INT_TYPE_NAME: &str = "INT";
+
+/// The canonical source spelling of the float word.
+pub const FLOAT_TYPE_NAME: &str = "FLOAT";
+
+/// The canonical source spelling of the bool word.
+pub const BOOL_TYPE_NAME: &str = "BOOL";
+
+/// The canonical source spelling of the pipe word.
+pub const PIPE_TYPE_NAME: &str = "PIPE";
+
+/// The canonical source spelling of the void word.
+pub const VOID_TYPE_NAME: &str = "VOID";
+
+/// The canonical source spelling of the duration word.
+pub const DURATION_TYPE_NAME: &str = "DURATION";
+
+/// The canonical source spelling of the path word.
+pub const PATH_TYPE_NAME: &str = "PATH";
+
+/// The canonical source spelling of the semaphore word.
+pub const SEMAPHORE_TYPE_NAME: &str = "SEMAPHORE";
+
+/// The canonical source spelling of the permit word.
+pub const PERMIT_TYPE_NAME: &str = "PERMIT";
 impl std::fmt::Debug for TypeTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -159,31 +201,31 @@ impl TypeTag {
     /// Display name: the builtin label, the custom descriptor name, or
     /// the coarse word kind for shaped compounds. Field detail renders
     /// structurally, never through this string. Borrowed in every
-    /// case: literals for words, the stored spelling for unions.
+    /// case: constants for words, the stored spelling for unions.
     pub fn name(&self) -> &str {
         match self {
-            TypeTag::String => "STRING",
-            TypeTag::Int => "INT",
-            TypeTag::Float => "FLOAT",
-            TypeTag::Bool => "BOOL",
-            TypeTag::List => "LIST",
-            TypeTag::Map => "MAP",
-            TypeTag::Pipe => "PIPE",
-            TypeTag::Handle => "HANDLE",
-            TypeTag::HandleOf(_) => "HANDLE",
-            TypeTag::Void => "VOID",
-            TypeTag::Duration => "DURATION",
-            TypeTag::Path => "PATH",
-            TypeTag::Semaphore => "SEMAPHORE",
-            TypeTag::Permit => "PERMIT",
-            TypeTag::Any => "ANY",
+            TypeTag::String => STRING_TYPE_NAME,
+            TypeTag::Int => INT_TYPE_NAME,
+            TypeTag::Float => FLOAT_TYPE_NAME,
+            TypeTag::Bool => BOOL_TYPE_NAME,
+            TypeTag::List => LIST_TYPE_NAME,
+            TypeTag::Map => MAP_TYPE_NAME,
+            TypeTag::Pipe => PIPE_TYPE_NAME,
+            TypeTag::Handle => HANDLE_TYPE_NAME,
+            TypeTag::HandleOf(_) => HANDLE_TYPE_NAME,
+            TypeTag::Void => VOID_TYPE_NAME,
+            TypeTag::Duration => DURATION_TYPE_NAME,
+            TypeTag::Path => PATH_TYPE_NAME,
+            TypeTag::Semaphore => SEMAPHORE_TYPE_NAME,
+            TypeTag::Permit => PERMIT_TYPE_NAME,
+            TypeTag::Any => ANY_TYPE_NAME,
             // Borrowed from the stored spelling: computed once at
             // construction, shared by every clone.
             TypeTag::Union(spelling, _) => spelling,
             TypeTag::Custom(descriptor) => descriptor.name,
-            TypeTag::ListOf(_) => "LIST",
-            TypeTag::MapOf(_) => "MAP",
-            TypeTag::Record(_) => "MAP",
+            TypeTag::ListOf(_) => LIST_TYPE_NAME,
+            TypeTag::MapOf(_) => MAP_TYPE_NAME,
+            TypeTag::Record(_) => MAP_TYPE_NAME,
         }
     }
 
@@ -192,20 +234,20 @@ impl TypeTag {
     /// directory, shapes through the schema directory.
     pub fn builtin(name: &str) -> Option<TypeTag> {
         match name {
-            "STRING" => Some(TypeTag::String),
-            "INT" => Some(TypeTag::Int),
-            "FLOAT" => Some(TypeTag::Float),
-            "BOOL" => Some(TypeTag::Bool),
-            "LIST" => Some(TypeTag::List),
-            "MAP" => Some(TypeTag::Map),
-            "PIPE" => Some(TypeTag::Pipe),
-            "HANDLE" => Some(TypeTag::Handle),
-            "VOID" => Some(TypeTag::Void),
-            "DURATION" => Some(TypeTag::Duration),
-            "PATH" => Some(TypeTag::Path),
-            "SEMAPHORE" => Some(TypeTag::Semaphore),
-            "PERMIT" => Some(TypeTag::Permit),
-            "ANY" => Some(TypeTag::Any),
+            STRING_TYPE_NAME => Some(TypeTag::String),
+            INT_TYPE_NAME => Some(TypeTag::Int),
+            FLOAT_TYPE_NAME => Some(TypeTag::Float),
+            BOOL_TYPE_NAME => Some(TypeTag::Bool),
+            LIST_TYPE_NAME => Some(TypeTag::List),
+            MAP_TYPE_NAME => Some(TypeTag::Map),
+            PIPE_TYPE_NAME => Some(TypeTag::Pipe),
+            HANDLE_TYPE_NAME => Some(TypeTag::Handle),
+            VOID_TYPE_NAME => Some(TypeTag::Void),
+            DURATION_TYPE_NAME => Some(TypeTag::Duration),
+            PATH_TYPE_NAME => Some(TypeTag::Path),
+            SEMAPHORE_TYPE_NAME => Some(TypeTag::Semaphore),
+            PERMIT_TYPE_NAME => Some(TypeTag::Permit),
+            ANY_TYPE_NAME => Some(TypeTag::Any),
             _ => None,
         }
     }

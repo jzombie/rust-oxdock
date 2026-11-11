@@ -60,9 +60,12 @@ pub use parser::{
 };
 pub use strip_flags::strip_flags;
 pub use tag::{
-    ANY_TAG, Field, HANDLE_TYPE_NAME, LIST_TAG, MAP_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField,
-    TypeTag, canonicalize_spelling, check_value, check_value_at, intern_rendered, lookup_rendered,
-    parse_spelling, render_structural,
+    ANY_TAG, ANY_TYPE_NAME, BOOL_TYPE_NAME, DURATION_TYPE_NAME, FLOAT_TYPE_NAME, Field,
+    HANDLE_TYPE_NAME, INT_TYPE_NAME, LIST_TAG, LIST_TYPE_NAME, MAP_TAG, MAP_TYPE_NAME,
+    MAX_GENERIC_DEPTH, PATH_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
+    STRING_TYPE_NAME, Spelled, SpelledField, TypeTag, VOID_TYPE_NAME, canonicalize_spelling,
+    check_value, check_value_at, intern_rendered, lookup_rendered, parse_spelling,
+    render_structural,
 };
 #[cfg(feature = "proc-macro-api")]
 pub use tok::lex_tokens;

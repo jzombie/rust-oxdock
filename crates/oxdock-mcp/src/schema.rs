@@ -5,7 +5,11 @@
 //! and rejects opaque host types before the reactor opens (fail fast).
 
 use anyhow::{Result, bail};
-use oxdock_parser::TypeTag;
+use oxdock_parser::{
+    ANY_TYPE_NAME, BOOL_TYPE_NAME, DURATION_TYPE_NAME, FLOAT_TYPE_NAME, HANDLE_TYPE_NAME,
+    INT_TYPE_NAME, LIST_TYPE_NAME, MAP_TYPE_NAME, PATH_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
+    SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME, TypeTag, VOID_TYPE_NAME,
+};
 use serde_json::{Map, Value};
 
 /// JSON-compatible leaves. Anything else fails validation naming the type.
@@ -118,23 +122,23 @@ pub fn schema_for_tag(tag: &TypeTag) -> Result<Value> {
 /// Short display name for error messages.
 fn tag_name(tag: &TypeTag) -> String {
     match tag {
-        TypeTag::String => "STRING".to_string(),
-        TypeTag::Int => "INT".to_string(),
-        TypeTag::Float => "FLOAT".to_string(),
-        TypeTag::Bool => "BOOL".to_string(),
-        TypeTag::List => "LIST".to_string(),
-        TypeTag::Map => "MAP".to_string(),
-        TypeTag::Pipe => "PIPE".to_string(),
-        TypeTag::Handle | TypeTag::HandleOf(_) => "HANDLE".to_string(),
-        TypeTag::Duration => "DURATION".to_string(),
-        TypeTag::Path => "PATH".to_string(),
-        TypeTag::Semaphore => "SEMAPHORE".to_string(),
-        TypeTag::Permit => "PERMIT".to_string(),
-        TypeTag::Void => "VOID".to_string(),
-        TypeTag::Any => "ANY".to_string(),
+        TypeTag::String => STRING_TYPE_NAME.to_string(),
+        TypeTag::Int => INT_TYPE_NAME.to_string(),
+        TypeTag::Float => FLOAT_TYPE_NAME.to_string(),
+        TypeTag::Bool => BOOL_TYPE_NAME.to_string(),
+        TypeTag::List => LIST_TYPE_NAME.to_string(),
+        TypeTag::Map => MAP_TYPE_NAME.to_string(),
+        TypeTag::Pipe => PIPE_TYPE_NAME.to_string(),
+        TypeTag::Handle | TypeTag::HandleOf(_) => HANDLE_TYPE_NAME.to_string(),
+        TypeTag::Duration => DURATION_TYPE_NAME.to_string(),
+        TypeTag::Path => PATH_TYPE_NAME.to_string(),
+        TypeTag::Semaphore => SEMAPHORE_TYPE_NAME.to_string(),
+        TypeTag::Permit => PERMIT_TYPE_NAME.to_string(),
+        TypeTag::Void => VOID_TYPE_NAME.to_string(),
+        TypeTag::Any => ANY_TYPE_NAME.to_string(),
         TypeTag::Custom(descriptor) => descriptor.name.to_string(),
-        TypeTag::ListOf(element) => format!("LIST<{}>", tag_name(element)),
-        TypeTag::MapOf(values) => format!("MAP<{}>", tag_name(values)),
+        TypeTag::ListOf(element) => format!("{LIST_TYPE_NAME}<{}>", tag_name(element)),
+        TypeTag::MapOf(values) => format!("{MAP_TYPE_NAME}<{}>", tag_name(values)),
         TypeTag::Record(fields) => {
             let names: Vec<String> = fields
                 .iter()
@@ -146,7 +150,7 @@ fn tag_name(tag: &TypeTag) -> String {
                     }
                 })
                 .collect();
-            format!("MAP<{}>", names.join(", "))
+            format!("{MAP_TYPE_NAME}<{}>", names.join(", "))
         }
         TypeTag::Union(spelling, _) => spelling.to_string(),
     }

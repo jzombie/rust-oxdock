@@ -7,11 +7,11 @@
 //! checking, `TYPES()`, `TYPE_DESCRIBE`) reads the state map.
 
 pub use oxdock_parser::{
-    Field, HANDLE_TYPE_NAME, LIST_TAG, MAP_TAG, OxDockType, TypeDescriptor, TypeTag, Value,
-    ValuePayload, check_value, check_value_at, clone_boxed, clone_copy, clone_shared, drop_boxed,
-    drop_noop, drop_shared, eq_boxed, eq_inline, eq_shared, fmt_boxed, fmt_inline, fmt_shared,
-    load_inline, startup_descriptors, store_inline, type_anchor, unshare_boxed, unshare_inline,
-    unshare_shared,
+    ANY_TYPE_NAME, Field, HANDLE_TYPE_NAME, LIST_TAG, LIST_TYPE_NAME, MAP_TAG, MAP_TYPE_NAME,
+    OxDockType, TypeDescriptor, TypeTag, Value, ValuePayload, check_value, check_value_at,
+    clone_boxed, clone_copy, clone_shared, drop_boxed, drop_noop, drop_shared, eq_boxed, eq_inline,
+    eq_shared, fmt_boxed, fmt_inline, fmt_shared, load_inline, startup_descriptors, store_inline,
+    type_anchor, unshare_boxed, unshare_inline, unshare_shared,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -164,19 +164,19 @@ impl<P: ProcessManager> ExecState<P> {
         if depth > MAX_GENERIC_DEPTH {
             bail!("type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: '{name}'");
         }
-        if name == "MAP" {
+        if name == MAP_TYPE_NAME {
             bail!(
-                "bare MAP is not a declaration type: write a shape (MAP<name: TYPE, ...>) or MAP<ANY> for maps with unknown keys"
+                "bare {MAP_TYPE_NAME} is not a declaration type: write a shape ({MAP_TYPE_NAME}<name: TYPE, ...>) or {MAP_TYPE_NAME}<{ANY_TYPE_NAME}> for maps with unknown keys"
             );
         }
-        if name == "LIST" {
+        if name == LIST_TYPE_NAME {
             bail!(
-                "bare LIST is not a declaration type: write a shape (LIST<TYPE>) or LIST<ANY> for lists with unknown elements"
+                "bare {LIST_TYPE_NAME} is not a declaration type: write a shape ({LIST_TYPE_NAME}<TYPE>) or {LIST_TYPE_NAME}<{ANY_TYPE_NAME}> for lists with unknown elements"
             );
         }
         if name == HANDLE_TYPE_NAME {
             bail!(
-                "bare HANDLE is not a declaration type: write HANDLE<T> for a known payload or HANDLE<ANY> for an unknown one"
+                "bare {HANDLE_TYPE_NAME} is not a declaration type: write {HANDLE_TYPE_NAME}<T> for a known payload or {HANDLE_TYPE_NAME}<{ANY_TYPE_NAME}> for an unknown one"
             );
         }
         if let Some(tag) = TypeTag::builtin(name) {
@@ -272,11 +272,11 @@ impl<P: ProcessManager> ExecState<P> {
         resolving: &mut Vec<String>,
         depth: usize,
     ) -> Result<TypeTag> {
-        if name != "LIST" && name != "MAP" && name != "HANDLE" {
+        if name != LIST_TYPE_NAME && name != MAP_TYPE_NAME && name != HANDLE_TYPE_NAME {
             self.resolve_named(name, resolving, depth)?;
             bail!("'{name}' takes no type arguments");
         }
-        if name == "HANDLE" {
+        if name == HANDLE_TYPE_NAME {
             let [
                 SpelledField {
                     name: None,
@@ -285,12 +285,12 @@ impl<P: ProcessManager> ExecState<P> {
                 },
             ] = args
             else {
-                bail!("HANDLE takes exactly one bare type argument");
+                bail!("{HANDLE_TYPE_NAME} takes exactly one bare type argument");
             };
             let payload = self.build_rendered(payload, resolving, depth + 1)?;
             return Ok(TypeTag::HandleOf(std::sync::Arc::new(payload)));
         }
-        if name == "LIST" {
+        if name == LIST_TYPE_NAME {
             let [
                 SpelledField {
                     name: None,
@@ -299,12 +299,12 @@ impl<P: ProcessManager> ExecState<P> {
                 },
             ] = args
             else {
-                bail!("LIST takes exactly one bare type argument");
+                bail!("{LIST_TYPE_NAME} takes exactly one bare type argument");
             };
             let element = self.build_rendered(element, resolving, depth + 1)?;
             return Ok(TypeTag::ListOf(std::sync::Arc::new(element)));
         }
-        if name == "MAP"
+        if name == MAP_TYPE_NAME
             && let [
                 SpelledField {
                     name: None,
@@ -312,7 +312,7 @@ impl<P: ProcessManager> ExecState<P> {
                     ..
                 },
             ] = args
-            && any.as_str() == "ANY"
+            && any.as_str() == ANY_TYPE_NAME
         {
             // Explicit unknown map: the only bare MAP spelling. Anything
             // else bare still rejects below, and plain `MAP` never
@@ -322,7 +322,9 @@ impl<P: ProcessManager> ExecState<P> {
         let mut fields = Vec::with_capacity(args.len());
         for arg in args {
             let Some(field_name) = arg.name.as_ref() else {
-                bail!("MAP fields require 'name: TYPE'; '{name}' takes no bare arguments");
+                bail!(
+                    "{MAP_TYPE_NAME} fields require 'name: TYPE'; '{name}' takes no bare arguments"
+                );
             };
             let ty = self.build_rendered(&arg.ty, resolving, depth + 1)?;
             fields.push(Field {
@@ -427,10 +429,10 @@ impl<P: ProcessManager> ExecState<P> {
     /// Single choke for declaration validity: known customs plus
     /// the VOID position rule. VOID is legal only as a bare function
     /// return (`top_void` covers exactly that call) or as the direct
-    /// payload of HANDLE (`HANDLE<VOID>`); every other position --
-    /// variable, parameter, record field, union member, container
-    /// element, or anything nested deeper -- is a static error naming
-    /// the site. One recursion serves all declaration sites, so the
+    /// payload of HANDLE (`HANDLE<VOID>`). Every other position is a
+    /// static error naming the site: variable, parameter, record
+    /// field, union member, container element, or anything nested
+    /// deeper. One recursion serves all declaration sites, so the
     /// rule cannot drift between LET, params, returns, schemas, and
     /// aliases: resolve first, then validate here.
     fn check_tag_known(&self, what: &str, tag: &TypeTag, top_void: bool) -> Result<()> {

@@ -2589,28 +2589,33 @@ mod tests {
 
     #[test]
     fn type_of_names_words_for_branching() {
+        use oxdock_parser::{
+            BOOL_TYPE_NAME, DURATION_TYPE_NAME, FLOAT_TYPE_NAME, HANDLE_TYPE_NAME, INT_TYPE_NAME,
+            LIST_TYPE_NAME, MAP_TYPE_NAME, PATH_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
+            SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME,
+        };
         use std::collections::BTreeMap;
         // Table-driven over the startup registry itself: a new word
         // without a sampler below fails here naming the word, so the
         // table can never silently shrink behind a hand list.
         fn sample(name: &str) -> Option<Value> {
             match name {
-                "INT" => Some(Value::int(1)),
-                "FLOAT" => Some(Value::float(1.5)),
-                "STRING" => Some(Value::string("x".to_string())),
-                "BOOL" => Some(Value::bool(true)),
-                "LIST" => Some(Value::list(vec![])),
-                "MAP" => Some(Value::map(BTreeMap::new())),
-                "PATH" => {
+                INT_TYPE_NAME => Some(Value::int(1)),
+                FLOAT_TYPE_NAME => Some(Value::float(1.5)),
+                STRING_TYPE_NAME => Some(Value::string("x".to_string())),
+                BOOL_TYPE_NAME => Some(Value::bool(true)),
+                LIST_TYPE_NAME => Some(Value::list(vec![])),
+                MAP_TYPE_NAME => Some(Value::map(BTreeMap::new())),
+                PATH_TYPE_NAME => {
                     #[allow(clippy::disallowed_types)]
                     let path = std::path::PathBuf::from("x");
                     Some(Value::path(path))
                 }
-                "DURATION" => Some(Value::duration(std::time::Duration::from_secs(1))),
-                "PIPE" => Some(Value::pipe_fresh()),
-                "HANDLE" => Some(Value::handle(1)),
-                "SEMAPHORE" => Some(Value::semaphore(1)),
-                "PERMIT" => {
+                DURATION_TYPE_NAME => Some(Value::duration(std::time::Duration::from_secs(1))),
+                PIPE_TYPE_NAME => Some(Value::pipe_fresh()),
+                HANDLE_TYPE_NAME => Some(Value::handle(1)),
+                SEMAPHORE_TYPE_NAME => Some(Value::semaphore(1)),
+                PERMIT_TYPE_NAME => {
                     let sem = Value::semaphore(1);
                     let backend = sem.as_semaphore().expect("semaphore backend");
                     Some(Value::permit(&backend))
