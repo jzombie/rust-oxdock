@@ -45,6 +45,14 @@ const FIELD_EXIT: &str = "exit";
 const FIELD_TRUNCATED: &str = "truncated";
 const FIELD_TIMED_OUT: &str = "timed_out";
 
+/// Option map keys for SSH calls. `username` and `password` reuse the
+/// `FIELD_*` spellings above (same words, same meaning); the rest live
+/// here so every lookup matches its `#[options]` spelling.
+const OPT_KEY_PATH: &str = "key_path";
+const OPT_IDLE_TIMEOUT: &str = "idle_timeout";
+const OPT_TIMEOUT: &str = "timeout";
+const OPT_MAX_BYTES: &str = "max_bytes";
+
 /// Unique server ids per process.
 static SERVER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -208,27 +216,27 @@ fn ssh_serve<P: ProcessManager>(
     options: BTreeMap<String, Value>,
 ) -> Result<Value> {
     let map = &options;
-    let username = match map.get("username") {
+    let username = match map.get(FIELD_USERNAME) {
         Some(value) => {
             let text = value.as_str().expect("check_options verified STRING");
             if text.trim().is_empty() {
-                bail!("SSH_SERVE option 'username' must not be empty");
+                bail!("SSH_SERVE option '{FIELD_USERNAME}' must not be empty");
             }
             text.to_string()
         }
-        None => bail!("SSH_SERVE option 'username' is required"),
+        None => bail!("SSH_SERVE option '{FIELD_USERNAME}' is required"),
     };
-    let password = match map.get("password") {
+    let password = match map.get(FIELD_PASSWORD) {
         Some(value) => {
             let text = value.as_str().expect("check_options verified STRING");
             if text.trim().is_empty() {
-                bail!("SSH_SERVE option 'password' must not be empty");
+                bail!("SSH_SERVE option '{FIELD_PASSWORD}' must not be empty");
             }
             text.to_string()
         }
-        None => bail!("SSH_SERVE option 'password' is required"),
+        None => bail!("SSH_SERVE option '{FIELD_PASSWORD}' is required"),
     };
-    let key_path = match map.get("key_path") {
+    let key_path = match map.get(OPT_KEY_PATH) {
         Some(value) => {
             let text = value.as_str().expect("check_options verified STRING");
             if text.trim().is_empty() {
@@ -241,7 +249,7 @@ fn ssh_serve<P: ProcessManager>(
     };
     // Idle kill override: absent keeps the default, zero disables the
     // timeout entirely (persistent sessions must opt out explicitly).
-    let idle_timeout = match map.get("idle_timeout") {
+    let idle_timeout = match map.get(OPT_IDLE_TIMEOUT) {
         Some(value) => {
             // `check_options` verified `DURATION|STRING`; narrow directly.
             let timeout = if let Some(duration) = value.as_duration() {
@@ -251,7 +259,9 @@ fn ssh_serve<P: ProcessManager>(
                     .as_str()
                     .expect("check_options verified DURATION|STRING");
                 oxdock_parser::command::parse_duration(text).with_context(|| {
-                    format!("SSH_SERVE option 'idle_timeout' must be a duration, got {text:?}")
+                    format!(
+                        "SSH_SERVE option '{OPT_IDLE_TIMEOUT}' must be a duration, got {text:?}"
+                    )
                 })?
             };
             (!timeout.is_zero()).then_some(timeout)
@@ -1024,7 +1034,7 @@ fn ssh_exec<P: ProcessManager>(
             return Err(no_cli_mapping("SSH_EXEC", &key.endpoint));
         }
     };
-    let timeout = match options.get("timeout") {
+    let timeout = match options.get(OPT_TIMEOUT) {
         None => crate::runtime::DEFAULT_EXEC_TIMEOUT,
         Some(value) => {
             // `check_options` verified `DURATION|STRING`; narrow directly.
@@ -1035,21 +1045,21 @@ fn ssh_exec<P: ProcessManager>(
                     .as_str()
                     .expect("check_options verified DURATION|STRING");
                 oxdock_parser::command::parse_duration(text).with_context(|| {
-                    format!("SSH_EXEC option 'timeout' must be a duration, got {text:?}")
+                    format!("SSH_EXEC option '{OPT_TIMEOUT}' must be a duration, got {text:?}")
                 })?
             };
             if timeout.is_zero() {
-                bail!("SSH_EXEC option 'timeout' must be positive");
+                bail!("SSH_EXEC option '{OPT_TIMEOUT}' must be positive");
             }
             timeout
         }
     };
-    let max_bytes = match options.get("max_bytes") {
+    let max_bytes = match options.get(OPT_MAX_BYTES) {
         None => crate::runtime::DEFAULT_EXEC_MAX_BYTES,
         Some(value) => {
             let bytes = value.as_i64().expect("check_options verified INT");
             if bytes <= 0 {
-                bail!("SSH_EXEC option 'max_bytes' must be positive");
+                bail!("SSH_EXEC option '{OPT_MAX_BYTES}' must be positive");
             }
             bytes as usize
         }

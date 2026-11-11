@@ -15,6 +15,13 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 
+/// TOC option keys. Single source for every lookup and error label, so
+/// the `#[options]` spellings and the reads cannot drift.
+const OPT_MIN_LEVEL: &str = "min_level";
+const OPT_MAX_LEVEL: &str = "max_level";
+const OPT_FORMAT: &str = "format";
+const OPT_DELIMITER: &str = "delimiter";
+
 /// Escape pipe characters so `|` inside a value does not break the
 /// enclosing Markdown table. Newlines become `<br>` so a multi line
 /// value stays within one table row.
@@ -293,34 +300,34 @@ pub struct Heading {
 pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Result<TocOptions> {
     // Per-key reads: one shape check per key, then direct
     // narrowing. Bounds and cross-key rules below are domain logic.
-    let min_level = match map.get("min_level") {
+    let min_level = match map.get(OPT_MIN_LEVEL) {
         Some(value) => {
             oxdock_parser::check_value_at(
                 &oxdock_parser::TypeTag::Int,
                 value,
-                "TOC option 'min_level'",
+                "TOC option '{OPT_MIN_LEVEL}'",
             )?;
             value.as_i64().expect("check_value_at verified INT")
         }
         None => 2,
     };
-    let max_level_explicit = match map.get("max_level") {
+    let max_level_explicit = match map.get(OPT_MAX_LEVEL) {
         Some(value) => {
             oxdock_parser::check_value_at(
                 &oxdock_parser::TypeTag::Int,
                 value,
-                "TOC option 'max_level'",
+                "TOC option '{OPT_MAX_LEVEL}'",
             )?;
             Some(value.as_i64().expect("check_value_at verified INT"))
         }
         None => None,
     };
-    let format_raw = match map.get("format") {
+    let format_raw = match map.get(OPT_FORMAT) {
         Some(value) => {
             oxdock_parser::check_value_at(
                 &oxdock_parser::TypeTag::String,
                 value,
-                "TOC option 'format'",
+                "TOC option '{OPT_FORMAT}'",
             )?;
             value
                 .as_str()
@@ -329,12 +336,12 @@ pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Resu
         }
         None => "tree".to_string(),
     };
-    let delimiter = match map.get("delimiter") {
+    let delimiter = match map.get(OPT_DELIMITER) {
         Some(value) => {
             oxdock_parser::check_value_at(
                 &oxdock_parser::TypeTag::String,
                 value,
-                "TOC option 'delimiter'",
+                "TOC option '{OPT_DELIMITER}'",
             )?;
             value
                 .as_str()
