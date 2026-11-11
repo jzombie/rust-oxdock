@@ -6616,7 +6616,9 @@ fn try_let_with_io_rhs(
             match parse_inner_command(&rest[..1], stmt, ctx) {
                 Err(e) => return Err(e),
                 Ok(_) => {
-                    return Err(fail("LET $var: HANDLE<T> = ASYNC requires a body".to_string()));
+                    return Err(fail(
+                        "LET $var: HANDLE<T> = ASYNC requires a body".to_string(),
+                    ));
                 }
             }
         }

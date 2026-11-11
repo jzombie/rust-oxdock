@@ -5163,7 +5163,8 @@ fn bare_handle_declaration_fails() {
         let root = guard_root(&temp);
         let err = run_script(&root, script).expect_err("bare HANDLE must fail");
         assert!(
-            err.to_string().contains("bare HANDLE is not a declaration type"),
+            err.to_string()
+                .contains("bare HANDLE is not a declaration type"),
             "{script:?}: {err}"
         );
     }
