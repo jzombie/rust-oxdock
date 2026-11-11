@@ -11,7 +11,7 @@ WORKSPACE SYSTEM
 # implements it, so only it asserts the placed binary reports back.
 # Extend here when a new product gains a version probe; callers
 # never inline the list.
-FUNC PRODUCT_CHECKS_VERSION($product: STRING) {
+FUNC PRODUCT_CHECKS_VERSION($product: STRING): BOOL {
     RETURN $product == "oxdock"
 }
 
@@ -21,7 +21,7 @@ FUNC PRODUCT_CHECKS_VERSION($product: STRING) {
 # stem, companions keep their tarball names, so any subset installs
 # by name with no special cases. Unknown names fail listing the
 # tarball members.
-FUNC INSTALL_SELECTED($dir: STRING, $destname: STRING) {
+FUNC INSTALL_SELECTED($dir: STRING, $destname: STRING): VOID {
     LET $members_raw: STRING = "\{{ env:OXDOCK_MEMBERS }}"
     LET $want_raw: STRING = "\{{ env:OXDOCK_BINS }}"
     IF $members_raw == "" {

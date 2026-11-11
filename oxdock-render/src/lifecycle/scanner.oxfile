@@ -14,17 +14,17 @@ IMPORT [STD, RENDER_ENGINE]
 IMPORT [TYPE CTX, TYPE VARS, TYPE WORKSPACE_SNAPSHOT FROM "../types.oxfile"]
 
 # Run-once intake: generic passthrough, no source state to create.
-FUNC SETUP($ctx: CTX) {
+FUNC SETUP($ctx: CTX): CTX {
     RETURN $ctx
 }
 
 # Descriptor check: passthrough, INGEST lives in generic.
-FUNC INGEST($ctx: CTX) {
+FUNC INGEST($ctx: CTX): CTX {
     RETURN $ctx
 }
 
 # SCAN hook: expand every fragment once into the staging source manifest.
-FUNC SCAN($ctx: CTX) {
+FUNC SCAN($ctx: CTX): CTX {
     LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)
     LET $has_vars: BOOL = HAS_KEY($cfg, "vars")
     IF $has_vars == false {
@@ -108,27 +108,27 @@ FUNC SCAN($ctx: CTX) {
 }
 
 # Manifest promotion lives in generic: passthrough here.
-FUNC ASSEMBLE($ctx: CTX) {
+FUNC ASSEMBLE($ctx: CTX): CTX {
     RETURN $ctx
 }
 
 # Master expansion lives in generic: passthrough here.
-FUNC RENDER($ctx: CTX) {
+FUNC RENDER($ctx: CTX): CTX {
     RETURN $ctx
 }
 
 # Deferred pass lives in generic: passthrough here.
-FUNC DEFERRED($ctx: CTX) {
+FUNC DEFERRED($ctx: CTX): CTX {
     RETURN $ctx
 }
 
 # Output write lives in generic: passthrough here.
-FUNC WRITE_OUT($ctx: CTX) {
+FUNC WRITE_OUT($ctx: CTX): CTX {
     RETURN $ctx
 }
 
 # Determinism check lives in generic: passthrough here.
-FUNC VERIFY($ctx: CTX) {
+FUNC VERIFY($ctx: CTX): CTX {
     RETURN $ctx
 }
 

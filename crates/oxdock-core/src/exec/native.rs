@@ -569,6 +569,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// shadow, same-scope duplicates cannot redefine, and nested shadowing
     /// of an outer script definition restores on scope exit. Stored as
     /// `SCRIPT::NAME`, exactly like every other qualified entry.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn define_script(
         &mut self,
         name: &str,
@@ -656,6 +657,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// Out-of-range depths fall back to the top frame; a missing frame
     /// (never in practice: the registry always holds the global frame)
     /// defines untracked, like top-level definitions.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn define_aliased_in(
         &mut self,
         depth: usize,
@@ -1976,7 +1978,7 @@ fn interpreter<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     # The library under test: demo guarded by IS_MAIN.
     WRITE lib.oxfile """
         IMPORT [STD]
-        FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+        FUNC GREET($x: STRING): STRING { RETURN "hi \{{ $x }}" }
         EXPORT GREET
         IF IS_MAIN() {
             ECHO "demo: hi Ada"

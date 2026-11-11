@@ -1100,7 +1100,7 @@ REMOTE prod {
 
 Define a user function.
 
-**Syntax:** `FUNC NAME([$param: TYPE, ...]) { <commands> }`
+**Syntax:** `FUNC NAME([$param: TYPE, ...]): RET { <commands> }`
 
 Defines a user function with UPPERCASE name and explicitly typed
 parameters.
@@ -1120,7 +1120,7 @@ imported; see IMPORT.
 
 Invoke any function with one syntax: `NAME(...)` as a statement
 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
-the RETURN value (fallthrough without RETURN captures as "").
+the RETURN value (fallthrough without RETURN is a static error unless RET is VOID).
 
 
 **Examples:**
@@ -1128,7 +1128,7 @@ the RETURN value (fallthrough without RETURN captures as "").
 **Example: func def call**
 
 ```oxdock
-FUNC GREET($name: STRING) {
+FUNC GREET($name: STRING): STRING {
   RETURN $name
 }
 
@@ -1145,7 +1145,7 @@ GREET("bex")
 # A pipe handle travels into a function as a typed argument
 # and is usable as a binding target in both directions.
 # `LET $p: PIPE` mints the handle; `$p` passes it on.
-FUNC DRAIN($q: PIPE) {
+FUNC DRAIN($q: PIPE): STRING {
   WITH_IO [stdin=$q] READ_LINE $line
   RETURN $line
 }
@@ -1179,7 +1179,7 @@ EXIT or ECHO there.
 **Example: return**
 
 ```oxdock
-FUNC PICK($flag: BOOL) {
+FUNC PICK($flag: BOOL): STRING {
   IF $flag {
     RETURN "yes"
   }
@@ -1446,7 +1446,7 @@ ASSERT_CONTAINS stdout "hi World!"
 # exist when the run starts cannot be analyzed, so the
 # import fails before the first step runs.
 WORKSPACE LOCAL
-WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
+WRITE lib.oxdock 'FUNC F($x: STRING): STRING { RETURN $x } EXPORT F'
 IMPORT ["lib.oxdock" AS LIB]
 ```
 
@@ -1488,7 +1488,7 @@ EXPORT NOSUCH::FOO
 # them so importing files can use the same spelling.
 TYPE PERSON = MAP<name: STRING>
 
-FUNC GREET($p: PERSON) {
+FUNC GREET($p: PERSON): STRING {
     RETURN "hi \{{ $p.name }}"
 }
 EXPORT GREET
@@ -1530,7 +1530,7 @@ LET $files: LIST<STRING> = GLOB("*.oxdock")
 # parent and child see the same files.
 IMPORT [STD]
 WRITE lib.oxfile """
-    FUNC GREET($x: STRING) { RETURN "hi \\\{{ $x }}" }
+    FUNC GREET($x: STRING): STRING { RETURN "hi \\\{{ $x }}" }
     EXPORT GREET
     """
 WRITE main.oxfile """
@@ -1555,9 +1555,9 @@ ASSERT_CONTAINS $out "says hi Ada"
 IMPORT [STD]
 
 # The renderer: parent values land in the module source.
-FUNC MAKE_GREETER($who: STRING) {
+FUNC MAKE_GREETER($who: STRING): STRING {
     WRITE greeter.oxfile """
-        FUNC GREET() { RETURN "hi \{{ $who }}" }
+        FUNC GREET(): STRING { RETURN "hi \{{ $who }}" }
         EXPORT GREET
         """
     RETURN "greeter.oxfile"

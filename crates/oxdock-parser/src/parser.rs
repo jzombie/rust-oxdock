@@ -7305,10 +7305,9 @@ fn parse_element_at(
             // ASYNC FUNC definition form: prefix, parser records is_async
             // with no type-constraint validation (checker owns HANDLE rule).
             if matches!(toks.get(pos + 1).map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_FUNC)
+                && let Some((kind, used)) = parse_func_at(toks, pos + 1, stmt, ctx, true)?
             {
-                if let Some((kind, used)) = parse_func_at(toks, pos + 1, stmt, ctx, true)? {
-                    return Ok((vec![step(kind)], 1 + used));
-                }
+                return Ok((vec![step(kind)], 1 + used));
             }
             if let Some((kind, used)) = parse_async_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));

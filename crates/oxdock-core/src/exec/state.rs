@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -195,6 +195,13 @@ pub struct ExecState<P: ProcessManager> {
     /// validate once, initialize once. Every alias is a view onto the
     /// same record and the same shared state.
     pub(super) modules: HashMap<String, ModuleRecord>,
+    pub(super) validated_modules: HashSet<String>,
+    /// Files the static closure pass already proved (#115): entry plus
+    /// every transitively imported file, checked with full nested
+    /// knowledge. Runtime re-validation of the same registry-cached
+    /// body would only false-positive on nested calls, so imports skip
+    /// the single-file re-proof when their key is present. Unseen
+    /// files (direct API use, no static pass) still validate here.
     /// Active module context (#115), innermost last: `Some(key)` while
     /// module-owned code runs (init body or module-owned `FUNC`),
     /// `None` past an entry-function boundary (entry `FUNC`s stay
@@ -734,6 +741,7 @@ impl<P: ProcessManager> ExecState<P> {
             import_stack: self.import_stack.clone(),
             import_alias_frame: self.import_alias_frame,
             modules: self.modules.clone(),
+            validated_modules: self.validated_modules.clone(),
             module_stack: self.module_stack.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),

@@ -462,6 +462,7 @@ pub(crate) fn new_state<P: ProcessManager>(
         import_stack: Vec::new(),
         import_alias_frame: None,
         modules: std::collections::HashMap::new(),
+        validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
         module_table: self::native::std_module_table(),
         types: self::typing::startup_type_map(),

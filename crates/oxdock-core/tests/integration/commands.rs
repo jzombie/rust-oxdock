@@ -1590,7 +1590,7 @@ fn let_block_return_does_not_escape_function() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC F() {
+        FUNC F(): STRING {
             LET $a: STRING = { RETURN "block" }
             RETURN "func-{{ $a }}"
         }
@@ -1695,7 +1695,7 @@ fn break_cannot_cross_function_boundary() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         FOR $x: STRING IN ["a"] {
-            FUNC FOO($y: STRING) {
+            FUNC FOO($y: STRING): VOID {
                 BREAK
             }
             FOO("a")
@@ -1896,7 +1896,7 @@ fn recursion_depth_limit_names_function() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC BOOM($n: INT) {
+        FUNC BOOM($n: INT): VOID {
             BOOM($n)
         }
         BOOM(1)
@@ -2006,7 +2006,7 @@ fn async_call_await_captures_return_value() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC WORK($job: STRING) {
+        FUNC WORK($job: STRING): STRING {
             RETURN "did-{{ $job }}"
         }
         LET $t: HANDLE = ASYNC WORK("job")
@@ -4768,7 +4768,6 @@ fn sleep_undefined_variable_errors_at_runtime() {
 }
 
 #[test]
-#[test]
 fn func_missing_return_fails_at_run_start() {
     // A RETURN on some path with reachable fallthrough fails before
     // the first step executes. Non-VOID gets no admits-empty carve-out.
@@ -4923,8 +4922,6 @@ fn func_guarded_return_without_fallback_fails() {
 fn func_without_return_annotation_fails_at_parse() {
     // #287: the annotation is mandatory. Missing `: TYPE` is a parse
     // error naming the fix, raised before any step executes.
-    let temp = GuardedPath::tempdir().unwrap();
-    let root = guard_root(&temp);
     for script in [
         "FUNC FOO() { RETURN 1 }\n",
         "FUNC FOO($x: INT) { RETURN $x }\n",
@@ -5267,7 +5264,7 @@ fn static_dead_guards_excluded_from_classification() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC QUIET() {
+        FUNC QUIET(): VOID {
             [bool:false] RETURN 1
             ECHO hi
         }
@@ -5276,7 +5273,7 @@ fn static_dead_guards_excluded_from_classification() {
     run_script(&root, script).expect("dead return ignored");
     // And `[bool:true]` counts as unconditional.
     let script = indoc! {r#"
-        FUNC LOUD() {
+        FUNC LOUD(): INT {
             [bool:true] RETURN 1
         }
         LET $x: INT = LOUD()
@@ -5395,14 +5392,14 @@ fn static_unsatisfiable_guard_is_dead() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC NEVER() {
+        FUNC NEVER(): VOID {
             ECHO hi
         }
         NEVER()
     "#};
     run_script(&root, script).expect("void runs");
     let script = indoc! {r#"
-        FUNC VOIDDESPITEDEAD() {
+        FUNC VOIDDESPITEDEAD(): VOID {
             [family:unix] [family:windows] RETURN 1
             ECHO hi
         }
@@ -5671,7 +5668,7 @@ fn static_type_aliases_define_once_use_everywhere() {
     assert!(err.to_string().contains("cycle"), "{err}");
     let err = run_script(&root, "TYPE STRING = MAP\n").expect_err("builtin collision must fail");
     assert!(err.to_string().contains("collides"), "{err}");
-    let err = run_script(&root, "FUNC F() {\n}\nTYPE F = MAP\n")
+    let err = run_script(&root, "FUNC F(): VOID {\n}\nTYPE F = MAP\n")
         .expect_err("func name collision must fail");
     assert!(
         err.to_string().contains("collides with function 'F'"),
@@ -5679,7 +5676,7 @@ fn static_type_aliases_define_once_use_everywhere() {
     );
     // Generic spellings work in every declaration form.
     let script = indoc! {r#"
-        FUNC FIRST($ms: LIST<MAP<ANY>>) {
+        FUNC FIRST($ms: LIST<MAP<ANY>>): LIST<MAP<ANY>> {
             RETURN $ms
         }
         LET $got: LIST<MAP<ANY>> = FIRST([{a: 1}])
@@ -5698,7 +5695,7 @@ fn static_literal_shapes_infer_exactly() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC FIRST($ms: LIST<MAP<ANY>>) {
+        FUNC FIRST($ms: LIST<MAP<ANY>>): LIST<MAP<ANY>> {
             RETURN $ms
         }
         LET $got: LIST<MAP<ANY>> = FIRST([{a: 1}])
@@ -5710,14 +5707,14 @@ fn static_literal_shapes_infer_exactly() {
     // A dynamic map never satisfies a fixed shape: gate through `LET`.
     let err = run_script(
         &root,
-        "IMPORT [STD]\nFUNC F($p: MAP<name: STRING>) {\nRETURN $p\n}\nLET $m: MAP<ANY> = {a: 1}\nLET $r: MAP<ANY> = F($m)\n",
+        "IMPORT [STD]\nFUNC F($p: MAP<name: STRING>): MAP<name: STRING> {\nRETURN $p\n}\nLET $m: MAP<ANY> = {a: 1}\nLET $r: MAP<ANY> = F($m)\n",
     )
     .expect_err("dynamic map into shape must fail");
     assert!(err.to_string().contains("TypeMismatch"), "{err}");
     // A mistyped element fails before the first step runs.
     let err = run_script(
         &root,
-        "IMPORT [STD]\nFUNC FIRST($ms: LIST<MAP<ANY>>) {\nRETURN $ms\n}\nLET $got: LIST<MAP<ANY>> = FIRST([1])\n",
+        "IMPORT [STD]\nFUNC FIRST($ms: LIST<MAP<ANY>>): LIST<MAP<ANY>> {\nRETURN $ms\n}\nLET $got: LIST<MAP<ANY>> = FIRST([1])\n",
     )
     .expect_err("mistyped element must fail");
     assert!(err.to_string().contains("TypeMismatch"), "{err}");
@@ -5733,7 +5730,7 @@ fn static_empty_list_enters_shaped_param_vacuously() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC FIRST($ms: LIST<STRING>) {
+        FUNC FIRST($ms: LIST<STRING>): STRING {
             RETURN "ok"
         }
         LET $r: STRING = FIRST([])
@@ -5741,7 +5738,7 @@ fn static_empty_list_enters_shaped_param_vacuously() {
     "#};
     run_script(&root, script).expect("empty list enters LIST<STRING>");
     let bad = indoc! {r#"
-        FUNC FIRST($ms: LIST<STRING>) {
+        FUNC FIRST($ms: LIST<STRING>): STRING {
             RETURN "ok"
         }
         LET $r: STRING = FIRST([{a: 1}, "a"])

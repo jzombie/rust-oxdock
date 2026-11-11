@@ -6,7 +6,7 @@ WORKSPACE SYSTEM
 
 # Draw 1..$high: RAND gives [0, 1), so scale up and count off whole
 # ones with repeated subtraction.
-FUNC PICK($high: INT) {
+FUNC PICK($high: INT): INT {
     LET $draw: FLOAT = RAND()
     LET $rest: FLOAT = $draw * $high
     LET $n: INT = 1
@@ -20,7 +20,7 @@ FUNC PICK($high: INT) {
 }
 
 # One validated guess: reprompts on junk without burning a try.
-FUNC ASK($attempt: INT, $tries: INT, $high: INT) {
+FUNC ASK($attempt: INT, $tries: INT, $high: INT): INT {
     LET $raw: STRING = ""
 
     WHILE true {

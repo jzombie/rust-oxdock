@@ -557,7 +557,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
 | [`ISOLATED`](#isolated) | `ISOLATED { INHERIT_ENV [...] <commands> } \| ISOLATED <command...>` |
 | [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
-| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]) { <commands> }` |
+| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]): RET { <commands> }` |
 | [`RETURN`](#return) | `RETURN [<expr>]` |
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |
@@ -1666,7 +1666,7 @@ REMOTE prod {
 
 Define a user function.
 
-**Syntax:** `FUNC NAME([$param: TYPE, ...]) { <commands> }`
+**Syntax:** `FUNC NAME([$param: TYPE, ...]): RET { <commands> }`
 
 Defines a user function with UPPERCASE name and explicitly typed
 parameters.
@@ -1686,7 +1686,7 @@ imported; see IMPORT.
 
 Invoke any function with one syntax: `NAME(...)` as a statement
 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
-the RETURN value (fallthrough without RETURN captures as "").
+the RETURN value (fallthrough without RETURN is a static error unless RET is VOID).
 
 
 **Examples:**
@@ -1694,7 +1694,7 @@ the RETURN value (fallthrough without RETURN captures as "").
 **Example: func def call**
 
 ```oxdock
-FUNC GREET($name: STRING) {
+FUNC GREET($name: STRING): STRING {
   RETURN $name
 }
 
@@ -1711,7 +1711,7 @@ GREET("bex")
 # A pipe handle travels into a function as a typed argument
 # and is usable as a binding target in both directions.
 # `LET $p: PIPE` mints the handle; `$p` passes it on.
-FUNC DRAIN($q: PIPE) {
+FUNC DRAIN($q: PIPE): STRING {
   WITH_IO [stdin=$q] READ_LINE $line
   RETURN $line
 }
@@ -1745,7 +1745,7 @@ EXIT or ECHO there.
 **Example: return**
 
 ```oxdock
-FUNC PICK($flag: BOOL) {
+FUNC PICK($flag: BOOL): STRING {
   IF $flag {
     RETURN "yes"
   }
@@ -2012,7 +2012,7 @@ ASSERT_CONTAINS stdout "hi World!"
 # exist when the run starts cannot be analyzed, so the
 # import fails before the first step runs.
 WORKSPACE LOCAL
-WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
+WRITE lib.oxdock 'FUNC F($x: STRING): STRING { RETURN $x } EXPORT F'
 IMPORT ["lib.oxdock" AS LIB]
 ```
 
@@ -2054,7 +2054,7 @@ EXPORT NOSUCH::FOO
 # them so importing files can use the same spelling.
 TYPE PERSON = MAP<name: STRING>
 
-FUNC GREET($p: PERSON) {
+FUNC GREET($p: PERSON): STRING {
     RETURN "hi {{ $p.name }}"
 }
 EXPORT GREET
@@ -2096,7 +2096,7 @@ LET $files: LIST<STRING> = GLOB("*.oxdock")
 # parent and child see the same files.
 IMPORT [STD]
 WRITE lib.oxfile """
-    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+    FUNC GREET($x: STRING): STRING { RETURN "hi \{{ $x }}" }
     EXPORT GREET
     """
 WRITE main.oxfile """
@@ -2121,9 +2121,9 @@ ASSERT_CONTAINS $out "says hi Ada"
 IMPORT [STD]
 
 # The renderer: parent values land in the module source.
-FUNC MAKE_GREETER($who: STRING) {
+FUNC MAKE_GREETER($who: STRING): STRING {
     WRITE greeter.oxfile """
-        FUNC GREET() { RETURN "hi {{ $who }}" }
+        FUNC GREET(): STRING { RETURN "hi {{ $who }}" }
         EXPORT GREET
         """
     RETURN "greeter.oxfile"
@@ -4284,7 +4284,7 @@ IMPORT [STD]
 # The library under test: demo guarded by IS_MAIN.
 WRITE lib.oxfile """
     IMPORT [STD]
-    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+    FUNC GREET($x: STRING): STRING { RETURN "hi \{{ $x }}" }
     EXPORT GREET
     IF IS_MAIN() {
         ECHO "demo: hi Ada"
@@ -6347,7 +6347,7 @@ State mutations stay where the script puts them. Entering a braced block or a fu
 ```oxdock
 # Calls snapshot caller state: the parameter shadows without clobbering.
 LET $v: STRING = "outer"
-FUNC SHADOW($v: STRING) {
+FUNC SHADOW($v: STRING): STRING {
     LET $inner: STRING = "inner"
     RETURN $v
 }
@@ -6636,7 +6636,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $version: STRING = #crate_version
     MKDIR dist
 
-    FUNC STAMP($name: STRING) {
+    FUNC STAMP($name: STRING): STRING {
         WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
         RETURN $name
     }
@@ -6644,7 +6644,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         STAMP($name)
     }
 
-    FUNC PICK($flag: BOOL) {
+    FUNC PICK($flag: BOOL): STRING {
         IF $flag {
             RETURN "alpha"
         }
@@ -7158,7 +7158,7 @@ running linear steps. One function, one tool:
 
 ```oxdock
 # Adds two integers. Returns the sum.
-FUNC ADD($a: INT, $b: INT) {
+FUNC ADD($a: INT, $b: INT): INT {
   RETURN $a + $b
 }
 

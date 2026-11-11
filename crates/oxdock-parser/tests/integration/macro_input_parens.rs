@@ -174,22 +174,22 @@ mod tests {
         // agree exactly, on the map and on the steps.
         let text = indoc! {r#"
             # First does A.
-            FUNC AAA() {
+            FUNC AAA(): STRING {
                 RETURN "a"
             }
             # Second does B.
             # With two lines.
-            FUNC BBB() {
+            FUNC BBB(): STRING {
                 RETURN "b"
             }
             # Orphaned by a blank line.
 
-            FUNC CCC() {
+            FUNC CCC(): STRING {
                 RETURN "c"
             }
             IF true {
                 # Looks like docs but nested.
-                FUNC NESTED() {
+                FUNC NESTED(): STRING {
                     RETURN "n"
                 }
             }
@@ -269,7 +269,7 @@ mod tests {
         let text = indoc! {r#"
             # Adds one.
             # Second line.
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
             EXPORT FOO
@@ -334,7 +334,7 @@ mod tests {
         let ts: TokenStream = indoc! {r#"
             # Adds one.
             # Second line.
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
             EXPORT FOO

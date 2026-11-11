@@ -214,7 +214,7 @@ fn nested_service_calls_are_inspected() {
             "funcdef statement",
             "lock-probe-funcdef",
             indoc! {r#"
-                FUNC PROBER() {
+                FUNC PROBER(): VOID {
                     NET_LISTEN("lock-probe-funcdef", {})
                 }
             "#},

@@ -637,7 +637,7 @@ IMPORT [STD]
 # The library under test: demo guarded by IS_MAIN.
 WRITE lib.oxfile """
     IMPORT [STD]
-    FUNC GREET($x: STRING) { RETURN "hi \\\{{ $x }}" }
+    FUNC GREET($x: STRING): STRING { RETURN "hi \\\{{ $x }}" }
     EXPORT GREET
     IF IS_MAIN() {
         ECHO "demo: hi Ada"

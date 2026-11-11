@@ -526,7 +526,7 @@ State mutations stay where the script puts them. Entering a braced block or a fu
 ```oxdock
 # Calls snapshot caller state: the parameter shadows without clobbering.
 LET $v: STRING = "outer"
-FUNC SHADOW($v: STRING) {
+FUNC SHADOW($v: STRING): STRING {
     LET $inner: STRING = "inner"
     RETURN $v
 }
@@ -722,7 +722,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $version: STRING = #crate_version
     MKDIR dist
 
-    FUNC STAMP($name: STRING) {
+    FUNC STAMP($name: STRING): STRING {
         WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
         RETURN $name
     }
@@ -730,7 +730,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         STAMP($name)
     }
 
-    FUNC PICK($flag: BOOL) {
+    FUNC PICK($flag: BOOL): STRING {
         IF $flag {
             RETURN "alpha"
         }

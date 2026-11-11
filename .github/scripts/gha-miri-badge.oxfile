@@ -21,7 +21,7 @@ WORKDIR "{{ env:GITHUB_WORKSPACE }}"
 # Shell formatting isolated behind a call: reassignment takes
 # expressions, never bare RUN statements, so the branch below assigns
 # from this call instead of formatting inline.
-FUNC RATIO_LABEL($pct: FLOAT) {
+FUNC RATIO_LABEL($pct: FLOAT): STRING {
     LET $label: STRING = RUN printf "%.1f%%" $pct
     RETURN $label
 }

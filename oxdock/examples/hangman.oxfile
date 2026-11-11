@@ -7,7 +7,7 @@ WORKSPACE SYSTEM
 
 # Pick a word: RAND gives [0, 1), so scale to the list size, count off
 # whole ones, then take the word at that index.
-FUNC PICK_WORD() {
+FUNC PICK_WORD(): STRING {
     LET $words: LIST<STRING> = ["oxdock", "shell", "script", "prompt", "terminal"]
     LET $draw: FLOAT = RAND()
     LET $rest: FLOAT = $draw * 5.0
@@ -30,7 +30,7 @@ FUNC PICK_WORD() {
 }
 
 # One full round. Returns true on a win.
-FUNC PLAY() {
+FUNC PLAY(): BOOL {
     LET $secret: STRING = PICK_WORD()
     LET $len: INT = TEXT_LENGTH($secret)
     LET $guessed: LIST<STRING> = []

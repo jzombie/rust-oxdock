@@ -21,7 +21,7 @@ IF $root_kind != "file" {
 # Time one contestant: run under bash TIMEFORMAT, take the last
 # non-empty output line as seconds, and require the expected result
 # line somewhere in the output. Answers as one report row.
-FUNC TIME_EVENT($label: STRING, $cmd: STRING, $want: STRING) {
+FUNC TIME_EVENT($label: STRING, $cmd: STRING, $want: STRING): STRING {
   LET $timed: STRING = RUN ["/bin/bash", "-c", "TIMEFORMAT=%R; { time {{ $cmd }}; } 2>&1"]
   LET $lines: LIST<STRING> = TEXT_LINES($timed)
   LET $secs: STRING = ""

@@ -414,7 +414,7 @@ fn fragmented_block_matrix_reports_inner_failure() {
         (
             "func",
             indoc! {r#"
-                FUNC GREET($n: STRING) {
+                FUNC GREET($n: STRING): STRING {
                     ECHO hi
             "#},
             1,

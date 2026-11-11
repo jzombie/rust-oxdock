@@ -6024,6 +6024,8 @@ mod tests {
             &vec![("name".to_string(), "STRING".to_string())],
             "{params:?}"
         );
+        assert_eq!(return_type, "STRING", "{return_type:?}");
+        assert!(!is_async, "plain FUNC is not async");
         assert!(matches!(body[0].kind, StepKind::Return { .. }));
         assert!(docs.is_none(), "undocumented FUNC carries no docs");
     }

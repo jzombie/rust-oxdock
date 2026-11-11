@@ -582,6 +582,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         // scope happens to be current. Sorted for determinism.
         let mut inferred: HashMap<String, StaticTy> = HashMap::new();
         let mut keys: Vec<String> = all_funcs.keys().cloned().collect();
+
         keys.sort();
         for key in keys {
             let owner = all_funcs.get(&key).and_then(|info| info.module.clone());
@@ -644,6 +645,18 @@ pub fn validate_script_closure<P: ProcessManager>(
         Ok(())
     })();
     exec.type_aliases = saved_global;
+    if outcome.is_ok() {
+        // Proven once, trusted thereafter: every file in the closure
+        // passed with full nested-import knowledge, and the registry
+        // cache pins the same parsed bodies for execution. Runtime
+        // re-validation would only false-positive on nested calls, so
+        // imports skip the single-file re-proof for these keys.
+        // Unseen files (direct API use, no static pass) still
+        // validate at import time.
+        for file in files {
+            exec.validated_modules.insert(file.key.clone());
+        }
+    }
     outcome
 }
 
@@ -1273,6 +1286,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Define one collected function under explicit keys: resolve the
     /// param tags now (the same error execution reports), store the
     /// body for return inference, and collect nested definitions.
+    #[allow(clippy::too_many_arguments)]
     fn define_collected(
         &mut self,
         name: &str,
@@ -1582,19 +1596,27 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         info: &FuncInfo,
         depth: usize,
     ) -> Result<StaticTy> {
-        self.check_function_body_probed(key, info, depth, None)
+        self.check_function_body_probed(key, info, depth, None, true)
     }
 
     /// Same, with an optional touch probe: when present, any read of a
     /// module-shared binding sets it, so harvest callers can reject
     /// state-dependent functions. The probe `Rc` is shared across env
     /// forks, so touches on discarded conditional paths still count.
+    /// Touch probes (harvest statefulness gates) walk only for
+    /// reads: return-type enforcement belongs to the dedicated
+    /// passes (the static pre-pass with full nested-import
+    /// knowledge; the runtime single-file validation for direct API
+    /// use), so a probe with a nested-unknown callee must not
+    /// false-positive here. Pass `enforce_types: false` from the
+    /// touch probes, `true` everywhere else.
     fn check_function_body_probed(
         &mut self,
         key: &str,
         info: &FuncInfo,
         depth: usize,
         probe: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+        enforce_types: bool,
     ) -> Result<StaticTy> {
         if depth > MAX_STATIC_DEPTH {
             bail!("static analysis depth exceeded in function `{key}`");
@@ -1639,6 +1661,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             idx: 0,
         };
         let out = self.walk_body(&info.body, &mut env, &scope, depth + 1)?;
+        if !enforce_types {
+            // Touch probe: reads are recorded in the module scope
+            // above; return-type enforcement lives in the dedicated
+            // passes, which have the nested knowledge this walk lacks.
+            return Ok(StaticTy::Ty(TypeTag::Any));
+        }
         let declared = &info.declared;
         let is_void = matches!(declared, TypeTag::Void);
         if info.is_async && !matches!(declared, TypeTag::Handle | TypeTag::HandleOf(_)) {
@@ -2793,7 +2821,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             return Ok(false);
         }
         let probe = std::rc::Rc::new(std::cell::Cell::new(false));
-        let _ = self.check_function_body_probed(key, &info, 0, Some(probe.clone()))?;
+        let _ = self.check_function_body_probed(key, &info, 0, Some(probe.clone()), false)?;
         Ok(probe.get())
     }
 
@@ -3536,6 +3564,7 @@ mod tests {
     ///   slots); patterns and representatives are hardcoded in the
     ///   macro body. A new multi-field constructor forces a visible
     ///   macro-body edit.
+    ///
     /// Adding any constructor without extending this list breaks
     /// compilation at the invocation below (non-exhaustive anchor),
     /// so coverage can never silently lag the enum. Deleting or
@@ -3544,16 +3573,20 @@ mod tests {
     macro_rules! tag_coverage {
         (
             units: [ $($unit:ident),* $(,)? ],
-            shaped: [ $($shaped:ident ( $payload:ident )),* $(,)? ],
+            shaped: [ $($shaped:ident ( $($payload:ident),* )),* $(,)? ],
             special: [ $($special:ident),* $(,)? ]
         ) => {
             fn variant_inventory() -> Vec<TypeTag> {
                 vec![
-                    $( TypeTag::$unit ),*,
-                    $( TypeTag::$shaped(std::sync::Arc::new(TypeTag::$payload)) ),*,
-                    $( special_representative(stringify!($special)) ),*
+                    $( TypeTag::$unit, )*
+                    $( $( TypeTag::$shaped(std::sync::Arc::new(TypeTag::$payload)), )* )*
+                    $( special_representative(stringify!($special)), )*
                 ]
             }
+            // One arm per constructor: payloads nest under their
+            // variant, so no arm is shadowed and no constructor is
+            // listed twice. Adding a constructor without extending
+            // this list breaks compilation here.
             fn anchor_exhaustive(tag: &TypeTag) {
                 match tag {
                     $( TypeTag::$unit => {} ),*,
@@ -3583,7 +3616,7 @@ mod tests {
     }
     tag_coverage! {
         units: [String, Int, Float, Bool, List, Map, Pipe, Handle, Void, Duration, Path, Semaphore, Permit, Any],
-        shaped: [HandleOf(String), HandleOf(Int), HandleOf(Void), HandleOf(Any), ListOf(Int), MapOf(String)],
+        shaped: [HandleOf(String, Int, Void, Any), ListOf(Int), MapOf(String)],
         special: [Custom, Record, Union]
     }
 

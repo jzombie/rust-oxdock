@@ -335,8 +335,14 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         for (name, target) in aliases {
             cx.state.type_aliases.insert(name, target);
         }
-        super::static_check::validate_import_body_types(&steps, cx.state, &key)
-            .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+        // Proven once, trusted thereafter: files the static closure
+        // pass validated (full nested-import knowledge, same cached
+        // body) skip the single-file re-proof, which would only
+        // false-positive on nested calls. Unseen files still validate.
+        if !cx.state.validated_modules.contains(&key) {
+            super::static_check::validate_import_body_types(&steps, cx.state, &key)
+                .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+        }
         // Stateful harvests are rejected: the file body never runs, so
         // there is no initialized state for them to observe. Import the
         // file to share its module instead.
@@ -650,8 +656,14 @@ pub(crate) fn import_file<P: ProcessManager>(
         // Entry parity: statically validate the imported body before its
         // first step runs. Nested imports validate when their own IMPORT
         // steps execute.
-        super::static_check::validate_import_body_types(&steps, cx.state, &key)
-            .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+        // Proven once, trusted thereafter: files the static closure
+        // pass validated (full nested-import knowledge, same cached
+        // body) skip the single-file re-proof, which would only
+        // false-positive on nested calls. Unseen files still validate.
+        if !cx.state.validated_modules.contains(&key) {
+            super::static_check::validate_import_body_types(&steps, cx.state, &key)
+                .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+        }
         // Register the imported file's EXPORTed top-level FUNCs under
         // the alias in the caller's scope: unexported means private.
         // Owner-tagged with the module so calls share its state.
