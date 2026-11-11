@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
-- Multi-line `FUNC` parameter lists: params may span lines with one entry per line, including generic shapes (`MAP<...>`, nested `LIST<MAP<...>>`), parsed and validated exactly like the single-line spelling through the shared `gap_nl` helper. A trailing newline before `)` rides along; outer header newlines (between `)` and `:`) stay single line.
+- Multi-line `FUNC` parameter lists: params may span lines with one entry per line, including generics and `|` unions. Newlines ride the shared `gap_nl` helper already used for call args, and a three-way string/token/backend parity proptest pins the agreement. A trailing newline before `)` is allowed; newlines between `)` and `:` are not.
 
 ### Fixed
 
