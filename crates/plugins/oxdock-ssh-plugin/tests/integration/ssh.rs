@@ -3253,7 +3253,7 @@ fn conhost_setup_query_never_reaches_client_windows() {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $to_child: PIPE
             LET $from_child: PIPE
-            LET $pty: HANDLE<VOID> = ASYNC { SSH_PTY_RUN($dq.session, ["powershell.exe", "-NoProfile"], 0, 0, $to_child, $from_child) }
+            LET $pty: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["powershell.exe", "-NoProfile"], 0, 0, $to_child, $from_child) }
             LET $pump: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
             LET $code: INT = AWAIT $pty
             AWAIT $pump
