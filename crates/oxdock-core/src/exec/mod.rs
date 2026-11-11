@@ -537,19 +537,24 @@ pub fn validate_steps_with_fs_modules_and_entry<P: ProcessManager>(
 /// script-side closure check (terminal unification, MissingReturn,
 /// undeclared variables, ungated ANY). Every entry point funnels
 /// through here so `--dry-run`, execution, and `--mcp` agree. Restores
-/// type aliases on success. Returns the import closure for callers
-/// needing export metadata.
+/// type aliases on success. Returns every type name exported anywhere
+/// in the closure for callers needing export metadata (the closure
+/// itself stays private to the module).
 pub fn validate_closure_for_run<P: ProcessManager>(
     state: &mut ExecState<P>,
     steps: &[Step],
-) -> Result<Vec<import::ClosureFile>> {
+) -> Result<Vec<String>> {
     state.type_aliases = self::typing::collect_type_aliases(steps, state)?;
     state.validate_function_type_tags()?;
     let saved_aliases = state.type_aliases.clone();
     let closure = self::import::expand_import_closure(state, steps)?;
     static_check::validate_script_closure(steps, &closure, state)?;
     state.type_aliases = saved_aliases;
-    Ok(closure)
+    let mut exported = Vec::new();
+    for file in &closure {
+        exported.extend(file.type_exports.iter().cloned());
+    }
+    Ok(exported)
 }
 
 #[allow(clippy::type_complexity)]

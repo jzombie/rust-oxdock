@@ -897,7 +897,7 @@ pub(crate) fn import_file<P: ProcessManager>(
 /// Func and type harvests track separately so `IMPORT [TYPE T, FUNC F
 /// FROM "f"]` gates each kind against its own export list.
 #[derive(Debug, Clone)]
-pub(crate) struct ClosureSite {
+pub(super) struct ClosureSite {
     pub alias: Option<String>,
     pub func_names: Option<Vec<String>>,
     pub type_names: Option<Vec<String>>,
@@ -910,7 +910,7 @@ pub(crate) struct ClosureSite {
 /// `dir` is the directory nested harvests resolve against (the file's
 /// own directory, so per-file validation needs no filesystem).
 #[derive(Debug, Clone)]
-pub(crate) struct ClosureFile {
+pub(super) struct ClosureFile {
     pub key: String,
     pub path: String,
     pub dir: GuardedPath,

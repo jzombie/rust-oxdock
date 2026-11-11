@@ -88,7 +88,7 @@ impl<P: ProcessManager> McpSession<P> {
         }
         state.functions.set_script_docs(&parsed.func_docs);
 
-        let closure = super::validate_closure_for_run(&mut state, &parsed.steps)?;
+        let closure_type_exports = super::validate_closure_for_run(&mut state, &parsed.steps)?;
         // Entry `EXPORT TYPE` names must be locally defined or re-exported
         // from the closure (bare re-exports only in v1; qualified stays
         // future). MCP skips types for tools, but typos still fail here.
@@ -100,10 +100,8 @@ impl<P: ProcessManager> McpSession<P> {
                 }
             }
             let mut exported_available = std::collections::HashSet::new();
-            for file in &closure {
-                for name in &file.type_exports {
-                    exported_available.insert(name.clone());
-                }
+            for name in &closure_type_exports {
+                exported_available.insert(name.clone());
             }
             for name in &parsed.type_exports {
                 if name.contains("::") {
