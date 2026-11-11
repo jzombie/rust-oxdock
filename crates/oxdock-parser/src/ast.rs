@@ -5,8 +5,9 @@ use std::sync::Arc;
 pub use crate::commands::{AssertTarget, StepKind};
 use crate::constants::{
     KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONTINUE, KEYWORD_ELSE,
-    KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_LET,
-    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_TYPE, KEYWORD_WHILE,
+    KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN,
+    KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_TIMEOUT, KEYWORD_TYPE,
+    KEYWORD_WHILE, KEYWORD_WITH_IO,
 };
 
 /// One module's function surface for parse-time call resolution: the base
@@ -137,7 +138,7 @@ impl Command {
             Command::Echo => "ECHO",
             Command::Run => "RUN",
             Command::Copy => "COPY",
-            Command::WithIo => "WITH_IO",
+            Command::WithIo => KEYWORD_WITH_IO,
             Command::CopyGit => "COPY_GIT",
             Command::Symlink => "SYMLINK",
             Command::Mkdir => "MKDIR",
@@ -293,7 +294,7 @@ pub const STRUCTURAL_KEYWORDS: &[&str] = &[
 /// (`IN` only heads `FOR` iterations). Declared alongside
 /// [`STRUCTURAL_KEYWORDS`] so grammar-conformance tests never hardcode
 /// exception lists of their own.
-pub const CLAUSE_KEYWORDS: &[&str] = &["IN"];
+pub const CLAUSE_KEYWORDS: &[&str] = &[KEYWORD_IN];
 
 /// One namespaced guard predicate. Every guard in the language is a
 /// namespace plus an optional subject plus an optional value; the

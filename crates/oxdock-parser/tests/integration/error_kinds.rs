@@ -3,7 +3,7 @@
 //! line, column span, source line, and caret block.
 use crate::common::mock_lower;
 use indoc::indoc;
-use oxdock_parser::{ParseErrorKind, lower_command, parse_script};
+use oxdock_parser::{KEYWORD_FUNC, ParseErrorKind, lower_command, parse_script};
 
 fn err_text(err: &oxdock_parser::ParseError) -> String {
     err.to_string()
@@ -884,7 +884,7 @@ fn func_missing_return_annotation_fails_at_parse() {
         assert!(
             matches!(
                 err.kind(),
-                ParseErrorKind::Validation { command } if command == "FUNC"
+                ParseErrorKind::Validation { command } if command == KEYWORD_FUNC
             ),
             "unexpected kind for {script:?}: {:?}",
             err.kind()

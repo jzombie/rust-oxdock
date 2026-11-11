@@ -9,7 +9,10 @@
 //! `ENV FOO=bar` or `RUN echo && ls` to look exactly like the string DSL,
 //! keeping both pathways unified.
 
-use super::constants::MODULE_SEPARATOR;
+use super::constants::{
+    KEYWORD_ASYNC, KEYWORD_IN, KEYWORD_ISOLATED, KEYWORD_TIMEOUT, KEYWORD_WITH_IO,
+    MODULE_SEPARATOR,
+};
 use super::{Command, Step};
 use anyhow::Result;
 use proc_macro2::{Delimiter, LineColumn, Spacing, TokenStream as TokenStream2, TokenTree};
@@ -277,18 +280,18 @@ fn line_awaits_inner_command(trimmed: &str) -> bool {
     let trimmed_end = trimmed.trim_end();
     let last_word = trimmed_end.split_whitespace().last();
     if trimmed_end.ends_with('=')
-        || last_word == Some("IN")
-        || last_word == Some("ASYNC")
+        || last_word == Some(KEYWORD_IN)
+        || last_word == Some(KEYWORD_ASYNC)
         || line_ends_in_timeout_duration(trimmed_end)
     {
         return true;
     }
-    if matches!(last_word, Some("ISOLATED") | Some("ASYNC")) {
+    if matches!(last_word, Some(KEYWORD_ISOLATED) | Some(KEYWORD_ASYNC)) {
         return true;
     }
     if trimmed_end.ends_with(']') {
         let head = trimmed.split_whitespace().next();
-        if head == Some("WITH_IO") {
+        if head == Some(KEYWORD_WITH_IO) {
             return true;
         }
     }
@@ -310,7 +313,7 @@ fn line_expects_inner_command(line: &str) -> bool {
 fn line_ends_in_timeout_duration(line: &str) -> bool {
     let mut words = line.split_whitespace().rev();
     let duration = words.next().unwrap_or("");
-    if words.next() != Some("TIMEOUT") {
+    if words.next() != Some(KEYWORD_TIMEOUT) {
         return false;
     }
     let digits = duration.trim_end_matches(|c: char| c.is_ascii_alphabetic());
@@ -492,7 +495,7 @@ fn walk(
                                 || trimmed_here.ends_with('(')
                                 || trimmed_here.ends_with('[')
                                 || trimmed_here.ends_with(',')
-                                || trimmed_here.split_whitespace().last() == Some("IN");
+                                || trimmed_here.split_whitespace().last() == Some(KEYWORD_IN);
                             // A bracket opening on a later line than the
                             // previous token starts a new statement (a
                             // leading guard), even right after a bare
@@ -790,8 +793,8 @@ fn walk(
                 let trimmed_end = trimmed.trim_end();
                 let last_word = trimmed_end.split_whitespace().last();
                 let expects_expr = trimmed_end.ends_with('=')
-                    || last_word == Some("IN")
-                    || last_word == Some("ASYNC")
+                    || last_word == Some(KEYWORD_IN)
+                    || last_word == Some(KEYWORD_ASYNC)
                     || line_ends_in_timeout_duration(trimmed_end);
                 let mut should_finalize = false;
                 // ELSE always appends to current line : grammar handles } \n ELSE via blank*
@@ -842,7 +845,7 @@ fn walk(
                     && !trimmed_empty
                     && *capture_has_inner
                     && line_requires_inner
-                    && ident_text != "ASYNC"
+                    && ident_text != KEYWORD_ASYNC
                 {
                     finalize_line(lines, line, capture_has_inner);
                 }
