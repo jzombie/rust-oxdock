@@ -8594,8 +8594,7 @@ mod tests {
             "LET $x = {\nRETURN 1\n}\n",
             "LET $x = WITH_IO [stdin=$p] ASYNC ECHO hi\n",
         ] {
-            let err =
-                crate::parse_script(text, lower).expect_err("untyped LET must fail");
+            let err = crate::parse_script(text, lower).expect_err("untyped LET must fail");
             assert!(
                 err.to_string().contains("LET requires explicit types"),
                 "wrong error for {text:?}: {err}"
