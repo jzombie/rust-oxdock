@@ -10,8 +10,7 @@
 //! keeping both pathways unified.
 
 use super::constants::{
-    KEYWORD_ASYNC, KEYWORD_IN, KEYWORD_ISOLATED, KEYWORD_TIMEOUT, KEYWORD_WITH_IO,
-    MODULE_SEPARATOR,
+    KEYWORD_ASYNC, KEYWORD_IN, KEYWORD_ISOLATED, KEYWORD_TIMEOUT, KEYWORD_WITH_IO, MODULE_SEPARATOR,
 };
 use super::{Command, Step};
 use anyhow::Result;

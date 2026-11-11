@@ -29,6 +29,22 @@ use crate::state::{
 use crate::types::{SshServerTag, SshSessionTag};
 use crate::validate::parse_serve_endpoint;
 
+/// Result map keys for SSH session outcomes. Single source for the
+/// `Field` schemas below and every `map.insert` site, so a rename
+/// cannot drift one side silent.
+const FIELD_CLOSED: &str = "closed";
+const FIELD_COMMAND: &str = "command";
+const FIELD_EXIT_STATUS: &str = "exit_status";
+const FIELD_SERVER: &str = "server";
+const FIELD_ADDR: &str = "addr";
+const FIELD_USERNAME: &str = "username";
+const FIELD_PASSWORD: &str = "password";
+const FIELD_VIRTUAL: &str = "virtual";
+const FIELD_SESSION: &str = "session";
+const FIELD_EXIT: &str = "exit";
+const FIELD_TRUNCATED: &str = "truncated";
+const FIELD_TIMED_OUT: &str = "timed_out";
+
 /// Unique server ids per process.
 static SERVER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -155,9 +171,9 @@ fn ssh_dequeue<P: ProcessManager>(
         "session".to_string(),
         Value::mint_heap(SshSessionTag::descriptor(), tag),
     );
-    map.insert("command".to_string(), Value::string(command));
-    map.insert("username".to_string(), Value::string(username));
-    map.insert("addr".to_string(), Value::string(addr));
+    map.insert(FIELD_COMMAND.to_string(), Value::string(command));
+    map.insert(FIELD_USERNAME.to_string(), Value::string(username));
+    map.insert(FIELD_ADDR.to_string(), Value::string(addr));
     Ok(Value::map(map))
 }
 
@@ -317,9 +333,9 @@ fn ssh_serve<P: ProcessManager>(
         "server".to_string(),
         Value::mint_heap(SshServerTag::descriptor(), SshServerTag::new(state)),
     );
-    map.insert("addr".to_string(), Value::string(addr_text));
-    map.insert("username".to_string(), Value::string(username));
-    map.insert("password".to_string(), Value::string(password));
+    map.insert(FIELD_ADDR.to_string(), Value::string(addr_text));
+    map.insert(FIELD_USERNAME.to_string(), Value::string(username));
+    map.insert(FIELD_PASSWORD.to_string(), Value::string(password));
     map.insert(
         "virtual".to_string(),
         Value::string(key.endpoint.to_string()),
@@ -334,12 +350,12 @@ fn ssh_serve<P: ProcessManager>(
 /// the reply cannot race teardown.
 ///
 #[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
-    name: "closed".to_string(),
+    name: FIELD_CLOSED.to_string(),
     ty: TypeTag::Bool,
     docs: "True when the session closed cleanly.",
     optional: false,
 }, Field {
-    name: "command".to_string(),
+    name: FIELD_COMMAND.to_string(),
     ty: TypeTag::String,
     docs: "Executed command, empty for shells.",
     optional: false,
@@ -395,7 +411,7 @@ fn ssh_accept<P: ProcessManager>(
         true,
     )?;
     let mut map = BTreeMap::new();
-    map.insert("closed".to_string(), Value::bool(true));
+    map.insert(FIELD_CLOSED.to_string(), Value::bool(true));
     map.insert(
         "command".to_string(),
         Value::string(session.exec_command.unwrap_or_default()),
@@ -409,7 +425,7 @@ fn ssh_accept<P: ProcessManager>(
 ///
 #[oxdock_func(
     returns = TypeTag::Record(std::sync::Arc::from([Field {
-        name: "closed".to_string(),
+        name: FIELD_CLOSED.to_string(),
         ty: TypeTag::Bool,
         docs: "True when the session closed cleanly.",
         optional: false,
@@ -460,7 +476,7 @@ fn ssh_pump_channel<P: ProcessManager>(
     session.finish_pump();
     pump?;
     let mut map = BTreeMap::new();
-    map.insert("closed".to_string(), Value::bool(true));
+    map.insert(FIELD_CLOSED.to_string(), Value::bool(true));
     Ok(Value::map(map))
 }
 
@@ -543,12 +559,12 @@ fn ssh_close<P: ProcessManager>(
 /// socket work. The result MAP carries `exit_status`, or -1 when the
 /// server sent none.
 #[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
-    name: "closed".to_string(),
+    name: FIELD_CLOSED.to_string(),
     ty: TypeTag::Bool,
     docs: "True when the session closed cleanly.",
     optional: false,
 }, Field {
-    name: "exit_status".to_string(),
+    name: FIELD_EXIT_STATUS.to_string(),
     ty: TypeTag::Int,
     docs: "Remote exit status, or -1 when none arrived.",
     optional: false,
@@ -639,12 +655,15 @@ fn ssh_connect<P: ProcessManager>(
     // Joined after disconnect: a post-EOF status records before this read.
     let _ = runtime.block_on(wire_done);
     let mut map = BTreeMap::new();
-    map.insert("closed".to_string(), Value::bool(true));
+    map.insert(FIELD_CLOSED.to_string(), Value::bool(true));
     let status = exit_status
         .lock()
         .map(|slot| slot.map(i64::from))
         .unwrap_or(None);
-    map.insert("exit_status".to_string(), Value::int(status.unwrap_or(-1)));
+    map.insert(
+        FIELD_EXIT_STATUS.to_string(),
+        Value::int(status.unwrap_or(-1)),
+    );
     Ok(Value::map(map))
 }
 
@@ -1045,7 +1064,10 @@ fn ssh_exec<P: ProcessManager>(
         ))
         .context("SSH_EXEC failed")?;
     let mut map = BTreeMap::new();
-    map.insert("exit".to_string(), Value::int(outcome.exit.unwrap_or(-1)));
+    map.insert(
+        FIELD_EXIT.to_string(),
+        Value::int(outcome.exit.unwrap_or(-1)),
+    );
     map.insert(
         "stdout".to_string(),
         Value::string(String::from_utf8_lossy(&outcome.stdout).into_owned()),
@@ -1054,8 +1076,8 @@ fn ssh_exec<P: ProcessManager>(
         "stderr".to_string(),
         Value::string(String::from_utf8_lossy(&outcome.stderr).into_owned()),
     );
-    map.insert("truncated".to_string(), Value::bool(outcome.truncated));
-    map.insert("timed_out".to_string(), Value::bool(outcome.timed_out));
+    map.insert(FIELD_TRUNCATED.to_string(), Value::bool(outcome.truncated));
+    map.insert(FIELD_TIMED_OUT.to_string(), Value::bool(outcome.timed_out));
     Ok(Value::map(map))
 }
 
@@ -1090,31 +1112,31 @@ fn ssh_generate_password() -> Result<Value> {
 fn serve_result_fields() -> Arc<[Field]> {
     Arc::from(vec![
         Field {
-            name: "server".to_string(),
+            name: FIELD_SERVER.to_string(),
             ty: TypeTag::Custom(SshServerTag::descriptor()),
             docs: "Server handle for `SSH_ACCEPT`, `SSH_DEQUEUE`, and `SSH_CLOSE`.",
             optional: false,
         },
         Field {
-            name: "addr".to_string(),
+            name: FIELD_ADDR.to_string(),
             ty: TypeTag::String,
             docs: "Bound socket address (`ip:port`) of the server.",
             optional: false,
         },
         Field {
-            name: "username".to_string(),
+            name: FIELD_USERNAME.to_string(),
             ty: TypeTag::String,
             docs: "Configured username.",
             optional: false,
         },
         Field {
-            name: "password".to_string(),
+            name: FIELD_PASSWORD.to_string(),
             ty: TypeTag::String,
             docs: "Configured password.",
             optional: false,
         },
         Field {
-            name: "virtual".to_string(),
+            name: FIELD_VIRTUAL.to_string(),
             ty: TypeTag::String,
             docs: "Virtual endpoint echo of the claimed slot.",
             optional: false,
@@ -1126,25 +1148,25 @@ fn serve_result_fields() -> Arc<[Field]> {
 fn dequeue_result_fields() -> Arc<[Field]> {
     Arc::from(vec![
         Field {
-            name: "session".to_string(),
+            name: FIELD_SESSION.to_string(),
             ty: TypeTag::Custom(SshSessionTag::descriptor()),
             docs: "Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).",
             optional: false,
         },
         Field {
-            name: "command".to_string(),
+            name: FIELD_COMMAND.to_string(),
             ty: TypeTag::String,
             docs: "Executed command, empty for shells.",
             optional: false,
         },
         Field {
-            name: "username".to_string(),
+            name: FIELD_USERNAME.to_string(),
             ty: TypeTag::String,
             docs: "Authenticated username, empty when unset.",
             optional: false,
         },
         Field {
-            name: "addr".to_string(),
+            name: FIELD_ADDR.to_string(),
             ty: TypeTag::String,
             docs: "Peer address, empty when unset.",
             optional: false,
