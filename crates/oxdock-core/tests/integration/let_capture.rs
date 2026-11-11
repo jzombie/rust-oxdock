@@ -294,6 +294,34 @@ fn typed_handle_without_return_fails_static() {
 }
 
 #[test]
+fn capture_checks_command_yield_against_decl() {
+    // `LET $x: T = <command>` binds the command's yield, so the
+    // checker verifies it like an AWAIT capture: a bare command (or
+    // a TIMEOUT-wrapped one, which captures stdout text rather than
+    // any inner call value) yields STRING. A TIMEOUT wrapper is not
+    // a way around the check.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $s: STRING = ECHO hi
+        ASSERT_EQ $s "hi\n"
+    "#};
+    run_script(&root, script).expect("string capture of stdout passes");
+    for script in [
+        "LET $i: INT = ECHO hi\n",
+        "LET $i: INT = TIMEOUT 30s ECHO hi\n",
+    ] {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+        let err = run_script(&root, script).expect_err("mismatched capture must fail");
+        assert!(
+            err.to_string().contains("captures STRING but declares INT"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
 fn await_capture_missing_fallback_branch_errors() {
     // A body that can RETURN on some path but falls off the end on the

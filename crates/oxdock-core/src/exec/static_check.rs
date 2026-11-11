@@ -2041,6 +2041,28 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
                 self.exec
                     .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
+                // Yield check mirroring runtime assign_capture (see
+                // capture_yield): without it a TIMEOUT-wrapped (or any
+                // non-call) command sails through with an incompatible
+                // declaration and fails only at runtime coercion.
+                if let Some(yield_tag) = self.capture_yield(cmd, depth)? {
+                    if self
+                        .check_arg(
+                            &tag,
+                            StaticTy::Ty(yield_tag.clone()),
+                            &format!("step {}", idx + 1),
+                        )
+                        .is_err()
+                    {
+                        bail!(
+                            "step {}: LET ${} captures {} but declares {}",
+                            idx + 1,
+                            clean_var(var),
+                            render_structural(&yield_tag),
+                            render_structural(&tag)
+                        );
+                    }
+                }
                 let key = clean_var(var);
                 env.declare(key, tag, step.guard.as_ref(), idx)?;
                 Ok(live)
@@ -2576,6 +2598,34 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             col: outer.col,
         };
         self.walk_step(&step, env, scope, idx, depth)
+    }
+
+    /// Yield type of a `LET $x: T = <command>` capture, mirroring
+    /// runtime `assign_capture`: a `Call` (under `WithIo` layers only)
+    /// binds the callee's `RETURN` type; an `ImportFile` binds a
+    /// pipeline value the checker cannot spell, so it defers (`None`);
+    /// anything else — plain commands and `TIMEOUT`-wrapped bodies —
+    /// binds captured stdout `TEXT`. `TIMEOUT` is deliberately not
+    /// peeled: at runtime a `TIMEOUT`-wrapped call goes down the
+    /// stdout-sink path, never the call-value path.
+    fn capture_yield(&mut self, cmd: &StepKind, depth: usize) -> Result<Option<TypeTag>> {
+        let mut current = cmd;
+        loop {
+            match current {
+                StepKind::WithIo { cmd, .. } => current = cmd,
+                StepKind::Call { name, .. } => {
+                    let callee = self.resolve_call(name, depth)?;
+                    return Ok(match callee.ret {
+                        StaticTy::Ty(tag) => Some(tag),
+                        // A VOID callee still binds something at
+                        // runtime (coerced on declaration); defer.
+                        StaticTy::Void => None,
+                    });
+                }
+                StepKind::ImportFile { .. } => return Ok(None),
+                _ => return Ok(Some(TypeTag::String)),
+            }
+        }
     }
 
     /// Static counterpart of `coerce_value` for argument positions.
