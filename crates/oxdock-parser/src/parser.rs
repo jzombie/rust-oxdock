@@ -2595,8 +2595,76 @@ fn parse_expr_call(
     })
 }
 
-/// RUN exec-form items: atoms only, except parenthesized/calls/lists/maps
-/// which recurse fully. Anything that is not a clean comma-separated list misses the whole
+/// Item rule selecting which `[...]` position the shared list core
+/// parses for. The loop, comma rule, empty rule, trailing-content rule,
+/// and newline tolerance are identical for every position (see
+/// [`parse_bracket_list`]); only items and miss handling differ.
+#[derive(Clone, Copy)]
+enum BracketItems {
+    /// Full checked expressions; a miss fails loudly.
+    Expr,
+    /// RUN-exec restricted atoms (brace groups try maps only, so blocks
+    /// miss); a miss is shell fallthrough (`None`), never an error, so
+    /// POSIX `[ -f ... ]` and malformed shapes stay shell.
+    Exec,
+}
+
+/// Shared comma-separated `[...]` core behind every bracket position.
+/// There is exactly one list loop: one empty rule, one comma rule, one
+/// trailing-content rule, newlines riding every gap. A bracket group
+/// already lexes across lines, so rejecting newlines here only strands
+/// the statement in raw-text rendering.
+fn parse_bracket_list(
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+    items: BracketItems,
+) -> Result<Option<Expr>, TokenError> {
+    let mut cur = Cursor::expr(inner, stmt);
+    cur.skip_gap_nl();
+    if cur.done() {
+        return Ok(Some(Expr::List(vec![])));
+    }
+    let mut list = Vec::new();
+    loop {
+        let item = match items {
+            BracketItems::Expr => parse_expr_checked(&mut cur, ctx),
+            BracketItems::Exec => match parse_run_exec_atom(&mut cur, ctx) {
+                Ok(Some(atom)) => Ok(atom),
+                // Not an exec shape at all: shell fallthrough.
+                Ok(None) | Err(_) => return Ok(None),
+            },
+        };
+        // Only expression positions can fail here: exec misses
+        // return `None` above.
+        let item = item?;
+        match reject_boundary(&lowering_ctx(stmt), &item) {
+            Ok(()) => {}
+            Err(e) if matches!(items, BracketItems::Expr) => {
+                return Err(cur.err(e.to_string()));
+            }
+            Err(_) => return Ok(None),
+        }
+        list.push(item);
+        cur.skip_gap_nl();
+        if cur.eat_punct(',') {
+            cur.skip_gap_nl();
+            continue;
+        }
+        break;
+    }
+    if !cur.done() {
+        return match items {
+            BracketItems::Expr => Err(cur.err("unexpected text in list")),
+            BracketItems::Exec => Ok(None),
+        };
+    }
+    Ok(Some(Expr::List(list)))
+}
+
+/// RUN exec-form list: the shared bracket core in `Exec` mode (atoms
+/// only, except parenthesized/calls/lists/maps which recurse fully).
+/// Anything that is not a clean comma-separated list misses the whole
 /// exec shape (`None`): the grammar falls through to the shell path,
 /// which reads the bracket literally and lets the shared lowering
 /// decide (POSIX `[ -f ... ]` stays shell; non-map blocks and malformed
@@ -2610,33 +2678,7 @@ fn parse_run_exec_list(
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<Option<Expr>, TokenError> {
-    let mut cur = Cursor::expr(inner, stmt);
-    cur.skip_gap();
-    if cur.done() {
-        return Ok(Some(Expr::List(vec![])));
-    }
-    let mut items = Vec::new();
-    loop {
-        let item = match parse_run_exec_atom(&mut cur, ctx) {
-            Ok(Some(item)) => item,
-            // Not an exec shape at all: shell fallthrough.
-            _ => return Ok(None),
-        };
-        if reject_boundary(&lowering_ctx(stmt), &item).is_err() {
-            return Ok(None);
-        }
-        items.push(item);
-        cur.skip_gap();
-        if cur.eat_punct(',') {
-            cur.skip_gap();
-            continue;
-        }
-        break;
-    }
-    if !cur.done() {
-        return Ok(None);
-    }
-    Ok(Some(Expr::List(items)))
+    parse_bracket_list(inner, stmt, ctx, BracketItems::Exec)
 }
 
 /// One RUN-exec item: brace groups try maps only (blocks miss);
@@ -6047,30 +6089,12 @@ fn parse_expr_checked(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenErr
     Ok(expr)
 }
 
-/// List literal over a bracket group's contents: `gap_nl` newlines
-/// skip at the edges and after commas only, mirroring the grammar.
+/// List literal over a bracket group's contents: the shared bracket
+/// core (see [`parse_bracket_list`]) in `Expr` mode. Expression
+/// positions fail loudly instead of missing, so `None` is unreachable.
 fn parse_list_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
-    let mut cur = Cursor::expr(inner, stmt);
-    cur.skip_gap_nl();
-    if cur.done() {
-        return Ok(Expr::List(vec![]));
-    }
-    let mut items = Vec::new();
-    loop {
-        let item = parse_expr_checked(&mut cur, ctx)?;
-        reject_boundary(&lowering_ctx(stmt), &item).map_err(|e| cur.err(e.to_string()))?;
-        items.push(item);
-        cur.skip_gap_nl();
-        if cur.eat_punct(',') {
-            cur.skip_gap_nl();
-            continue;
-        }
-        break;
-    }
-    if !cur.done() {
-        return Err(cur.err("unexpected text in list"));
-    }
-    Ok(Expr::List(items))
+    parse_bracket_list(inner, stmt, ctx, BracketItems::Expr)
+        .map(|list| list.expect("expression lists fail loudly, never miss"))
 }
 
 /// Map literal attempt over a brace group's contents: comma-separated
@@ -8504,6 +8528,31 @@ mod tests {
                 "FOR $x: LIST<\nINT> IN [1] { ECHO hi }",
             ),
             ("TYPE R = MAP<x: A | B>", "TYPE R = MAP<x: A |\nB>"),
+        ] {
+            assert_parity(multi);
+            let want = crate::parse_script(single, lower)
+                .unwrap_or_else(|e| panic!("single-line shape must parse {single:?}: {e}"));
+            let got = crate::parse_script(multi, lower)
+                .unwrap_or_else(|e| panic!("multi-line shape must parse {multi:?}: {e}"));
+            assert_eq!(
+                got, want,
+                "multi-line must canonicalize like one line: {multi:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_line_run_exec_matches_single_line_shape() {
+        // `RUN [...]` rides the shared bracket core, so a wrapped exec
+        // list parses exactly like its single-line spelling (and agrees
+        // across lexer frontends).
+        for (single, multi) in [
+            ("RUN [\"echo\", \"hi\"]", "RUN [\"echo\",\n\"hi\"]"),
+            ("RUN [\"echo\", \"hi\"]", "RUN [\n\"echo\",\n\"hi\"\n]"),
+            (
+                "LET $o: STRING = RUN [\"echo\", \"hi\"]",
+                "LET $o: STRING = RUN [\"echo\",\n\"hi\"]",
+            ),
         ] {
             assert_parity(multi);
             let want = crate::parse_script(single, lower)

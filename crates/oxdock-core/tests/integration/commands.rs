@@ -2626,6 +2626,44 @@ fn run_exec_form_spawns_directly_and_pipes_stdout() {
     ignore = "spawns processes; Miri does not support process execution"
 )]
 #[test]
+fn run_exec_form_allows_newlines_inside_brackets() {
+    // The exec list rides the shared bracket core, so newlines inside
+    // `RUN [...]` parse exactly like the single-line spelling.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    // `cargo` drives the test suite itself, so it exists on every platform
+    // without relying on shell builtins (`echo` is not a Windows executable).
+    let script = indoc!(
+        r#"
+        LET $cap: PIPE
+        WITH_IO [stdout=$cap] RUN ["cargo",
+            "--version"]
+        WITH_IO [stdin=$cap] WRITE out.txt
+        "#
+    );
+    let steps = oxdock_core::parse_script(script).unwrap();
+    assert!(
+        steps.iter().any(
+            |step| matches!(&step.kind, StepKind::WithIo { cmd, .. } if matches!(cmd.as_ref(), StepKind::RunExec { .. }))
+        ),
+        "one step must wrap RunExec, got {:?}",
+        steps.iter().map(|step| &step.kind).collect::<Vec<_>>()
+    );
+    run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new()).unwrap();
+
+    let out = read_trimmed(&root.join("out.txt").unwrap());
+    assert!(
+        out.starts_with("cargo "),
+        "expected cargo version output, got {out:?}"
+    );
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "spawns processes; Miri does not support process execution"
+)]
+#[test]
 fn run_exec_nonzero_status_bails_with_step_context() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
