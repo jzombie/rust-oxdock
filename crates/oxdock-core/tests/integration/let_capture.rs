@@ -256,6 +256,45 @@ fn await_capture_without_return_binds_zero() {
 
 #[test]
 #[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn single_call_task_without_return_binds_zero() {
+    // No implicit yield: a single-call body publishes nothing on its
+    // own, even when the call itself returns a value. Only an explicit
+    // RETURN publishes. `HANDLE<ANY>` defers to the runtime, so the
+    // capture binds the void-task zero instead of the call's string.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $t: HANDLE<ANY> = ASYNC TEXT_TRIM("  padded  ")
+        LET $o: INT = AWAIT $t
+        ASSERT_EQ $o 0
+    "#};
+    run_script(&root, script).expect("single call without RETURN binds 0");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn typed_handle_without_return_fails_static() {
+    // RETURN is required for a typed payload: a task with no value
+    // RETURN is a static error even when the single call in its body
+    // would have returned a matching value at runtime. The second
+    // case pins the old fast-path shape directly.
+    for script in [
+        "LET $t: HANDLE<STRING> = ASYNC { ECHO hi }\n",
+        "IMPORT [STD]\nLET $t: HANDLE<STRING> = ASYNC TEXT_TRIM(\"  padded  \")\n",
+    ] {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+        let err = run_script(&root, script).expect_err("typed task without RETURN must fail");
+        assert!(
+            err.to_string().contains("no value RETURN"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
 fn await_capture_missing_fallback_branch_errors() {
     // A body that can RETURN on some path but falls off the end on the
     // path taken fails loudly: a missing fallback must never silently

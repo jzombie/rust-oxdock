@@ -2091,9 +2091,9 @@ fn tty_request(bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyReque
 }
 
 /// Resolve `WITH_IO` bindings against the active context handles, shared by
-/// `with_io` and the `CALL` fast paths (`LET`-capture / `ASYNC` tasks) so a
-/// `CALL` under `WITH_IO` layers observes identical stream wiring whether
-/// it runs inline or for its return value.
+/// `with_io` and the `CALL` capture path (`LET`-capture) so a `CALL`
+/// under `WITH_IO` layers observes identical stream wiring whether it
+/// runs inline or for its return value.
 ///
 /// Besides the runnable streams this returns the script backends behind
 /// the stdin/stdout bindings, which enrich the step context for
@@ -2264,7 +2264,7 @@ fn resolve_pipe_handle<P: ProcessManager>(
 
 /// If `cmd` is a bare `NAME(...)` call possibly nested under `WITH_IO` layers, return the
 /// merged bindings (outermost first, inner wins per stream) plus the call
-/// name and args. Used by `LET`-capture and `ASYNC` fast paths so
+/// name and args. Used by `LET`-capture so
 /// `WITH_IO [stdin=$tx] FOO()` binds the `RETURN` value instead
 /// of swallowing stdout into a capture sink.
 fn extract_call(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &[Expr])> {
@@ -4167,11 +4167,10 @@ pub(crate) fn dispatch_continue<P: ProcessManager>(
 
 /// Whether an ASYNC body can publish a value: true when any step in its
 /// own scope is a `RETURN`. Nested `FUNC` definitions and nested `ASYNC`
-/// bodies belong to inner scopes and never count, and a bare `Call`
-/// statement discards its value (only the single-call fast path
-/// publishes). A body that can return but falls off the end fails its
-/// capture loudly, so a missing fallback branch can never silently yield
-/// the void-task zero.
+/// bodies belong to inner scopes and never count, and bare `Call` and
+/// bare `IMPORT` statements discard their values. A body that can return
+/// but falls off the end fails its capture loudly, so a missing fallback
+/// branch can never silently yield the void-task zero.
 fn body_returns_value(body: &[Step]) -> bool {
     body.iter().any(|step| step_returns_value(&step.kind))
 }
@@ -4179,11 +4178,9 @@ fn body_returns_value(body: &[Step]) -> bool {
 fn step_returns_value(kind: &StepKind) -> bool {
     match kind {
         StepKind::Return { .. } => true,
-        // A bare `IMPORT` statement discards its pipeline value, but a
-        // single-import `ASYNC` body publishes it (the worker fast path
-        // above); claiming `true` routes that shape through the fast
-        // path, and any other placement falls off the end loudly.
-        StepKind::ImportFile { .. } => true,
+        // Bare `Call` and bare `IMPORT` statements discard their values
+        // in every position, task bodies included: only `RETURN`
+        // publishes.
         StepKind::WithIo { cmd, .. } => step_returns_value(cmd),
         StepKind::For { body, .. }
         | StepKind::While { body, .. }
@@ -4268,29 +4265,16 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let worker_child = std::sync::Arc::clone(&worker);
 
     // Spawn the task thread. Leftover guards unpin at thread termination.
-    // A single-`CALL` body (possibly under `WITH_IO` layers) runs as a
-    // function invocation whose `RETURN` value is published into the entry
-    // for `LET $o = AWAIT $t`; block bodies publish a `RETURN` value the
-    // same way. Control flow never crosses the thread boundary: stray
-    // BREAK/CONTINUE become errors here.
-    let call_task: Option<(Vec<IoBinding>, String, Vec<Expr>)> = match body.as_slice() {
-        [step] => extract_call(&step.kind)
-            .map(|(bindings, name, args)| (bindings, name.to_string(), args.to_vec())),
-        _ => None,
-    };
-    // Single-`IMPORT` bodies (#115) publish the imported pipeline's
-    // `RETURN` value the same way single calls do; anything else runs
-    // the block path below.
-    let import_task: Option<(Vec<IoBinding>, String, String)> = match body.as_slice() {
-        [step] => extract_import(&step.kind)
-            .map(|(bindings, path, alias)| (bindings, path.to_string(), alias.to_string())),
-        _ => None,
-    };
-    // Single-call and single-import bodies always yield their value;
-    // block bodies yield one only when they can RETURN. Recorded on the
-    // entry so a later capture can tell "void task" (binds 0) from "fell
-    // off the end" (loud error).
-    let returns_value = call_task.is_some() || import_task.is_some() || body_returns_value(&body);
+    // Every body runs the block path below: a task publishes a value
+    // only through an explicit `RETURN`, which the entry records for
+    // `LET $o = AWAIT $t`. A body with no `RETURN` yields `INT` 0 on
+    // success; a body that can return but fell off the end fails its
+    // capture loudly. Control flow never crosses the thread boundary:
+    // stray BREAK/CONTINUE become errors here.
+    // A task publishes a value only through an explicit `RETURN`.
+    // Recorded on the entry so a later capture can tell "void task"
+    // (binds 0) from "fell off the end" (loud error).
+    let returns_value = body_returns_value(&body);
     let (entry_tx, entry_rx) = std::sync::mpsc::channel::<Arc<super::state::TaskEntry>>();
     let join = std::thread::spawn(move || {
         // Slot guard first: dropping on return or unwind releases the
@@ -4305,88 +4289,6 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
         let entry = entry_rx
             .recv()
             .map_err(|_| anyhow::anyhow!("ASYNC task entry unavailable"))?;
-        if let Some((bindings, name, args)) = call_task {
-            let mut child_cx = super::steps::StepCtx {
-                state: &mut child_state,
-                process: &mut child_process,
-                stdin,
-                expose_stdin,
-                out,
-                err,
-                out_pipe,
-                stdin_pipe,
-                tty: None,
-            };
-            // Apply call-site bindings (e.g. stdin pipes) like the inline
-            // path; stdout stays shared-live (parse rejects stdout pipes).
-            let value = if bindings.is_empty() {
-                call_func_value(&mut child_cx, &name, &args)?
-            } else {
-                let (task_stdin, task_expose, task_out, task_err, task_out_pipe, task_stdin_pipe) =
-                    resolve_io_streams(&mut child_cx, &bindings, &body[0].kind)?;
-                let state = &mut *child_cx.state;
-                let process = &mut *child_cx.process;
-                let mut sub_cx = super::steps::StepCtx {
-                    state,
-                    process,
-                    stdin: task_stdin,
-                    expose_stdin: task_expose,
-                    out: task_out,
-                    err: task_err,
-                    out_pipe: task_out_pipe.or(child_cx.out_pipe.clone()),
-                    stdin_pipe: task_stdin_pipe.or(child_cx.stdin_pipe.clone()),
-                    tty: None,
-                };
-                call_func_value(&mut sub_cx, &name, &args)?
-            };
-            entry
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .return_value = Some(value);
-            return Ok(());
-        }
-        if let Some((bindings, path, alias)) = import_task {
-            let mut child_cx = super::steps::StepCtx {
-                state: &mut child_state,
-                process: &mut child_process,
-                stdin,
-                expose_stdin,
-                out,
-                err,
-                out_pipe,
-                stdin_pipe,
-                tty: None,
-            };
-            // Apply call-site bindings like the inline path; stdout stays
-            // shared-live (parse rejects stdout pipes).
-            let value = if bindings.is_empty() {
-                super::import::import_file(&mut child_cx, &path, &alias)?
-            } else {
-                let (task_stdin, task_expose, task_out, task_err, task_out_pipe, task_stdin_pipe) =
-                    resolve_io_streams(&mut child_cx, &bindings, &body[0].kind)?;
-                let state = &mut *child_cx.state;
-                let process = &mut *child_cx.process;
-                let mut sub_cx = super::steps::StepCtx {
-                    state,
-                    process,
-                    stdin: task_stdin,
-                    expose_stdin: task_expose,
-                    out: task_out,
-                    err: task_err,
-                    out_pipe: task_out_pipe.or(child_cx.out_pipe.clone()),
-                    stdin_pipe: task_stdin_pipe.or(child_cx.stdin_pipe.clone()),
-                    tty: None,
-                };
-                super::import::import_file(&mut sub_cx, &path, &alias)?
-            };
-            entry
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .return_value = Some(value);
-            return Ok(());
-        }
         let flow = super::steps::execute_steps(
             &mut child_state,
             &mut child_process,
@@ -4408,9 +4310,9 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                 anyhow::bail!("step {}: CONTINUE cannot cross ASYNC boundary", idx + 1);
             }
             Flow::Return { value, .. } => {
-                // Block bodies publish an explicit result like single-call
-                // bodies and function calls do; there is no stdout
-                // sniffing. `LET $o = AWAIT $t` binds this value.
+                // Only an explicit `RETURN` publishes a task value;
+                // there is no stdout sniffing. `LET $o = AWAIT $t`
+                // binds this value.
                 entry
                     .state
                     .lock()
