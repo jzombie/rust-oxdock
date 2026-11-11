@@ -61,12 +61,12 @@ later `AWAIT` all see the same outcome.
 ```oxdock
 IMPORT [STD]
 # Detach a slow command and hand back its handle.
-FUNC SLOW_OP(): HANDLE {
-  LET $t: HANDLE = ASYNC { RUN ["sleep", "30"] }
+FUNC SLOW_OP(): HANDLE<VOID> {
+  LET $t: HANDLE<VOID> = ASYNC { RUN ["sleep", "30"] }
   RETURN $t
 }
 # Poll the handle: running with tails so far, then finished.
-FUNC POLL_WRAP($t: HANDLE): MAP<ANY> {
+FUNC POLL_WRAP($t: HANDLE<ANY>): MAP<ANY> {
   RETURN TASK_POLL($t)
 }
 # The export marks the tools without changing linear calls.

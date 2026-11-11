@@ -781,9 +781,9 @@ fn walk(
                 // A line ending in `=` (or the `IN` of a FOR header) expects an
                 // expression next: `LET $o: STRING = ECHO hi`,
                 // `LET $r: STRING = F()`,
-                // `LET $t: HANDLE = ASYNC ...`, `FOR $x: STRING IN [...]`.
+                // `LET $t: HANDLE<T> = ASYNC ...`, `FOR $x: STRING IN [...]`.
                 // A trailing `ASYNC` expects its command the same way:
-                // without this, `LET $t: HANDLE = ASYNC ECHO hi` splits
+                // without this, `LET $t: HANDLE<VOID> = ASYNC ECHO hi` splits
                 // the command onto its own line and misparses.
                 // A statement keyword there continues the line instead of
                 // starting a new one.

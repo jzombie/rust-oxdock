@@ -106,6 +106,11 @@ pub const MAP_TAG: TypeTag = TypeTag::Map;
 
 /// The LIST word for `TypeTag` metadata, matching `MAP_TAG`.
 pub const LIST_TAG: TypeTag = TypeTag::List;
+
+/// The canonical source spelling of the handle word: declaration
+/// sites compare against this instead of a literal, so the spelling
+/// lives once beside the tag it names.
+pub const HANDLE_TYPE_NAME: &str = "HANDLE";
 impl std::fmt::Debug for TypeTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

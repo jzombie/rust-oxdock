@@ -45,7 +45,7 @@ fn alias_spellings_bind_in_capture_decls() {
     // AWAIT capture binds the published value through the alias.
     let script = indoc! {r#"
         TYPE PERSON = MAP<name: STRING, age: INT>
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<PERSON> = ASYNC {
             RETURN {name: "a", age: 1}
         }
         LET $p: PERSON = AWAIT $t
@@ -214,7 +214,7 @@ fn let_await_capture_binds_task_output() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC { ECHO "logged"; RETURN "returned" }
+        LET $t: HANDLE<STRING> = ASYNC { ECHO "logged"; RETURN "returned" }
         LET $o: STRING = AWAIT $t
         ASSERT_EQ $o "returned"
     "#};
@@ -227,7 +227,7 @@ fn bare_await_task_output_streams_live_to_parent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ECHO fwd-hi
+        LET $t: HANDLE<VOID> = ASYNC ECHO fwd-hi
         AWAIT $t
     "#};
     let steps = oxdock_core::parse_script(script).expect("parse script");
@@ -247,7 +247,7 @@ fn await_capture_without_return_binds_zero() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ECHO hi
+        LET $t: HANDLE<ANY> = ASYNC ECHO hi
         LET $o: INT = AWAIT $t
         ASSERT_EQ $o 0
     "#};
@@ -264,7 +264,7 @@ fn await_capture_missing_fallback_branch_errors() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         LET $flag: BOOL = false
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<ANY> = ASYNC {
             IF $flag {
                 RETURN "yes"
             }
@@ -285,7 +285,7 @@ fn await_capture_exhaustive_branches_bind() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         LET $flag: BOOL = false
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<STRING> = ASYNC {
             IF $flag {
                 RETURN "yes"
             }
@@ -303,7 +303,7 @@ fn await_capture_then_bare_await_still_double_await_errors() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC { ECHO "logged"; RETURN "returned" }
+        LET $t: HANDLE<STRING> = ASYNC { ECHO "logged"; RETURN "returned" }
         LET $o: STRING = AWAIT $t
         AWAIT $t
     "#};
@@ -320,7 +320,7 @@ fn bare_await_then_capture_still_double_await_errors() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ECHO hi
+        LET $t: HANDLE<INT> = ASYNC { ECHO hi; RETURN 0 }
         AWAIT $t
         LET $o: STRING = AWAIT $t
     "#};
@@ -337,7 +337,7 @@ fn await_capture_of_failing_task_propagates_error() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC READ "missing.txt"
+        LET $t: HANDLE<ANY> = ASYNC READ "missing.txt"
         LET $o: STRING = AWAIT $t
     "#};
     let err = run_script(&root, script).expect_err("capture of failing task must fail");
@@ -353,7 +353,7 @@ fn await_capture_after_cancel_reports_cancelled() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC SLEEP 30s
+        LET $t: HANDLE<ANY> = ASYNC SLEEP 30s
         CANCEL $t
         LET $o: STRING = AWAIT $t
     "#};

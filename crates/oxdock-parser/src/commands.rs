@@ -424,13 +424,13 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
     match name {
         "WITH_IO" => Some(with_io_hint(&got, received)),
         "AWAIT" => Some(format!(
-            "AWAIT waits for a background task variable, e.g. `LET $t: HANDLE = ASYNC ECHO hi` then `AWAIT $t`; got {got}."
+            "AWAIT waits for a background task variable, e.g. `LET $t: HANDLE<VOID> = ASYNC ECHO hi` then `AWAIT $t`; got {got}."
         )),
         "CANCEL" => Some(format!(
-            "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t: HANDLE = ASYNC ...`); got {got}."
+            "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t: HANDLE<VOID> = ASYNC ...`); got {got}."
         )),
         "ASYNC" => Some(format!(
-            "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t: HANDLE = ASYNC ...`; got {got}."
+            "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t: HANDLE<T> = ASYNC ...`; got {got}."
         )),
         "FOR" => Some(format!(
             "FOR loops need `FOR $item: TYPE IN <expr> {{ ... }}` (or `FOR $key: STRING, $value: TYPE IN <expr> {{ ... }}`); got {got}."
@@ -442,7 +442,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}."
         )),
         "LET" => Some(format!(
-            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}."
+            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE<T> = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}."
         )),
         "SET" => Some(
             "`SET` is not a keyword; mutate a declared variable with `$var = <expr>`, e.g. `$count = 2`.".to_string(),
@@ -3125,7 +3125,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         CommandMeta {
             in_index: true,
             name: "ASYNC",
-            syntax: "ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }",
+            syntax: "ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE<T> = ASYNC { <commands> }",
             summary: "Run steps in a background thread.",
             description: indoc! {r#"
                 Runs a command or block of commands in a background thread with
@@ -3151,8 +3151,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # Inline and block forms both run in the background; AWAIT joins them.
                 ASYNC ECHO "warming-up"
-                LET $a: HANDLE = ASYNC ECHO "first"
-                LET $b: HANDLE = ASYNC {
+                LET $a: HANDLE<VOID> = ASYNC ECHO "first"
+                LET $b: HANDLE<VOID> = ASYNC {
                     ECHO "second"
                 }
                 AWAIT $a
@@ -3165,7 +3165,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "async task handle",
                     fence_meta: None,
                     code: indoc! {r#"
-                    LET $task: HANDLE = ASYNC {
+                    LET $task: HANDLE<VOID> = ASYNC {
                         ECHO "built"
                     }
                     AWAIT $task
@@ -3196,7 +3196,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "await",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $task: HANDLE = ASYNC ECHO "done"
+                LET $task: HANDLE<VOID> = ASYNC ECHO "done"
                 AWAIT $task
                 ASSERT_CONTAINS stdout "done"
             "#},
@@ -3205,7 +3205,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "await capture",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $task: HANDLE = ASYNC {
+                LET $task: HANDLE<STRING> = ASYNC {
                     ECHO "logged"
                     RETURN "returned"
                 }
@@ -3223,7 +3223,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             syntax: "CANCEL $var",
             summary: "Synchronously cancel a background task.",
             description: indoc! {r#"
-                Kills the named background task spawned via LET $var: HANDLE = ASYNC ....
+                Kills the named background task spawned via LET $var: HANDLE<T> = ASYNC ....
 
                 Blocking: returns only after the task thread has been joined and its OS
                 process reaped, so no residual filesystem or stream mutation follows. A
@@ -3237,7 +3237,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "cancel",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $task: HANDLE = ASYNC SLEEP 30s
+                LET $task: HANDLE<VOID> = ASYNC SLEEP 30s
                 CANCEL $task
             "#},
                 },
@@ -3246,7 +3246,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: Some("expect_error:\"was cancelled\""),
                     code: indoc! {r#"
                 # A cancelled task stays cancelled: joining it reports.
-                LET $task: HANDLE = ASYNC SLEEP 30s
+                LET $task: HANDLE<VOID> = ASYNC SLEEP 30s
                 CANCEL $task
                 AWAIT $task
             "#},
@@ -3265,7 +3265,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 A blocking foreground process is killed.
 
                 ASYNC nests in either order with order-dependent deadline
-                semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
+                semantics: `LET $task: HANDLE<VOID> = ASYNC TIMEOUT 30s RUN "build"` enforces
                 the deadline inside the background thread (a later `AWAIT $task`
                 surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
                 preempts a hung task from the awaiting side.
@@ -3323,7 +3323,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                     # AWAIT form bounds a task join instead of a step.
-                    LET $quick: HANDLE = ASYNC {
+                    LET $quick: HANDLE<VOID> = ASYNC {
                         ECHO hi
                     }
                     TIMEOUT 30s AWAIT $quick
@@ -3498,10 +3498,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     IMPORT [STD]
                     LET $cap: PIPE
                     WITH_IO [stdout=$cap] {
-                        LET $a: HANDLE = ASYNC REMOTE prod {
+                        LET $a: HANDLE<VOID> = ASYNC REMOTE prod {
                             ECHO "from-a"
                         }
-                        LET $b: HANDLE = ASYNC REMOTE prod {
+                        LET $b: HANDLE<VOID> = ASYNC REMOTE prod {
                             ECHO "from-b"
                         }
                         AWAIT $a
@@ -3597,7 +3597,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     # guest is already dead, and the failure surfaces as
                     # a host step error carrying the same code. The CLI
                     # then exits with it, so the guest code reaches the OS.
-                    LET $t: HANDLE = ASYNC REMOTE prod {
+                    LET $t: HANDLE<VOID> = ASYNC REMOTE prod {
                         EXIT 3
                     }
                     WRITE host-alive.txt "still here"
@@ -4819,7 +4819,7 @@ pub(crate) fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> Par
         }
     };
     if bad {
-        return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
+        return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE<T> = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
     }
     Ok(())
 }

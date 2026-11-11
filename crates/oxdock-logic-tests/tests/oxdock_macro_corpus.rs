@@ -384,7 +384,7 @@ fn macro_timeout_runs_fast_command() {
 #[test]
 fn macro_async_await_task() {
     let steps = oxdock! {
-        LET $t: HANDLE = ASYNC ECHO background
+        LET $t: HANDLE<VOID> = ASYNC ECHO background
         AWAIT $t
     };
     let temp = GuardedPath::tempdir().unwrap();

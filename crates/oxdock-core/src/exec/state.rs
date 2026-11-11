@@ -355,7 +355,7 @@ impl TaskTails {
     }
 }
 
-/// Lifecycle phase of a named background task (`LET $var: HANDLE = ASYNC ...`).
+/// Lifecycle phase of a named background task (`LET $var: HANDLE<T> = ASYNC ...`).
 /// `Running` and `Awaiting` both hold the live handle inside the entry;
 /// `Cancelled` and `Completed` are terminal tombstones with no handle.
 pub(super) enum TaskPhase {

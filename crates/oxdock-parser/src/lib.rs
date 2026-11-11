@@ -60,8 +60,8 @@ pub use parser::{
 };
 pub use strip_flags::strip_flags;
 pub use tag::{
-    ANY_TAG, Field, LIST_TAG, MAP_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, TypeTag,
-    canonicalize_spelling, check_value, check_value_at, intern_rendered, lookup_rendered,
+    ANY_TAG, Field, HANDLE_TYPE_NAME, LIST_TAG, MAP_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField,
+    TypeTag, canonicalize_spelling, check_value, check_value_at, intern_rendered, lookup_rendered,
     parse_spelling, render_structural,
 };
 #[cfg(feature = "proc-macro-api")]

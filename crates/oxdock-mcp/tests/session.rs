@@ -461,17 +461,17 @@ fn status_tool_name_is_reserved() {
 const HANDLE_DEMO: &str = indoc! {r#"
     IMPORT [STD]
     # Spawns a sleeper and returns its handle for polling.
-    FUNC SPAWN_SLOW(): HANDLE {
-      LET $t: HANDLE = ASYNC { SLEEP 30s }
+    FUNC SPAWN_SLOW(): HANDLE<VOID> {
+      LET $t: HANDLE<VOID> = ASYNC { SLEEP 30s }
       RETURN $t
     }
     # Spawns a fast task and returns its handle for polling.
-    FUNC SPAWN_FAST(): HANDLE {
-      LET $t: HANDLE = ASYNC { ECHO "hi"; RETURN "done" }
+    FUNC SPAWN_FAST(): HANDLE<STRING> {
+      LET $t: HANDLE<STRING> = ASYNC { ECHO "hi"; RETURN "done" }
       RETURN $t
     }
     # Polls any task handle by value.
-    FUNC POLL_WRAP($t: HANDLE): MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> {
+    FUNC POLL_WRAP($t: HANDLE<ANY>): MAP<ANY> {
       RETURN TASK_POLL($t)
     }
     EXPORT [SPAWN_SLOW, SPAWN_FAST, POLL_WRAP, STD::TASK_POLL]
@@ -599,11 +599,12 @@ fn task_poll_rejects_non_handle() {
 const BG_WORKSPACE_DEMO: &str = indoc! {r#"
     IMPORT [STD]
     # Detaches a directory read under a workspace switch.
-    FUNC BG_WHERE(): HANDLE {
-      LET $t: HANDLE = ASYNC {
+    FUNC BG_WHERE(): HANDLE<STRING> {
+      LET $t: HANDLE<STRING> = ASYNC {
         WORKSPACE LOCAL
         LET $d: STRING = CWD
-        RETURN TEXT_TRIM($d)
+        LET $trimmed: STRING = TEXT_TRIM($d)
+        RETURN $trimmed
       }
       RETURN $t
     }
@@ -641,10 +642,11 @@ fn async_block_supports_workspace_switch_and_handle_return() {
 fn async_block_runs_child_processes() {
     let mut session = init_session(indoc! {r#"
         IMPORT [STD]
-        FUNC BG_RUN(): HANDLE {
-          LET $t: HANDLE = ASYNC {
+        FUNC BG_RUN(): HANDLE<STRING> {
+          LET $t: HANDLE<STRING> = ASYNC {
             LET $o: STRING = RUN ["echo", "bg-hi"]
-            RETURN TEXT_TRIM($o)
+            LET $trimmed: STRING = TEXT_TRIM($o)
+            RETURN $trimmed
           }
           RETURN $t
         }

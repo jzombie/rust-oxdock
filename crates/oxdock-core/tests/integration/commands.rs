@@ -1606,7 +1606,7 @@ fn let_block_return_binds_inside_async_task() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<STRING> = ASYNC {
             LET $a: STRING = { RETURN "task-block" }
             RETURN $a
         }
@@ -1777,7 +1777,7 @@ fn run_exec_form_rejects_task_handles() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ECHO hi
+        LET $t: HANDLE<VOID> = ASYNC ECHO hi
         RUN ["cargo", $t]
     "#};
     let err = run_script(&root, script).expect_err("handle argv must fail");
@@ -1959,7 +1959,7 @@ fn inspect_reports_script_pipe_for_single_run() {
     // single-RUN producer; its tiny output never fills the pipe.
     let script = indoc! {r#"
         LET $osp: PIPE
-        LET $t: HANDLE = WITH_IO [stdout=$osp] ASYNC RUN ["cargo", "--version"]
+        LET $t: HANDLE<VOID> = WITH_IO [stdout=$osp] ASYNC RUN ["cargo", "--version"]
         AWAIT $t
         LET $info: MAP<ANY> = INSPECT($osp)
         LET $v: STRING = "{{ $info.pipe_kind }}"
@@ -2009,7 +2009,9 @@ fn async_call_await_captures_return_value() {
         FUNC WORK($job: STRING): STRING {
             RETURN "did-{{ $job }}"
         }
-        LET $t: HANDLE = ASYNC WORK("job")
+        LET $t: HANDLE<STRING> = ASYNC {
+            RETURN WORK("job")
+        }
         LET $o: STRING = AWAIT $t
         WRITE o.txt "{{ $o }}"
     "#};
@@ -2925,7 +2927,7 @@ fn cancel_blocks_and_await_reports_cancelled() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC SLEEP 30s
+        LET $t: HANDLE<VOID> = ASYNC SLEEP 30s
         CANCEL $t
         WRITE "resumed.txt" "ok"
         AWAIT $t
@@ -2947,7 +2949,7 @@ fn cancel_double_reports_already_cancelled() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC SLEEP 30s
+        LET $t: HANDLE<VOID> = ASYNC SLEEP 30s
         CANCEL $t
         CANCEL $t
     "#};
@@ -2963,7 +2965,7 @@ fn cancel_previously_awaited_task_fails() {
     let err = run_script(
         &root,
         indoc! {r#"
-            LET $t: HANDLE = ASYNC ECHO hi
+            LET $t: HANDLE<VOID> = ASYNC ECHO hi
             AWAIT $t
             CANCEL $t
         "#},
@@ -3155,7 +3157,7 @@ fn semaphore_worker_return_releases() {
     let script = indoc! {r#"
         IMPORT [STD]
         LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<BOOL> = ASYNC {
             LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
             LET $permit: PERMIT = $acq.permit
             RETURN $acq.held
@@ -3216,7 +3218,7 @@ fn semaphore_cancel_releases_the_permit() {
     let script = indoc! {r#"
         IMPORT [STD]
         LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
             LET $permit: PERMIT = $acq.permit
             WRITE holding.txt "yes"
@@ -3246,11 +3248,12 @@ fn semaphore_worker_error_releases_the_permit() {
     let script = indoc! {r#"
         IMPORT [STD]
         LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<STRING> = ASYNC {
             LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
             LET $permit: PERMIT = $acq.permit
             WRITE holding.txt "yes"
             ASSERT_EQ 1 2
+            RETURN "unreached"
         }
         LET $running: BOOL = true
         WHILE $running {
@@ -3304,10 +3307,10 @@ fn async_captures_unreferenced_bindings() {
     let script = indoc! {r#"
         IMPORT [STD]
         LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
-        LET $w: HANDLE = {
+        LET $w: HANDLE<VOID> = {
             LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
             LET $permit: PERMIT = $acq.permit
-            LET $inner: HANDLE = ASYNC {
+            LET $inner: HANDLE<VOID> = ASYNC {
                 SLEEP 5s
             }
             RETURN $inner
@@ -3418,7 +3421,7 @@ fn await_list_joins_worker_pool() {
         LET $workers: LIST<ANY> = []
         LET $w: INT = 0
         WHILE $w < 3 {
-            LET $h: HANDLE = ASYNC { ECHO "worker {{ $w }}" }
+            LET $h: HANDLE<VOID> = ASYNC { ECHO "worker {{ $w }}" }
             LIST_APPEND $workers $h
             $w = $w + 1
         }
@@ -3459,7 +3462,7 @@ fn await_list_rejects_non_handle_member() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ECHO hi
+        LET $t: HANDLE<VOID> = ASYNC ECHO hi
         LET $workers: LIST<ANY> = []
         LIST_APPEND $workers $t
         LIST_APPEND $workers 1
@@ -3490,7 +3493,7 @@ fn await_list_twice_reports_already_awaited() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ECHO hi
+        LET $t: HANDLE<VOID> = ASYNC ECHO hi
         LET $workers: LIST<ANY> = []
         LIST_APPEND $workers $t
         AWAIT $workers
@@ -3507,7 +3510,7 @@ fn timeout_preempts_hung_await() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC SLEEP 30s
+        LET $t: HANDLE<VOID> = ASYNC SLEEP 30s
         TIMEOUT 500ms AWAIT $t
     "#};
     let start = Instant::now();
@@ -3545,7 +3548,7 @@ fn async_task_failure_preserves_error_chain() {
     let via_task = run_script(
         &root,
         indoc! {r#"
-            LET $t: HANDLE = ASYNC READ missing.txt
+            LET $t: HANDLE<VOID> = ASYNC READ missing.txt
             AWAIT $t
         "#},
     )
@@ -3574,7 +3577,7 @@ fn concurrent_cancel_and_await_race() {
     // A background thread CANCELs while the main thread AWAITs the same
     // task. Every outcome must report cancellation : never TaskNotFound.
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC SLEEP 30s
+        LET $t: HANDLE<VOID> = ASYNC SLEEP 30s
         ASYNC {
             CANCEL $t
         }
@@ -3600,7 +3603,7 @@ fn concurrent_cancel_blocks_until_dead() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             SLEEP 5s
             WRITE "leak.txt" "leaked"
         }
@@ -4494,9 +4497,9 @@ fn read_line_ping_pong_proves_live_streaming() {
         LET $ctl_tx: PIPE
         LET $rx: PIPE
         LET $ctl_rx: PIPE
-        LET $keep_tx: HANDLE = WITH_IO [stdout=$tx, stdin=$ctl_tx] ASYNC READ_LINE $ktx
-        LET $keep_rx: HANDLE = WITH_IO [stdout=$rx, stdin=$ctl_rx] ASYNC READ_LINE $krx
-        LET $live: HANDLE = ASYNC {
+        LET $keep_tx: HANDLE<VOID> = WITH_IO [stdout=$tx, stdin=$ctl_tx] ASYNC READ_LINE $ktx
+        LET $keep_rx: HANDLE<VOID> = WITH_IO [stdout=$rx, stdin=$ctl_rx] ASYNC READ_LINE $krx
+        LET $live: HANDLE<VOID> = ASYNC {
             WITH_IO [stdin=$tx] READ_LINE $a
             WITH_IO [stdout=$rx] ECHO "{{ $a }}"
             WITH_IO [stdin=$tx] READ_LINE $b
@@ -4540,7 +4543,7 @@ fn async_self_referential_write_then_read_sees_eof() {
     // for a close that never comes).
     let script = indoc! {r#"
         LET $p: PIPE
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             WITH_IO [stdout=$p] ECHO "hello"
             WITH_IO [stdin=$p] WRITE got.txt
         }
@@ -4577,7 +4580,7 @@ fn timeout_wraps_block_and_await() {
     run_script(
         &root,
         indoc! {r#"
-            LET $task: HANDLE = ASYNC {
+            LET $task: HANDLE<VOID> = ASYNC {
                 ECHO quick
             }
             TIMEOUT 30s {
@@ -5074,14 +5077,14 @@ fn async_func_handle_task_passes() {
 #[test]
 fn func_handle_params_agree_across_gates() {
     // Call-site args use the same handle semantics as declared
-    // returns: shaped satisfies bare by payload (VOID never flows),
-    // bare satisfies only bare or ANY-payload. A drift here would
-    // be a silent soundness hole, so this pins all four flows
-    // end to end.
+    // returns: shaped satisfies ANY by payload (VOID never flows
+    // anywhere), ANY satisfies only ANY. Bare HANDLE is not a
+    // declaration type at all. A drift here would be a silent
+    // soundness hole, so this pins all four flows end to end.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FUNC TAKES($t: HANDLE): VOID {
+        FUNC TAKES($t: HANDLE<ANY>): VOID {
             AWAIT $t
         }
         FUNC TAKES_TYPED($t: HANDLE<STRING>): STRING {
@@ -5090,23 +5093,25 @@ fn func_handle_params_agree_across_gates() {
         }
         LET $shaped: HANDLE<STRING> = ASYNC { RETURN "hi" }
         LET $shaped2: HANDLE<STRING> = ASYNC { RETURN "hi" }
-        LET $bare: HANDLE = ASYNC { RETURN "hi" }
-        TAKES($shaped)
+        LET $any_copy: HANDLE<ANY> = $shaped
+        TAKES($any_copy)
         LET $out: STRING = TAKES_TYPED($shaped2)
         ASSERT_EQ $out "hi"
-        LET $any_typed: HANDLE<ANY> = $bare
-        TAKES($any_typed)
         WRITE out.txt "done"
     "#};
     run_script(&root, script).expect("handle params agree");
     for (script, want) in [
         (
-            "FUNC TAKES($t: HANDLE): VOID {\n    AWAIT $t\n}\nLET $v: HANDLE<VOID> = ASYNC { ECHO hi }\nTAKES($v)\n",
+            "FUNC TAKES($t: HANDLE<ANY>): VOID {\n    AWAIT $t\n}\nLET $v: HANDLE<VOID> = ASYNC { ECHO hi }\nTAKES($v)\n",
             "got HANDLE<VOID>",
         ),
         (
-            "FUNC TAKES_TYPED($t: HANDLE<STRING>): VOID {\n    AWAIT $t\n}\nLET $v: HANDLE = ASYNC { RETURN \"hi\" }\nTAKES_TYPED($v)\n",
-            "expected HANDLE<STRING>, got HANDLE",
+            "FUNC TAKES_TYPED($t: HANDLE<STRING>): VOID {\n    AWAIT $t\n}\nLET $v: HANDLE<ANY> = ASYNC { RETURN \"hi\" }\nTAKES_TYPED($v)\n",
+            "expected HANDLE<STRING>, got HANDLE<ANY>",
+        ),
+        (
+            "FUNC TAKES($t: HANDLE): VOID {\n    AWAIT $t\n}\n",
+            "bare HANDLE is not a declaration type",
         ),
     ] {
         let temp = GuardedPath::tempdir().unwrap();
@@ -5138,6 +5143,29 @@ fn void_outside_return_or_handle_payload_fails() {
         let root = guard_root(&temp);
         let err = run_script(&root, script).expect_err("misplaced VOID must fail");
         assert!(err.to_string().contains("VOID"), "{script:?}: {err}");
+    }
+}
+
+#[test]
+fn bare_handle_declaration_fails() {
+    // Bare HANDLE is not a declaration type: every site names a
+    // payload (HANDLE<T>) or explicit unknown (HANDLE<ANY>).
+    let cases = [
+        "LET $t: HANDLE = ASYNC { ECHO hi }\n",
+        "FUNC F(): HANDLE {\n    RETURN $t\n}\n",
+        "FUNC F($t: HANDLE): VOID {\n    AWAIT $t\n}\n",
+        "ASYNC FUNC F(): HANDLE {\n    RETURN $t\n}\n",
+        "TYPE H = HANDLE\nLET $t: H = ASYNC { ECHO hi }\n",
+        "LET $t: LIST<HANDLE> = []\n",
+    ];
+    for script in cases {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+        let err = run_script(&root, script).expect_err("bare HANDLE must fail");
+        assert!(
+            err.to_string().contains("bare HANDLE is not a declaration type"),
+            "{script:?}: {err}"
+        );
     }
 }
 

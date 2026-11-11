@@ -510,7 +510,10 @@ fn build_module_table<P: ProcessManager>(
 
 /// Shared validation-only entry: builds no snapshot output, runs no
 /// steps. Dry-run calls this before printing the closure so it fails
-/// exactly where execution and `--mcp` would.
+/// where execution and `--mcp` would on script errors. Service
+/// mapping (`check_pre_run`) is deliberately excluded: dry-run
+/// previews without binding sockets, and mappings are a deployment
+/// concern validated at execution and MCP-init time.
 pub fn validate_steps_with_fs_modules_and_entry<P: ProcessManager>(
     fs: Box<dyn WorkspaceFs>,
     steps: &[Step],
@@ -521,9 +524,6 @@ pub fn validate_steps_with_fs_modules_and_entry<P: ProcessManager>(
     let mut state = new_state(fs, ExecIo::new())?;
     state.entry_file = entry_file;
     state.module_table = build_module_table(&modules);
-    for module in &modules {
-        module.check_pre_run(steps)?;
-    }
     for module in modules {
         state.register_module(module);
     }

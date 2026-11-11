@@ -252,14 +252,14 @@ fn numeric_service_names_never_touch_the_host() {
         LET $l: NET_LISTEN_INFO = NET_LISTEN("__SVC__", {})
         LET $sin: PIPE
         LET $sout: PIPE
-        LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $sin, $sout, {}) }
-        LET $e: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $sin, $sout, {}) }
+        LET $e: HANDLE<VOID> = ASYNC {
             WITH_IO [stdin=$sout] READ_LINE $line
             WITH_IO [stdout=$sin] ECHO "{{ $line }}"
         }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { NET_CONNECT("__SVC__", $cin, $cout, {}) }
+        LET $c: HANDLE<VOID> = ASYNC { NET_CONNECT("__SVC__", $cin, $cout, {}) }
         WITH_IO [stdout=$cin] ECHO "number-echo"
         WITH_IO [stdin=$cout] READ_LINE $got
         AWAIT $c
@@ -359,8 +359,8 @@ fn accept_connect_roundtrip() {
         WRITE addr.txt "{{ $l.addr }}"
         LET $in: PIPE
         LET $out: PIPE
-        LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
-        LET $e: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+        LET $e: HANDLE<VOID> = ASYNC {
             WITH_IO [stdin=$out] READ_LINE $line
             WITH_IO [stdout=$in] ECHO "{{ $line }}"
         }
@@ -422,7 +422,7 @@ fn connect_roundtrip_against_real_server() {
         IMPORT [STD, NET]
         LET $req: PIPE
         LET $resp: PIPE
-        LET $t: HANDLE = ASYNC { NET_CONNECT("test-real-dial", $req, $resp, {}) }
+        LET $t: HANDLE<VOID> = ASYNC { NET_CONNECT("test-real-dial", $req, $resp, {}) }
         WITH_IO [stdout=$req] ECHO "hello"
         WITH_IO [stdin=$resp] READ_LINE $got
         AWAIT $t
@@ -469,7 +469,7 @@ fn no_half_close_defers_fin() {
         IMPORT [STD, NET]
         LET $req: PIPE
         LET $resp: PIPE
-        LET $t: HANDLE = ASYNC { NET_CONNECT("test-no-fin", $req, $resp, {no_half_close: true}) }
+        LET $t: HANDLE<VOID> = ASYNC { NET_CONNECT("test-no-fin", $req, $resp, {no_half_close: true}) }
         WITH_IO [stdout=$req] ECHO "hi"
         WITH_IO [stdin=$resp] READ_LINE $got
         AWAIT $t
@@ -533,7 +533,7 @@ fn close_during_accept_returns() {
         LET $l: NET_LISTEN_INFO = NET_LISTEN("test-close-accept", {})
         LET $in: PIPE
         LET $out: PIPE
-        LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+        LET $t: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
         SLEEP 500ms
         NET_CLOSE($l.listener)
         AWAIT $t
@@ -653,8 +653,8 @@ fn proxy_terminates() {
         WRITE addr.txt "{{ $l.addr }}"
         LET $s2c: PIPE
         LET $c2s: PIPE
-        LET $ls: HANDLE = ASYNC { NET_ACCEPT($l.listener, $s2c, $c2s, {}) }
-        LET $up: HANDLE = ASYNC { NET_CONNECT("test-proxy-up", $c2s, $s2c, {}) }
+        LET $ls: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $s2c, $c2s, {}) }
+        LET $up: HANDLE<VOID> = ASYNC { NET_CONNECT("test-proxy-up", $c2s, $s2c, {}) }
         AWAIT $up
         AWAIT $ls
         WRITE done.txt "both-tasks-completed"
@@ -702,7 +702,7 @@ fn peer_fin_then_late_producer_completes() {
         IMPORT [STD, NET]
         LET $req: PIPE
         LET $resp: PIPE
-        LET $t: HANDLE = ASYNC { NET_CONNECT("test-peer-fin", $req, $resp, {}) }
+        LET $t: HANDLE<VOID> = ASYNC { NET_CONNECT("test-peer-fin", $req, $resp, {}) }
         SLEEP 300ms
         WITH_IO [stdout=$req] ECHO "late"
         AWAIT $t
@@ -724,7 +724,7 @@ fn cancel_accept_blocked_returns_promptly() {
         LET $l: NET_LISTEN_INFO = NET_LISTEN("test-cancel-accept", {})
         LET $in: PIPE
         LET $out: PIPE
-        LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+        LET $t: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
         CANCEL $t
         NET_CLOSE($l.listener)
     "#};
@@ -751,8 +751,8 @@ fn second_accept_serves_next_client() {
         WRITE addr.txt "{{ $l.addr }}"
         LET $in1: PIPE
         LET $out1: PIPE
-        LET $t1: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in1, $out1, {}) }
-        LET $e1: HANDLE = ASYNC {
+        LET $t1: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $in1, $out1, {}) }
+        LET $e1: HANDLE<VOID> = ASYNC {
             WITH_IO [stdin=$out1] READ_LINE $line
             WITH_IO [stdout=$in1] ECHO "{{ $line }}"
         }
@@ -760,8 +760,8 @@ fn second_accept_serves_next_client() {
         AWAIT $e1
         LET $in2: PIPE
         LET $out2: PIPE
-        LET $t2: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in2, $out2, {}) }
-        LET $e2: HANDLE = ASYNC {
+        LET $t2: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $in2, $out2, {}) }
+        LET $e2: HANDLE<VOID> = ASYNC {
             WITH_IO [stdin=$out2] READ_LINE $line
             WITH_IO [stdout=$in2] ECHO "{{ $line }}"
         }
@@ -806,8 +806,8 @@ fn prebound_claim_serves_cli_mapped_socket() {
         WRITE addr.txt "{{ $l.addr }}"
         LET $in: PIPE
         LET $out: PIPE
-        LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
-        LET $e: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+        LET $e: HANDLE<VOID> = ASYNC {
             WITH_IO [stdin=$out] READ_LINE $line
             WITH_IO [stdout=$in] ECHO "{{ $line }}"
         }
@@ -846,14 +846,14 @@ fn memory_session_roundtrips_with_zero_sockets() {
         WRITE virt.txt "{{ $l.virtual }}"
         LET $sin: PIPE
         LET $sout: PIPE
-        LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $sin, $sout, {}) }
-        LET $e: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $sin, $sout, {}) }
+        LET $e: HANDLE<VOID> = ASYNC {
             WITH_IO [stdin=$sout] READ_LINE $line
             WITH_IO [stdout=$sin] ECHO "{{ $line }}"
         }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { NET_CONNECT("mem-echo", $cin, $cout, {}) }
+        LET $c: HANDLE<VOID> = ASYNC { NET_CONNECT("mem-echo", $cin, $cout, {}) }
         WITH_IO [stdout=$cin] ECHO "hello-memory"
         WITH_IO [stdin=$cout] READ_LINE $got
         AWAIT $c
@@ -879,13 +879,13 @@ fn memory_client_before_server_rendezvous() {
         IMPORT [STD, NET]
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { NET_CONNECT("mem-early", $cin, $cout, {}) }
+        LET $c: HANDLE<VOID> = ASYNC { NET_CONNECT("mem-early", $cin, $cout, {}) }
         SLEEP 500ms
         LET $l: NET_LISTEN_INFO = NET_LISTEN("mem-early", {})
         LET $sin: PIPE
         LET $sout: PIPE
-        LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $sin, $sout, {}) }
-        LET $e: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $sin, $sout, {}) }
+        LET $e: HANDLE<VOID> = ASYNC {
             WITH_IO [stdin=$sout] READ_LINE $line
             WITH_IO [stdout=$sin] ECHO "{{ $line }}"
         }
@@ -923,7 +923,7 @@ fn memory_queue_full_bails_through_connect() {
         IMPORT [STD, NET]
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { NET_CONNECT("mem-full", $cin, $cout, {}) }
+        LET $c: HANDLE<VOID> = ASYNC { NET_CONNECT("mem-full", $cin, $cout, {}) }
         AWAIT $c
     "#};
     let err = run_script_with(registry, &root, script).expect_err("full queue must fail");
@@ -969,7 +969,7 @@ fn offline_connect_bails_before_sockets() {
                 IMPORT [STD, NET]
                 LET $in: PIPE
                 LET $out: PIPE
-                LET $c: HANDLE = ASYNC {{
+                LET $c: HANDLE<VOID> = ASYNC {{
                     NET_CONNECT("{target}", $in, $out, {{}})
                 }}
                 AWAIT $c
@@ -1230,7 +1230,7 @@ fn offline_connect_reads_both_timeout_shapes() {
                 LET $d: DURATION = "5s"
                 LET $in: PIPE
                 LET $out: PIPE
-                LET $c: HANDLE = ASYNC {{
+                LET $c: HANDLE<VOID> = ASYNC {{
                     NET_CONNECT("test-offline-timeout", $in, $out, {options})
                 }}
                 AWAIT $c

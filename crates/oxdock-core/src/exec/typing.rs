@@ -7,10 +7,11 @@
 //! checking, `TYPES()`, `TYPE_DESCRIBE`) reads the state map.
 
 pub use oxdock_parser::{
-    Field, LIST_TAG, MAP_TAG, OxDockType, TypeDescriptor, TypeTag, Value, ValuePayload,
-    check_value, check_value_at, clone_boxed, clone_copy, clone_shared, drop_boxed, drop_noop,
-    drop_shared, eq_boxed, eq_inline, eq_shared, fmt_boxed, fmt_inline, fmt_shared, load_inline,
-    startup_descriptors, store_inline, type_anchor, unshare_boxed, unshare_inline, unshare_shared,
+    Field, HANDLE_TYPE_NAME, LIST_TAG, MAP_TAG, OxDockType, TypeDescriptor, TypeTag, Value,
+    ValuePayload, check_value, check_value_at, clone_boxed, clone_copy, clone_shared, drop_boxed,
+    drop_noop, drop_shared, eq_boxed, eq_inline, eq_shared, fmt_boxed, fmt_inline, fmt_shared,
+    load_inline, startup_descriptors, store_inline, type_anchor, unshare_boxed, unshare_inline,
+    unshare_shared,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -171,6 +172,11 @@ impl<P: ProcessManager> ExecState<P> {
         if name == "LIST" {
             bail!(
                 "bare LIST is not a declaration type: write a shape (LIST<TYPE>) or LIST<ANY> for lists with unknown elements"
+            );
+        }
+        if name == HANDLE_TYPE_NAME {
+            bail!(
+                "bare HANDLE is not a declaration type: write HANDLE<T> for a known payload or HANDLE<ANY> for an unknown one"
             );
         }
         if let Some(tag) = TypeTag::builtin(name) {

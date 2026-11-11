@@ -38,7 +38,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
-| [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE = ASYNC { <commands> }` |
+| [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE<T> = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
@@ -684,7 +684,7 @@ ASSERT_EQ $f 2.75
 
 Run steps in a background thread.
 
-**Syntax:** `ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }`
+**Syntax:** `ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE<T> = ASYNC { <commands> }`
 
 Runs a command or block of commands in a background thread with
 subshell isolation.
@@ -707,8 +707,8 @@ inside `ASYNC` is rejected at parse time.
 ```oxdock
 # Inline and block forms both run in the background; AWAIT joins them.
 ASYNC ECHO "warming-up"
-LET $a: HANDLE = ASYNC ECHO "first"
-LET $b: HANDLE = ASYNC {
+LET $a: HANDLE<VOID> = ASYNC ECHO "first"
+LET $b: HANDLE<VOID> = ASYNC {
     ECHO "second"
 }
 AWAIT $a
@@ -720,7 +720,7 @@ ASSERT_CONTAINS stdout "second"
 **Example: async task handle**
 
 ```oxdock
-LET $task: HANDLE = ASYNC {
+LET $task: HANDLE<VOID> = ASYNC {
     ECHO "built"
 }
 AWAIT $task
@@ -748,7 +748,7 @@ a value).
 **Example: await**
 
 ```oxdock
-LET $task: HANDLE = ASYNC ECHO "done"
+LET $task: HANDLE<VOID> = ASYNC ECHO "done"
 AWAIT $task
 ASSERT_CONTAINS stdout "done"
 ```
@@ -756,7 +756,7 @@ ASSERT_CONTAINS stdout "done"
 **Example: await capture**
 
 ```oxdock
-LET $task: HANDLE = ASYNC {
+LET $task: HANDLE<STRING> = ASYNC {
     ECHO "logged"
     RETURN "returned"
 }
@@ -773,7 +773,7 @@ Synchronously cancel a background task.
 
 **Syntax:** `CANCEL $var`
 
-Kills the named background task spawned via LET $var: HANDLE = ASYNC ....
+Kills the named background task spawned via LET $var: HANDLE<T> = ASYNC ....
 
 Blocking: returns only after the task thread has been joined and its OS
 process reaped, so no residual filesystem or stream mutation follows. A
@@ -785,7 +785,7 @@ later AWAIT $var reports cancellation. Only named tasks can be cancelled.
 **Example: cancel**
 
 ```oxdock
-LET $task: HANDLE = ASYNC SLEEP 30s
+LET $task: HANDLE<VOID> = ASYNC SLEEP 30s
 CANCEL $task
 ```
 
@@ -793,7 +793,7 @@ CANCEL $task
 
 ```oxdock expect_error:"was cancelled"
 # A cancelled task stays cancelled: joining it reports.
-LET $task: HANDLE = ASYNC SLEEP 30s
+LET $task: HANDLE<VOID> = ASYNC SLEEP 30s
 CANCEL $task
 AWAIT $task
 ```
@@ -813,7 +813,7 @@ duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
 A blocking foreground process is killed.
 
 ASYNC nests in either order with order-dependent deadline
-semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
+semantics: `LET $task: HANDLE<VOID> = ASYNC TIMEOUT 30s RUN "build"` enforces
 the deadline inside the background thread (a later `AWAIT $task`
 surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
 preempts a hung task from the awaiting side.
@@ -867,7 +867,7 @@ ASSERT_EQ $beat "alive"
 
 ```oxdock
 # AWAIT form bounds a task join instead of a step.
-LET $quick: HANDLE = ASYNC {
+LET $quick: HANDLE<VOID> = ASYNC {
     ECHO hi
 }
 TIMEOUT 30s AWAIT $quick
@@ -1033,10 +1033,10 @@ ASSERT_EQ $back "1.2.3"
 IMPORT [STD]
 LET $cap: PIPE
 WITH_IO [stdout=$cap] {
-    LET $a: HANDLE = ASYNC REMOTE prod {
+    LET $a: HANDLE<VOID> = ASYNC REMOTE prod {
         ECHO "from-a"
     }
-    LET $b: HANDLE = ASYNC REMOTE prod {
+    LET $b: HANDLE<VOID> = ASYNC REMOTE prod {
         ECHO "from-b"
     }
     AWAIT $a
@@ -1127,7 +1127,7 @@ REMOTE prod {
 # guest is already dead, and the failure surfaces as
 # a host step error carrying the same code. The CLI
 # then exits with it, so the guest code reaches the OS.
-LET $t: HANDLE = ASYNC REMOTE prod {
+LET $t: HANDLE<VOID> = ASYNC REMOTE prod {
     EXIT 3
 }
 WRITE host-alive.txt "still here"
@@ -4504,7 +4504,7 @@ clean finishes add `result`, failed ones add `error` instead.
 ```oxdock
 # A sleeping task is still running on the first poll.
 IMPORT [STD]
-LET $t: HANDLE = ASYNC { SLEEP 30s }
+LET $t: HANDLE<STRING> = ASYNC { SLEEP 30s; RETURN "done" }
 LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
 ASSERT_EQ $m.state "running"
 ASSERT_EQ $m.ok true
@@ -4517,7 +4517,7 @@ CANCEL $t
 ```oxdock
 # A finished task reports its value and final tails, then still awaits.
 IMPORT [STD]
-LET $t: HANDLE = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
+LET $t: HANDLE<STRING> = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
 # Do other work while the task runs; poll once it should be done.
 SLEEP 2s
 LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)

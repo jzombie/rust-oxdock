@@ -241,7 +241,7 @@ fn nested_service_calls_are_inspected() {
             "async statement",
             "lock-probe-async",
             indoc! {r#"
-                LET $t: HANDLE = ASYNC {
+                LET $t: HANDLE<VOID> = ASYNC {
                     NET_LISTEN("lock-probe-async", {})
                 }
             "#},

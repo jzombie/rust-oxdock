@@ -6616,7 +6616,7 @@ fn try_let_with_io_rhs(
             match parse_inner_command(&rest[..1], stmt, ctx) {
                 Err(e) => return Err(e),
                 Ok(_) => {
-                    return Err(fail("LET $var: HANDLE = ASYNC requires a body".to_string()));
+                    return Err(fail("LET $var: HANDLE<T> = ASYNC requires a body".to_string()));
                 }
             }
         }
@@ -6637,7 +6637,7 @@ fn try_let_with_io_rhs(
             let body = parse_body_steps(&brace_inner, stmt, ctx, false)?;
             if body.len() != 1 {
                 return Err(fail(
-                        "LET $var: TYPE = WITH_IO [..] ASYNC accepts a single command; use LET $var: HANDLE = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks"
+                        "LET $var: TYPE = WITH_IO [..] ASYNC accepts a single command; use LET $var: HANDLE<T> = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks"
                             .to_string(),
                     ));
             }
@@ -6649,7 +6649,7 @@ fn try_let_with_io_rhs(
                         body.into_iter()
                             .next()
                             .ok_or_else(|| {
-                                fail("LET $var: HANDLE = ASYNC requires a body".to_string())
+                                fail("LET $var: HANDLE<T> = ASYNC requires a body".to_string())
                             })?
                             .kind,
                     ),
@@ -6778,7 +6778,7 @@ fn parse_let_async_rhs(
     let Some(first) = rest.first() else {
         return Err(TokenError {
             stmt,
-            msg: "LET $var: HANDLE = ASYNC requires a body".to_string(),
+            msg: "LET $var: HANDLE<T> = ASYNC requires a body".to_string(),
             line: 0,
             col: 0,
             kind: None,
@@ -6815,7 +6815,7 @@ fn parse_let_async_rhs(
     if first.joint {
         return Err(TokenError {
             stmt,
-            msg: "LET $var: HANDLE = ASYNC requires a body".to_string(),
+            msg: "LET $var: HANDLE<T> = ASYNC requires a body".to_string(),
             line: 0,
             col: 0,
             kind: None,

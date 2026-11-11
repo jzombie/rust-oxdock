@@ -178,12 +178,12 @@ fn net_listen<P: ProcessManager>(
     # Accept one connection into fresh pipes.
     LET $in: PIPE
     LET $out: PIPE
-    LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+    LET $acc: HANDLE<MAP<closed: BOOL>> = ASYNC { RETURN NET_ACCEPT($l.listener, $in, $out, {}) }
 
     # Connect a client to the listener.
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { NET_CONNECT("doc-net-demo", $cin, $cout, {}) }
+    LET $c: HANDLE<MAP<closed: BOOL>> = ASYNC { RETURN NET_CONNECT("doc-net-demo", $cin, $cout, {}) }
 
     # Greet through the server pipe and wait for delivery.
     WITH_IO [stdout=$in] ECHO "server-greeting"
@@ -217,7 +217,7 @@ fn net_accept<P: ProcessManager>(
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!(
-            "NET_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ NET_ACCEPT($l, $in, $out, {{}}) }}"
+            "NET_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ NET_ACCEPT($l, $in, $out, {{}}) }}"
         );
     }
     let state = Arc::clone(listener.state());
@@ -358,10 +358,10 @@ fn net_close<P: ProcessManager>(cx: &mut StepCtx<P>, listener: NetListenerTag) -
     LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-connect", {})
     LET $in: PIPE
     LET $out: PIPE
-    LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+    LET $acc: HANDLE<MAP<closed: BOOL>> = ASYNC { RETURN NET_ACCEPT($l.listener, $in, $out, {}) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { NET_CONNECT("doc-net-connect", $cin, $cout, {}) }
+    LET $c: HANDLE<MAP<closed: BOOL>> = ASYNC { RETURN NET_CONNECT("doc-net-connect", $cin, $cout, {}) }
 
     # Close both inputs: each pump observes EOF, half-closes, and both
     # tasks return their result maps with no cancellation. Closing only
@@ -389,7 +389,7 @@ fn net_connect<P: ProcessManager>(
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!(
-            "NET_CONNECT requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ NET_CONNECT($target, $in, $out, {{}}) }}"
+            "NET_CONNECT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ NET_CONNECT($target, $in, $out, {{}}) }}"
         );
     }
     // Module-shared endpoint registry: stashed at registration, so
@@ -708,7 +708,7 @@ fn net_addr<P: ProcessManager>(
     LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-fetch", {})
     LET $in: PIPE
     LET $out: PIPE
-    LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+    LET $acc: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
     WITH_IO [stdout=$in] ECHO "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"
     LET $base: STRING = NET_ADDR("doc-net-fetch")
     LET $body: STRING = NET_FETCH("http://{{ $base }}/doc.json", {})

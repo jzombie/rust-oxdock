@@ -813,7 +813,7 @@ fn async_stdin_pipe_unblocks_background_write() {
             guard: None,
             kind: StepKind::AssignAsync {
                 var: "writer".into(),
-                decl_type: "HANDLE".to_string(),
+                decl_type: "HANDLE<VOID>".to_string(),
                 body: vec![Step {
                     guard: None,
                     kind: StepKind::WithIo {
@@ -3630,7 +3630,7 @@ fn timeout_scope_does_not_join_prior_background_work() {
             guard: None,
             kind: StepKind::AssignAsync {
                 var: "srv".into(),
-                decl_type: "HANDLE".to_string(),
+                decl_type: "HANDLE<VOID>".to_string(),
                 body: vec![step(StepKind::Run("server".into()))],
             },
             scope_enter: 0,
@@ -4184,7 +4184,7 @@ fn spawn_manifest_outer_pipe_stays_script() {
     // binary is required and the test is cross-platform.
     let steps = crate::parse_script(indoc! {r#"
         LET $p: PIPE
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
           WITH_IO [stdin=$p] RUN ["stub-never-executed"]
         }
         WITH_IO [stdout=$p] ECHO "hello"
@@ -4237,9 +4237,9 @@ fn nested_spawn_marks_pipes_nested_in_collections_escaped() {
             LET $p: PIPE
             RETURN [$p]
         }
-        LET $t1: HANDLE = ASYNC {
+        LET $t1: HANDLE<STRING> = ASYNC {
             LET $bag: LIST<PIPE> = MAKE()
-            LET $t2: HANDLE = ASYNC {
+            LET $t2: HANDLE<VOID> = ASYNC {
                 LET $q: PIPE = $bag.0
                 WITH_IO [stdout=$q] ECHO "child"
             }
@@ -4331,7 +4331,7 @@ fn eof_false_with_live_writer_true_after_join() {
     let steps = crate::parse_script(indoc! {r#"
         IMPORT [STD]
         LET $q: PIPE
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             WITH_IO [stdout=$q] SLEEP 5s
         }
         LET $live: BOOL = EOF($q)
@@ -4427,7 +4427,7 @@ fn mixed_task_body_pins_script_and_run_adapts() {
     // repeat DSL access and host-facing reads all keep working there.
     let steps = crate::parse_script(indoc! {r#"
         LET $p: PIPE
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             WITH_IO [stdout=$p] RUN ["stub-never-executed"]
             WITH_IO [stdout=$p] ECHO "from-task"
         }
@@ -5614,7 +5614,7 @@ fn os_rebind_take_twice_bails_with_fresh_declaration_remedy() {
     // take at resolve time: the first bridged take wins deterministically
     // and the second fails with the remedy.
     let steps = crate::parse_script(indoc! {r#"
-        LET $t1: HANDLE = ASYNC {
+        LET $t1: HANDLE<VOID> = ASYNC {
             LET $p: PIPE
             WITH_IO [stdout=$p] RUN ["stub-producer"]
             WITH_IO [stdin=$p] ECHO "first"
@@ -5685,7 +5685,7 @@ fn host_take_twice_on_os_bails() {
     };
     let steps = crate::parse_script_with_modules(
         indoc! {r#"
-        LET $t1: HANDLE = ASYNC {
+        LET $t1: HANDLE<PIPE> = ASYNC {
             LET $p: PIPE
             WITH_IO [stdout=$p] RUN ["stub"]
             RETURN $p
@@ -6067,7 +6067,7 @@ fn isolated_async_task_inherits_scrub() {
         ENV KEEP=yes
         ISOLATED {
             INHERIT_ENV [KEEP]
-            LET $t: HANDLE = ASYNC { RUN "echo hi" }
+            LET $t: HANDLE<VOID> = ASYNC { RUN "echo hi" }
             AWAIT $t
         }
     "#});
@@ -6085,7 +6085,7 @@ fn isolated_async_task_inherits_scrub() {
 fn isolated_inside_async_scopes_to_task() {
     let (_temp, mock) = run_isolated_case(indoc! {r#"
         ENV SECRET=topsecret
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             ISOLATED {
                 RUN "echo hi"
             }

@@ -1370,7 +1370,7 @@ clean finishes add `result`, failed ones add `error` instead.
 ```oxdock
 # A sleeping task is still running on the first poll.
 IMPORT [STD]
-LET $t: HANDLE = ASYNC { SLEEP 30s }
+LET $t: HANDLE<STRING> = ASYNC { SLEEP 30s; RETURN "done" }
 LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
 ASSERT_EQ $m.state "running"
 ASSERT_EQ $m.ok true
@@ -1383,7 +1383,7 @@ CANCEL $t
 ```oxdock
 # A finished task reports its value and final tails, then still awaits.
 IMPORT [STD]
-LET $t: HANDLE = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
+LET $t: HANDLE<STRING> = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
 # Do other work while the task runs; poll once it should be done.
 SLEEP 2s
 LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)

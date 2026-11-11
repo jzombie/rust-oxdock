@@ -103,7 +103,7 @@ fn dequeue_session<P: ProcessManager>(
     # Serve: dequeue one session and pump a synthetic reply.
     LET $in: PIPE
     LET $out: PIPE
-    LET $w: HANDLE = ASYNC {
+    LET $w: HANDLE<VOID> = ASYNC {
         LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
         ASSERT_EQ $sess.username "u"
         SSH_PUMP_CHANNEL($sess.session, $in, $out)
@@ -112,7 +112,7 @@ fn dequeue_session<P: ProcessManager>(
     # Connect a client to the server.
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and every
     # task returns with no cancellation.
@@ -131,7 +131,7 @@ fn ssh_dequeue<P: ProcessManager>(
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!(
-            "SSH_DEQUEUE requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ SSH_DEQUEUE($server.server) }}"
+            "SSH_DEQUEUE requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ SSH_DEQUEUE($server.server) }}"
         );
     }
     let state = Arc::clone(server.state());
@@ -351,10 +351,10 @@ fn ssh_serve<P: ProcessManager>(
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-accept", {username: "u", password: "p"})
     LET $in: PIPE
     LET $out: PIPE
-    LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+    LET $acc: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_ACCEPT($m.server, $in, $out) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and both
     # tasks return their result maps with no cancellation.
@@ -379,7 +379,7 @@ fn ssh_accept<P: ProcessManager>(
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!(
-            "SSH_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ SSH_ACCEPT($server, $in, $out) }}"
+            "SSH_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ SSH_ACCEPT($server, $in, $out) }}"
         );
     }
     let in_pipe = Value::pipe_handle(in_pipe);
@@ -421,15 +421,15 @@ fn ssh_accept<P: ProcessManager>(
     code = r###"
     IMPORT [STD, SSH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pump", {username: "u", password: "p"})
-    LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+    LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
     WITH_IO [stdout=$cin] ECHO "client-hello"
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
     LET $sin: PIPE
     LET $sout: PIPE
-    LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
+    LET $p: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
     WITH_IO [stdout=$sin] ECHO "server-greeting"
     LET $cDone: MAP<ANY> = AWAIT $c
     ASSERT_EQ $cDone.closed true
@@ -474,18 +474,18 @@ fn ssh_pump_channel<P: ProcessManager>(
     code = r###"
     IMPORT [STD, SSH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-exit-status", {username: "u", password: "p"})
-    LET $srv: HANDLE = ASYNC {
+    LET $srv: HANDLE<VOID> = ASYNC {
         LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
         LET $sin: PIPE
         LET $sout: PIPE
-        LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
+        LET $p: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
         SSH_SEND_EXIT_STATUS($sess.session, 3)
         WITH_IO [stdout=$sin] ECHO "server-greeting"
         AWAIT $p
     }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-exit-status", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-exit-status", "u", "p", $cin, $cout) }
     # Close the client input: its pump observes EOF and half-closes, so
     # both pumps drain instead of idling on an empty pipe.
     WITH_IO [stdout=$cin] ECHO "client-hello"
@@ -550,10 +550,10 @@ fn ssh_close<P: ProcessManager>(
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-connect", {username: "u", password: "p"})
     LET $in: PIPE
     LET $out: PIPE
-    LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+    LET $acc: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_ACCEPT($m.server, $in, $out) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and both
     # tasks return their result maps with no cancellation.
@@ -722,10 +722,10 @@ fn ssh_pump<P: ProcessManager>(
     IMPORT [STD, SSH]
     INHERIT_ENV [PATH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pty", {username: "u", password: "p"})
-    LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+    LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pty", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<VOID> = ASYNC { SSH_CONNECT("doc-ssh-pty", "u", "p", $cin, $cout) }
     WITH_IO [stdout=$cin] ECHO "client-hello"
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 
@@ -737,13 +737,13 @@ fn ssh_pump<P: ProcessManager>(
     # Assert on the whole pipe: terminal streams carry setup noise ahead
     # of child output, so line reads are version-dependent.
     [family:unix] {
-        LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["sh", "-c", "echo pty-hi"], 0, 0, $pin, $pout) }
+        LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($sess.session, ["sh", "-c", "echo pty-hi"], 0, 0, $pin, $pout) }
         LET $code: INT = AWAIT $t
         ASSERT_EQ $code 0
         ASSERT_CONTAINS $pout "pty-hi"
     }
     [family:windows] {
-        LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["cmd", "/c", "echo pty-hi"], 0, 0, $pin, $pout) }
+        LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($sess.session, ["cmd", "/c", "echo pty-hi"], 0, 0, $pin, $pout) }
         LET $code: INT = AWAIT $t
         ASSERT_EQ $code 0
         ASSERT_CONTAINS $pout "pty-hi"
@@ -828,10 +828,10 @@ fn ssh_pty_run<P: ProcessManager>(
     IMPORT [STD, SSH]
     INHERIT_ENV [PATH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-run", {username: "u", password: "p"})
-    LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+    LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-run", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<VOID> = ASYNC { SSH_CONNECT("doc-ssh-run", "u", "p", $cin, $cout) }
     WITH_IO [stdout=$cin] ECHO "client-hello"
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 
@@ -845,7 +845,7 @@ fn ssh_pty_run<P: ProcessManager>(
     [family:windows] {
         $argv = ["cmd", "/c", "echo run-hi"]
     }
-    LET $t: HANDLE = ASYNC { SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
+    LET $t: HANDLE<INT> = ASYNC { RETURN SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
     LET $code: INT = AWAIT $t
     ASSERT_EQ $code 0
     ASSERT_CONTAINS $pout "run-hi"
@@ -918,17 +918,17 @@ fn ssh_run<P: ProcessManager>(
     IMPORT [STD, SSH]
     INHERIT_ENV [PATH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-exec", {username: "u", password: "p"})
-    LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
-    LET $runner: HANDLE = ASYNC {
+    LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
+    LET $runner: HANDLE<VOID> = ASYNC {
         LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
         LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS($sess.command)
         LET $wire: PIPE
         LET $drain: PIPE
-        LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $wire, $drain) }
+        LET $pump: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_PUMP_CHANNEL($sess.session, $wire, $drain) }
         LET $pin: PIPE
         LET $pout: PIPE
         LET $perr: PIPE
-        LET $run: HANDLE = ASYNC { SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
+        LET $run: HANDLE<INT> = ASYNC { RETURN SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
         LET $n: INT = SSH_PUMP($pout, $wire)
         LET $code: INT = AWAIT $run
         LET $pDone: MAP<ANY> = AWAIT $pump

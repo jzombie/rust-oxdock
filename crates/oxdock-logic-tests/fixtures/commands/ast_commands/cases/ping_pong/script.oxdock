@@ -9,9 +9,9 @@ LET $tx: PIPE
 LET $ctl_tx: PIPE
 LET $rx: PIPE
 LET $ctl_rx: PIPE
-LET $keep_tx: HANDLE = WITH_IO [stdout=$tx, stdin=$ctl_tx] ASYNC READ_LINE $ktx
-LET $keep_rx: HANDLE = WITH_IO [stdout=$rx, stdin=$ctl_rx] ASYNC READ_LINE $krx
-LET $live: HANDLE = ASYNC {
+LET $keep_tx: HANDLE<VOID> = WITH_IO [stdout=$tx, stdin=$ctl_tx] ASYNC READ_LINE $ktx
+LET $keep_rx: HANDLE<VOID> = WITH_IO [stdout=$rx, stdin=$ctl_rx] ASYNC READ_LINE $krx
+LET $live: HANDLE<VOID> = ASYNC {
     WITH_IO [stdin=$tx] READ_LINE $a
     WITH_IO [stdout=$rx] ECHO "{{ $a }}"
     WITH_IO [stdin=$tx] READ_LINE $b
