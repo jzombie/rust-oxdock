@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.37.0-alpha] - TBD
+
+### Changed
+
+- [breaking] Scripts are affected: `FUNC` requires an explicit return type (`FUNC NAME(...): RET`, `ASYNC FUNC NAME(...): HANDLE<T>`). Missing `: TYPE` is a parse error; every `RETURN` checks top-down against the declaration with no inference. Fallthrough and bare `RETURN` are `VOID`-only; non-`VOID` functions must `RETURN` a matching value on every path (#287).
+- [breaking] Scripts are affected: new `VOID` return type for procedures (fallthrough or bare `RETURN` only, unusable as a value) and typed `HANDLE<T>` payloads. Bare `HANDLE` is `HANDLE<ANY>`; void tasks are `HANDLE<VOID>` joined by bare `AWAIT` (#287).
+
 ## [0.36.0-alpha] - 2026-11-09
 
 ### Added
