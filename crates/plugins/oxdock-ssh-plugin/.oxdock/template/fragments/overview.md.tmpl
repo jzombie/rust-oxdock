@@ -52,11 +52,11 @@ LET $srv: HANDLE<VOID> = ASYNC {
 # Unix.
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
+LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
 
 WITH_IO [stdout=$cin] ECHO "proxy-ping"
 
-LET $cDone: MAP<ANY> = AWAIT $c
+LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
 ASSERT_EQ $cDone.closed true
 ASSERT_EQ $cDone.exit_status 0
 ASSERT_CONTAINS $cout "proxy-ping"

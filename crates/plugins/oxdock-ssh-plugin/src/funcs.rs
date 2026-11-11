@@ -112,13 +112,13 @@ fn dequeue_session<P: ProcessManager>(
     # Connect a client to the server.
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and every
     # task returns with no cancellation.
     WITH_IO [stdout=$cin] ECHO "client-hello"
     WITH_IO [stdout=$in] ECHO "server-greeting"
-    LET $cDone: MAP<ANY> = AWAIT $c
+    LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
     ASSERT_EQ $cDone.closed true
     AWAIT $w
     SSH_CLOSE($m.server)
@@ -354,7 +354,7 @@ fn ssh_serve<P: ProcessManager>(
     LET $acc: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_ACCEPT($m.server, $in, $out) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and both
     # tasks return their result maps with no cancellation.
@@ -424,14 +424,14 @@ fn ssh_accept<P: ProcessManager>(
     LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
     WITH_IO [stdout=$cin] ECHO "client-hello"
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
     LET $sin: PIPE
     LET $sout: PIPE
     LET $p: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
     WITH_IO [stdout=$sin] ECHO "server-greeting"
-    LET $cDone: MAP<ANY> = AWAIT $c
+    LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
     ASSERT_EQ $cDone.closed true
     LET $pDone: MAP<ANY> = AWAIT $p
     ASSERT_EQ $pDone.closed true
@@ -485,11 +485,11 @@ fn ssh_pump_channel<P: ProcessManager>(
     }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-exit-status", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-exit-status", "u", "p", $cin, $cout) }
     # Close the client input: its pump observes EOF and half-closes, so
     # both pumps drain instead of idling on an empty pipe.
     WITH_IO [stdout=$cin] ECHO "client-hello"
-    LET $cDone: MAP<ANY> = AWAIT $c
+    LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
     ASSERT_EQ $cDone.closed true
     ASSERT_EQ $cDone.exit_status 3
     AWAIT $srv
@@ -542,7 +542,17 @@ fn ssh_close<P: ProcessManager>(
 /// the pump tasks. Under `--offline` the dial bails before any
 /// socket work. The result MAP carries `exit_status`, or -1 when the
 /// server sent none.
-#[oxdock_func(returns = TypeTag::Map, summary = "Open an SSH client session into pipes.")]
+#[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
+    name: "closed".to_string(),
+    ty: TypeTag::Bool,
+    docs: "True when the session closed cleanly.",
+    optional: false,
+}, Field {
+    name: "exit_status".to_string(),
+    ty: TypeTag::Int,
+    docs: "Remote exit status, or -1 when none arrived.",
+    optional: false,
+}])), summary = "Open an SSH client session into pipes.")]
 #[example(
     name = "connect and close",
     code = r###"
@@ -553,14 +563,14 @@ fn ssh_close<P: ProcessManager>(
     LET $acc: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_ACCEPT($m.server, $in, $out) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and both
     # tasks return their result maps with no cancellation.
     WITH_IO [stdout=$cin] ECHO "client-hello"
     WITH_IO [stdout=$in] ECHO "server-greeting"
-    LET $done: MAP<ANY> = AWAIT $c
-    ASSERT_EQ $done.closed true
+    LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
+    ASSERT_EQ $cDone.closed true
     LET $adone: MAP<ANY> = AWAIT $acc
     ASSERT_EQ $adone.closed true
     SSH_CLOSE($m.server)

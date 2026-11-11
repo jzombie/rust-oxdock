@@ -3164,9 +3164,9 @@ fn proxy_client_lingers_for_reply_and_status() {
         }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE<ANY> = ASYNC { SSH_CONNECT("test-ssh-proxy-linger", "guest", "__TEST_PASSWORD__", $cin, $cout) }
+        LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("test-ssh-proxy-linger", "guest", "__TEST_PASSWORD__", $cin, $cout) }
         WITH_IO [stdout=$cin] ECHO "linger-ping"
-        LET $cDone: MAP<ANY> = AWAIT $c
+        LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
         ASSERT_EQ $cDone.closed true
         ASSERT_EQ $cDone.exit_status 0
         ASSERT_CONTAINS $cout "linger-ping"
