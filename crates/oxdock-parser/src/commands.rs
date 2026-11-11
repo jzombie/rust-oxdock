@@ -3621,11 +3621,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         CommandMeta {
             in_index: true,
             name: "FUNC",
-            syntax: "FUNC NAME([$param: TYPE, ...]): RET { <commands> }",
+            syntax: "FUNC NAME([$param: TYPE, ...]): RET { <commands> } | ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }",
             summary: "Define a user function.",
             description: indoc! {r#"
                 Defines a user function with UPPERCASE name and explicitly typed
-                parameters.
+                parameters. `FUNC` runs synchronously; `ASYNC FUNC` is the same
+                with a structural guarantee: the declaration must be
+                `HANDLE<T>`, so every `RETURN` hands out a task handle.
 
                 Params bind by position, converting each argument to its
                 declared parameter type before the body runs.
@@ -3643,6 +3645,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 Invoke any function with one syntax: `NAME(...)` as a statement
                 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
                 the RETURN value (fallthrough without RETURN is a static error unless RET is VOID).
+
+                `ASYNC FUNC` does not spawn on call. The body runs
+                synchronously on the caller thread up to its inner `ASYNC`
+                step, which spawns the background task and yields its handle
+                immediately; the function then hands that handle out with
+                `RETURN $t`. The caller joins it separately with `AWAIT`.
             "#},
             args: &[],
             flags: &[],
@@ -3661,6 +3669,30 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 # Statement form: parens stay, the value drops.
                 GREET("bex")
+            "#},
+                },
+                Example {
+                    name: "async func is a handle guarantee",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Side by side: identical bodies, identical handling. The
+                # ASYNC marker only guarantees the HANDLE declaration.
+                ASYNC FUNC FETCH(): HANDLE<STRING> {
+                  LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+                  RETURN $t
+                }
+                FUNC MAKE(): HANDLE<STRING> {
+                  LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+                  RETURN $t
+                }
+
+                # Both run synchronously to RETURN; the inner ASYNC spawns.
+                LET $a: HANDLE<STRING> = FETCH()
+                LET $b: HANDLE<STRING> = MAKE()
+                LET $x: STRING = AWAIT $a
+                LET $y: STRING = AWAIT $b
+                ASSERT_EQ $x "hi"
+                ASSERT_EQ $y "hi"
             "#},
                 },
                 Example {

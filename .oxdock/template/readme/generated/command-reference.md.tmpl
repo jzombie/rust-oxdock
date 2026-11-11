@@ -44,7 +44,7 @@ See the [changelog]({{ $docs_global.changelog_url }}) for what changed in each r
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
 | [`ISOLATED`](#isolated) | `ISOLATED { INHERIT_ENV [...] <commands> } \| ISOLATED <command...>` |
 | [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
-| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]): RET { <commands> }` |
+| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]): RET { <commands> } \| ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }` |
 | [`RETURN`](#return) | `RETURN [<expr>]` |
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |

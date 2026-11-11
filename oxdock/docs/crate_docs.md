@@ -1174,7 +1174,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
 | [`ISOLATED`](#isolated) | `ISOLATED { INHERIT_ENV [...] <commands> } \| ISOLATED <command...>` |
 | [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
-| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]): RET { <commands> }` |
+| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]): RET { <commands> } \| ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }` |
 | [`RETURN`](#return) | `RETURN [<expr>]` |
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |
@@ -2284,10 +2284,12 @@ REMOTE prod {
 
 Define a user function.
 
-**Syntax:** `FUNC NAME([$param: TYPE, ...]): RET { <commands> }`
+**Syntax:** `FUNC NAME([$param: TYPE, ...]): RET { <commands> } | ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }`
 
 Defines a user function with UPPERCASE name and explicitly typed
-parameters.
+parameters. `FUNC` runs synchronously; `ASYNC FUNC` is the same
+with a structural guarantee: the declaration must be
+`HANDLE<T>`, so every `RETURN` hands out a task handle.
 
 Params bind by position, converting each argument to its
 declared parameter type before the body runs.
@@ -2306,6 +2308,12 @@ Invoke any function with one syntax: `NAME(...)` as a statement
 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
 the RETURN value (fallthrough without RETURN is a static error unless RET is VOID).
 
+`ASYNC FUNC` does not spawn on call. The body runs
+synchronously on the caller thread up to its inner `ASYNC`
+step, which spawns the background task and yields its handle
+immediately; the function then hands that handle out with
+`RETURN $t`. The caller joins it separately with `AWAIT`.
+
 
 **Examples:**
 
@@ -2321,6 +2329,29 @@ ASSERT_EQ $res "ada"
 
 # Statement form: parens stay, the value drops.
 GREET("bex")
+```
+
+**Example: async func is a handle guarantee**
+
+```oxdock
+# Side by side: identical bodies, identical handling. The
+# ASYNC marker only guarantees the HANDLE declaration.
+ASYNC FUNC FETCH(): HANDLE<STRING> {
+  LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+  RETURN $t
+}
+FUNC MAKE(): HANDLE<STRING> {
+  LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+  RETURN $t
+}
+
+# Both run synchronously to RETURN; the inner ASYNC spawns.
+LET $a: HANDLE<STRING> = FETCH()
+LET $b: HANDLE<STRING> = MAKE()
+LET $x: STRING = AWAIT $a
+LET $y: STRING = AWAIT $b
+ASSERT_EQ $x "hi"
+ASSERT_EQ $y "hi"
 ```
 
 **Example: call with pipes**
