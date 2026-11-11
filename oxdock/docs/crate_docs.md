@@ -1903,7 +1903,7 @@ Synchronously cancel a background task.
 
 **Syntax:** `CANCEL $var`
 
-Kills the named background task spawned via LET $var: HANDLE<T> = ASYNC ....
+Kills the named background task spawned via `LET $var: HANDLE<T> = ASYNC ...`.
 
 Blocking: returns only after the task thread has been joined and its OS
 process reaped, so no residual filesystem or stream mutation follows. A
