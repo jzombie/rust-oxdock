@@ -1390,7 +1390,7 @@ mod tests {
         let script = indoc!(
             r#"
             ENV OUTER=outer-val
-            FUNC DUMPENV() {
+            FUNC DUMPENV(): STRING {
                 [family:unix] LET $o: STRING = RUN ["sh", "-c", "env"]
                 [family:windows] LET $o: STRING = RUN ["cmd", "/c", "set"]
                 RETURN $o

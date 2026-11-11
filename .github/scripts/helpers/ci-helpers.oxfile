@@ -17,14 +17,14 @@ IMPORT [STD]
 # Lockfile hash for cache keys. Module calls never inherit caller
 # context: the workspace resets to the run-initial root, so reach the
 # checkout explicitly.
-FUNC LOCKFILE_HASH() {
+FUNC LOCKFILE_HASH(): STRING {
   WORKSPACE SYSTEM
 
   RETURN HASH_SHA256(PATH_JOIN(env:GITHUB_WORKSPACE, "Cargo.lock"))
 }
 EXPORT LOCKFILE_HASH
 
-FUNC RUSTC_HASH($report: STRING) {
+FUNC RUSTC_HASH($report: STRING): STRING {
   LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
   RETURN $caps.1
 }
@@ -34,19 +34,22 @@ EXPORT RUSTC_HASH
 # discipline as LOCKFILE_HASH above: reach the checkout explicitly so
 # file scripts importing this module resolve the manifest from the
 # checkout, not the module directory.
-FUNC MANIFEST_VERSION() {
+FUNC MANIFEST_VERSION(): STRING {
   WORKSPACE SYSTEM
 
   LET $manifest: MAP<ANY> = LOAD_TOML(PATH_JOIN(env:GITHUB_WORKSPACE, "Cargo.toml"))
   IF HAS_KEY($manifest, "workspace") {
     LET $ws: MAP<ANY> = $manifest.workspace
     IF HAS_KEY($ws, "package") {
-      RETURN $manifest.workspace.package.version
+      LET $v: STRING = $manifest.workspace.package.version
+      RETURN $v
     } ELSE {
-      RETURN $manifest.package.version
+      LET $v: STRING = $manifest.package.version
+      RETURN $v
     }
   } ELSE {
-    RETURN $manifest.package.version
+    LET $v: STRING = $manifest.package.version
+    RETURN $v
   }
 }
 EXPORT MANIFEST_VERSION
@@ -59,7 +62,7 @@ EXPORT MANIFEST_VERSION
 # inherit the caller's WORKSPACE or WORKDIR, and cargo metadata must
 # resolve the real checkout (under LOCAL the module directory falls
 # outside the snapshot root).
-FUNC WORKSPACE_PACKAGES() {
+FUNC WORKSPACE_PACKAGES(): LIST<MAP<ANY>> {
   WORKSPACE SYSTEM
   WORKDIR "{{ env:GITHUB_WORKSPACE }}"
 
@@ -67,6 +70,7 @@ FUNC WORKSPACE_PACKAGES() {
   # responses by command substring, which only exists for shell runs.
   LET $meta_raw: STRING = RUN "cargo metadata --no-deps --format-version 1"
   LET $meta: MAP<ANY> = PARSE_JSON($meta_raw)
-  RETURN $meta.packages
+  LET $pkgs: LIST<MAP<ANY>> = $meta.packages
+  RETURN $pkgs
 }
 EXPORT WORKSPACE_PACKAGES

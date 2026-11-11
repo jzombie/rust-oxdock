@@ -36,7 +36,7 @@ awaited result. The server sends first: the client side never EOFs
 its input, so the reply cannot race teardown.
 
 
-**Signature:** `NET_ACCEPT($listener: NET_LISTENER, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<no_half_close?: BOOL>) -> MAP<closed: BOOL>`
+**Signature:** `NET_ACCEPT($listener: NET_LISTENER, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<no_half_close?: BOOL>): MAP<closed: BOOL>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -97,7 +97,7 @@ service without claiming it: the dial-string companion to
 [`net_port`]. Same qualifier and fallback rules; socketless targets
 bail, never an empty string.
 
-**Signature:** `NET_ADDR($target: STRING) -> STRING`
+**Signature:** `NET_ADDR($target: STRING): STRING`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -130,7 +130,7 @@ Shut a listener down. Idempotent: returns BOOL true. A blocked
 `NET_ACCEPT` observes the shutdown flag on its next tick and returns
 instead of hanging.
 
-**Signature:** `NET_CLOSE($listener: NET_LISTENER) -> BOOL`
+**Signature:** `NET_CLOSE($listener: NET_LISTENER): BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -163,7 +163,7 @@ explicitly-mapped memory rendezvous): physical dials come only from
 mappings, never from script text. Under `--offline` every dial bails
 before any socket work. Returns a MAP with `closed` (BOOL).
 
-**Signature:** `NET_CONNECT($target: STRING, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<timeout?: DURATION|STRING, no_half_close?: BOOL>) -> MAP<closed: BOOL>`
+**Signature:** `NET_CONNECT($target: STRING, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<timeout?: DURATION|STRING, no_half_close?: BOOL>): MAP<closed: BOOL>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -233,7 +233,7 @@ scheme gate, so a `Location` can never smuggle cleartext), at most
 the URL and the reason; nothing retries, nothing touches the
 filesystem.
 
-**Signature:** `NET_FETCH($url: STRING, $options?: MAP<headers?: MAP<STRING>, timeout?: DURATION|STRING, max_body_bytes?: INT, max_redirects?: INT>) -> STRING`
+**Signature:** `NET_FETCH($url: STRING, $options?: MAP<headers?: MAP<STRING>, timeout?: DURATION|STRING, max_body_bytes?: INT, max_redirects?: INT>): STRING`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -279,7 +279,7 @@ returns a MAP with `listener` (NET_LISTENER), `addr` (STRING: the
 physical bind, or the virtual endpoint echo when socketless), and
 `virtual` (STRING echo).
 
-**Signature:** `NET_LISTEN($bind: STRING, $options: MAP) -> MAP<listener: NET_LISTENER, addr: STRING, virtual: STRING>`
+**Signature:** `NET_LISTEN($bind: STRING, $options: MAP): MAP<listener: NET_LISTENER, addr: STRING, virtual: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -318,7 +318,7 @@ with single-protocol fallback; text bound under both protocols must
 be qualified. Memory, offline, and unmapped services bail: with no
 physical bind there is no port to report.
 
-**Signature:** `NET_PORT($target: STRING) -> INT`
+**Signature:** `NET_PORT($target: STRING): INT`
 
 **Contexts:** [`AST`](#context-ast) only
 

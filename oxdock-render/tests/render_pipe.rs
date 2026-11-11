@@ -46,10 +46,10 @@ fn seed(root: &GuardedPath, resolver: &PathResolver) {
             "hook.oxfile",
             indoc::indoc! {r#"
                 IMPORT [STD]
-                FUNC TRACE_A($x: STRING) {
+                FUNC TRACE_A($x: STRING): STRING {
                     RETURN "{{ $x }}+A"
                 }
-                FUNC TRACE_B($x: STRING) {
+                FUNC TRACE_B($x: STRING): STRING {
                     RETURN "{{ $x }}+B"
                 }
                 EXPORT TRACE_A

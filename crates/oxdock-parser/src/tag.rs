@@ -72,6 +72,8 @@ pub enum TypeTag {
     Map,
     Pipe,
     Handle,
+    HandleOf(Arc<TypeTag>),
+    Void,
     Duration,
     Path,
     Semaphore,
@@ -111,6 +113,7 @@ impl std::fmt::Debug for TypeTag {
                 write!(f, "Custom({})", descriptor.name)
             }
             TypeTag::ListOf(element) => write!(f, "ListOf({element:?})"),
+            TypeTag::HandleOf(inner) => write!(f, "HandleOf({inner:?})"),
             TypeTag::MapOf(values) => write!(f, "MapOf({values:?})"),
             TypeTag::Record(fields) => {
                 let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
@@ -162,6 +165,8 @@ impl TypeTag {
             TypeTag::Map => "MAP",
             TypeTag::Pipe => "PIPE",
             TypeTag::Handle => "HANDLE",
+            TypeTag::HandleOf(_) => "HANDLE",
+            TypeTag::Void => "VOID",
             TypeTag::Duration => "DURATION",
             TypeTag::Path => "PATH",
             TypeTag::Semaphore => "SEMAPHORE",
@@ -190,6 +195,7 @@ impl TypeTag {
             "MAP" => Some(TypeTag::Map),
             "PIPE" => Some(TypeTag::Pipe),
             "HANDLE" => Some(TypeTag::Handle),
+            "VOID" => Some(TypeTag::Void),
             "DURATION" => Some(TypeTag::Duration),
             "PATH" => Some(TypeTag::Path),
             "SEMAPHORE" => Some(TypeTag::Semaphore),
@@ -214,6 +220,8 @@ impl TypeTag {
             | TypeTag::Map
             | TypeTag::Pipe
             | TypeTag::Handle
+            | TypeTag::HandleOf(_)
+            | TypeTag::Void
             | TypeTag::Duration
             | TypeTag::Path
             | TypeTag::Semaphore
@@ -234,6 +242,7 @@ impl TypeTag {
 pub fn render_structural(tag: &TypeTag) -> String {
     match tag {
         TypeTag::ListOf(inner) => format!("LIST<{}>", render_structural(inner)),
+        TypeTag::HandleOf(inner) => format!("HANDLE<{}>", render_structural(inner)),
         TypeTag::MapOf(values) => format!("MAP<{}>", render_structural(values)),
         TypeTag::Record(fields) => {
             let field_list = fields
@@ -498,6 +507,8 @@ pub fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
         TypeTag::Bool if value.as_bool().is_some() => Ok(()),
         TypeTag::Pipe if value.as_pipe_handle().is_some() => Ok(()),
         TypeTag::Handle if value.as_handle().is_some() => Ok(()),
+        TypeTag::HandleOf(_) if value.as_handle().is_some() => Ok(()),
+        TypeTag::Void => bail!("{path}: expected VOID, got {}", value.type_name()),
         TypeTag::Duration if value.as_duration().is_some() => Ok(()),
         TypeTag::Path if value.as_path().is_some() => Ok(()),
         TypeTag::Semaphore if value.as_semaphore().is_some() => Ok(()),
@@ -596,6 +607,7 @@ pub fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
         | TypeTag::Bool
         | TypeTag::Pipe
         | TypeTag::Handle
+        | TypeTag::HandleOf(_)
         | TypeTag::Duration
         | TypeTag::Path
         | TypeTag::Semaphore

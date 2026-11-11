@@ -1808,16 +1808,21 @@ fn dispatch_flow_step<P: ProcessManager>(
 ) -> Result<Flow> {
     match cmd {
         StepKind::FuncDef {
-            name, params, body, ..
+            name,
+            params,
+            return_type,
+            is_async,
+            body,
+            ..
         } => {
-            handlers::define_func(cx, name, params, body)?;
+            handlers::define_func(cx, name, params, return_type, *is_async, body)?;
             Ok(Flow::Done)
         }
         StepKind::Call { name, args } => {
             let _ = handlers::call_func_value(cx, name, args)?;
             Ok(Flow::Done)
         }
-        StepKind::Return { expr } => handlers::handle_return(cx, idx, expr),
+        StepKind::Return { expr, .. } => handlers::handle_return(cx, idx, expr),
         StepKind::ImportFile { path, alias } => {
             let _ = super::import::import_file(cx, path, alias)?;
             Ok(Flow::Done)

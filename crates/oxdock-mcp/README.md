@@ -61,12 +61,12 @@ later `AWAIT` all see the same outcome.
 ```oxdock
 IMPORT [STD]
 # Detach a slow command and hand back its handle.
-FUNC SLOW_OP() {
+FUNC SLOW_OP(): HANDLE {
   LET $t: HANDLE = ASYNC { RUN ["sleep", "30"] }
   RETURN $t
 }
 # Poll the handle: running with tails so far, then finished.
-FUNC POLL_WRAP($t: HANDLE) {
+FUNC POLL_WRAP($t: HANDLE): MAP<ANY> {
   RETURN TASK_POLL($t)
 }
 # The export marks the tools without changing linear calls.
@@ -76,7 +76,7 @@ EXPORT [SLOW_OP, POLL_WRAP, STD::TASK_POLL]
 
 ```oxdock
 # Define an exported tool and call it directly.
-FUNC ADD($a: INT, $b: INT) {
+FUNC ADD($a: INT, $b: INT): INT {
   RETURN $a + $b
 }
 EXPORT [ADD]

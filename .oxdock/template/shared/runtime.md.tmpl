@@ -45,7 +45,7 @@ State mutations stay where the script puts them. Entering a braced block or a fu
 ```oxdock
 # Calls snapshot caller state: the parameter shadows without clobbering.
 LET $v: STRING = "outer"
-FUNC SHADOW($v: STRING) {
+FUNC SHADOW($v: STRING): STRING {
     LET $inner: STRING = "inner"
     RETURN $v
 }

@@ -335,8 +335,14 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         for (name, target) in aliases {
             cx.state.type_aliases.insert(name, target);
         }
-        super::static_check::validate_import_body_types(&steps, cx.state, &key)
-            .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+        // Proven once, trusted thereafter: files the static closure
+        // pass validated (full nested-import knowledge, same cached
+        // body) skip the single-file re-proof, which would only
+        // false-positive on nested calls. Unseen files still validate.
+        if !cx.state.validated_modules.contains(&key) {
+            super::static_check::validate_import_body_types(&steps, cx.state, &key)
+                .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+        }
         // Stateful harvests are rejected: the file body never runs, so
         // there is no initialized state for them to observe. Import the
         // file to share its module instead.
@@ -357,17 +363,27 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 StepKind::FuncDef {
                     name: def_name,
                     params,
+                    return_type,
+                    is_async,
                     body,
                     ..
-                } if def_name == name => Some((params.clone(), body.clone())),
+                } if def_name == name => {
+                    Some((params.clone(), return_type.clone(), *is_async, body.clone()))
+                }
                 _ => None,
             }) else {
                 bail!("IMPORT `{path}` has no such function `{name}`");
             };
             let mut resolved_params = Vec::with_capacity(def.0.len());
             for (pname, ptype) in &def.0 {
-                resolved_params.push((pname.clone(), cx.state.resolve_tag(ptype)?));
+                let tag = cx.state.resolve_tag(ptype)?;
+                cx.state
+                    .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
+                resolved_params.push((pname.clone(), tag));
             }
+            let return_tag = cx.state.resolve_tag(&def.1)?;
+            cx.state
+                .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
             // Owner-tagged with the module: calls resolve names against
             // the shared store. Re-imports skip already-registered
             // names, so shared views stay idempotent.
@@ -380,7 +396,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                             alias,
                             name,
                             &resolved_params,
+                            return_tag.clone(),
                             &def.1,
+                            def.2,
+                            &def.3,
                             Some(&key),
                         )?;
                     }
@@ -390,7 +409,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                         cx.state.functions.define_script(
                             name,
                             &resolved_params,
+                            return_tag.clone(),
                             &def.1,
+                            def.2,
+                            &def.3,
                             Some(&key),
                         )?;
                     }
@@ -634,8 +656,14 @@ pub(crate) fn import_file<P: ProcessManager>(
         // Entry parity: statically validate the imported body before its
         // first step runs. Nested imports validate when their own IMPORT
         // steps execute.
-        super::static_check::validate_import_body_types(&steps, cx.state, &key)
-            .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+        // Proven once, trusted thereafter: files the static closure
+        // pass validated (full nested-import knowledge, same cached
+        // body) skip the single-file re-proof, which would only
+        // false-positive on nested calls. Unseen files still validate.
+        if !cx.state.validated_modules.contains(&key) {
+            super::static_check::validate_import_body_types(&steps, cx.state, &key)
+                .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+        }
         // Register the imported file's EXPORTed top-level FUNCs under
         // the alias in the caller's scope: unexported means private.
         // Owner-tagged with the module so calls share its state.
@@ -644,7 +672,12 @@ pub(crate) fn import_file<P: ProcessManager>(
             func_exports.iter().map(|e| e.as_str()).collect();
         for step in &steps {
             if let StepKind::FuncDef {
-                name, params, body, ..
+                name,
+                params,
+                return_type,
+                is_async,
+                body,
+                ..
             } = &step.kind
                 && func_exported.contains(name.as_str())
             {
@@ -652,13 +685,24 @@ pub(crate) fn import_file<P: ProcessManager>(
                 if cx.state.functions.get(&qualified).is_none() {
                     let mut resolved_params = Vec::with_capacity(params.len());
                     for (pname, ptype) in params {
-                        resolved_params.push((pname.clone(), cx.state.resolve_tag(ptype)?));
+                        let tag = cx.state.resolve_tag(ptype)?;
+                        cx.state.check_declaration_tag(
+                            &format!("function `{name}` param `${pname}`"),
+                            &tag,
+                        )?;
+                        resolved_params.push((pname.clone(), tag));
                     }
+                    let return_tag = cx.state.resolve_tag(return_type)?;
+                    cx.state
+                        .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
                     cx.state.functions.define_aliased_in(
                         alias_frame,
                         alias,
                         name,
                         &resolved_params,
+                        return_tag,
+                        return_type,
+                        *is_async,
                         body,
                         Some(&key),
                     )?;

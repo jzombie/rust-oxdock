@@ -479,7 +479,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     walk_expr(&mut keys, arg);
                 }
             }
-            StepKind::Return { expr } => {
+            StepKind::Return { expr, .. } => {
                 walk_expr(&mut keys, expr);
             }
             // Import paths are literal (templates rejected at parse), so

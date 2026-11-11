@@ -454,7 +454,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "REMOTE needs a target and a braced block, e.g. `REMOTE prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}."
         )),
         "FUNC" => Some(format!(
-            "FUNC defines a function, e.g. `FUNC GREET($name: STRING) {{ RETURN $name }}`; got {got}."
+            "FUNC defines a function, e.g. `FUNC GREET($name: STRING): STRING {{ RETURN $name }}`; got {got}."
         )),
         "RETURN" => Some(format!(
             "RETURN ends the nearest function, ASYNC task, or inline LET block with a value, e.g. `RETURN $x`; got {got}."
@@ -666,7 +666,7 @@ impl StepKind {
         }
         match self {
             StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => f(expr),
-            StepKind::Return { expr } => f(expr),
+            StepKind::Return { expr, .. } => f(expr),
             StepKind::Call { args, .. } => {
                 for arg in args {
                     f(arg);
@@ -1149,9 +1149,9 @@ declare_commands! {
         IsolatedInheritEnv { keys: Vec<String> },
         RemoteBlock { target: String, vars: Vec<String>, env: Vec<String>, body: Vec<Step> },
         RunExec { argv: Vec<Arg> },
-        FuncDef { name: String, params: Vec<(String, String)>, body: Vec<Step>, docs: Option<(String, String)> },
+        FuncDef { name: String, params: Vec<(String, String)>, return_type: String, is_async: bool, body: Vec<Step>, docs: Option<(String, String)> },
         Call { name: String, args: Vec<Expr> },
-        Return { expr: Box<Expr> },
+        Return { expr: Box<Expr>, is_bare: bool },
         ImportFile { path: String, alias: String },
         ImportFuncs {
             path: String,
@@ -3620,7 +3620,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         CommandMeta {
             in_index: true,
             name: "FUNC",
-            syntax: "FUNC NAME([$param: TYPE, ...]) { <commands> }",
+            syntax: "FUNC NAME([$param: TYPE, ...]): RET { <commands> }",
             summary: "Define a user function.",
             description: indoc! {r#"
                 Defines a user function with UPPERCASE name and explicitly typed
@@ -3641,7 +3641,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 Invoke any function with one syntax: `NAME(...)` as a statement
                 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
-                the RETURN value (fallthrough without RETURN captures as "").
+                the RETURN value (fallthrough without RETURN is a static error unless RET is VOID).
             "#},
             args: &[],
             flags: &[],
@@ -3651,7 +3651,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "func def call",
                     fence_meta: None,
                     code: indoc! {r#"
-                FUNC GREET($name: STRING) {
+                FUNC GREET($name: STRING): STRING {
                   RETURN $name
                 }
 
@@ -3669,7 +3669,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # A pipe handle travels into a function as a typed argument
                 # and is usable as a binding target in both directions.
                 # `LET $p: PIPE` mints the handle; `$p` passes it on.
-                FUNC DRAIN($q: PIPE) {
+                FUNC DRAIN($q: PIPE): STRING {
                   WITH_IO [stdin=$q] READ_LINE $line
                   RETURN $line
                 }
@@ -3705,7 +3705,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 name: "return",
                 fence_meta: None,
                 code: indoc! {r#"
-                FUNC PICK($flag: BOOL) {
+                FUNC PICK($flag: BOOL): STRING {
                   IF $flag {
                     RETURN "yes"
                   }
@@ -3978,7 +3978,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # exist when the run starts cannot be analyzed, so the
                 # import fails before the first step runs.
                 WORKSPACE LOCAL
-                WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
+                WRITE lib.oxdock 'FUNC F($x: STRING): STRING { RETURN $x } EXPORT F'
                 IMPORT ["lib.oxdock" AS LIB]
             "#},
                 },
@@ -4016,7 +4016,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # them so importing files can use the same spelling.
                 TYPE PERSON = MAP<name: STRING>
 
-                FUNC GREET($p: PERSON) {
+                FUNC GREET($p: PERSON): STRING {
                     RETURN "hi {{ $p.name }}"
                 }
                 EXPORT GREET
@@ -4060,7 +4060,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # parent and child see the same files.
                 IMPORT [STD]
                 WRITE lib.oxfile """
-                    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+                    FUNC GREET($x: STRING): STRING { RETURN "hi \{{ $x }}" }
                     EXPORT GREET
                     """
                 WRITE main.oxfile """
@@ -4086,9 +4086,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IMPORT [STD]
 
                 # The renderer: parent values land in the module source.
-                FUNC MAKE_GREETER($who: STRING) {
+                FUNC MAKE_GREETER($who: STRING): STRING {
                     WRITE greeter.oxfile """
-                        FUNC GREET() { RETURN "hi {{ $who }}" }
+                        FUNC GREET(): STRING { RETURN "hi {{ $who }}" }
                         EXPORT GREET
                         """
                     RETURN "greeter.oxfile"
@@ -4528,6 +4528,8 @@ impl fmt::Display for StepKind {
             StepKind::FuncDef {
                 name,
                 params,
+                return_type,
+                is_async,
                 body,
                 docs,
             } => {
@@ -4543,7 +4545,17 @@ impl fmt::Display for StepKind {
                     .iter()
                     .map(|(p, t)| format!("${}: {}", p, t))
                     .collect();
-                write!(f, "FUNC {}({}) {{", name, ps.join(", "))?;
+                if *is_async {
+                    write!(
+                        f,
+                        "ASYNC FUNC {}({}): {} {{",
+                        name,
+                        ps.join(", "),
+                        return_type
+                    )?;
+                } else {
+                    write!(f, "FUNC {}({}): {} {{", name, ps.join(", "), return_type)?;
+                }
                 for s in body {
                     write!(f, "\n    {}", s)?;
                 }
@@ -4580,7 +4592,13 @@ impl fmt::Display for StepKind {
                     None => write!(f, "IMPORT [[{} FROM \"{}\"]]", parts.join(", "), path),
                 }
             }
-            StepKind::Return { expr } => write!(f, "RETURN {}", expr),
+            StepKind::Return { expr, is_bare } => {
+                if *is_bare {
+                    write!(f, "RETURN")
+                } else {
+                    write!(f, "RETURN {}", expr)
+                }
+            }
             StepKind::TypeAlias { name, target } => write!(f, "TYPE {} = {}", name, target),
             StepKind::While { cond, body } => {
                 write!(f, "WHILE {} {{", cond)?;
@@ -5985,13 +6003,15 @@ mod tests {
     #[test]
     fn func_def_requires_typed_uppercase_name() {
         let steps = parse_script(
-            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\n",
+            "FUNC GREET($name: STRING): STRING {\n  RETURN $name\n}\n",
             lower_command,
         )
         .expect("func def parses");
         let StepKind::FuncDef {
             name,
             params,
+            return_type,
+            is_async,
             body,
             docs,
         } = &steps[0].kind
@@ -6004,6 +6024,8 @@ mod tests {
             &vec![("name".to_string(), "STRING".to_string())],
             "{params:?}"
         );
+        assert_eq!(return_type, "STRING", "{return_type:?}");
+        assert!(!is_async, "plain FUNC is not async");
         assert!(matches!(body[0].kind, StepKind::Return { .. }));
         assert!(docs.is_none(), "undocumented FUNC carries no docs");
     }
@@ -6017,7 +6039,7 @@ mod tests {
     #[test]
     fn call_and_while_lower_correctly() {
         let steps = parse_script(
-            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\nGREET(\"ada\")\n",
+            "FUNC GREET($name: STRING): STRING {\n  RETURN $name\n}\nGREET(\"ada\")\n",
             lower_command,
         )
         .expect("call parses");
@@ -6027,7 +6049,7 @@ mod tests {
             steps[1].kind
         );
         let steps = parse_script(
-            "FUNC GREET($a: STRING, $b: STRING) {\n  RETURN $a\n}\nGREET(\"ada\", \"bex\")\n",
+            "FUNC GREET($a: STRING, $b: STRING): STRING {\n  RETURN $a\n}\nGREET(\"ada\", \"bex\")\n",
             lower_command,
         )
         .expect("spaced call parses");
@@ -6057,7 +6079,7 @@ mod tests {
         // only ASYNC/TIMEOUT/command captures produce AssignCapture.
         let steps = parse_script(
             indoc! {r#"
-                FUNC GREET($name: STRING) {
+                FUNC GREET($name: STRING): STRING {
                   RETURN $name
                 }
                 LET $r: STRING = GREET("ada")
@@ -6074,7 +6096,7 @@ mod tests {
             "{expr:?}"
         );
         let steps = parse_script(
-            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\nLET $t: HANDLE = ASYNC GREET(\"a\")\n",
+            "FUNC GREET($name: STRING): STRING {\n  RETURN $name\n}\nLET $t: HANDLE<STRING> = ASYNC GREET(\"a\")\n",
             lower_command,
         )
         .expect("async call parses");
@@ -6091,7 +6113,7 @@ mod tests {
         // options map) may put one argument per line. Bracket interiors
         // tolerate linebreaks while statement structure stays single-line.
         let steps = parse_script(
-            "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP) {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n",
+            "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP): STRING {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n",
             lower_command,
         )
         .expect("multiline call parses");
@@ -6107,7 +6129,7 @@ mod tests {
         // Display stays single-line; reparsing the same text is identical.
         let rendered = steps[1].to_string();
         assert!(!rendered.contains('\n'), "{rendered}");
-        let script = "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP) {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n";
+        let script = "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP): STRING {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n";
         let again = parse_script(script, lower_command).expect("reparse ok");
         assert_eq!(again, steps);
     }
@@ -6116,7 +6138,7 @@ mod tests {
     fn multiline_bare_call_and_list_span_lines() {
         let steps = parse_script(
             indoc! {r#"
-                FUNC GREET($a: STRING) {
+                FUNC GREET($a: STRING): STRING {
                   RETURN $a
                 }
                 GREET(
@@ -6468,6 +6490,8 @@ mod tests {
             StepKind::FuncDef {
                 name: "F".to_string(),
                 params: Vec::new(),
+                return_type: "STRING".to_string(),
+                is_async: false,
                 body: Vec::new(),
                 docs: None,
             },
@@ -6477,6 +6501,7 @@ mod tests {
             },
             StepKind::Return {
                 expr: Box::new(Expr::Literal(Value::bool(true))),
+                is_bare: false,
             },
             StepKind::While {
                 cond: Box::new(Expr::Literal(Value::bool(true))),

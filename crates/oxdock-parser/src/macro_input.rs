@@ -1354,7 +1354,7 @@ mod tests {
         // `]` / `{` never parses back and misreports at the enclosing
         // block opener.
         let ts: proc_macro2::TokenStream = indoc! {r#"
-            FUNC FOO($x: MAP) {
+            FUNC FOO($x: MAP): VOID {
                 [bool:true] {
                     WRITE inner.txt inside
                 }
@@ -1445,7 +1445,7 @@ mod tests {
         // the previous line.
         let ts: proc_macro2::TokenStream = indoc! {r#"
             WRITE a.txt hi
-            FUNC GREET($name: STRING) {
+            FUNC GREET($name: STRING): STRING {
                 RETURN $name
             }
             GREET("ada")

@@ -9,7 +9,7 @@ Render record data as an aligned Markdown table: one row per MAP,
 one column per key. Fails strict on shapes with no table in them.
 
 
-**Signature:** `MAP_TO_MD_TABLE($map: MAP<ANY>|LIST<MAP<ANY>>) -> STRING`
+**Signature:** `MAP_TO_MD_TABLE($map: MAP<ANY>|LIST<MAP<ANY>>): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -36,7 +36,7 @@ Parse markdown headings into a structured list.
 Immediate helper for assembly and tests: returns one MAP per
 heading with `level`, `text`, and `anchor` keys.
 
-**Signature:** `PARSE($md: STRING) -> LIST<ANY>`
+**Signature:** `PARSE($md: STRING): LIST<ANY>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -68,7 +68,7 @@ of equal or higher level. Fenced code headings never match. Missing
 needles fail naming the needle, so release notes extraction fails
 loudly instead of publishing an empty section.
 
-**Signature:** `SECTION($md: STRING, $needle: STRING) -> STRING`
+**Signature:** `SECTION($md: STRING, $needle: STRING): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -100,7 +100,7 @@ of calling it during expansion. Links render GitHub-style
 (`[text](#github-slug)` with `-1` dedup), so output pastes into any
 GitHub-rendered document with working anchors.
 
-**Signature:** `TOC($md: STRING, $options: MAP<min_level?: INT, max_level?: INT, format?: STRING, delimiter?: STRING>) -> STRING`
+**Signature:** `TOC($md: STRING, $options: MAP<min_level?: INT, max_level?: INT, format?: STRING, delimiter?: STRING>): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 

@@ -1307,7 +1307,7 @@ mod tests {
     #[test]
     fn call_args_accept_comments_between_lines() {
         let script = indoc! {r#"
-            FUNC SERVE($h: STRING, $u: STRING, $p: STRING, $o: MAP) {
+            FUNC SERVE($h: STRING, $u: STRING, $p: STRING, $o: MAP): STRING {
             RETURN $h
             }
             LET $s: STRING = SERVE(
@@ -1359,7 +1359,7 @@ mod tests {
     #[test]
     fn hash_comments_span_call_args_like_slash_comments() {
         let script = indoc! {r#"
-            FUNC SERVE($h: STRING, $o: MAP) {
+            FUNC SERVE($h: STRING, $o: MAP): STRING {
             RETURN $h
             }
             # leading hash comment
@@ -1843,7 +1843,7 @@ mod tests {
         // changing read rules.
         let script = indoc! {r#"
             ISOLATED {
-                FUNC F() {
+                FUNC F(): VOID {
                     INHERIT_ENV [NOPE]
                 }
             }

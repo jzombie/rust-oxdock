@@ -203,7 +203,7 @@ fn remote_rejects_inherit_env_inside() {
 #[test]
 fn remote_rejects_outer_func_calls() {
     let err = parse_err(indoc! {r#"
-        FUNC BUILD($x: STRING) {
+        FUNC BUILD($x: STRING): STRING {
             RETURN $x
         }
         REMOTE prod {
@@ -216,11 +216,11 @@ fn remote_rejects_outer_func_calls() {
 #[test]
 fn remote_allows_inner_func_defs() {
     let script = indoc! {r#"
-        FUNC BUILD($x: STRING) {
+        FUNC BUILD($x: STRING): STRING {
             RETURN $x
         }
         REMOTE prod {
-            FUNC BUILD($x: STRING) {
+            FUNC BUILD($x: STRING): STRING {
                 RETURN $x
             }
             LET $out: STRING = BUILD("hi")
