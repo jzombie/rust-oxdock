@@ -83,3 +83,31 @@ fn func_params_accept_generic_spellings() {
         other => panic!("expected FuncDef, got {other:?}"),
     }
 }
+
+#[test]
+fn func_params_accept_multiline_lists() {
+    // Param lists split across lines (one per line, generics
+    // included) parse exactly like the single-line shape: the shared
+    // `gap_nl` helper skips newlines at every juncture, and generic
+    // shapes already tolerate them via `skip_type_nl`.
+    let steps = parse_script(
+        "FUNC FOO(\n$x: STRING,\n$y: MAP<a: STRING, b: INT>\n): STRING {\nRETURN $x\n}\n",
+        mock_lower,
+    )
+    .expect("multiline params parse");
+    match &steps[0].kind {
+        StepKind::FuncDef {
+            name,
+            params,
+            return_type,
+            ..
+        } => {
+            assert_eq!(name, "FOO");
+            assert_eq!(params.len(), 2);
+            assert_eq!(params[0].1, "STRING");
+            assert_eq!(params[1].1, "MAP<a: STRING, b: INT>");
+            assert_eq!(return_type, "STRING");
+        }
+        other => panic!("expected FuncDef, got {other:?}"),
+    }
+}

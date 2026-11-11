@@ -67,8 +67,8 @@
 //!   pending wait holds bare brackets across separators.
 //! - Block headers: `IF`/`FOR`/`WHILE`
 //!   conditions miss to generic on expression failure (inline-block
-//!   failures propagate); `FUNC` paren-group params parse with `gap`
-//!   discipline; `REMOTE` targets/blocks/bindings; `TYPE` maximal
+//!   failures propagate); `FUNC` paren-group params parse with `gap_nl`
+//!   discipline (shared helper, like call args); `REMOTE` targets/blocks/bindings; `TYPE` maximal
 //!   shape match; `IMPORT`/`EXPORT` lists. Shared
 //!   validators are truly shared (`validate_remote_copy_placement`,
 //!   `contains_remote_block`, `collect_remote_body_symbols`,
@@ -4250,8 +4250,8 @@ fn parse_func_at(
         _ => return Ok(None),
     };
     // Paren group at any gap (`gap` zero-width): params live inside
-    // its inner tokens, parsed with `gap` discipline (newlines miss,
-    // like the grammar).
+    // its inner tokens, parsed with `gap_nl` discipline (newlines ride
+    // free like call args and generics, via the shared helper).
     let mut p = pos + 2;
     let paren_inner = match toks.get(p).map(|t| &t.kind) {
         Some(TokKind::Group {
@@ -4265,7 +4265,7 @@ fn parse_func_at(
     let mut params = Vec::new();
     {
         let mut pcur = Cursor::expr(&paren_inner, stmt);
-        pcur.skip_gap();
+        pcur.skip_gap_nl();
         if !pcur.done() {
             loop {
                 let base = pcur.pos;
@@ -4273,11 +4273,11 @@ fn parse_func_at(
                     return Ok(None);
                 };
                 pcur.pos = base + 2;
-                pcur.skip_gap();
+                pcur.skip_gap_nl();
                 if !pcur.eat_punct(':') {
                     return Ok(None);
                 }
-                pcur.skip_gap();
+                pcur.skip_gap_nl();
                 let tstart = pcur.pos;
                 let Some(tend) = parse_type_shape(&paren_inner, tstart) else {
                     return Ok(None);
@@ -4288,9 +4288,9 @@ fn parse_func_at(
                     render_type_region(&paren_inner[tstart..tend], stmt).unwrap_or_default();
                 params.push((pname, ptype));
                 pcur.pos = tend;
-                pcur.skip_gap();
+                pcur.skip_gap_nl();
                 if pcur.eat_punct(',') {
-                    pcur.skip_gap();
+                    pcur.skip_gap_nl();
                     // Trailing comma misses (a param must follow).
                     if pcur.done() {
                         return Ok(None);
@@ -4300,6 +4300,7 @@ fn parse_func_at(
                 break;
             }
             // Trailing junk (including newlines) misses to generic.
+            pcur.skip_gap_nl();
             if !pcur.done() {
                 return Ok(None);
             }

@@ -1,7 +1,7 @@
 use indoc::indoc;
-use oxdock_cli::{Options, ScriptSource, Step, StepKind};
+use oxdock_cli::{EndpointFlags, Options, ScriptSource, Step, StepKind, execute_with_result};
 use oxdock_core::parse_script;
-use oxdock_fs::{GuardedPath, GuardedTempDir};
+use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver};
 use oxdock_parser::Arg;
 
 fn workspace_root() -> GuardedTempDir {
@@ -189,4 +189,55 @@ fn parse_guarded_block_applies_to_all_commands() {
     assert!(steps[0].guard.is_some());
     assert!(steps[1].guard.is_some());
     assert!(steps[2].guard.is_none());
+}
+
+#[test]
+fn dry_run_rejects_static_return_mismatch() {
+    // Parity: dry-run runs the same shared closure validation as
+    // execution and `--mcp`, so a union-typed RETURN fails here
+    // instead of printing a passing closure.
+    let temp = GuardedPath::tempdir().expect("tmpdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    resolver
+        .write_file(
+            &root.join("bad.oxdock").expect("join"),
+            b"IMPORT [STD]\nFUNC F(): STRING {\nRETURN TEXT_TRIM(\"x\")\n}\nLET $r: STRING = F()\n",
+        )
+        .expect("write bad script");
+    resolver
+        .write_file(
+            &root.join("good.oxdock").expect("join"),
+            b"IMPORT [STD]\nFUNC F(): STRING {\nRETURN \"x\"\n}\nLET $r: STRING = F()\n",
+        )
+        .expect("write good script");
+    let opts = Options {
+        script: ScriptSource::Path(root.join("good.oxdock").expect("join")),
+        shell: false,
+        dry_run: true,
+        endpoints: EndpointFlags::default(),
+        remote_serve: false,
+        mcp: false,
+        remotes: Vec::new(),
+    };
+    assert!(
+        execute_with_result(opts, root.clone()).is_ok(),
+        "valid dry-run passes"
+    );
+    let opts = Options {
+        script: ScriptSource::Path(root.join("bad.oxdock").expect("join")),
+        shell: false,
+        dry_run: true,
+        endpoints: EndpointFlags::default(),
+        remote_serve: false,
+        mcp: false,
+        remotes: Vec::new(),
+    };
+    match execute_with_result(opts, root) {
+        Ok(_) => panic!("dry-run must fail static check"),
+        Err(err) => assert!(
+            format!("{err:#}").contains("yields STRING|PIPE"),
+            "expected union mismatch, got: {err:#}"
+        ),
+    }
 }
