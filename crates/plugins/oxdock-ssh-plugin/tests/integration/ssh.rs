@@ -3248,7 +3248,6 @@ fn conhost_setup_query_never_reaches_client_windows() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-dsr-leak", {username: "u", password: "__TEST_PASSWORD__"})
-        WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $to_child: PIPE
@@ -3261,11 +3260,24 @@ fn conhost_setup_query_never_reaches_client_windows() {
         AWAIT $h
         SSH_CLOSE($m.server)
     "#}.replace(PASSWORD_MARKER, &pass);
-    let probe = root.clone();
+    // Pre-bound by the harness: no `addr.txt` rendezvous. The file
+    // poll masked early script failures as "addr file never appeared"
+    // on loaded Windows runners; the registry addr is known up front
+    // and the connect below retries until the server thread is ready.
+    let addr = service_addr(&registry, "test-ssh-no-dsr-leak");
     let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
-    let addr = read_addr(&probe);
-    let addr: SocketAddr = addr.parse().expect("addr parses");
-    let mut client = TestClient::connect_with_pty(addr, "u", &pass).expect("client connects");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut client = loop {
+        match TestClient::connect_with_pty(addr, "u", &pass) {
+            Ok(client) => break client,
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    panic!("client never connected: {err:#}");
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    };
     let out = client
         .read_until(b"> ", Duration::from_secs(20))
         .expect("prompt renders");
