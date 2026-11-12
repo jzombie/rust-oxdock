@@ -2367,7 +2367,7 @@ fn hash_sha256_directory_digest_is_deterministic() {
                 WRITE pkg/b.txt 22
                 WRITE pkg/a.txt 1
                 LET $d: STRING = HASH_SHA256("pkg")
-                LET $n: INT = TEXT_LENGTH($d)
+                LET $n: INT = LEN($d)
                 ASSERT_EQ $n 64
                 WRITE hex.txt $d
             "#})

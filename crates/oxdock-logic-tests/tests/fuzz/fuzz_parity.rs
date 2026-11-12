@@ -229,7 +229,7 @@ fn arb_expr_with_depth(depth: u32) -> BoxedStrategy<Expr> {
         arb_arith_with_depth(0).boxed(),
         arb_bool_with_depth(0).boxed(),
         safe_string().prop_map(|s| Expr::Call {
-            name: "STD::TEXT_LENGTH".to_string(),
+            name: "STD::LEN".to_string(),
             args: vec![Expr::Literal(Value::string(s))],
         }),
         arb_flat_block_body().prop_map(Expr::Block),
@@ -877,7 +877,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         }),
         Just(StepKind::Call {
-            name: "STD::TEXT_LENGTH".to_string(),
+            name: "STD::LEN".to_string(),
             args: vec![Expr::Literal(Value::string("coverage".to_string()))],
         }),
         // File-backed, but the parity pathways only parse: no files are
@@ -2190,7 +2190,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             var: "coverage".to_string(),
             decl_type: "INT".to_string(),
             expr: Expr::Call {
-                name: "STD::TEXT_LENGTH".to_string(),
+                name: "STD::LEN".to_string(),
                 args: vec![Expr::Literal(Value::string("coverage".to_string()))],
             },
         },
@@ -2337,7 +2337,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         },
         StepKind::Call {
-            name: "STD::TEXT_LENGTH".to_string(),
+            name: "STD::LEN".to_string(),
             args: vec![Expr::Literal(Value::string("coverage".to_string()))],
         },
         StepKind::Isolated {
@@ -2557,7 +2557,7 @@ fn sample_covered_exprs() -> Vec<Expr> {
             col: 0,
         }]),
         Expr::Call {
-            name: "STD::TEXT_LENGTH".to_string(),
+            name: "STD::LEN".to_string(),
             args: vec![Expr::Literal(Value::string("coverage".to_string()))],
         },
         Expr::Compare {

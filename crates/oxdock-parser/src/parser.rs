@@ -8970,19 +8970,19 @@ mod tests {
             modules: HashMap::from([(
                 crate::constants::STD_MODULE_NAME.to_string(),
                 Some(ModuleFuncs {
-                    func_names: HashSet::from(["TEXT_LENGTH".to_string()]),
+                    func_names: HashSet::from(["LEN".to_string()]),
                 }),
             )]),
         };
         fn lower_fn(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
             test_lower_mock::lower(name, args)
         }
-        // One table for both pathways: STD exports TEXT_LENGTH.
+        // One table for both pathways: STD exports LEN.
         // Rebuilt per case (parse-time only, keeps borrows local).
         for text in [
-            "LET $n: INT = STD::TEXT_LENGTH(\"hi\")",
-            "STD::TEXT_LENGTH(\"hi\")",
-            "LET $n: INT = STD::TEXT_LENGTH(\"a\", \"b\")",
+            "LET $n: INT = STD::LEN(\"hi\")",
+            "STD::LEN(\"hi\")",
+            "LET $n: INT = STD::LEN(\"a\", \"b\")",
             "LET $s: STRING = INSPECT($x)",
             "INSPECT($x)",
             "LET $x: STRING = ECHO hi",
@@ -9019,11 +9019,11 @@ mod tests {
             "COPY a b",
             "ECHO foo[bar]baz",
             "LET $x: STRING = FOOBAR",
-            "STD::TEXT_LENGTH(\"hi\") ECHO bye",
-            "LET $n: INT = STD::TEXT_LENGTH(\"a\") ECHO bye",
-            "TIMEOUT 10s STD::TEXT_LENGTH(\"hi\")",
-            "TIMEOUT 10s STD::TEXT_LENGTH(\"hi\") ECHO bye",
-            "LET $n: INT = STD::TEXT_LENGTH(\"a\")STD::TEXT_LENGTH(\"b\")",
+            "STD::LEN(\"hi\") ECHO bye",
+            "LET $n: INT = STD::LEN(\"a\") ECHO bye",
+            "TIMEOUT 10s STD::LEN(\"hi\")",
+            "TIMEOUT 10s STD::LEN(\"hi\") ECHO bye",
+            "LET $n: INT = STD::LEN(\"a\")STD::LEN(\"b\")",
         ] {
             let table = std_table();
             let old =

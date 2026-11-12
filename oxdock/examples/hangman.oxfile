@@ -5,12 +5,12 @@
 IMPORT [STD]
 WORKSPACE SYSTEM
 
-# Pick a word: RAND gives [0, 1), so scale to the list size, count off
-# whole ones, then take the word at that index.
+# Pick a word: RAND gives [0, 1), so scale by the word count,
+# count off whole ones, then take the word at that index.
 FUNC PICK_WORD(): STRING {
     LET $words: LIST<STRING> = ["oxdock", "shell", "script", "prompt", "terminal"]
     LET $draw: FLOAT = RAND()
-    LET $rest: FLOAT = $draw * 5.0
+    LET $rest: FLOAT = $draw * FLOAT(LEN($words))
     LET $pick: INT = 0
 
     WHILE $rest >= 1.0 {
@@ -32,7 +32,7 @@ FUNC PICK_WORD(): STRING {
 # One full round. Returns true on a win.
 FUNC PLAY(): BOOL {
     LET $secret: STRING = PICK_WORD()
-    LET $len: INT = TEXT_LENGTH($secret)
+    LET $len: INT = LEN($secret)
     LET $guessed: LIST<STRING> = []
     LET $misses: INT = 0
     LET $max: INT = 6

@@ -234,13 +234,13 @@ fn target_env_translation_matches_tr() -> Result<()> {
 #[test]
 #[cfg(unix)]
 #[cfg_attr(miri, ignore = "spawns a real sh process")]
-fn text_length_matches_shell_count() -> Result<()> {
+fn len_matches_shell_count() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
         INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "tag=v0.27.1-alpha; printf '%s' \"${#tag}\""]
         LET $shell: STRING = TEXT_TRIM($raw)
-        LET $n: INT = TEXT_LENGTH("v0.27.1-alpha")
+        LET $n: INT = LEN("v0.27.1-alpha")
         ASSERT_EQ "{{ $n }}" $shell
     "#})
 }

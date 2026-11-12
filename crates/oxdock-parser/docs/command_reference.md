@@ -3872,6 +3872,53 @@ LET $term: BOOL = IS_TERMINAL("stdin")
 ASSERT_EQ $term false
 ```
 
+### STD::LEN
+
+Count the elements of a text, list, or map as an `INT`.
+
+Strings count Unicode scalars: multibyte characters count once
+each, so this is not the byte length (`"héllo"` binds 5, not 6).
+Lists count elements, maps count entries; empty values bind 0.
+The `${#var}` and `wc -m` counterpart for scripts that size tags,
+digests, and table rows.
+
+
+**Signature:** `STD::LEN($value: STRING|LIST|MAP): INT`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$value` (`STRING|LIST|MAP`): Value to measure: `STRING` counts characters, `LIST` counts
+elements, `MAP` counts entries.
+
+**Returns:** `INT`
+
+**Examples:**
+
+**Example: length**
+
+```oxdock
+# Plain text counts one per character.
+IMPORT [STD]
+LET $n: INT = LEN("hello")
+ASSERT_EQ $n 5
+
+# Multibyte characters count once each, not per byte.
+LET $wide: INT = LEN("héllo")
+ASSERT_EQ $wide 5
+
+# Lists count elements, maps count entries.
+LET $items: LIST<STRING> = ["a", "b", "c"]
+LET $nitems: INT = LEN($items)
+ASSERT_EQ $nitems 3
+LET $row: MAP<name: STRING> = {name: "ada"}
+LET $nkeys: INT = LEN($row)
+ASSERT_EQ $nkeys 1
+LET $empty: INT = LEN([])
+ASSERT_EQ $empty 0
+```
+
 ### STD::LOAD_JSON
 
 Load and parse a JSON file.
@@ -4872,40 +4919,6 @@ Join a `LIST<STRING>` with a literal separator into a `STRING`.
 IMPORT [STD]
 LET $joined: STRING = TEXT_JOIN(["a", "b", "c"], ",")
 ASSERT_EQ $joined "a,b,c"
-```
-
-### STD::TEXT_LENGTH
-
-Count the characters in text as Unicode scalars.
-
-Multibyte characters count once each, so this is not the byte
-length: `"héllo"` binds 5, not 6. The `${#var}` and `wc -m`
-counterpart for scripts that size tags and digests.
-
-
-**Signature:** `STD::TEXT_LENGTH($text: STRING): INT`
-
-**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
-
-**Parameters:**
-
-- `$text` (`STRING`): Text to measure.
-
-**Returns:** `INT`
-
-**Examples:**
-
-**Example: length**
-
-```oxdock
-# Plain text counts one per character.
-IMPORT [STD]
-LET $n: INT = TEXT_LENGTH("hello")
-ASSERT_EQ $n 5
-
-# Multibyte characters count once each, not per byte.
-LET $wide: INT = TEXT_LENGTH("héllo")
-ASSERT_EQ $wide 5
 ```
 
 ### STD::TEXT_LINES

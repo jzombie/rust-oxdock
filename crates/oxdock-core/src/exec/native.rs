@@ -449,7 +449,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TextStartsWith::registration(),
             TextEndsWith::registration(),
             TextContains::registration(),
-            TextLength::registration(),
+            Len::registration(),
             TextCount::registration(),
             TextCountMatches::registration(),
             TextGrep::registration(),
@@ -3210,11 +3210,13 @@ fn text_contains(
     Ok(Value::bool(text.contains(needle.as_str())))
 }
 
-/// Count the characters in text as Unicode scalars.
+/// Count the elements of a text, list, or map as an `INT`.
 ///
-/// Multibyte characters count once each, so this is not the byte
-/// length: `"héllo"` binds 5, not 6. The `${#var}` and `wc -m`
-/// counterpart for scripts that size tags and digests.
+/// Strings count Unicode scalars: multibyte characters count once
+/// each, so this is not the byte length (`"héllo"` binds 5, not 6).
+/// Lists count elements, maps count entries; empty values bind 0.
+/// The `${#var}` and `wc -m` counterpart for scripts that size tags,
+/// digests, and table rows.
 ///
 #[oxdock_func(pure, returns = TypeTag::Int)]
 #[example(
@@ -3222,19 +3224,43 @@ fn text_contains(
     code = r###"
     # Plain text counts one per character.
     IMPORT [STD]
-    LET $n: INT = TEXT_LENGTH("hello")
+    LET $n: INT = LEN("hello")
     ASSERT_EQ $n 5
 
     # Multibyte characters count once each, not per byte.
-    LET $wide: INT = TEXT_LENGTH("héllo")
+    LET $wide: INT = LEN("héllo")
     ASSERT_EQ $wide 5
+
+    # Lists count elements, maps count entries.
+    LET $items: LIST<STRING> = ["a", "b", "c"]
+    LET $nitems: INT = LEN($items)
+    ASSERT_EQ $nitems 3
+    LET $row: MAP<name: STRING> = {name: "ada"}
+    LET $nkeys: INT = LEN($row)
+    ASSERT_EQ $nkeys 1
+    LET $empty: INT = LEN([])
+    ASSERT_EQ $empty 0
     "###
 )]
-fn text_length(
-    /// Text to measure.
-    text: String,
+fn len(
+    /// Value to measure: `STRING` counts characters, `LIST` counts
+    /// elements, `MAP` counts entries.
+    #[union(String, List, Map)]
+    value: Value,
 ) -> Result<Value> {
-    Ok(Value::int(text.chars().count() as i64))
+    if let Some(text) = value.as_str() {
+        return Ok(Value::int(text.chars().count() as i64));
+    }
+    if let Some(items) = value.as_list() {
+        return Ok(Value::int(items.len() as i64));
+    }
+    if let Some(entries) = value.as_map() {
+        return Ok(Value::int(entries.len() as i64));
+    }
+    Err(anyhow::anyhow!(
+        "LEN needs a STRING, LIST, or MAP value, got {}",
+        value.type_name()
+    ))
 }
 
 /// Count non-overlapping literal occurrences of a needle.
