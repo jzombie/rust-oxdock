@@ -85,7 +85,7 @@ fn fixture_opt(
     // SAFETY: written to the same value on every call; tests never
     // mutate it back or depend on a prior process value.
     unsafe {
-        std::env::set_var("OXDOCK_RENDER_CHILD", child_bin());
+        std::env::set_var(oxdock_fs::env::render::CHILD, child_bin());
     }
     let temp = GuardedPath::tempdir().expect("tempdir");
     let root = temp.as_guarded_path().clone();
@@ -1205,7 +1205,7 @@ fn init_scaffold_renders() {
     // SAFETY: written to the same value on every call; tests never
     // mutate it back or depend on a prior process value.
     unsafe {
-        std::env::set_var("OXDOCK_RENDER_CHILD", child_bin());
+        std::env::set_var(oxdock_fs::env::render::CHILD, child_bin());
     }
     // The --init template is a working starting point: scaffold it,
     // add the smallest values/target/template triple, and render.

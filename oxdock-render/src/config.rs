@@ -288,7 +288,7 @@ pub(crate) fn configured_plugins(
 /// neutral name. Anything else fails closed naming what was looked
 /// for; the DSL never carries a filename default.
 pub(crate) fn resolve_config_name(fs: &dyn WorkspaceFs, root: &GuardedPath) -> Result<String> {
-    if let Ok(name) = std::env::var("RENDER_CONFIG") {
+    if let Ok(name) = std::env::var(oxdock_fs::env::render::CONFIG) {
         return Ok(name);
     }
     let neutral = root.join("render.json")?;
@@ -296,8 +296,9 @@ pub(crate) fn resolve_config_name(fs: &dyn WorkspaceFs, root: &GuardedPath) -> R
         return Ok("render.json".to_string());
     }
     anyhow::bail!(
-        "no render.json under {}; pass --config or set RENDER_CONFIG",
-        root.as_path().to_string_lossy()
+        "no render.json under {}; pass --config or set {}",
+        root.as_path().to_string_lossy(),
+        oxdock_fs::env::render::CONFIG,
     )
 }
 

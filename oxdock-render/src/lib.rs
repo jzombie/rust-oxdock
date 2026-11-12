@@ -12,6 +12,7 @@
 //! [`lifecycle`] (embedded pipeline serving, uniformity check), and
 //! [`dispatcher`] (engine wiring, pipe spawn). Sequencing and all
 //! writes live in the DSL as named `FUNC` stages.
+pub mod cli;
 pub mod config;
 pub mod defer;
 pub mod dispatcher;
@@ -83,12 +84,12 @@ pub fn run_with_plugins(
         oxdock_fs::env::oxdock::WORKSPACE_ROOT,
         root.as_path().to_string_lossy().into_owned(),
     );
-    let config_name =
-        std::env::var("RENDER_CONFIG").or_else(|_| resolve_config_name(&fs_resolver, &root))?;
-    io.insert_inherit_env("RENDER_CONFIG", config_name.clone());
+    let config_name = std::env::var(oxdock_fs::env::render::CONFIG)
+        .or_else(|_| resolve_config_name(&fs_resolver, &root))?;
+    io.insert_inherit_env(oxdock_fs::env::render::CONFIG, config_name.clone());
     io.insert_inherit_env(
-        "RENDER_PRINT_CHILD",
-        std::env::var("RENDER_PRINT_CHILD").unwrap_or_else(|_| "0".to_string()),
+        oxdock_fs::env::render::PRINT_CHILD,
+        std::env::var(oxdock_fs::env::render::PRINT_CHILD).unwrap_or_else(|_| "0".to_string()),
     );
     // Validate the config before anything runs: unknown keys and
     // mistyped values fail here naming the fix, so a typo like
