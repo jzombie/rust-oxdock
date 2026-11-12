@@ -43,7 +43,7 @@ pub fn usage() -> String {
          \x20 --print-child     print the generated script, skip the run\n\
          \x20 --init            write a template render.json, then stop\n\
          \x20 --help, -h        print this help and exit\n\
-         \x20 --version, -V     print the version and exit\n",
+         \x20 --version, -V, -v print the version and exit\n",
         version = version(),
         description = env!("CARGO_PKG_DESCRIPTION"),
     )
@@ -68,7 +68,7 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
             "--print-child" => opts.print_child = true,
             "--init" => opts.init = true,
             "--help" | "-h" => opts.help = true,
-            "--version" | "-V" => opts.version = true,
+            "--version" | "-V" | "-v" => opts.version = true,
             flag if flag.starts_with("--") => {
                 anyhow::bail!("unknown flag '{flag}'\n\n{}", usage())
             }
@@ -113,6 +113,7 @@ mod tests {
             "-h",
             "--version",
             "-V",
+            "-v",
         ] {
             assert!(text.contains(flag), "usage names {flag}: {text}");
         }
@@ -147,6 +148,8 @@ mod tests {
         let opts = parse_options(&args(&["-h"])).expect("short help parses");
         assert!(opts.help);
         let opts = parse_options(&args(&["-V"])).expect("short version parses");
+        assert!(opts.version);
+        let opts = parse_options(&args(&["-v"])).expect("lowercase version parses");
         assert!(opts.version);
     }
 

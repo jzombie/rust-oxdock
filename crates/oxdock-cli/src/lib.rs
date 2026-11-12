@@ -67,7 +67,7 @@ oxdock_embed! {
               --mcp              serve EXPORTed FUNCs as MCP tools over stdio (requires the `mcp` feature)
             {{ $net_flags }}
               --help, -h         print this help and exit
-              --version, -V      print the version and exit
+              --version, -V, -v   print the version and exit
 
             With no script given, reads the script from stdin (must be piped unless `--shell`).
             {{ $tail }}
@@ -467,7 +467,7 @@ impl Options {
                 Long("help") | Short('h') => {
                     bail!("{}", usage());
                 }
-                Long("version") | Short('V') => {
+                Long("version") | Short('V') | Short('v') => {
                     bail!("{}", version());
                 }
                 Value(value) => {
@@ -516,7 +516,7 @@ fn value_string(value: std::ffi::OsString) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("argument must be UTF-8"))
 }
 
-/// Human-readable CLI version, printed for `--version`/`-V`.
+/// Human-readable CLI version, printed for `--version`/`-V`/`-v`.
 pub fn version() -> String {
     format!("oxdock {}", env!("CARGO_PKG_VERSION"))
 }
@@ -1454,7 +1454,7 @@ mod tests {
         // (parse must not exit the process itself: it is public library
         // API). Print it and succeed so the binary exits 0.
         let workspace = GuardedPath::tempdir().expect("tempdir");
-        for flag in ["--version", "-V"] {
+        for flag in ["--version", "-V", "-v"] {
             let mut args = vec![flag.to_string()].into_iter();
             let err = Options::parse(&mut args, workspace.as_guarded_path())
                 .expect_err("version flag must not parse as options");
