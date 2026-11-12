@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Added
 
 - `setup-oxdock-render` composite GitHub action: installs the `oxdock-render` binary so later steps can render docs. Takes `version` (full release tag or `latest`), `binary-name` (default `oxdock-render`), and `source` (`release` downloads the installer for `version`; `local` builds the caller's checkout with cargo so unreleased renderer behavior is testable before any tag exists). Generated from `.oxdock/template/github-actions/`, so CI runs exactly the documented installer commands.
-- `pre` and `post` render hooks: `render.json` accepts a `hooks` object with `pre` and `post` string lists. Pre hooks run before the entry script assembles the child; post hooks run after every target verifies. Either side failing halts the pipeline naming the hook. Each hook executes as its own script file through the pipeline engine, so hooks read the same modules and resolve the same workspace as the entry.
+- `oxdock-render` `pre` and `post` hooks: `render.json` accepts a `hooks` object with `pre` and `post` string lists. Pre hooks run before the entry script assembles the child; post hooks run after every target verifies. Either side failing halts the pipeline naming the hook. Each hook executes as its own script file through the pipeline engine, so hooks read the same modules and resolve the same workspace as the entry.
 - `oxdock-render --init`: writes a template `render.json` (workspace root scope, empty hooks) into `--root` (else the current directory) and stops. Refuses to overwrite an existing file, naming the file to delete first. The template validates clean under strict config validation.
 - Strict `render.json` validation: unknown top level, `vars`, `lifecycle`, `generated`, and `hooks` keys fail naming the known set; mistyped values name the expected shape. Presence is required only for `scopes` and `global_values`; everything else is optional but type checked when present, so custom lifecycles that skip `vars` or `generated` keep working.
 - `oxdock-render` `--help`/`-h` and `--version`/`-V`/`-v`: new `oxdock-render/src/cli.rs` parser with `Options`, `usage()`, `version()`, and `parse_options()`. `--root`, `--config`, `--print-child`, and `--init` keep their shapes; a lone `--` separator is skipped.
@@ -28,6 +28,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Fixed
 
 - Hook nested relative imports: a hook at `scripts/X.oxfile` doing `IMPORT ["./lanes.oxfile" AS ...]` resolves to `scripts/lanes.oxfile`, not the workspace root. Hooks run via the new file aware entry with a regression test pinning the shape.
+
+### Dependencies
+
+- Bump `russh` 0.65.0 → 0.65.1 (#293).
+- Bump `ureq` 3.5.0 → 3.5.1 (#294).
+- Bump `syn` 3.0.9 → 3.0.10 (#295).
+- Bump `flate2` 1.1.10 → 1.1.11 (#296).
 
 ## [0.37.0-alpha] - 2026-11-12
 
