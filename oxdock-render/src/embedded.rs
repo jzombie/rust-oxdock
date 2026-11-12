@@ -1,4 +1,4 @@
-//! Embedded pipeline overlay: the binary's scripts, served from memory.
+//! Embedded pipeline files: the binary's scripts, served from memory.
 //!
 //! The pipeline entry plus every default lifecycle file lives in the
 //! binary via `include_bytes!` and is served from memory through this
@@ -12,12 +12,13 @@ use anyhow::{Context, Result};
 #[allow(clippy::disallowed_types)]
 use oxdock_fs::UnguardedPath;
 use oxdock_fs::{
-    CopySourceRoot, DirEntry, EntryKind, GuardedPath, PathResolver, WorkspaceFs, to_forward_slashes,
+    CopySourceRoot, DirEntry, EntryKind, GuardedPath, PathResolver, WorkspaceFs,
+    WorkspaceSelection, to_forward_slashes,
 };
 
 /// Pipeline files the binary carries: entry, renderer, stage order,
 /// shared types, and the default hook set, keyed by workspace-relative
-/// path. Served from memory (see [`OverlayFs`]), never written to disk.
+/// path. Served from memory (see [`EmbeddedFiles`]), never written to disk.
 const DIST: &[(&str, &[u8])] = &[
     ("oxdock-render/src/run.oxfile", include_bytes!("run.oxfile")),
     (
@@ -64,11 +65,11 @@ fn embedded_for(path: &GuardedPath) -> Option<&'static [u8]> {
 /// when the disk holds a stale copy. Everything else delegates to
 /// the inner resolver, so consumer trees stay free of pipeline files.
 #[derive(Clone)]
-pub(crate) struct OverlayFs {
+pub(crate) struct EmbeddedFiles {
     inner: PathResolver,
 }
 
-impl OverlayFs {
+impl EmbeddedFiles {
     /// Wrap a configured resolver; the wrapper serves dist paths.
     pub(crate) fn new(inner: PathResolver) -> Self {
         Self { inner }
@@ -97,7 +98,7 @@ pub(crate) fn warn_on_shadowed_dist(resolver: &PathResolver, root: &GuardedPath)
     }
 }
 
-impl WorkspaceFs for OverlayFs {
+impl WorkspaceFs for EmbeddedFiles {
     fn canonicalize(&self, path: &GuardedPath) -> Result<GuardedPath> {
         self.inner.canonicalize(path)
     }
@@ -124,8 +125,12 @@ impl WorkspaceFs for OverlayFs {
         self.inner.build_context()
     }
 
-    fn set_root(&mut self, root: &GuardedPath) {
-        self.inner.set_root(root)
+    fn selection(&self) -> WorkspaceSelection {
+        self.inner.selection()
+    }
+
+    fn restore_selection(&mut self, selection: WorkspaceSelection) {
+        self.inner.restore_selection(selection)
     }
 
     fn switch_to_snapshot(&mut self) {

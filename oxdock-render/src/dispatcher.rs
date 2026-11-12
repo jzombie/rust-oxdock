@@ -10,7 +10,7 @@ use oxdock_core::{Engine, ExecIo, HostModule, OxDockFn, TypeTag, Value};
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
 use oxdock_func_macro::oxdock_func;
 
-use crate::overlay::{OverlayFs, warn_on_shadowed_dist};
+use crate::embedded::{EmbeddedFiles, warn_on_shadowed_dist};
 
 /// `run()`'s module set, written once.
 ///
@@ -211,7 +211,7 @@ pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
     let engine = pipeline_full_engine(vec![], io);
     let steps = oxdock_core::parse_script_with_modules(script, engine.module_table())
         .context("parse child script")?;
-    let fs: Box<dyn WorkspaceFs> = Box::new(OverlayFs::new(resolver));
+    let fs: Box<dyn WorkspaceFs> = Box::new(EmbeddedFiles::new(resolver));
     engine
         .run_steps_on(fs, &steps, oxdock_process::default_process_manager())
         .context("child script failed")?;

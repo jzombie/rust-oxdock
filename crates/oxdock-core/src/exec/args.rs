@@ -562,7 +562,7 @@ pub(crate) fn path_type_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), &path_str)
+        .resolve_write(&cx.state.cwd, &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
     let kind = match cx.state.fs.entry_kind_no_follow(&target) {
         Ok(EntryKind::Symlink) => "symlink",
@@ -703,11 +703,7 @@ fn is_executable_candidate<P: ProcessManager>(
     candidate: &str,
     exts: &[String],
 ) -> bool {
-    let Ok(guard) = cx
-        .state
-        .fs
-        .resolve_read(&cx.state.effective_cwd(), candidate)
-    else {
+    let Ok(guard) = cx.state.fs.resolve_read(&cx.state.cwd, candidate) else {
         return false;
     };
     if !matches!(
@@ -765,7 +761,7 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), &path_str)
+        .resolve_write(&cx.state.cwd, &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
     let mut current = target;
     loop {
@@ -781,7 +777,7 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
                     return Ok(Value::bool(false));
                 };
                 if parent.as_path().as_os_str().is_empty() {
-                    let cwd = cx.state.effective_cwd();
+                    let cwd = cx.state.cwd.clone();
                     let anchor =
                         cx.state.fs.resolve_write(&cwd, ".").map_err(|e| {
                             anyhow::anyhow!("failed to resolve working directory: {e}")
@@ -1377,7 +1373,7 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
     // pending snapshot materializes here (a snapshot read), while local
     // roots resolve with zero I/O. The listing below then runs on concrete
     // paths in both cases.
-    let _ = cx.state.fs.resolve_read(&cx.state.effective_cwd(), ".")?;
+    let _ = cx.state.fs.resolve_read(&cx.state.cwd, ".")?;
     let root = cx.state.fs.root().clone();
     let root_path = root.as_path().to_path_buf();
     let mut entries: Vec<Value> = root
@@ -1409,7 +1405,7 @@ pub(crate) fn load_toml_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_read(&cx.state.effective_cwd(), &path_str)
+        .resolve_read(&cx.state.cwd, &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve TOML path '{}': {}", path_str, e))?;
     let content = cx
         .state
@@ -1436,7 +1432,7 @@ pub(crate) fn load_json_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_read(&cx.state.effective_cwd(), &path_str)
+        .resolve_read(&cx.state.cwd, &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve JSON path '{}': {}", path_str, e))?;
     let content = cx
         .state

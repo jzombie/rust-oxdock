@@ -246,6 +246,19 @@ pub enum CopySourceRoot {
     System,
 }
 
+/// Four-way workspace selector plus the cache flavor, for exact
+/// save/restore through scope push/pop and module-context reset.
+/// Unlike re-deriving selection from a saved path, this round-trips
+/// the applied selection itself, so restores can never misread a
+/// recomputed guard.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceSelection {
+    Snapshot,
+    Local,
+    Cache { local: bool },
+    System,
+}
+
 /// Cross-clone synchronized snapshot backing (issue #131). Fork clones share
 /// the same `Arc<SharedSnapshot>`, so the first snapshot-targeted choke point
 /// on any clone materializes the ONE physical directory and every clone
@@ -281,7 +294,7 @@ pub struct PathResolver {
     /// group directory, OS-native or project-local per `cache_local`. Built
     /// with no filesystem I/O; the directory is created on first
     /// cache-targeted resolve through `ensure_cache`. Always reflects the
-    /// current flavor, so scope restore via `set_root` keeps working.
+    /// current flavor, so selection restore keeps working.
     cache_guard: GuardedPath,
     /// Application identity for the OS-native cache root, resolved once at
     /// construction (explicit builder argument over the auto-detect chain).
@@ -496,6 +509,31 @@ impl PathResolver {
         self.current = CurrentRoot::Local;
     }
 
+    /// Selection last applied through `switch_to_*`, for exact
+    /// save/restore through scope push/pop and module-context reset.
+    pub fn selection(&self) -> WorkspaceSelection {
+        match self.current {
+            CurrentRoot::Snapshot => WorkspaceSelection::Snapshot,
+            CurrentRoot::Local => WorkspaceSelection::Local,
+            CurrentRoot::Cache => WorkspaceSelection::Cache {
+                local: self.cache_local,
+            },
+            CurrentRoot::System => WorkspaceSelection::System,
+        }
+    }
+
+    /// Restore a selection previously read from [`selection`].
+    /// Equivalent to re-running the matching `switch_to_*`; the cache
+    /// guard recomputes purely, so no saved path can go stale.
+    pub fn restore_selection(&mut self, selection: WorkspaceSelection) {
+        match selection {
+            WorkspaceSelection::Snapshot => self.switch_to_snapshot(),
+            WorkspaceSelection::Local => self.switch_to_local(),
+            WorkspaceSelection::Cache { local } => self.switch_to_cache(local),
+            WorkspaceSelection::System => self.switch_to_system(),
+        }
+    }
+
     /// Select the persistent cache root (`WORKSPACE CACHE`, issue #163).
     /// With `local`, the cache lives in the project tree
     /// (`<workspace-root>/.cache/workspace`, falling back to the build
@@ -614,49 +652,6 @@ impl PathResolver {
     /// build state by role, not by path. Must not be called mid-run.
     pub fn set_build_context(&mut self, build_context: GuardedPath) {
         self.build_context = build_context;
-    }
-
-    pub fn set_root(&mut self, root: &GuardedPath) {
-        // Scope-restore compatibility: only the root SELECTION is restored.
-        // The concrete publication (if any) stays the source of truth for
-        // I/O paths, so a stale anchor or concrete value can never regress
-        // resolution. The anchor field itself is never adopted here.
-        if root == &self.build_context {
-            self.current = CurrentRoot::Local;
-        } else if root == &self.cache_guard {
-            self.current = CurrentRoot::Cache;
-        } else if root == &self.system_anchor {
-            self.current = CurrentRoot::System;
-        } else if self.adopt_cache_guard(root) {
-            self.current = CurrentRoot::Cache;
-        } else {
-            self.current = CurrentRoot::Snapshot;
-        }
-    }
-
-    /// Adopt a saved cache guard from the non-current flavor (OS-native vs
-    /// project-local): recompute both flavors purely and, on a match,
-    /// install the guard plus its flavor. Returns false when `root` names
-    /// neither flavor. Keeps cross-flavor scope restores exact.
-    fn adopt_cache_guard(&mut self, root: &GuardedPath) -> bool {
-        let os_guard = cache::cache_guard_for(Some(self.cache_app.as_str()));
-        if root == &os_guard {
-            self.cache_guard = os_guard;
-            self.cache_local = false;
-            return true;
-        }
-        let anchor = self
-            .workspace_root
-            .as_ref()
-            .unwrap_or(&self.build_context)
-            .clone();
-        let local_guard = cache::cache_guard_for_local(&anchor);
-        if root == &local_guard {
-            self.cache_guard = local_guard;
-            self.cache_local = true;
-            return true;
-        }
-        false
     }
 }
 

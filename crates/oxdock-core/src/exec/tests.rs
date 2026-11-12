@@ -882,9 +882,10 @@ fn success_status() -> ExitStatus {
 /// - `GuardedPath::tempdir` / `tempdir_with`: eager tempdir creation.
 ///   (`capture.rs` is exempt: its >8MiB pipe-spill tempdir is pre-existing
 ///   capture behavior, not an execution root.)
-/// - `set_root(`: legacy direct root flipping in handler/arg code. Root
-///   selection goes through `switch_to_snapshot` / `switch_to_local`
-///   (`state.rs` scope restore keeps using `set_root` and is not scanned).
+/// - `set_root(`: removed. Root selection goes through `switch_to_*`;
+///   scope save/restore and module-context reset round-trip through
+///   `selection` / `restore_selection` instead of re-deriving selection
+///   from a saved path.
 /// - `anchor_path`: the never-created virtual anchor must never be named
 ///   outside `workspace_fs`.
 #[test]
@@ -905,6 +906,7 @@ fn ast_handlers_route_snapshot_demand_through_resolve_choke_points() {
         "GuardedPath::tempdir",
         "tempdir_with",
         "anchor_path",
+        "set_root(",
     ];
     let mut violations = Vec::new();
     for (file, source) in HANDLER_SOURCES {
@@ -912,9 +914,6 @@ fn ast_handlers_route_snapshot_demand_through_resolve_choke_points() {
             if source.contains(needle) {
                 violations.push(format!("{file} contains forbidden {needle}"));
             }
-        }
-        if (*file == "handlers.rs" || *file == "args.rs") && source.contains("set_root(") {
-            violations.push(format!("{file} contains forbidden set_root("));
         }
     }
     assert!(
@@ -930,7 +929,6 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         cargo_scratch: oxdock_fs::reserve_cargo_scratch().unwrap(),
         seed: Arc::new(HashMap::new()),
         cwd: fs.root().clone(),
-        initial_root: fs.root().clone(),
         envs: Arc::new(HashMap::new()),
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
@@ -6840,10 +6838,12 @@ fn file_import_function_env_does_not_leak_out() {
     );
 }
 
-/// Module law, cwd leg: no matter where the caller `WORKDIR`s, a
-/// module function observes its defining file's directory.
+/// Module law, cwd leg: the ambient cwd is the same everywhere.
+/// A module function observes the caller's working directory, not
+/// its defining file's directory: WORKSPACE and WORKDIR mean the
+/// same in every file.
 #[test]
-fn file_import_function_cwd_is_module_dir() {
+fn file_import_function_cwd_is_ambient_cwd() {
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -6884,8 +6884,8 @@ fn file_import_function_cwd_is_module_dir() {
     assert_ne!(here, root_cwd, "caller really moved into sub");
     assert_eq!(
         bindings.get("there").and_then(|v| v.as_str()),
-        Some(root_cwd),
-        "module function still observes its own directory"
+        Some(here),
+        "module function observes the same ambient cwd as entry code"
     );
 }
 
@@ -8730,11 +8730,11 @@ fn file_import_transitive_syntax_error_fails_before_any_step() {
 }
 
 #[test]
-fn file_import_module_paths_ignore_caller_workdir() {
+fn file_import_module_paths_follow_caller_workdir() {
     // The store is single and shared (the counter increments across
-    // aliases and across WORKDIR changes), while relative paths resolve
-    // against the module file's directory even when the caller has
-    // moved elsewhere: the decoy in the caller dir is never read.
+    // aliases and across WORKDIR changes), while relative paths
+    // resolve against the ambient cwd in every file: after the
+    // caller moves, the module reads the caller's files.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -8769,19 +8769,19 @@ fn file_import_module_paths_ignore_caller_workdir() {
         MockProcessManager::default(),
         ExecIo::new(),
     )
-    .expect("shared store with per-caller paths");
+    .expect("shared store with ambient paths");
     assert_eq!(bindings.get("r1").and_then(|v| v.as_str()), Some("root"));
-    assert_eq!(bindings.get("r2").and_then(|v| v.as_str()), Some("root"));
+    assert_eq!(bindings.get("r2").and_then(|v| v.as_str()), Some("nested"));
     assert_eq!(bindings.get("total").and_then(|v| v.as_i64()), Some(2));
 }
 
 #[test]
-fn file_import_module_paths_anchor_to_defining_file() {
-    // A module behaves as if it were the only module: its relative
-    // file operations resolve against its own directory, never the
-    // importer's cwd. The entry WORKDIRs elsewhere and a decoy file
-    // with the same name sits in the entry dir; the module must still
-    // read and write next to itself.
+fn file_import_module_paths_resolve_ambiently() {
+    // Relative paths resolve against the ambient cwd in every file:
+    // the module init writes next to the entry (import time cwd),
+    // and a later call reads the caller's files, never the module's
+    // own directory. The seeded copy next to the module is never
+    // touched.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -8802,12 +8802,11 @@ fn file_import_module_paths_anchor_to_defining_file() {
             EXPORT READIT
         "#},
     );
-    seed_lib(&fs, "other/decoy.txt", "seeded\n");
     seed_lib(
         &fs,
         "other/data.txt",
         indoc! {r#"
-            decoy-data
+            caller-data
         "#},
     );
     let steps = parse_entry(indoc! {r#"
@@ -8822,33 +8821,31 @@ fn file_import_module_paths_anchor_to_defining_file() {
         MockProcessManager::default(),
         ExecIo::new(),
     )
-    .expect("module paths anchor to defining file");
-    // Call-time read hit the module's own directory, not the entry's.
+    .expect("module paths resolve ambiently");
+    // Call-time read hit the caller directory, not the module's.
     assert_eq!(
         bindings.get("v").and_then(|v| v.as_str()),
-        Some("module-data\n")
+        Some("caller-data\n")
     );
-    // Init-time write landed next to the module, not the caller.
+    // Init-time write landed next to the entry, not the module.
     let snap = fs.snapshot();
     assert!(
-        snap.keys()
-            .any(|k| k == "sub/out.txt" || k.ends_with("/sub/out.txt")),
-        "lib wrote next to itself: {:?}",
+        snap.keys().any(|k| k == "out.txt"),
+        "lib wrote next to the entry: {:?}",
         snap.keys().collect::<Vec<_>>()
     );
     assert!(
-        !snap
-            .keys()
-            .any(|k| k == "out.txt" || k.ends_with("/out.txt") && !k.contains("sub")),
-        "nothing leaked into the caller dir: {:?}",
+        !snap.keys().any(|k| k == "sub/out.txt"),
+        "nothing leaked into the module dir: {:?}",
         snap.keys().collect::<Vec<_>>()
     );
 }
 
 #[test]
-fn file_import_module_run_uses_module_dir() {
-    // Child processes spawned by module-owned code start in the module
-    // directory, wherever the importer happens to be.
+fn file_import_module_run_uses_caller_cwd() {
+    // Child processes spawned by module-owned code start in the
+    // ambient cwd, wherever the importer happens to be: RUN means
+    // the same in every file.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -8871,14 +8868,62 @@ fn file_import_module_run_uses_module_dir() {
     let mock = MockProcessManager::default();
     let (_, _, bindings) =
         run_steps_with_manager(Box::new(fs), &steps, mock.clone(), ExecIo::new())
-            .expect("module RUN anchors to module dir");
+            .expect("module RUN uses caller cwd");
     assert_eq!(bindings.get("r").and_then(|v| v.as_str()), Some("done"));
     let runs = mock.recorded_argv_runs();
     assert_eq!(runs.len(), 1);
     assert!(
-        runs[0].cwd.ends_with("sub"),
-        "module RUN cwd is the module dir: {:?}",
+        runs[0].cwd.ends_with("other"),
+        "module RUN cwd is the caller cwd: {:?}",
         runs[0].cwd
+    );
+}
+
+#[test]
+fn file_import_module_workspace_local_matches_main() {
+    // WORKSPACE means the same in every file: after WORKSPACE LOCAL,
+    // relative writes in the module land in the local root exactly
+    // like entry code.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "sub/tool.oxfile",
+        indoc! {r#"
+            FUNC MARK(): STRING {
+             WORKSPACE LOCAL
+             WRITE "module-marker.txt" "from-module"
+             RETURN "done"
+            }
+            EXPORT MARK
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["sub/tool.oxfile" AS LIB]
+        WORKSPACE LOCAL
+        WRITE "main-marker.txt" "from-main"
+        LET $r: STRING = LIB::MARK()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs.clone()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("import runs");
+    assert_eq!(bindings.get("r").and_then(|v| v.as_str()), Some("done"));
+    let snap = fs.snapshot();
+    let keys: Vec<&String> = snap.keys().collect();
+    assert!(
+        snap.contains_key("main-marker.txt"),
+        "main write lands in local root: {keys:?}"
+    );
+    assert!(
+        snap.contains_key("module-marker.txt"),
+        "module WORKSPACE LOCAL write lands in the same local root: {keys:?}"
+    );
+    assert!(
+        !snap.contains_key("sub/module-marker.txt"),
+        "nothing leaks into the module dir: {keys:?}"
     );
 }
 
@@ -8975,7 +9020,6 @@ fn workflow_inline_scripts_pass_static_gate() {
                 cargo_scratch: oxdock_fs::reserve_cargo_scratch().unwrap(),
                 seed: Arc::new(HashMap::new()),
                 cwd: root.clone(),
-                initial_root: root.clone(),
                 envs: Arc::new(HashMap::new()),
                 bg_children: Vec::new(),
                 scope_stack: Vec::new(),

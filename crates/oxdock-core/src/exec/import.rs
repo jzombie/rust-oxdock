@@ -789,7 +789,9 @@ pub(crate) fn import_file<P: ProcessManager>(
         let env_before: std::collections::HashMap<String, String> = (*cx.state.envs).clone();
         // The init body runs with its module on the context stack so
         // nested definitions owner-tag correctly; lexical reads still
-        // resolve through the pushed frames first.
+        // resolve through the pushed frames first. Relative paths in
+        // the init body resolve against the ambient cwd like any
+        // other code: there is no module-dir anchoring.
         cx.state.module_stack.push(Some(key.clone()));
         let flow = execute_steps(
             cx.state,
@@ -1305,14 +1307,12 @@ fn load_file<P: ProcessManager>(
         table,
     )
     .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed to parse: {e}"))?;
-    let dir = resolved.parent();
     state.modules.insert(
         key,
         super::state::ModuleRecord {
             steps: parsed.steps.clone(),
             func_exports: parsed.func_exports.clone(),
             type_exports: parsed.type_exports.clone(),
-            dir,
             init: None,
         },
     );

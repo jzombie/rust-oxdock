@@ -1973,9 +1973,9 @@ Paths:
 - Workspace-side, against the importing file's
   directory (entry parent at top level; off-workspace
   entries resolve like stdin against the root).
-- Module-owned relative paths resolve against the
-  module file's own directory, not the caller cwd.
-  Entry code keeps resolving against the run cwd.
+- Relative operation paths resolve against the ambient
+  cwd in every file, module or entry alike. `WORKSPACE`
+  and `WORKDIR` mean the same everywhere.
 - Missing files fail before the first step runs.
   Write-then-import in one script is rejected; check
   libraries into the tree, or combine them at runtime
@@ -1983,21 +1983,22 @@ Paths:
   examples below).
 
 Module rules (every file import is a module):
-- Context: never inherits the caller. Env resets to
-  the seed plus the module init's own contributions
-  (declared `INHERIT_ENV` names re-read from the host
-  on every call), cwd to the defining file's
-  directory, workspace to the run-initial root.
-- Determinism: the same file behaves identically no
-  matter who imports it.
+- Context: never inherits the caller's namespace. Env
+  resets to the seed plus the module init's own
+  contributions (declared `INHERIT_ENV` names re-read
+  from the host on every call). Workspace selection
+  and cwd flow through untouched, so module code
+  observes the same workspace its importer does.
+- Determinism: behavior is a pure function of the
+  script. The same file with the same ambient cwd and
+  selection behaves identically no matter who imports
+  it.
 - State: one init per file, shared by every alias.
   Top-level `LET` bindings drain into a single store
   visible to all of the module's functions.
-- Workspace: declare `WORKSPACE` or `WORKDIR`
-  in-function to read outside the module directory.
-  Without it the reset leaves the module on the
-  run-initial root (snapshot by default), even when
-  the caller switched away.
+- Workspace: `WORKSPACE` and `WORKDIR` mean the same
+  in module scope as in entry code, selecting the
+  shared workspace and moving the shared cwd.
 - Exports: only `EXPORT`ed top-level `FUNC`s and
   `EXPORT TYPE` aliases cross. Variables never cross.
 - Imports: whole-file or harvest, only exported

@@ -48,6 +48,9 @@ pub struct MockFs {
     /// separate cache backing dir; selection is tracked so resolve behavior
     /// and scope restore mirror the real resolver.
     cache_root: Option<GuardedPath>,
+    /// Cache flavor remembered alongside the cache root, so selection
+    /// round-trips exactly like the real resolver.
+    cache_local: bool,
     /// System marker remembered across switches (issue #163). Absolute
     /// paths resolve without confinement while system-selected.
     system_root: Option<GuardedPath>,
@@ -81,6 +84,7 @@ impl MockFs {
             build_context,
             snapshot_root: None,
             cache_root: None,
+            cache_local: false,
             system_root: None,
             current: MockCurrent::Snapshot,
             state: Arc::new(Mutex::new(MockState {
@@ -184,16 +188,23 @@ impl WorkspaceFs for MockFs {
         &self.build_context
     }
 
-    fn set_root(&mut self, root: &GuardedPath) {
-        self.root = root.clone();
-        if root == &self.build_context {
-            self.current = MockCurrent::Local;
-        } else if Some(root) == self.cache_root.as_ref() {
-            self.current = MockCurrent::Cache;
-        } else if Some(root) == self.system_root.as_ref() {
-            self.current = MockCurrent::System;
-        } else {
-            self.current = MockCurrent::Snapshot;
+    fn selection(&self) -> super::WorkspaceSelection {
+        match self.current {
+            MockCurrent::Snapshot => super::WorkspaceSelection::Snapshot,
+            MockCurrent::Local => super::WorkspaceSelection::Local,
+            MockCurrent::Cache => super::WorkspaceSelection::Cache {
+                local: self.cache_local,
+            },
+            MockCurrent::System => super::WorkspaceSelection::System,
+        }
+    }
+
+    fn restore_selection(&mut self, selection: super::WorkspaceSelection) {
+        match selection {
+            super::WorkspaceSelection::Snapshot => self.switch_to_snapshot(),
+            super::WorkspaceSelection::Local => self.switch_to_local(),
+            super::WorkspaceSelection::Cache { local } => self.switch_to_cache(local),
+            super::WorkspaceSelection::System => self.switch_to_system(),
         }
     }
 
@@ -213,7 +224,7 @@ impl WorkspaceFs for MockFs {
     }
 
     fn switch_to_cache(&mut self, local: bool) {
-        let _ = local;
+        self.cache_local = local;
         if self.cache_root.is_none() {
             self.cache_root = Some(self.root.clone());
         }

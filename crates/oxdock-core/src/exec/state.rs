@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
-use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs};
+use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs, WorkspaceSelection};
 use oxdock_parser::{Field, Step, TypeDescriptor, TypeTag, Value};
 use oxdock_process::{BackgroundHandle, CancelHub, CommandContext, ProcessManager};
 
@@ -70,13 +70,6 @@ pub struct ExecState<P: ProcessManager> {
     /// state stability.
     pub(super) seed: Arc<HashMap<String, String>>,
     pub(super) cwd: GuardedPath,
-    /// Workspace root the run started with, before any script
-    /// `WORKSPACE` statement. Module-owned function calls reset to it
-    /// (#115): a module must not inherit its caller's workspace, so a
-    /// module that reads outside the default (e.g. the host checkout)
-    /// declares its own `WORKSPACE` in-function. Scope pop restores
-    /// the caller afterwards.
-    pub(super) initial_root: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
     /// Each entry is the script env as it stood at that block's entry, so
     /// the block allowlist resolves against the enclosing scope even as
@@ -231,7 +224,7 @@ pub struct ExecState<P: ProcessManager> {
 
 pub(super) struct ScopeSnapshot {
     pub(super) cwd: GuardedPath,
-    pub(super) root: GuardedPath,
+    pub(super) selection: WorkspaceSelection,
     pub(super) envs: Arc<HashMap<String, String>>,
 }
 
@@ -246,11 +239,6 @@ pub(super) struct ModuleRecord {
     /// `EXPORT TYPE` names in source order. Separate from func exports
     /// so the MCP server never confuses a type for a tool.
     pub(super) type_exports: Vec<String>,
-    /// Directory relative paths in module-owned code resolve against:
-    /// the module file's parent. `None` falls back to the run cwd.
-    /// Entry code always resolves ambiently, so an inline temp script
-    /// keeps operating on the workspace it was pointed at.
-    pub(super) dir: Option<GuardedPath>,
     pub(super) init: Option<ModuleInit>,
 }
 
@@ -627,7 +615,7 @@ impl<P: ProcessManager> ExecState<P> {
         // zero I/O. The seeded scratch materializes alongside: `HOME` and
         // `TMPDIR` point at it, so children writing temp or profile data
         // must observe real directories, never lexical candidates.
-        let cwd = self.fs.resolve_write(&self.effective_cwd(), ".")?;
+        let cwd = self.fs.resolve_write(&self.cwd, ".")?;
         self.cargo_scratch.ensure_materialized()?;
         Ok(CommandContext::new(
             &cwd.into(),
@@ -712,7 +700,6 @@ impl<P: ProcessManager> ExecState<P> {
             cargo_scratch: self.cargo_scratch.clone(),
             seed: Arc::clone(&self.seed),
             cwd: self.cwd.clone(),
-            initial_root: self.initial_root.clone(),
             envs: Arc::clone(&self.envs),
             bg_children: Vec::new(),
             scope_stack: Vec::new(),
@@ -802,24 +789,13 @@ impl<P: ProcessManager> ExecState<P> {
         self.var_scopes.pop();
     }
 
-    /// Reset to a module-owned call context (#115): env to the
-    /// module init's stored map, cwd to the defining file's directory,
-    /// workspace root to the run-initial root. A module never inherits
-    /// its caller's context; the surrounding `push_scope` restores the
-    /// caller afterwards. Root switching lives here (not in handlers)
-    /// so workspace demand keeps routing through the resolve choke
-    /// points.
-    pub(super) fn reset_module_context(
-        &mut self,
-        dir: Option<GuardedPath>,
-        envs: HashMap<String, String>,
-    ) {
+    /// Reset module-owned env (#115): env to the module init's
+    /// stored map. Nothing else is touched: workspace selection and
+    /// cwd are ambient and flow through from the caller, so a module
+    /// operates in the same workspace its importer does. The
+    /// surrounding `push_scope` restores the caller afterwards.
+    pub(super) fn reset_module_env(&mut self, envs: HashMap<String, String>) {
         self.envs = Arc::new(envs);
-        if let Some(dir) = dir {
-            self.cwd = dir;
-        }
-        let initial = self.initial_root.clone();
-        self.fs.set_root(&initial);
     }
 
     /// Enter a lexical scope: snapshot cwd/root/envs and open a fresh
@@ -829,7 +805,7 @@ impl<P: ProcessManager> ExecState<P> {
     pub(super) fn push_scope(&mut self) {
         self.scope_stack.push(ScopeSnapshot {
             cwd: self.cwd.clone(),
-            root: self.fs.root().clone(),
+            selection: self.fs.selection(),
             envs: Arc::clone(&self.envs),
         });
         self.functions.push_scope();
@@ -842,7 +818,7 @@ impl<P: ProcessManager> ExecState<P> {
             .scope_stack
             .pop()
             .ok_or_else(|| anyhow::anyhow!("scope stack underflow during pop"))?;
-        self.fs.set_root(&snapshot.root);
+        self.fs.restore_selection(snapshot.selection);
         self.cwd = snapshot.cwd;
         self.envs = snapshot.envs;
         self.functions.pop_scope();
@@ -1013,24 +989,6 @@ impl<P: ProcessManager> ExecState<P> {
     /// accessors that write through to the store in place.
     fn module_var_mut(&mut self, key: &str) -> Option<&mut (TypeTag, Value)> {
         self.module_store_mut()?.get_mut(key)
-    }
-
-    /// Base directory relative paths resolve against (#115): the
-    /// owning module file's parent directory when executing
-    /// module-owned code, so a module behaves the same no matter
-    /// which importer calls it. Entry code (and anything past an
-    /// entry boundary) resolves against the run cwd, so inline temp
-    /// scripts keep operating on the workspace they were pointed at.
-    pub(super) fn effective_cwd(&self) -> GuardedPath {
-        if let Some(module) = self.current_module()
-            && let Some(dir) = self
-                .modules
-                .get(&module)
-                .and_then(|record| record.dir.clone())
-        {
-            return dir;
-        }
-        self.cwd.clone()
     }
 
     /// Get a flattened view of all variables across all scopes.

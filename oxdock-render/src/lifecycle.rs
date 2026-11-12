@@ -1,6 +1,6 @@
 //! Embedded pipeline integrity: uniformity check over served files.
 //!
-//! The binary carries its pipeline files (see [`crate::overlay`]) and
+//! The binary carries its pipeline files (see [`crate::embedded`]) and
 //! serves them from memory, so a bare binary runs anywhere without a
 //! source checkout and without writing pipeline files into consumer
 //! repos. What runs is the binary's version, never Rust-assembled
@@ -67,7 +67,7 @@ pub(crate) fn check_plugin_uniformity(
 }
 
 /// Byte-copy one static script out of the served tree: what runs is
-/// what the overlay serves, never Rust-assembled text.
+/// what the embedded layer serves, never Rust-assembled text.
 pub(crate) fn read_support(fs: &dyn WorkspaceFs, root: &GuardedPath, rel: &str) -> Result<String> {
     let path = root.join(rel)?;
     fs.read_to_string(&path)

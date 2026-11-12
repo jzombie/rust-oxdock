@@ -437,7 +437,6 @@ pub(crate) fn new_state<P: ProcessManager>(
         cargo_scratch,
         seed,
         cwd: cwd.clone(),
-        initial_root: cwd,
         envs,
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
