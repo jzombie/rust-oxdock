@@ -1,0 +1,4 @@
+{
+  "name": "setup-oxdock-render",
+  "description": "Setup OxDock renderer composite action for CI legs."
+}
