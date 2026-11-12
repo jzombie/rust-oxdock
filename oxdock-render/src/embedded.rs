@@ -86,11 +86,17 @@ pub(crate) fn warn_on_shadowed_dist(resolver: &PathResolver, root: &GuardedPath)
             Ok(path) => path,
             Err(_) => continue,
         };
-        let disk = match resolver.read_file(&path) {
-            Ok(disk) => disk,
+        // Existence and length first: only read the file when a
+        // byte-for-byte comparison is actually needed.
+        let stale = match resolver.metadata(&path) {
             Err(_) => continue,
+            Ok(meta) if meta.len() as usize != bytes.len() => true,
+            Ok(_) => match resolver.read_file(&path) {
+                Ok(disk) => disk.as_slice() != *bytes,
+                Err(_) => continue,
+            },
         };
-        if disk.as_slice() != *bytes {
+        if stale {
             eprintln!(
                 "render: ignoring on-disk '{rel}' (it differs from this binary's embedded pipeline, which is authoritative); delete it to silence this warning"
             );
@@ -175,7 +181,7 @@ impl WorkspaceFs for EmbeddedFiles {
 
     fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
         if let Some(bytes) = embedded_for(path) {
-            return Ok(Box::new(std::io::Cursor::new(bytes.to_vec())));
+            return Ok(Box::new(std::io::Cursor::new(bytes)));
         }
         self.inner.open_read(path)
     }
@@ -194,7 +200,7 @@ impl WorkspaceFs for EmbeddedFiles {
         expected_root: &GuardedPath,
     ) -> Result<Box<dyn std::io::Read + Send>> {
         if let Some(bytes) = embedded_for(path) {
-            return Ok(Box::new(std::io::Cursor::new(bytes.to_vec())));
+            return Ok(Box::new(std::io::Cursor::new(bytes)));
         }
         self.inner.open_read_nofollow(path, expected_root)
     }
