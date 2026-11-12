@@ -5,7 +5,7 @@
 # runs; SCAN discovers plus expands fragments into the staging
 # source manifest; ASSEMBLE promotes it. The child never imports
 # this file: it receives the unrolled calls, never stubs.
-FUNC STAGES() {
+FUNC STAGES(): LIST<STRING> {
     RETURN ["INGEST", "SCAN", "ASSEMBLE", "RENDER", "DEFERRED", "WRITE_OUT", "VERIFY"]
 }
 

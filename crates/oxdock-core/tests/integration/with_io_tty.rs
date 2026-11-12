@@ -300,7 +300,7 @@ fn tty_stdio_never_promotes_to_os_pipe() {
     let script = indoc! {r#"
         IMPORT [STD]
         INHERIT_ENV [PATH]
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             LET $p: PIPE
             LET $q: PIPE
             WITH_IO [tty, stdin=$p, stdout=$q] RUN "echo hi"

@@ -10,9 +10,9 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.36.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.37.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.36.0-alpha`, or install the standalone runner with `cargo install oxdock@0.36.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.37.0-alpha`, or install the standalone runner with `cargo install oxdock@0.37.0-alpha`.
 
 ### Run a script with the CLI
 
@@ -463,7 +463,7 @@ Every variable the seed provides to spawned children is specified in [ENV_CONTRA
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.36.0-alpha
+cargo install oxdock@0.37.0-alpha
 ```
 
 Run a script file:
@@ -526,7 +526,7 @@ State mutations stay where the script puts them. Entering a braced block or a fu
 ```oxdock
 # Calls snapshot caller state: the parameter shadows without clobbering.
 LET $v: STRING = "outer"
-FUNC SHADOW($v: STRING) {
+FUNC SHADOW($v: STRING): STRING {
     LET $inner: STRING = "inner"
     RETURN $v
 }
@@ -537,7 +537,7 @@ ASSERT_EQ $v "outer"
 
 # Background tasks fork the same way: worker mutations never escape.
 LET $w: STRING = "outer"
-LET $t: HANDLE = ASYNC {
+LET $t: HANDLE<VOID> = ASYNC {
     $w = "inner"
     ECHO "task-ran"
 }
@@ -722,7 +722,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $version: STRING = #crate_version
     MKDIR dist
 
-    FUNC STAMP($name: STRING) {
+    FUNC STAMP($name: STRING): STRING {
         WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
         RETURN $name
     }
@@ -730,7 +730,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         STAMP($name)
     }
 
-    FUNC PICK($flag: BOOL) {
+    FUNC PICK($flag: BOOL): STRING {
         IF $flag {
             RETURN "alpha"
         }
@@ -742,8 +742,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.36.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.36.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.37.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.37.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -755,7 +755,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.36.0-alpha"
+    "alpha OxDock 0.37.0-alpha"
 );
 ```
 
@@ -1247,7 +1247,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.36.0-alpha", default-features = false }
+oxdock = { version = "0.37.0-alpha", default-features = false }
 ```
 
 ## Glossary

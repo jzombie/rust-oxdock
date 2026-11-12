@@ -56,8 +56,9 @@ fn call_and_string_loop_throughput() {
     let start = Instant::now();
     run_script(indoc! {r#"
         IMPORT [STD]
-        FUNC WORK($x: INT) {
-          RETURN TEXT_TRIM("  {{ $x }}  ")
+        FUNC WORK($x: INT): STRING {
+          LET $s: STRING = TEXT_TRIM("  {{ $x }}  ")
+          RETURN $s
         }
         LET $i: INT = 0
         LET $last: STRING = ""

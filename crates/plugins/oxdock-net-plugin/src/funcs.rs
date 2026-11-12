@@ -51,6 +51,21 @@ fn next_listener_id() -> String {
 /// Default dial timeout for `NET_CONNECT` without a `timeout` option.
 const DEFAULT_DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Result map keys for NET outcomes. Single source for the `Field`
+/// schemas and every insert site, so a rename cannot drift one side.
+const FIELD_LISTENER: &str = "listener";
+const FIELD_ADDR: &str = "addr";
+const FIELD_VIRTUAL: &str = "virtual";
+const FIELD_CLOSED: &str = "closed";
+
+/// Option map keys for NET calls. Single source for every lookup, so
+/// the `#[options]` attribute spellings and the reads cannot drift.
+const OPT_NO_HALF_CLOSE: &str = "no_half_close";
+const OPT_TIMEOUT: &str = "timeout";
+const OPT_HEADERS: &str = "headers";
+const OPT_MAX_BODY_BYTES: &str = "max_body_bytes";
+const OPT_MAX_REDIRECTS: &str = "max_redirects";
+
 /// Accept-loop poll interval. Non-blocking accept has no timeout knob in
 /// `std`, so the tick is the wakeup source; it only ever delays
 /// connection setup (once per accept), never the data path. Ten
@@ -147,7 +162,7 @@ fn net_listen<P: ProcessManager>(
         "listener".to_string(),
         Value::mint_heap(NetListenerTag::descriptor(), NetListenerTag::new(state)),
     );
-    out.insert("addr".to_string(), Value::string(addr_text));
+    out.insert(FIELD_ADDR.to_string(), Value::string(addr_text));
     out.insert(
         "virtual".to_string(),
         Value::string(key.endpoint.to_string()),
@@ -164,7 +179,7 @@ fn net_listen<P: ProcessManager>(
 /// its input, so the reply cannot race teardown.
 ///
 #[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
-    name: "closed".to_string(),
+    name: FIELD_CLOSED.to_string(),
     ty: TypeTag::Bool,
     docs: "True when the connection closed cleanly.",
     optional: false,
@@ -178,12 +193,12 @@ fn net_listen<P: ProcessManager>(
     # Accept one connection into fresh pipes.
     LET $in: PIPE
     LET $out: PIPE
-    LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+    LET $acc: HANDLE<MAP<closed: BOOL>> = ASYNC { RETURN NET_ACCEPT($l.listener, $in, $out, {}) }
 
     # Connect a client to the listener.
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { NET_CONNECT("doc-net-demo", $cin, $cout, {}) }
+    LET $c: HANDLE<MAP<closed: BOOL>> = ASYNC { RETURN NET_CONNECT("doc-net-demo", $cin, $cout, {}) }
 
     # Greet through the server pipe and wait for delivery.
     WITH_IO [stdout=$in] ECHO "server-greeting"
@@ -217,7 +232,7 @@ fn net_accept<P: ProcessManager>(
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!(
-            "NET_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ NET_ACCEPT($l, $in, $out, {{}}) }}"
+            "NET_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ NET_ACCEPT($l, $in, $out, {{}}) }}"
         );
     }
     let state = Arc::clone(listener.state());
@@ -225,7 +240,7 @@ fn net_accept<P: ProcessManager>(
     // Unknown keys already failed in the wrapper against the same
     // `#[options]` static the metadata renders; only read known keys.
     let mut no_half_close = false;
-    if let Some(value) = map.get("no_half_close") {
+    if let Some(value) = map.get(OPT_NO_HALF_CLOSE) {
         // `check_options` verified `BOOL`; narrow directly.
         no_half_close = value.as_bool().expect("check_options verified BOOL");
     }
@@ -273,7 +288,7 @@ fn net_accept<P: ProcessManager>(
             !no_half_close,
         )?;
         let mut out = BTreeMap::new();
-        out.insert("closed".to_string(), Value::bool(true));
+        out.insert(FIELD_CLOSED.to_string(), Value::bool(true));
         return Ok(Value::map(out));
     }
     let Some(listener) = state.try_clone_listener() else {
@@ -311,7 +326,7 @@ fn net_accept<P: ProcessManager>(
         !no_half_close,
     )?;
     let mut out = BTreeMap::new();
-    out.insert("closed".to_string(), Value::bool(true));
+    out.insert(FIELD_CLOSED.to_string(), Value::bool(true));
     Ok(Value::map(out))
 }
 
@@ -344,7 +359,7 @@ fn net_close<P: ProcessManager>(cx: &mut StepCtx<P>, listener: NetListenerTag) -
 /// before any socket work. Returns a MAP with `closed` (BOOL).
 #[oxdock_func(
     returns = TypeTag::Record(std::sync::Arc::from([Field {
-        name: "closed".to_string(),
+        name: FIELD_CLOSED.to_string(),
         ty: TypeTag::Bool,
         docs: "True when the connection closed cleanly.",
         optional: false,
@@ -358,10 +373,10 @@ fn net_close<P: ProcessManager>(cx: &mut StepCtx<P>, listener: NetListenerTag) -
     LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-connect", {})
     LET $in: PIPE
     LET $out: PIPE
-    LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+    LET $acc: HANDLE<MAP<closed: BOOL>> = ASYNC { RETURN NET_ACCEPT($l.listener, $in, $out, {}) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { NET_CONNECT("doc-net-connect", $cin, $cout, {}) }
+    LET $c: HANDLE<MAP<closed: BOOL>> = ASYNC { RETURN NET_CONNECT("doc-net-connect", $cin, $cout, {}) }
 
     # Close both inputs: each pump observes EOF, half-closes, and both
     # tasks return their result maps with no cancellation. Closing only
@@ -389,7 +404,7 @@ fn net_connect<P: ProcessManager>(
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!(
-            "NET_CONNECT requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ NET_CONNECT($target, $in, $out, {{}}) }}"
+            "NET_CONNECT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ NET_CONNECT($target, $in, $out, {{}}) }}"
         );
     }
     // Module-shared endpoint registry: stashed at registration, so
@@ -404,7 +419,7 @@ fn net_connect<P: ProcessManager>(
     let map = &options;
     let mut timeout = DEFAULT_DIAL_TIMEOUT;
     let mut no_half_close = false;
-    if let Some(value) = map.get("timeout") {
+    if let Some(value) = map.get(OPT_TIMEOUT) {
         // `check_options` verified `DURATION|STRING`; narrow directly.
         if let Some(duration) = value.as_duration() {
             timeout = duration;
@@ -413,11 +428,11 @@ fn net_connect<P: ProcessManager>(
                 .as_str()
                 .expect("check_options verified DURATION|STRING");
             timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
-                format!("NET_CONNECT option 'timeout' must be a duration, got {text:?}")
+                format!("NET_CONNECT option '{OPT_TIMEOUT}' must be a duration, got {text:?}")
             })?;
         }
     }
-    if let Some(value) = map.get("no_half_close") {
+    if let Some(value) = map.get(OPT_NO_HALF_CLOSE) {
         no_half_close = value.as_bool().expect("check_options verified BOOL");
     }
     // Sandbox gate first: offline runs open no OS sockets, so even a
@@ -467,7 +482,7 @@ fn dial_tcp<P: ProcessManager>(
         .with_context(|| format!("NET_CONNECT {target:?} dial failed"))?;
     pump_stream(cx, "NET_CONNECT", in_pipe, out_pipe, stream, half_close)?;
     let mut out = BTreeMap::new();
-    out.insert("closed".to_string(), Value::bool(true));
+    out.insert(FIELD_CLOSED.to_string(), Value::bool(true));
     Ok(Value::map(out))
 }
 
@@ -530,7 +545,7 @@ fn connect_memory<P: ProcessManager>(
         half_close,
     )?;
     let mut out = BTreeMap::new();
-    out.insert("closed".to_string(), Value::bool(true));
+    out.insert(FIELD_CLOSED.to_string(), Value::bool(true));
     Ok(Value::map(out))
 }
 
@@ -578,19 +593,19 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
 fn listen_result_fields() -> Arc<[Field]> {
     Arc::from(vec![
         Field {
-            name: "listener".to_string(),
+            name: FIELD_LISTENER.to_string(),
             ty: TypeTag::Custom(NetListenerTag::descriptor()),
             docs: "Listener handle for `NET_ACCEPT` and `NET_CLOSE`.",
             optional: false,
         },
         Field {
-            name: "addr".to_string(),
+            name: FIELD_ADDR.to_string(),
             ty: TypeTag::String,
             docs: "Bound socket address (`ip:port`), or the virtual endpoint echo when socketless.",
             optional: false,
         },
         Field {
-            name: "virtual".to_string(),
+            name: FIELD_VIRTUAL.to_string(),
             ty: TypeTag::String,
             docs: "Virtual endpoint echo of the claimed slot.",
             optional: false,
@@ -708,7 +723,7 @@ fn net_addr<P: ProcessManager>(
     LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-fetch", {})
     LET $in: PIPE
     LET $out: PIPE
-    LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+    LET $acc: HANDLE<VOID> = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
     WITH_IO [stdout=$in] ECHO "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"
     LET $base: STRING = NET_ADDR("doc-net-fetch")
     LET $body: STRING = NET_FETCH("http://{{ $base }}/doc.json", {})
@@ -734,7 +749,7 @@ fn net_fetch<P: ProcessManager>(
     let _ = cx;
     let options_map = &options;
     let mut headers = Vec::new();
-    if let Some(value) = options_map.get("headers") {
+    if let Some(value) = options_map.get(OPT_HEADERS) {
         // `check_options` verified `MAP<STRING>`; narrow directly.
         for (entry_key, entry_value) in value.as_map().expect("check_options verified MAP<STRING>")
         {
@@ -748,7 +763,7 @@ fn net_fetch<P: ProcessManager>(
         }
     }
     let mut timeout = crate::fetch::DEFAULT_FETCH_TIMEOUT;
-    if let Some(value) = options_map.get("timeout") {
+    if let Some(value) = options_map.get(OPT_TIMEOUT) {
         // `check_options` verified `DURATION|STRING`; narrow directly.
         if let Some(duration) = value.as_duration() {
             timeout = duration;
@@ -757,28 +772,28 @@ fn net_fetch<P: ProcessManager>(
                 .as_str()
                 .expect("check_options verified DURATION|STRING");
             timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
-                format!("NET_FETCH option 'timeout' must be a duration, got {text:?}")
+                format!("NET_FETCH option '{OPT_TIMEOUT}' must be a duration, got {text:?}")
             })?;
         }
     }
     let mut max_body_bytes = crate::fetch::DEFAULT_MAX_BODY_BYTES;
-    if let Some(value) = options_map.get("max_body_bytes") {
+    if let Some(value) = options_map.get(OPT_MAX_BODY_BYTES) {
         let n = value.as_i64().expect("check_options verified INT");
         if n < 0 {
-            bail!("NET_FETCH option 'max_body_bytes' must be non-negative, got {n}");
+            bail!("NET_FETCH option '{OPT_MAX_BODY_BYTES}' must be non-negative, got {n}");
         }
         max_body_bytes = n as u64;
     }
     let mut max_redirects = crate::fetch::DEFAULT_MAX_REDIRECTS as u64;
-    if let Some(value) = options_map.get("max_redirects") {
+    if let Some(value) = options_map.get(OPT_MAX_REDIRECTS) {
         let n = value.as_i64().expect("check_options verified INT");
         if n < 0 {
-            bail!("NET_FETCH option 'max_redirects' must be non-negative, got {n}");
+            bail!("NET_FETCH option '{OPT_MAX_REDIRECTS}' must be non-negative, got {n}");
         }
         max_redirects = n as u64;
     }
     let max_redirects = u32::try_from(max_redirects).map_err(|_| {
-        anyhow::anyhow!("NET_FETCH() option 'max_redirects' exceeds u32: {max_redirects}")
+        anyhow::anyhow!("NET_FETCH() option '{OPT_MAX_REDIRECTS}' exceeds u32: {max_redirects}")
     })?;
     let body = fetch_text_with_options(
         &url,

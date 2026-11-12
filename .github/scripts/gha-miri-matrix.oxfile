@@ -37,7 +37,7 @@ ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
 # unsupported under Miri upstream. Libs + integration targets are
 # the whole provable set. The chunk loop below splits each pair's
 # tests into shards of at most $shard_size tests.
-FUNC MIRI_JOBS($packages: LIST<MAP<ANY>>) {
+FUNC MIRI_JOBS($packages: LIST<MAP<ANY>>): LIST<LIST<STRING>> {
   LET $jobs: LIST<LIST<STRING>> = []
   FOR $p: MAP<ANY> IN $packages {
     LET $pkg: STRING = $p.name
@@ -71,7 +71,7 @@ FUNC MIRI_JOBS($packages: LIST<MAP<ANY>>) {
 # One matrix entry: {package, args, tests, index} as JSON. Single
 # construction site for the chunk loop below, which flushes on full
 # shards and once more on the remainder.
-FUNC MIRI_SHARD_ENTRY($pkg: STRING, $flag: STRING, $tests: STRING, $index: INT) {
+FUNC MIRI_SHARD_ENTRY($pkg: STRING, $flag: STRING, $tests: STRING, $index: INT): STRING {
   RETURN "{\"package\":\"{{ $pkg }}\",\"args\":\"{{ $flag }}\",\"tests\":\"{{ $tests }}\",\"index\":{{ $index }}}"
 }
 

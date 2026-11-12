@@ -5,8 +5,9 @@ use std::sync::Arc;
 pub use crate::commands::{AssertTarget, StepKind};
 use crate::constants::{
     KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONTINUE, KEYWORD_ELSE,
-    KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_LET,
-    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_TYPE, KEYWORD_WHILE,
+    KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN,
+    KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_TIMEOUT, KEYWORD_TYPE,
+    KEYWORD_WHILE, KEYWORD_WITH_IO,
 };
 
 /// One module's function surface for parse-time call resolution: the base
@@ -137,7 +138,7 @@ impl Command {
             Command::Echo => "ECHO",
             Command::Run => "RUN",
             Command::Copy => "COPY",
-            Command::WithIo => "WITH_IO",
+            Command::WithIo => KEYWORD_WITH_IO,
             Command::CopyGit => "COPY_GIT",
             Command::Symlink => "SYMLINK",
             Command::Mkdir => "MKDIR",
@@ -158,9 +159,9 @@ impl Command {
             Command::AssertNe => "ASSERT_NE",
             Command::AssertContains => "ASSERT_CONTAINS",
             Command::Exit => "EXIT",
-            Command::Async => "ASYNC",
-            Command::Timeout => "TIMEOUT",
-            Command::Isolated => "ISOLATED",
+            Command::Async => KEYWORD_ASYNC,
+            Command::Timeout => KEYWORD_TIMEOUT,
+            Command::Isolated => KEYWORD_ISOLATED,
             Command::Sleep => "SLEEP",
             Command::ListAppend => "LIST_APPEND",
         }
@@ -226,7 +227,7 @@ impl Command {
             "ECHO" => Some(Command::Echo),
             "RUN" => Some(Command::Run),
             "COPY" => Some(Command::Copy),
-            "WITH_IO" => Some(Command::WithIo),
+            KEYWORD_WITH_IO => Some(Command::WithIo),
             "COPY_GIT" => Some(Command::CopyGit),
             "SYMLINK" => Some(Command::Symlink),
             "MKDIR" => Some(Command::Mkdir),
@@ -247,9 +248,9 @@ impl Command {
             "ASSERT_NE" => Some(Command::AssertNe),
             "ASSERT_CONTAINS" => Some(Command::AssertContains),
             "EXIT" => Some(Command::Exit),
-            "ASYNC" => Some(Command::Async),
-            "TIMEOUT" => Some(Command::Timeout),
-            "ISOLATED" => Some(Command::Isolated),
+            KEYWORD_ASYNC => Some(Command::Async),
+            KEYWORD_TIMEOUT => Some(Command::Timeout),
+            KEYWORD_ISOLATED => Some(Command::Isolated),
             "SLEEP" => Some(Command::Sleep),
             "LIST_APPEND" => Some(Command::ListAppend),
             _ => None,
@@ -293,7 +294,7 @@ pub const STRUCTURAL_KEYWORDS: &[&str] = &[
 /// (`IN` only heads `FOR` iterations). Declared alongside
 /// [`STRUCTURAL_KEYWORDS`] so grammar-conformance tests never hardcode
 /// exception lists of their own.
-pub const CLAUSE_KEYWORDS: &[&str] = &["IN"];
+pub const CLAUSE_KEYWORDS: &[&str] = &[KEYWORD_IN];
 
 /// One namespaced guard predicate. Every guard in the language is a
 /// namespace plus an optional subject plus an optional value; the

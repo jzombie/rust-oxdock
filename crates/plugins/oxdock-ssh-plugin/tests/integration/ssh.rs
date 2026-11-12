@@ -497,8 +497,8 @@ fn accept_echo_roundtrip() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-echo", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
-        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
-        LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $echo: HANDLE<VOID> = ASYNC { SSH_PUMP($out, $in) }
         AWAIT $acc
         AWAIT $echo
         SSH_CLOSE($m.server)
@@ -538,8 +538,8 @@ fn pty_request_accepted_echo_roundtrip() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
-        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
-        LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $echo: HANDLE<VOID> = ASYNC { SSH_PUMP($out, $in) }
         AWAIT $acc
         AWAIT $echo
         SSH_CLOSE($m.server)
@@ -601,11 +601,11 @@ fn pty_explicit_size() {
         [family:windows] {
             $child = ["cmd", "/c", "mode con"]
         }
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, $child, 40, 100, $in, $out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, $child, 40, 100, $in, $out) }
             AWAIT $t
             [family:unix] {
                 ASSERT_CONTAINS $out "40 100"
@@ -652,12 +652,12 @@ fn outer_window_change_reaches_pty_child_unix() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-unix", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $c_in: PIPE
             LET $c_out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "while IFS= read -r line; do stty size; done"], 0, 0, $c_out, $c_in) }
-            LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["sh", "-c", "while IFS= read -r line; do stty size; done"], 0, 0, $c_out, $c_in) }
+            LET $p: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
             AWAIT $t
             AWAIT $p
         }
@@ -716,12 +716,12 @@ fn outer_window_change_reaches_pty_child_windows() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-windows", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $c_in: PIPE
             LET $c_out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["powershell", "-NoProfile", "-Command", "while (($l = [Console]::In.ReadLine()) -ne $null) { if ($l -eq 'quit') { Write-Output 'BYE'; break }; Write-Output \"W=$([Console]::WindowWidth) H=$([Console]::WindowHeight)\" }"], 0, 0, $c_out, $c_in) }
-            LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["powershell", "-NoProfile", "-Command", "while (($l = [Console]::In.ReadLine()) -ne $null) { if ($l -eq 'quit') { Write-Output 'BYE'; break }; Write-Output \"W=$([Console]::WindowWidth) H=$([Console]::WindowHeight)\" }"], 0, 0, $c_out, $c_in) }
+            LET $p: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
             AWAIT $t
             AWAIT $p
         }
@@ -787,7 +787,7 @@ fn pty_child_sees_session_env() {
         [family:windows] {
             $child = ["cmd", "/c", "echo relay:%SSH_USER%:%SSH_CLIENT%:%SSH_SERVER%:%SSH_COMMAND%:%PROBE_TOP%"]
         }
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             ENV SSH_USER="{{ $dq.username }}"
             ENV SSH_CLIENT="{{ $dq.addr }}"
@@ -795,7 +795,7 @@ fn pty_child_sees_session_env() {
             ENV SSH_COMMAND="{{ $dq.command }}"
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, $child, 0, 0, $in, $out) }
+            LET $t: HANDLE<VOID> = ASYNC { SSH_PTY_RUN($dq.session, $child, 0, 0, $in, $out) }
             AWAIT $t
             ASSERT_CONTAINS $out "relay:u:127.0.0.1:"
             ASSERT_CONTAINS $out "127.0.0.1:"
@@ -837,11 +837,11 @@ fn argv_preserves_quote_backslash_unix() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-unix", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["printf", "%s", $dq.command], 0, 0, $in, $out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["printf", "%s", $dq.command], 0, 0, $in, $out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 0
             ASSERT_CONTAINS $out "a\"b\\c"
@@ -903,12 +903,12 @@ fn run_cancel_with_orphan_stdout_returns_promptly() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-orphan", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $to_child: PIPE
             LET $from_child: PIPE
             LET $err: PIPE
-            LET $run: HANDLE = ASYNC { TIMEOUT 8s SSH_RUN($dq.session, ["sh", "-c", "sleep 20 >&1 &"], $to_child, $from_child, $err) }
+            LET $run: HANDLE<INT> = ASYNC { LET $c: INT = TIMEOUT 8s SSH_RUN($dq.session, ["sh", "-c", "sleep 20 >&1 &"], $to_child, $from_child, $err); RETURN $c }
             LET $code: INT = AWAIT $run
             ASSERT_EQ $code 0
         }
@@ -973,8 +973,8 @@ fn pump_workers_drain_after_completion_and_cancel() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-drain-clean", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
-        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
-        LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $echo: HANDLE<VOID> = ASYNC { SSH_PUMP($out, $in) }
         AWAIT $acc
         AWAIT $echo
         SSH_CLOSE($m.server)
@@ -1009,10 +1009,10 @@ fn pump_workers_drain_after_completion_and_cancel() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-drain-cancel", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
-        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-drain-cancel", "guest", "__TEST_PASSWORD__", $cin, $cout) }
+        LET $c: HANDLE<VOID> = ASYNC { SSH_CONNECT("test-ssh-drain-cancel", "guest", "__TEST_PASSWORD__", $cin, $cout) }
         WITH_IO [stdout=$in] ECHO "server-greeting"
         AWAIT $acc
         CANCEL $c
@@ -1051,11 +1051,11 @@ fn cmd_argv_preserves_backslashes_windows() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-bs-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", $dq.command], 0, 0, $in, $out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["cmd", "/c", $dq.command], 0, 0, $in, $out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 0
             ASSERT_CONTAINS $out "AB\\CD"
@@ -1096,12 +1096,12 @@ fn cmd_env_quote_behavior_windows() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-q-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             ENV SSH_COMMAND="{{ $dq.command }}"
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 0
             ASSERT_CONTAINS $out "\"foo bar\""
@@ -1141,11 +1141,11 @@ fn cmd_argv_percent_verbatim_windows() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-pct-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", $dq.command], 0, 0, $in, $out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["cmd", "/c", $dq.command], 0, 0, $in, $out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 0
             ASSERT_CONTAINS $out "100%%done"
@@ -1187,12 +1187,12 @@ fn env_relay_preserves_backslashes_windows() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-bs-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             ENV SSH_COMMAND="{{ $dq.command }}"
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 0
             ASSERT_CONTAINS $out "AB\\CD\\\\EF"
@@ -1233,12 +1233,12 @@ fn cmd_env_relay_quoted_reg_query_windows() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-reg-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             ENV SSH_COMMAND="{{ $dq.command }}"
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 0
             ASSERT_CONTAINS $out "SetupType"
@@ -1288,12 +1288,12 @@ fn cmd_env_relay_full_probe_windows() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-probe-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             ENV SSH_COMMAND="{{ $dq.command }}"
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 0
             ASSERT_CONTAINS $out "[SETUP]"
@@ -1350,12 +1350,12 @@ fn cmd_env_relay_quoted_powershell_windows() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-ps-win", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             ENV SSH_COMMAND="{{ $dq.command }}"
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 0
             ASSERT_CONTAINS $out "QP-ALPHA"
@@ -1407,8 +1407,8 @@ fn interactive_shell_first_bytes_survive_windows() {
         WHILE $i < 10 {
             LET $in: PIPE
             LET $out: PIPE
-            LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
-            LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+            LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+            LET $echo: HANDLE<VOID> = ASYNC { SSH_PUMP($out, $in) }
             AWAIT $acc
             AWAIT $echo
             $i = $i + 1
@@ -1459,14 +1459,14 @@ fn semaphore_guards_the_accept_loop() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-sem", {username: "guest", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
-        LET $w: HANDLE = ASYNC {
+        LET $w: HANDLE<BOOL> = ASYNC {
             LET $s1: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $a1: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
             LET $held1: BOOL = $a1.held
             ASSERT_EQ $held1 true
             LET $permit: PERMIT = $a1.permit
             WRITE stage1.txt "admitted"
-            LET $hold: HANDLE = ASYNC {
+            LET $hold: HANDLE<BOOL> = ASYNC {
                 LET $s2: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
                 LET $a2: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
                 WRITE rejected.txt "{{ $a2.held }}"
@@ -1478,7 +1478,7 @@ fn semaphore_guards_the_accept_loop() {
         }
         LET $res: BOOL = AWAIT $w
         ASSERT_EQ $res false
-        LET $t3: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+        LET $t3: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
         LET $s3: MAP<ANY> = AWAIT $t3
         LET $a3: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
         WRITE admitted.txt "{{ $a3.held }}"
@@ -1530,11 +1530,11 @@ fn pty_live_resize() {
         [family:windows] {
             $child = ["cmd", "/c", "ping -n 5 127.0.0.1 >nul & mode con"]
         }
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, $child, 0, 0, $in, $out) }
+            LET $t: HANDLE<VOID> = ASYNC { SSH_PTY_RUN($dq.session, $child, 0, 0, $in, $out) }
             AWAIT $t
             [family:unix] {
                 ASSERT_CONTAINS $out "50 120"
@@ -1595,7 +1595,7 @@ fn teardown_wakes_blocked_accept() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-teardown", {username: "guest", password: "pass"})
         LET $in: PIPE
         LET $out: PIPE
-        LET $t: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $t: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
         SLEEP 2s
         SSH_CLOSE($m.server)
         AWAIT $t
@@ -1621,7 +1621,7 @@ fn cancel_mid_pump_terminates() {
         INHERIT_ENV [PATH]
         LET $a: PIPE
         LET $b: PIPE
-        LET $t: HANDLE = ASYNC SSH_PUMP($a, $b)
+        LET $t: HANDLE<VOID> = ASYNC SSH_PUMP($a, $b)
         TIMEOUT 2s AWAIT $t
     "#};
     let start = Instant::now();
@@ -1655,7 +1655,7 @@ fn inner_exit_closes_outer_session() {
         WRITE addr.txt "{{ $m.addr }}"
         LET $c_in: PIPE
         LET $c_out: PIPE
-        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $c_in, $c_out) }
+        LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $c_in, $c_out) }
         WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["sh", "-c", "echo canned-response"]
         AWAIT $acc
         SSH_CLOSE($m.server)
@@ -1718,8 +1718,8 @@ fn real_openssh_client_echo_roundtrip() {
         WRITE addr.txt "{{ $m.addr }}"
         LET $in: PIPE
         LET $out: PIPE
-        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
-        LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $echo: HANDLE<VOID> = ASYNC { SSH_PUMP($out, $in) }
         AWAIT $acc
         AWAIT $echo
         SSH_CLOSE($m.server)
@@ -1781,16 +1781,16 @@ fn proxy_outer_to_inner_roundtrip() {
         LET $i: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-inner", {username: "inner", password: "__INNER_PASSWORD__"})
         LET $j_in: PIPE
         LET $j_out: PIPE
-        LET $h_inner: HANDLE = ASYNC { SSH_ACCEPT($i.server, $j_in, $j_out) }
-        LET $h_iecho: HANDLE = ASYNC { SSH_PUMP($j_out, $j_in) }
+        LET $h_inner: HANDLE<VOID> = ASYNC { SSH_ACCEPT($i.server, $j_in, $j_out) }
+        LET $h_iecho: HANDLE<VOID> = ASYNC { SSH_PUMP($j_out, $j_in) }
         LET $c_in: PIPE
         LET $c_out: PIPE
         LET $i_in: PIPE
         LET $i_out: PIPE
-        LET $h_conn: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-inner", "inner", "__INNER_PASSWORD__", $i_in, $i_out) }
-        LET $h_p1: HANDLE = ASYNC { SSH_PUMP($c_out, $i_in) }
-        LET $h_p2: HANDLE = ASYNC { SSH_PUMP($i_out, $c_in) }
-        LET $h_acc: HANDLE = ASYNC { SSH_ACCEPT($o.server, $c_in, $c_out) }
+        LET $h_conn: HANDLE<VOID> = ASYNC { SSH_CONNECT("test-ssh-proxy-inner", "inner", "__INNER_PASSWORD__", $i_in, $i_out) }
+        LET $h_p1: HANDLE<VOID> = ASYNC { SSH_PUMP($c_out, $i_in) }
+        LET $h_p2: HANDLE<VOID> = ASYNC { SSH_PUMP($i_out, $c_in) }
+        LET $h_acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($o.server, $c_in, $c_out) }
         AWAIT $h_acc
         AWAIT $h_conn
         AWAIT $h_p1
@@ -2072,8 +2072,8 @@ fn loaded_host_key_serves_clients() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-client", {username: "guest", password: "__TEST_PASSWORD__", key_path: "ssh_host_key"})
         LET $in: PIPE
         LET $out: PIPE
-        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
-        LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $echo: HANDLE<VOID> = ASYNC { SSH_PUMP($out, $in) }
         AWAIT $acc
         AWAIT $echo
         SSH_CLOSE($m.server)
@@ -2293,7 +2293,7 @@ fn dequeue_exposes_metadata_before_pump() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-dequeue", {username: "guest", password: "__TEST_PASSWORD__"})
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             WRITE meta.txt "{{ $sess.command }}|{{ $sess.username }}|{{ $sess.addr }}"
         }
@@ -2339,12 +2339,12 @@ fn virtual_command_router() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-router", {username: "guest", password: "__TEST_PASSWORD__"})
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             IF $sess.command == "health-check" {
                 LET $in: PIPE
                 LET $out: PIPE
-                LET $p: HANDLE = ASYNC { WITH_IO [stdout=$in] ECHO "System Status: OK" }
+                LET $p: HANDLE<VOID> = ASYNC { WITH_IO [stdout=$in] ECHO "System Status: OK" }
                 SSH_PUMP_CHANNEL($sess.session, $in, $out)
                 AWAIT $p
                 WRITE routed.txt "health-check"
@@ -2395,7 +2395,7 @@ fn unknown_virtual_command_rejected_cleanly() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-reject", {username: "guest", password: "__TEST_PASSWORD__"})
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             IF $sess.command == "health-check" {
                 WRITE routed.txt "health-check"
@@ -2437,7 +2437,7 @@ fn session_value_crosses_await_boundary() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-session", {username: "guest", password: "__TEST_PASSWORD__"})
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<SSH_SESSION> = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             RETURN $sess.session
         }
@@ -2474,18 +2474,18 @@ fn pump_channel_second_pump_bails() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pump-twice", {username: "guest", password: "__TEST_PASSWORD__"})
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<SSH_SESSION> = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             RETURN $sess.session
         }
         LET $s: SSH_SESSION = AWAIT $t
         LET $in: PIPE
         LET $out: PIPE
-        LET $prod: HANDLE = ASYNC { WITH_IO [stdout=$in] ECHO "in-bytes" }
-        LET $p1: HANDLE = ASYNC { SSH_PUMP_CHANNEL($s, $in, $out) }
+        LET $prod: HANDLE<VOID> = ASYNC { WITH_IO [stdout=$in] ECHO "in-bytes" }
+        LET $p1: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($s, $in, $out) }
         AWAIT $prod
         AWAIT $p1
-        LET $p2: HANDLE = ASYNC { SSH_PUMP_CHANNEL($s, $in, $out) }
+        LET $p2: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($s, $in, $out) }
         AWAIT $p2
     "#}.replace(PASSWORD_MARKER, &pass);
     let handle = std::thread::spawn(move || run_script_with(registry, &root, &script));
@@ -2525,14 +2525,14 @@ fn worker_pool_script_parses() {
         LET $workers: LIST<ANY> = []
         LET $w: INT = 0
         WHILE $w < 4 {
-            LET $h: HANDLE = ASYNC {
+            LET $h: HANDLE<VOID> = ASYNC {
                 LET $run: BOOL = true
                 WHILE $run {
                     LET $c_in: PIPE
                     LET $c_out: PIPE
-                    LET $acc: HANDLE = ASYNC { SSH_ACCEPT($server.server, $c_in, $c_out) }
+                    LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($server.server, $c_in, $c_out) }
 
-                    LET $proc: HANDLE = ASYNC {
+                    LET $proc: HANDLE<VOID> = ASYNC {
                         WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["ssh", "-o", "BatchMode=yes", "orb"]
                     }
 
@@ -2574,7 +2574,7 @@ fn finite_worker_pool_runs_to_completion() {
             LET $workers: LIST<ANY> = []
             LET $w: INT = 0
             WHILE $w < 4 {
-                LET $h: HANDLE = ASYNC { ECHO "w{{ $w }}" }
+                LET $h: HANDLE<VOID> = ASYNC { ECHO "w{{ $w }}" }
                 LIST_APPEND $workers $h
                 $w = $w + 1
             }
@@ -2604,11 +2604,11 @@ fn pool_accept_round_robins_across_workers() {
         LET $workers: LIST<ANY> = []
         LET $w: INT = 0
         WHILE $w < 4 {
-            LET $h: HANDLE = ASYNC {
+            LET $h: HANDLE<VOID> = ASYNC {
                 LET $in: PIPE
                 LET $out: PIPE
-                LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
-                LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+                LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+                LET $echo: HANDLE<VOID> = ASYNC { SSH_PUMP($out, $in) }
                 AWAIT $acc
                 AWAIT $echo
             }
@@ -2682,12 +2682,12 @@ fn pool_pty_run_companions_terminate() {
         LET $workers: LIST<ANY> = []
         LET $w: INT = 0
         WHILE $w < 2 {
-            LET $h: HANDLE = ASYNC {
+            LET $h: HANDLE<VOID> = ASYNC {
                 LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
                 LET $c_in: PIPE
                 LET $c_out: PIPE
-                LET $acc: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
-                LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cat"], 0, 0, $c_out, $c_in) }
+                LET $acc: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
+                LET $pty: HANDLE<VOID> = ASYNC { SSH_PTY_RUN($dq.session, ["cat"], 0, 0, $c_out, $c_in) }
                 AWAIT $acc
                 AWAIT $pty
             }
@@ -2836,7 +2836,7 @@ fn numeric_connect_never_dials() {
             INHERIT_ENV [PATH]
             LET $in: PIPE
             LET $out: PIPE
-            LET $c: HANDLE = ASYNC {{
+            LET $c: HANDLE<VOID> = ASYNC {{
                 SSH_CONNECT("{number}", "guest", "pass", $in, $out)
             }}
             AWAIT $c
@@ -2962,7 +2962,7 @@ fn offline_connect_bails_before_sockets() {
         INHERIT_ENV [PATH]
         LET $in: PIPE
         LET $out: PIPE
-        LET $c: HANDLE = ASYNC {
+        LET $c: HANDLE<VOID> = ASYNC {
             SSH_CONNECT("test-ssh-offline-connect", "guest", "pass", $in, $out)
         }
         AWAIT $c
@@ -2992,15 +2992,15 @@ fn concurrent_guests_keep_their_own_pty_size() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-two-guests", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $a: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $b: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $a_in: PIPE
             LET $a_out: PIPE
             LET $b_in: PIPE
             LET $b_out: PIPE
-            LET $ta: HANDLE = ASYNC { SSH_PTY_RUN($a.session, ["sh", "-c", "sleep 3; stty size"], 0, 0, $a_in, $a_out) }
-            LET $tb: HANDLE = ASYNC { SSH_PTY_RUN($b.session, ["sh", "-c", "sleep 3; stty size"], 0, 0, $b_in, $b_out) }
+            LET $ta: HANDLE<VOID> = ASYNC { SSH_PTY_RUN($a.session, ["sh", "-c", "sleep 3; stty size"], 0, 0, $a_in, $a_out) }
+            LET $tb: HANDLE<VOID> = ASYNC { SSH_PTY_RUN($b.session, ["sh", "-c", "sleep 3; stty size"], 0, 0, $b_in, $b_out) }
             AWAIT $ta
             AWAIT $tb
             ASSERT_CONTAINS $a_out "40 100"
@@ -3042,10 +3042,10 @@ fn logical_port_connect_roundtrip() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-mapped-roundtrip", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
-        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-mapped-roundtrip", "guest", "__TEST_PASSWORD__", $cin, $cout) }
+        LET $c: HANDLE<VOID> = ASYNC { SSH_CONNECT("test-ssh-mapped-roundtrip", "guest", "__TEST_PASSWORD__", $cin, $cout) }
         WITH_IO [stdout=$in] ECHO "server-greeting"
         LET $info: MAP<ANY> = INSPECT($cout)
         LET $empty: BOOL = $info.buffer_bytes == 0
@@ -3098,10 +3098,10 @@ fn mapped_name_connect_roundtrip() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-demo", {username: "guest", password: "__TEST_PASSWORD__"})
         LET $in: PIPE
         LET $out: PIPE
-        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $acc: HANDLE<VOID> = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-demo", "guest", "__TEST_PASSWORD__", $cin, $cout) }
+        LET $c: HANDLE<VOID> = ASYNC { SSH_CONNECT("doc-demo", "guest", "__TEST_PASSWORD__", $cin, $cout) }
         WITH_IO [stdout=$in] ECHO "server-greeting"
         LET $info: MAP<ANY> = INSPECT($cout)
         LET $empty: BOOL = $info.buffer_bytes == 0
@@ -3153,21 +3153,21 @@ fn proxy_client_lingers_for_reply_and_status() {
         [family:windows] {
             $child = ["cmd", "/v:on", "/c", "(set /p line= && echo got:!line!)"]
         }
-        LET $srv: HANDLE = ASYNC {
+        LET $srv: HANDLE<VOID> = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $c_in: PIPE
             LET $c_out: PIPE
-            LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, $child, 0, 0, $c_out, $c_in) }
-            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out) }
+            LET $pty: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($sess.session, $child, 0, 0, $c_out, $c_in) }
+            LET $pump: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out) }
             LET $code: INT = AWAIT $pty
             ASSERT_EQ $code 0
             AWAIT $pump
         }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-linger", "guest", "__TEST_PASSWORD__", $cin, $cout) }
+        LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("test-ssh-proxy-linger", "guest", "__TEST_PASSWORD__", $cin, $cout) }
         WITH_IO [stdout=$cin] ECHO "linger-ping"
-        LET $cDone: MAP<ANY> = AWAIT $c
+        LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
         ASSERT_EQ $cDone.closed true
         ASSERT_EQ $cDone.exit_status 0
         ASSERT_CONTAINS $cout "linger-ping"
@@ -3205,11 +3205,11 @@ fn pty_session_opens_cleared() {
         [family:windows] {
             $child = ["cmd", "/c", "exit 0"]
         }
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, $child, 0, 0, $in, $out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, $child, 0, 0, $in, $out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 0
             ASSERT_CONTAINS $out "[2J"
@@ -3249,12 +3249,12 @@ fn conhost_setup_query_never_reaches_client_windows() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-dsr-leak", {username: "u", password: "__TEST_PASSWORD__"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $to_child: PIPE
             LET $from_child: PIPE
-            LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["powershell.exe", "-NoProfile"], 0, 0, $to_child, $from_child) }
-            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
+            LET $pty: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, ["powershell.exe", "-NoProfile"], 0, 0, $to_child, $from_child) }
+            LET $pump: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
             LET $code: INT = AWAIT $pty
             AWAIT $pump
         }
@@ -3306,13 +3306,13 @@ fn run_exec_binary_roundtrip() {
         [family:windows] {
             $child = ["powershell.exe", "-NoProfile", "-Command", "$i=[Console]::OpenStandardInput(); $o=[Console]::OpenStandardOutput(); $i.CopyTo($o)"]
         }
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $to_child: PIPE
             LET $from_child: PIPE
             LET $err: PIPE
-            LET $run: HANDLE = ASYNC { SSH_RUN($dq.session, $child, $to_child, $from_child, $err) }
-            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
+            LET $run: HANDLE<INT> = ASYNC { RETURN SSH_RUN($dq.session, $child, $to_child, $from_child, $err) }
+            LET $pump: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
             LET $code: INT = AWAIT $run
             AWAIT $pump
             ASSERT_EQ $code 0
@@ -3372,13 +3372,13 @@ fn run_exec_reports_exit_code() {
         [family:windows] {
             $child = ["cmd", "/c", "exit 3"]
         }
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $to_child: PIPE
             LET $from_child: PIPE
             LET $err: PIPE
-            LET $run: HANDLE = ASYNC { SSH_RUN($dq.session, $child, $to_child, $from_child, $err) }
-            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
+            LET $run: HANDLE<INT> = ASYNC { RETURN SSH_RUN($dq.session, $child, $to_child, $from_child, $err) }
+            LET $pump: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
             LET $code: INT = AWAIT $run
             AWAIT $pump
             ASSERT_EQ $code 3
@@ -3428,13 +3428,13 @@ fn run_exec_splits_stderr() {
         [family:windows] {
             $child = ["cmd", "/c", "echo out & echo oops 1>&2"]
         }
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $to_child: PIPE
             LET $from_child: PIPE
             LET $err: PIPE
-            LET $run: HANDLE = ASYNC { SSH_RUN($dq.session, $child, $to_child, $from_child, $err) }
-            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
+            LET $run: HANDLE<INT> = ASYNC { RETURN SSH_RUN($dq.session, $child, $to_child, $from_child, $err) }
+            LET $pump: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
             LET $code: INT = AWAIT $run
             AWAIT $pump
             ASSERT_EQ $code 0
@@ -3529,15 +3529,15 @@ fn pump_channel_close_reaches_client_while_session_held() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pump-close", {username: "guest", password: "__TEST_PASSWORD__"})
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<SSH_SESSION> = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             RETURN $sess.session
         }
         LET $s: SSH_SESSION = AWAIT $t
         LET $in: PIPE
         LET $out: PIPE
-        LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($s, $in, $out) }
-        LET $e: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        LET $p: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($s, $in, $out) }
+        LET $e: HANDLE<VOID> = ASYNC { SSH_PUMP($out, $in) }
         SLEEP 12s
         AWAIT $p
         AWAIT $e
@@ -3580,7 +3580,7 @@ fn send_exit_status_reaches_exec_client() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-raw", {username: "guest", password: "__TEST_PASSWORD__"})
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             SSH_SEND_EXIT_STATUS($sess.session, 42)
         }
@@ -3625,12 +3625,12 @@ fn pty_child_code_reaches_exec_client() {
         [family:windows] {
             $child = ["cmd", "/c", "exit 7"]
         }
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $c_in: PIPE
             LET $c_out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, $child, 0, 0, $c_out, $c_in) }
-            LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
+            LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($dq.session, $child, 0, 0, $c_out, $c_in) }
+            LET $p: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 7
             AWAIT $p
@@ -3668,7 +3668,7 @@ fn send_exit_status_rejects_negative_code() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-neg", {username: "guest", password: "__TEST_PASSWORD__"})
-        LET $h: HANDLE = ASYNC {
+        LET $h: HANDLE<VOID> = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             SSH_SEND_EXIT_STATUS($sess.session, -1)
         }
@@ -3708,17 +3708,17 @@ fn exec_argv_round_trip_preserves_hostile_words() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exec-quote", {username: "u", password: "__TEST_PASSWORD__"})
-        LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
-        LET $runner: HANDLE = ASYNC {
+        LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
+        LET $runner: HANDLE<VOID> = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
             LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS($sess.command)
             LET $wire: PIPE
             LET $drain: PIPE
-            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $wire, $drain) }
+            LET $pump: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_PUMP_CHANNEL($sess.session, $wire, $drain) }
             LET $pin: PIPE
             LET $pout: PIPE
             LET $perr: PIPE
-            LET $run: HANDLE = ASYNC { SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
+            LET $run: HANDLE<INT> = ASYNC { RETURN SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
             LET $n: INT = SSH_PUMP($pout, $wire)
             LET $code: INT = AWAIT $run
             LET $pDone: MAP<ANY> = AWAIT $pump

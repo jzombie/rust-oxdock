@@ -39,7 +39,7 @@ LET $sem: SEMAPHORE = SEMAPHORE_NEW($max_conns)
 LET $run: BOOL = true
 WHILE $run {
     # Dequeue authenticated session metadata
-    LET $deq_task: HANDLE = ASYNC { SSH_DEQUEUE($server.server) }
+    LET $deq_task: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($server.server) }
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $deq_task
 
     # Non-blocking admission: a miss carries no permit key, so branch
@@ -89,11 +89,11 @@ WHILE $run {
                 }
             }
 
-            LET $pty: HANDLE = ASYNC {
+            LET $pty: HANDLE<VOID> = ASYNC {
                 SSH_PTY_RUN($sess.session, $hop, 0, 0, $c_out, $c_in)
             }
 
-            LET $pump: HANDLE = ASYNC {
+            LET $pump: HANDLE<VOID> = ASYNC {
                 # Enforces a 30-minute max session limit to reap idle or abandoned connections
                 # [INTENTIONALLY-COMMENTED-OUT] TIMEOUT 1800s {
                     SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out)

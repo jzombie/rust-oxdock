@@ -3,7 +3,7 @@
 //! line, column span, source line, and caret block.
 use crate::common::mock_lower;
 use indoc::indoc;
-use oxdock_parser::{ParseErrorKind, lower_command, parse_script};
+use oxdock_parser::{KEYWORD_FUNC, ParseErrorKind, lower_command, parse_script};
 
 fn err_text(err: &oxdock_parser::ParseError) -> String {
     err.to_string()
@@ -215,7 +215,7 @@ fn documented_outputs_match_byte_for_byte() {
                 LET $x = 1
             "},
             indoc! {"
-                invalid syntax for command LET: LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = { ... }` (inline block); got `$x = 1`.
+                LET requires explicit types: LET $var: TYPE = <expr>
                   --> line 1, col 1-10
                   1 | LET $x = 1
                     | ^^^^^^^^^^
@@ -414,7 +414,7 @@ fn fragmented_block_matrix_reports_inner_failure() {
         (
             "func",
             indoc! {r#"
-                FUNC GREET($n: STRING) {
+                FUNC GREET($n: STRING): STRING {
                     ECHO hi
             "#},
             1,
@@ -868,4 +868,65 @@ fn valid_nested_blocks_still_parse() {
     )
     .expect("balanced nesting must parse");
     assert_eq!(steps.len(), 2);
+}
+
+#[test]
+fn func_missing_return_annotation_fails_at_parse() {
+    // #287: the return annotation is mandatory. A `FUNC` header with
+    // name and parens matched but no `: TYPE` is a hard parse error
+    // naming the fix, never a silent miss to generic.
+    for script in [
+        "FUNC FOO() { RETURN 1 }\n",
+        "FUNC FOO($x: INT) { RETURN $x }\n",
+        "ASYNC FUNC FETCH() { RETURN $t }\n",
+    ] {
+        let err = parse_script(script, mock_lower).expect_err("missing : TYPE must fail");
+        assert!(
+            matches!(
+                err.kind(),
+                ParseErrorKind::Validation { command } if command == KEYWORD_FUNC
+            ),
+            "unexpected kind for {script:?}: {:?}",
+            err.kind()
+        );
+        let text = err_text(&err);
+        assert!(
+            text.contains("requires a return type"),
+            "must name the fix, got: {text}"
+        );
+    }
+}
+
+#[test]
+fn func_return_annotation_parses_into_ast() {
+    // The annotation rides the AST verbatim; `ASYNC FUNC` sets the
+    // flag with no constraint validation (the checker owns that).
+    let steps = parse_script("FUNC FOO(): INT { RETURN 1 }\n", mock_lower).expect("parses");
+    match &steps[0].kind {
+        oxdock_parser::StepKind::FuncDef {
+            return_type,
+            is_async,
+            ..
+        } => {
+            assert_eq!(return_type, "INT");
+            assert!(!is_async);
+        }
+        other => panic!("expected FuncDef, got {other:?}"),
+    }
+    let steps = parse_script(
+        "ASYNC FUNC FETCH(): HANDLE<STRING> { RETURN $t }\n",
+        mock_lower,
+    )
+    .expect("parses");
+    match &steps[0].kind {
+        oxdock_parser::StepKind::FuncDef {
+            return_type,
+            is_async,
+            ..
+        } => {
+            assert_eq!(return_type, "HANDLE<STRING>");
+            assert!(*is_async);
+        }
+        other => panic!("expected FuncDef, got {other:?}"),
+    }
 }

@@ -57,6 +57,12 @@ use std::time::Duration;
 use oxdock_func_macro::oxdock_type;
 use oxdock_pipe::{PipeHandle, new_handle_in_task};
 
+use crate::tag::{
+    BOOL_TYPE_NAME, DURATION_TYPE_NAME, FLOAT_TYPE_NAME, HANDLE_TYPE_NAME, INT_TYPE_NAME,
+    LIST_TYPE_NAME, MAP_TYPE_NAME, PATH_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME,
+    SEMAPHORE_TYPE_NAME, STRING_TYPE_NAME,
+};
+
 /// Anchor of a type's reference section, derived from its name the way the
 /// Markdown slugger derives it from the doc title.
 pub fn type_anchor(name: &str) -> String {
@@ -68,18 +74,18 @@ pub fn type_anchor(name: &str) -> String {
 /// Each entry is the payload struct's own singleton: no table, no lock.
 pub fn startup_descriptors() -> [(&'static str, &'static TypeDescriptor); 12] {
     [
-        ("INT", IntValue::descriptor()),
-        ("FLOAT", FloatValue::descriptor()),
-        ("STRING", StringValue::descriptor()),
-        ("BOOL", BoolValue::descriptor()),
-        ("LIST", ListValue::descriptor()),
-        ("MAP", MapValue::descriptor()),
-        ("PATH", PathValue::descriptor()),
-        ("DURATION", DurationValue::descriptor()),
-        ("PIPE", PipeValue::descriptor()),
-        ("HANDLE", HandleValue::descriptor()),
-        ("SEMAPHORE", SemaphoreValue::descriptor()),
-        ("PERMIT", SemaphorePermit::descriptor()),
+        (INT_TYPE_NAME, IntValue::descriptor()),
+        (FLOAT_TYPE_NAME, FloatValue::descriptor()),
+        (STRING_TYPE_NAME, StringValue::descriptor()),
+        (BOOL_TYPE_NAME, BoolValue::descriptor()),
+        (LIST_TYPE_NAME, ListValue::descriptor()),
+        (MAP_TYPE_NAME, MapValue::descriptor()),
+        (PATH_TYPE_NAME, PathValue::descriptor()),
+        (DURATION_TYPE_NAME, DurationValue::descriptor()),
+        (PIPE_TYPE_NAME, PipeValue::descriptor()),
+        (HANDLE_TYPE_NAME, HandleValue::descriptor()),
+        (SEMAPHORE_TYPE_NAME, SemaphoreValue::descriptor()),
+        (PERMIT_TYPE_NAME, SemaphorePermit::descriptor()),
     ]
 }
 
@@ -162,7 +168,14 @@ impl PartialEq for PipeValue {
     }
 }
 
-/// Background ASYNC task handle for AWAIT/CANCEL.
+/// Background task handle minted by `LET $t: HANDLE<T> = ASYNC ...`.
+/// The payload names what `AWAIT` binds: `HANDLE<T>` yields `T` on
+/// capture, `HANDLE<VOID>` is join-only (bare `AWAIT`/`CANCEL` only).
+/// The handle itself is just a task id and carries no data: observe
+/// the task through `AWAIT`, `CANCEL`, or `TASK_POLL`, never through
+/// the handle. Copying it aliases the same task, and joining twice
+/// fails. Bare `HANDLE` is not a declaration type: write the payload
+/// or explicit `HANDLE<ANY>`.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "HANDLE", inline)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HandleValue(pub u64);

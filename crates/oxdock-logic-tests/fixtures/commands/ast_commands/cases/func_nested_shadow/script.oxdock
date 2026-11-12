@@ -1,9 +1,9 @@
-FUNC FOO($x: STRING) {
+FUNC FOO($x: STRING): STRING {
     RETURN "outer-{{ $x }}"
 }
 LET $go: BOOL = true
 IF $go {
-    FUNC FOO($x: STRING) {
+    FUNC FOO($x: STRING): STRING {
         RETURN "inner-{{ $x }}"
     }
     LET $inner: STRING = FOO("in")

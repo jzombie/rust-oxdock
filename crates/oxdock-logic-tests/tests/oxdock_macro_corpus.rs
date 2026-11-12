@@ -332,7 +332,7 @@ fn macro_while_break_continue() {
 #[test]
 fn macro_func_call_return() {
     let steps = oxdock! {
-        FUNC ADD($a: INT, $b: INT) {
+        FUNC ADD($a: INT, $b: INT): INT {
             RETURN $a + $b
         }
         LET $s: INT = ADD(1, 2)
@@ -384,7 +384,7 @@ fn macro_timeout_runs_fast_command() {
 #[test]
 fn macro_async_await_task() {
     let steps = oxdock! {
-        LET $t: HANDLE = ASYNC ECHO background
+        LET $t: HANDLE<VOID> = ASYNC ECHO background
         AWAIT $t
     };
     let temp = GuardedPath::tempdir().unwrap();
@@ -648,22 +648,22 @@ fn macro_func_docs_associate_per_function_including_nested() {
     // steps themselves.
     let steps = oxdock! {
         # First does A.
-        FUNC AAA() {
+        FUNC AAA(): STRING {
             RETURN "a"
         }
         # Second does B.
         # With two lines.
-        FUNC BBB() {
+        FUNC BBB(): STRING {
             RETURN "b"
         }
         # Orphaned by a blank line.
 
-        FUNC CCC() {
+        FUNC CCC(): STRING {
             RETURN "c"
         }
         IF true {
             # Looks like docs but nested.
-            FUNC NESTED() {
+            FUNC NESTED(): STRING {
                 RETURN "n"
             }
         }
@@ -714,7 +714,7 @@ fn macro_func_doc_comment_rides_on_the_step() {
     // stamped from the same map that feeds `func_docs`.
     let steps = oxdock! {
         # This function does something
-        FUNC DO_SOMETHING() {
+        FUNC DO_SOMETHING(): STRING {
             RETURN "done"
         }
     };
@@ -1063,20 +1063,33 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
             StepKind::FuncDef {
                 name: nx,
                 params: px,
+                return_type: rx,
+                is_async: ax,
                 body: bx,
                 docs: dx,
             },
             StepKind::FuncDef {
                 name: ny,
                 params: py,
+                return_type: ry,
+                is_async: ay,
                 body: by,
                 docs: dy,
             },
-        ) => nx == ny && px == py && dx == dy && steps_content_eq(bx, by),
+        ) => nx == ny && px == py && rx == ry && ax == ay && dx == dy && steps_content_eq(bx, by),
         (StepKind::Call { name: nx, args: ax }, StepKind::Call { name: ny, args: ay }) => {
             nx == ny && ax == ay
         }
-        (StepKind::Return { expr: x }, StepKind::Return { expr: y }) => x == y,
+        (
+            StepKind::Return {
+                expr: x,
+                is_bare: bx,
+            },
+            StepKind::Return {
+                expr: y,
+                is_bare: by,
+            },
+        ) => x == y && bx == by,
         (
             StepKind::ImportFile {
                 path: px,

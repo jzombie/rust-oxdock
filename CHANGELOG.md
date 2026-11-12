@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.37.0-alpha] - TBD
+
+### Added
+
+- Multi-line `FUNC` parameter lists: params may span lines with one entry per line, including generics and `|` unions. Newlines ride the shared `gap_nl` helper already used for call args, and a three-way string/token/backend parity proptest pins the agreement. A trailing newline before `)` is allowed; newlines between `)` and `:` are not.
+
+### Fixed
+
+- `--dry-run` runs the shared static validation before printing the closure, so it fails exactly where execution and `--mcp` would instead of reporting a passing preview for a statically invalid script. `finish_run`, `McpSession::init`, and both dry-run paths funnel through one `validate_closure_for_run` helper.
+
+### Changed
+
+- [breaking] Scripts are affected: `FUNC` requires an explicit return type (`FUNC NAME(...): RET`, `ASYNC FUNC NAME(...): HANDLE<T>`). Missing `: TYPE` is a parse error; every `RETURN` checks top-down against the declaration with no inference. Fallthrough and bare `RETURN` are `VOID`-only; non-`VOID` functions must `RETURN` a matching value on every path (#287).
+- [breaking] Scripts are affected: bare `HANDLE` is not a declaration type. Every `LET`, parameter, and `FUNC` return names a payload (`HANDLE<T>`) or explicit unknown (`HANDLE<ANY>`, required even where the old bare spelling used to pass); a bare `HANDLE` spelling fails at resolution naming the fix, mirroring the existing bare-`LIST`/`MAP` rejection. `HANDLE<VOID>` marks join-only tasks, and awaiting a `VOID` task for a value is a static error. Host-registered functions keep bare `HANDLE` as the word-kind gate; only script declarations are affected.
+- [breaking] Scripts are affected: `ASYNC` tasks publish a value only through an explicit `RETURN`. The single-call/single-import fast path is removed: a body that is one call with no `RETURN` is now a void task yielding `INT` 0 on success (like any other `RETURN`-less body) instead of publishing the call's value. Bodies that relied on the implicit yield must add `RETURN <expr>`; the static checker already required this for typed handles and is unchanged.
+- [breaking] Scripts are affected: `TIMEOUT` is transparent in `LET` capture. A `TIMEOUT`-wrapped single command binds exactly what the bare command binds (call `RETURN` value or pipeline value), with the tightest deadline enforced around it; previously it bound captured stdout text. The static checker mirrors this: `capture_yield` peels `TIMEOUT` exactly where the runtime does, so a deadline never changes the checked type.
+- [breaking] Scripts are affected: `LET $x: T = <command>` capture now checks the command's yield against `T` (call `RETURN` type, stdout `TEXT` otherwise), mirroring the `AWAIT`-capture rule. Mismatches fail static instead of at runtime coercion.
+- [breaking] Scripts are affected: new `VOID` return type for procedures (fallthrough or bare `RETURN` only, unusable as a value) and typed `HANDLE<T>` payloads. Void tasks are `HANDLE<VOID>`, joined by bare `AWAIT` (#287).
+
 ## [0.36.0-alpha] - 2026-11-09
 
 ### Added

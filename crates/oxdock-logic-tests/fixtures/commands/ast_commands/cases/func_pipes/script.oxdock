@@ -5,18 +5,18 @@
 #     error.
 #   - `$p` is the variable form in bindings and calls; there are no
 #     named-pipe literals.
-FUNC FILL($q: PIPE) {
+FUNC FILL($q: PIPE): STRING {
     WITH_IO [stdout=$q] ECHO "filled"
     RETURN "filled-ok"
 }
 
-FUNC DRAIN($q: PIPE) {
+FUNC DRAIN($q: PIPE): STRING {
     WITH_IO [stdin=$q] READ_LINE $line
     RETURN $line
 }
 
 # A function can also hand a pipe back: the caller receives a live handle.
-FUNC MAKEPIPE($name: STRING) {
+FUNC MAKEPIPE($name: STRING): PIPE {
     LET $made: PIPE
     WITH_IO [stdout=$made] ECHO "seed"
     RETURN $made

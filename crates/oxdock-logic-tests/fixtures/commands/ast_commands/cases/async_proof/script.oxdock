@@ -5,7 +5,7 @@
 
 LET $req: PIPE
 LET $resp: PIPE
-LET $bg_task: HANDLE = ASYNC {
+LET $bg_task: HANDLE<VOID> = ASYNC {
     # Step 1: Only bind the read channel it actually drains
     WITH_IO [stdin=$req] WRITE "async_rec.txt"
 

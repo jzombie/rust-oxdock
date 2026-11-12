@@ -29,6 +29,30 @@ use crate::state::{
 use crate::types::{SshServerTag, SshSessionTag};
 use crate::validate::parse_serve_endpoint;
 
+/// Result map keys for SSH session outcomes. Single source for the
+/// `Field` schemas below and every `map.insert` site, so a rename
+/// cannot drift one side silent.
+const FIELD_CLOSED: &str = "closed";
+const FIELD_COMMAND: &str = "command";
+const FIELD_EXIT_STATUS: &str = "exit_status";
+const FIELD_SERVER: &str = "server";
+const FIELD_ADDR: &str = "addr";
+const FIELD_USERNAME: &str = "username";
+const FIELD_PASSWORD: &str = "password";
+const FIELD_VIRTUAL: &str = "virtual";
+const FIELD_SESSION: &str = "session";
+const FIELD_EXIT: &str = "exit";
+const FIELD_TRUNCATED: &str = "truncated";
+const FIELD_TIMED_OUT: &str = "timed_out";
+
+/// Option map keys for SSH calls. `username` and `password` reuse the
+/// `FIELD_*` spellings above (same words, same meaning); the rest live
+/// here so every lookup matches its `#[options]` spelling.
+const OPT_KEY_PATH: &str = "key_path";
+const OPT_IDLE_TIMEOUT: &str = "idle_timeout";
+const OPT_TIMEOUT: &str = "timeout";
+const OPT_MAX_BYTES: &str = "max_bytes";
+
 /// Unique server ids per process.
 static SERVER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -103,7 +127,7 @@ fn dequeue_session<P: ProcessManager>(
     # Serve: dequeue one session and pump a synthetic reply.
     LET $in: PIPE
     LET $out: PIPE
-    LET $w: HANDLE = ASYNC {
+    LET $w: HANDLE<VOID> = ASYNC {
         LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
         ASSERT_EQ $sess.username "u"
         SSH_PUMP_CHANNEL($sess.session, $in, $out)
@@ -112,13 +136,13 @@ fn dequeue_session<P: ProcessManager>(
     # Connect a client to the server.
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and every
     # task returns with no cancellation.
     WITH_IO [stdout=$cin] ECHO "client-hello"
     WITH_IO [stdout=$in] ECHO "server-greeting"
-    LET $cDone: MAP<ANY> = AWAIT $c
+    LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
     ASSERT_EQ $cDone.closed true
     AWAIT $w
     SSH_CLOSE($m.server)
@@ -131,7 +155,7 @@ fn ssh_dequeue<P: ProcessManager>(
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!(
-            "SSH_DEQUEUE requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ SSH_DEQUEUE($server.server) }}"
+            "SSH_DEQUEUE requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ SSH_DEQUEUE($server.server) }}"
         );
     }
     let state = Arc::clone(server.state());
@@ -155,9 +179,9 @@ fn ssh_dequeue<P: ProcessManager>(
         "session".to_string(),
         Value::mint_heap(SshSessionTag::descriptor(), tag),
     );
-    map.insert("command".to_string(), Value::string(command));
-    map.insert("username".to_string(), Value::string(username));
-    map.insert("addr".to_string(), Value::string(addr));
+    map.insert(FIELD_COMMAND.to_string(), Value::string(command));
+    map.insert(FIELD_USERNAME.to_string(), Value::string(username));
+    map.insert(FIELD_ADDR.to_string(), Value::string(addr));
     Ok(Value::map(map))
 }
 
@@ -192,27 +216,27 @@ fn ssh_serve<P: ProcessManager>(
     options: BTreeMap<String, Value>,
 ) -> Result<Value> {
     let map = &options;
-    let username = match map.get("username") {
+    let username = match map.get(FIELD_USERNAME) {
         Some(value) => {
             let text = value.as_str().expect("check_options verified STRING");
             if text.trim().is_empty() {
-                bail!("SSH_SERVE option 'username' must not be empty");
+                bail!("SSH_SERVE option '{FIELD_USERNAME}' must not be empty");
             }
             text.to_string()
         }
-        None => bail!("SSH_SERVE option 'username' is required"),
+        None => bail!("SSH_SERVE option '{FIELD_USERNAME}' is required"),
     };
-    let password = match map.get("password") {
+    let password = match map.get(FIELD_PASSWORD) {
         Some(value) => {
             let text = value.as_str().expect("check_options verified STRING");
             if text.trim().is_empty() {
-                bail!("SSH_SERVE option 'password' must not be empty");
+                bail!("SSH_SERVE option '{FIELD_PASSWORD}' must not be empty");
             }
             text.to_string()
         }
-        None => bail!("SSH_SERVE option 'password' is required"),
+        None => bail!("SSH_SERVE option '{FIELD_PASSWORD}' is required"),
     };
-    let key_path = match map.get("key_path") {
+    let key_path = match map.get(OPT_KEY_PATH) {
         Some(value) => {
             let text = value.as_str().expect("check_options verified STRING");
             if text.trim().is_empty() {
@@ -225,7 +249,7 @@ fn ssh_serve<P: ProcessManager>(
     };
     // Idle kill override: absent keeps the default, zero disables the
     // timeout entirely (persistent sessions must opt out explicitly).
-    let idle_timeout = match map.get("idle_timeout") {
+    let idle_timeout = match map.get(OPT_IDLE_TIMEOUT) {
         Some(value) => {
             // `check_options` verified `DURATION|STRING`; narrow directly.
             let timeout = if let Some(duration) = value.as_duration() {
@@ -235,7 +259,9 @@ fn ssh_serve<P: ProcessManager>(
                     .as_str()
                     .expect("check_options verified DURATION|STRING");
                 oxdock_parser::command::parse_duration(text).with_context(|| {
-                    format!("SSH_SERVE option 'idle_timeout' must be a duration, got {text:?}")
+                    format!(
+                        "SSH_SERVE option '{OPT_IDLE_TIMEOUT}' must be a duration, got {text:?}"
+                    )
                 })?
             };
             (!timeout.is_zero()).then_some(timeout)
@@ -317,9 +343,9 @@ fn ssh_serve<P: ProcessManager>(
         "server".to_string(),
         Value::mint_heap(SshServerTag::descriptor(), SshServerTag::new(state)),
     );
-    map.insert("addr".to_string(), Value::string(addr_text));
-    map.insert("username".to_string(), Value::string(username));
-    map.insert("password".to_string(), Value::string(password));
+    map.insert(FIELD_ADDR.to_string(), Value::string(addr_text));
+    map.insert(FIELD_USERNAME.to_string(), Value::string(username));
+    map.insert(FIELD_PASSWORD.to_string(), Value::string(password));
     map.insert(
         "virtual".to_string(),
         Value::string(key.endpoint.to_string()),
@@ -334,12 +360,12 @@ fn ssh_serve<P: ProcessManager>(
 /// the reply cannot race teardown.
 ///
 #[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
-    name: "closed".to_string(),
+    name: FIELD_CLOSED.to_string(),
     ty: TypeTag::Bool,
     docs: "True when the session closed cleanly.",
     optional: false,
 }, Field {
-    name: "command".to_string(),
+    name: FIELD_COMMAND.to_string(),
     ty: TypeTag::String,
     docs: "Executed command, empty for shells.",
     optional: false,
@@ -351,10 +377,10 @@ fn ssh_serve<P: ProcessManager>(
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-accept", {username: "u", password: "p"})
     LET $in: PIPE
     LET $out: PIPE
-    LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+    LET $acc: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_ACCEPT($m.server, $in, $out) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and both
     # tasks return their result maps with no cancellation.
@@ -379,7 +405,7 @@ fn ssh_accept<P: ProcessManager>(
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!(
-            "SSH_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ SSH_ACCEPT($server, $in, $out) }}"
+            "SSH_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ SSH_ACCEPT($server, $in, $out) }}"
         );
     }
     let in_pipe = Value::pipe_handle(in_pipe);
@@ -395,7 +421,7 @@ fn ssh_accept<P: ProcessManager>(
         true,
     )?;
     let mut map = BTreeMap::new();
-    map.insert("closed".to_string(), Value::bool(true));
+    map.insert(FIELD_CLOSED.to_string(), Value::bool(true));
     map.insert(
         "command".to_string(),
         Value::string(session.exec_command.unwrap_or_default()),
@@ -409,7 +435,7 @@ fn ssh_accept<P: ProcessManager>(
 ///
 #[oxdock_func(
     returns = TypeTag::Record(std::sync::Arc::from([Field {
-        name: "closed".to_string(),
+        name: FIELD_CLOSED.to_string(),
         ty: TypeTag::Bool,
         docs: "True when the session closed cleanly.",
         optional: false,
@@ -421,17 +447,17 @@ fn ssh_accept<P: ProcessManager>(
     code = r###"
     IMPORT [STD, SSH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pump", {username: "u", password: "p"})
-    LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+    LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
     WITH_IO [stdout=$cin] ECHO "client-hello"
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
     LET $sin: PIPE
     LET $sout: PIPE
-    LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
+    LET $p: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
     WITH_IO [stdout=$sin] ECHO "server-greeting"
-    LET $cDone: MAP<ANY> = AWAIT $c
+    LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
     ASSERT_EQ $cDone.closed true
     LET $pDone: MAP<ANY> = AWAIT $p
     ASSERT_EQ $pDone.closed true
@@ -460,7 +486,7 @@ fn ssh_pump_channel<P: ProcessManager>(
     session.finish_pump();
     pump?;
     let mut map = BTreeMap::new();
-    map.insert("closed".to_string(), Value::bool(true));
+    map.insert(FIELD_CLOSED.to_string(), Value::bool(true));
     Ok(Value::map(map))
 }
 
@@ -474,22 +500,22 @@ fn ssh_pump_channel<P: ProcessManager>(
     code = r###"
     IMPORT [STD, SSH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-exit-status", {username: "u", password: "p"})
-    LET $srv: HANDLE = ASYNC {
+    LET $srv: HANDLE<VOID> = ASYNC {
         LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
         LET $sin: PIPE
         LET $sout: PIPE
-        LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
+        LET $p: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
         SSH_SEND_EXIT_STATUS($sess.session, 3)
         WITH_IO [stdout=$sin] ECHO "server-greeting"
         AWAIT $p
     }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-exit-status", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-exit-status", "u", "p", $cin, $cout) }
     # Close the client input: its pump observes EOF and half-closes, so
     # both pumps drain instead of idling on an empty pipe.
     WITH_IO [stdout=$cin] ECHO "client-hello"
-    LET $cDone: MAP<ANY> = AWAIT $c
+    LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
     ASSERT_EQ $cDone.closed true
     ASSERT_EQ $cDone.exit_status 3
     AWAIT $srv
@@ -542,7 +568,17 @@ fn ssh_close<P: ProcessManager>(
 /// the pump tasks. Under `--offline` the dial bails before any
 /// socket work. The result MAP carries `exit_status`, or -1 when the
 /// server sent none.
-#[oxdock_func(returns = TypeTag::Map, summary = "Open an SSH client session into pipes.")]
+#[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
+    name: FIELD_CLOSED.to_string(),
+    ty: TypeTag::Bool,
+    docs: "True when the session closed cleanly.",
+    optional: false,
+}, Field {
+    name: FIELD_EXIT_STATUS.to_string(),
+    ty: TypeTag::Int,
+    docs: "Remote exit status, or -1 when none arrived.",
+    optional: false,
+}])), summary = "Open an SSH client session into pipes.")]
 #[example(
     name = "connect and close",
     code = r###"
@@ -550,17 +586,17 @@ fn ssh_close<P: ProcessManager>(
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-connect", {username: "u", password: "p"})
     LET $in: PIPE
     LET $out: PIPE
-    LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+    LET $acc: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_ACCEPT($m.server, $in, $out) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and both
     # tasks return their result maps with no cancellation.
     WITH_IO [stdout=$cin] ECHO "client-hello"
     WITH_IO [stdout=$in] ECHO "server-greeting"
-    LET $done: MAP<ANY> = AWAIT $c
-    ASSERT_EQ $done.closed true
+    LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
+    ASSERT_EQ $cDone.closed true
     LET $adone: MAP<ANY> = AWAIT $acc
     ASSERT_EQ $adone.closed true
     SSH_CLOSE($m.server)
@@ -629,12 +665,15 @@ fn ssh_connect<P: ProcessManager>(
     // Joined after disconnect: a post-EOF status records before this read.
     let _ = runtime.block_on(wire_done);
     let mut map = BTreeMap::new();
-    map.insert("closed".to_string(), Value::bool(true));
+    map.insert(FIELD_CLOSED.to_string(), Value::bool(true));
     let status = exit_status
         .lock()
         .map(|slot| slot.map(i64::from))
         .unwrap_or(None);
-    map.insert("exit_status".to_string(), Value::int(status.unwrap_or(-1)));
+    map.insert(
+        FIELD_EXIT_STATUS.to_string(),
+        Value::int(status.unwrap_or(-1)),
+    );
     Ok(Value::map(map))
 }
 
@@ -722,10 +761,10 @@ fn ssh_pump<P: ProcessManager>(
     IMPORT [STD, SSH]
     INHERIT_ENV [PATH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pty", {username: "u", password: "p"})
-    LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+    LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pty", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<VOID> = ASYNC { SSH_CONNECT("doc-ssh-pty", "u", "p", $cin, $cout) }
     WITH_IO [stdout=$cin] ECHO "client-hello"
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 
@@ -737,13 +776,13 @@ fn ssh_pump<P: ProcessManager>(
     # Assert on the whole pipe: terminal streams carry setup noise ahead
     # of child output, so line reads are version-dependent.
     [family:unix] {
-        LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["sh", "-c", "echo pty-hi"], 0, 0, $pin, $pout) }
+        LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($sess.session, ["sh", "-c", "echo pty-hi"], 0, 0, $pin, $pout) }
         LET $code: INT = AWAIT $t
         ASSERT_EQ $code 0
         ASSERT_CONTAINS $pout "pty-hi"
     }
     [family:windows] {
-        LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["cmd", "/c", "echo pty-hi"], 0, 0, $pin, $pout) }
+        LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($sess.session, ["cmd", "/c", "echo pty-hi"], 0, 0, $pin, $pout) }
         LET $code: INT = AWAIT $t
         ASSERT_EQ $code 0
         ASSERT_CONTAINS $pout "pty-hi"
@@ -828,10 +867,10 @@ fn ssh_pty_run<P: ProcessManager>(
     IMPORT [STD, SSH]
     INHERIT_ENV [PATH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-run", {username: "u", password: "p"})
-    LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+    LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-run", "u", "p", $cin, $cout) }
+    LET $c: HANDLE<VOID> = ASYNC { SSH_CONNECT("doc-ssh-run", "u", "p", $cin, $cout) }
     WITH_IO [stdout=$cin] ECHO "client-hello"
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 
@@ -845,7 +884,7 @@ fn ssh_pty_run<P: ProcessManager>(
     [family:windows] {
         $argv = ["cmd", "/c", "echo run-hi"]
     }
-    LET $t: HANDLE = ASYNC { SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
+    LET $t: HANDLE<INT> = ASYNC { RETURN SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
     LET $code: INT = AWAIT $t
     ASSERT_EQ $code 0
     ASSERT_CONTAINS $pout "run-hi"
@@ -918,17 +957,17 @@ fn ssh_run<P: ProcessManager>(
     IMPORT [STD, SSH]
     INHERIT_ENV [PATH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-exec", {username: "u", password: "p"})
-    LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
-    LET $runner: HANDLE = ASYNC {
+    LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
+    LET $runner: HANDLE<VOID> = ASYNC {
         LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
         LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS($sess.command)
         LET $wire: PIPE
         LET $drain: PIPE
-        LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $wire, $drain) }
+        LET $pump: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_PUMP_CHANNEL($sess.session, $wire, $drain) }
         LET $pin: PIPE
         LET $pout: PIPE
         LET $perr: PIPE
-        LET $run: HANDLE = ASYNC { SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
+        LET $run: HANDLE<INT> = ASYNC { RETURN SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
         LET $n: INT = SSH_PUMP($pout, $wire)
         LET $code: INT = AWAIT $run
         LET $pDone: MAP<ANY> = AWAIT $pump
@@ -995,7 +1034,7 @@ fn ssh_exec<P: ProcessManager>(
             return Err(no_cli_mapping("SSH_EXEC", &key.endpoint));
         }
     };
-    let timeout = match options.get("timeout") {
+    let timeout = match options.get(OPT_TIMEOUT) {
         None => crate::runtime::DEFAULT_EXEC_TIMEOUT,
         Some(value) => {
             // `check_options` verified `DURATION|STRING`; narrow directly.
@@ -1006,21 +1045,21 @@ fn ssh_exec<P: ProcessManager>(
                     .as_str()
                     .expect("check_options verified DURATION|STRING");
                 oxdock_parser::command::parse_duration(text).with_context(|| {
-                    format!("SSH_EXEC option 'timeout' must be a duration, got {text:?}")
+                    format!("SSH_EXEC option '{OPT_TIMEOUT}' must be a duration, got {text:?}")
                 })?
             };
             if timeout.is_zero() {
-                bail!("SSH_EXEC option 'timeout' must be positive");
+                bail!("SSH_EXEC option '{OPT_TIMEOUT}' must be positive");
             }
             timeout
         }
     };
-    let max_bytes = match options.get("max_bytes") {
+    let max_bytes = match options.get(OPT_MAX_BYTES) {
         None => crate::runtime::DEFAULT_EXEC_MAX_BYTES,
         Some(value) => {
             let bytes = value.as_i64().expect("check_options verified INT");
             if bytes <= 0 {
-                bail!("SSH_EXEC option 'max_bytes' must be positive");
+                bail!("SSH_EXEC option '{OPT_MAX_BYTES}' must be positive");
             }
             bytes as usize
         }
@@ -1035,7 +1074,10 @@ fn ssh_exec<P: ProcessManager>(
         ))
         .context("SSH_EXEC failed")?;
     let mut map = BTreeMap::new();
-    map.insert("exit".to_string(), Value::int(outcome.exit.unwrap_or(-1)));
+    map.insert(
+        FIELD_EXIT.to_string(),
+        Value::int(outcome.exit.unwrap_or(-1)),
+    );
     map.insert(
         "stdout".to_string(),
         Value::string(String::from_utf8_lossy(&outcome.stdout).into_owned()),
@@ -1044,8 +1086,8 @@ fn ssh_exec<P: ProcessManager>(
         "stderr".to_string(),
         Value::string(String::from_utf8_lossy(&outcome.stderr).into_owned()),
     );
-    map.insert("truncated".to_string(), Value::bool(outcome.truncated));
-    map.insert("timed_out".to_string(), Value::bool(outcome.timed_out));
+    map.insert(FIELD_TRUNCATED.to_string(), Value::bool(outcome.truncated));
+    map.insert(FIELD_TIMED_OUT.to_string(), Value::bool(outcome.timed_out));
     Ok(Value::map(map))
 }
 
@@ -1080,31 +1122,31 @@ fn ssh_generate_password() -> Result<Value> {
 fn serve_result_fields() -> Arc<[Field]> {
     Arc::from(vec![
         Field {
-            name: "server".to_string(),
+            name: FIELD_SERVER.to_string(),
             ty: TypeTag::Custom(SshServerTag::descriptor()),
             docs: "Server handle for `SSH_ACCEPT`, `SSH_DEQUEUE`, and `SSH_CLOSE`.",
             optional: false,
         },
         Field {
-            name: "addr".to_string(),
+            name: FIELD_ADDR.to_string(),
             ty: TypeTag::String,
             docs: "Bound socket address (`ip:port`) of the server.",
             optional: false,
         },
         Field {
-            name: "username".to_string(),
+            name: FIELD_USERNAME.to_string(),
             ty: TypeTag::String,
             docs: "Configured username.",
             optional: false,
         },
         Field {
-            name: "password".to_string(),
+            name: FIELD_PASSWORD.to_string(),
             ty: TypeTag::String,
             docs: "Configured password.",
             optional: false,
         },
         Field {
-            name: "virtual".to_string(),
+            name: FIELD_VIRTUAL.to_string(),
             ty: TypeTag::String,
             docs: "Virtual endpoint echo of the claimed slot.",
             optional: false,
@@ -1116,25 +1158,25 @@ fn serve_result_fields() -> Arc<[Field]> {
 fn dequeue_result_fields() -> Arc<[Field]> {
     Arc::from(vec![
         Field {
-            name: "session".to_string(),
+            name: FIELD_SESSION.to_string(),
             ty: TypeTag::Custom(SshSessionTag::descriptor()),
             docs: "Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).",
             optional: false,
         },
         Field {
-            name: "command".to_string(),
+            name: FIELD_COMMAND.to_string(),
             ty: TypeTag::String,
             docs: "Executed command, empty for shells.",
             optional: false,
         },
         Field {
-            name: "username".to_string(),
+            name: FIELD_USERNAME.to_string(),
             ty: TypeTag::String,
             docs: "Authenticated username, empty when unset.",
             optional: false,
         },
         Field {
-            name: "addr".to_string(),
+            name: FIELD_ADDR.to_string(),
             ty: TypeTag::String,
             docs: "Peer address, empty when unset.",
             optional: false,

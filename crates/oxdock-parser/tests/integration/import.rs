@@ -164,7 +164,7 @@ fn script_definitions_win_over_opaque_imports() {
     // wins: no ambiguity to report. (Known-module names stay reserved, see
     // func_shadow_native and func_cannot_shadow_module_function.)
     let steps = parse(indoc! {r#"
-        FUNC FOO($p: STRING) {
+        FUNC FOO($p: STRING): STRING {
         RETURN $p
         }
         IMPORT [OPAQ]
@@ -178,7 +178,7 @@ fn script_definitions_win_over_opaque_imports() {
 fn func_cannot_shadow_module_function() {
     let err = parse(indoc! {r#"
         IMPORT [ALPHA]
-        FUNC GLOB($p: STRING) {
+        FUNC GLOB($p: STRING): STRING {
         RETURN $p
         }
     "#})
@@ -195,7 +195,7 @@ fn export_single_and_list_forms() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
             EXPORT FOO
@@ -210,10 +210,10 @@ fn export_single_and_list_forms() {
 
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
-            FUNC BAR() {
+            FUNC BAR(): STRING {
                 RETURN "y"
             }
             EXPORT [FOO, BAR]
@@ -235,7 +235,7 @@ fn export_forward_reference_allowed() {
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
             EXPORT FOO
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
         "#},
@@ -269,7 +269,7 @@ fn export_qualified_host_name_passes() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
             EXPORT [FOO, ALPHA::GLOB]
@@ -290,7 +290,7 @@ fn export_qualified_script_name_passes() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
             EXPORT SCRIPT::FOO
@@ -347,7 +347,7 @@ fn export_duplicate_fails() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let err = parse_script_with_modules_and_exports(
         indoc! {r#"
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
             EXPORT [FOO, FOO]
@@ -395,10 +395,10 @@ fn export_lists_span_lines() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
-            FUNC BAR() {
+            FUNC BAR(): STRING {
                 RETURN "y"
             }
             TYPE A = STRING
@@ -426,7 +426,7 @@ fn export_lists_span_lines() {
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
             TYPE PERSON = MAP<name: STRING>
-            FUNC MAKE() {
+            FUNC MAKE(): STRING {
                 RETURN "x"
             }
             EXPORT [
@@ -446,10 +446,10 @@ fn export_lists_span_lines() {
     // name and must not fail the list (single- or multi-line).
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
-            FUNC BAR() {
+            FUNC BAR(): STRING {
                 RETURN "y"
             }
             EXPORT [
@@ -474,7 +474,7 @@ fn export_mixed_type_and_func_list_parses() {
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
             TYPE PERSON = MAP<name: STRING>
-            FUNC MAKE() {
+            FUNC MAKE(): STRING {
                 RETURN "x"
             }
             EXPORT [TYPE PERSON, MAKE]
@@ -511,7 +511,7 @@ fn export_type_duplicate_across_kinds_fails() {
     let err = parse_script_with_modules_and_exports(
         indoc! {r#"
             TYPE PERSON = MAP<name: STRING>
-            FUNC PERSON() {
+            FUNC PERSON(): STRING {
                 RETURN "x"
             }
             EXPORT PERSON
@@ -534,7 +534,7 @@ fn export_type_reexport_with_local_func_same_name_passes() {
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
             IMPORT ["lib.oxdock" AS LIB]
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
             EXPORT TYPE FOO
@@ -564,7 +564,7 @@ fn export_docs_collected_from_hash_comments() {
         indoc! {r#"
             # Adds one.
             # Second line.
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
             EXPORT FOO
@@ -584,7 +584,7 @@ fn export_docs_absent_without_comments() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
             EXPORT FOO
@@ -607,7 +607,7 @@ fn export_docs_ignore_slash_comments() {
         indoc! {r#"
             // Adds one.
             // Second line.
-            FUNC FOO() {
+            FUNC FOO(): STRING {
                 RETURN "x"
             }
             EXPORT FOO

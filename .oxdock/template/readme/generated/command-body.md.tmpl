@@ -554,9 +554,10 @@ Mutate a declared variable.
 **Syntax:** `$var = <expr>`
 
 Reassigns an existing variable, converting the new value to
-the type declared at LET time. The explicit annotation is
-what authorizes string-to-number conversion here (`$n = "42"`
-binds 42 for an INT); a non-numeric string is an error.
+the type declared at LET time through the same narrow
+coercion pairs as declaration. Strings never parse to
+numbers implicitly: `$n = "42"` is a TypeMismatch for an
+INT, write `$n = INT("42")` instead.
 Expressions never convert: `"100" + 1` is a Type Error, use
 `INT()` / `FLOAT()` to cross that boundary explicitly.
 
@@ -631,7 +632,7 @@ ASSERT_EQ $f 2.75
 
 Run steps in a background thread.
 
-**Syntax:** `ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }`
+**Syntax:** `ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE<T> = ASYNC { <commands> }`
 
 Runs a command or block of commands in a background thread with
 subshell isolation.
@@ -654,8 +655,8 @@ inside `ASYNC` is rejected at parse time.
 ```oxdock
 # Inline and block forms both run in the background; AWAIT joins them.
 ASYNC ECHO "warming-up"
-LET $a: HANDLE = ASYNC ECHO "first"
-LET $b: HANDLE = ASYNC {
+LET $a: HANDLE<VOID> = ASYNC ECHO "first"
+LET $b: HANDLE<VOID> = ASYNC {
     ECHO "second"
 }
 AWAIT $a
@@ -667,7 +668,7 @@ ASSERT_CONTAINS stdout "second"
 **Example: async task handle**
 
 ```oxdock
-LET $task: HANDLE = ASYNC {
+LET $task: HANDLE<VOID> = ASYNC {
     ECHO "built"
 }
 AWAIT $task
@@ -695,7 +696,7 @@ a value).
 **Example: await**
 
 ```oxdock
-LET $task: HANDLE = ASYNC ECHO "done"
+LET $task: HANDLE<VOID> = ASYNC ECHO "done"
 AWAIT $task
 ASSERT_CONTAINS stdout "done"
 ```
@@ -703,7 +704,7 @@ ASSERT_CONTAINS stdout "done"
 **Example: await capture**
 
 ```oxdock
-LET $task: HANDLE = ASYNC {
+LET $task: HANDLE<STRING> = ASYNC {
     ECHO "logged"
     RETURN "returned"
 }
@@ -720,7 +721,7 @@ Synchronously cancel a background task.
 
 **Syntax:** `CANCEL $var`
 
-Kills the named background task spawned via LET $var: HANDLE = ASYNC ....
+Kills the named background task spawned via `LET $var: HANDLE<T> = ASYNC ...`.
 
 Blocking: returns only after the task thread has been joined and its OS
 process reaped, so no residual filesystem or stream mutation follows. A
@@ -732,7 +733,7 @@ later AWAIT $var reports cancellation. Only named tasks can be cancelled.
 **Example: cancel**
 
 ```oxdock
-LET $task: HANDLE = ASYNC SLEEP 30s
+LET $task: HANDLE<VOID> = ASYNC SLEEP 30s
 CANCEL $task
 ```
 
@@ -740,7 +741,7 @@ CANCEL $task
 
 ```oxdock expect_error:"was cancelled"
 # A cancelled task stays cancelled: joining it reports.
-LET $task: HANDLE = ASYNC SLEEP 30s
+LET $task: HANDLE<VOID> = ASYNC SLEEP 30s
 CANCEL $task
 AWAIT $task
 ```
@@ -760,7 +761,7 @@ duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
 A blocking foreground process is killed.
 
 ASYNC nests in either order with order-dependent deadline
-semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
+semantics: `LET $task: HANDLE<VOID> = ASYNC TIMEOUT 30s RUN "build"` enforces
 the deadline inside the background thread (a later `AWAIT $task`
 surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
 preempts a hung task from the awaiting side.
@@ -814,7 +815,7 @@ ASSERT_EQ $beat "alive"
 
 ```oxdock
 # AWAIT form bounds a task join instead of a step.
-LET $quick: HANDLE = ASYNC {
+LET $quick: HANDLE<VOID> = ASYNC {
     ECHO hi
 }
 TIMEOUT 30s AWAIT $quick
@@ -980,10 +981,10 @@ ASSERT_EQ $back "1.2.3"
 IMPORT [STD]
 LET $cap: PIPE
 WITH_IO [stdout=$cap] {
-    LET $a: HANDLE = ASYNC REMOTE prod {
+    LET $a: HANDLE<VOID> = ASYNC REMOTE prod {
         ECHO "from-a"
     }
-    LET $b: HANDLE = ASYNC REMOTE prod {
+    LET $b: HANDLE<VOID> = ASYNC REMOTE prod {
         ECHO "from-b"
     }
     AWAIT $a
@@ -1074,7 +1075,7 @@ REMOTE prod {
 # guest is already dead, and the failure surfaces as
 # a host step error carrying the same code. The CLI
 # then exits with it, so the guest code reaches the OS.
-LET $t: HANDLE = ASYNC REMOTE prod {
+LET $t: HANDLE<VOID> = ASYNC REMOTE prod {
     EXIT 3
 }
 WRITE host-alive.txt "still here"
@@ -1100,10 +1101,12 @@ REMOTE prod {
 
 Define a user function.
 
-**Syntax:** `FUNC NAME([$param: TYPE, ...]) { <commands> }`
+**Syntax:** `FUNC NAME([$param: TYPE, ...]): RET { <commands> } | ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }`
 
 Defines a user function with UPPERCASE name and explicitly typed
-parameters.
+parameters. `FUNC` runs synchronously; `ASYNC FUNC` is the same
+with a structural guarantee: the declaration must be
+`HANDLE<T>`, so every `RETURN` hands out a task handle.
 
 Params bind by position, converting each argument to its
 declared parameter type before the body runs.
@@ -1120,7 +1123,13 @@ imported; see IMPORT.
 
 Invoke any function with one syntax: `NAME(...)` as a statement
 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
-the RETURN value (fallthrough without RETURN captures as "").
+the RETURN value (fallthrough without RETURN is a static error unless RET is VOID).
+
+`ASYNC FUNC` does not spawn on call. The body runs
+synchronously on the caller thread up to its inner `ASYNC`
+step, which spawns the background task and yields its handle
+immediately; the function then hands that handle out with
+`RETURN $t`. The caller joins it separately with `AWAIT`.
 
 
 **Examples:**
@@ -1128,7 +1137,7 @@ the RETURN value (fallthrough without RETURN captures as "").
 **Example: func def call**
 
 ```oxdock
-FUNC GREET($name: STRING) {
+FUNC GREET($name: STRING): STRING {
   RETURN $name
 }
 
@@ -1139,13 +1148,36 @@ ASSERT_EQ $res "ada"
 GREET("bex")
 ```
 
+**Example: async func is a handle guarantee**
+
+```oxdock
+# Side by side: identical bodies, identical handling. The
+# ASYNC marker only guarantees the HANDLE declaration.
+ASYNC FUNC FETCH(): HANDLE<STRING> {
+  LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+  RETURN $t
+}
+FUNC MAKE(): HANDLE<STRING> {
+  LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+  RETURN $t
+}
+
+# Both run synchronously to RETURN; the inner ASYNC spawns.
+LET $a: HANDLE<STRING> = FETCH()
+LET $b: HANDLE<STRING> = MAKE()
+LET $x: STRING = AWAIT $a
+LET $y: STRING = AWAIT $b
+ASSERT_EQ $x "hi"
+ASSERT_EQ $y "hi"
+```
+
 **Example: call with pipes**
 
 ```oxdock
 # A pipe handle travels into a function as a typed argument
 # and is usable as a binding target in both directions.
 # `LET $p: PIPE` mints the handle; `$p` passes it on.
-FUNC DRAIN($q: PIPE) {
+FUNC DRAIN($q: PIPE): STRING {
   WITH_IO [stdin=$q] READ_LINE $line
   RETURN $line
 }
@@ -1165,7 +1197,7 @@ Return a value from a function, task, or inline block.
 **Syntax:** `RETURN [<expr>]`
 
 Ends the nearest enclosing boundary with a value: a function
-call, an `ASYNC` task (bound by `LET $o = AWAIT $t`), or an
+call, an `ASYNC` task (bound by `LET $out: STRING = AWAIT $t`), or an
 inline `LET` block. Bare `RETURN` with no expression yields
 `""`.
 
@@ -1179,7 +1211,7 @@ EXIT or ECHO there.
 **Example: return**
 
 ```oxdock
-FUNC PICK($flag: BOOL) {
+FUNC PICK($flag: BOOL): STRING {
   IF $flag {
     RETURN "yes"
   }
@@ -1446,7 +1478,7 @@ ASSERT_CONTAINS stdout "hi World!"
 # exist when the run starts cannot be analyzed, so the
 # import fails before the first step runs.
 WORKSPACE LOCAL
-WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
+WRITE lib.oxdock 'FUNC F($x: STRING): STRING { RETURN $x } EXPORT F'
 IMPORT ["lib.oxdock" AS LIB]
 ```
 
@@ -1488,7 +1520,7 @@ EXPORT NOSUCH::FOO
 # them so importing files can use the same spelling.
 TYPE PERSON = MAP<name: STRING>
 
-FUNC GREET($p: PERSON) {
+FUNC GREET($p: PERSON): STRING {
     RETURN "hi \{{ $p.name }}"
 }
 EXPORT GREET
@@ -1530,7 +1562,7 @@ LET $files: LIST<STRING> = GLOB("*.oxdock")
 # parent and child see the same files.
 IMPORT [STD]
 WRITE lib.oxfile """
-    FUNC GREET($x: STRING) { RETURN "hi \\\{{ $x }}" }
+    FUNC GREET($x: STRING): STRING { RETURN "hi \\\{{ $x }}" }
     EXPORT GREET
     """
 WRITE main.oxfile """
@@ -1555,9 +1587,9 @@ ASSERT_CONTAINS $out "says hi Ada"
 IMPORT [STD]
 
 # The renderer: parent values land in the module source.
-FUNC MAKE_GREETER($who: STRING) {
+FUNC MAKE_GREETER($who: STRING): STRING {
     WRITE greeter.oxfile """
-        FUNC GREET() { RETURN "hi \{{ $who }}" }
+        FUNC GREET(): STRING { RETURN "hi \{{ $who }}" }
         EXPORT GREET
         """
     RETURN "greeter.oxfile"

@@ -1497,6 +1497,8 @@ fn emit_stepkind(
         StepKind::FuncDef {
             name,
             params,
+            return_type,
+            is_async,
             body,
             docs,
         } => {
@@ -1512,15 +1514,15 @@ fn emit_stepkind(
                 Some((summary, full)) => quote! { Some((#summary.to_string(), #full.to_string())) },
                 None => quote! { None },
             };
-            quote! { StepKind::FuncDef { name: #name.to_string(), params: vec![#(#ps),*], body: vec![#(#steps),*], docs: #docs } }
+            quote! { StepKind::FuncDef { name: #name.to_string(), params: vec![#(#ps),*], return_type: #return_type.to_string(), is_async: #is_async, body: vec![#(#steps),*], docs: #docs } }
         }
         StepKind::Call { name, args } => {
             let toks: Vec<_> = args.iter().map(|a| emit_expr(a, interp)).collect();
             quote! { StepKind::Call { name: #name.to_string(), args: vec![#(#toks),*] } }
         }
-        StepKind::Return { expr } => {
+        StepKind::Return { expr, is_bare } => {
             let e = emit_expr(expr, interp);
-            quote! { StepKind::Return { expr: Box::new(#e) } }
+            quote! { StepKind::Return { expr: Box::new(#e), is_bare: #is_bare } }
         }
         StepKind::While { cond, body } => {
             let c = emit_expr(cond, interp);

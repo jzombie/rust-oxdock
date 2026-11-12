@@ -6,10 +6,10 @@
 
 LET $pipe1: PIPE
 LET $pipe2: PIPE
-LET $task1: HANDLE = ASYNC {
+LET $task1: HANDLE<VOID> = ASYNC {
     WITH_IO [stdout=$pipe1] ECHO "output1"
 }
-LET $task2: HANDLE = ASYNC {
+LET $task2: HANDLE<VOID> = ASYNC {
     WITH_IO [stdout=$pipe2] ECHO "output2"
 }
 WITH_IO [stdin=$pipe1] WRITE file1.txt

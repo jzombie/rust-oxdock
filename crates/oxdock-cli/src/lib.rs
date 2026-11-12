@@ -37,7 +37,7 @@ oxdock_embed! {
     name: UsageAssets,
     script: {
         INHERIT_ENV [CARGO_PKG_VERSION, CARGO_PKG_DESCRIPTION]
-        FUNC EMIT_BODY($is_net: BOOL) {
+        FUNC EMIT_BODY($is_net: BOOL): VOID {
             LET $net_flags: STRING = """
               --offline          open no sockets (endpoint flags require the `net` feature)
             """
@@ -204,13 +204,30 @@ fn entry_file_of(script: &ScriptSource) -> Option<GuardedPath> {
 
 /// Print the transitive import closure (`file:line CMD`, #115 preview)
 /// instead of executing. Pure parser + loader: no handlers run, no
-/// processes spawn, no FS writes.
+/// processes spawn, no FS writes. Validates first through the shared
+/// run boundary so dry-run fails exactly where execution and `--mcp`
+/// would.
 fn print_dry_run(
     steps: &[Step],
     script: &ScriptSource,
     workspace_root: &GuardedPath,
 ) -> Result<()> {
     let table = cli_module_table();
+    let entry_file = entry_file_of(script);
+    // Shared validation before any listing: same closure check as
+    // execution and MCP init, with default module instances (no socket
+    // binds, preserving the preview contract).
+    {
+        let resolver = PathResolver::new_lazy(workspace_root.clone())?;
+        let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
+        oxdock_core::validate_steps_with_fs_modules_and_entry(
+            fs,
+            steps,
+            cli_host_modules_with(None),
+            cli_host_types(),
+            entry_file.clone(),
+        )?;
+    }
     let (label, base) = match script {
         ScriptSource::Path(path) => (
             path.display(),

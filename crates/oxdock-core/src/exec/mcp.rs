@@ -88,11 +88,7 @@ impl<P: ProcessManager> McpSession<P> {
         }
         state.functions.set_script_docs(&parsed.func_docs);
 
-        state.type_aliases = super::typing::collect_type_aliases(&parsed.steps, &state)?;
-        state.validate_function_type_tags()?;
-        let saved_aliases = state.type_aliases.clone();
-        let closure = super::import::expand_import_closure(&mut state, &parsed.steps)?;
-        super::static_check::validate_script_closure(&parsed.steps, &closure, &mut state)?;
+        let closure_type_exports = super::validate_closure_for_run(&mut state, &parsed.steps)?;
         // Entry `EXPORT TYPE` names must be locally defined or re-exported
         // from the closure (bare re-exports only in v1; qualified stays
         // future). MCP skips types for tools, but typos still fail here.
@@ -104,10 +100,8 @@ impl<P: ProcessManager> McpSession<P> {
                 }
             }
             let mut exported_available = std::collections::HashSet::new();
-            for file in &closure {
-                for name in &file.type_exports {
-                    exported_available.insert(name.clone());
-                }
+            for name in &closure_type_exports {
+                exported_available.insert(name.clone());
             }
             for name in &parsed.type_exports {
                 if name.contains("::") {
@@ -122,7 +116,6 @@ impl<P: ProcessManager> McpSession<P> {
                 }
             }
         }
-        state.type_aliases = saved_aliases;
 
         let assert_windows = Arc::clone(&state.assert_windows);
         let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);

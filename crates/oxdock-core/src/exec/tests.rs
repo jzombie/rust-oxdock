@@ -813,7 +813,7 @@ fn async_stdin_pipe_unblocks_background_write() {
             guard: None,
             kind: StepKind::AssignAsync {
                 var: "writer".into(),
-                decl_type: "HANDLE".to_string(),
+                decl_type: "HANDLE<VOID>".to_string(),
                 body: vec![Step {
                     guard: None,
                     kind: StepKind::WithIo {
@@ -955,6 +955,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         import_stack: Vec::new(),
         import_alias_frame: None,
         modules: std::collections::HashMap::new(),
+        validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
         module_table: super::native::std_module_table(),
         types: super::typing::startup_type_map(),
@@ -3629,7 +3630,7 @@ fn timeout_scope_does_not_join_prior_background_work() {
             guard: None,
             kind: StepKind::AssignAsync {
                 var: "srv".into(),
-                decl_type: "HANDLE".to_string(),
+                decl_type: "HANDLE<VOID>".to_string(),
                 body: vec![step(StepKind::Run("server".into()))],
             },
             scope_enter: 0,
@@ -4183,7 +4184,7 @@ fn spawn_manifest_outer_pipe_stays_script() {
     // binary is required and the test is cross-platform.
     let steps = crate::parse_script(indoc! {r#"
         LET $p: PIPE
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
           WITH_IO [stdin=$p] RUN ["stub-never-executed"]
         }
         WITH_IO [stdout=$p] ECHO "hello"
@@ -4232,13 +4233,13 @@ fn nested_spawn_marks_pipes_nested_in_collections_escaped() {
     // Either order fails pre-fix; the shared script backend binds both
     // sides cleanly post-fix.
     let steps = crate::parse_script(indoc! {r#"
-        FUNC MAKE() {
+        FUNC MAKE(): LIST<PIPE> {
             LET $p: PIPE
             RETURN [$p]
         }
-        LET $t1: HANDLE = ASYNC {
+        LET $t1: HANDLE<STRING> = ASYNC {
             LET $bag: LIST<PIPE> = MAKE()
-            LET $t2: HANDLE = ASYNC {
+            LET $t2: HANDLE<VOID> = ASYNC {
                 LET $q: PIPE = $bag.0
                 WITH_IO [stdout=$q] ECHO "child"
             }
@@ -4330,7 +4331,7 @@ fn eof_false_with_live_writer_true_after_join() {
     let steps = crate::parse_script(indoc! {r#"
         IMPORT [STD]
         LET $q: PIPE
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             WITH_IO [stdout=$q] SLEEP 5s
         }
         LET $live: BOOL = EOF($q)
@@ -4426,7 +4427,7 @@ fn mixed_task_body_pins_script_and_run_adapts() {
     // repeat DSL access and host-facing reads all keep working there.
     let steps = crate::parse_script(indoc! {r#"
         LET $p: PIPE
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             WITH_IO [stdout=$p] RUN ["stub-never-executed"]
             WITH_IO [stdout=$p] ECHO "from-task"
         }
@@ -5147,7 +5148,7 @@ fn func_loop_only_return_fails() {
     // Loops may trip zero times, so a `RETURN` inside a loop body
     // never satisfies the contract: the trailing path must return.
     let steps = crate::parse_script(indoc! {r#"
-        FUNC F($xs: LIST<INT>) {
+        FUNC F($xs: LIST<INT>): INT {
             FOR $x: INT IN $xs {
                 RETURN $x
             }
@@ -5167,7 +5168,7 @@ fn func_branch_missing_return_fails() {
     // An `ELSE`-less `IF` leaves the fallthrough path open: a
     // `RETURN` on the taken branch alone fails validation.
     let steps = crate::parse_script(indoc! {r#"
-        FUNC F($flag: BOOL) {
+        FUNC F($flag: BOOL): INT {
             IF $flag {
                 RETURN 1
             }
@@ -5187,7 +5188,7 @@ fn func_trailing_return_after_loop_passes() {
     // The same loop with a trailing `RETURN` closes every path and
     // runs end to end.
     let steps = crate::parse_script(indoc! {r#"
-        FUNC FIRST($xs: LIST<INT>) {
+        FUNC FIRST($xs: LIST<INT>): INT {
             FOR $x: INT IN $xs {
                 RETURN $x
             }
@@ -5224,10 +5225,10 @@ fn describe_spells_union_sets() {
 
 #[test]
 fn func_bare_return_fails_non_string_slot() {
-    // A bare `RETURN` yields the empty string: it type-checks only
-    // against a `STRING` slot and fails every other contract.
+    // Bare `RETURN` is the void exit: it never satisfies a value
+    // type, not even `STRING`.
     let steps = crate::parse_script(indoc! {r#"
-        FUNC F($flag: BOOL) {
+        FUNC F($flag: BOOL): INT {
             IF $flag {
                 RETURN 1
             }
@@ -5239,8 +5240,8 @@ fn func_bare_return_fails_non_string_slot() {
     let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
     let err = run_expect_err(fs, &steps, MockProcessManager::default());
     assert!(
-        format!("{err:#}").contains("cannot unify"),
-        "bare return mismatches INT: {err:#}"
+        format!("{err:#}").contains("bare RETURN"),
+        "bare return never satisfies INT: {err:#}"
     );
 }
 
@@ -5309,7 +5310,7 @@ fn static_pass_scales_linearly_on_adversarial_input() {
     // visits must stay proportional to input size on deep nesting,
     // wide sequences, loops, math, and nested functions. A fixpoint
     // or exponential blowup trips this like any regression.
-    let mut script = String::from("IMPORT [STD]\nFUNC DEEP($x: INT) {\n");
+    let mut script = String::from("IMPORT [STD]\nFUNC DEEP($x: INT): INT {\n");
     for index in 0..200 {
         script.push_str(&format!("    LET $v{index}: INT = $x + {index}\n"));
     }
@@ -5319,7 +5320,7 @@ fn static_pass_scales_linearly_on_adversarial_input() {
         ));
     }
     script.push_str("    FOR $i: INT IN [1, 2, 3] {\n        LET $w: INT = $i * 2\n    }\n");
-    script.push_str("    FUNC INNER($y: INT) {\n        RETURN $y\n    }\n");
+    script.push_str("    FUNC INNER($y: INT): INT {\n        RETURN $y\n    }\n");
     script.push_str("    RETURN $v0\n}\n");
     let steps = crate::parse_script(&script).expect("adversarial script parses");
     let fs = MockFs::new();
@@ -5613,7 +5614,7 @@ fn os_rebind_take_twice_bails_with_fresh_declaration_remedy() {
     // take at resolve time: the first bridged take wins deterministically
     // and the second fails with the remedy.
     let steps = crate::parse_script(indoc! {r#"
-        LET $t1: HANDLE = ASYNC {
+        LET $t1: HANDLE<VOID> = ASYNC {
             LET $p: PIPE
             WITH_IO [stdout=$p] RUN ["stub-producer"]
             WITH_IO [stdin=$p] ECHO "first"
@@ -5684,7 +5685,7 @@ fn host_take_twice_on_os_bails() {
     };
     let steps = crate::parse_script_with_modules(
         indoc! {r#"
-        LET $t1: HANDLE = ASYNC {
+        LET $t1: HANDLE<PIPE> = ASYNC {
             LET $p: PIPE
             WITH_IO [stdout=$p] RUN ["stub"]
             RETURN $p
@@ -6043,7 +6044,7 @@ fn isolated_shares_vars_and_files() {
 fn isolated_works_inside_func() {
     let (_temp, mock) = run_isolated_case(indoc! {r#"
         ENV SECRET=topsecret
-        FUNC PROBE() {
+        FUNC PROBE(): VOID {
             ISOLATED {
                 RUN "echo hi"
             }
@@ -6066,7 +6067,7 @@ fn isolated_async_task_inherits_scrub() {
         ENV KEEP=yes
         ISOLATED {
             INHERIT_ENV [KEEP]
-            LET $t: HANDLE = ASYNC { RUN "echo hi" }
+            LET $t: HANDLE<VOID> = ASYNC { RUN "echo hi" }
             AWAIT $t
         }
     "#});
@@ -6084,7 +6085,7 @@ fn isolated_async_task_inherits_scrub() {
 fn isolated_inside_async_scopes_to_task() {
     let (_temp, mock) = run_isolated_case(indoc! {r#"
         ENV SECRET=topsecret
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<VOID> = ASYNC {
             ISOLATED {
                 RUN "echo hi"
             }
@@ -6553,7 +6554,7 @@ fn file_import_registers_alias_and_calls() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC DOUBLE($x: STRING) {
+                FUNC DOUBLE($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT DOUBLE
@@ -6653,11 +6654,11 @@ fn file_import_function_mutation_stays_in_module_store() {
         "lib.oxdock",
         indoc! {r#"
                 LET $m: STRING = "module-orig"
-                FUNC TOUCH() {
+                FUNC TOUCH(): STRING {
                     $m = "touched-by-function"
                     RETURN $m
                 }
-                FUNC READ() {
+                FUNC READ(): STRING {
                     RETURN $m
                 }
                 EXPORT TOUCH
@@ -6702,7 +6703,7 @@ fn file_import_function_read_of_caller_var_fails() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC SNIFF() {
+                FUNC SNIFF(): STRING {
                     RETURN $carrier
                 }
                 EXPORT SNIFF
@@ -6739,7 +6740,7 @@ fn file_import_function_appends_own_module_list() {
         "lib.oxdock",
         indoc! {r#"
                 LET $items: LIST<STRING> = ["a"]
-                FUNC ADD($x: STRING) {
+                FUNC ADD($x: STRING): LIST<STRING> {
                     LIST_APPEND $items $x
                     RETURN $items
                 }
@@ -6778,7 +6779,7 @@ fn file_import_function_env_ignores_caller() {
         "lib.oxdock",
         indoc! {r#"
                 INHERIT_ENV [OXDOCK_TEST_ISOLATION_PROBE_QZX9]
-                FUNC READENV() {
+                FUNC READENV(): STRING {
                     RETURN "{{ env:OXDOCK_TEST_ISOLATION_PROBE_QZX9 }}"
                 }
                 EXPORT READENV
@@ -6812,7 +6813,7 @@ fn file_import_function_env_does_not_leak_out() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC SETIT() {
+                FUNC SETIT(): STRING {
                     ENV OXDOCK_TEST_ISOLATION_PROBE_QZX9=callee-value
                     RETURN "done"
                 }
@@ -6849,7 +6850,7 @@ fn file_import_function_cwd_is_module_dir() {
         "lib.oxdock",
         indoc! {r#"
                 IMPORT [STD]
-                FUNC WHERE() {
+                FUNC WHERE(): STRING {
                     LET $c: STRING = CWD()
                     RETURN $c
                 }
@@ -6898,14 +6899,14 @@ fn file_import_module_body_cannot_call_importer_function() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC SNEAKY() {
+                FUNC SNEAKY(): STRING {
                     RETURN HELPER()
                 }
                 EXPORT SNEAKY
             "#},
     );
     let steps = parse_entry(indoc! {r#"
-        FUNC HELPER() {
+        FUNC HELPER(): STRING {
             RETURN "importer-only"
         }
         IMPORT ["lib.oxdock" AS LIB]
@@ -6951,7 +6952,7 @@ fn file_import_function_template_reads_module_store() {
         "lib.oxdock",
         indoc! {r#"
                 LET $shared: STRING = "module-value"
-                FUNC SHOW() {
+                FUNC SHOW(): STRING {
                     RETURN "{{ shared }}"
                 }
                 EXPORT SHOW
@@ -6992,7 +6993,7 @@ fn file_import_nested_module_call_keeps_working() {
         "nested.oxdock",
         indoc! {r#"
                 LET $tag: STRING = "nested-tag"
-                FUNC MARK($x: STRING) {
+                FUNC MARK($x: STRING): STRING {
                     RETURN "{{ $tag }}:{{ $x }}"
                 }
                 EXPORT MARK
@@ -7003,7 +7004,7 @@ fn file_import_nested_module_call_keeps_working() {
         "lib.oxdock",
         indoc! {r#"
                 IMPORT ["nested.oxdock" AS N2]
-                FUNC WRAP($x: STRING) {
+                FUNC WRAP($x: STRING): STRING {
                     RETURN N2::MARK($x)
                 }
                 EXPORT WRAP
@@ -7107,7 +7108,7 @@ fn file_import_nested_alias_is_transitive() {
         &fs,
         "nested.oxdock",
         indoc! {r#"
-                FUNC HIDDEN($x: STRING) {
+                FUNC HIDDEN($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT HIDDEN
@@ -7118,7 +7119,7 @@ fn file_import_nested_alias_is_transitive() {
         "lib.oxdock",
         indoc! {r#"
                 IMPORT ["nested.oxdock" AS NEST]
-                FUNC SHOWN($x: STRING) {
+                FUNC SHOWN($x: STRING): STRING {
                  RETURN NEST::HIDDEN($x)
                 }
                 EXPORT SHOWN
@@ -7185,7 +7186,7 @@ fn file_import_multi_entry_statement_runs_in_order() {
         &fs,
         "a.oxdock",
         indoc! {r#"
-                FUNC FA($x: STRING) {
+                FUNC FA($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT FA
@@ -7195,7 +7196,7 @@ fn file_import_multi_entry_statement_runs_in_order() {
         &fs,
         "b.oxdock",
         indoc! {r#"
-                FUNC FB($x: STRING) {
+                FUNC FB($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT FB
@@ -7225,10 +7226,10 @@ fn file_import_from_bare_harvest_skips_body() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC FOO($x: STRING) {
+                FUNC FOO($x: STRING): STRING {
                  RETURN $x
                 }
-                FUNC BAR($x: STRING) {
+                FUNC BAR($x: STRING): STRING {
                  RETURN $x
                 }
                 WRITE side.txt "effect"
@@ -7262,7 +7263,7 @@ fn file_import_from_missing_func_fails() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC FOO($x: STRING) {
+                FUNC FOO($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT FOO
@@ -7283,7 +7284,7 @@ fn file_import_from_aliased_harvest() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC FOO($x: STRING) {
+                FUNC FOO($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT FOO
@@ -7315,7 +7316,7 @@ fn file_import_type_whole_file_persists_qualified_for_signatures() {
         "lib.oxdock",
         indoc! {r#"
             TYPE PERSON = MAP<name: STRING>
-            FUNC GREET($p: PERSON) {
+            FUNC GREET($p: PERSON): STRING {
                 RETURN "hi"
             }
             EXPORT GREET
@@ -7348,7 +7349,7 @@ fn file_import_type_harvest_registers_bare() {
         indoc! {r#"
             TYPE PERSON = MAP<name: STRING>
             TYPE OTHER = STRING
-            FUNC GREET($p: PERSON) {
+            FUNC GREET($p: PERSON): STRING {
                 RETURN "hi"
             }
             EXPORT GREET
@@ -7379,7 +7380,7 @@ fn file_import_type_harvest_registers_bare() {
         indoc! {r#"
             TYPE PERSON = MAP<name: STRING>
             TYPE OTHER = STRING
-            FUNC GREET($p: PERSON) {
+            FUNC GREET($p: PERSON): STRING {
                 RETURN "hi"
             }
             EXPORT GREET
@@ -7467,7 +7468,7 @@ fn file_import_from_runs_nested_imports() {
         &fs,
         "nested.oxdock",
         indoc! {r#"
-                FUNC HIDDEN($x: STRING) {
+                FUNC HIDDEN($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT HIDDEN
@@ -7478,7 +7479,7 @@ fn file_import_from_runs_nested_imports() {
         "lib.oxdock",
         indoc! {r#"
                 IMPORT ["nested.oxdock" AS NEST]
-                FUNC SHOWN($x: STRING) {
+                FUNC SHOWN($x: STRING): STRING {
                  RETURN NEST::HIDDEN($x)
                 }
                 EXPORT SHOWN
@@ -7507,7 +7508,7 @@ fn file_import_from_cycle_fails_instead_of_recursing() {
         &fs,
         "a.oxdock",
         indoc! {r#"
-                FUNC FA($x: STRING) {
+                FUNC FA($x: STRING): STRING {
                  RETURN $x
                 }
                 IMPORT [[GB FROM "b.oxdock"]]
@@ -7518,7 +7519,7 @@ fn file_import_from_cycle_fails_instead_of_recursing() {
         &fs,
         "b.oxdock",
         indoc! {r#"
-                FUNC GB($x: STRING) {
+                FUNC GB($x: STRING): STRING {
                  RETURN $x
                 }
                 IMPORT [[FA FROM "a.oxdock"]]
@@ -7538,7 +7539,7 @@ fn file_import_from_nested_import_resolves_against_harvested_dir() {
         "sub/lib.oxdock",
         indoc! {r#"
                 IMPORT ["sibling.oxdock" AS SIB]
-                FUNC F($x: STRING) {
+                FUNC F($x: STRING): STRING {
                  RETURN SIB::G($x)
                 }
                 EXPORT F
@@ -7548,7 +7549,7 @@ fn file_import_from_nested_import_resolves_against_harvested_dir() {
         &fs,
         "sub/sibling.oxdock",
         indoc! {r#"
-                FUNC G($x: STRING) {
+                FUNC G($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT G
@@ -7575,7 +7576,7 @@ fn file_import_from_leaves_no_stack_or_frame_behind() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC F($x: STRING) {
+                FUNC F($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT F
@@ -7621,7 +7622,7 @@ fn file_import_cross_file_arity_fails_before_any_step() {
         "lib.oxdock",
         indoc! {r#"
                 WRITE marker.txt side-effect
-                FUNC F($a: STRING, $b: STRING) {
+                FUNC F($a: STRING, $b: STRING): STRING {
                  RETURN $a
                 }
                 EXPORT F
@@ -7654,7 +7655,7 @@ fn file_import_nested_static_error_fails_before_any_step() {
         &fs,
         "nested.oxdock",
         indoc! {r#"
-                FUNC H($x: STRING) {
+                FUNC H($x: STRING): STRING {
                  RETURN $x
                 }
                 LET $v: STRING = $undefined_var
@@ -7666,7 +7667,7 @@ fn file_import_nested_static_error_fails_before_any_step() {
         "lib.oxdock",
         indoc! {r#"
                 IMPORT ["nested.oxdock" AS NEST]
-                FUNC L($x: STRING) {
+                FUNC L($x: STRING): STRING {
                  RETURN NEST::H($x)
                 }
                 EXPORT L
@@ -7696,7 +7697,7 @@ fn file_import_same_file_sibling_sites_share_no_stack() {
         &fs,
         "a.oxdock",
         indoc! {r#"
-                FUNC F($x: STRING) {
+                FUNC F($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT F
@@ -7732,7 +7733,7 @@ fn file_import_harvest_and_full_of_same_file_share_no_stack() {
         &fs,
         "a.oxdock",
         indoc! {r#"
-                FUNC F($x: STRING) {
+                FUNC F($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT F
@@ -7764,7 +7765,7 @@ fn file_import_entry_file_parent_resolves() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC F($x: STRING) {
+                FUNC F($x: STRING): STRING {
                  RETURN "root"
                 }
                 EXPORT F
@@ -7774,7 +7775,7 @@ fn file_import_entry_file_parent_resolves() {
         &fs,
         "ci/lib.oxdock",
         indoc! {r#"
-                FUNC F($x: STRING) {
+                FUNC F($x: STRING): STRING {
                  RETURN "entry-dir"
                 }
                 EXPORT F
@@ -7812,7 +7813,7 @@ fn file_import_nested_resolves_against_importer_not_entry() {
         "sub/lib.oxdock",
         indoc! {r#"
                 IMPORT ["sibling.oxdock" AS SIB]
-                FUNC F($x: STRING) {
+                FUNC F($x: STRING): STRING {
                  RETURN SIB::G($x)
                 }
                 EXPORT F
@@ -7822,7 +7823,7 @@ fn file_import_nested_resolves_against_importer_not_entry() {
         &fs,
         "sub/sibling.oxdock",
         indoc! {r#"
-                FUNC G($x: STRING) {
+                FUNC G($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT G
@@ -7832,7 +7833,7 @@ fn file_import_nested_resolves_against_importer_not_entry() {
         &fs,
         "ci/sibling.oxdock",
         indoc! {r#"
-                FUNC G($x: STRING) {
+                FUNC G($x: STRING): STRING {
                  RETURN "wrong"
                 }
                 EXPORT G
@@ -7865,7 +7866,7 @@ fn file_import_dotdot_escape_fails_before_any_step() {
         &fs,
         "ci/lib.oxdock",
         indoc! {r#"
-                FUNC F($x: STRING) {
+                FUNC F($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT F
@@ -7904,7 +7905,7 @@ fn file_import_outside_entry_resolves_against_workspace_root() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC F($x: STRING) {
+                FUNC F($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT F
@@ -7971,7 +7972,7 @@ fn file_import_module_env_without_inherit_fails_statically() {
         &fs,
         "helper.oxdock",
         indoc! {r#"
-            FUNC WHERE() {
+            FUNC WHERE(): STRING {
                 RETURN "{{ env:MOD_TOKEN }}"
             }
             EXPORT WHERE
@@ -8007,7 +8008,7 @@ fn file_import_module_env_with_inherit_runs() {
         "helper.oxdock",
         indoc! {r#"
             INHERIT_ENV [MOD_TOKEN]
-            FUNC WHERE() {
+            FUNC WHERE(): STRING {
                 RETURN "{{ env:MOD_TOKEN }}"
             }
             EXPORT WHERE
@@ -8042,7 +8043,7 @@ fn file_import_module_env_ignores_caller_values() {
         "helper.oxdock",
         indoc! {r#"
             ENV SHARED=module-val
-            FUNC WHICH() {
+            FUNC WHICH(): STRING {
                 RETURN "{{ env:SHARED }}"
             }
             EXPORT WHICH
@@ -8077,7 +8078,7 @@ fn file_import_module_capture_let_resolves() {
         "cap.oxdock",
         indoc! {r#"
             LET $out: STRING = RUN "echo hi"
-            FUNC GET() {
+            FUNC GET(): STRING {
                 RETURN $out
             }
             EXPORT GET
@@ -8385,10 +8386,10 @@ fn file_import_unexported_fn_invisible_to_full_import() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC SHOWN($x: STRING) {
+                FUNC SHOWN($x: STRING): STRING {
                  RETURN $x
                 }
-                FUNC SECRET($x: STRING) {
+                FUNC SECRET($x: STRING): STRING {
                  RETURN $x
                 }
                 EXPORT SHOWN
@@ -8412,10 +8413,10 @@ fn file_import_harvest_unexported_fails_upfront() {
         &fs,
         "lib.oxdock",
         indoc! {r#"
-                FUNC SHOWN($x: STRING) {
+                FUNC SHOWN($x: STRING): STRING {
                  RETURN $x
                 }
-                FUNC SECRET($x: STRING) {
+                FUNC SECRET($x: STRING): STRING {
                  RETURN $x
                 }
                 WRITE side.txt "effect"
@@ -8479,7 +8480,7 @@ fn file_import_state_shared_across_aliases() {
         "counter.oxdock",
         indoc! {r#"
             LET $n: INT = 0
-            FUNC INCR() {
+            FUNC INCR(): INT {
                 $n = $n + 1
                 RETURN $n
             }
@@ -8517,10 +8518,10 @@ fn is_main_distinguishes_entry_from_module() {
         indoc! {r#"
             IMPORT [STD]
             LET $init_was_main: BOOL = IS_MAIN()
-            FUNC WHOAMI() {
+            FUNC WHOAMI(): BOOL {
                 RETURN IS_MAIN()
             }
-            FUNC WAS_INIT_MAIN() {
+            FUNC WAS_INIT_MAIN(): BOOL {
                 RETURN $init_was_main
             }
             EXPORT WHOAMI
@@ -8589,7 +8590,7 @@ fn file_import_state_shared_through_nested_imports() {
         "state.oxdock",
         indoc! {r#"
             LET $n: INT = 0
-            FUNC BUMP() {
+            FUNC BUMP(): INT {
                 $n = $n + 10
                 RETURN $n
             }
@@ -8601,7 +8602,7 @@ fn file_import_state_shared_through_nested_imports() {
         "lib.oxdock",
         indoc! {r#"
             IMPORT ["state.oxdock" AS S]
-            FUNC GO() {
+            FUNC GO(): INT {
                 RETURN S::BUMP()
             }
             EXPORT GO
@@ -8635,10 +8636,10 @@ fn file_import_harvest_stateful_fails_upfront() {
         "lib.oxdock",
         indoc! {r#"
             LET $n: INT = 0
-            FUNC PURE($x: STRING) {
+            FUNC PURE($x: STRING): STRING {
              RETURN $x
             }
-            FUNC STATEFUL() {
+            FUNC STATEFUL(): INT {
              $n = $n + 1
              RETURN $n
             }
@@ -8667,10 +8668,10 @@ fn file_import_harvest_stateless_still_works() {
         "lib.oxdock",
         indoc! {r#"
             LET $n: INT = 0
-            FUNC PURE($x: STRING) {
+            FUNC PURE($x: STRING): STRING {
              RETURN $x
             }
-            FUNC STATEFUL() {
+            FUNC STATEFUL(): INT {
              $n = $n + 1
              RETURN $n
             }
@@ -8712,7 +8713,7 @@ fn file_import_transitive_syntax_error_fails_before_any_step() {
         "b.oxdock",
         indoc! {r#"
             IMPORT ["c.oxdock" AS C]
-            FUNC MID() {
+            FUNC MID(): ANY {
              RETURN C::BROKEN()
             }
             EXPORT MID
@@ -8740,12 +8741,12 @@ fn file_import_module_paths_ignore_caller_workdir() {
         "lib.oxdock",
         indoc! {r#"
             LET $n: INT = 0
-            FUNC GET() {
+            FUNC GET(): STRING {
              $n = $n + 1
              LET $out: STRING = READ "probe.txt"
              RETURN $out
             }
-            FUNC COUNT() {
+            FUNC COUNT(): INT {
              RETURN $n
             }
             EXPORT [GET, COUNT]
@@ -8794,7 +8795,7 @@ fn file_import_module_paths_anchor_to_defining_file() {
         "sub/lib.oxdock",
         indoc! {r#"
             WRITE out.txt "from-lib"
-            FUNC READIT() {
+            FUNC READIT(): STRING {
              LET $c: STRING = READ "data.txt"
              RETURN $c
             }
@@ -8853,7 +8854,7 @@ fn file_import_module_run_uses_module_dir() {
         &fs,
         "sub/tool.oxdock",
         indoc! {r#"
-            FUNC RUNIT() {
+            FUNC RUNIT(): STRING {
              RUN ["echo", "hi"]
              RETURN "done"
             }
@@ -9001,6 +9002,7 @@ fn workflow_inline_scripts_pass_static_gate() {
                 import_stack: Vec::new(),
                 import_alias_frame: None,
                 modules: std::collections::HashMap::new(),
+                validated_modules: std::collections::HashSet::new(),
                 module_stack: Vec::new(),
                 module_table: super::native::std_module_table(),
                 types: super::typing::startup_type_map(),

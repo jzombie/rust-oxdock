@@ -1,5 +1,5 @@
 LET $outer: STRING = "outer"
-FUNC SHADOW($outer: STRING) {
+FUNC SHADOW($outer: STRING): STRING {
     LET $inner: STRING = "inner"
     RETURN $outer
 }
