@@ -1140,6 +1140,40 @@ fn hook_nested_import_resolves_against_hook_dir() {
     miri,
     ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
 )]
+fn hooks_read_user_disk_never_embedded_pipeline() {
+    // Hook execution runs on the raw host filesystem, never the
+    // embedded pipeline overlay: a user file shadowing an embedded
+    // dist path reads back disk bytes inside hooks, not the binary's
+    // pipeline payload.
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "render.json")
+        .expect("base tree carries render.json");
+    entry.1 = HOOK_RENDER.to_string();
+    tree.push((
+        "scripts/pre.oxfile".to_string(),
+        "LET $c: STRING = READ \"oxdock-render/src/run.oxfile\"\nWRITE pre.txt \"{{ $c }}\"\n"
+            .to_string(),
+    ));
+    tree.push((
+        "scripts/post.oxfile".to_string(),
+        "WRITE post.txt post-ran\n".to_string(),
+    ));
+    tree.push((
+        "oxdock-render/src/run.oxfile".to_string(),
+        "from-disk\n".to_string(),
+    ));
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    oxdock_render::run(root.as_path()).expect("render with shadowed dist");
+    assert_eq!(read(&resolver, &root, "pre.txt"), "from-disk\n");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
 fn failing_pre_hook_halts_before_render() {
     // A failing pre hook names the hook and never reaches targets:
     // no output file is written.
@@ -1279,4 +1313,43 @@ fn init_scaffold_renders() {
         resolver.read_to_string(&written).expect("read after"),
         before
     );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "reads the repository checkout; needs real host files")]
+fn setup_render_action_pins_release_and_local_contract() {
+    // The generated composite action is CI surface: the release legs
+    // (unix plus windows) and the local-build leg must stay wired to
+    // the renderer product, so a template edit that drops one fails
+    // here instead of in a downstream workflow run. Template-to-file
+    // drift stays with the CI `git diff --exit-code` render check;
+    // this pins the semantics the file must keep.
+    let manifest = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR).expect("manifest dir");
+    let repo = oxdock_fs::to_forward_slashes(&manifest);
+    let repo = repo
+        .strip_suffix("/oxdock-render")
+        .expect("test lives in oxdock-render");
+    let repo_root = GuardedPath::new_root_from_str(repo).expect("repo root");
+    let repo_fs = PathResolver::new_guarded(repo_root.clone(), repo_root.clone()).expect("repo fs");
+    let action_path = repo_fs
+        .root()
+        .join(".github/actions/setup-oxdock-render/action.yml")
+        .expect("action path");
+    let action = repo_fs
+        .read_to_string(&action_path)
+        .expect("generated action is checked in");
+    for needle in [
+        "name: Setup OxDock renderer",
+        "binary-name:",
+        "default: oxdock-render",
+        "default: release",
+        "OXDOCK_PRODUCT: oxdock-render",
+        "runner.os != 'Windows'",
+        "runner.os == 'Windows'",
+        "source == 'local'",
+        "cargo build --release -p oxdock -p oxdock-render --bins --all-features",
+        "OXDOCK_SKIP_DOWNLOAD: '1'",
+    ] {
+        assert!(action.contains(needle), "action names {needle}");
+    }
 }

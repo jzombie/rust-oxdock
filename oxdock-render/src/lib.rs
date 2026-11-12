@@ -109,6 +109,12 @@ pub fn run_with_plugins(
     // copies shadowing the embedded paths are ignored; warn naming
     // them so stale provisioned copies get deleted.
     warn_on_shadowed_dist(&fs_resolver, &root);
+    // User hooks execute on the raw host filesystem, never the
+    // embedded pipeline overlay: a hook read of a dist path must see
+    // user disk bytes, never the binary's pipeline payload.
+    // `EmbeddedFiles` stays exclusive to the internal pipeline below
+    // (uniformity check, entry support read, entry run).
+    let raw_fs = fs_resolver.clone();
     let embedded = EmbeddedFiles::new(fs_resolver);
     let engine = pipeline_full_engine(extra_modules, io);
     // Every lifecycle plugin exposes the same methods; registration
@@ -118,33 +124,28 @@ pub fn run_with_plugins(
         .context("check plugin lifecycle methods")?;
     // Pre hooks run before the entry script assembles the child: a
     // failing hook halts the pipeline before any target renders.
-    run_hooks(&engine, &embedded, &root, &hooks.pre, config::HOOK_PRE)?;
+    run_hooks(&engine, &raw_fs, &root, &hooks.pre, config::HOOK_PRE)?;
     // The pipeline entry is one static script, served from memory:
     // it reads the config, assembles the child from the plugin
     // registry, and pipes it through the interpreter. What runs is
     // the binary's version, never a stale on-disk copy.
     let entry = read_support(&embedded, &root, "oxdock-render/src/run.oxfile")?;
     let fs: Box<dyn WorkspaceFs> = Box::new(embedded);
-    let post_fs = fs.clone_box();
     engine
         .run_script_on(fs, &entry, default_process_manager())
         .context("render pipeline")?;
     // Post hooks run after every target verifies: a failing hook
     // fails the run even though the artifacts already wrote.
-    run_hooks(
-        &engine,
-        post_fs.as_ref(),
-        &root,
-        &hooks.post,
-        config::HOOK_POST,
-    )?;
+    run_hooks(&engine, &raw_fs, &root, &hooks.post, config::HOOK_POST)?;
     eprintln!("docs rendered");
     Ok(())
 }
 
-/// Run one hook phase: each script executes top to bottom with the
-/// pipeline engine, so hooks read the same modules and resolve the
-/// same workspace. The first failure halts the pipeline naming the
+/// Run one hook phase on the raw host filesystem: each script
+/// executes top to bottom with the pipeline engine, so hooks read
+/// the same modules and resolve the same workspace. User disk bytes
+/// are authoritative here; the embedded pipeline overlay never
+/// participates. The first failure halts the pipeline naming the
 /// hook. Each hook runs as its own script file, so nested imports
 /// resolve against the hook's directory, exactly like entry scripts.
 fn run_hooks(

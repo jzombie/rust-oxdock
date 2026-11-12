@@ -8927,6 +8927,80 @@ fn file_import_module_workspace_local_matches_main() {
     );
 }
 
+#[test]
+fn file_import_module_call_restores_workspace_selection() {
+    // Scope save/restore round-trips WorkspaceSelection: a module
+    // function that switches workspace must not leak its selection
+    // into the caller after the call returns.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "sub/tool.oxfile",
+        indoc! {r#"
+            FUNC SWITCHER(): STRING {
+             WORKSPACE SNAPSHOT
+             RETURN "done"
+            }
+            EXPORT SWITCHER
+        "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["sub/tool.oxfile" AS LIB]
+        WORKSPACE LOCAL
+        LET $r: STRING = LIB::SWITCHER()
+    "#});
+    let (_, fs, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("import runs");
+    assert_eq!(bindings.get("r").and_then(|v| v.as_str()), Some("done"));
+    assert_eq!(
+        fs.selection(),
+        oxdock_fs::WorkspaceSelection::Local,
+        "module WORKSPACE switch must not leak into the caller"
+    );
+}
+
+#[test]
+fn engine_run_script_file_on_resolves_sibling_imports() {
+    // The file-aware entry resolves relative IMPORTs against the
+    // entry file's directory (like the CLI running a script file);
+    // the text-only entry point resolves against the workspace
+    // root instead, so the same sibling import fails there.
+    let script = indoc! {r#"
+        IMPORT ["./lanes.oxfile" AS LANES]
+        LET $m: STRING = LANES::MARK()
+    "#};
+    let lanes = indoc! {r#"
+        FUNC MARK(): STRING {
+         RETURN "from-lanes"
+        }
+        EXPORT MARK
+    "#};
+    let fs = MockFs::new();
+    seed_lib(&fs, "scripts/lanes.oxfile", lanes);
+    let entry = fs.root().join("scripts/main.oxfile").expect("join entry");
+    let out = Engine::<MockProcessManager>::new_custom()
+        .run_script_file_on(Box::new(fs), &entry, script, MockProcessManager::default())
+        .expect("file-aware run resolves the sibling import");
+    assert_eq!(
+        out.bindings.get("m").and_then(|v| v.as_str()),
+        Some("from-lanes")
+    );
+    let fs = MockFs::new();
+    seed_lib(&fs, "scripts/lanes.oxfile", lanes);
+    let err = Engine::<MockProcessManager>::new_custom()
+        .run_script_on(Box::new(fs), script, MockProcessManager::default())
+        .expect_err("text-only run resolves against the root");
+    assert!(
+        format!("{err:#}").contains("not found"),
+        "names the unresolvable import: {err:#}"
+    );
+}
+
 /// Every inline `oxdock` step in the CI workflows must pass the real
 /// static gate: CI runs these blocks with the branch engine, so an
 /// undeclared env read fails the run instead of the PR that added it.

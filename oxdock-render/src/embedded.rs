@@ -76,11 +76,13 @@ impl EmbeddedFiles {
     }
 }
 
-/// Warn about on-disk files shadowing embedded dist paths: they are
-/// ignored (the embedded copy is authoritative), and deleting them
-/// silences the warning. Repos provisioned by older releases use this
-/// to find their stale copies.
-pub(crate) fn warn_on_shadowed_dist(resolver: &PathResolver, root: &GuardedPath) {
+/// Workspace-relative dist paths whose on-disk copies differ from the
+/// embedded bytes: they are ignored (the embedded copy wins), and
+/// repos carrying stale copies from older releases use this list to
+/// find what to delete. Missing files and byte-identical copies are
+/// never listed, so only real drift shows up.
+pub(crate) fn shadowed_dist_paths(resolver: &PathResolver, root: &GuardedPath) -> Vec<String> {
+    let mut stale = Vec::new();
     for (rel, bytes) in DIST {
         let path = match root.join(rel) {
             Ok(path) => path,
@@ -88,19 +90,30 @@ pub(crate) fn warn_on_shadowed_dist(resolver: &PathResolver, root: &GuardedPath)
         };
         // Existence and length first: only read the file when a
         // byte-for-byte comparison is actually needed.
-        let stale = match resolver.metadata(&path) {
-            Err(_) => continue,
+        let differs = match resolver.metadata(&path) {
+            Err(_) => false,
             Ok(meta) if meta.len() as usize != bytes.len() => true,
             Ok(_) => match resolver.read_file(&path) {
                 Ok(disk) => disk.as_slice() != *bytes,
-                Err(_) => continue,
+                Err(_) => false,
             },
         };
-        if stale {
-            eprintln!(
-                "render: ignoring on-disk '{rel}' (it differs from this binary's embedded pipeline, which is authoritative); delete it to silence this warning"
-            );
+        if differs {
+            stale.push((*rel).to_string());
         }
+    }
+    stale
+}
+
+/// Warn about on-disk files shadowing embedded dist paths: they are
+/// ignored (the embedded copy is authoritative), and deleting them
+/// silences the warning. Repos provisioned by older releases use this
+/// to find their stale copies.
+pub(crate) fn warn_on_shadowed_dist(resolver: &PathResolver, root: &GuardedPath) {
+    for rel in shadowed_dist_paths(resolver, root) {
+        eprintln!(
+            "render: ignoring on-disk '{rel}' (it differs from this binary's embedded pipeline, which is authoritative); delete it to silence this warning"
+        );
     }
 }
 
@@ -400,5 +413,100 @@ impl WorkspaceFs for EmbeddedFiles {
 
     fn clone_box(&self) -> Box<dyn WorkspaceFs> {
         Box::new(self.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    fn fixture_root() -> (oxdock_fs::GuardedTempDir, GuardedPath, PathResolver) {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+        (temp, root, resolver)
+    }
+
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    fn write_rel(resolver: &PathResolver, root: &GuardedPath, rel: &str, contents: &[u8]) {
+        if let Some((parent, _)) = rel.rsplit_once('/') {
+            let dir = root.join(parent).expect("join dir");
+            resolver.create_dir_all(&dir).expect("mkdir");
+        }
+        let path = root.join(rel).expect("join file");
+        resolver.write_file(&path, contents).expect("write");
+    }
+
+    #[test]
+    fn missing_dist_file_is_not_shadowed() {
+        let (_temp, root, resolver) = fixture_root();
+        assert!(
+            shadowed_dist_paths(&resolver, &root).is_empty(),
+            "absent files carry no stale copy"
+        );
+    }
+
+    #[test]
+    fn identical_dist_file_is_not_shadowed() {
+        let (_temp, root, resolver) = fixture_root();
+        let (rel, bytes) = DIST[0];
+        write_rel(&resolver, &root, rel, bytes);
+        assert!(
+            shadowed_dist_paths(&resolver, &root).is_empty(),
+            "byte-identical copy is not drift"
+        );
+    }
+
+    #[test]
+    fn stale_dist_file_is_shadowed() {
+        let (_temp, root, resolver) = fixture_root();
+        let (rel, _) = DIST[0];
+        write_rel(&resolver, &root, rel, b"stale pipeline");
+        assert_eq!(
+            shadowed_dist_paths(&resolver, &root),
+            vec![rel.to_string()],
+            "different bytes list the path"
+        );
+    }
+
+    #[test]
+    fn same_length_dist_file_is_shadowed() {
+        // The length fast path must not mask drift: equal-length
+        // bytes still compare byte-for-byte.
+        let (_temp, root, resolver) = fixture_root();
+        let (rel, bytes) = DIST[0];
+        let mut drifted = bytes.to_vec();
+        drifted[0] ^= 0xff;
+        assert_eq!(drifted.len(), bytes.len(), "fixture keeps the length");
+        write_rel(&resolver, &root, rel, &drifted);
+        assert_eq!(
+            shadowed_dist_paths(&resolver, &root),
+            vec![rel.to_string()],
+            "same-length drift still lists the path"
+        );
+    }
+
+    #[test]
+    fn embedded_reads_win_over_stale_disk() {
+        // The embedded copy is authoritative: reads of a dist path
+        // return binary bytes even when the disk holds a stale copy,
+        // while ordinary paths delegate to the disk.
+        let (_temp, root, resolver) = fixture_root();
+        let (rel, bytes) = DIST[0];
+        write_rel(&resolver, &root, rel, b"stale pipeline");
+        write_rel(&resolver, &root, "plain.txt", b"from disk");
+        let embedded = EmbeddedFiles::new(resolver);
+        let path = root.join(rel).expect("join dist");
+        assert_eq!(
+            embedded.read_to_string(&path).expect("read dist"),
+            String::from_utf8(bytes.to_vec()).expect("embedded is UTF-8")
+        );
+        let plain = root.join("plain.txt").expect("join plain");
+        assert_eq!(
+            embedded.read_to_string(&plain).expect("read plain"),
+            "from disk"
+        );
+        assert_eq!(embedded.entry_kind(&path).expect("kind"), EntryKind::File);
     }
 }
