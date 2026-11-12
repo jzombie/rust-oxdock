@@ -1,10 +1,10 @@
 //! Pipe plus fresh interpreter: tracer order through the child.
 //!
-//! Seeds the real `src/render.oxfile`, a tracer hook, and a parent
-//! script that pipes a hand-written child through `PIPE_RUN`. The
-//! child calls tracer FUNCs in order; the parent asserts the output
-//! markers arrive in that order, proving the pipe executes the child
-//! with a fresh interpreter. `RENDER_ALL` byte layout is covered by
+//! Seeds only a tracer hook plus a parent script that pipes a
+//! hand-written child through an entry-level spawn. The child calls
+//! tracer FUNCs in order; the parent asserts the output markers
+//! arrive in that order, proving the pipe executes the child with a
+//! fresh interpreter. `RENDER_ALL` byte layout is covered by
 //! `dispatcher.rs`; end-to-end docs renders are covered by `render.rs`.
 
 use oxdock_core::{Engine, ExecIo};
@@ -39,11 +39,10 @@ fn engine(root: &GuardedPath) -> Engine<oxdock_process::DefaultProcessManager> {
 }
 
 fn seed(root: &GuardedPath, resolver: &PathResolver) {
-    for (rel, contents) in [
-        ("render.oxfile", include_str!("../src/render.oxfile")),
-        ("types.oxfile", include_str!("../src/types.oxfile")),
-        (
-            "hook.oxfile",
+    let path = root.join("hook.oxfile").expect("join seed");
+    resolver
+        .write_file(
+            &path,
             indoc::indoc! {r#"
                 IMPORT [STD]
                 FUNC TRACE_A($x: STRING): STRING {
@@ -54,14 +53,10 @@ fn seed(root: &GuardedPath, resolver: &PathResolver) {
                 }
                 EXPORT TRACE_A
                 EXPORT TRACE_B
-            "#},
-        ),
-    ] {
-        let path = root.join(rel).expect("join seed");
-        resolver
-            .write_file(&path, contents.as_bytes())
-            .expect("write seed");
-    }
+            "#}
+            .as_bytes(),
+        )
+        .expect("write seed");
 }
 
 #[test]
@@ -73,17 +68,16 @@ fn tracer_stages_run_through_pipe_in_order() {
     seed(&root, &resolver);
 
     // Hand-written child: imports the tracer hook, calls A then B,
-    // echoes the trace. PIPE_RUN pipes it through the fresh child
-    // binary; the output markers prove execution order.
+    // echoes the trace. The entry-level spawn pipes it through the
+    // fresh child binary; the output markers prove execution order.
     //
     // The child stays an `indoc` raw string, not an `oxdock!` block:
-    // it is data fed to the DSL unit under test (`PIPE_RUN`), and
+    // it is data fed to the DSL spawn under test, and
     // its inner quotes would need Rust-escaping inside macro tokens
     // (`\"` on every quote), which reads worse than the one `\{{`
     // escape the raw string needs.
     let parent = indoc::indoc! {r#"
         INHERIT_ENV [OXDOCK_WORKSPACE_ROOT]
-        IMPORT ["render.oxfile" AS C]
         LET $mod: STRING = """
         INHERIT_ENV [RENDER_CONFIG, OXDOCK_WORKSPACE_ROOT]
         WORKSPACE LOCAL
@@ -94,7 +88,10 @@ fn tracer_stages_run_through_pipe_in_order() {
         ECHO "trace=\{{ $x }}"
         """
         LET $wsroot: STRING = "{{ env:OXDOCK_WORKSPACE_ROOT }}"
-        LET $out: STRING = C::PIPE_RUN($mod, $wsroot, "render.json")
+        LET $exe: STRING = STD::INTERPRETER()
+        LET $child: PIPE
+        WITH_IO [stdout=$child] ECHO "{{ $mod }}"
+        LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe, "--root", $wsroot, "--config", "render.json"]
     "#};
     let output = engine(&root)
         .run_script(&root, parent)

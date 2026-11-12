@@ -31,43 +31,6 @@ fn child_bin() -> String {
     candidate.to_string_lossy().into_owned()
 }
 
-/// Checked-in DSL support files every run needs at repo-relative
-/// paths: the entry, the renderer, the stage order, the scanner
-/// source plugin, the generic lifecycle, and the OxDock docs plugin.
-/// Tests seed them byte-identical so temp roots mirror the real tree.
-fn support_files() -> Vec<(&'static str, &'static str)> {
-    vec![
-        (
-            "oxdock-render/src/run.oxfile",
-            include_str!("../src/run.oxfile"),
-        ),
-        (
-            "oxdock-render/src/lifecycle/scanner.oxfile",
-            include_str!("../src/lifecycle/scanner.oxfile"),
-        ),
-        (
-            "oxdock-render/src/lifecycle/generic.oxfile",
-            include_str!("../src/lifecycle/generic.oxfile"),
-        ),
-        (
-            "oxdock-render/src/lifecycle/oxdock.oxfile",
-            include_str!("../src/lifecycle/oxdock.oxfile"),
-        ),
-        (
-            "oxdock-render/src/types.oxfile",
-            include_str!("../src/types.oxfile"),
-        ),
-        (
-            "oxdock-render/src/render.oxfile",
-            include_str!("../src/render.oxfile"),
-        ),
-        (
-            "oxdock-render/src/stages.oxfile",
-            include_str!("../src/stages.oxfile"),
-        ),
-    ]
-}
-
 /// Lifecycle override plus scope contract every fixture config gets:
 /// the OxDock docs plugin on top of the engine's generic lifecycle.
 /// Scope key names and the version env name are config data, never
@@ -127,8 +90,7 @@ fn fixture_opt(
     let temp = GuardedPath::tempdir().expect("tempdir");
     let root = temp.as_guarded_path().clone();
     let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
-    let support = support_files();
-    for (rel, contents) in files.iter().chain(support.iter()) {
+    for (rel, contents) in files.iter() {
         if let Some((parent, _)) = rel.rsplit_once('/') {
             let dir = root.join(parent).expect("join dir");
             resolver.create_dir_all(&dir).expect("create dir");

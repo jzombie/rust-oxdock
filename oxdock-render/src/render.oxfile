@@ -193,17 +193,7 @@ FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): 
     RETURN $mod
 }
 
-FUNC PIPE_RUN($mod: STRING, $wsroot: STRING, $cfgpath: STRING): STRING {
-    WORKSPACE LOCAL
-    LET $exe: STRING = STD::INTERPRETER()
-    LET $child: PIPE
-    WITH_IO [stdout=$child] ECHO "{{ $mod }}"
-    LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe, "--root", $wsroot, "--config", $cfgpath]
-    RETURN $out
-}
-
 EXPORT RENDER_ALL
-EXPORT PIPE_RUN
 
 # Lifecycle files from the config, or the engine's own lifecycle
 # files when the config names none. Entries stay plain paths: every

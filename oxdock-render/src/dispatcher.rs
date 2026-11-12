@@ -2,15 +2,15 @@
 //!
 //! Rust owns the module set, the child interpreter lookup, and the
 //! environment the pipe child inherits. The child script itself is
-//! rendered in the DSL (`render.oxfile` `RENDER_ALL` plus
-//! `PIPE_RUN`); Rust never assembles script text.
+//! rendered in the DSL (`render.oxfile` `RENDER_ALL`, piped through
+//! by the entry script); Rust never assembles script text.
 
 use anyhow::{Context, Result};
 use oxdock_core::{Engine, ExecIo, HostModule, OxDockFn, TypeTag, Value};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
 use oxdock_func_macro::oxdock_func;
 
-use crate::lifecycle::provision_dist;
+use crate::overlay::{OverlayFs, warn_on_shadowed_dist};
 
 /// `run()`'s module set, written once.
 ///
@@ -191,8 +191,9 @@ pub fn run_child_script(script: &str) -> Result<()> {
 pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
     let root = GuardedPath::new_root(dir)?;
     let resolver = PathResolver::new(root.as_path(), root.as_path())?;
-    // Standalone child runs provision too; the piped flow already did.
-    provision_dist(&resolver, &root).context("provision pipeline files")?;
+    // The piped flow already warned; standalone child runs warn too.
+    // Either way nothing is written: dist paths resolve from memory.
+    warn_on_shadowed_dist(&resolver, &root);
     let mut io = ExecIo::new();
     // The child's INHERIT_ENV reads these overrides; it never sees the
     // parent's script environment through the spawn boundary. Paths are
@@ -208,8 +209,11 @@ pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
     let cfg_abs = dir.join(cfg).to_string_lossy().into_owned();
     io.insert_inherit_env("RENDER_CONFIG", cfg_abs);
     let engine = pipeline_full_engine(vec![], io);
+    let steps = oxdock_core::parse_script_with_modules(script, engine.module_table())
+        .context("parse child script")?;
+    let fs: Box<dyn WorkspaceFs> = Box::new(OverlayFs::new(resolver));
     engine
-        .run_script(&root, script)
+        .run_steps_on(fs, &steps, oxdock_process::default_process_manager())
         .context("child script failed")?;
     Ok(())
 }

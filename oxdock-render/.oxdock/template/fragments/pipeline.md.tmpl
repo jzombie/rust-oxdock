@@ -4,9 +4,9 @@ Each run performs the same steps, in order:
 
 1. Load `render.json`: global values, which files to scan,
    generated inputs, and naming rules.
-2. Copy the pipeline's own script files into place and check every
-   plugin implements the same stages, failing fast with the
-   offender named instead of halfway through a target.
+2. Serve the binary's embedded pipeline scripts from memory and
+   check every plugin implements the same stages, failing fast with
+   the offender named instead of halfway through a target.
 3. Build the run script: one step per stage per plugin, in
    registration order (`SETUP` once up front, then each stage per
    target), piped through a fresh interpreter that never touches

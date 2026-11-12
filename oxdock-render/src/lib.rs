@@ -9,7 +9,7 @@
 //!
 //! Rust owns only the boundaries the DSL has no primitives for:
 //! [`config`] (filename default, plugin registry read),
-//! [`lifecycle`] (embedded file provisioning, uniformity check), and
+//! [`lifecycle`] (embedded pipeline serving, uniformity check), and
 //! [`dispatcher`] (engine wiring, pipe spawn). Sequencing and all
 //! writes live in the DSL as named `FUNC` stages.
 pub mod config;
@@ -17,6 +17,7 @@ pub mod defer;
 pub mod dispatcher;
 pub mod engine;
 pub mod lifecycle;
+pub mod overlay;
 pub mod plugins;
 
 use anyhow::{Context, Result};
@@ -30,13 +31,14 @@ pub use dispatcher::{run_child_script, run_child_script_on};
 
 use config::resolve_config_name;
 use dispatcher::{child_interpreter, pipeline_full_engine};
-use lifecycle::{check_plugin_uniformity, provision_dist, read_support};
+use lifecycle::{check_plugin_uniformity, read_support};
+use overlay::{OverlayFs, warn_on_shadowed_dist};
 
-/// Execute the render pipeline: provision the embedded files,
-/// check every registered plugin exposes the same lifecycle
+/// Execute the render pipeline: serve the embedded pipeline from
+/// memory, check every registered plugin exposes the same lifecycle
 /// methods, then run the entry script, which assembles the child from
 /// the plugin registry and pipes it through the interpreter. Static
-/// scripts are byte-copied from the tree (see [`lifecycle`]);
+/// scripts are served from the binary (see [`overlay`]);
 /// sequencing and all writes live in the DSL while Rust owns only
 /// the boundaries above.
 ///
@@ -88,22 +90,24 @@ pub fn run_with_plugins(
         "RENDER_PRINT_CHILD",
         std::env::var("RENDER_PRINT_CHILD").unwrap_or_else(|_| "0".to_string()),
     );
-    // Binary-only repos have no checkout: lay the embedded pipeline
-    // files down first (write-if-missing, customizations win), so the
-    // entry read below and every DSL import resolve.
-    provision_dist(&fs_resolver, &root).context("provision pipeline files")?;
+    // The pipeline scripts ride in the binary and resolve from memory,
+    // so consumer repos never receive pipeline files on disk. On-disk
+    // copies shadowing the embedded paths are ignored; warn naming
+    // them so stale provisioned copies get deleted.
+    warn_on_shadowed_dist(&fs_resolver, &root);
+    let overlay = OverlayFs::new(fs_resolver);
     let engine = pipeline_full_engine(extra_modules, io);
     // Every lifecycle plugin exposes the same methods; registration
     // order is execution order. Fail fast here naming the outlier
     // instead of mid-pipeline at first use.
-    check_plugin_uniformity(&fs_resolver, &root, &engine, &config_name)
+    check_plugin_uniformity(&overlay, &root, &engine, &config_name)
         .context("check plugin lifecycle methods")?;
-    // The pipeline entry is one static script, byte-copied from the
-    // tree: it reads the config, assembles the child from the plugin
+    // The pipeline entry is one static script, served from memory:
+    // it reads the config, assembles the child from the plugin
     // registry, and pipes it through the interpreter. What runs is
-    // what the tree holds, never Rust-assembled text.
-    let entry = read_support(&fs_resolver, &root, "oxdock-render/src/run.oxfile")?;
-    let fs: Box<dyn WorkspaceFs> = Box::new(fs_resolver);
+    // the binary's version, never a stale on-disk copy.
+    let entry = read_support(&overlay, &root, "oxdock-render/src/run.oxfile")?;
+    let fs: Box<dyn WorkspaceFs> = Box::new(overlay);
     engine
         .run_script_on(fs, &entry, default_process_manager())
         .context("render pipeline")?;

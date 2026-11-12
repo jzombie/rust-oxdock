@@ -5,7 +5,7 @@
 //! all sequencing stay in the DSL (`render.oxfile`).
 
 use anyhow::{Context, Result};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, WorkspaceFs};
 
 /// The engine's default lifecycle providers: the source scanner
 /// plus the generic stage owner. Used when the config names no
@@ -24,12 +24,12 @@ pub(crate) fn default_plugins() -> Vec<String> {
 /// plugin file exposes the same lifecycle methods, so there is
 /// nothing else to declare.
 pub(crate) fn configured_plugins(
-    resolver: &PathResolver,
+    fs: &dyn WorkspaceFs,
     root: &GuardedPath,
     config_name: &str,
 ) -> Result<Vec<String>> {
     let path = root.join(config_name)?;
-    let raw = resolver
+    let raw = fs
         .read_to_string(&path)
         .with_context(|| format!("read {config_name} for plugin list"))?;
     let cfg: serde_json::Value = serde_json::from_str(&raw)
@@ -54,12 +54,12 @@ pub(crate) fn configured_plugins(
 /// Config filename: explicit `RENDER_CONFIG` wins, else the one
 /// neutral name. Anything else fails closed naming what was looked
 /// for; the DSL never carries a filename default.
-pub(crate) fn resolve_config_name(resolver: &PathResolver, root: &GuardedPath) -> Result<String> {
+pub(crate) fn resolve_config_name(fs: &dyn WorkspaceFs, root: &GuardedPath) -> Result<String> {
     if let Ok(name) = std::env::var("RENDER_CONFIG") {
         return Ok(name);
     }
     let neutral = root.join("render.json")?;
-    if resolver.metadata(&neutral).is_ok() {
+    if fs.metadata(&neutral).is_ok() {
         return Ok("render.json".to_string());
     }
     anyhow::bail!(

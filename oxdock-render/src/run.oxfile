@@ -18,6 +18,14 @@ LET $pc: STRING = "{{ env:RENDER_PRINT_CHILD }}"
 IF $pc == "1" {
     ECHO $mod
 } ELSE {
-    LET $log: STRING = C::PIPE_RUN($mod, $wsroot, $cfgpath)
+    # Entry top-level spawn: `RUN` inside a module-owned `FUNC`
+    # starts in the defining file's directory, and this pipeline
+    # serves from memory, so the pipe lives here where the cwd is
+    # the workspace root. The child resolves everything through
+    # --root, so the spawn directory carries nothing.
+    LET $exe: STRING = STD::INTERPRETER()
+    LET $child: PIPE
+    WITH_IO [stdout=$child] ECHO "{{ $mod }}"
+    LET $log: STRING = WITH_IO [stdin=$child] RUN [$exe, "--root", $wsroot, "--config", $cfgpath]
     ECHO "{{ $log }}"
 }
