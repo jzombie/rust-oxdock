@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- `setup-oxdock-render` composite GitHub action: installs the `oxdock-render` binary so later steps can render docs. Takes `version` (full release tag or `latest`), `binary-name` (default `oxdock-render`), and `source` (`release` downloads the installer for `version`; `local` builds the caller's checkout with cargo so unreleased renderer behavior is testable before any tag exists). Generated from `.oxdock/template/github-actions/`, so CI runs exactly the documented installer commands.
+- `pre` and `post` render hooks: `render.json` accepts a `hooks` object with `pre` and `post` string lists. Pre hooks run before the entry script assembles the child; post hooks run after every target verifies. Either side failing halts the pipeline naming the hook. Each hook executes as its own script file through the pipeline engine, so hooks read the same modules and resolve the same workspace as the entry.
+- `oxdock-render --init`: writes a template `render.json` (workspace root scope, empty hooks) into `--root` (else the current directory) and stops. Refuses to overwrite an existing file, naming the file to delete first. The template validates clean under strict config validation.
+- Strict `render.json` validation: unknown top level, `vars`, `lifecycle`, `generated`, and `hooks` keys fail naming the known set; mistyped values name the expected shape. Presence is required only for `scopes` and `global_values`; everything else is optional but type checked when present, so custom lifecycles that skip `vars` or `generated` keep working.
+- `oxdock-render` `--help`/`-h` and `--version`/`-V`/`-v`: new `oxdock-render/src/cli.rs` parser with `Options`, `usage()`, `version()`, and `parse_options()`. `--root`, `--config`, `--print-child`, and `--init` keep their shapes; a lone `--` separator is skipped.
+- Lowercase `-v` version alias: `oxdock --version`/`-V`/`-v` and `oxdock-render --version`/`-V`/`-v` all print the version and exit. Usage texts name all three spellings.
+- `Engine::run_script_file_on` (Host Rust API only, scripts are unaffected): parse and run a script file on a caller built filesystem with the entry file set, so nested `IMPORT` paths resolve against the file's directory like the CLI running a script file. Backs hook execution; the text only `run_script_on` entry point is unchanged.
+- `oxdock_fs::env::render` constants: `CONFIG` (`RENDER_CONFIG`), `PRINT_CHILD` (`RENDER_PRINT_CHILD`), and `CHILD` (`OXDOCK_RENDER_CHILD`) replace hardcoded renderer env name literals at every call site. Covered by the `ENV_CONTRACTS.md` plumbing inventory like every other engine owned name.
+
+### Changed
+
+- [breaking] Scripts are affected: relative paths resolve against the ambient working directory in main scripts and imported modules. Module directory anchoring (`effective_cwd`) and cwd reset on module entry are removed; scope save and restore round trip `WorkspaceSelection` instead, and `IMPORT` still resolves against the importing file. Scripts that relied on module relative resolution landing under the module directory now resolve under the ambient cwd. The `IMPORT` reference documents the ambient semantics.
+- `oxdock-render` CLI fails closed on unknown input: unknown `--` flags, unknown short clusters, and positional arguments fail with the usage text instead of silently rendering with defaults, so a typo like `--confg` never means run anyway. A trailing `--root`/`--config` with no value keeps the lenient read (no override, discovery applies).
+- CLI runner consolidation (Host Rust API only, scripts are unaffected): `execute_with_result` and `execute_with_shell_runner` funnel through one `run_cli_steps` helper where the CLI module set, types, and entry file meet the lazy snapshot runner. Callers differ only in IO setup and what they do with the output; the net and non net module wiring lives in one place. No behavior change.
+- Render pipeline served from memory: the embedded lifecycle files ride in the binary through `EmbeddedFiles` (renamed from `overlay`), and on disk copies shadowing the embedded paths warn naming the stale files instead of silently shadowing. Embedded comparison avoids redundant allocation.
+
+### Fixed
+
+- Hook nested relative imports: a hook at `scripts/X.oxfile` doing `IMPORT ["./lanes.oxfile" AS ...]` resolves to `scripts/lanes.oxfile`, not the workspace root. Hooks run via the new file aware entry with a regression test pinning the shape.
+
 ## [0.37.0-alpha] - 2026-11-12
 
 ### Added
