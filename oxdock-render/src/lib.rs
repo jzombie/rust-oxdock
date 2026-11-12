@@ -90,6 +90,19 @@ pub fn run_with_plugins(
         "RENDER_PRINT_CHILD",
         std::env::var("RENDER_PRINT_CHILD").unwrap_or_else(|_| "0".to_string()),
     );
+    // Validate the config before anything runs: unknown keys and
+    // mistyped values fail here naming the fix, so a typo like
+    // `scope` for `scopes` can never silently change the pipeline.
+    let cfg_path = root
+        .join(&config_name)
+        .with_context(|| format!("resolve {config_name}"))?;
+    let cfg_raw = fs_resolver
+        .read_to_string(&cfg_path)
+        .with_context(|| format!("read {config_name}"))?;
+    let cfg_json: serde_json::Value =
+        serde_json::from_str(&cfg_raw).with_context(|| format!("parse {config_name}"))?;
+    config::validate_config(&cfg_json, &config_name)?;
+    let hooks = config::hooks_of(&cfg_json);
     // The pipeline scripts ride in the binary and resolve from memory,
     // so consumer repos never receive pipeline files on disk. On-disk
     // copies shadowing the embedded paths are ignored; warn naming
@@ -102,16 +115,55 @@ pub fn run_with_plugins(
     // instead of mid-pipeline at first use.
     check_plugin_uniformity(&embedded, &root, &engine, &config_name)
         .context("check plugin lifecycle methods")?;
+    // Pre hooks run before the entry script assembles the child: a
+    // failing hook halts the pipeline before any target renders.
+    run_hooks(&engine, &embedded, &root, &hooks.pre, config::HOOK_PRE)?;
     // The pipeline entry is one static script, served from memory:
     // it reads the config, assembles the child from the plugin
     // registry, and pipes it through the interpreter. What runs is
     // the binary's version, never a stale on-disk copy.
     let entry = read_support(&embedded, &root, "oxdock-render/src/run.oxfile")?;
     let fs: Box<dyn WorkspaceFs> = Box::new(embedded);
+    let post_fs = fs.clone_box();
     engine
         .run_script_on(fs, &entry, default_process_manager())
         .context("render pipeline")?;
+    // Post hooks run after every target verifies: a failing hook
+    // fails the run even though the artifacts already wrote.
+    run_hooks(
+        &engine,
+        post_fs.as_ref(),
+        &root,
+        &hooks.post,
+        config::HOOK_POST,
+    )?;
     eprintln!("docs rendered");
+    Ok(())
+}
+
+/// Run one hook phase: each script executes top to bottom with the
+/// pipeline engine, so hooks read the same modules and resolve the
+/// same workspace. The first failure halts the pipeline naming the
+/// hook. Hook imports resolve against the workspace root: hook
+/// scripts are entry scripts, not module files.
+fn run_hooks(
+    engine: &Engine<oxdock_process::DefaultProcessManager>,
+    fs: &dyn WorkspaceFs,
+    root: &GuardedPath,
+    hooks: &[String],
+    phase: &str,
+) -> Result<()> {
+    for rel in hooks {
+        let path = root
+            .join(rel)
+            .with_context(|| format!("{phase} hook '{rel}' cannot be resolved"))?;
+        let script = fs
+            .read_to_string(&path)
+            .with_context(|| format!("{phase} hook '{rel}' cannot be read"))?;
+        engine
+            .run_script_on(fs.clone_box(), &script, default_process_manager())
+            .with_context(|| format!("{phase} hook '{rel}' failed"))?;
+    }
     Ok(())
 }
 

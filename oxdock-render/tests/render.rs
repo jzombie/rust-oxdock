@@ -1069,3 +1069,181 @@ fn executable_target_regains_mode_bit_after_render() {
         assert_eq!(mode & 0o111, 0o111, "executable bit re-applied");
     }
 }
+
+const HOOK_RENDER: &str = r#"{"global_values": ["base.json", "overlay.json"], "merge_policy": "overwrite", "scopes": ["."], "generated": [], "staging_dir": "target/t-docs", "hooks": {"pre": ["scripts/pre.oxfile"], "post": ["scripts/post.oxfile"]}}"#;
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn pre_and_post_hooks_run_around_render() {
+    // Hooks are ordinary scripts run by the pipeline engine: the pre
+    // hook writes before any target renders, the post hook after.
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "render.json")
+        .expect("base tree carries render.json");
+    entry.1 = HOOK_RENDER.to_string();
+    tree.push((
+        "scripts/pre.oxfile".to_string(),
+        "WRITE pre.txt pre-ran\n".to_string(),
+    ));
+    tree.push((
+        "scripts/post.oxfile".to_string(),
+        "WRITE post.txt post-ran\n".to_string(),
+    ));
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    oxdock_render::run(root.as_path()).expect("render");
+    assert_eq!(read(&resolver, &root, "pre.txt"), "pre-ran");
+    assert_eq!(read(&resolver, &root, "post.txt"), "post-ran");
+    let out = read(&resolver, &root, "out.md");
+    assert!(out.contains("# Base 1"), "targets still render: {out}");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn failing_pre_hook_halts_before_render() {
+    // A failing pre hook names the hook and never reaches targets:
+    // no output file is written.
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "render.json")
+        .expect("base tree carries render.json");
+    entry.1 = HOOK_RENDER.to_string();
+    tree.push((
+        "scripts/pre.oxfile".to_string(),
+        "ASSERT_EQ 1 2\n".to_string(),
+    ));
+    tree.push((
+        "scripts/post.oxfile".to_string(),
+        "WRITE post.txt post-ran\n".to_string(),
+    ));
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    let err = err_text(oxdock_render::run(root.as_path()).expect_err("pre must fail"));
+    assert!(
+        err.contains("pre hook 'scripts/pre.oxfile' failed"),
+        "error names the hook: {err}"
+    );
+    let out = root.join("out.md").expect("join out");
+    assert!(
+        resolver.entry_kind(&out).is_err(),
+        "no target rendered after a failing pre hook"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn failing_post_hook_fails_after_render() {
+    // Post hooks run after every target verifies: the artifacts
+    // exist, but the run still fails naming the hook.
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "render.json")
+        .expect("base tree carries render.json");
+    entry.1 = HOOK_RENDER.to_string();
+    tree.push((
+        "scripts/pre.oxfile".to_string(),
+        "WRITE pre.txt pre-ran\n".to_string(),
+    ));
+    tree.push((
+        "scripts/post.oxfile".to_string(),
+        "ASSERT_EQ 1 2\n".to_string(),
+    ));
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    let err = err_text(oxdock_render::run(root.as_path()).expect_err("post must fail"));
+    assert!(
+        err.contains("post hook 'scripts/post.oxfile' failed"),
+        "error names the hook: {err}"
+    );
+    let out = read(&resolver, &root, "out.md");
+    assert!(
+        out.contains("# Base 1"),
+        "targets rendered before the failing post hook: {out}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn unknown_render_key_fails_fast() {
+    // A typoed top-level key fails closed naming the known keys,
+    // instead of silently changing the pipeline.
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "render.json")
+        .expect("base tree carries render.json");
+    entry.1 = r#"{"global_values": ["base.json"], "scope": ["."], "generated": []}"#.to_string();
+    let (_temp, root, _resolver) = fixture(&as_refs(&tree));
+    let err = err_text(oxdock_render::run(root.as_path()).expect_err("typo must fail"));
+    assert!(
+        err.contains("unknown key 'scope'"),
+        "error names the typo: {err}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn init_scaffold_renders() {
+    // The run pipes stages through the child binary, never the
+    // pipeline binary itself.
+    // SAFETY: written to the same value on every call; tests never
+    // mutate it back or depend on a prior process value.
+    unsafe {
+        std::env::set_var("OXDOCK_RENDER_CHILD", child_bin());
+    }
+    // The --init template is a working starting point: scaffold it,
+    // add the smallest values/target/template triple, and render.
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    let written = oxdock_render::config::init_config_file(&root).expect("init writes the template");
+    assert_eq!(
+        resolver.read_to_string(&written).expect("read back"),
+        oxdock_render::config::INIT_TEMPLATE
+    );
+    for (rel, contents) in [
+        ("values.json", r#"{"n": "1"}"#),
+        (
+            "target.json",
+            r#"{"targets": [{"name": "t", "out": "out.md", "values": "values.json", "template": "master.md.tmpl", "fragments": {}}]}"#,
+        ),
+        ("master.md.tmpl", "# {{ $docs_ctx.n }}\n"),
+    ] {
+        let path = root.join(rel).expect("join scaffold");
+        resolver
+            .write_file(&path, contents.as_bytes())
+            .expect("write");
+    }
+    oxdock_render::run(root.as_path()).expect("scaffold renders");
+    let out = read(&resolver, &root, "out.md");
+    assert!(out.contains("# 1"), "scaffolded pipeline renders: {out}");
+    // A second init refuses to overwrite, leaving the file untouched.
+    let before = resolver
+        .read_to_string(&written)
+        .expect("read before second init");
+    let err = err_text(oxdock_render::config::init_config_file(&root).expect_err("no overwrite"));
+    assert!(
+        err.contains("already exists"),
+        "names the existing file: {err}"
+    );
+    assert_eq!(
+        resolver.read_to_string(&written).expect("read after"),
+        before
+    );
+}

@@ -26,34 +26,70 @@ See what would run without writing anything:
 oxdock-render --root /path/to/repo --print-child
 ```
 
+Scaffold a template config in a new repo (never overwrites):
+
+```sh
+oxdock-render --init --root /path/to/repo
+```
+
 Flags: `--root <path>` (workspace root, default: discovered),
 `--config <path>` (pipeline config, default: `render.json`),
-`--print-child` (print the generated script, skip the run).
+`--print-child` (print the generated script, skip the run),
+`--init` (write a template `render.json`, then stop).
 
 Fail-closed throughout: duplicate target names, zero discovered
-targets, misspelled placeholders, and unknown values fail the run
-instead of writing wrong outputs.
+targets, misspelled placeholders, unknown values, and unknown
+config keys fail the run instead of writing wrong outputs.
+
+### Hooks
+
+`pre` and `post` hooks in `render.json` run ordinary scripts
+around the render, so codegen or checks ride the same invocation:
+
+```json
+{
+  "hooks": {
+    "pre": ["scripts/regen.oxfile"],
+    "post": []
+  }
+}
+```
+
+Hooks execute with the pipeline engine against the workspace
+root, in listed order; imports inside a hook resolve against
+the workspace root. Either side failing halts the pipeline:
+a failing `pre` hook renders nothing, a failing `post` hook
+fails the run after the artifacts write. Omit the `hooks`
+key (or leave both lists empty) and the pipeline runs
+unchanged.
 
 ## Pipeline
 
 Each run performs the same steps, in order:
 
 1. Load `render.json`: global values, which files to scan,
-   generated inputs, and naming rules.
+   generated inputs, naming rules, and hooks. Unknown keys fail
+   naming the known set, so a typo can never silently change the
+   pipeline. Start from a template with `oxdock-render --init`.
 2. Serve the binary's embedded pipeline scripts from memory and
    check every plugin implements the same stages, failing fast with
    the offender named instead of halfway through a target.
-3. Build the run script: one step per stage per plugin, in
+3. Run the `pre` hooks, if any: ordinary scripts executed with the
+   pipeline engine. A failing hook halts the run before any
+   target renders.
+4. Build the run script: one step per stage per plugin, in
    registration order (`SETUP` once up front, then each stage per
    target), piped through a fresh interpreter that never touches
    disk.
-4. Per target: check the target declaration, expand the fragments
+5. Per target: check the target declaration, expand the fragments
    into the master template, and write the output file. The docs
    plugin first refreshes generated inputs and re-reads workspace
    metadata.
-5. Restore executable bits declared by targets (so regenerating
-   `install.sh` keeps its executable bit), then report. Zero
-   discovered targets fails the run.
+6. Run the `post` hooks, if any, then restore executable bits
+   declared by targets (so regenerating `install.sh` keeps its
+   executable bit), then report. Zero discovered targets fails
+   the run. A failing post hook fails the run even though the
+   artifacts already wrote.
 
 The pipeline itself runs on OxDock scripts shipped inside the
 binary: static `.oxfile` sources plus one lifecycle file per

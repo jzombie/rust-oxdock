@@ -20,10 +20,39 @@ See what would run without writing anything:
 oxdock-render --root /path/to/repo --print-child
 ```
 
+Scaffold a template config in a new repo (never overwrites):
+
+```sh
+oxdock-render --init --root /path/to/repo
+```
+
 Flags: `--root <path>` (workspace root, default: discovered),
 `--config <path>` (pipeline config, default: `render.json`),
-`--print-child` (print the generated script, skip the run).
+`--print-child` (print the generated script, skip the run),
+`--init` (write a template `render.json`, then stop).
 
 Fail-closed throughout: duplicate target names, zero discovered
-targets, misspelled placeholders, and unknown values fail the run
-instead of writing wrong outputs.
+targets, misspelled placeholders, unknown values, and unknown
+config keys fail the run instead of writing wrong outputs.
+
+### Hooks
+
+`pre` and `post` hooks in `render.json` run ordinary scripts
+around the render, so codegen or checks ride the same invocation:
+
+```json
+{
+  "hooks": {
+    "pre": ["scripts/regen.oxfile"],
+    "post": []
+  }
+}
+```
+
+Hooks execute with the pipeline engine against the workspace
+root, in listed order; imports inside a hook resolve against
+the workspace root. Either side failing halts the pipeline:
+a failing `pre` hook renders nothing, a failing `post` hook
+fails the run after the artifacts write. Omit the `hooks`
+key (or leave both lists empty) and the pipeline runs
+unchanged.

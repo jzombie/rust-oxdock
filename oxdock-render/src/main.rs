@@ -5,6 +5,18 @@ use std::path::PathBuf;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--init") {
+        // Scaffold a template render.json in --root (else the cwd)
+        // and stop: never overwrite an existing file.
+        let dir = match root_arg(&args) {
+            Some(root) => root,
+            None => std::env::current_dir().context("current directory for --init")?,
+        };
+        let root = oxdock_fs::GuardedPath::new_root(&dir).context("guard --init directory")?;
+        let path = oxdock_render::config::init_config_file(&root)?;
+        println!("wrote {}", path.display());
+        return Ok(());
+    }
     let repo_root = match root_arg(&args) {
         Some(root) => root,
         None => oxdock_fs::discover_workspace_root()
