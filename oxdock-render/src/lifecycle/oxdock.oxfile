@@ -1,4 +1,4 @@
-# OxDock docs lifecycle: the run-once intake plus passthroughs.
+# oxdock-render lifecycle: the run-once intake plus passthroughs.
 #
 # Every lifecycle plugin exposes these same methods; registration
 # order decides which plugin runs first within a stage.
