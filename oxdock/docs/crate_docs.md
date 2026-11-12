@@ -8,7 +8,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.36.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.37.0-alpha/oxdock/)
 
 ## Dynamically embed assets at compile time
 
@@ -81,7 +81,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $version: STRING = #crate_version
     MKDIR dist
 
-    FUNC STAMP($name: STRING) {
+    FUNC STAMP($name: STRING): STRING {
         WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
         RETURN $name
     }
@@ -89,7 +89,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         STAMP($name)
     }
 
-    FUNC PICK($flag: BOOL) {
+    FUNC PICK($flag: BOOL): STRING {
         IF $flag {
             RETURN "alpha"
         }
@@ -101,8 +101,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.36.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.36.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.37.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.37.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -114,7 +114,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.36.0-alpha"
+    "alpha OxDock 0.37.0-alpha"
 );
 ```
 
@@ -290,7 +290,7 @@ State mutations stay where the script puts them. Entering a braced block or a fu
 ```oxdock
 # Calls snapshot caller state: the parameter shadows without clobbering.
 LET $v: STRING = "outer"
-FUNC SHADOW($v: STRING) {
+FUNC SHADOW($v: STRING): STRING {
     LET $inner: STRING = "inner"
     RETURN $v
 }
@@ -301,7 +301,7 @@ ASSERT_EQ $v "outer"
 
 # Background tasks fork the same way: worker mutations never escape.
 LET $w: STRING = "outer"
-LET $t: HANDLE = ASYNC {
+LET $t: HANDLE<VOID> = ASYNC {
     $w = "inner"
     ECHO "task-ran"
 }
@@ -1168,13 +1168,13 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
-| [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE = ASYNC { <commands> }` |
+| [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE<T> = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
 | [`ISOLATED`](#isolated) | `ISOLATED { INHERIT_ENV [...] <commands> } \| ISOLATED <command...>` |
 | [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
-| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]) { <commands> }` |
+| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]): RET { <commands> } \| ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }` |
 | [`RETURN`](#return) | `RETURN [<expr>]` |
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |
@@ -1737,9 +1737,10 @@ Mutate a declared variable.
 **Syntax:** `$var = <expr>`
 
 Reassigns an existing variable, converting the new value to
-the type declared at LET time. The explicit annotation is
-what authorizes string-to-number conversion here (`$n = "42"`
-binds 42 for an INT); a non-numeric string is an error.
+the type declared at LET time through the same narrow
+coercion pairs as declaration. Strings never parse to
+numbers implicitly: `$n = "42"` is a TypeMismatch for an
+INT, write `$n = INT("42")` instead.
 Expressions never convert: `"100" + 1` is a Type Error, use
 `INT()` / `FLOAT()` to cross that boundary explicitly.
 
@@ -1814,7 +1815,7 @@ ASSERT_EQ $f 2.75
 
 Run steps in a background thread.
 
-**Syntax:** `ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }`
+**Syntax:** `ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE<T> = ASYNC { <commands> }`
 
 Runs a command or block of commands in a background thread with
 subshell isolation.
@@ -1837,8 +1838,8 @@ inside `ASYNC` is rejected at parse time.
 ```oxdock
 # Inline and block forms both run in the background; AWAIT joins them.
 ASYNC ECHO "warming-up"
-LET $a: HANDLE = ASYNC ECHO "first"
-LET $b: HANDLE = ASYNC {
+LET $a: HANDLE<VOID> = ASYNC ECHO "first"
+LET $b: HANDLE<VOID> = ASYNC {
     ECHO "second"
 }
 AWAIT $a
@@ -1850,7 +1851,7 @@ ASSERT_CONTAINS stdout "second"
 **Example: async task handle**
 
 ```oxdock
-LET $task: HANDLE = ASYNC {
+LET $task: HANDLE<VOID> = ASYNC {
     ECHO "built"
 }
 AWAIT $task
@@ -1878,7 +1879,7 @@ a value).
 **Example: await**
 
 ```oxdock
-LET $task: HANDLE = ASYNC ECHO "done"
+LET $task: HANDLE<VOID> = ASYNC ECHO "done"
 AWAIT $task
 ASSERT_CONTAINS stdout "done"
 ```
@@ -1886,7 +1887,7 @@ ASSERT_CONTAINS stdout "done"
 **Example: await capture**
 
 ```oxdock
-LET $task: HANDLE = ASYNC {
+LET $task: HANDLE<STRING> = ASYNC {
     ECHO "logged"
     RETURN "returned"
 }
@@ -1903,7 +1904,7 @@ Synchronously cancel a background task.
 
 **Syntax:** `CANCEL $var`
 
-Kills the named background task spawned via LET $var: HANDLE = ASYNC ....
+Kills the named background task spawned via `LET $var: HANDLE<T> = ASYNC ...`.
 
 Blocking: returns only after the task thread has been joined and its OS
 process reaped, so no residual filesystem or stream mutation follows. A
@@ -1915,7 +1916,7 @@ later AWAIT $var reports cancellation. Only named tasks can be cancelled.
 **Example: cancel**
 
 ```oxdock
-LET $task: HANDLE = ASYNC SLEEP 30s
+LET $task: HANDLE<VOID> = ASYNC SLEEP 30s
 CANCEL $task
 ```
 
@@ -1923,7 +1924,7 @@ CANCEL $task
 
 ```oxdock expect_error:"was cancelled"
 # A cancelled task stays cancelled: joining it reports.
-LET $task: HANDLE = ASYNC SLEEP 30s
+LET $task: HANDLE<VOID> = ASYNC SLEEP 30s
 CANCEL $task
 AWAIT $task
 ```
@@ -1943,7 +1944,7 @@ duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
 A blocking foreground process is killed.
 
 ASYNC nests in either order with order-dependent deadline
-semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
+semantics: `LET $task: HANDLE<VOID> = ASYNC TIMEOUT 30s RUN "build"` enforces
 the deadline inside the background thread (a later `AWAIT $task`
 surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
 preempts a hung task from the awaiting side.
@@ -1997,7 +1998,7 @@ ASSERT_EQ $beat "alive"
 
 ```oxdock
 # AWAIT form bounds a task join instead of a step.
-LET $quick: HANDLE = ASYNC {
+LET $quick: HANDLE<VOID> = ASYNC {
     ECHO hi
 }
 TIMEOUT 30s AWAIT $quick
@@ -2163,10 +2164,10 @@ ASSERT_EQ $back "1.2.3"
 IMPORT [STD]
 LET $cap: PIPE
 WITH_IO [stdout=$cap] {
-    LET $a: HANDLE = ASYNC REMOTE prod {
+    LET $a: HANDLE<VOID> = ASYNC REMOTE prod {
         ECHO "from-a"
     }
-    LET $b: HANDLE = ASYNC REMOTE prod {
+    LET $b: HANDLE<VOID> = ASYNC REMOTE prod {
         ECHO "from-b"
     }
     AWAIT $a
@@ -2257,7 +2258,7 @@ REMOTE prod {
 # guest is already dead, and the failure surfaces as
 # a host step error carrying the same code. The CLI
 # then exits with it, so the guest code reaches the OS.
-LET $t: HANDLE = ASYNC REMOTE prod {
+LET $t: HANDLE<VOID> = ASYNC REMOTE prod {
     EXIT 3
 }
 WRITE host-alive.txt "still here"
@@ -2283,10 +2284,12 @@ REMOTE prod {
 
 Define a user function.
 
-**Syntax:** `FUNC NAME([$param: TYPE, ...]) { <commands> }`
+**Syntax:** `FUNC NAME([$param: TYPE, ...]): RET { <commands> } | ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }`
 
 Defines a user function with UPPERCASE name and explicitly typed
-parameters.
+parameters. `FUNC` runs synchronously; `ASYNC FUNC` is the same
+with a structural guarantee: the declaration must be
+`HANDLE<T>`, so every `RETURN` hands out a task handle.
 
 Params bind by position, converting each argument to its
 declared parameter type before the body runs.
@@ -2303,7 +2306,13 @@ imported; see IMPORT.
 
 Invoke any function with one syntax: `NAME(...)` as a statement
 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
-the RETURN value (fallthrough without RETURN captures as "").
+the RETURN value (fallthrough without RETURN is a static error unless RET is VOID).
+
+`ASYNC FUNC` does not spawn on call. The body runs
+synchronously on the caller thread up to its inner `ASYNC`
+step, which spawns the background task and yields its handle
+immediately; the function then hands that handle out with
+`RETURN $t`. The caller joins it separately with `AWAIT`.
 
 
 **Examples:**
@@ -2311,7 +2320,7 @@ the RETURN value (fallthrough without RETURN captures as "").
 **Example: func def call**
 
 ```oxdock
-FUNC GREET($name: STRING) {
+FUNC GREET($name: STRING): STRING {
   RETURN $name
 }
 
@@ -2322,13 +2331,36 @@ ASSERT_EQ $res "ada"
 GREET("bex")
 ```
 
+**Example: async func is a handle guarantee**
+
+```oxdock
+# Side by side: identical bodies, identical handling. The
+# ASYNC marker only guarantees the HANDLE declaration.
+ASYNC FUNC FETCH(): HANDLE<STRING> {
+  LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+  RETURN $t
+}
+FUNC MAKE(): HANDLE<STRING> {
+  LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+  RETURN $t
+}
+
+# Both run synchronously to RETURN; the inner ASYNC spawns.
+LET $a: HANDLE<STRING> = FETCH()
+LET $b: HANDLE<STRING> = MAKE()
+LET $x: STRING = AWAIT $a
+LET $y: STRING = AWAIT $b
+ASSERT_EQ $x "hi"
+ASSERT_EQ $y "hi"
+```
+
 **Example: call with pipes**
 
 ```oxdock
 # A pipe handle travels into a function as a typed argument
 # and is usable as a binding target in both directions.
 # `LET $p: PIPE` mints the handle; `$p` passes it on.
-FUNC DRAIN($q: PIPE) {
+FUNC DRAIN($q: PIPE): STRING {
   WITH_IO [stdin=$q] READ_LINE $line
   RETURN $line
 }
@@ -2348,7 +2380,7 @@ Return a value from a function, task, or inline block.
 **Syntax:** `RETURN [<expr>]`
 
 Ends the nearest enclosing boundary with a value: a function
-call, an `ASYNC` task (bound by `LET $o = AWAIT $t`), or an
+call, an `ASYNC` task (bound by `LET $out: STRING = AWAIT $t`), or an
 inline `LET` block. Bare `RETURN` with no expression yields
 `""`.
 
@@ -2362,7 +2394,7 @@ EXIT or ECHO there.
 **Example: return**
 
 ```oxdock
-FUNC PICK($flag: BOOL) {
+FUNC PICK($flag: BOOL): STRING {
   IF $flag {
     RETURN "yes"
   }
@@ -2629,7 +2661,7 @@ ASSERT_CONTAINS stdout "hi World!"
 # exist when the run starts cannot be analyzed, so the
 # import fails before the first step runs.
 WORKSPACE LOCAL
-WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
+WRITE lib.oxdock 'FUNC F($x: STRING): STRING { RETURN $x } EXPORT F'
 IMPORT ["lib.oxdock" AS LIB]
 ```
 
@@ -2671,7 +2703,7 @@ EXPORT NOSUCH::FOO
 # them so importing files can use the same spelling.
 TYPE PERSON = MAP<name: STRING>
 
-FUNC GREET($p: PERSON) {
+FUNC GREET($p: PERSON): STRING {
     RETURN "hi {{ $p.name }}"
 }
 EXPORT GREET
@@ -2713,7 +2745,7 @@ LET $files: LIST<STRING> = GLOB("*.oxdock")
 # parent and child see the same files.
 IMPORT [STD]
 WRITE lib.oxfile """
-    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+    FUNC GREET($x: STRING): STRING { RETURN "hi \{{ $x }}" }
     EXPORT GREET
     """
 WRITE main.oxfile """
@@ -2738,9 +2770,9 @@ ASSERT_CONTAINS $out "says hi Ada"
 IMPORT [STD]
 
 # The renderer: parent values land in the module source.
-FUNC MAKE_GREETER($who: STRING) {
+FUNC MAKE_GREETER($who: STRING): STRING {
     WRITE greeter.oxfile """
-        FUNC GREET() { RETURN "hi {{ $who }}" }
+        FUNC GREET(): STRING { RETURN "hi {{ $who }}" }
         EXPORT GREET
         """
     RETURN "greeter.oxfile"
@@ -4246,7 +4278,14 @@ equality is handle identity, never byte comparison.
 
 ### Value type: HANDLE
 
-Background ASYNC task handle for AWAIT/CANCEL.
+Background task handle minted by `LET $t: HANDLE<T> = ASYNC ...`.
+The payload names what `AWAIT` binds: `HANDLE<T>` yields `T` on
+capture, `HANDLE<VOID>` is join-only (bare `AWAIT`/`CANCEL` only).
+The handle itself is just a task id and carries no data: observe
+the task through `AWAIT`, `CANCEL`, or `TASK_POLL`, never through
+the handle. Copying it aliases the same task, and joining twice
+fails. Bare `HANDLE` is not a declaration type: write the payload
+or explicit `HANDLE<ANY>`.
 
 ### Value type: SEMAPHORE
 
@@ -4276,7 +4315,7 @@ non-UTF-8 payloads instead of rendering a silent empty. Pairs
 with `BASE64_ENCODE` for the round trip.
 
 
-**Signature:** `STD::BASE64_DECODE($text: STRING) -> STRING`
+**Signature:** `STD::BASE64_DECODE($text: STRING): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4305,7 +4344,7 @@ Padded RFC 4648 alphabet, so encoded output pastes into any
 standard decoder. Pairs with `BASE64_DECODE` for the round trip.
 
 
-**Signature:** `STD::BASE64_ENCODE($text: STRING) -> STRING`
+**Signature:** `STD::BASE64_ENCODE($text: STRING): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4337,7 +4376,7 @@ absent env names (which read empty) must go through `BOOL_OR`
 with a stated default instead of converting here.
 
 
-**Signature:** `STD::BOOL($val: BOOL|STRING) -> BOOL`
+**Signature:** `STD::BOOL($val: BOOL|STRING): BOOL`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4371,7 +4410,7 @@ implicit polarity lives in the coercion. Non-blank garbage still
 fails naming the input, exactly like `LET $x: BOOL` coercion.
 
 
-**Signature:** `STD::BOOL_OR($text: STRING, $default: BOOL) -> BOOL`
+**Signature:** `STD::BOOL_OR($text: STRING, $default: BOOL): BOOL`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4411,7 +4450,7 @@ Reports the snapshot-pending sentinel when no concrete directory
 exists yet, so snapshot scripts keep working unchanged.
 
 
-**Signature:** `STD::CWD() -> STRING`
+**Signature:** `STD::CWD(): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4444,7 +4483,7 @@ Field table for the `DESCRIBE` result bundle: one source for the
 shape the host mints, so introspection, enforcement, and
 documentation cannot drift apart.
 
-**Signature:** `STD::DESCRIBE($name: STRING) -> MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
+**Signature:** `STD::DESCRIBE($name: STRING): MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -4486,7 +4525,7 @@ Non-pipe arguments bail at the boundary: the parameter declares
 the body runs.
 
 
-**Signature:** `STD::EOF($pipe: PIPE) -> BOOL`
+**Signature:** `STD::EOF($pipe: PIPE): BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -4525,7 +4564,7 @@ Convert a value to FLOAT.
 Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 
 
-**Signature:** `STD::FLOAT($val: FLOAT|INT|STRING) -> FLOAT`
+**Signature:** `STD::FLOAT($val: FLOAT|INT|STRING): FLOAT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4554,7 +4593,7 @@ binary `10KIB` and friends): the inverse of `PARSE_BYTE_COUNT`, so
 formatted values reparse exactly. Negative inputs fail.
 
 
-**Signature:** `STD::FORMAT_BYTE_COUNT($bytes: INT) -> STRING`
+**Signature:** `STD::FORMAT_BYTE_COUNT($bytes: INT): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4586,7 +4625,7 @@ Format millisecond durations canonically (`500ms`, `10s`, `2m`,
 reparse exactly. Negative inputs fail.
 
 
-**Signature:** `STD::FORMAT_DURATION($millis: INT) -> STRING`
+**Signature:** `STD::FORMAT_DURATION($millis: INT): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4618,7 +4657,7 @@ List all visible function names.
 Sorted LIST of qualified `MODULE::NAME` entries: DSL-defined plus native
 plus host-registered names.
 
-**Signature:** `STD::FUNCTIONS() -> LIST<STRING>`
+**Signature:** `STD::FUNCTIONS(): LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -4641,7 +4680,7 @@ List workspace paths matching a glob pattern.
 Sorted, root-relative LIST; empty on no match or `..` escape.
 
 
-**Signature:** `STD::GLOB($pattern: STRING|PATH) -> LIST<STRING>`
+**Signature:** `STD::GLOB($pattern: STRING|PATH): LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4677,7 +4716,7 @@ directly. Returns the 64 lowercase hex chars with no trailing
 newline.
 
 
-**Signature:** `STD::HASH_SHA256($path: STRING|PATH) -> STRING`
+**Signature:** `STD::HASH_SHA256($path: STRING|PATH): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4706,7 +4745,7 @@ Pure MAP probe so scripts can branch on optional fields without
 tripping the strict missing-key error.
 
 
-**Signature:** `STD::HAS_KEY($map: MAP<ANY>, $key: STRING) -> BOOL`
+**Signature:** `STD::HAS_KEY($map: MAP<ANY>, $key: STRING): BOOL`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4738,7 +4777,7 @@ Trims ASCII whitespace and parses i64. Passes Int through; Float only
 when integral and finite; Bool as 1/0.
 
 
-**Signature:** `STD::INT($val: INT|FLOAT|STRING|BOOL) -> INT`
+**Signature:** `STD::INT($val: INT|FLOAT|STRING|BOOL): INT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4776,7 +4815,7 @@ Unsupported under Miri isolation: the lookup itself fails there
 instead of returning a path.
 
 
-**Signature:** `STD::INTERPRETER() -> STRING`
+**Signature:** `STD::INTERPRETER(): STRING`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -4832,7 +4871,7 @@ usual, so host probing wants `WORKSPACE SYSTEM` and an inherited
 by design, like `PATH_TYPE`: there is no RPN arm for filesystem IO.
 
 
-**Signature:** `STD::IS_EXEC($name: STRING|PATH) -> BOOL`
+**Signature:** `STD::IS_EXEC($name: STRING|PATH): BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -4868,7 +4907,7 @@ library file double as a runnable demo: guard the demo with
 `IF IS_MAIN()` so importing it stays side-effect free.
 
 
-**Signature:** `STD::IS_MAIN() -> BOOL`
+**Signature:** `STD::IS_MAIN(): BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -4901,7 +4940,7 @@ IMPORT [STD]
 # The library under test: demo guarded by IS_MAIN.
 WRITE lib.oxfile """
     IMPORT [STD]
-    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+    FUNC GREET($x: STRING): STRING { RETURN "hi \{{ $x }}" }
     EXPORT GREET
     IF IS_MAIN() {
         ECHO "demo: hi Ada"
@@ -4941,7 +4980,7 @@ matches exactly (no case folding): anything else bails. AST-only:
 reads the step context like the other introspection functions.
 
 
-**Signature:** `STD::IS_TERMINAL($stream_name: STRING = "stdin" | "stdout" | "stderr") -> BOOL`
+**Signature:** `STD::IS_TERMINAL($stream_name: STRING = "stdin" | "stdout" | "stderr"): BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -4972,7 +5011,7 @@ scalar word. `LET` coercion still checks the actual value at
 assignment.
 
 
-**Signature:** `STD::LOAD_JSON($path: STRING|PATH) -> ANY`
+**Signature:** `STD::LOAD_JSON($path: STRING|PATH): ANY`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5000,7 +5039,7 @@ Load and parse a TOML file.
 Reads a workspace file and parses TOML into a DSL value.
 
 
-**Signature:** `STD::LOAD_TOML($path: STRING|PATH) -> MAP<ANY>`
+**Signature:** `STD::LOAD_TOML($path: STRING|PATH): MAP<ANY>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5029,7 +5068,7 @@ Fails on duplicates so two entries sharing a key fail the run
 instead of silently shadowing each other.
 
 
-**Signature:** `STD::MAP_SET($map: MAP<ANY>, $key: STRING, $value: ANY) -> MAP<ANY>`
+**Signature:** `STD::MAP_SET($map: MAP<ANY>, $key: STRING, $value: ANY): MAP<ANY>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5061,7 +5100,7 @@ other. `overwrite` lets later files win, for environment overlays.
 Non MAP elements fail naming their position.
 
 
-**Signature:** `STD::MERGE_MAPS($maps: LIST<MAP<ANY>>, $policy: STRING = "fail_on_duplicate" | "overwrite") -> MAP<ANY>`
+**Signature:** `STD::MERGE_MAPS($maps: LIST<MAP<ANY>>, $policy: STRING = "fail_on_duplicate" | "overwrite"): MAP<ANY>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5120,7 +5159,7 @@ ASSERT_EQ $spaced 1_000_000_000
 ```
 
 
-**Signature:** `STD::PARSE_BYTE_COUNT($text: INT|FLOAT|STRING) -> INT`
+**Signature:** `STD::PARSE_BYTE_COUNT($text: INT|FLOAT|STRING): INT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5150,7 +5189,7 @@ Suffixes `ms`/`s`/`m`/`h`; a bare number means seconds. Pairs with
 `FORMAT_DURATION` for the round trip.
 
 
-**Signature:** `STD::PARSE_DURATION($text: STRING) -> INT`
+**Signature:** `STD::PARSE_DURATION($text: STRING): INT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5190,7 +5229,7 @@ parses to `LIST` or a scalar word. `LET` coercion still checks the
 actual value at assignment.
 
 
-**Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
+**Signature:** `STD::PARSE_JSON($text: STRING): ANY`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5225,7 +5264,7 @@ Uses the same conversion as file loading, so fetch bodies, file
 contents, and captured text share one JSON/TOML shape.
 
 
-**Signature:** `STD::PARSE_TOML($text: STRING) -> MAP<ANY>`
+**Signature:** `STD::PARSE_TOML($text: STRING): MAP<ANY>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5258,7 +5297,7 @@ destination string like `$dir` itself, and `PATH` words
 re-canonicalize to forward slashes on template expansion, which
 would undo the native join.
 
-**Signature:** `STD::PATH_JOIN($dir: STRING|PATH, $name: STRING|PATH) -> STRING`
+**Signature:** `STD::PATH_JOIN($dir: STRING|PATH, $name: STRING|PATH): STRING`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -5291,7 +5330,7 @@ Reports file, dir, symlink (no-follow), or absent. AST-only by design;
 there is no RPN arm for filesystem IO.
 
 
-**Signature:** `STD::PATH_TYPE($path: STRING|PATH) -> STRING`
+**Signature:** `STD::PATH_TYPE($path: STRING|PATH): STRING`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -5325,7 +5364,7 @@ AST-only by design, like `PATH_TYPE`: there is no RPN arm for
 filesystem IO.
 
 
-**Signature:** `STD::PATH_WRITABLE($path: STRING|PATH) -> BOOL`
+**Signature:** `STD::PATH_WRITABLE($path: STRING|PATH): BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -5360,7 +5399,7 @@ call. A seed draws the same value on every run, for deterministic
 fixtures. Scale and shift the draw for wider ranges.
 
 
-**Signature:** `STD::RAND($options?: MAP<seed?: INT>) -> FLOAT`
+**Signature:** `STD::RAND($options?: MAP<seed?: INT>): FLOAT`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -5408,7 +5447,7 @@ Exact at read time and stale the instant the caller acts on it, so it
 must never drive admission: that is `SEMAPHORE_TRY_ACQUIRE`'s job.
 
 
-**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE) -> INT`
+**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE): INT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5444,7 +5483,7 @@ observes the same count, and admission runs through
 readout.
 
 
-**Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
+**Signature:** `STD::SEMAPHORE_NEW($max: INT): SEMAPHORE`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -5479,7 +5518,7 @@ unless `held`: missing-key access bails strictly.
 Never waits, so no wait can wedge.
 
 
-**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE) -> MAP<held: BOOL, permit?: PERMIT>`
+**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE): MAP<held: BOOL, permit?: PERMIT>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -5521,7 +5560,7 @@ Inverse of `SHELL_SPLIT_ARGS` on the word side: splitting the
 result returns the input list unchanged.
 
 
-**Signature:** `STD::SHELL_JOIN_ARGS($words: LIST<STRING>) -> STRING`
+**Signature:** `STD::SHELL_JOIN_ARGS($words: LIST<STRING>): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5564,7 +5603,7 @@ Shell syntax only: plain prose with no quoting splits on
 whitespace like any shell would, which is rarely what prose wants.
 
 
-**Signature:** `STD::SHELL_SPLIT_ARGS($command: STRING) -> LIST<STRING>`
+**Signature:** `STD::SHELL_SPLIT_ARGS($command: STRING): LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5608,7 +5647,7 @@ and `stderr_tail` carry bounded output with `truncated_bytes`
 counting dropped head bytes. Finished tasks add `exit_code`;
 clean finishes add `result`, failed ones add `error` instead.
 
-**Signature:** `STD::TASK_POLL($task: HANDLE) -> MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING>`
+**Signature:** `STD::TASK_POLL($task: HANDLE): MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -5634,7 +5673,7 @@ clean finishes add `result`, failed ones add `error` instead.
 ```oxdock
 # A sleeping task is still running on the first poll.
 IMPORT [STD]
-LET $t: HANDLE = ASYNC { SLEEP 30s }
+LET $t: HANDLE<STRING> = ASYNC { SLEEP 30s; RETURN "done" }
 LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
 ASSERT_EQ $m.state "running"
 ASSERT_EQ $m.ok true
@@ -5647,7 +5686,7 @@ CANCEL $t
 ```oxdock
 # A finished task reports its value and final tails, then still awaits.
 IMPORT [STD]
-LET $t: HANDLE = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
+LET $t: HANDLE<STRING> = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
 # Do other work while the task runs; poll once it should be done.
 SLEEP 2s
 LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
@@ -5666,7 +5705,7 @@ alongside the prefix and suffix tests. Matching is
 case-sensitive; there is no case-insensitive mode.
 
 
-**Signature:** `STD::TEXT_CONTAINS($text: STRING, $needle: STRING) -> BOOL`
+**Signature:** `STD::TEXT_CONTAINS($text: STRING, $needle: STRING): BOOL`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5702,7 +5741,7 @@ binding every character boundary. Matching is case-sensitive;
 there is no case-insensitive mode.
 
 
-**Signature:** `STD::TEXT_COUNT($text: STRING, $needle: STRING) -> INT`
+**Signature:** `STD::TEXT_COUNT($text: STRING, $needle: STRING): INT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5740,7 +5779,7 @@ unless the pattern carries an inline `(?i)` flag, which makes
 uppercase and lowercase letters match each other.
 
 
-**Signature:** `STD::TEXT_COUNT_MATCHES($text: STRING, $pattern: STRING) -> INT`
+**Signature:** `STD::TEXT_COUNT_MATCHES($text: STRING, $pattern: STRING): INT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5775,7 +5814,7 @@ check in CI legs. Matching is case-sensitive; there is no
 case-insensitive mode.
 
 
-**Signature:** `STD::TEXT_ENDS_WITH($text: STRING, $suffix: STRING) -> BOOL`
+**Signature:** `STD::TEXT_ENDS_WITH($text: STRING, $suffix: STRING): BOOL`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5812,7 +5851,7 @@ case-sensitive unless the pattern carries an inline `(?i)` flag,
 which makes uppercase and lowercase letters match each other.
 
 
-**Signature:** `STD::TEXT_EXTRACT($text: STRING, $pattern: STRING) -> LIST<STRING>`
+**Signature:** `STD::TEXT_EXTRACT($text: STRING, $pattern: STRING): LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5844,7 +5883,7 @@ Returns a `LIST<STRING>`; the checksum-line parser that replaces
 `cut -d' ' -f1` in CI legs.
 
 
-**Signature:** `STD::TEXT_FIELDS($text: STRING) -> LIST<STRING>`
+**Signature:** `STD::TEXT_FIELDS($text: STRING): LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5881,7 +5920,7 @@ which makes uppercase and lowercase letters match each other. Bad
 patterns fail closed naming the pattern and its position.
 
 
-**Signature:** `STD::TEXT_GREP($text: STRING, $pattern: STRING, $options?: MAP<invert?: BOOL>) -> LIST<STRING>`
+**Signature:** `STD::TEXT_GREP($text: STRING, $pattern: STRING, $options?: MAP<invert?: BOOL>): LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5942,7 +5981,7 @@ ASSERT_EQ $msg "kept:two"
 Join a `LIST<STRING>` with a literal separator into a `STRING`.
 
 
-**Signature:** `STD::TEXT_JOIN($elements: LIST<STRING>, $delimiter: STRING) -> STRING`
+**Signature:** `STD::TEXT_JOIN($elements: LIST<STRING>, $delimiter: STRING): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -5973,7 +6012,7 @@ length: `"héllo"` binds 5, not 6. The `${#var}` and `wc -m`
 counterpart for scripts that size tags and digests.
 
 
-**Signature:** `STD::TEXT_LENGTH($text: STRING) -> INT`
+**Signature:** `STD::TEXT_LENGTH($text: STRING): INT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6008,7 +6047,7 @@ and mixed endings all split, then delegates the split itself to
 Returns a `LIST<STRING>`; eager-only like `TEXT_SPLIT`.
 
 
-**Signature:** `STD::TEXT_LINES($text: STRING) -> LIST<STRING>`
+**Signature:** `STD::TEXT_LINES($text: STRING): LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6055,7 +6094,7 @@ clamp like sed instead of failing; a start before line 1 or past
 `to` fails closed, since no line reading satisfies it.
 
 
-**Signature:** `STD::TEXT_LINES_RANGE($text: STRING, $from: INT, $to: INT) -> LIST<STRING>`
+**Signature:** `STD::TEXT_LINES_RANGE($text: STRING, $from: INT, $to: INT): LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6093,7 +6132,7 @@ carries an inline `(?i)` flag, which makes uppercase and lowercase
 letters match each other.
 
 
-**Signature:** `STD::TEXT_MATCH($text: STRING, $pattern: STRING) -> BOOL`
+**Signature:** `STD::TEXT_MATCH($text: STRING, $pattern: STRING): BOOL`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6132,7 +6171,7 @@ closed, and regex work with captures belongs to
 case-insensitive mode.
 
 
-**Signature:** `STD::TEXT_REPLACE($text: STRING|PIPE, $from: STRING, $to: STRING) -> STRING|PIPE`
+**Signature:** `STD::TEXT_REPLACE($text: STRING|PIPE, $from: STRING, $to: STRING): STRING|PIPE`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6193,7 +6232,7 @@ each other.
 The literal counterpart is `TEXT_REPLACE`.
 
 
-**Signature:** `STD::TEXT_REPLACE_REGEX($text: STRING|PIPE, $pattern: STRING, $replacement: STRING) -> STRING|PIPE`
+**Signature:** `STD::TEXT_REPLACE_REGEX($text: STRING|PIPE, $pattern: STRING, $replacement: STRING): STRING|PIPE`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6250,7 +6289,7 @@ Delimiters match case-sensitively; there is no
 case-insensitive mode.
 
 
-**Signature:** `STD::TEXT_SPLIT($text: STRING, $delimiter: STRING) -> LIST<STRING>`
+**Signature:** `STD::TEXT_SPLIT($text: STRING, $delimiter: STRING): LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6283,7 +6322,7 @@ such as `matrix.target` suffix and prefix tests. Matching is
 case-sensitive; there is no case-insensitive mode.
 
 
-**Signature:** `STD::TEXT_STARTS_WITH($text: STRING, $prefix: STRING) -> BOOL`
+**Signature:** `STD::TEXT_STARTS_WITH($text: STRING, $prefix: STRING): BOOL`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6318,7 +6357,7 @@ Pipes map chunk by chunk across a char-boundary carry, like
 `TEXT_TO_UPPER`.
 
 
-**Signature:** `STD::TEXT_TO_LOWER($text: STRING|PIPE) -> STRING|PIPE`
+**Signature:** `STD::TEXT_TO_LOWER($text: STRING|PIPE): STRING|PIPE`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6371,7 +6410,7 @@ Pipes map chunk by chunk across a char-boundary carry, so
 multibyte characters split across reads still fold correctly.
 
 
-**Signature:** `STD::TEXT_TO_UPPER($text: STRING|PIPE) -> STRING|PIPE`
+**Signature:** `STD::TEXT_TO_UPPER($text: STRING|PIPE): STRING|PIPE`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6426,7 +6465,7 @@ holds in the spill substrate until the next segment proves it
 interior, so unbounded streams never buffer unbounded memory.
 
 
-**Signature:** `STD::TEXT_TRIM($text: STRING|PIPE) -> STRING|PIPE`
+**Signature:** `STD::TEXT_TRIM($text: STRING|PIPE): STRING|PIPE`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6491,7 +6530,7 @@ case-insensitive mode.
 Used for tag prefix strips such as `v1.2.3` to `1.2.3`.
 
 
-**Signature:** `STD::TEXT_TRIM_PREFIX($text: STRING|PIPE, $prefix: STRING) -> STRING|PIPE`
+**Signature:** `STD::TEXT_TRIM_PREFIX($text: STRING|PIPE, $prefix: STRING): STRING|PIPE`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6550,7 +6589,7 @@ Pipes hold a `suffix.len()` trailing window and stream the rest.
 Matching is case-sensitive; there is no case-insensitive mode.
 
 
-**Signature:** `STD::TEXT_TRIM_SUFFIX($text: STRING|PIPE, $suffix: STRING) -> STRING|PIPE`
+**Signature:** `STD::TEXT_TRIM_SUFFIX($text: STRING|PIPE, $suffix: STRING): STRING|PIPE`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6609,7 +6648,7 @@ BOOL, LIST, MAP) survive, anything else fails here instead of
 rendering as a silent empty.
 
 
-**Signature:** `STD::TO_JSON($value: STRING|INT|FLOAT|BOOL|LIST|MAP) -> STRING`
+**Signature:** `STD::TO_JSON($value: STRING|INT|FLOAT|BOOL|LIST|MAP): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6637,7 +6676,7 @@ Sorted LIST of startup plus host-registered type descriptors. Reads the
 run's name directory, so it runs on the AST path like the other
 introspection functions.
 
-**Signature:** `STD::TYPES() -> LIST<STRING>`
+**Signature:** `STD::TYPES(): LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -6661,7 +6700,7 @@ Returns a MAP with name, summary, and docs. Errors on unknown type.
 Reads the run's name directory, so it runs on the AST path.
 
 
-**Signature:** `STD::TYPE_DESCRIBE($name: STRING) -> MAP<name: STRING, summary: STRING, docs: STRING>`
+**Signature:** `STD::TYPE_DESCRIBE($name: STRING): MAP<name: STRING, summary: STRING, docs: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -6695,7 +6734,7 @@ value prints in arity and coercion errors, so scripts can branch
 on config shapes (a path string or a path list) without failing.
 
 
-**Signature:** `STD::TYPE_OF($value: ANY) -> STRING`
+**Signature:** `STD::TYPE_OF($value: ANY): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6722,7 +6761,7 @@ Report the running engine version.
 Returns the workspace version baked in at compile time, so scripts
 and agents can branch on engine behavior instead of probing it.
 
-**Signature:** `STD::VERSION() -> STRING`
+**Signature:** `STD::VERSION(): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -6808,7 +6847,7 @@ let script = indoc! {"
 let err = oxdock_parser::parse_script(script, oxdock_parser::lower_command)
     .expect_err("must fail");
 let expected = indoc! {"
-    invalid syntax for command LET: LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = { ... }` (inline block); got `$x = 1`.
+    LET requires explicit types: LET $var: TYPE = <expr>
       --> line 1, col 1-10
       1 | LET $x = 1
         | ^^^^^^^^^^

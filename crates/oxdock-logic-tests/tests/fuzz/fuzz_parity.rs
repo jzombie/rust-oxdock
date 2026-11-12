@@ -242,7 +242,7 @@ fn arb_expr() -> BoxedStrategy<Expr> {
 }
 
 /// Block bodies stay flat and command-safe: the coverage target is the
-/// `Block` shape itself (inline `LET $x = { ... }` round-trip), not
+/// `Block` shape itself (inline `LET $x: STRING = { ... }` round-trip), not
 /// nesting inside evaluation scopes.
 fn arb_flat_block_body() -> impl Strategy<Value = Vec<Step>> {
     prop::collection::vec(
@@ -772,7 +772,8 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         ],
         ("[a-z][a-zA-Z0-9_]*", arb_expr()).prop_map(|(var, expr)| StepKind::Set { var, expr }),
         arb_expr().prop_map(|expr| StepKind::Return {
-            expr: Box::new(expr)
+            expr: Box::new(expr),
+            is_bare: false,
         }),
         Just(StepKind::Break),
         Just(StepKind::Continue),
@@ -826,6 +827,8 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         ("FUZZ[A-Z0-9_]*", arb_body()).prop_map(|(name, body)| StepKind::FuncDef {
             name,
             params: vec![("coverage".to_string(), "STRING".to_string())],
+            return_type: "STRING".to_string(),
+            is_async: false,
             body,
             docs: None,
         }),
@@ -1476,8 +1479,18 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_eq!(lv, rv, "Set var mismatch: {}", msg);
             assert!(expr_image_eq(le, re), "Set expr mismatch: {}", msg);
         }
-        (StepKind::Return { expr: le }, StepKind::Return { expr: re }) => {
+        (
+            StepKind::Return {
+                expr: le,
+                is_bare: lb,
+            },
+            StepKind::Return {
+                expr: re,
+                is_bare: rb,
+            },
+        ) => {
             assert!(expr_image_eq(le, re), "Return expr mismatch: {}", msg);
+            assert_eq!(lb, rb, "Return bare mismatch: {}", msg);
         }
         (StepKind::Break, StepKind::Break) => {}
         (StepKind::Continue, StepKind::Continue) => {}
@@ -1532,18 +1545,24 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             StepKind::FuncDef {
                 name: ln,
                 params: lp,
+                return_type: lret,
+                is_async: lasync,
                 body: lb,
                 docs: ld,
             },
             StepKind::FuncDef {
                 name: rn,
                 params: rp,
+                return_type: rret,
+                is_async: rasync,
                 body: rb,
                 docs: rd,
             },
         ) => {
             assert_eq!(ln, rn, "FuncDef name mismatch: {}", msg);
             assert_eq!(lp, rp, "FuncDef params mismatch: {}", msg);
+            assert_eq!(lret, rret, "FuncDef return mismatch: {}", msg);
+            assert_eq!(lasync, rasync, "FuncDef async mismatch: {}", msg);
             assert_eq!(ld, rd, "FuncDef docs mismatch: {}", msg);
             assert_bodies_eq(lb, rb, msg);
         }
@@ -1825,6 +1844,113 @@ proptest! {
     }
 }
 
+proptest! {
+    /// Multiline `FUNC` parameter lists (one entry per line, split
+    /// generics included) agree three ways: string, token, and backend
+    /// pathways parse identically. Newline placement is drawn per gap
+    /// (after `(`, after each `,`, before `)`), so the fuzzer covers
+    /// leading, trailing, and interior breaks over the shared `gap_nl`
+    /// helper; generic shapes ride the existing `skip_type_nl`, so no
+    /// newline logic is duplicated.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "requires real TokenStream/proc-macro parsing to validate API parity"
+    )]
+    fn fuzz_multiline_func_params(
+        types in prop::collection::vec(
+            prop::sample::select(vec![
+                "STRING",
+                "INT",
+                "BOOL",
+                "LIST<STRING>",
+                "LIST<MAP<ANY>>",
+                "MAP<name: STRING>",
+                "MAP<a: STRING, b: INT>",
+                "MAP<name: STRING, age?: INT>",
+                "STRING|PIPE",
+                "LIST<STRING|PIPE>",
+            ]),
+            1..=3,
+        ),
+        breaks in any::<[bool; 4]>(),
+    ) {
+        // Indexed names: duplicates are a loud parse error, and names
+        // are not the dimension under test (newline placement is).
+        let mut inner = String::new();
+        if breaks[0] {
+            inner.push('\n');
+        }
+        for (i, ty) in types.iter().enumerate() {
+            if i > 0 {
+                inner.push(',');
+                inner.push_str(if breaks[i] { "\n" } else { " " });
+            }
+            inner.push_str(&format!("$p{i}: {ty}"));
+        }
+        if breaks[types.len()] {
+            inner.push('\n');
+        }
+        let s = format!("FUNC FOO({inner}): STRING {{\nRETURN \"x\"\n}}\n");
+        // Every pathway parses the same single definition ...
+        let parsed = parse_string_with_std_modules(&s)
+            .unwrap_or_else(|e| panic!("string parse failed for {s:?}: {e:#}"));
+        assert_eq!(parsed.len(), 1, "string split lines: {s}");
+        let ts: proc_macro2::TokenStream = s.parse().expect("multiline script must tokenize");
+        let tokenized = parse_tokens_with_std_modules(&ts)
+            .unwrap_or_else(|e| panic!("token parse failed for {s:?}: {e:#}"));
+        assert_eq!(tokenized.len(), 1, "token split lines: {s}");
+        let backend = parse_backend_with_std_modules(&s)
+            .unwrap_or_else(|e| panic!("backend parse failed for {s:?}: {e:#}"));
+        assert_eq!(backend.len(), 1, "backend split lines: {s}");
+        // ... with identical params and return on every pathway. Type
+        // spellings compare whitespace-insensitively: rendering
+        // normalizes newlines to single-line canonical form.
+        let squash = |t: &str| t.replace([' ', '\n', '\r', '\t'], "");
+        for steps in [&parsed, &tokenized, &backend] {
+            match &steps[0].kind {
+                StepKind::FuncDef {
+                    name,
+                    params: got,
+                    return_type,
+                    ..
+                } => {
+                    assert_eq!(name, "FOO", "name mismatch: {s}");
+                    assert_eq!(got.len(), types.len(), "param count mismatch: {s}");
+                    for (i, ((got_name, got_ty), want_ty)) in
+                        got.iter().zip(types.iter()).enumerate()
+                    {
+                        assert_eq!(got_name, &format!("p{i}"), "param name mismatch: {s}");
+                        assert_eq!(
+                            squash(got_ty),
+                            squash(want_ty),
+                            "param type mismatch: {s}"
+                        );
+                    }
+                    assert_eq!(return_type, "STRING", "return mismatch: {s}");
+                }
+                other => panic!("expected FuncDef, got {other:?}: {s}"),
+            }
+        }
+        let mut parsed = parsed;
+        zero_markers(&mut parsed);
+        let mut tokenized = tokenized;
+        zero_markers(&mut tokenized);
+        let mut v2d = backend;
+        zero_markers(&mut v2d);
+        assert_steps_eq(
+            &parsed[0],
+            &tokenized[0],
+            &format!("string/token mismatch: {s}"),
+        );
+        assert_steps_eq(
+            &parsed[0],
+            &v2d[0],
+            &format!("string/backend mismatch: {s}"),
+        );
+    }
+}
+
 /// Regression test for the CI failure with minimal input
 /// `Write { path: "a", contents: "IF" }`: bare statement keywords as arg
 /// values must render quoted so both parse pathways round-trip them as
@@ -1984,6 +2110,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         },
         StepKind::Return {
             expr: Box::new(Expr::Literal(Value::bool(true))),
+            is_bare: false,
         },
         StepKind::ImportFile {
             path: "coverage.oxdock".to_string(),
@@ -2074,6 +2201,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 guard: None,
                 kind: StepKind::Return {
                     expr: Box::new(Expr::Literal(Value::string("covered".to_string()))),
+                    is_bare: false,
                 },
                 scope_enter: 0,
                 scope_exit: 0,
@@ -2108,6 +2236,8 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         StepKind::FuncDef {
             name: "COVERAGEFUNC".to_string(),
             params: vec![("coverage".to_string(), "STRING".to_string())],
+            return_type: "STRING".to_string(),
+            is_async: false,
             body: vec![Step {
                 guard: None,
                 kind: StepKind::Echo("coverage echo".into()),
@@ -2419,6 +2549,7 @@ fn sample_covered_exprs() -> Vec<Expr> {
             guard: None,
             kind: StepKind::Return {
                 expr: Box::new(Expr::Literal(Value::string("covered".to_string()))),
+                is_bare: false,
             },
             scope_enter: 0,
             scope_exit: 0,

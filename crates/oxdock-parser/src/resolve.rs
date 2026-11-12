@@ -6,7 +6,8 @@
 
 use crate::ast::ModuleTable;
 use crate::constants::{
-    KEYWORD_EXPORT, KEYWORD_IMPORT, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, qualify, split_qualified,
+    KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_IMPORT, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, qualify,
+    split_qualified,
 };
 use crate::error::{ParseError, ParseResult, SpanContext};
 use std::collections::HashSet;
@@ -22,7 +23,7 @@ pub(crate) fn check_func_ident(ctx: &SpanContext, name: &str) -> ParseResult<()>
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
     if !ok {
         return Err(ParseError::validation(
-            "FUNC",
+            KEYWORD_FUNC,
             format!(
                 "function names must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{name}`"
             ),
@@ -42,7 +43,7 @@ pub(crate) fn resolve_call_name(
     if let Some((module, base)) = split_qualified(name) {
         if base == KEYWORD_INSPECT {
             return Err(ParseError::validation(
-                "FUNC",
+                KEYWORD_FUNC,
                 "INSPECT is a builtin keyword and cannot be module-qualified".to_string(),
                 ctx,
             ));
@@ -60,7 +61,7 @@ pub(crate) fn resolve_call_name(
                 let mut known: Vec<String> = modules.modules.keys().cloned().collect();
                 known.sort();
                 Err(ParseError::validation(
-                    "FUNC",
+                    KEYWORD_FUNC,
                     format!(
                         "unknown module `{module}`; known modules: {}",
                         known.join(", ")
@@ -74,7 +75,7 @@ pub(crate) fn resolve_call_name(
                     Ok(qualify(module, base))
                 } else {
                     Err(ParseError::validation(
-                        "FUNC",
+                        KEYWORD_FUNC,
                         format!("unknown function `{module}::{base}`"),
                         ctx,
                     ))
@@ -84,7 +85,7 @@ pub(crate) fn resolve_call_name(
     } else {
         if name == KEYWORD_IMPORT || name == KEYWORD_EXPORT {
             return Err(ParseError::validation(
-                "FUNC",
+                KEYWORD_FUNC,
                 format!("`{name}` is a directive, not a function"),
                 ctx,
             ));
@@ -120,7 +121,7 @@ pub(crate) fn resolve_call_name(
         if known_matches.len() > 1 {
             known_matches.sort();
             return Err(ParseError::validation(
-                "FUNC",
+                KEYWORD_FUNC,
                 format!(
                     "ambiguous function `{name}`: exported by {}; qualify it (e.g. `{}::{name}`)",
                     known_matches.join(", "),
@@ -135,7 +136,7 @@ pub(crate) fn resolve_call_name(
         if opaque_matches.len() > 1 {
             opaque_matches.sort();
             return Err(ParseError::validation(
-                "FUNC",
+                KEYWORD_FUNC,
                 format!(
                     "ambiguous function `{name}`: imported opaque modules {}; qualify it",
                     opaque_matches.join(", "),
@@ -159,7 +160,7 @@ pub(crate) fn resolve_call_name(
         exporters.sort();
         if let Some(first) = exporters.first() {
             return Err(ParseError::validation(
-                "FUNC",
+                KEYWORD_FUNC,
                 format!(
                     "unknown function `{name}`; qualify it (`{first}::{name}`) or add `IMPORT [{first}]`"
                 ),
@@ -167,7 +168,7 @@ pub(crate) fn resolve_call_name(
             ));
         }
         Err(ParseError::validation(
-            "FUNC",
+            KEYWORD_FUNC,
             format!("unknown function `{name}`"),
             ctx,
         ))

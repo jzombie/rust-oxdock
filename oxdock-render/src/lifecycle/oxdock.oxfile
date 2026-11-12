@@ -13,7 +13,7 @@
 IMPORT [STD, RUST, OXDOCK]
 IMPORT [TYPE CTX, TYPE GENERATED_ENTRY, TYPE WORKSPACE_PACKAGE FROM "../types.oxfile"]
 
-FUNC SETUP($ctx: CTX) {
+FUNC SETUP($ctx: CTX): CTX {
     LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)
     LET $gen: LIST<ANY> = $cfg.generated
     FOR $entry: GENERATED_ENTRY IN $gen {
@@ -49,32 +49,32 @@ FUNC SETUP($ctx: CTX) {
     RETURN $ctx
 }
 
-FUNC INGEST($ctx: CTX) {
+FUNC INGEST($ctx: CTX): CTX {
     RETURN $ctx
 }
 
 # Source discovery lives in the scanner plugin: passthrough here.
-FUNC SCAN($ctx: CTX) {
+FUNC SCAN($ctx: CTX): CTX {
     RETURN $ctx
 }
 
-FUNC ASSEMBLE($ctx: CTX) {
+FUNC ASSEMBLE($ctx: CTX): CTX {
     RETURN $ctx
 }
 
-FUNC RENDER($ctx: CTX) {
+FUNC RENDER($ctx: CTX): CTX {
     RETURN $ctx
 }
 
-FUNC DEFERRED($ctx: CTX) {
+FUNC DEFERRED($ctx: CTX): CTX {
     RETURN $ctx
 }
 
-FUNC WRITE_OUT($ctx: CTX) {
+FUNC WRITE_OUT($ctx: CTX): CTX {
     RETURN $ctx
 }
 
-FUNC VERIFY($ctx: CTX) {
+FUNC VERIFY($ctx: CTX): CTX {
     RETURN $ctx
 }
 

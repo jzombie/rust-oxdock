@@ -45,7 +45,7 @@ fn alias_spellings_bind_in_capture_decls() {
     // AWAIT capture binds the published value through the alias.
     let script = indoc! {r#"
         TYPE PERSON = MAP<name: STRING, age: INT>
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<PERSON> = ASYNC {
             RETURN {name: "a", age: 1}
         }
         LET $p: PERSON = AWAIT $t
@@ -214,7 +214,7 @@ fn let_await_capture_binds_task_output() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC { ECHO "logged"; RETURN "returned" }
+        LET $t: HANDLE<STRING> = ASYNC { ECHO "logged"; RETURN "returned" }
         LET $o: STRING = AWAIT $t
         ASSERT_EQ $o "returned"
     "#};
@@ -227,7 +227,7 @@ fn bare_await_task_output_streams_live_to_parent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ECHO fwd-hi
+        LET $t: HANDLE<VOID> = ASYNC ECHO fwd-hi
         AWAIT $t
     "#};
     let steps = oxdock_core::parse_script(script).expect("parse script");
@@ -247,11 +247,115 @@ fn await_capture_without_return_binds_zero() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ECHO hi
+        LET $t: HANDLE<ANY> = ASYNC ECHO hi
         LET $o: INT = AWAIT $t
         ASSERT_EQ $o 0
     "#};
     run_script(&root, script).expect("capture without RETURN binds 0");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn single_call_task_without_return_binds_zero() {
+    // No implicit yield: a single-call body publishes nothing on its
+    // own, even when the call itself returns a value. Only an explicit
+    // RETURN publishes. `HANDLE<ANY>` defers to the runtime, so the
+    // capture binds the void-task zero instead of the call's string.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $t: HANDLE<ANY> = ASYNC TEXT_TRIM("  padded  ")
+        LET $o: INT = AWAIT $t
+        ASSERT_EQ $o 0
+    "#};
+    run_script(&root, script).expect("single call without RETURN binds 0");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn typed_handle_without_return_fails_static() {
+    // RETURN is required for a typed payload: a task with no value
+    // RETURN is a static error even when the single call in its body
+    // would have returned a matching value at runtime. The second
+    // case pins the old fast-path shape directly.
+    for script in [
+        "LET $t: HANDLE<STRING> = ASYNC { ECHO hi }\n",
+        "IMPORT [STD]\nLET $t: HANDLE<STRING> = ASYNC TEXT_TRIM(\"  padded  \")\n",
+    ] {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+        let err = run_script(&root, script).expect_err("typed task without RETURN must fail");
+        assert!(
+            err.to_string().contains("no value RETURN"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[test]
+fn capture_checks_command_yield_against_decl() {
+    // `LET $x: T = <command>` binds the command's yield, so the
+    // checker verifies it like an AWAIT capture: a bare command (or
+    // a TIMEOUT-wrapped one, which captures stdout text rather than
+    // any inner call value) yields STRING. A TIMEOUT wrapper is not
+    // a way around the check.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $s: STRING = ECHO hi
+        ASSERT_EQ $s "hi\n"
+    "#};
+    run_script(&root, script).expect("string capture of stdout passes");
+    for script in [
+        "LET $i: INT = ECHO hi\n",
+        "LET $i: INT = TIMEOUT 30s ECHO hi\n",
+    ] {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+        let err = run_script(&root, script).expect_err("mismatched capture must fail");
+        assert!(
+            err.to_string().contains("captures STRING but declares INT"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "TIMEOUT watchdog Zhang real background threads")]
+fn timeout_capture_binds_inner_call_value() {
+    // TIMEOUT is transparent in capture: a TIMEOUT-wrapped single
+    // call binds exactly what the bare call binds, with the
+    // deadline enforced around it.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC THREE(): INT {
+            RETURN 3
+        }
+        LET $x: INT = TIMEOUT 30s THREE()
+        ASSERT_EQ $x 3
+    "#};
+    run_script(&root, script).expect("timeout capture binds call value");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "TIMEOUT watchdog Zhang real background threads")]
+fn timeout_capture_still_enforces_deadline() {
+    // Transparency cuts both ways: the value path above binds, but
+    // a hung call under the deadline fails with TIMEOUT instead of
+    // hanging on the value.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC HANG(): INT {
+            SLEEP 30s
+            RETURN 1
+        }
+        LET $x: INT = TIMEOUT 50ms HANG()
+    "#};
+    let err = run_script(&root, script).expect_err("hung call must time out");
+    assert!(err.to_string().contains("TIMEOUT"), "{err}");
 }
 
 #[test]
@@ -264,7 +368,7 @@ fn await_capture_missing_fallback_branch_errors() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         LET $flag: BOOL = false
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<ANY> = ASYNC {
             IF $flag {
                 RETURN "yes"
             }
@@ -285,7 +389,7 @@ fn await_capture_exhaustive_branches_bind() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         LET $flag: BOOL = false
-        LET $t: HANDLE = ASYNC {
+        LET $t: HANDLE<STRING> = ASYNC {
             IF $flag {
                 RETURN "yes"
             }
@@ -303,7 +407,7 @@ fn await_capture_then_bare_await_still_double_await_errors() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC { ECHO "logged"; RETURN "returned" }
+        LET $t: HANDLE<STRING> = ASYNC { ECHO "logged"; RETURN "returned" }
         LET $o: STRING = AWAIT $t
         AWAIT $t
     "#};
@@ -320,7 +424,7 @@ fn bare_await_then_capture_still_double_await_errors() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ECHO hi
+        LET $t: HANDLE<INT> = ASYNC { ECHO hi; RETURN 0 }
         AWAIT $t
         LET $o: STRING = AWAIT $t
     "#};
@@ -337,7 +441,7 @@ fn await_capture_of_failing_task_propagates_error() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC READ "missing.txt"
+        LET $t: HANDLE<ANY> = ASYNC READ "missing.txt"
         LET $o: STRING = AWAIT $t
     "#};
     let err = run_script(&root, script).expect_err("capture of failing task must fail");
@@ -353,7 +457,7 @@ fn await_capture_after_cancel_reports_cancelled() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC SLEEP 30s
+        LET $t: HANDLE<ANY> = ASYNC SLEEP 30s
         CANCEL $t
         LET $o: STRING = AWAIT $t
     "#};

@@ -1,4 +1,4 @@
-FUNC GREET($name: STRING) {
+FUNC GREET($name: STRING): STRING {
     ECHO "hi {{ $name }}"
     RETURN $name
 }

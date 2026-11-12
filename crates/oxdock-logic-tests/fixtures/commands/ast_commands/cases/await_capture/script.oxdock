@@ -1,8 +1,8 @@
 # Async capture: tasks stream their stdout live, so LET $out = AWAIT $task
 # binds the task's explicit RETURN value; a task that succeeds without
 # RETURN yields INT 0 (like a process exit status).
-LET $task: HANDLE = ASYNC ECHO "task-output"
+LET $task: HANDLE<ANY> = ASYNC ECHO "task-output"
 LET $out: INT = AWAIT $task
-LET $t2: HANDLE = ASYNC { RETURN "explicit" }
+LET $t2: HANDLE<STRING> = ASYNC { RETURN "explicit" }
 LET $v: STRING = AWAIT $t2
 WRITE result.txt "{{ $out }}-{{ $v }}"

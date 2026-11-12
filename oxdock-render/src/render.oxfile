@@ -9,7 +9,7 @@
 IMPORT [STD]
 IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "types.oxfile"]
 
-FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) {
+FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): STRING {
     LET $clean: BOOL = STD::TEXT_CONTAINS($types, "\\")
     IF $clean {
         ECHO "types path '{{ $types }}' uses backslashes; use forward slashes"
@@ -193,7 +193,7 @@ FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING) {
     RETURN $mod
 }
 
-FUNC PIPE_RUN($mod: STRING, $wsroot: STRING, $cfgpath: STRING) {
+FUNC PIPE_RUN($mod: STRING, $wsroot: STRING, $cfgpath: STRING): STRING {
     WORKSPACE LOCAL
     LET $exe: STRING = STD::INTERPRETER()
     LET $child: PIPE
@@ -212,7 +212,7 @@ EXPORT PIPE_RUN
 # The default pair is scanner plus generic: discovery plus
 # expansion first, manifest promotion second. A pipeline naming its
 # own files owns the whole list, scanner included.
-FUNC LIFECYCLE_FILES_WITH_DEFAULT($cfg: MAP<ANY>) {
+FUNC LIFECYCLE_FILES_WITH_DEFAULT($cfg: MAP<ANY>): LIST<STRING> {
     LET $paths: LIST<STRING> = ["oxdock-render/src/lifecycle/scanner.oxfile", "oxdock-render/src/lifecycle/generic.oxfile"]
     LET $has_lc: BOOL = HAS_KEY($cfg, "lifecycle")
     IF $has_lc {
@@ -225,7 +225,7 @@ FUNC LIFECYCLE_FILES_WITH_DEFAULT($cfg: MAP<ANY>) {
     RETURN $paths
 }
 
-FUNC TYPES_WITH_DEFAULT($cfg: MAP<ANY>) {
+FUNC TYPES_WITH_DEFAULT($cfg: MAP<ANY>): STRING {
     LET $has_lc: BOOL = HAS_KEY($cfg, "lifecycle")
     IF $has_lc == false {
         RETURN "oxdock-render/src/types.oxfile"

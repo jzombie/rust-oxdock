@@ -1063,7 +1063,8 @@ fn option_value_type(name: &str) -> syn::Result<TokenStream2> {
         return Ok(quote! { ::oxdock_core::TypeTag::union(vec![#(#members),*]) });
     }
     if let Some(inner) = name
-        .strip_prefix("MAP<")
+        .strip_prefix(MAP_WORD)
+        .and_then(|rest| rest.strip_prefix('<'))
         .and_then(|rest| rest.strip_suffix('>'))
     {
         let values = option_single_value_type(inner.trim())?;
@@ -1072,7 +1073,8 @@ fn option_value_type(name: &str) -> syn::Result<TokenStream2> {
         });
     }
     if let Some(inner) = name
-        .strip_prefix("LIST<")
+        .strip_prefix(LIST_WORD)
+        .and_then(|rest| rest.strip_prefix('<'))
         .and_then(|rest| rest.strip_suffix('>'))
     {
         let element = option_single_value_type(inner.trim())?;
@@ -1083,18 +1085,31 @@ fn option_value_type(name: &str) -> syn::Result<TokenStream2> {
     option_single_value_type(name)
 }
 
+/// Canonical option value words. Local copies because this macro crate
+/// cannot depend on `oxdock-parser` (the parser depends on this crate).
+/// They must stay identical to the parser `*_TYPE_NAME` constants.
+const STRING_WORD: &str = "STRING";
+const INT_WORD: &str = "INT";
+const FLOAT_WORD: &str = "FLOAT";
+const BOOL_WORD: &str = "BOOL";
+const DURATION_WORD: &str = "DURATION";
+const PATH_WORD: &str = "PATH";
+const MAP_WORD: &str = "MAP";
+const LIST_WORD: &str = "LIST";
+const ANY_WORD: &str = "ANY";
+
 /// Map one bare `#[options(...)]` value type name to its tag.
 fn option_single_value_type(name: &str) -> syn::Result<TokenStream2> {
     match name {
-        "STRING" => Ok(quote! { ::oxdock_core::TypeTag::String }),
-        "INT" => Ok(quote! { ::oxdock_core::TypeTag::Int }),
-        "FLOAT" => Ok(quote! { ::oxdock_core::TypeTag::Float }),
-        "BOOL" => Ok(quote! { ::oxdock_core::TypeTag::Bool }),
-        "DURATION" => Ok(quote! { ::oxdock_core::TypeTag::Duration }),
-        "PATH" => Ok(quote! { ::oxdock_core::TypeTag::Path }),
-        "MAP" => Ok(quote! { ::oxdock_core::TypeTag::Map }),
-        "LIST" => Ok(quote! { ::oxdock_core::TypeTag::List }),
-        "ANY" => Ok(quote! { ::oxdock_core::TypeTag::Any }),
+        STRING_WORD => Ok(quote! { ::oxdock_core::TypeTag::String }),
+        INT_WORD => Ok(quote! { ::oxdock_core::TypeTag::Int }),
+        FLOAT_WORD => Ok(quote! { ::oxdock_core::TypeTag::Float }),
+        BOOL_WORD => Ok(quote! { ::oxdock_core::TypeTag::Bool }),
+        DURATION_WORD => Ok(quote! { ::oxdock_core::TypeTag::Duration }),
+        PATH_WORD => Ok(quote! { ::oxdock_core::TypeTag::Path }),
+        MAP_WORD => Ok(quote! { ::oxdock_core::TypeTag::Map }),
+        LIST_WORD => Ok(quote! { ::oxdock_core::TypeTag::List }),
+        ANY_WORD => Ok(quote! { ::oxdock_core::TypeTag::Any }),
         _ => Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             "unknown options value type; expected STRING, INT, FLOAT, BOOL, DURATION, PATH, MAP, LIST, ANY, an A|B union, or MAP<SCALAR>/LIST<SCALAR>",

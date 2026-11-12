@@ -60,9 +60,12 @@ pub use parser::{
 };
 pub use strip_flags::strip_flags;
 pub use tag::{
-    ANY_TAG, Field, LIST_TAG, MAP_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, TypeTag,
-    canonicalize_spelling, check_value, check_value_at, intern_rendered, lookup_rendered,
-    parse_spelling, render_structural,
+    ANY_TAG, ANY_TYPE_NAME, BOOL_TYPE_NAME, DURATION_TYPE_NAME, FLOAT_TYPE_NAME, Field,
+    HANDLE_TYPE_NAME, INT_TYPE_NAME, LIST_TAG, LIST_TYPE_NAME, MAP_TAG, MAP_TYPE_NAME,
+    MAX_GENERIC_DEPTH, PATH_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
+    STRING_TYPE_NAME, Spelled, SpelledField, TypeTag, VOID_TYPE_NAME, canonicalize_spelling,
+    check_value, check_value_at, intern_rendered, lookup_rendered, parse_spelling,
+    render_structural,
 };
 #[cfg(feature = "proc-macro-api")]
 pub use tok::lex_tokens;
@@ -1307,7 +1310,7 @@ mod tests {
     #[test]
     fn call_args_accept_comments_between_lines() {
         let script = indoc! {r#"
-            FUNC SERVE($h: STRING, $u: STRING, $p: STRING, $o: MAP) {
+            FUNC SERVE($h: STRING, $u: STRING, $p: STRING, $o: MAP): STRING {
             RETURN $h
             }
             LET $s: STRING = SERVE(
@@ -1359,7 +1362,7 @@ mod tests {
     #[test]
     fn hash_comments_span_call_args_like_slash_comments() {
         let script = indoc! {r#"
-            FUNC SERVE($h: STRING, $o: MAP) {
+            FUNC SERVE($h: STRING, $o: MAP): STRING {
             RETURN $h
             }
             # leading hash comment
@@ -1843,7 +1846,7 @@ mod tests {
         // changing read rules.
         let script = indoc! {r#"
             ISOLATED {
-                FUNC F() {
+                FUNC F(): VOID {
                     INHERIT_ENV [NOPE]
                 }
             }

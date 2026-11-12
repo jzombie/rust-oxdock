@@ -14,7 +14,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $version: STRING = #crate_version
     MKDIR dist
 
-    FUNC STAMP($name: STRING) {
+    FUNC STAMP($name: STRING): STRING {
         WRITE dist/\{{ $name }}.txt \{{ $name }} \{{ env:PROJECT }} \{{ $version }}
         RETURN $name
     }
@@ -22,7 +22,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         STAMP($name)
     }
 
-    FUNC PICK($flag: BOOL) {
+    FUNC PICK($flag: BOOL): STRING {
         IF $flag {
             RETURN "alpha"
         }

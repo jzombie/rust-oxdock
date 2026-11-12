@@ -220,12 +220,15 @@ impl<P: ProcessManager> HostRegistration<P> {
     }
 }
 
-/// One user-defined function body (`FUNC NAME($p: TYPE, ...) { ... }`).
-/// Param types resolve to tags at definition time, where the type
+/// One user-defined function body (`FUNC NAME($p: TYPE, ...): RET { ... }`).
+/// Param and return types resolve to tags at definition time, where the type
 /// directory is in scope; the registry never holds raw type strings.
 #[derive(Debug, Clone)]
 pub(super) struct FuncDefData {
     pub(super) params: Vec<(String, TypeTag)>,
+    pub(super) return_type: TypeTag,
+    pub(super) return_spelling: String,
+    pub(super) is_async: bool,
     pub(super) body: Vec<Step>,
     /// Owning file module (#115, resolved display path): module-owned
     /// `FUNC`s resolve names against the module's shared store after
@@ -566,10 +569,14 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// shadow, same-scope duplicates cannot redefine, and nested shadowing
     /// of an outer script definition restores on scope exit. Stored as
     /// `SCRIPT::NAME`, exactly like every other qualified entry.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn define_script(
         &mut self,
         name: &str,
         params: &[(String, TypeTag)],
+        return_type: TypeTag,
+        return_spelling: &str,
+        is_async: bool,
         body: &[Step],
         module: Option<&str>,
     ) -> Result<()> {
@@ -618,7 +625,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                             })
                             .collect(),
                     ),
-                    returns: None,
+                    returns: Some(return_type.clone()),
                     rpn: false,
                     summary: "DSL-defined function.",
                     docs: "Defined via FUNC in script.",
@@ -626,6 +633,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 },
                 body: FuncBody::Script(FuncDefData {
                     params: params.to_vec(),
+                    return_type,
+                    return_spelling: return_spelling.to_string(),
+                    is_async,
                     body: body.to_vec(),
                     module: module.map(|m| m.to_string()),
                 }),
@@ -647,12 +657,16 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// Out-of-range depths fall back to the top frame; a missing frame
     /// (never in practice: the registry always holds the global frame)
     /// defines untracked, like top-level definitions.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn define_aliased_in(
         &mut self,
         depth: usize,
         alias: &str,
         name: &str,
         params: &[(String, TypeTag)],
+        return_type: TypeTag,
+        return_spelling: &str,
+        is_async: bool,
         body: &[Step],
         module: Option<&str>,
     ) -> Result<()> {
@@ -707,7 +721,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                             })
                             .collect(),
                     ),
-                    returns: None,
+                    returns: Some(return_type.clone()),
                     rpn: false,
                     summary: "DSL-defined function.",
                     docs: "Defined via FUNC in an imported script.",
@@ -715,6 +729,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 },
                 body: FuncBody::Script(FuncDefData {
                     params: params.to_vec(),
+                    return_type,
+                    return_spelling: return_spelling.to_string(),
+                    is_async,
                     body: body.to_vec(),
                     module: module.map(|m| m.to_string()),
                 }),
@@ -1961,7 +1978,7 @@ fn interpreter<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     # The library under test: demo guarded by IS_MAIN.
     WRITE lib.oxfile """
         IMPORT [STD]
-        FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+        FUNC GREET($x: STRING): STRING { RETURN "hi \{{ $x }}" }
         EXPORT GREET
         IF IS_MAIN() {
             ECHO "demo: hi Ada"
@@ -3473,7 +3490,7 @@ fn task_poll_result_fields() -> Arc<[Field]> {
     code = r###"
     # A sleeping task is still running on the first poll.
     IMPORT [STD]
-    LET $t: HANDLE = ASYNC { SLEEP 30s }
+    LET $t: HANDLE<STRING> = ASYNC { SLEEP 30s; RETURN "done" }
     LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
     ASSERT_EQ $m.state "running"
     ASSERT_EQ $m.ok true
@@ -3486,7 +3503,7 @@ fn task_poll_result_fields() -> Arc<[Field]> {
     code = r###"
     # A finished task reports its value and final tails, then still awaits.
     IMPORT [STD]
-    LET $t: HANDLE = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
+    LET $t: HANDLE<STRING> = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
     # Do other work while the task runs; poll once it should be done.
     SLEEP 2s
     LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
@@ -3889,6 +3906,31 @@ mod tests {
             map.get("returns").and_then(Value::as_str),
             Some("STRING|PIPE"),
             "returns render the set"
+        );
+    }
+
+    #[test]
+    fn describe_entry_renders_handle_payload() {
+        // Shaped handles render structurally (HANDLE<STRING>, not
+        // bare HANDLE): script ASYNC FUNC declarations surface their
+        // payload through DESCRIBE exactly as declared.
+        let meta = FuncMeta {
+            name: "SCRIPT::FETCH".to_string(),
+            module: "SCRIPT".to_string(),
+            kind: FuncKind::Script,
+            params: Some(vec![]),
+            returns: Some(TypeTag::HandleOf(std::sync::Arc::new(TypeTag::String))),
+            rpn: false,
+            summary: "test-only",
+            docs: "test-only",
+            examples: &[],
+        };
+        let value = meta_to_value(&meta);
+        let map = value.as_map().expect("describe value is a map");
+        assert_eq!(
+            map.get("returns").and_then(Value::as_str),
+            Some("HANDLE<STRING>"),
+            "returns render the payload"
         );
     }
 

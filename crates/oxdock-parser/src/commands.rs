@@ -424,13 +424,13 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
     match name {
         "WITH_IO" => Some(with_io_hint(&got, received)),
         "AWAIT" => Some(format!(
-            "AWAIT waits for a background task variable, e.g. `LET $t: HANDLE = ASYNC ECHO hi` then `AWAIT $t`; got {got}."
+            "AWAIT waits for a background task variable, e.g. `LET $t: HANDLE<VOID> = ASYNC ECHO hi` then `AWAIT $t`; got {got}."
         )),
         "CANCEL" => Some(format!(
-            "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t: HANDLE = ASYNC ...`); got {got}."
+            "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t: HANDLE<VOID> = ASYNC ...`); got {got}."
         )),
         "ASYNC" => Some(format!(
-            "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t: HANDLE = ASYNC ...`; got {got}."
+            "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t: HANDLE<T> = ASYNC ...`; got {got}."
         )),
         "FOR" => Some(format!(
             "FOR loops need `FOR $item: TYPE IN <expr> {{ ... }}` (or `FOR $key: STRING, $value: TYPE IN <expr> {{ ... }}`); got {got}."
@@ -442,7 +442,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}."
         )),
         "LET" => Some(format!(
-            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}."
+            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE<T> = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}."
         )),
         "SET" => Some(
             "`SET` is not a keyword; mutate a declared variable with `$var = <expr>`, e.g. `$count = 2`.".to_string(),
@@ -454,7 +454,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "REMOTE needs a target and a braced block, e.g. `REMOTE prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}."
         )),
         "FUNC" => Some(format!(
-            "FUNC defines a function, e.g. `FUNC GREET($name: STRING) {{ RETURN $name }}`; got {got}."
+            "FUNC defines a function, e.g. `FUNC GREET($name: STRING): STRING {{ RETURN $name }}`; got {got}."
         )),
         "RETURN" => Some(format!(
             "RETURN ends the nearest function, ASYNC task, or inline LET block with a value, e.g. `RETURN $x`; got {got}."
@@ -666,7 +666,7 @@ impl StepKind {
         }
         match self {
             StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => f(expr),
-            StepKind::Return { expr } => f(expr),
+            StepKind::Return { expr, .. } => f(expr),
             StepKind::Call { args, .. } => {
                 for arg in args {
                     f(arg);
@@ -1149,9 +1149,9 @@ declare_commands! {
         IsolatedInheritEnv { keys: Vec<String> },
         RemoteBlock { target: String, vars: Vec<String>, env: Vec<String>, body: Vec<Step> },
         RunExec { argv: Vec<Arg> },
-        FuncDef { name: String, params: Vec<(String, String)>, body: Vec<Step>, docs: Option<(String, String)> },
+        FuncDef { name: String, params: Vec<(String, String)>, return_type: String, is_async: bool, body: Vec<Step>, docs: Option<(String, String)> },
         Call { name: String, args: Vec<Expr> },
-        Return { expr: Box<Expr> },
+        Return { expr: Box<Expr>, is_bare: bool },
         ImportFile { path: String, alias: String },
         ImportFuncs {
             path: String,
@@ -3044,9 +3044,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             summary: "Mutate a declared variable.",
             description: indoc! {r#"
                 Reassigns an existing variable, converting the new value to
-                the type declared at LET time. The explicit annotation is
-                what authorizes string-to-number conversion here (`$n = "42"`
-                binds 42 for an INT); a non-numeric string is an error.
+                the type declared at LET time through the same narrow
+                coercion pairs as declaration. Strings never parse to
+                numbers implicitly: `$n = "42"` is a TypeMismatch for an
+                INT, write `$n = INT("42")` instead.
                 Expressions never convert: `"100" + 1` is a Type Error, use
                 `INT()` / `FLOAT()` to cross that boundary explicitly.
 
@@ -3125,7 +3126,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         CommandMeta {
             in_index: true,
             name: "ASYNC",
-            syntax: "ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }",
+            syntax: "ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE<T> = ASYNC { <commands> }",
             summary: "Run steps in a background thread.",
             description: indoc! {r#"
                 Runs a command or block of commands in a background thread with
@@ -3151,8 +3152,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # Inline and block forms both run in the background; AWAIT joins them.
                 ASYNC ECHO "warming-up"
-                LET $a: HANDLE = ASYNC ECHO "first"
-                LET $b: HANDLE = ASYNC {
+                LET $a: HANDLE<VOID> = ASYNC ECHO "first"
+                LET $b: HANDLE<VOID> = ASYNC {
                     ECHO "second"
                 }
                 AWAIT $a
@@ -3165,7 +3166,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "async task handle",
                     fence_meta: None,
                     code: indoc! {r#"
-                    LET $task: HANDLE = ASYNC {
+                    LET $task: HANDLE<VOID> = ASYNC {
                         ECHO "built"
                     }
                     AWAIT $task
@@ -3196,7 +3197,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "await",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $task: HANDLE = ASYNC ECHO "done"
+                LET $task: HANDLE<VOID> = ASYNC ECHO "done"
                 AWAIT $task
                 ASSERT_CONTAINS stdout "done"
             "#},
@@ -3205,7 +3206,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "await capture",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $task: HANDLE = ASYNC {
+                LET $task: HANDLE<STRING> = ASYNC {
                     ECHO "logged"
                     RETURN "returned"
                 }
@@ -3223,7 +3224,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             syntax: "CANCEL $var",
             summary: "Synchronously cancel a background task.",
             description: indoc! {r#"
-                Kills the named background task spawned via LET $var: HANDLE = ASYNC ....
+                Kills the named background task spawned via `LET $var: HANDLE<T> = ASYNC ...`.
 
                 Blocking: returns only after the task thread has been joined and its OS
                 process reaped, so no residual filesystem or stream mutation follows. A
@@ -3237,7 +3238,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "cancel",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $task: HANDLE = ASYNC SLEEP 30s
+                LET $task: HANDLE<VOID> = ASYNC SLEEP 30s
                 CANCEL $task
             "#},
                 },
@@ -3246,7 +3247,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: Some("expect_error:\"was cancelled\""),
                     code: indoc! {r#"
                 # A cancelled task stays cancelled: joining it reports.
-                LET $task: HANDLE = ASYNC SLEEP 30s
+                LET $task: HANDLE<VOID> = ASYNC SLEEP 30s
                 CANCEL $task
                 AWAIT $task
             "#},
@@ -3265,7 +3266,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 A blocking foreground process is killed.
 
                 ASYNC nests in either order with order-dependent deadline
-                semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
+                semantics: `LET $task: HANDLE<VOID> = ASYNC TIMEOUT 30s RUN "build"` enforces
                 the deadline inside the background thread (a later `AWAIT $task`
                 surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
                 preempts a hung task from the awaiting side.
@@ -3323,7 +3324,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                     # AWAIT form bounds a task join instead of a step.
-                    LET $quick: HANDLE = ASYNC {
+                    LET $quick: HANDLE<VOID> = ASYNC {
                         ECHO hi
                     }
                     TIMEOUT 30s AWAIT $quick
@@ -3498,10 +3499,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     IMPORT [STD]
                     LET $cap: PIPE
                     WITH_IO [stdout=$cap] {
-                        LET $a: HANDLE = ASYNC REMOTE prod {
+                        LET $a: HANDLE<VOID> = ASYNC REMOTE prod {
                             ECHO "from-a"
                         }
-                        LET $b: HANDLE = ASYNC REMOTE prod {
+                        LET $b: HANDLE<VOID> = ASYNC REMOTE prod {
                             ECHO "from-b"
                         }
                         AWAIT $a
@@ -3597,7 +3598,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     # guest is already dead, and the failure surfaces as
                     # a host step error carrying the same code. The CLI
                     # then exits with it, so the guest code reaches the OS.
-                    LET $t: HANDLE = ASYNC REMOTE prod {
+                    LET $t: HANDLE<VOID> = ASYNC REMOTE prod {
                         EXIT 3
                     }
                     WRITE host-alive.txt "still here"
@@ -3620,11 +3621,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         CommandMeta {
             in_index: true,
             name: "FUNC",
-            syntax: "FUNC NAME([$param: TYPE, ...]) { <commands> }",
+            syntax: "FUNC NAME([$param: TYPE, ...]): RET { <commands> } | ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }",
             summary: "Define a user function.",
             description: indoc! {r#"
                 Defines a user function with UPPERCASE name and explicitly typed
-                parameters.
+                parameters. `FUNC` runs synchronously; `ASYNC FUNC` is the same
+                with a structural guarantee: the declaration must be
+                `HANDLE<T>`, so every `RETURN` hands out a task handle.
 
                 Params bind by position, converting each argument to its
                 declared parameter type before the body runs.
@@ -3641,7 +3644,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 Invoke any function with one syntax: `NAME(...)` as a statement
                 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
-                the RETURN value (fallthrough without RETURN captures as "").
+                the RETURN value (fallthrough without RETURN is a static error unless RET is VOID).
+
+                `ASYNC FUNC` does not spawn on call. The body runs
+                synchronously on the caller thread up to its inner `ASYNC`
+                step, which spawns the background task and yields its handle
+                immediately; the function then hands that handle out with
+                `RETURN $t`. The caller joins it separately with `AWAIT`.
             "#},
             args: &[],
             flags: &[],
@@ -3651,7 +3660,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "func def call",
                     fence_meta: None,
                     code: indoc! {r#"
-                FUNC GREET($name: STRING) {
+                FUNC GREET($name: STRING): STRING {
                   RETURN $name
                 }
 
@@ -3663,13 +3672,37 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
+                    name: "async func is a handle guarantee",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Side by side: identical bodies, identical handling. The
+                # ASYNC marker only guarantees the HANDLE declaration.
+                ASYNC FUNC FETCH(): HANDLE<STRING> {
+                  LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+                  RETURN $t
+                }
+                FUNC MAKE(): HANDLE<STRING> {
+                  LET $t: HANDLE<STRING> = ASYNC { RETURN "hi" }
+                  RETURN $t
+                }
+
+                # Both run synchronously to RETURN; the inner ASYNC spawns.
+                LET $a: HANDLE<STRING> = FETCH()
+                LET $b: HANDLE<STRING> = MAKE()
+                LET $x: STRING = AWAIT $a
+                LET $y: STRING = AWAIT $b
+                ASSERT_EQ $x "hi"
+                ASSERT_EQ $y "hi"
+            "#},
+                },
+                Example {
                     name: "call with pipes",
                     fence_meta: None,
                     code: indoc! {r#"
                 # A pipe handle travels into a function as a typed argument
                 # and is usable as a binding target in both directions.
                 # `LET $p: PIPE` mints the handle; `$p` passes it on.
-                FUNC DRAIN($q: PIPE) {
+                FUNC DRAIN($q: PIPE): STRING {
                   WITH_IO [stdin=$q] READ_LINE $line
                   RETURN $line
                 }
@@ -3690,7 +3723,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             summary: "Return a value from a function, task, or inline block.",
             description: indoc! {r#"
                 Ends the nearest enclosing boundary with a value: a function
-                call, an `ASYNC` task (bound by `LET $o = AWAIT $t`), or an
+                call, an `ASYNC` task (bound by `LET $out: STRING = AWAIT $t`), or an
                 inline `LET` block. Bare `RETURN` with no expression yields
                 `""`.
 
@@ -3705,7 +3738,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 name: "return",
                 fence_meta: None,
                 code: indoc! {r#"
-                FUNC PICK($flag: BOOL) {
+                FUNC PICK($flag: BOOL): STRING {
                   IF $flag {
                     RETURN "yes"
                   }
@@ -3978,7 +4011,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # exist when the run starts cannot be analyzed, so the
                 # import fails before the first step runs.
                 WORKSPACE LOCAL
-                WRITE lib.oxdock 'FUNC F($x: STRING) { RETURN $x } EXPORT F'
+                WRITE lib.oxdock 'FUNC F($x: STRING): STRING { RETURN $x } EXPORT F'
                 IMPORT ["lib.oxdock" AS LIB]
             "#},
                 },
@@ -4016,7 +4049,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # them so importing files can use the same spelling.
                 TYPE PERSON = MAP<name: STRING>
 
-                FUNC GREET($p: PERSON) {
+                FUNC GREET($p: PERSON): STRING {
                     RETURN "hi {{ $p.name }}"
                 }
                 EXPORT GREET
@@ -4060,7 +4093,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # parent and child see the same files.
                 IMPORT [STD]
                 WRITE lib.oxfile """
-                    FUNC GREET($x: STRING) { RETURN "hi \{{ $x }}" }
+                    FUNC GREET($x: STRING): STRING { RETURN "hi \{{ $x }}" }
                     EXPORT GREET
                     """
                 WRITE main.oxfile """
@@ -4086,9 +4119,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IMPORT [STD]
 
                 # The renderer: parent values land in the module source.
-                FUNC MAKE_GREETER($who: STRING) {
+                FUNC MAKE_GREETER($who: STRING): STRING {
                     WRITE greeter.oxfile """
-                        FUNC GREET() { RETURN "hi {{ $who }}" }
+                        FUNC GREET(): STRING { RETURN "hi {{ $who }}" }
                         EXPORT GREET
                         """
                     RETURN "greeter.oxfile"
@@ -4528,6 +4561,8 @@ impl fmt::Display for StepKind {
             StepKind::FuncDef {
                 name,
                 params,
+                return_type,
+                is_async,
                 body,
                 docs,
             } => {
@@ -4543,7 +4578,17 @@ impl fmt::Display for StepKind {
                     .iter()
                     .map(|(p, t)| format!("${}: {}", p, t))
                     .collect();
-                write!(f, "FUNC {}({}) {{", name, ps.join(", "))?;
+                if *is_async {
+                    write!(
+                        f,
+                        "ASYNC FUNC {}({}): {} {{",
+                        name,
+                        ps.join(", "),
+                        return_type
+                    )?;
+                } else {
+                    write!(f, "FUNC {}({}): {} {{", name, ps.join(", "), return_type)?;
+                }
                 for s in body {
                     write!(f, "\n    {}", s)?;
                 }
@@ -4580,7 +4625,13 @@ impl fmt::Display for StepKind {
                     None => write!(f, "IMPORT [[{} FROM \"{}\"]]", parts.join(", "), path),
                 }
             }
-            StepKind::Return { expr } => write!(f, "RETURN {}", expr),
+            StepKind::Return { expr, is_bare } => {
+                if *is_bare {
+                    write!(f, "RETURN")
+                } else {
+                    write!(f, "RETURN {}", expr)
+                }
+            }
             StepKind::TypeAlias { name, target } => write!(f, "TYPE {} = {}", name, target),
             StepKind::While { cond, body } => {
                 write!(f, "WHILE {} {{", cond)?;
@@ -4801,7 +4852,7 @@ pub(crate) fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> Par
         }
     };
     if bad {
-        return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
+        return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE<T> = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
     }
     Ok(())
 }
@@ -5492,8 +5543,8 @@ mod tests {
     #[test]
     fn bare_let_without_type_points_at_typed_syntax() {
         let err = parse_err("LET $x = 1\n");
-        assert!(err.contains("invalid syntax for command LET"), "{err}");
-        assert!(err.contains("LET $name: STRING = <expr>"), "{err}");
+        assert!(err.contains("LET requires explicit types"), "{err}");
+        assert!(err.contains("LET $var: TYPE = <expr>"), "{err}");
     }
 
     #[test]
@@ -5985,13 +6036,15 @@ mod tests {
     #[test]
     fn func_def_requires_typed_uppercase_name() {
         let steps = parse_script(
-            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\n",
+            "FUNC GREET($name: STRING): STRING {\n  RETURN $name\n}\n",
             lower_command,
         )
         .expect("func def parses");
         let StepKind::FuncDef {
             name,
             params,
+            return_type,
+            is_async,
             body,
             docs,
         } = &steps[0].kind
@@ -6004,6 +6057,8 @@ mod tests {
             &vec![("name".to_string(), "STRING".to_string())],
             "{params:?}"
         );
+        assert_eq!(return_type, "STRING", "{return_type:?}");
+        assert!(!is_async, "plain FUNC is not async");
         assert!(matches!(body[0].kind, StepKind::Return { .. }));
         assert!(docs.is_none(), "undocumented FUNC carries no docs");
     }
@@ -6017,7 +6072,7 @@ mod tests {
     #[test]
     fn call_and_while_lower_correctly() {
         let steps = parse_script(
-            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\nGREET(\"ada\")\n",
+            "FUNC GREET($name: STRING): STRING {\n  RETURN $name\n}\nGREET(\"ada\")\n",
             lower_command,
         )
         .expect("call parses");
@@ -6027,7 +6082,7 @@ mod tests {
             steps[1].kind
         );
         let steps = parse_script(
-            "FUNC GREET($a: STRING, $b: STRING) {\n  RETURN $a\n}\nGREET(\"ada\", \"bex\")\n",
+            "FUNC GREET($a: STRING, $b: STRING): STRING {\n  RETURN $a\n}\nGREET(\"ada\", \"bex\")\n",
             lower_command,
         )
         .expect("spaced call parses");
@@ -6057,7 +6112,7 @@ mod tests {
         // only ASYNC/TIMEOUT/command captures produce AssignCapture.
         let steps = parse_script(
             indoc! {r#"
-                FUNC GREET($name: STRING) {
+                FUNC GREET($name: STRING): STRING {
                   RETURN $name
                 }
                 LET $r: STRING = GREET("ada")
@@ -6074,7 +6129,7 @@ mod tests {
             "{expr:?}"
         );
         let steps = parse_script(
-            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\nLET $t: HANDLE = ASYNC GREET(\"a\")\n",
+            "FUNC GREET($name: STRING): STRING {\n  RETURN $name\n}\nLET $t: HANDLE<STRING> = ASYNC GREET(\"a\")\n",
             lower_command,
         )
         .expect("async call parses");
@@ -6091,7 +6146,7 @@ mod tests {
         // options map) may put one argument per line. Bracket interiors
         // tolerate linebreaks while statement structure stays single-line.
         let steps = parse_script(
-            "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP) {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n",
+            "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP): STRING {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n",
             lower_command,
         )
         .expect("multiline call parses");
@@ -6107,7 +6162,7 @@ mod tests {
         // Display stays single-line; reparsing the same text is identical.
         let rendered = steps[1].to_string();
         assert!(!rendered.contains('\n'), "{rendered}");
-        let script = "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP) {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n";
+        let script = "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP): STRING {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n";
         let again = parse_script(script, lower_command).expect("reparse ok");
         assert_eq!(again, steps);
     }
@@ -6116,7 +6171,7 @@ mod tests {
     fn multiline_bare_call_and_list_span_lines() {
         let steps = parse_script(
             indoc! {r#"
-                FUNC GREET($a: STRING) {
+                FUNC GREET($a: STRING): STRING {
                   RETURN $a
                 }
                 GREET(
@@ -6468,6 +6523,8 @@ mod tests {
             StepKind::FuncDef {
                 name: "F".to_string(),
                 params: Vec::new(),
+                return_type: "STRING".to_string(),
+                is_async: false,
                 body: Vec::new(),
                 docs: None,
             },
@@ -6477,6 +6534,7 @@ mod tests {
             },
             StepKind::Return {
                 expr: Box::new(Expr::Literal(Value::bool(true))),
+                is_bare: false,
             },
             StepKind::While {
                 cond: Box::new(Expr::Literal(Value::bool(true))),

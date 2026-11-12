@@ -462,6 +462,7 @@ pub(crate) fn new_state<P: ProcessManager>(
         import_stack: Vec::new(),
         import_alias_frame: None,
         modules: std::collections::HashMap::new(),
+        validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
         module_table: self::native::std_module_table(),
         types: self::typing::startup_type_map(),
@@ -507,31 +508,62 @@ fn build_module_table<P: ProcessManager>(
     table
 }
 
+/// Shared validation-only entry: builds no snapshot output, runs no
+/// steps. Dry-run calls this before printing the closure so it fails
+/// where execution and `--mcp` would on script errors. Service
+/// mapping (`check_pre_run`) is deliberately excluded: dry-run
+/// previews without binding sockets, and mappings are a deployment
+/// concern validated at execution and MCP-init time.
+pub fn validate_steps_with_fs_modules_and_entry<P: ProcessManager>(
+    fs: Box<dyn WorkspaceFs>,
+    steps: &[Step],
+    modules: Vec<HostModule<P>>,
+    types: Vec<&'static TypeDescriptor>,
+    entry_file: Option<GuardedPath>,
+) -> Result<()> {
+    let mut state = new_state(fs, ExecIo::new())?;
+    state.entry_file = entry_file;
+    state.module_table = build_module_table(&modules);
+    for module in modules {
+        state.register_module(module);
+    }
+    for descriptor in types {
+        state.register_type(descriptor);
+    }
+    validate_closure_for_run(&mut state, steps).map(|_| ())
+}
+
+/// Shared run boundary: typo'd param and return tags plus the full
+/// script-side closure check (terminal unification, MissingReturn,
+/// undeclared variables, ungated ANY). Every entry point funnels
+/// through here so `--dry-run`, execution, and `--mcp` agree. Restores
+/// type aliases on success. Returns every type name exported anywhere
+/// in the closure for callers needing export metadata (the closure
+/// itself stays private to the module).
+pub fn validate_closure_for_run<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    steps: &[Step],
+) -> Result<Vec<String>> {
+    state.type_aliases = self::typing::collect_type_aliases(steps, state)?;
+    state.validate_function_type_tags()?;
+    let saved_aliases = state.type_aliases.clone();
+    let closure = self::import::expand_import_closure(state, steps)?;
+    static_check::validate_script_closure(steps, &closure, state)?;
+    state.type_aliases = saved_aliases;
+    let mut exported = Vec::new();
+    for file in &closure {
+        exported.extend(file.type_exports.iter().cloned());
+    }
+    Ok(exported)
+}
+
 #[allow(clippy::type_complexity)]
 fn finish_run<P: ProcessManager>(
     mut state: ExecState<P>,
     process: P,
     steps: &[Step],
 ) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
-    // Execution boundary: every run entry point funnels through here, so
-    // typo'd param and return type tags fail before any step runs. A bad
-    // label is a programmer error, never a runtime value.
-    state.type_aliases = self::typing::collect_type_aliases(steps, &state)?;
-    state.validate_function_type_tags()?;
-    // Script-side counterpart: terminal unification, MissingReturn,
-    // undeclared variables, and ungated ANY flow fail here too,
-    // before any step runs. The closure pass covers the entry script
-    // plus every transitively imported file (#115): cross-file calls
-    // typecheck against the collected signatures, so no nested file
-    // can smuggle a type error past the entry gate.
-    let saved_aliases = state.type_aliases.clone();
-    let closure = self::import::expand_import_closure(&mut state, steps)?;
-    // Per-file scoping lives inside the closure pass: every file is
-    // checked against exactly its own aliases plus the shared
-    // harvests, never another file's defs, so same-named types in
-    // different files coexist. Harvest collisions still fail loud.
-    static_check::validate_script_closure(steps, &closure, &mut state)?;
-    state.type_aliases = saved_aliases;
+    validate_closure_for_run(&mut state, steps)?;
     let assert_windows = Arc::clone(&state.assert_windows);
     let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
     let exact_stdout = Arc::clone(&state.exact_stdout);

@@ -370,7 +370,7 @@ jobs:
           # lingering from an earlier leg must never fail this bind.
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
+          LET $srv: HANDLE<VOID> = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
 
           # Bounded readiness wait in shell: the DSL has no try/retry
           # (see #243), so a slow listener gets 30s and a dead one fails
@@ -401,7 +401,7 @@ jobs:
           ASSERT_EQ $got "oxdock {{ $manifest.workspace.package.version }}"
 
           LET $p: PIPE
-          LET $t: HANDLE = ASYNC {
+          LET $t: HANDLE<VOID> = ASYNC {
               WITH_IO [stdout=$p] ECHO "IMPORT [STD]"
               WITH_IO [stdout=$p] ECHO "ECHO via-stdin"
           }
@@ -469,7 +469,7 @@ jobs:
           ENV OXDOCK_PRODUCT="oxdock-render"
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
+          LET $srv: HANDLE<VOID> = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
 
           # Bounded readiness wait in shell: the DSL has no try/retry
           # (see #243), so a slow listener gets 30s and a dead one fails
@@ -560,7 +560,7 @@ jobs:
           # Own loopback port for this leg; shared binds flake across legs.
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
+          LET $srv: HANDLE<VOID> = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
 
           # Bounded readiness wait in shell: the DSL has no try/retry
           # (see #243), so a slow listener gets 30s and a dead one fails
@@ -675,7 +675,7 @@ jobs:
 
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
+          LET $srv: HANDLE<VOID> = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
 
           # Bounded readiness wait in shell: the DSL has no try/retry
           # (see #243), so a slow listener gets 30s and a dead one fails
@@ -768,7 +768,7 @@ jobs:
 
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
+          LET $srv: HANDLE<VOID> = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
 
           # Bounded readiness wait in shell: the DSL has no try/retry
           # (see #243), so a slow listener gets 30s and a dead one fails
@@ -862,7 +862,7 @@ jobs:
           # Own loopback port for this leg; shared binds flake across legs.
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
+          LET $srv: HANDLE<VOID> = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
 
           # Bounded readiness wait in shell: the DSL has no try/retry
           # (see #243), so a slow listener gets 30s and a dead one fails
@@ -981,7 +981,7 @@ jobs:
           ASSERT_CONTAINS $first "{{ env:SMOKE_VERSION }}"
 
           LET $q: PIPE
-          LET $t: HANDLE = ASYNC {
+          LET $t: HANDLE<VOID> = ASYNC {
               WITH_IO [stdout=$q] ECHO "IMPORT [STD]"
               WITH_IO [stdout=$q] ECHO "ECHO via-stdin"
           }
@@ -1047,7 +1047,7 @@ jobs:
 
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
+          LET $srv: HANDLE<VOID> = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
 
           # Bounded readiness wait in shell: the DSL has no try/retry
           # (see #243), so a slow listener gets 30s and a dead one fails
@@ -1166,7 +1166,7 @@ jobs:
 
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
+          LET $srv: HANDLE<VOID> = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
 
           [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
@@ -1257,7 +1257,7 @@ jobs:
 
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
+          LET $srv: HANDLE<VOID> = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ $stage }}"] }
 
           # Bounded readiness wait in shell: the DSL has no try/retry
           # (see #243), so a slow listener gets 30s and a dead one fails

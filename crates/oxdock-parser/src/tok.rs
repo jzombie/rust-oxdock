@@ -1,7 +1,7 @@
 //! Shared token model for the unified parser backend.
 //!
 //! Two context-free lexers emit [`Tok`]: [`lex_str`] for string sources
-//! and [`lex_tokens`] (behind `proc-macro-api`) for `TokenStream`.
+//! and `lex_tokens` (behind `proc-macro-api`) for `TokenStream`.
 //! Both are positional only: they record gap adjacency (`joint`) and
 //! literal newlines, but never decide statement boundaries. Whether a
 //! newline ends a statement (or a `[` opens a guard vs. args, or a word

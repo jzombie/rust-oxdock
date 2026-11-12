@@ -621,10 +621,10 @@ fn remote_shared_capture_fan_in_drains_via_eof() {
             IMPORT [STD]
             LET $cap: PIPE
             WITH_IO [stdout=$cap] ASYNC {
-                LET $a: HANDLE = ASYNC REMOTE prod {
+                LET $a: HANDLE<VOID> = ASYNC REMOTE prod {
                     ECHO "1.2.3"
                 }
-                LET $b: HANDLE = ASYNC REMOTE prod {
+                LET $b: HANDLE<VOID> = ASYNC REMOTE prod {
                     ECHO "1.2.3"
                 }
                 AWAIT $a
@@ -658,7 +658,7 @@ fn remote_inside_async_task_keeps_live_stdout_backend() {
     let steps = oxdock_core::parse_script(indoc! {r#"
         LET $cap: PIPE
         WITH_IO [stdout=$cap] {
-            LET $t: HANDLE = ASYNC REMOTE prod {
+            LET $t: HANDLE<VOID> = ASYNC REMOTE prod {
                 ECHO "live"
             }
             AWAIT $t
@@ -734,7 +734,7 @@ fn remote_guest_exit_fails_host_step() {
     let err = run_with_runner(
         &root,
         indoc! {r#"
-            LET $t: HANDLE = ASYNC REMOTE prod {
+            LET $t: HANDLE<VOID> = ASYNC REMOTE prod {
                 EXIT 3
             }
             WRITE host-alive.txt "still here"

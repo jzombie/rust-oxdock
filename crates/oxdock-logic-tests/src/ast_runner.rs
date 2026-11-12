@@ -1295,12 +1295,12 @@ fn setup_copy_inputs(_snapshot: &GuardedPath, local: &GuardedPath) -> Result<()>
 fn setup_import_libs(_snapshot: &GuardedPath, local: &GuardedPath) -> Result<()> {
     write_text(
         &local.join("lib.oxdock")?,
-        "FUNC DOUBLE($x: STRING) { RETURN $x } EXPORT DOUBLE",
+        "FUNC DOUBLE($x: STRING): STRING { RETURN $x } EXPORT DOUBLE",
     )?;
     write_text(&local.join("lib_value.oxdock")?, "RETURN \"lib-value\"")?;
     write_text(
         &local.join("helpers.oxdock")?,
-        "FUNC HELPER($x: STRING) { RETURN $x } EXPORT HELPER",
+        "FUNC HELPER($x: STRING): STRING { RETURN $x } EXPORT HELPER",
     )?;
     Ok(())
 }

@@ -128,7 +128,7 @@ fn aliased_same_name_types_coexist_per_file() {
         "d.oxfile",
         indoc! {r#"
             TYPE THING = MAP<x: STRING>
-            FUNC MK($x: STRING) {
+            FUNC MK($x: STRING): STRING {
                 LET $t: THING = {x: $x}
                 RETURN $t.x
             }
@@ -140,7 +140,7 @@ fn aliased_same_name_types_coexist_per_file() {
         "e.oxfile",
         indoc! {r#"
             TYPE THING = MAP<y: STRING>
-            FUNC MK($y: STRING) {
+            FUNC MK($y: STRING): STRING {
                 LET $t: THING = {y: $y}
                 RETURN $t.y
             }
@@ -170,7 +170,7 @@ fn aliased_same_name_types_coexist_per_file() {
             "d.oxfile",
             indoc! {r#"
                 TYPE THING = MAP<x: STRING>
-                FUNC MK($x: STRING) {
+                FUNC MK($x: STRING): STRING {
                     LET $t: THING = {x: $x}
                     RETURN $t.x
                 }
@@ -181,7 +181,7 @@ fn aliased_same_name_types_coexist_per_file() {
             "e.oxfile",
             indoc! {r#"
                 TYPE THING = MAP<y: STRING>
-                FUNC MK($y: STRING) {
+                FUNC MK($y: STRING): STRING {
                     LET $t: THING = {y: $y}
                     RETURN $t.y
                 }
@@ -255,7 +255,7 @@ fn aliased_import_exposes_types_only_qualified() {
         "d.oxfile",
         indoc! {r#"
             TYPE THING = MAP<x: STRING>
-            FUNC MK($x: STRING) {
+            FUNC MK($x: STRING): STRING {
                 LET $t: THING = {x: $x}
                 RETURN $t.x
             }
@@ -311,11 +311,11 @@ fn aliased_file_own_type_harvest_covers_signatures_and_bodies() {
         "lib.oxfile",
         indoc! {r#"
             IMPORT [TYPE POINT FROM "types.oxfile"]
-            FUNC MAKE($x: STRING) {
+            FUNC MAKE($x: STRING): STRING {
                 LET $p: POINT = {x: $x}
                 RETURN $p.x
             }
-            FUNC SHOW($p: POINT) {
+            FUNC SHOW($p: POINT): STRING {
                 RETURN $p.x
             }
             EXPORT [MAKE, SHOW]

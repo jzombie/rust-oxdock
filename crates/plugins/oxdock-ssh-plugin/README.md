@@ -33,7 +33,7 @@ LET $child: LIST<STRING> = ["cat"]
 }
 
 # Accept one session in the background and bridge the wire through the PTY child.
-LET $srv: HANDLE = ASYNC {
+LET $srv: HANDLE<VOID> = ASYNC {
     LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
 
     ENV SSH_USER="{{ $sess.username }}"
@@ -43,8 +43,8 @@ LET $srv: HANDLE = ASYNC {
     LET $c_in: PIPE
     LET $c_out: PIPE
 
-    LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, $child, 0, 0, $c_out, $c_in) }
-    LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out) }
+    LET $pty: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($sess.session, $child, 0, 0, $c_out, $c_in) }
+    LET $pump: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out) }
 
     LET $code: INT = AWAIT $pty
     ASSERT_EQ $code 0
@@ -58,11 +58,11 @@ LET $srv: HANDLE = ASYNC {
 # Unix.
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
+LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
 
 WITH_IO [stdout=$cin] ECHO "proxy-ping"
 
-LET $cDone: MAP<ANY> = AWAIT $c
+LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
 ASSERT_EQ $cDone.closed true
 ASSERT_EQ $cDone.exit_status 0
 ASSERT_CONTAINS $cout "proxy-ping"
@@ -87,7 +87,7 @@ The server sends first: the client side never EOFs its input, so
 the reply cannot race teardown.
 
 
-**Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL, command: STRING>`
+**Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE): MAP<closed: BOOL, command: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -111,10 +111,10 @@ IMPORT [STD, SSH]
 LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-accept", {username: "u", password: "p"})
 LET $in: PIPE
 LET $out: PIPE
-LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+LET $acc: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_ACCEPT($m.server, $in, $out) }
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
+LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
 
 # Close both inputs: each pump observes EOF, half-closes, and both
 # tasks return their result maps with no cancellation.
@@ -136,7 +136,7 @@ Shut a server down and join its runtime thread (bounded).
 Idempotent.
 
 
-**Signature:** `SSH_CLOSE($server: SSH_SERVER) -> BOOL`
+**Signature:** `SSH_CLOSE($server: SSH_SERVER): BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -167,7 +167,7 @@ the pump tasks. Under `--offline` the dial bails before any
 socket work. The result MAP carries `exit_status`, or -1 when the
 server sent none.
 
-**Signature:** `SSH_CONNECT($target: STRING, $username: STRING, $password: STRING, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP`
+**Signature:** `SSH_CONNECT($target: STRING, $username: STRING, $password: STRING, $in_pipe: PIPE, $out_pipe: PIPE): MAP<closed: BOOL, exit_status: INT>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -179,7 +179,10 @@ server sent none.
 - `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
 - `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
 
-**Returns:** `MAP`
+**Returns:** `MAP<closed: BOOL, exit_status: INT>`
+
+  - `closed` (`BOOL`): True when the session closed cleanly.
+  - `exit_status` (`INT`): Remote exit status, or -1 when none arrived.
 
 **Examples:**
 
@@ -190,17 +193,17 @@ IMPORT [STD, SSH]
 LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-connect", {username: "u", password: "p"})
 LET $in: PIPE
 LET $out: PIPE
-LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+LET $acc: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_ACCEPT($m.server, $in, $out) }
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
+LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
 
 # Close both inputs: each pump observes EOF, half-closes, and both
 # tasks return their result maps with no cancellation.
 WITH_IO [stdout=$cin] ECHO "client-hello"
 WITH_IO [stdout=$in] ECHO "server-greeting"
-LET $done: MAP<ANY> = AWAIT $c
-ASSERT_EQ $done.closed true
+LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
+ASSERT_EQ $cDone.closed true
 LET $adone: MAP<ANY> = AWAIT $acc
 ASSERT_EQ $adone.closed true
 SSH_CLOSE($m.server)
@@ -217,7 +220,7 @@ The server sends first: the client side never EOFs its input, so a
 synthetic reply cannot race teardown.
 
 
-**Signature:** `SSH_DEQUEUE($server: SSH_SERVER) -> MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
+**Signature:** `SSH_DEQUEUE($server: SSH_SERVER): MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -243,7 +246,7 @@ LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-route", {username: "u", password: "p
 # Serve: dequeue one session and pump a synthetic reply.
 LET $in: PIPE
 LET $out: PIPE
-LET $w: HANDLE = ASYNC {
+LET $w: HANDLE<VOID> = ASYNC {
     LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
     ASSERT_EQ $sess.username "u"
     SSH_PUMP_CHANNEL($sess.session, $in, $out)
@@ -252,13 +255,13 @@ LET $w: HANDLE = ASYNC {
 # Connect a client to the server.
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
+LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
 
 # Close both inputs: each pump observes EOF, half-closes, and every
 # task returns with no cancellation.
 WITH_IO [stdout=$cin] ECHO "client-hello"
 WITH_IO [stdout=$in] ECHO "server-greeting"
-LET $cDone: MAP<ANY> = AWAIT $c
+LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
 ASSERT_EQ $cDone.closed true
 AWAIT $w
 SSH_CLOSE($m.server)
@@ -288,7 +291,7 @@ learns its exit status and reports `truncated`. A timeout kills
 the wait and returns whatever arrived with `timed_out`. `exit` is
 -1 when the server never sent a status.
 
-**Signature:** `SSH_EXEC($target: STRING, $username: STRING, $password: STRING, $argv: LIST<STRING>, $options: MAP<timeout?: DURATION|STRING, max_bytes?: INT>) -> MAP`
+**Signature:** `SSH_EXEC($target: STRING, $username: STRING, $password: STRING, $argv: LIST<STRING>, $options: MAP<timeout?: DURATION|STRING, max_bytes?: INT>): MAP`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -318,17 +321,17 @@ plugin, with POSIX shell quoting.
 IMPORT [STD, SSH]
 INHERIT_ENV [PATH]
 LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-exec", {username: "u", password: "p"})
-LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
-LET $runner: HANDLE = ASYNC {
+LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
+LET $runner: HANDLE<VOID> = ASYNC {
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
     LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS($sess.command)
     LET $wire: PIPE
     LET $drain: PIPE
-    LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $wire, $drain) }
+    LET $pump: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_PUMP_CHANNEL($sess.session, $wire, $drain) }
     LET $pin: PIPE
     LET $pout: PIPE
     LET $perr: PIPE
-    LET $run: HANDLE = ASYNC { SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
+    LET $run: HANDLE<INT> = ASYNC { RETURN SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
     LET $n: INT = SSH_PUMP($pout, $wire)
     LET $code: INT = AWAIT $run
     LET $pDone: MAP<ANY> = AWAIT $pump
@@ -362,7 +365,7 @@ credential: mint at runtime, hand the value to both sides, drop
 it after. Pure (no step context), so it runs anywhere a STRING
 binds, including option maps and placeholders.
 
-**Signature:** `SSH_GENERATE_PASSWORD() -> STRING`
+**Signature:** `SSH_GENERATE_PASSWORD(): STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -432,7 +435,7 @@ session-driven sizing or reaper-ordered reporting, that is the
 point to revisit unifying the two.
 
 
-**Signature:** `SSH_PTY_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $rows: INT, $cols: INT, $in_pipe: PIPE, $out_pipe: PIPE) -> INT`
+**Signature:** `SSH_PTY_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $rows: INT, $cols: INT, $in_pipe: PIPE, $out_pipe: PIPE): INT`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -455,10 +458,10 @@ point to revisit unifying the two.
 IMPORT [STD, SSH]
 INHERIT_ENV [PATH]
 LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pty", {username: "u", password: "p"})
-LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pty", "u", "p", $cin, $cout) }
+LET $c: HANDLE<VOID> = ASYNC { SSH_CONNECT("doc-ssh-pty", "u", "p", $cin, $cout) }
 WITH_IO [stdout=$cin] ECHO "client-hello"
 LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 
@@ -470,13 +473,13 @@ LET $pout: PIPE
 # Assert on the whole pipe: terminal streams carry setup noise ahead
 # of child output, so line reads are version-dependent.
 [family:unix] {
-    LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["sh", "-c", "echo pty-hi"], 0, 0, $pin, $pout) }
+    LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($sess.session, ["sh", "-c", "echo pty-hi"], 0, 0, $pin, $pout) }
     LET $code: INT = AWAIT $t
     ASSERT_EQ $code 0
     ASSERT_CONTAINS $pout "pty-hi"
 }
 [family:windows] {
-    LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["cmd", "/c", "echo pty-hi"], 0, 0, $pin, $pout) }
+    LET $t: HANDLE<INT> = ASYNC { RETURN SSH_PTY_RUN($sess.session, ["cmd", "/c", "echo pty-hi"], 0, 0, $pin, $pout) }
     LET $code: INT = AWAIT $t
     ASSERT_EQ $code 0
     ASSERT_CONTAINS $pout "pty-hi"
@@ -492,7 +495,7 @@ Copy one pipe into another until EOF, then close the target.
 Either task placement works, as long as the other end is live.
 
 
-**Signature:** `SSH_PUMP($from_pipe: PIPE, $to_pipe: PIPE) -> INT`
+**Signature:** `SSH_PUMP($from_pipe: PIPE, $to_pipe: PIPE): INT`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -528,7 +531,7 @@ closes. Must run inside `ASYNC`. Pump ends take once: a second
 pump bails instead of splitting bytes.
 
 
-**Signature:** `SSH_PUMP_CHANNEL($session: SSH_SESSION, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL>`
+**Signature:** `SSH_PUMP_CHANNEL($session: SSH_SESSION, $in_pipe: PIPE, $out_pipe: PIPE): MAP<closed: BOOL>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -549,17 +552,17 @@ pump bails instead of splitting bytes.
 ```oxdock
 IMPORT [STD, SSH]
 LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pump", {username: "u", password: "p"})
-LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
+LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
 WITH_IO [stdout=$cin] ECHO "client-hello"
 LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 LET $sin: PIPE
 LET $sout: PIPE
-LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
+LET $p: HANDLE<MAP<ANY>> = ASYNC { RETURN SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
 WITH_IO [stdout=$sin] ECHO "server-greeting"
-LET $cDone: MAP<ANY> = AWAIT $c
+LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
 ASSERT_EQ $cDone.closed true
 LET $pDone: MAP<ANY> = AWAIT $p
 ASSERT_EQ $pDone.closed true
@@ -595,7 +598,7 @@ exactly `argv`. `cmd /c` is the exception (its tail is a command,
 not `argv`): route command text via `ENV SSH_COMMAND="..."` with
 `["cmd", "/c", "%SSH_COMMAND%"]` instead.
 
-**Signature:** `SSH_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $in_pipe: PIPE, $out_pipe: PIPE, $err_pipe: PIPE) -> INT`
+**Signature:** `SSH_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $in_pipe: PIPE, $out_pipe: PIPE, $err_pipe: PIPE): INT`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -617,10 +620,10 @@ not `argv`): route command text via `ENV SSH_COMMAND="..."` with
 IMPORT [STD, SSH]
 INHERIT_ENV [PATH]
 LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-run", {username: "u", password: "p"})
-LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+LET $d: HANDLE<SSH_DEQUEUE_INFO> = ASYNC { RETURN SSH_DEQUEUE($m.server) }
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-run", "u", "p", $cin, $cout) }
+LET $c: HANDLE<VOID> = ASYNC { SSH_CONNECT("doc-ssh-run", "u", "p", $cin, $cout) }
 WITH_IO [stdout=$cin] ECHO "client-hello"
 LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 
@@ -634,7 +637,7 @@ LET $argv: LIST<STRING> = ["sh", "-c", "echo run-hi"]
 [family:windows] {
     $argv = ["cmd", "/c", "echo run-hi"]
 }
-LET $t: HANDLE = ASYNC { SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
+LET $t: HANDLE<INT> = ASYNC { RETURN SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
 LET $code: INT = AWAIT $t
 ASSERT_EQ $code 0
 ASSERT_CONTAINS $pout "run-hi"
@@ -650,7 +653,7 @@ ahead of the channel close. Survives the take-once pump ends, so
 call it before the pump drains. `SSH_PTY_RUN` reports by itself;
 this covers other legs (`RUN`, synthetic replies).
 
-**Signature:** `SSH_SEND_EXIT_STATUS($session: SSH_SESSION, $code: INT) -> BOOL`
+**Signature:** `SSH_SEND_EXIT_STATUS($session: SSH_SESSION, $code: INT): BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -668,22 +671,22 @@ this covers other legs (`RUN`, synthetic replies).
 ```oxdock
 IMPORT [STD, SSH]
 LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-exit-status", {username: "u", password: "p"})
-LET $srv: HANDLE = ASYNC {
+LET $srv: HANDLE<VOID> = ASYNC {
     LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
     LET $sin: PIPE
     LET $sout: PIPE
-    LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
+    LET $p: HANDLE<VOID> = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
     SSH_SEND_EXIT_STATUS($sess.session, 3)
     WITH_IO [stdout=$sin] ECHO "server-greeting"
     AWAIT $p
 }
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-exit-status", "u", "p", $cin, $cout) }
+LET $c: HANDLE<MAP<closed: BOOL, exit_status: INT>> = ASYNC { RETURN SSH_CONNECT("doc-ssh-exit-status", "u", "p", $cin, $cout) }
 # Close the client input: its pump observes EOF and half-closes, so
 # both pumps drain instead of idling on an empty pipe.
 WITH_IO [stdout=$cin] ECHO "client-hello"
-LET $cDone: MAP<ANY> = AWAIT $c
+LET $cDone: MAP<closed: BOOL, exit_status: INT> = AWAIT $c
 ASSERT_EQ $cDone.closed true
 ASSERT_EQ $cDone.exit_status 3
 AWAIT $srv
@@ -702,7 +705,7 @@ load-or-create; blank keeps the ephemeral key) and the optional
 `idle_timeout` DURATION (quiet-connection kill, default 5m; zero
 disables it for persistent sessions).
 
-**Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING, idle_timeout?: DURATION|STRING>) -> MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
+**Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING, idle_timeout?: DURATION|STRING>): MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 

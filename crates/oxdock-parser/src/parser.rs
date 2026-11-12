@@ -67,8 +67,8 @@
 //!   pending wait holds bare brackets across separators.
 //! - Block headers: `IF`/`FOR`/`WHILE`
 //!   conditions miss to generic on expression failure (inline-block
-//!   failures propagate); `FUNC` paren-group params parse with `gap`
-//!   discipline; `REMOTE` targets/blocks/bindings; `TYPE` maximal
+//!   failures propagate); `FUNC` paren-group params parse with `gap_nl`
+//!   discipline (shared helper, like call args); `REMOTE` targets/blocks/bindings; `TYPE` maximal
 //!   shape match; `IMPORT`/`EXPORT` lists. Shared
 //!   validators are truly shared (`validate_remote_copy_placement`,
 //!   `contains_remote_block`, `collect_remote_body_symbols`,
@@ -2595,8 +2595,76 @@ fn parse_expr_call(
     })
 }
 
-/// RUN exec-form items: atoms only, except parenthesized/calls/lists/maps
-/// which recurse fully. Anything that is not a clean comma-separated list misses the whole
+/// Item rule selecting which `[...]` position the shared list core
+/// parses for. The loop, comma rule, empty rule, trailing-content rule,
+/// and newline tolerance are identical for every position (see
+/// [`parse_bracket_list`]); only items and miss handling differ.
+#[derive(Clone, Copy)]
+enum BracketItems {
+    /// Full checked expressions; a miss fails loudly.
+    Expr,
+    /// RUN-exec restricted atoms (brace groups try maps only, so blocks
+    /// miss); a miss is shell fallthrough (`None`), never an error, so
+    /// POSIX `[ -f ... ]` and malformed shapes stay shell.
+    Exec,
+}
+
+/// Shared comma-separated `[...]` core behind every bracket position.
+/// There is exactly one list loop: one empty rule, one comma rule, one
+/// trailing-content rule, newlines riding every gap. A bracket group
+/// already lexes across lines, so rejecting newlines here only strands
+/// the statement in raw-text rendering.
+fn parse_bracket_list(
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+    items: BracketItems,
+) -> Result<Option<Expr>, TokenError> {
+    let mut cur = Cursor::expr(inner, stmt);
+    cur.skip_gap_nl();
+    if cur.done() {
+        return Ok(Some(Expr::List(vec![])));
+    }
+    let mut list = Vec::new();
+    loop {
+        let item = match items {
+            BracketItems::Expr => parse_expr_checked(&mut cur, ctx),
+            BracketItems::Exec => match parse_run_exec_atom(&mut cur, ctx) {
+                Ok(Some(atom)) => Ok(atom),
+                // Not an exec shape at all: shell fallthrough.
+                Ok(None) | Err(_) => return Ok(None),
+            },
+        };
+        // Only expression positions can fail here: exec misses
+        // return `None` above.
+        let item = item?;
+        match reject_boundary(&lowering_ctx(stmt), &item) {
+            Ok(()) => {}
+            Err(e) if matches!(items, BracketItems::Expr) => {
+                return Err(cur.err(e.to_string()));
+            }
+            Err(_) => return Ok(None),
+        }
+        list.push(item);
+        cur.skip_gap_nl();
+        if cur.eat_punct(',') {
+            cur.skip_gap_nl();
+            continue;
+        }
+        break;
+    }
+    if !cur.done() {
+        return match items {
+            BracketItems::Expr => Err(cur.err("unexpected text in list")),
+            BracketItems::Exec => Ok(None),
+        };
+    }
+    Ok(Some(Expr::List(list)))
+}
+
+/// RUN exec-form list: the shared bracket core in `Exec` mode (atoms
+/// only, except parenthesized/calls/lists/maps which recurse fully).
+/// Anything that is not a clean comma-separated list misses the whole
 /// exec shape (`None`): the grammar falls through to the shell path,
 /// which reads the bracket literally and lets the shared lowering
 /// decide (POSIX `[ -f ... ]` stays shell; non-map blocks and malformed
@@ -2610,33 +2678,7 @@ fn parse_run_exec_list(
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<Option<Expr>, TokenError> {
-    let mut cur = Cursor::expr(inner, stmt);
-    cur.skip_gap();
-    if cur.done() {
-        return Ok(Some(Expr::List(vec![])));
-    }
-    let mut items = Vec::new();
-    loop {
-        let item = match parse_run_exec_atom(&mut cur, ctx) {
-            Ok(Some(item)) => item,
-            // Not an exec shape at all: shell fallthrough.
-            _ => return Ok(None),
-        };
-        if reject_boundary(&lowering_ctx(stmt), &item).is_err() {
-            return Ok(None);
-        }
-        items.push(item);
-        cur.skip_gap();
-        if cur.eat_punct(',') {
-            cur.skip_gap();
-            continue;
-        }
-        break;
-    }
-    if !cur.done() {
-        return Ok(None);
-    }
-    Ok(Some(Expr::List(items)))
+    parse_bracket_list(inner, stmt, ctx, BracketItems::Exec)
 }
 
 /// One RUN-exec item: brace groups try maps only (blocks miss);
@@ -4227,7 +4269,9 @@ fn parse_func_at(
     pos: usize,
     stmt: usize,
     ctx: &ParseCtx,
+    is_async: bool,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let keyword = if is_async { "ASYNC FUNC" } else { KEYWORD_FUNC };
     let fail = |msg: String| TokenError {
         stmt,
         msg,
@@ -4248,8 +4292,8 @@ fn parse_func_at(
         _ => return Ok(None),
     };
     // Paren group at any gap (`gap` zero-width): params live inside
-    // its inner tokens, parsed with `gap` discipline (newlines miss,
-    // like the grammar).
+    // its inner tokens, parsed with `gap_nl` discipline (newlines ride
+    // free like call args and generics, via the shared helper).
     let mut p = pos + 2;
     let paren_inner = match toks.get(p).map(|t| &t.kind) {
         Some(TokKind::Group {
@@ -4263,7 +4307,7 @@ fn parse_func_at(
     let mut params = Vec::new();
     {
         let mut pcur = Cursor::expr(&paren_inner, stmt);
-        pcur.skip_gap();
+        pcur.skip_gap_nl();
         if !pcur.done() {
             loop {
                 let base = pcur.pos;
@@ -4271,11 +4315,11 @@ fn parse_func_at(
                     return Ok(None);
                 };
                 pcur.pos = base + 2;
-                pcur.skip_gap();
+                pcur.skip_gap_nl();
                 if !pcur.eat_punct(':') {
                     return Ok(None);
                 }
-                pcur.skip_gap();
+                pcur.skip_gap_nl();
                 let tstart = pcur.pos;
                 let Some(tend) = parse_type_shape(&paren_inner, tstart) else {
                     return Ok(None);
@@ -4286,9 +4330,9 @@ fn parse_func_at(
                     render_type_region(&paren_inner[tstart..tend], stmt).unwrap_or_default();
                 params.push((pname, ptype));
                 pcur.pos = tend;
-                pcur.skip_gap();
+                pcur.skip_gap_nl();
                 if pcur.eat_punct(',') {
-                    pcur.skip_gap();
+                    pcur.skip_gap_nl();
                     // Trailing comma misses (a param must follow).
                     if pcur.done() {
                         return Ok(None);
@@ -4298,13 +4342,47 @@ fn parse_func_at(
                 break;
             }
             // Trailing junk (including newlines) misses to generic.
+            pcur.skip_gap_nl();
             if !pcur.done() {
                 return Ok(None);
             }
         }
     }
+    // Mandatory return annotation: FUNC NAME(...): RET { ... }.
+    // After paren group, require gap-optional colon then type shape.
+    // Missing colon after matched name+parens is a hard parse error
+    // (no legacy fallback). Non-block tails (neither colon nor brace)
+    // miss to generic (probed FUNC FOO() ECHO hi).
+    let is_colon = matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct(':')));
+    if !is_colon {
+        let is_brace = matches!(
+            toks.get(p).map(|t| &t.kind),
+            Some(TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            })
+        ) && toks.get(p).is_some_and(|t| !is_template_brace(t));
+        if is_brace {
+            return Err(fail(format!(
+                "{keyword} {def_name} requires a return type : TYPE (e.g. : VOID, : STRING)"
+            )));
+        }
+        return Ok(None);
+    }
+    let Some(ret_end) = parse_type_shape(toks, p + 1) else {
+        return Err(fail(format!(
+            "{keyword} {def_name} requires a return type : TYPE after ':'"
+        )));
+    };
+    let return_type = render_type_region(&toks[p + 1..ret_end], stmt).map_err(|_| {
+        fail(format!(
+            "{keyword} {def_name} requires a return type : TYPE after ':'"
+        ))
+    })?;
+    let return_type = crate::canonicalize_spelling(&return_type);
+    p = ret_end;
     // Block at any gap (never a template); missing blocks miss to
-    // generic (probed `FUNC FOO() ECHO hi`).
+    // generic (probed FUNC FOO() ECHO hi).
     let block_ok = matches!(
         toks.get(p).map(|t| &t.kind),
         Some(TokKind::Group {
@@ -4343,6 +4421,8 @@ fn parse_func_at(
     let kind = StepKind::FuncDef {
         name: def_name,
         params,
+        return_type,
+        is_async,
         body,
         docs: None,
     };
@@ -6009,30 +6089,12 @@ fn parse_expr_checked(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenErr
     Ok(expr)
 }
 
-/// List literal over a bracket group's contents: `gap_nl` newlines
-/// skip at the edges and after commas only, mirroring the grammar.
+/// List literal over a bracket group's contents: the shared bracket
+/// core (see [`parse_bracket_list`]) in `Expr` mode. Expression
+/// positions fail loudly instead of missing, so `None` is unreachable.
 fn parse_list_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
-    let mut cur = Cursor::expr(inner, stmt);
-    cur.skip_gap_nl();
-    if cur.done() {
-        return Ok(Expr::List(vec![]));
-    }
-    let mut items = Vec::new();
-    loop {
-        let item = parse_expr_checked(&mut cur, ctx)?;
-        reject_boundary(&lowering_ctx(stmt), &item).map_err(|e| cur.err(e.to_string()))?;
-        items.push(item);
-        cur.skip_gap_nl();
-        if cur.eat_punct(',') {
-            cur.skip_gap_nl();
-            continue;
-        }
-        break;
-    }
-    if !cur.done() {
-        return Err(cur.err("unexpected text in list"));
-    }
-    Ok(Expr::List(items))
+    parse_bracket_list(inner, stmt, ctx, BracketItems::Expr)
+        .map(|list| list.expect("expression lists fail loudly, never miss"))
 }
 
 /// Map literal attempt over a brace group's contents: comma-separated
@@ -6267,9 +6329,19 @@ fn parse_let_body(
     };
     // The header allows gaps (comments, never newlines).
     cur.skip_gap();
-    // No `:`: no `LET` form can match (miss, like `LET $x = 1`).
+    // No `:`: untyped LET is rejected outright. Every binding is
+    // typed; the old miss-to-generic path only hid that behind a
+    // rambling "invalid syntax" message. (FOR already does this.)
     if !cur.eat_punct(':') {
-        return Ok(None);
+        return Err(TokenError {
+            stmt,
+            msg: "LET requires explicit types: LET $var: TYPE = <expr>".to_string(),
+            line: 0,
+            col: 0,
+            kind: Some(ParseErrorKind::InvalidSyntax {
+                command: "LET".to_string(),
+            }),
+        });
     }
     // Type region runs to the assignment `=`; it cannot contain one.
     let type_start = cur.pos;
@@ -6430,7 +6502,7 @@ fn parse_let_rhs(
         }
     }
     // File `IMPORT ["path" AS ALIAS]` (#115) captures the imported
-    // pipeline's `RETURN` value like a call (`LET $r = IMPORT ...`
+    // pipeline's `RETURN` value like a call (`LET $r: STRING = IMPORT ...`
     // lowers to `AssignCapture`): exactly one file entry, no modules.
     // Anything else shaped like an import is a hard error; shape misses
     // fall through to generic below, which fails them in lowering.
@@ -6551,7 +6623,7 @@ fn try_let_with_io_rhs(
     let Some(first) = rest.first() else {
         // Bare bracket: the grammar's committed validation error.
         return Err(fail(
-            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
                 .to_string(),
         ));
     };
@@ -6559,7 +6631,7 @@ fn try_let_with_io_rhs(
         // The inner rides after a `sep`: joint followers miss the
         // shape and fail validation like the grammar's bare bracket.
         return Err(fail(
-            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
                 .to_string(),
         ));
     }
@@ -6578,7 +6650,9 @@ fn try_let_with_io_rhs(
             match parse_inner_command(&rest[..1], stmt, ctx) {
                 Err(e) => return Err(e),
                 Ok(_) => {
-                    return Err(fail("LET $var: HANDLE = ASYNC requires a body".to_string()));
+                    return Err(fail(
+                        "LET $var: HANDLE<T> = ASYNC requires a body".to_string(),
+                    ));
                 }
             }
         }
@@ -6599,7 +6673,7 @@ fn try_let_with_io_rhs(
             let body = parse_body_steps(&brace_inner, stmt, ctx, false)?;
             if body.len() != 1 {
                 return Err(fail(
-                        "LET $var: TYPE = WITH_IO [..] ASYNC accepts a single command; use LET $var: HANDLE = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks"
+                        "LET $var: TYPE = WITH_IO [..] ASYNC accepts a single command; use LET $var: HANDLE<T> = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks"
                             .to_string(),
                     ));
             }
@@ -6611,7 +6685,7 @@ fn try_let_with_io_rhs(
                         body.into_iter()
                             .next()
                             .ok_or_else(|| {
-                                fail("LET $var: HANDLE = ASYNC requires a body".to_string())
+                                fail("LET $var: HANDLE<T> = ASYNC requires a body".to_string())
                             })?
                             .kind,
                     ),
@@ -6634,7 +6708,7 @@ fn try_let_with_io_rhs(
             // Joint followers miss the inner `sep`: same validation
             // error as the bare bracket.
             return Err(fail(
-                "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+                "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
                     .to_string(),
             ));
         }
@@ -6683,7 +6757,7 @@ fn try_let_with_io_rhs(
     ) {
         // A brace is no sync command: same validation error (probed).
         return Err(fail(
-            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
                 .to_string(),
         ));
     }
@@ -6740,7 +6814,7 @@ fn parse_let_async_rhs(
     let Some(first) = rest.first() else {
         return Err(TokenError {
             stmt,
-            msg: "LET $var: HANDLE = ASYNC requires a body".to_string(),
+            msg: "LET $var: HANDLE<T> = ASYNC requires a body".to_string(),
             line: 0,
             col: 0,
             kind: None,
@@ -6777,7 +6851,7 @@ fn parse_let_async_rhs(
     if first.joint {
         return Err(TokenError {
             stmt,
-            msg: "LET $var: HANDLE = ASYNC requires a body".to_string(),
+            msg: "LET $var: HANDLE<T> = ASYNC requires a body".to_string(),
             line: 0,
             col: 0,
             kind: None,
@@ -6851,6 +6925,7 @@ fn parse_return_body(
         return Ok((
             StepKind::Return {
                 expr: Box::new(Expr::Literal(Value::string(String::new()))),
+                is_bare: true,
             },
             cur.pos,
         ));
@@ -6859,6 +6934,7 @@ fn parse_return_body(
     Ok((
         StepKind::Return {
             expr: Box::new(expr),
+            is_bare: false,
         },
         cur.pos,
     ))
@@ -7045,7 +7121,7 @@ fn parse_elements(
     let mut pending_guard: Option<GuardExpr> = guard;
     while pos < toks.len() {
         // Trailing gap comments between elements (`} #c`, `F("a")
-        // /*c*/ ECHO`, `LET $x = 1 //c` — the pair ended, so the
+        // /*c*/ ECHO`, `LET $x: INT = 1 //c` — the pair ended, so the
         // comment is silent like the grammar, never payload):
         // `#` and lexer `Comment` markers run to the run end, `//`
         // likewise (line comments eat `;` too, and runs hold no
@@ -7236,7 +7312,7 @@ fn parse_element_at(
             }
         }
         Some(KEYWORD_FUNC) => {
-            if let Some((kind, used)) = parse_func_at(toks, pos, stmt, ctx)? {
+            if let Some((kind, used)) = parse_func_at(toks, pos, stmt, ctx, false)? {
                 return Ok((vec![step(kind)], used));
             }
         }
@@ -7263,6 +7339,13 @@ fn parse_element_at(
             }
         }
         Some(KEYWORD_ASYNC) => {
+            // ASYNC FUNC definition form: prefix, parser records is_async
+            // with no type-constraint validation (checker owns HANDLE rule).
+            if matches!(toks.get(pos + 1).map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_FUNC)
+                && let Some((kind, used)) = parse_func_at(toks, pos + 1, stmt, ctx, true)?
+            {
+                return Ok((vec![step(kind)], 1 + used));
+            }
             if let Some((kind, used)) = parse_async_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
@@ -8374,12 +8457,12 @@ mod tests {
             "WHILE true{ ECHO hi }",
             "TIMEOUT 10s WHILE true { ECHO hi }",
             "ASYNC WHILE true { ECHO hi }",
-            "FUNC FOO() { RETURN 1 }",
-            "FUNC FOO(){ RETURN 1 }",
-            "FUNC FOO($x: INT) { RETURN $x }",
-            "FUNC FOO($x: INT, $y: STRING) { RETURN $x }",
-            "FUNC FOO() { FUNC FOO() { RETURN 1 } }",
-            "FUNC FOO() { RETURN 1 }\nFUNC BAR() { FOO() }\nBAR()",
+            "FUNC FOO(): INT { RETURN 1 }",
+            "FUNC FOO(): INT { RETURN 1 }",
+            "FUNC FOO($x: INT): INT { RETURN $x }",
+            "FUNC FOO($x: INT, $y: STRING): INT { RETURN $x }",
+            "FUNC FOO(): INT { FUNC FOO(): INT { RETURN 1 } }",
+            "FUNC FOO(): INT { RETURN 1 }\nFUNC BAR(): VOID { FOO() }\nBAR()",
             "TYPE PERSON = MAP<name: STRING>",
             "TYPE A=B",
             "TYPE A = B | C",
@@ -8465,6 +8548,71 @@ mod tests {
                 got, want,
                 "multi-line must canonicalize like one line: {multi:?}"
             );
+        }
+    }
+
+    #[test]
+    fn multi_line_run_exec_matches_single_line_shape() {
+        // `RUN [...]` rides the shared bracket core, so a wrapped exec
+        // list parses exactly like its single-line spelling (and agrees
+        // across lexer frontends).
+        for (single, multi) in [
+            ("RUN [\"echo\", \"hi\"]", "RUN [\"echo\",\n\"hi\"]"),
+            ("RUN [\"echo\", \"hi\"]", "RUN [\n\"echo\",\n\"hi\"\n]"),
+            (
+                "LET $o: STRING = RUN [\"echo\", \"hi\"]",
+                "LET $o: STRING = RUN [\"echo\",\n\"hi\"]",
+            ),
+        ] {
+            assert_parity(multi);
+            let want = crate::parse_script(single, lower)
+                .unwrap_or_else(|e| panic!("single-line shape must parse {single:?}: {e}"));
+            let got = crate::parse_script(multi, lower)
+                .unwrap_or_else(|e| panic!("multi-line shape must parse {multi:?}: {e}"));
+            assert_eq!(
+                got, want,
+                "multi-line must canonicalize like one line: {multi:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn untyped_let_fails_in_every_rhs_shape() {
+        // The everything-typed rule: a missing `:` is a hard error
+        // carrying the explicit-types message, regardless of what
+        // follows the `=`. Every binding shape is covered, so no
+        // untyped position can slip back in unnoticed.
+        for text in [
+            "LET $x = 1\n",
+            "LET $x = \"hi\"\n",
+            "LET $x = $y\n",
+            "LET $x = [\"a\", \"b\"]\n",
+            "LET $x = [\"a\",\n\"b\"]\n",
+            "LET $x = ECHO hi\n",
+            "LET $x = AWAIT $t\n",
+            "LET $x = ASYNC ECHO hi\n",
+            "LET $x = {\nRETURN 1\n}\n",
+            "LET $x = WITH_IO [stdin=$p] ASYNC ECHO hi\n",
+        ] {
+            let err = crate::parse_script(text, lower).expect_err("untyped LET must fail");
+            assert!(
+                err.to_string().contains("LET requires explicit types"),
+                "wrong error for {text:?}: {err}"
+            );
+        }
+        // Typed spellings of the same shapes keep parsing through
+        // every lexer frontend.
+        for text in [
+            "LET $x: INT = 1\n",
+            "LET $x: STRING = \"hi\"\n",
+            "LET $x: LIST<STRING> = [\"a\", \"b\"]\n",
+            "LET $x: LIST<STRING> = [\"a\",\n\"b\"]\n",
+            "LET $x: STRING = ECHO hi\n",
+            "LET $x: STRING = AWAIT $t\n",
+            "LET $x: HANDLE<VOID> = ASYNC ECHO hi\n",
+            "LET $x: INT = {\nRETURN 1\n}\n",
+        ] {
+            assert_parity(text);
         }
     }
 

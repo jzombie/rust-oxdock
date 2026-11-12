@@ -55,7 +55,7 @@ fn type_alias_parses_to_name_and_target() {
 
 #[test]
 fn type_alias_rejects_nested_and_guarded_positions() {
-    assert!(parse_script("FUNC F() {\nTYPE X = MAP\n}\n", mock_lower).is_err());
+    assert!(parse_script("FUNC F(): VOID {\nTYPE X = MAP\n}\n", mock_lower).is_err());
     assert!(parse_script("IF true {\nTYPE X = MAP\n}\n", mock_lower).is_err());
     assert!(parse_script("[bool:true]\nTYPE X = MAP\n", mock_lower).is_err());
 }
@@ -74,11 +74,39 @@ fn generic_for_key_still_hits_the_pin() {
 
 #[test]
 fn func_params_accept_generic_spellings() {
-    let steps = parse_script("FUNC F($p: LIST<MAP>) {\n}\n", mock_lower).expect("parses");
+    let steps = parse_script("FUNC F($p: LIST<MAP>): VOID {\n}\n", mock_lower).expect("parses");
     match &steps[0].kind {
         StepKind::FuncDef { params, .. } => {
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].1, "LIST<MAP>");
+        }
+        other => panic!("expected FuncDef, got {other:?}"),
+    }
+}
+
+#[test]
+fn func_params_accept_multiline_lists() {
+    // Param lists split across lines (one per line, generics
+    // included) parse exactly like the single-line shape: the shared
+    // `gap_nl` helper skips newlines at every juncture, and generic
+    // shapes already tolerate them via `skip_type_nl`.
+    let steps = parse_script(
+        "FUNC FOO(\n$x: STRING,\n$y: MAP<a: STRING, b: INT>\n): STRING {\nRETURN $x\n}\n",
+        mock_lower,
+    )
+    .expect("multiline params parse");
+    match &steps[0].kind {
+        StepKind::FuncDef {
+            name,
+            params,
+            return_type,
+            ..
+        } => {
+            assert_eq!(name, "FOO");
+            assert_eq!(params.len(), 2);
+            assert_eq!(params[0].1, "STRING");
+            assert_eq!(params[1].1, "MAP<a: STRING, b: INT>");
+            assert_eq!(return_type, "STRING");
         }
         other => panic!("expected FuncDef, got {other:?}"),
     }
