@@ -301,6 +301,32 @@ impl<P: ProcessManager> Engine<P> {
         )?;
         Ok(EngineOutput { cwd, fs, bindings })
     }
+
+    /// Parse and run the script file at `path` on a caller-built
+    /// filesystem, with the entry file set so nested imports resolve
+    /// against the file's directory (like the CLI running a script
+    /// file), not the workspace root. Without this, a script run from
+    /// its text resolves sibling imports against the root and fails
+    /// to find them.
+    pub fn run_script_file_on(
+        &self,
+        fs: Box<dyn WorkspaceFs>,
+        path: &GuardedPath,
+        script: &str,
+        process: P,
+    ) -> Result<EngineOutput> {
+        let steps = crate::parse_script_with_modules(script, self.module_table())?;
+        let (cwd, fs, bindings) = super::run_steps_with_manager_with_modules_and_entry(
+            fs,
+            &steps,
+            process,
+            self.io.clone(),
+            self.modules.clone(),
+            self.types.clone(),
+            Some(path.clone()),
+        )?;
+        Ok(EngineOutput { cwd, fs, bindings })
+    }
 }
 
 impl Engine<DefaultProcessManager> {

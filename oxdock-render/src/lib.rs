@@ -145,8 +145,8 @@ pub fn run_with_plugins(
 /// Run one hook phase: each script executes top to bottom with the
 /// pipeline engine, so hooks read the same modules and resolve the
 /// same workspace. The first failure halts the pipeline naming the
-/// hook. Hook imports resolve against the workspace root: hook
-/// scripts are entry scripts, not module files.
+/// hook. Each hook runs as its own script file, so nested imports
+/// resolve against the hook's directory, exactly like entry scripts.
 fn run_hooks(
     engine: &Engine<oxdock_process::DefaultProcessManager>,
     fs: &dyn WorkspaceFs,
@@ -162,7 +162,7 @@ fn run_hooks(
             .read_to_string(&path)
             .with_context(|| format!("{phase} hook '{rel}' cannot be read"))?;
         engine
-            .run_script_on(fs.clone_box(), &script, default_process_manager())
+            .run_script_file_on(fs.clone_box(), &path, &script, default_process_manager())
             .with_context(|| format!("{phase} hook '{rel}' failed"))?;
     }
     Ok(())

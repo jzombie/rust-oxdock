@@ -1107,6 +1107,39 @@ fn pre_and_post_hooks_run_around_render() {
     miri,
     ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
 )]
+fn hook_nested_import_resolves_against_hook_dir() {
+    // A hook runs as its own script file: a relative import inside
+    // the hook resolves against the hook's directory, not the
+    // workspace root (regression: hooks used to run from their text,
+    // so `./lanes.oxfile` looked next to render.json and failed).
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "render.json")
+        .expect("base tree carries render.json");
+    entry.1 = HOOK_RENDER.to_string();
+    tree.push((
+        "scripts/pre.oxfile".to_string(),
+        "IMPORT [\"./lanes.oxfile\" AS LANES]\nLET $m: STRING = LANES::MARK()\nWRITE pre.txt \"{{ $m }}\"\n".to_string(),
+    ));
+    tree.push((
+        "scripts/lanes.oxfile".to_string(),
+        "FUNC MARK(): STRING {\n    RETURN \"from-lanes\"\n}\nEXPORT MARK\n".to_string(),
+    ));
+    tree.push((
+        "scripts/post.oxfile".to_string(),
+        "WRITE post.txt post-ran\n".to_string(),
+    ));
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    oxdock_render::run(root.as_path()).expect("render with nested hook import");
+    assert_eq!(read(&resolver, &root, "pre.txt"), "from-lanes");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
 fn failing_pre_hook_halts_before_render() {
     // A failing pre hook names the hook and never reaches targets:
     // no output file is written.

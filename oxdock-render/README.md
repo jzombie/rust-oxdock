@@ -56,8 +56,9 @@ around the render, so codegen or checks ride the same invocation:
 ```
 
 Hooks execute with the pipeline engine against the workspace
-root, in listed order; imports inside a hook resolve against
-the workspace root. Either side failing halts the pipeline:
+root, in listed order; each hook runs as its own script file, so
+nested imports resolve against the hook's directory like any
+entry script. Either side failing halts the pipeline:
 a failing `pre` hook renders nothing, a failing `post` hook
 fails the run after the artifacts write. Omit the `hooks`
 key (or leave both lists empty) and the pipeline runs

@@ -172,6 +172,29 @@ fn cli_host_types() -> Vec<&'static TypeDescriptor> {
     net.iter().chain(ssh.iter()).copied().collect()
 }
 
+/// Run parsed steps with the CLI host surface under a lazy snapshot:
+/// one place where the CLI module set, types, and entry file meet the
+/// lazy-snapshot runner, so the net/non-net module wiring lives here
+/// instead of at every call site. Callers differ only in IO setup
+/// (stdin handling, remote runners) and what they do with the output.
+fn run_cli_steps(
+    workspace_root: &GuardedPath,
+    steps: &[Step],
+    io: ExecIo,
+    #[cfg(feature = "net")] registry: Option<&Arc<EndpointRegistry>>,
+    #[cfg(not(feature = "net"))] registry: Option<&Arc<()>>,
+    entry_file: Option<GuardedPath>,
+) -> Result<oxdock_core::exec::LazyRunOutput> {
+    run_steps_with_lazy_snapshot_and_modules_and_entry(
+        workspace_root,
+        steps,
+        io,
+        cli_host_modules_with(registry),
+        cli_host_types(),
+        entry_file,
+    )
+}
+
 /// Parse a CLI script against STD plus any bundled host modules. Without
 /// extra modules this is exactly `parse_script`, so base-build behavior
 /// never changes.
@@ -619,27 +642,17 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
         };
         let entry_file = entry_file_of(&opts.script);
         #[cfg(feature = "net")]
-        let output = {
+        let io_cfg = {
             let mut io_cfg = ExecIo::new();
             register_remote_runners(&mut io_cfg, &inventory);
-            run_steps_with_lazy_snapshot_and_modules_and_entry(
-                &workspace_root,
-                &steps,
-                io_cfg,
-                cli_host_modules_with(Some(&registry)),
-                cli_host_types(),
-                entry_file,
-            )?
+            io_cfg
         };
         #[cfg(not(feature = "net"))]
-        let output = run_steps_with_lazy_snapshot_and_modules_and_entry(
-            &workspace_root,
-            &steps,
-            ExecIo::new(),
-            cli_host_modules_with(None),
-            cli_host_types(),
-            entry_file,
-        )?;
+        let io_cfg = ExecIo::new();
+        #[cfg(feature = "net")]
+        let output = run_cli_steps(&workspace_root, &steps, io_cfg, Some(&registry), entry_file)?;
+        #[cfg(not(feature = "net"))]
+        let output = run_cli_steps(&workspace_root, &steps, io_cfg, None, entry_file)?;
         final_cwd = output.final_cwd;
         return Ok(ExecutionResult {
             snapshot: output.snapshot,
@@ -884,23 +897,9 @@ where
         register_remote_runners(&mut io_cfg, &inventory);
         let entry_file = entry_file_of(&opts.script);
         #[cfg(feature = "net")]
-        let output = run_steps_with_lazy_snapshot_and_modules_and_entry(
-            &workspace_root,
-            &steps,
-            io_cfg,
-            cli_host_modules_with(Some(&registry)),
-            cli_host_types(),
-            entry_file,
-        )?;
+        let output = run_cli_steps(&workspace_root, &steps, io_cfg, Some(&registry), entry_file)?;
         #[cfg(not(feature = "net"))]
-        let output = run_steps_with_lazy_snapshot_and_modules_and_entry(
-            &workspace_root,
-            &steps,
-            io_cfg,
-            cli_host_modules_with(None),
-            cli_host_types(),
-            entry_file,
-        )?;
+        let output = run_cli_steps(&workspace_root, &steps, io_cfg, None, entry_file)?;
         final_cwd = output.final_cwd;
         snapshot = output.snapshot;
         fs = Some(output.fs);
