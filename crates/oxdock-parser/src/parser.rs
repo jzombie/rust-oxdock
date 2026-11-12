@@ -2552,7 +2552,13 @@ fn parse_call_args(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Vec<Exp
         break;
     }
     if !cur.done() {
-        return Err(cur.err("unexpected text in call"));
+        return Err(trailing_items_error(
+            &cur,
+            ctx,
+            stmt,
+            "call arguments",
+            "unexpected text in call",
+        ));
     }
     Ok(args)
 }
@@ -2609,6 +2615,40 @@ enum BracketItems {
     Exec,
 }
 
+/// Trailing-content error for comma-separated positions (list
+/// items, call arguments): stamps the offending token's position so
+/// the caret names the line that actually fails instead of the
+/// statement head, and names the likely missing comma when the
+/// remainder parses as another item. Genuine trailing garbage keeps
+/// the previous message verbatim. Error-path only, so the probe
+/// parse costs nothing on success.
+fn trailing_items_error(
+    cur: &Cursor,
+    ctx: &ParseCtx,
+    stmt: usize,
+    missing_what: &str,
+    fallback: &str,
+) -> TokenError {
+    let (line, col) = cur
+        .toks
+        .get(cur.pos)
+        .map(|t| (t.line, t.col))
+        .unwrap_or((0, 0));
+    let mut probe = Cursor::expr(&cur.toks[cur.pos.min(cur.toks.len())..], stmt);
+    let msg = if parse_expr_checked(&mut probe, ctx).is_ok() {
+        format!("missing comma between {missing_what}")
+    } else {
+        fallback.to_string()
+    };
+    TokenError {
+        stmt,
+        line,
+        col,
+        msg,
+        kind: None,
+    }
+}
+
 /// Shared comma-separated `[...]` core behind every bracket position.
 /// There is exactly one list loop: one empty rule, one comma rule, one
 /// trailing-content rule, newlines riding every gap. A bracket group
@@ -2655,7 +2695,13 @@ fn parse_bracket_list(
     }
     if !cur.done() {
         return match items {
-            BracketItems::Expr => Err(cur.err("unexpected text in list")),
+            BracketItems::Expr => Err(trailing_items_error(
+                &cur,
+                ctx,
+                stmt,
+                "list items",
+                "unexpected text in list",
+            )),
             BracketItems::Exec => Ok(None),
         };
     }
@@ -6102,6 +6148,12 @@ fn parse_list_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr
 /// Any entry failing the shape is not a map: the caller reports the
 /// deferred block slice (the grammar tries `block` next, which fails
 /// the same inputs at this stage).
+/// Marker message for a map entry run that ends without a comma
+/// where another entry follows. Matched by exact equality in
+/// [`parse_map_or_block`], never by prefix, so wording changes stay
+/// local to this const and its one reader.
+const MISSING_MAP_COMMA_MSG: &str = "missing comma between map entries";
+
 fn parse_map_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let mut entries = Vec::new();
     // Empty (or blank/comment-only) braces are an empty map.
@@ -6114,35 +6166,72 @@ fn parse_map_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr,
     for part in split_top_commas(inner) {
         let mut sub = Cursor::expr(part, stmt);
         sub.skip_gap_nl();
-        let key = match sub.toks.get(sub.pos).map(|t| &t.kind) {
-            Some(TokKind::Str { text, .. }) => {
-                let key = text.clone();
-                sub.pos += 1;
-                key
-            }
-            Some(TokKind::BlockStr(full)) => {
-                let key = crate::command::lower_block_string(full);
-                sub.pos += 1;
-                key
-            }
-            Some(TokKind::Word(_)) | Some(TokKind::Punct('-')) | Some(TokKind::Punct('/')) => {
-                map_bare_key(&mut sub)?
-            }
-            _ => return Err(sub.err("not a map literal")),
-        };
-        sub.skip_gap();
-        if !sub.eat_punct(':') {
-            return Err(sub.err("not a map literal"));
-        }
-        let val = parse_expr_checked(&mut sub, ctx)?;
-        reject_boundary(&lowering_ctx(stmt), &val).map_err(|e| sub.err(e.to_string()))?;
+        let (key, val) = parse_map_entry(&mut sub, ctx, stmt)?;
         sub.skip_gap_nl();
         if !sub.done() {
-            return Err(sub.err("not a map literal"));
+            return Err(map_trailing_error(&sub, ctx, stmt));
         }
         entries.push((key, val));
     }
     Ok(Expr::Map(entries))
+}
+
+/// One `key: value` map entry: string, block-string, or bare key,
+/// a colon, then a full checked expression. Every failure reads
+/// `not a map literal` exactly like the old inline loop, so only
+/// the trailing rule changes the surface.
+fn parse_map_entry(
+    sub: &mut Cursor,
+    ctx: &ParseCtx,
+    stmt: usize,
+) -> Result<(String, Expr), TokenError> {
+    let key = match sub.toks.get(sub.pos).map(|t| &t.kind) {
+        Some(TokKind::Str { text, .. }) => {
+            let key = text.clone();
+            sub.pos += 1;
+            key
+        }
+        Some(TokKind::BlockStr(full)) => {
+            let key = crate::command::lower_block_string(full);
+            sub.pos += 1;
+            key
+        }
+        Some(TokKind::Word(_)) | Some(TokKind::Punct('-')) | Some(TokKind::Punct('/')) => {
+            map_bare_key(sub)?
+        }
+        _ => return Err(sub.err("not a map literal")),
+    };
+    sub.skip_gap();
+    if !sub.eat_punct(':') {
+        return Err(sub.err("not a map literal"));
+    }
+    let val = parse_expr_checked(sub, ctx)?;
+    reject_boundary(&lowering_ctx(stmt), &val).map_err(|e| sub.err(e.to_string()))?;
+    Ok((key, val))
+}
+
+/// Trailing content after a complete map entry: stamps the
+/// offending token and names the likely missing comma when the
+/// remainder parses as another entry. Anything else keeps the old
+/// `not a map literal` text. Error-path only.
+fn map_trailing_error(sub: &Cursor, ctx: &ParseCtx, stmt: usize) -> TokenError {
+    let (line, col) = sub
+        .toks
+        .get(sub.pos)
+        .map(|t| (t.line, t.col))
+        .unwrap_or((0, 0));
+    let mut probe = Cursor::expr(&sub.toks[sub.pos.min(sub.toks.len())..], stmt);
+    probe.skip_gap_nl();
+    if parse_map_entry(&mut probe, ctx, stmt).is_ok() {
+        return TokenError {
+            stmt,
+            line,
+            col,
+            msg: MISSING_MAP_COMMA_MSG.to_string(),
+            kind: None,
+        };
+    }
+    sub.err("not a map literal")
 }
 
 /// Bare map key: joint `-/.'/'`-run, mirroring the bare-word charset
@@ -6204,6 +6293,12 @@ fn map_bare_key(sub: &mut Cursor) -> Result<String, TokenError> {
 fn parse_map_or_block(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     match parse_map_literal(inner, stmt, ctx) {
         Ok(map) => Ok(map),
+        // A detected missing comma is never a block: its `key:`
+        // remainder cannot parse as a statement (a `name: "a"` line
+        // fails as `unknown command`), so the block path can only
+        // misreport it. Surface the map error instead; every other
+        // map failure keeps the block fallback exactly as before.
+        Err(e) if e.msg == MISSING_MAP_COMMA_MSG => Err(e),
         Err(_) => Ok(Expr::Block(parse_body_steps(inner, stmt, ctx, false)?)),
     }
 }
@@ -8268,6 +8363,7 @@ fn docs_above(lines: &[&str], line_no: usize) -> Option<(String, String)> {
 mod tests {
     use super::*;
     use crate::test_lower_mock;
+    use indoc::indoc;
 
     fn lower(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
         test_lower_mock::lower(name, args)
@@ -8614,6 +8710,76 @@ mod tests {
         ] {
             assert_parity(text);
         }
+    }
+
+    #[test]
+    fn missing_comma_points_at_the_item() {
+        // A forgotten comma between items names the missing
+        // comma and points at the item's line, not the statement
+        // head. Lists and call arguments share the rule.
+        let text = indoc! {r#"
+            LET $x: LIST<STRING> = [
+            "a"
+            "b",
+            "c"
+            ]
+        "#};
+        let err = crate::parse_script(text, lower).expect_err("missing comma must fail");
+        assert!(
+            err.to_string().contains("missing comma between list items"),
+            "wrong error: {err}"
+        );
+        assert_eq!(err.line(), 3, "caret names the item line: {err}");
+        // Same shape on one line.
+        let err = crate::parse_script("LET $x: LIST<STRING> = [\"a\" \"b\"]\n", lower)
+            .expect_err("missing comma must fail");
+        assert!(
+            err.to_string().contains("missing comma between list items"),
+            "wrong error: {err}"
+        );
+        assert_eq!(err.line(), 1, "single-line points at line 1: {err}");
+        // Call arguments share the rule.
+        let err = crate::parse_script("LET $x: STRING = FOO(\"a\" \"b\")\n", lower)
+            .expect_err("missing comma must fail");
+        assert!(
+            err.to_string()
+                .contains("missing comma between call arguments"),
+            "wrong error: {err}"
+        );
+        // Genuine trailing garbage keeps the old message but still
+        // points at the garbage instead of the statement head.
+        let err = crate::parse_script("LET $x: LIST<STRING> = [\"a\" : \"b\"]\n", lower)
+            .expect_err("garbage must fail");
+        assert!(
+            err.to_string().contains("unexpected text in list"),
+            "wrong error: {err}"
+        );
+        // Maps share the rule: a forgotten comma between entries
+        // names it at the entry's line instead of misreporting the
+        // key as an unknown command.
+        let text = indoc! {r#"
+            LET $m: MAP<name: STRING> = {
+            name: "a"
+            value: "b"
+            }
+        "#};
+        let err = crate::parse_script(text, lower).expect_err("missing comma must fail");
+        assert!(
+            err.to_string()
+                .contains("missing comma between map entries"),
+            "wrong error: {err}"
+        );
+        assert_eq!(err.line(), 3, "caret names the entry line: {err}");
+        let err = crate::parse_script(
+            "LET $m: MAP<name: STRING> = {name: \"a\" value: \"b\"}\n",
+            lower,
+        )
+        .expect_err("missing comma must fail");
+        assert!(
+            err.to_string()
+                .contains("missing comma between map entries"),
+            "wrong error: {err}"
+        );
     }
 
     #[test]
