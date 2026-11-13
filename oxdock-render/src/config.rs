@@ -6,6 +6,7 @@
 //! sequencing stay in the DSL (`render.oxfile`).
 
 use anyhow::{Context, Result, bail};
+use oxdock_core::Value;
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
 
 /// Known top-level `render.json` keys. Anything else fails closed so
@@ -25,28 +26,30 @@ const TOP_LEVEL_KEYS: &[&str] = &[
 ];
 
 /// Template `render.json` written by `--init`: the minimal valid
-/// pipeline (workspace root scope, empty hooks). Comments are
+/// pipeline (hooks first, workspace root scope). Authored as an
+/// OxDock template (`init.json.tmpl`) and expanded through the
+/// pipeline's own fragment engine before writing, so the suggested
+/// starting point is always engine-rendered output. Comments are
 /// allowed (`//` and `/* */`) in every JSON file the pipeline
 /// reads; they never reach validation. Validates clean.
-pub const INIT_TEMPLATE: &str = r#"{
-  // Hooks run around the render: `pre` scripts run before any target
-  // renders, `post` scripts run after every target verifies.
-  // Paths are workspace-relative script files; empty lists skip the phase.
-  "hooks": {
-    "pre": [],
-    "post": []
-  },
-  // Workspace data visible to every target as `$global`.
-  // A string or a list of strings; lists merge in order.
-  "global_values": "values.json",
-  // Scopes searched for `target.json` files: one target set per scope entry.
-  "scopes": ["."],
-  // Derived inputs refreshed before scan: each `key` renders live
-  // through `OXDOCK::GENERATED` and writes to `out`.
-  // Empty when the pipeline has no derived inputs.
-  "generated": []
+pub const INIT_TEMPLATE: &str = include_str!("../templates/init.json.tmpl");
+
+/// Expand the init template through the pipeline's own fragment
+/// engine with an empty scope, restoring the trailing newline the
+/// engine strips (mirroring the `RENDER` stage). Any `{{ }}`
+/// typo in the template fails here instead of shipping a broken
+/// starting point.
+pub(crate) fn render_init_template() -> Result<String> {
+    let empty = Value::map(std::collections::BTreeMap::new());
+    let text = crate::engine::render_fragment(INIT_TEMPLATE, &empty, &empty, None)?
+        .as_str()
+        .expect("fragment expansion renders a string")
+        .to_string();
+    if INIT_TEMPLATE.ends_with('\n') && !text.ends_with('\n') {
+        return Ok(format!("{text}\n"));
+    }
+    Ok(text)
 }
-"#;
 
 /// Hook phases: scripts that run before the entry assembles the
 /// child (`pre`) and after every target verifies (`post`). Named
@@ -242,7 +245,7 @@ pub fn init_config_file(root: &GuardedPath) -> Result<GuardedPath> {
         );
     }
     resolver
-        .write_file(&path, INIT_TEMPLATE.as_bytes())
+        .write_file(&path, render_init_template()?.as_bytes())
         .with_context(|| format!("write {}", path.display()))?;
     Ok(path)
 }
@@ -319,7 +322,17 @@ mod tests {
 
     #[test]
     fn init_template_validates_clean() {
-        let value = parse(INIT_TEMPLATE);
+        // Self-parse verification: the suggested template is expanded
+        // through the pipeline's own fragment engine first, and the
+        // rendered bytes (what `--init` actually writes) must parse
+        // and validate. A template the pipeline cannot read back is
+        // a broken suggestion, so this fails instead of shipping it.
+        let rendered = render_init_template().expect("init renders");
+        assert_eq!(
+            rendered, INIT_TEMPLATE,
+            "template carries no live placeholders; a deliberate {{ }} must wire scope explicitly"
+        );
+        let value = parse(&rendered);
         validate_config(&value, "render.json").expect("template is valid");
         assert_eq!(hooks_of(&value), Hooks::default());
     }
