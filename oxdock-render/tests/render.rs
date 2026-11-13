@@ -271,14 +271,35 @@ fn unknown_placeholder_fails_strict() {
     miri,
     ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
 )]
+fn empty_fragment_glob_fails_closed() {
+    // A fragment pattern matching zero files fails naming the pattern
+    // instead of silently staging an empty group: a typo'd directory
+    // can never drop fragments quietly.
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "target.json")
+        .expect("base tree carries target.json");
+    entry.1 = r#"{"targets": [{"name": "t", "out": "out.md", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl", "fragments/empty/*.md.tmpl"]}}]}"#.to_string();
+    let (_temp, root, _resolver) = fixture(&as_refs(&tree));
+    let err = err_text(oxdock_render::run(root.as_path()).expect_err("empty glob must fail"));
+    assert!(
+        err.contains("failed with status"),
+        "empty fragment pattern fails closed: {err}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
 fn escaped_placeholder_stays_literal() {
     let mut tree = base_tree("overwrite");
     tree.push((
         "fragments/sec/c.md.tmpl".to_string(),
         "C \\{{ $global.title }}".to_string(),
     ));
-    // The extra fragment joins group sec; master stays fixed, so read
-    // the staged manifest for the literal instead of the output.
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
     oxdock_render::run(root.as_path()).expect("render");
     let manifest = read(&resolver, &root, "target/t-docs/t.json");

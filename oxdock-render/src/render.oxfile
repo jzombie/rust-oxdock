@@ -99,7 +99,13 @@ FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): 
         {{ $setup }}LET $seen: MAP<ANY> = {}
         LET $count: INT = 0
         FOR $scope: STRING IN $cfg.scopes {
-            FOR $tj: STRING IN GLOB("\{{ $scope }}/**/target.json") {
+            LET $tjs: LIST<STRING> = GLOB("\{{ $scope }}/**/target.json")
+            LET $nfound: INT = LEN($tjs)
+            IF $nfound == 0 {
+                ECHO "render: scope '\{{ $scope }}' holds no target.json; check 'scopes' in \{{ $cfgpath }}"
+                EXIT 1
+            }
+            FOR $tj: STRING IN $tjs {
                 LET $file: TARGET_FILE = LOAD_JSON($tj)
                 FOR $t: TARGET IN $file.targets {
                     LET $tname: STRING = $t.name

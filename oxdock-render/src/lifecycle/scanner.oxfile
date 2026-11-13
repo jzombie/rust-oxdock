@@ -76,7 +76,13 @@ FUNC SCAN($ctx: CTX): CTX {
         LET $group_map: MAP<ANY> = {}
         FOR $pattern: STRING IN $patterns {
             LET $abs: STRING = "{{ $ctx.wsroot }}/{{ $pattern }}"
-            FOR $file_rel: STRING IN GLOB($abs) {
+            LET $matches: LIST<STRING> = GLOB($abs)
+            LET $nmatch: INT = LEN($matches)
+            IF $nmatch == 0 {
+                ECHO "scan: target '{{ $ctx.target }}' fragment pattern '{{ $pattern }}' matched no files"
+                EXIT 1
+            }
+            FOR $file_rel: STRING IN $matches {
                 LET $stem: STRING = RENDER_ENGINE::FILE_STEM($file_rel)
                 LET $dup: BOOL = HAS_KEY($group_map, $stem)
                 IF $dup {

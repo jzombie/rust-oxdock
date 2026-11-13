@@ -26,6 +26,14 @@ Each run performs the same steps, in order:
    the run. A failing post hook fails the run even though the
    artifacts already wrote.
 
+Discovery and references are fail-closed: a scope with no
+targets and a fragment pattern matching no files each fail the
+run naming the culprit, so dead configuration can never drop
+content silently. Referenced-but-missing fragments fail the
+same way at expansion: a `\{{ $files.* }}`, `\{{ $global.* }}`,
+or `\{{ $ctx.* }}` placeholder with no backing value is a hard
+error, never an empty string.
+
 The pipeline itself runs on OxDock scripts shipped inside the
 binary: static `.oxfile` sources plus one lifecycle file per
 pipeline participant, with the run script built fresh every run.
