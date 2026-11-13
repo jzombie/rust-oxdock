@@ -3122,6 +3122,7 @@ ASSERT_EQ $items $want
 ### Value type: STRING
 
 Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` interpolates.
+Shared heap: cloning bumps a refcount, never copies the bytes.
 
 ### Value type: BOOL
 
