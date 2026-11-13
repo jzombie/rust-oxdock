@@ -68,13 +68,6 @@ fn fixture_opt(
     files: &[(&str, &str)],
     inject: bool,
 ) -> (GuardedTempDir, GuardedPath, PathResolver) {
-    // Every run pipes stages through the child binary, never the
-    // pipeline binary itself.
-    // SAFETY: written to the same value on every call; tests never
-    // mutate it back or depend on a prior process value.
-    unsafe {
-        std::env::set_var(oxdock_fs::env::render::CHILD, child_bin());
-    }
     let temp = GuardedPath::tempdir().expect("tempdir");
     let root = temp.as_guarded_path().clone();
     let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
@@ -97,6 +90,18 @@ fn fixture_opt(
 fn read(resolver: &PathResolver, root: &GuardedPath, rel: &str) -> String {
     let path = root.join(rel).expect("join read");
     String::from_utf8(resolver.read_file(&path).expect("read")).expect("utf8")
+}
+
+/// Explicit pipeline options for every test: the pipe child is the
+/// built `oxdock-render-child` binary, never the pipeline binary
+/// itself. No process-global mutation: options travel by value, so
+/// parallel tests cannot race on `OXDOCK_RENDER_CHILD`.
+fn test_options() -> oxdock_render::RunOptions {
+    oxdock_render::RunOptions {
+        config: None,
+        print_child: false,
+        child_bin: Some(child_bin()),
+    }
 }
 
 fn err_text(err: anyhow::Error) -> String {
@@ -160,7 +165,7 @@ fn as_refs(tree: &[(String, String)]) -> Vec<(&str, &str)> {
 fn overwrite_merge_renders_overlay_values_in_master_order() {
     let tree = base_tree("overwrite");
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(out.contains("# Base 1"), "master header renders: {out}");
     assert!(
@@ -184,7 +189,9 @@ fn overwrite_merge_renders_overlay_values_in_master_order() {
 fn fail_on_duplicate_names_the_repeated_key() {
     let tree = base_tree("fail_on_duplicate");
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("dup must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options()).expect_err("dup must fail"),
+    );
     // Fail-closed across the child boundary: the violator is named in
     // child stderr (plan 5.1 propagation is still an engine gap), while
     // the error value proves the failure crossed the boundary.
@@ -208,7 +215,10 @@ fn duplicate_stem_fails_naming_the_stem() {
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
     // Fail-closed across the child boundary: the stem ECHO goes to
     // child stdout, so pin the failure mode (clean non-zero exit).
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("dup stem must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("dup stem must fail"),
+    );
     assert!(
         err.contains("failed with status"),
         "duplicate stem fails closed: {err}"
@@ -228,7 +238,10 @@ fn duplicate_target_name_fails() {
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
     // Fail-closed across the child boundary: the duplicate echo goes
     // to child stdout, so pin the failure mode (clean non-zero exit).
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("dup target must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("dup target must fail"),
+    );
     assert!(
         err.contains("failed with status"),
         "duplicate target fails closed: {err}"
@@ -247,7 +260,10 @@ fn unknown_placeholder_fails_strict() {
         "C {{ $global.nope }}".to_string(),
     ));
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("unknown key must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("unknown key must fail"),
+    );
     // Fail-closed across the child boundary (see duplicate tests).
     assert!(
         err.contains("failed with status"),
@@ -271,7 +287,10 @@ fn empty_fragment_glob_fails_closed() {
         .expect("base tree carries target.json");
     entry.1 = r#"{"targets": [{"name": "t", "out": "out.md", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl", "fragments/empty/*.md.tmpl"]}}]}"#.to_string();
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("empty glob must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("empty glob must fail"),
+    );
     assert!(
         err.contains("failed with status"),
         "empty fragment pattern fails closed: {err}"
@@ -290,7 +309,7 @@ fn escaped_placeholder_stays_literal() {
         "C \\{{ $global.title }}".to_string(),
     ));
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let manifest = read(&resolver, &root, "target/t-docs/t.json");
     assert!(
         manifest.contains("{{ $global.title }}"),
@@ -316,7 +335,7 @@ fn master_sees_workspace_package_like_citation() {
     let r = PR::new(root.as_path(), root.as_path()).expect("resolver");
     r.write_file(&master, b"repo: {{ $workspace_pkg.repository }}")
         .expect("write master");
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(
         out.contains("https://example.test/repo"),
@@ -341,7 +360,10 @@ fn empty_scopes_fail_closed_instead_of_rendering_nothing() {
         ("base.json".to_string(), BASE_VALUES.to_string()),
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("empty must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("empty must fail"),
+    );
     assert!(
         err.contains("failed with status"),
         "error proves the child boundary failed it: {err}"
@@ -364,7 +386,7 @@ fn omitted_lifecycle_falls_back_to_generic() {
         .expect("base tree carries render.json");
     entry.1 = r#"{"global_values": ["base.json", "overlay.json"], "merge_policy": "overwrite", "scopes": ["."], "generated": [], "staging_dir": "target/t-docs"}"#.to_string();
     let (_temp, root, resolver) = fixture_opt(&as_refs(&tree), false);
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(out.contains("# Base 1"), "generic master renders: {out}");
     assert!(
@@ -403,7 +425,7 @@ fn custom_scope_keys_and_staging_render() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(out.contains("# Base 1"), "custom scope keys render: {out}");
     assert!(out.contains("A base "), "custom version key renders: {out}");
@@ -436,7 +458,10 @@ fn unknown_generated_key_lists_known_keys() {
         ),
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("bad key must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("bad key must fail"),
+    );
     // Fail-closed across the child boundary (see duplicate tests).
     assert!(
         err.contains("failed with status"),
@@ -479,7 +504,7 @@ fn slim_and_full_share_fragments_with_split_content() {
         .map(|(rel, contents)| (*rel, *contents))
         .collect();
     let (_temp, root, resolver) = fixture(&refs);
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let slim = read(&resolver, &root, "slim.txt");
     let full = read(&resolver, &root, "full.txt");
     assert!(
@@ -533,7 +558,7 @@ fn base_prefix_resolves_inputs_under_base() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "sub/out.md");
     assert!(
         out.contains("hello A"),
@@ -576,7 +601,7 @@ fn base_leaves_shared_patterns_at_wsroot() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "sub/out.md");
     assert!(
         out.contains("hello A") && out.contains("shared S"),
@@ -610,7 +635,10 @@ fn base_not_a_directory_fails_closed() {
         ),
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("bad base must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("bad base must fail"),
+    );
     assert!(
         err.contains("failed with status"),
         "error proves the child boundary failed it: {err}"
@@ -644,7 +672,12 @@ fn external_plugin_resolves_in_templates_without_header_changes() {
         "C {{ TEST::PING($global.who) }}".to_string(),
     ));
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run_with_plugins(root.as_path(), vec![test_module()]).expect("render");
+    oxdock_render::run_with_plugins_and_options(
+        root.as_path(),
+        vec![test_module()],
+        test_options(),
+    )
+    .expect("render");
     let manifest = read(&resolver, &root, "target/t-docs/t.json");
     assert!(
         manifest.contains("PONG:overlay"),
@@ -693,7 +726,7 @@ fn toc_renders_tree_from_final_readme() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(
         out.contains("- [Alpha](#alpha)\n  - [Sub](#sub)\n- [Alpha](#alpha-1)\n"),
@@ -736,7 +769,7 @@ fn toc_renders_inline_bar_for_single_level() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(
         out.contains("[Alpha](#alpha) | [Beta](#beta)"),
@@ -781,7 +814,7 @@ fn toc_replaces_multiple_sentinels_independently() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(
         out.contains("[Alpha](#alpha) | [Beta](#beta)"),
@@ -823,7 +856,10 @@ fn toc_rejects_multi_level_inline_at_dispatch() {
     // its own options when pass 2 dispatches the full document. The
     // rule text surfaces in child stderr; the value proves fail-closed
     // across the child boundary.
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("inline depth must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("inline depth must fail"),
+    );
     assert!(
         err.contains("failed with status"),
         "error proves the child boundary failed it: {err}"
@@ -861,7 +897,7 @@ fn toc_renders_immediately_without_deferral() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(
         out.contains("- [Alpha](#alpha)\n- [Beta](#beta)\n"),
@@ -900,7 +936,7 @@ fn context_reference_renders_once_with_resolving_links() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&tree);
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert_eq!(
         out.matches("## Contexts").count(),
@@ -960,7 +996,7 @@ fn function_reference_without_context_fragment_leaves_dangling_anchors() {
         ),
     ];
     let (_temp, root, resolver) = fixture(&tree);
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "out.md");
     assert!(out.contains("](#context-ast)"), "links still render: {out}");
     assert!(
@@ -994,7 +1030,10 @@ fn toc_rejects_unknown_defer_targets_at_dispatch() {
         ),
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("unknown target must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("unknown target must fail"),
+    );
     // Fail-closed through the pipe: the violator is named in child
     // stderr (plan 5.1's error-chain propagation is still an engine
     // gap), while the error value proves the failure crossed the
@@ -1020,7 +1059,10 @@ fn executable_without_out_fails_closed() {
         .expect("base tree carries target.json");
     entry.1 = r#"{"targets": [{"name": "bad", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"]}, "executable": true}]}"#.to_string();
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("missing out must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("missing out must fail"),
+    );
     // Fail-closed across the child boundary (see duplicate tests):
     // the naming ECHO goes to child stdout, the exit proves it fired.
     assert!(
@@ -1042,7 +1084,10 @@ fn non_boolean_executable_fails_closed() {
         .expect("base tree carries target.json");
     entry.1 = r#"{"targets": [{"name": "t", "out": "run.sh", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"]}, "executable": "yes"}]}"#.to_string();
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("string flag must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("string flag must fail"),
+    );
     // Fail-closed across the child boundary (see duplicate tests):
     // the naming ECHO goes to child stdout, the exit proves it fired.
     assert!(
@@ -1064,7 +1109,7 @@ fn executable_target_regains_mode_bit_after_render() {
         .expect("base tree carries target.json");
     entry.1 = EXEC_TARGET.to_string();
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     let out = read(&resolver, &root, "run.sh");
     assert!(!out.contains("{{"), "no placeholders survive: {out}");
     #[cfg(unix)]
@@ -1105,7 +1150,7 @@ fn pre_and_post_hooks_run_around_render() {
         "WRITE post.txt post-ran\n".to_string(),
     ));
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("render");
     assert_eq!(read(&resolver, &root, "pre.txt"), "pre-ran");
     assert_eq!(read(&resolver, &root, "post.txt"), "post-ran");
     let out = read(&resolver, &root, "out.md");
@@ -1141,7 +1186,8 @@ fn hook_nested_import_resolves_against_hook_dir() {
         "WRITE post.txt post-ran\n".to_string(),
     ));
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render with nested hook import");
+    oxdock_render::run_with_options(root.as_path(), test_options())
+        .expect("render with nested hook import");
     assert_eq!(read(&resolver, &root, "pre.txt"), "from-lanes");
 }
 
@@ -1175,7 +1221,8 @@ fn hooks_read_user_disk_never_embedded_pipeline() {
         "from-disk\n".to_string(),
     ));
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    oxdock_render::run(root.as_path()).expect("render with shadowed dist");
+    oxdock_render::run_with_options(root.as_path(), test_options())
+        .expect("render with shadowed dist");
     assert_eq!(read(&resolver, &root, "pre.txt"), "from-disk\n");
 }
 
@@ -1202,7 +1249,9 @@ fn failing_pre_hook_halts_before_render() {
         "WRITE post.txt post-ran\n".to_string(),
     ));
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("pre must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options()).expect_err("pre must fail"),
+    );
     assert!(
         err.contains("pre hook 'scripts/pre.oxfile' failed"),
         "error names the hook: {err}"
@@ -1231,7 +1280,10 @@ fn empty_scope_fails_naming_the_scope() {
     entry.1 = r#"{"global_values": "base.json", "scopes": ["empty"], "generated": []}"#.to_string();
     tree.push(("empty/README.md".to_string(), "not a target\n".to_string()));
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("empty scope must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("empty scope must fail"),
+    );
     assert!(
         err.contains("failed with status"),
         "empty scope fails closed: {err}"
@@ -1258,7 +1310,10 @@ fn missing_hook_file_fails_naming_the_hook() {
         "WRITE pre.txt pre-ran\n".to_string(),
     ));
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("missing hook must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("missing hook must fail"),
+    );
     assert!(
         err.contains("post hook 'scripts/post.oxfile'"),
         "error names the missing hook: {err}"
@@ -1288,7 +1343,10 @@ fn failing_post_hook_fails_after_render() {
         "ASSERT_EQ 1 2\n".to_string(),
     ));
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("post must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("post must fail"),
+    );
     assert!(
         err.contains("post hook 'scripts/post.oxfile' failed"),
         "error names the hook: {err}"
@@ -1315,7 +1373,10 @@ fn unknown_render_key_fails_fast() {
         .expect("base tree carries render.json");
     entry.1 = r#"{"global_values": ["base.json"], "scope": ["."], "generated": []}"#.to_string();
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
-    let err = err_text(oxdock_render::run(root.as_path()).expect_err("typo must fail"));
+    let err = err_text(
+        oxdock_render::run_with_options(root.as_path(), test_options())
+            .expect_err("typo must fail"),
+    );
     assert!(
         err.contains("unknown key 'scope'"),
         "error names the typo: {err}"
@@ -1328,13 +1389,6 @@ fn unknown_render_key_fails_fast() {
     ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
 )]
 fn init_scaffold_renders() {
-    // The run pipes stages through the child binary, never the
-    // pipeline binary itself.
-    // SAFETY: written to the same value on every call; tests never
-    // mutate it back or depend on a prior process value.
-    unsafe {
-        std::env::set_var(oxdock_fs::env::render::CHILD, child_bin());
-    }
     // The --init template is a working starting point: scaffold it,
     // add the smallest values/target/template triple, and render.
     let temp = GuardedPath::tempdir().expect("tempdir");
@@ -1358,7 +1412,7 @@ fn init_scaffold_renders() {
             .write_file(&path, contents.as_bytes())
             .expect("write");
     }
-    oxdock_render::run(root.as_path()).expect("scaffold renders");
+    oxdock_render::run_with_options(root.as_path(), test_options()).expect("scaffold renders");
     let out = read(&resolver, &root, "out.md");
     assert!(out.contains("# 1"), "scaffolded pipeline renders: {out}");
     // A second init refuses to overwrite, leaving the file untouched.
@@ -1404,13 +1458,38 @@ fn setup_render_action_pins_release_and_local_contract() {
         "binary-name:",
         "default: oxdock-render",
         "default: release",
-        "OXDOCK_PRODUCT: oxdock-render",
         "runner.os != 'Windows'",
         "runner.os == 'Windows'",
         "source == 'local'",
         "cargo build --release -p oxdock -p oxdock-render --bins --all-features",
-        "OXDOCK_SKIP_DOWNLOAD: '1'",
+        "Invalid source",
+        "CARGO_TARGET_DIR",
+        "GITHUB_PATH",
     ] {
         assert!(action.contains(needle), "action names {needle}");
     }
+    for absent in [
+        "OXDOCK_SKIP_DOWNLOAD",
+        "OXDOCK_OXFILE:",
+        "OXDOCK_BIN:",
+        "OXDOCK_ENGINE_BIN:",
+        "shell: pwsh\n      working-directory: ${{ github.workspace }}\n      env:\n        OXDOCK_BIN:",
+    ] {
+        assert!(
+            !action.contains(absent),
+            "action must not contain {absent:?}"
+        );
+    }
+    // Validation runs before any installer: an invalid `source` must
+    // fail before the release download mutates `GITHUB_PATH`.
+    let validate = action
+        .find("Validate renderer source input")
+        .expect("validation step exists");
+    let release = action
+        .find("Install OxDock renderer")
+        .expect("release step exists");
+    assert!(
+        validate < release,
+        "validation precedes release installation"
+    );
 }

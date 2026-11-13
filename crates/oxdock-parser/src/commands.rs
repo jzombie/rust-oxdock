@@ -856,6 +856,148 @@ impl StepKind {
         }
     }
 
+    /// Mutable twin of [`walk_exprs`](Self::walk_exprs): visits every
+    /// immediate child expression mutably. Bodies are NOT descended,
+    /// matching the immutable boundary: the parse-time placeholder
+    /// qualifier recurses per statement with its own frames.
+    /// Exhaustive for the same reason: new expression carriers fail
+    /// compilation here.
+    pub fn walk_exprs_mut(&mut self, f: &mut impl FnMut(&mut Expr)) {
+        fn walk_arg(arg: &mut Arg, f: &mut impl FnMut(&mut Expr)) {
+            match arg {
+                Arg::Expr(expr) => f(expr),
+                Arg::Parts(parts) => {
+                    for part in parts {
+                        if let ArgPart::Expr(expr) = part {
+                            f(expr);
+                        }
+                    }
+                }
+                Arg::String(..) => {}
+            }
+        }
+        fn walk_opt(arg: &mut Option<Arg>, f: &mut impl FnMut(&mut Expr)) {
+            if let Some(arg) = arg {
+                walk_arg(arg, f);
+            }
+        }
+        fn walk_target(target: &mut AssertTarget, f: &mut impl FnMut(&mut Expr)) {
+            if let AssertTarget::Value(arg) = target {
+                walk_arg(arg, f);
+            }
+        }
+        match self {
+            StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => f(expr),
+            StepKind::Return { expr, .. } => f(expr),
+            StepKind::Call { args, .. } => {
+                for arg in args {
+                    f(arg);
+                }
+            }
+            StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => {}
+            StepKind::For { in_expr, .. } => f(in_expr),
+            StepKind::If { cond, else_ifs, .. } => {
+                f(cond);
+                for (cond, _) in else_ifs {
+                    f(cond);
+                }
+            }
+            StepKind::While { cond, .. } => f(cond),
+            StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
+                walk_arg(duration, f);
+            }
+            StepKind::Workdir(arg)
+            | StepKind::Echo(arg)
+            | StepKind::Run(arg)
+            | StepKind::Mkdir(arg)
+            | StepKind::Exit(arg) => walk_arg(arg, f),
+            StepKind::Env { value, .. } => walk_arg(value, f),
+            StepKind::Copy { from, to, .. }
+            | StepKind::Symlink { from, to, .. }
+            | StepKind::Archive {
+                src: from, dst: to, ..
+            }
+            | StepKind::Install { from, to } => {
+                walk_arg(from, f);
+                walk_arg(to, f);
+            }
+            StepKind::SetExecutable { path } => walk_arg(path, f),
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                walk_arg(src, f);
+                walk_arg(dst, f);
+                walk_opt(max_bytes, f);
+            }
+            StepKind::CopyGit { rev, from, to, .. } => {
+                walk_arg(rev, f);
+                walk_arg(from, f);
+                walk_arg(to, f);
+            }
+            StepKind::Ls(arg) | StepKind::Read(arg) => walk_opt(arg, f),
+            StepKind::Remove { path, .. } => walk_arg(path, f),
+            StepKind::Prompt {
+                message, default, ..
+            } => {
+                walk_arg(message, f);
+                walk_opt(default, f);
+            }
+            StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
+                walk_arg(path, f);
+                walk_opt(contents, f);
+            }
+            StepKind::AppendLine { path, contents } => {
+                walk_arg(path, f);
+                walk_arg(contents, f);
+            }
+            StepKind::Expand { path, overrides } => {
+                walk_opt(path, f);
+                for (_, value) in overrides {
+                    walk_arg(value, f);
+                }
+            }
+            StepKind::AssertEq {
+                actual, expected, ..
+            }
+            | StepKind::AssertNe {
+                actual, expected, ..
+            } => {
+                walk_target(actual, f);
+                walk_opt(expected, f);
+            }
+            StepKind::AssertContains { haystack, needle } => {
+                walk_target(haystack, f);
+                walk_arg(needle, f);
+            }
+            StepKind::ListAppend { item, .. } => walk_arg(item, f),
+            StepKind::RunExec { argv } => {
+                for arg in argv {
+                    walk_arg(arg, f);
+                }
+            }
+            StepKind::WithIo { .. }
+            | StepKind::WithIoBlock { .. }
+            | StepKind::TypeAlias { .. }
+            | StepKind::Workspace(_)
+            | StepKind::InheritEnv { .. }
+            | StepKind::Isolated { .. }
+            | StepKind::IsolatedInheritEnv { .. }
+            | StepKind::ReadLine { .. }
+            | StepKind::AssignCapture { .. }
+            | StepKind::AwaitCapture { .. }
+            | StepKind::AsyncBlock { .. }
+            | StepKind::AssignAsync { .. }
+            | StepKind::Await { .. }
+            | StepKind::Cancel { .. }
+            | StepKind::RemoteBlock { .. }
+            | StepKind::FuncDef { .. }
+            | StepKind::Break
+            | StepKind::Continue => {}
+        }
+    }
+
     define_raw_string_walkers!(f, walk_arg, walk_opt, walk_target, {
         StepKind::Assign { .. }
                 | StepKind::Set { .. }

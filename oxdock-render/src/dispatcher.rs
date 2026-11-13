@@ -10,7 +10,7 @@ use oxdock_core::{Engine, ExecIo, HostModule, OxDockFn, TypeTag, Value};
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
 use oxdock_func_macro::oxdock_func;
 
-use crate::embedded::{EmbeddedFiles, warn_on_shadowed_dist};
+use crate::embedded::EmbeddedFiles;
 
 /// `run()`'s module set, written once.
 ///
@@ -192,9 +192,9 @@ pub fn run_child_script(script: &str) -> Result<()> {
 pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
     let root = GuardedPath::new_root(dir)?;
     let resolver = PathResolver::new(root.as_path(), root.as_path())?;
-    // The piped flow already warned; standalone child runs warn too.
-    // Either way nothing is written: dist paths resolve from memory.
-    warn_on_shadowed_dist(&resolver, &root);
+    // No shadow warning here: the parent pipeline already warned once
+    // before piping (see `run_with_plugins`). Warning in both
+    // processes prints the same drift twice on every run.
     let mut io = ExecIo::new();
     // The child's INHERIT_ENV reads these overrides; it never sees the
     // parent's script environment through the spawn boundary. Paths are

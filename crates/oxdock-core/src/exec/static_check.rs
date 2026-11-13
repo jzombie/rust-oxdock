@@ -83,7 +83,7 @@ use oxdock_process::ProcessManager;
 use super::{
     ExecState, FuncMeta, FuncParam,
     import::{ClosureFile, ClosureSite},
-    optional_zero_value, required_arity,
+    required_arity, resolve_script_params,
 };
 
 /// Maximum expression nesting and nested-body descent. Parser-bounded
@@ -1297,23 +1297,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         body: &[Step],
         module: Option<&str>,
     ) -> Result<()> {
-        let mut resolved = Vec::with_capacity(params.len());
-        for (pname, ptype, optional) in params {
-            let tag = self
-                .exec
-                .resolve_tag(ptype)
-                .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-            self.exec
-                .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
-            if *optional {
-                super::optional_zero_value(&tag)
-                    .map(|_| ())
-                    .map_err(|err| {
-                        anyhow::anyhow!("function `{name}` optional param `${pname}`: {err:#}")
-                    })?;
-            }
-            resolved.push((clean_var(pname), tag, *optional));
-        }
+        let resolved = resolve_script_params(self.exec, name, params)?;
         let declared = self
             .exec
             .resolve_tag(return_type)
@@ -1979,23 +1963,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 body,
                 ..
             } => {
-                let mut resolved = Vec::with_capacity(params.len());
-                for (pname, ptype, optional) in params {
-                    let tag = self
-                        .exec
-                        .resolve_tag(ptype)
-                        .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-                    self.exec.check_declaration_tag(
-                        &format!("function `{name}` param `${pname}`"),
-                        &tag,
-                    )?;
-                    if *optional {
-                        optional_zero_value(&tag).map(|_| ()).map_err(|err| {
-                            anyhow::anyhow!("function `{name}` optional param `${pname}`: {err:#}")
-                        })?;
-                    }
-                    resolved.push((clean_var(pname), tag, *optional));
-                }
+                let resolved = resolve_script_params(self.exec, name, params)?;
                 let declared = self
                     .exec
                     .resolve_tag(return_type)

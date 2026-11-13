@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use oxdock_render::{cli, run};
+use oxdock_render::{RunOptions, cli, run_with_options};
 #[allow(clippy::disallowed_types)]
 use std::path::PathBuf;
 
@@ -18,6 +18,8 @@ fn main() -> Result<()> {
     if opts.init {
         // Scaffold a template render.json in --root (else the cwd)
         // and stop: never overwrite an existing file.
+        // `--config`/`--print-child` with `--init` already failed in
+        // `parse_options`, so there is nothing to silently ignore.
         let dir = match opts.root {
             Some(root) => PathBuf::from(root),
             None => std::env::current_dir().context("current directory for --init")?,
@@ -34,22 +36,15 @@ fn main() -> Result<()> {
             .as_path()
             .to_path_buf(),
     };
-    if let Some(config) = opts.config {
-        // Edge default lives here so the DSL never names a filename:
-        // the flag wins, otherwise run() requires render.json.
-        // SAFETY: process startup, single-threaded; no threads exist
-        // yet and nothing reads this var concurrently.
-        unsafe {
-            std::env::set_var(oxdock_fs::env::render::CONFIG, config);
-        }
-    }
-    // Dry run: print the rendered child instead of piping it through
-    // the interpreter. Shows the dynamically assembled child for debugging.
-    // SAFETY: same single-threaded startup as above.
-    if opts.print_child {
-        unsafe {
-            std::env::set_var(oxdock_fs::env::render::PRINT_CHILD, "1");
-        }
-    }
-    run(&repo_root)
+    // Edge default lives in the options layer so the DSL never names
+    // a filename: the flag wins, otherwise `run` requires render.json.
+    // No process-global mutation: options travel by value.
+    run_with_options(
+        &repo_root,
+        RunOptions {
+            config: opts.config,
+            print_child: opts.print_child,
+            child_bin: None,
+        },
+    )
 }

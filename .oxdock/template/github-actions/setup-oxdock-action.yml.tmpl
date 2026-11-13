@@ -5,27 +5,41 @@
 runs:
   using: composite
   steps:
+    - name: Validate engine source input
+      if: $\{{ inputs.source != '' && inputs.source != 'release' && inputs.source != 'local' }}
+      shell: bash
+      run: |
+        echo "Invalid source '$\{{ inputs.source }}': must be '', 'release', or 'local'" >&2
+        exit 1
 {{ $files.local.action-release-steps }}
 {{ $files.local.install-rust }}
     - name: Build local OxDock engine
-      if: $\{{ inputs.source == 'local' }}
+      if: $\{{ inputs.source == 'local' && runner.os != 'Windows' }}
+      shell: bash
+      working-directory: $\{{ github.workspace }}
+      env:
+        OXDOCK_BINARY_NAME: $\{{ inputs.binary-name }}
+      run: |
+        set -euo pipefail
+        TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+        cargo build --release -p oxdock
+        INSTALL_DIR="$\{{ runner.temp }}/oxdock-engine"
+        mkdir -p "$INSTALL_DIR"
+        BINARY_NAME="${OXDOCK_BINARY_NAME:-oxdock}"
+        cp "$TARGET_DIR/release/oxdock" "$INSTALL_DIR/$BINARY_NAME"
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+    - name: Build local OxDock engine
+      if: $\{{ inputs.source == 'local' && runner.os == 'Windows' }}
       shell: pwsh
       working-directory: $\{{ github.workspace }}
       env:
-        OXDOCK_BIN: $\{{ github.workspace }}/target/release/oxdock$\{{ runner.os == 'Windows' && '.exe' || '' }}
-        OXDOCK_OXFILE: $\{{ github.workspace }}/install.oxfile
-        OXDOCK_PRODUCT: oxdock
-        OXDOCK_DIR: $\{{ runner.temp }}/oxdock-engine
-        OXDOCK_VERSION: local
         OXDOCK_BINARY_NAME: $\{{ inputs.binary-name }}
-        OXDOCK_SKIP_DOWNLOAD: '1'
       run: |
         $ErrorActionPreference='Stop'
+        $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }
         cargo build --release -p oxdock
-        # Local builds stage no tarball, so there is no member
-        # inventory to extract: bridge the single built binary as the
-        # whole product instead.
-        $env:OXDOCK_SIBLING_DIR = (Split-Path $env:OXDOCK_BIN -Parent)
-        $env:OXDOCK_MEMBERS = (Split-Path $env:OXDOCK_BIN -Leaf)
-        $env:OXDOCK_PRIMARY = $env:OXDOCK_MEMBERS
-        & $env:OXDOCK_BIN $env:OXDOCK_OXFILE
+        $installDir = "$env:RUNNER_TEMP/oxdock-engine"
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+        $binaryName = if ($env:OXDOCK_BINARY_NAME) { $env:OXDOCK_BINARY_NAME } else { 'oxdock' }
+        Copy-Item (Join-Path $targetDir 'release/oxdock.exe') (Join-Path $installDir "$binaryName.exe")
+        Add-Content -Path $env:GITHUB_PATH -Value $installDir

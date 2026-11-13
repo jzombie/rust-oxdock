@@ -61,9 +61,14 @@ fn embedded_for(path: &GuardedPath) -> Option<&'static [u8]> {
 }
 
 /// Filesystem wrapper serving the binary's embedded pipeline files
-/// from memory: reads of dist paths return the embedded bytes even
-/// when the disk holds a stale copy. Everything else delegates to
-/// the inner resolver, so consumer trees stay free of pipeline files.
+/// from memory: reads (`read_file`, `open_read`, `read_to_string`)
+/// and `entry_kind` of dist paths return the embedded bytes/status
+/// even when the disk holds a stale copy or nothing at all. `metadata`
+/// and `canonicalize` intentionally delegate to disk: drift detection
+/// (`shadowed_dist_paths`) runs on the raw resolver, never this
+/// wrapper, so those probes must see disk truth, not the virtual
+/// file. Everything else delegates to the inner resolver, so
+/// consumer trees stay free of pipeline files.
 #[derive(Clone)]
 pub(crate) struct EmbeddedFiles {
     inner: PathResolver,
@@ -89,13 +94,19 @@ pub(crate) fn shadowed_dist_paths(resolver: &PathResolver, root: &GuardedPath) -
             Err(_) => continue,
         };
         // Existence and length first: only read the file when a
-        // byte-for-byte comparison is actually needed.
+        // byte-for-byte comparison is actually needed. A metadata hit
+        // with an unreadable file (directory shadowing a file path,
+        // permission error) counts as drift: the disk entry cannot be
+        // the embedded bytes. A broken symlink has no target for
+        // `metadata` (which follows links) but still shadows the path:
+        // `entry_kind_no_follow` sees the link itself, so that case
+        // counts as drift instead of silently passing as missing.
         let differs = match resolver.metadata(&path) {
-            Err(_) => false,
+            Err(_) => resolver.entry_kind_no_follow(&path).is_ok(),
             Ok(meta) if meta.len() as usize != bytes.len() => true,
             Ok(_) => match resolver.read_file(&path) {
                 Ok(disk) => disk.as_slice() != *bytes,
-                Err(_) => false,
+                Err(_) => true,
             },
         };
         if differs {
@@ -508,5 +519,28 @@ mod tests {
             "from disk"
         );
         assert_eq!(embedded.entry_kind(&path).expect("kind"), EntryKind::File);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_at_dist_path_counts_as_drift() {
+        // A broken symlink has no target for `metadata` (which follows
+        // links), but the link itself still shadows the dist path: the
+        // no-follow probe sees it, so it lists as drift instead of
+        // silently passing as missing.
+        let (_temp, root, resolver) = fixture_root();
+        let (rel, _) = DIST[0];
+        let path = root.join(rel).expect("join dist");
+        if let Some((parent, _)) = rel.rsplit_once('/') {
+            let dir = root.join(parent).expect("join dir");
+            resolver.create_dir_all(&dir).expect("mkdir");
+        }
+        #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+        std::os::unix::fs::symlink("/nonexistent-target", path.as_path()).expect("symlink");
+        assert_eq!(
+            shadowed_dist_paths(&resolver, &root),
+            vec![rel.to_string()],
+            "broken symlink lists as drift"
+        );
     }
 }

@@ -50,21 +50,49 @@ pub fn usage() -> String {
 }
 
 /// Parse renderer flags, skipping the program name in position zero.
-/// A lone `--` separator is skipped. Anything else starting with
-/// `--` (or a short cluster that is not exactly `-h`/`-V`) fails
-/// with the usage text instead of running with defaults.
+/// Fail-closed: unknown flags, missing values, and positionals all
+/// bail with usage instead of running with defaults. A lone `--`
+/// separator ends option parsing: anything after it is a positional
+/// and fails (there are no positionals). `--init` scaffolds and
+/// stops, so combining it with `--config`/`--print-child` fails
+/// instead of silently ignoring them.
 pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
     let mut opts = Options::default();
     let mut rest = args.iter().skip(1).peekable();
+    let mut seen_separator = false;
     while let Some(arg) = rest.next() {
+        if seen_separator {
+            anyhow::bail!("unexpected argument '{arg}'\n\n{}", usage())
+        }
         match arg.as_str() {
-            "--" => {}
-            "--root" => {
-                opts.root = rest.next().cloned();
+            "--" => {
+                seen_separator = true;
             }
-            "--config" => {
-                opts.config = rest.next().cloned();
-            }
+            "--root" => match rest.next() {
+                Some(value) if !value.is_empty() && !value.starts_with('-') => {
+                    opts.root = Some(value.clone());
+                }
+                Some(value) => {
+                    anyhow::bail!("missing value for '--root' (got '{value}')\n\n{}", usage())
+                }
+                None => {
+                    anyhow::bail!("missing value for '--root'\n\n{}", usage())
+                }
+            },
+            "--config" => match rest.next() {
+                Some(value) if !value.is_empty() && !value.starts_with('-') => {
+                    opts.config = Some(value.clone());
+                }
+                Some(value) => {
+                    anyhow::bail!(
+                        "missing value for '--config' (got '{value}')\n\n{}",
+                        usage()
+                    )
+                }
+                None => {
+                    anyhow::bail!("missing value for '--config'\n\n{}", usage())
+                }
+            },
             "--print-child" => opts.print_child = true,
             "--init" => opts.init = true,
             "--help" | "-h" => opts.help = true,
@@ -79,6 +107,12 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
                 anyhow::bail!("unexpected argument '{arg}'\n\n{}", usage())
             }
         }
+    }
+    if opts.init && (opts.print_child || opts.config.is_some()) {
+        anyhow::bail!(
+            "'--init' cannot be combined with '--config' or '--print-child'\n\n{}",
+            usage()
+        )
     }
     Ok(opts)
 }
@@ -121,26 +155,23 @@ mod tests {
 
     #[test]
     fn parses_known_flags() {
-        let opts = parse_options(&args(&[
-            "--root",
-            "/tmp/ws",
-            "--config",
-            "custom.json",
-            "--print-child",
-            "--init",
-        ]))
-        .expect("known flags parse");
+        let opts = parse_options(&args(&["--root", "/tmp/ws", "--config", "custom.json"]))
+            .expect("known flags parse");
         assert_eq!(
             opts,
             Options {
                 root: Some("/tmp/ws".to_string()),
                 config: Some("custom.json".to_string()),
-                print_child: true,
-                init: true,
+                print_child: false,
+                init: false,
                 help: false,
                 version: false,
             }
         );
+        let opts = parse_options(&args(&["--print-child"])).expect("print-child parses");
+        assert!(opts.print_child);
+        let opts = parse_options(&args(&["--init"])).expect("init parses");
+        assert!(opts.init);
     }
 
     #[test]
@@ -178,10 +209,65 @@ mod tests {
     }
 
     #[test]
-    fn dangling_value_flag_falls_back_to_default() {
-        // A trailing `--root` with no value keeps the old lenient read:
-        // no value means no override, so discovery applies.
-        let opts = parse_options(&args(&["--root"])).expect("dangling parses");
-        assert_eq!(opts.root, None);
+    fn dangling_value_flag_fails_closed() {
+        // A trailing `--root` with no value fails instead of
+        // silently falling back to discovery.
+        let err = parse_options(&args(&["--root"])).expect_err("dangling must fail");
+        assert!(
+            format!("{err:#}").contains("missing value for '--root'"),
+            "{err:#}"
+        );
+        let err = parse_options(&args(&["--config"])).expect_err("dangling config must fail");
+        assert!(
+            format!("{err:#}").contains("missing value for '--config'"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn flag_value_cannot_be_another_flag() {
+        // `--root --print-child` used to swallow the flag as the path
+        // and silently drop `--print-child`.
+        let err = parse_options(&args(&["--root", "--print-child"]))
+            .expect_err("flag-as-value must fail");
+        assert!(
+            format!("{err:#}").contains("missing value for '--root'"),
+            "{err:#}"
+        );
+        let err = parse_options(&args(&["--config", "--root", "/tmp/ws"]))
+            .expect_err("flag-as-value must fail");
+        assert!(
+            format!("{err:#}").contains("missing value for '--config'"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn separator_terminates_option_parsing() {
+        // `-- --init` must not execute `--init`: everything after the
+        // separator is positional and fails (there are no positionals).
+        let err = parse_options(&args(&["--", "--init"])).expect_err("post-separator must fail");
+        assert!(
+            format!("{err:#}").contains("unexpected argument '--init'"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn init_rejects_config_and_print_child() {
+        // `--init` scaffolds and stops; combining it with run flags
+        // used to silently ignore them.
+        let err = parse_options(&args(&["--init", "--print-child"]))
+            .expect_err("init+print-child must fail");
+        assert!(
+            format!("{err:#}").contains("'--init' cannot be combined"),
+            "{err:#}"
+        );
+        let err = parse_options(&args(&["--init", "--config", "custom.json"]))
+            .expect_err("init+config must fail");
+        assert!(
+            format!("{err:#}").contains("'--init' cannot be combined"),
+            "{err:#}"
+        );
     }
 }

@@ -263,6 +263,46 @@ pub fn optional_zero_value(tag: &TypeTag) -> Result<Value> {
     }
 }
 
+/// Resolve script `FUNC` param spellings to tags in one place: tag
+/// resolution, declaration checks, and optional zero-value validation.
+/// All definition paths (direct, static check, file import) funnel
+/// here, so a required-after-optional or zero-less optional fails
+/// identically everywhere instead of drifting by call site.
+pub fn resolve_script_params<P: ProcessManager>(
+    state: &ExecState<P>,
+    func_name: &str,
+    params: &[(String, String, bool)],
+) -> Result<Vec<(String, TypeTag, bool)>> {
+    let mut resolved = Vec::with_capacity(params.len());
+    for (pname, ptype, optional) in params {
+        let clean = pname.trim_start_matches('$').to_string();
+        let tag = state
+            .resolve_tag(ptype)
+            .map_err(|err| anyhow::anyhow!("function `{func_name}`: {err:#}"))?;
+        state.check_declaration_tag(&format!("function `{func_name}` param `${clean}`"), &tag)?;
+        if *optional {
+            optional_zero_value(&tag).map(|_| ()).map_err(|err| {
+                anyhow::anyhow!("function `{func_name}` optional param `${clean}`: {err:#}")
+            })?;
+        }
+        resolved.push((clean, tag, *optional));
+    }
+    Ok(resolved)
+}
+
+/// Validate already-resolved script param tags: the zero-value gate
+/// for registry insertion paths that never see spellings.
+pub fn check_script_param_tags(func_name: &str, params: &[(String, TypeTag, bool)]) -> Result<()> {
+    for (pname, tag, optional) in params {
+        if *optional {
+            optional_zero_value(tag).map(|_| ()).map_err(|err| {
+                anyhow::anyhow!("function `{func_name}` optional param `${pname}`: {err:#}")
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Executable body behind one registry entry: an interpreted script, a
 /// pure scalar function, a stateful function with step context, or a
 /// dual entry whose pure arm serves `{{ }}` placeholders while the ctx
@@ -629,6 +669,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         {
             anyhow::bail!("duplicate function `{name}` in same scope");
         }
+        check_script_param_tags(name, params)?;
         let old = self.entries.insert(
             qualified.clone(),
             FuncEntry {
@@ -640,13 +681,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                         params
                             .iter()
                             .map(|(pname, param_type, optional)| {
-                                if *optional {
-                                    optional_zero_value(param_type).map(|_| ()).map_err(|err| {
-                                        anyhow::anyhow!(
-                                            "function `{name}` optional param `${pname}`: {err:#}"
-                                        )
-                                    })?;
-                                }
                                 Ok(FuncParam {
                                     name: pname.clone(),
                                     param_type: Some(param_type.clone()),
@@ -736,6 +770,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         {
             anyhow::bail!("duplicate function `{name}` in same scope");
         }
+        check_script_param_tags(name, params)?;
         let old = self.entries.insert(
             qualified.clone(),
             FuncEntry {
@@ -747,13 +782,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                         params
                             .iter()
                             .map(|(pname, param_type, optional)| {
-                                if *optional {
-                                    optional_zero_value(param_type).map(|_| ()).map_err(|err| {
-                                        anyhow::anyhow!(
-                                            "function `{name}` optional param `${pname}`: {err:#}"
-                                        )
-                                    })?;
-                                }
                                 Ok(FuncParam {
                                     name: pname.clone(),
                                     param_type: Some(param_type.clone()),

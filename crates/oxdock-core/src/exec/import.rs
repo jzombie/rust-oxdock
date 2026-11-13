@@ -18,6 +18,7 @@ use oxdock_fs::{GuardedPath, WorkspaceFs};
 use oxdock_parser::{ModuleTable, Step, StepKind, Value};
 use oxdock_process::ProcessManager;
 
+use super::resolve_script_params;
 use super::state::ExecState;
 use super::steps::{Flow, StepCtx, execute_steps};
 
@@ -374,13 +375,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             }) else {
                 bail!("IMPORT `{path}` has no such function `{name}`");
             };
-            let mut resolved_params = Vec::with_capacity(def.0.len());
-            for (pname, ptype, optional) in &def.0 {
-                let tag = cx.state.resolve_tag(ptype)?;
-                cx.state
-                    .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
-                resolved_params.push((pname.clone(), tag, *optional));
-            }
+            let resolved_params = resolve_script_params(cx.state, name, &def.0)?;
             let return_tag = cx.state.resolve_tag(&def.1)?;
             cx.state
                 .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
@@ -683,15 +678,7 @@ pub(crate) fn import_file<P: ProcessManager>(
             {
                 let qualified = oxdock_parser::qualify(alias, name);
                 if cx.state.functions.get(&qualified).is_none() {
-                    let mut resolved_params = Vec::with_capacity(params.len());
-                    for (pname, ptype, optional) in params {
-                        let tag = cx.state.resolve_tag(ptype)?;
-                        cx.state.check_declaration_tag(
-                            &format!("function `{name}` param `${pname}`"),
-                            &tag,
-                        )?;
-                        resolved_params.push((pname.clone(), tag, *optional));
-                    }
+                    let resolved_params = resolve_script_params(cx.state, name, params)?;
                     let return_tag = cx.state.resolve_tag(return_type)?;
                     cx.state
                         .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;

@@ -2484,16 +2484,16 @@ fn resolve_name(ctx: &ParseCtx, stmt: usize, name: &str) -> Result<String, Token
 /// Bare placeholder call shape in a template key: an UPPERCASE head
 /// (statement calls never spell anything else, so lowercase heads
 /// keep today's handling untouched), an optional gap, and a paren
-/// group through the key's end. Mirrors what the runtime
+/// group closing exactly at the key's end. Mirrors what the runtime
 /// `parse_call` accepts once qualified, minus the `::` it requires.
 /// Returns the head and the paren group onwards (gap included, so
-/// the splice below stays byte-identical past the head).
+/// the splice below stays byte-identical past the head). Compound
+/// placeholders (`{{ LEN($a) + LEN($b) }}`) are not single calls and
+/// return `None` so they pass through untouched instead of being
+/// partially rewritten.
 fn bare_placeholder_call(key: &str) -> Option<(&str, &str)> {
     let paren = key.find('(')?;
     let (head_raw, rest) = key.split_at(paren);
-    if !rest.ends_with(')') {
-        return None;
-    }
     let head = head_raw.trim_end();
     if head.is_empty() {
         return None;
@@ -2503,6 +2503,52 @@ fn bare_placeholder_call(key: &str) -> Option<(&str, &str)> {
         return None;
     }
     if !chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+        return None;
+    }
+    // The paren group must balance and close at the key's end
+    // (modulo trailing whitespace; the key already arrives trimmed).
+    // Scan with string awareness: quoted args may hold parens.
+    // Both quote styles are tracked so a paren inside `'a(b'` or
+    // `"a(b"` never affects depth; the runtime arg grammar decides
+    // which styles it accepts.
+    let bytes = rest.as_bytes();
+    let mut depth: usize = 0;
+    let mut quote: u8 = 0;
+    let mut escaped = false;
+    let mut close_at: Option<usize> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == quote {
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = b,
+            b'(' => depth += 1,
+            b')' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    close_at = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let close_at = close_at?;
+    if !rest[close_at + 1..].trim().is_empty() {
         return None;
     }
     Some((head, rest))
@@ -7194,23 +7240,124 @@ fn lower_stmt_steps(
     // the shared static resolver, so templates obey exactly the
     // statement-position scope rule. Nested bodies were already
     // qualified by their own recursive statements with their own
-    // frames, so only direct products are visited here.
+    // frames, so only direct products are visited here. Both
+    // `Arg::String` fragments (via `walk_raw_strings_mut`) and
+    // `Expr::Literal` strings (LET/SET/RETURN/call args/list/map
+    // literals/parenthesized args) are qualified: expression
+    // positions expand through the same `expand_string` at runtime,
+    // so they must see the same parse-time rewrite. `WithIo` and
+    // `AssignCapture` box their inner command directly (no recursive
+    // statement pass), so the helper descends into them; all other
+    // bodies were already qualified with their own frames.
+    // `Step.guards` carry no template text (`Guard::Attr` triples
+    // evaluated via `guard_allows`, never expanded), so there is
+    // nothing to qualify there.
     let mut failed: Option<TokenError> = None;
     for step in &mut steps {
-        step.kind.walk_raw_strings_mut(&mut |text| {
-            if failed.is_none() {
-                match qualify_template_calls(text, ctx, idx) {
-                    Ok(Some(rewritten)) => *text = rewritten,
-                    Ok(None) => {}
-                    Err(err) => failed = Some(err),
-                }
-            }
-        });
+        qualify_step_templates(step, ctx, idx, &mut failed);
+        if failed.is_some() {
+            break;
+        }
     }
     if let Some(err) = failed {
         return Err(err);
     }
     Ok(steps)
+}
+
+/// Qualify one direct statement product plus any boxed `WithIo` /
+/// `AssignCapture` inner command (same scope frame, never a
+/// recursive statement pass). Body vectors are skipped: their steps
+/// were qualified by their own recursive statements.
+fn qualify_step_templates(
+    step: &mut Step,
+    ctx: &ParseCtx,
+    stmt: usize,
+    failed: &mut Option<TokenError>,
+) {
+    qualify_kind_templates(&mut step.kind, ctx, stmt, failed);
+}
+
+/// Qualify one `StepKind` plus boxed inner commands sharing the
+/// same scope frame.
+fn qualify_kind_templates(
+    kind: &mut StepKind,
+    ctx: &ParseCtx,
+    stmt: usize,
+    failed: &mut Option<TokenError>,
+) {
+    kind.walk_raw_strings_mut(&mut |text| {
+        if failed.is_none() {
+            match qualify_template_calls(text, ctx, stmt) {
+                Ok(Some(rewritten)) => *text = rewritten,
+                Ok(None) => {}
+                Err(err) => *failed = Some(err),
+            }
+        }
+    });
+    if failed.is_some() {
+        return;
+    }
+    kind.walk_exprs_mut(&mut |expr| {
+        if failed.is_some() {
+            return;
+        }
+        expr.walk_mut(&mut |node| {
+            if failed.is_some() {
+                return;
+            }
+            if let Expr::Literal(value) = node
+                && let Some(text) = value.as_str()
+            {
+                match qualify_template_calls(text, ctx, stmt) {
+                    Ok(Some(rewritten)) => {
+                        *value = Value::string(rewritten);
+                    }
+                    Ok(None) => {}
+                    Err(err) => *failed = Some(err),
+                }
+            }
+        });
+    });
+    if failed.is_some() {
+        return;
+    }
+    // Boxed single commands share the outer scope frame (no recursive
+    // statement pass built them): qualify the inner kind directly.
+    match kind {
+        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
+            qualify_kind_templates(cmd, ctx, stmt, failed);
+        }
+        _ => {}
+    }
+    if failed.is_some() {
+        return;
+    }
+    // Single-command synthetic bodies share the outer frame: `TIMEOUT 5s
+    // <cmd>`, `ISOLATED <cmd>`, `ASYNC <cmd>`, and `AssignAsync` wrappers
+    // build their `body` inline via `parse_single_inner` with no recursive
+    // `lower_stmt_steps` pass, so their one synthetic step needs this one.
+    // Brace-delimited bodies are NEVER re-walked here: they were already
+    // lowered via `parse_body_steps` with their own frames and statement
+    // indices (mirroring `Expr::walk_mut` skipping `Expr::Block`), and
+    // re-resolving under the outer frame would corrupt scope isolation
+    // and error attribution. The match names only the synthetic carriers;
+    // any other body (If/For/While/FuncDef/RemoteBlock/WithIoBlock) stays
+    // exactly as its own recursive pass left it.
+    match kind {
+        StepKind::Timeout { body, .. }
+        | StepKind::Isolated { body }
+        | StepKind::AsyncBlock { body }
+        | StepKind::AssignAsync { body, .. } => {
+            for step in body.iter_mut() {
+                if failed.is_some() {
+                    return;
+                }
+                qualify_step_templates(step, ctx, stmt, failed);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Statement-head `{...}` dispatcher. Template braces fail (the
@@ -9309,6 +9456,173 @@ mod tests {
         let toks = crate::tok::lex_str(text).expect("string lex must succeed");
         let new = parse_tokens_with_ctx(&toks, &ctx).expect("token path parses");
         assert_eq!(new, old, "token/string-lex mismatch for {text:?}");
+    }
+
+    #[test]
+    fn placeholder_bare_calls_qualify_in_expr_positions() {
+        // Regression: `walk_raw_strings_mut` skips `Assign`/`Set`/
+        // `Call`/`Return`/`If`/`For`/`While`, so `LET`/`RETURN`/call
+        // args/list/map literals never qualified and failed at
+        // runtime as undefined variables. Both carriers now qualify.
+        use crate::ast::{ModuleFuncs, ModuleTable};
+        use std::collections::{HashMap, HashSet};
+        let table = || ModuleTable {
+            modules: HashMap::from([(
+                crate::constants::STD_MODULE_NAME.to_string(),
+                Some(ModuleFuncs {
+                    func_names: HashSet::from(["LEN".to_string()]),
+                }),
+            )]),
+        };
+        fn lower_fn(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
+            test_lower_mock::lower(name, args)
+        }
+        fn parse(text: &str, table: ModuleTable) -> ParseResult<Vec<crate::Step>> {
+            crate::parse_script_with_modules(text, lower_fn, HashSet::new(), table)
+        }
+        // LET string literal qualifies.
+        let steps = parse(
+            "IMPORT [STD]\nLET $s: STRING = \"n: {{ LEN($x) }}\"\n",
+            table(),
+        )
+        .expect("LET template parses");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => match expr {
+                Expr::Literal(value) => assert_eq!(
+                    value.as_str().unwrap_or_default(),
+                    "n: {{ STD::LEN($x) }}",
+                    "LET qualifies"
+                ),
+                other => panic!("expected literal, got {other:?}"),
+            },
+            other => panic!("expected Assign, got {other:?}"),
+        }
+        // RETURN string literal qualifies.
+        let steps = parse(
+            "IMPORT [STD]\nFUNC F(): STRING {\nRETURN \"n: {{ LEN($x) }}\"\n}\n",
+            table(),
+        )
+        .expect("RETURN template parses");
+        let body = steps.iter().find_map(|s| match &s.kind {
+            StepKind::FuncDef { body, .. } => Some(body),
+            _ => None,
+        });
+        match body.map(Vec::as_slice) {
+            Some([inner]) => match &inner.kind {
+                StepKind::Return { expr, .. } => match &**expr {
+                    Expr::Literal(value) => assert_eq!(
+                        value.as_str().unwrap_or_default(),
+                        "n: {{ STD::LEN($x) }}",
+                        "RETURN qualifies"
+                    ),
+                    other => panic!("expected literal, got {other:?}"),
+                },
+                other => panic!("expected RETURN, got {other:?}"),
+            },
+            _ => panic!("expected one FUNC, got {steps:?}"),
+        }
+        // Call args, list and map literals qualify.
+        let steps = parse(
+            "IMPORT [STD]\nLET $y: INT = LEN(\"b: {{ LEN($x) }}\")\n",
+            table(),
+        )
+        .expect("call-arg template parses");
+        let rendered = format!("{:?}", steps[0].kind);
+        assert!(
+            rendered.contains("STD::LEN"),
+            "call arg qualifies: {rendered}"
+        );
+        let steps = parse(
+            "IMPORT [STD]\nLET $l: LIST<STRING> = [\"{{ LEN($x) }}\"]\n",
+            table(),
+        )
+        .expect("list template parses");
+        let rendered = format!("{:?}", steps[0].kind);
+        assert!(rendered.contains("STD::LEN"), "list qualifies: {rendered}");
+        // Compound placeholders are not single calls: they pass
+        // through untouched (no partial rewrite) for the runtime to
+        // fail closed on the whole key.
+        let text = "IMPORT [STD]\nECHO \"v: {{ LEN($a) + LEN($b) }}\"\n";
+        let steps = parse(text, table()).expect("compound parses");
+        match &steps[0].kind {
+            StepKind::Echo(Arg::String(echoed, _)) => assert_eq!(
+                echoed, "v: {{ LEN($a) + LEN($b) }}",
+                "compound untouched: {echoed}"
+            ),
+            other => panic!("expected ECHO string, got {other:?}"),
+        }
+        // Quoted parens inside args do not end the call early.
+        let text = "IMPORT [STD]\nECHO 'v: {{ LEN(\"a(b\") }}'\n";
+        let steps = parse(text, table()).expect("quoted paren parses");
+        match &steps[0].kind {
+            StepKind::Echo(Arg::String(echoed, _)) => assert_eq!(
+                echoed, "v: {{ STD::LEN(\"a(b\") }}",
+                "quoted paren qualifies: {echoed}"
+            ),
+            other => panic!("expected ECHO string, got {other:?}"),
+        }
+        // Single-quoted args balance the same way.
+        let text = "IMPORT [STD]\nECHO \"v: {{ LEN('a(b') }}\"\n";
+        let steps = parse(text, table()).expect("single-quoted paren parses");
+        match &steps[0].kind {
+            StepKind::Echo(Arg::String(echoed, _)) => assert_eq!(
+                echoed, "v: {{ STD::LEN('a(b') }}",
+                "single-quoted paren qualifies: {echoed}"
+            ),
+            other => panic!("expected ECHO string, got {other:?}"),
+        }
+        // `WithIo` boxes its inner command directly (no recursive
+        // statement pass), so the qualifier must descend into it.
+        // `LET $p: PIPE` plus bindings keep the shape realistic.
+        let text = "IMPORT [STD]\nLET $p: PIPE\nWITH_IO [stdout=$p] ECHO 'v: {{ LEN($x) }}'\n";
+        let steps = parse(text, table()).expect("with-io template parses");
+        match &steps[1].kind {
+            StepKind::WithIo { cmd, .. } => {
+                let rendered = format!("{cmd:?}");
+                assert!(
+                    rendered.contains("STD::LEN"),
+                    "with-io inner qualifies: {rendered}"
+                );
+            }
+            other => panic!("expected WithIo, got {other:?}"),
+        }
+        // Single-command wrappers build synthetic body steps without a
+        // recursive pass: `TIMEOUT 5s <cmd>` and `ASYNC <cmd>` share
+        // the outer frame, so the qualifier must descend into bodies.
+        let text = "IMPORT [STD]\nTIMEOUT 5s ECHO 't: {{ LEN($x) }}'\n";
+        let steps = parse(text, table()).expect("timeout template parses");
+        let rendered = format!("{:?}", steps[0].kind);
+        assert!(
+            rendered.contains("STD::LEN"),
+            "timeout single qualifies: {rendered}"
+        );
+        let text = "IMPORT [STD]\nLET $h: HANDLE<ANY> = ASYNC ECHO 'a: {{ LEN($x) }}'\n";
+        let steps = parse(text, table()).expect("async template parses");
+        let rendered = format!("{:?}", steps[0].kind);
+        assert!(
+            rendered.contains("STD::LEN"),
+            "async single qualifies: {rendered}"
+        );
+        // Brace bodies keep their own frames: the outer qualifier must
+        // never re-walk them. A valid nested body qualifies via its own
+        // recursive pass, and an unknown callee inside one fails with
+        // the inner position, never re-resolved against the outer frame.
+        let text = "IMPORT [STD]\nIF true {\nECHO 'v: {{ LEN($x) }}'\n}\n";
+        let steps = parse(text, table()).expect("nested body qualifies");
+        let rendered = format!("{:?}", steps[0].kind);
+        assert!(
+            rendered.contains("STD::LEN"),
+            "nested IF body qualifies via its own frame: {rendered}"
+        );
+        let err = parse(
+            "IMPORT [STD]\nIF true {\nECHO 'v: {{ NOPE($x) }}'\n}\n",
+            table(),
+        )
+        .expect_err("nested unknown must fail");
+        assert!(
+            err.to_string().contains("unknown function `NOPE`"),
+            "nested unknown names culprit: {err}"
+        );
     }
 
     #[test]

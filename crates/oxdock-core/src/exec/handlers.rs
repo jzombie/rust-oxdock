@@ -2497,20 +2497,7 @@ pub(crate) fn define_func<P: ProcessManager>(
     // Resolve param and return type names where the directory lives, so the
     // registry only ever holds tags. Unknown names fail here naming
     // the function and every known type and schema.
-    let mut resolved = Vec::with_capacity(params.len());
-    for (pname, ptype, optional) in params {
-        let tag = cx.state.resolve_tag(ptype)?;
-        cx.state
-            .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
-        if *optional {
-            super::optional_zero_value(&tag)
-                .map(|_| ())
-                .map_err(|err| {
-                    anyhow::anyhow!("function `{name}` optional param `${pname}`: {err:#}")
-                })?;
-        }
-        resolved.push((pname.clone(), tag, *optional));
-    }
+    let resolved = super::resolve_script_params(cx.state, name, params)?;
     let return_tag = cx.state.resolve_tag(return_type)?;
     cx.state
         .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;

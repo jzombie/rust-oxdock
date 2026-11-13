@@ -52,6 +52,26 @@ pub fn run(repo_root: &Path) -> Result<()> {
     run_with_plugins(repo_root, vec![])
 }
 
+/// Explicit pipeline options: no process-global `env::set_var`
+/// needed. `None` falls back to the corresponding environment
+/// variable (then the built-in default), so existing harnesses keep
+/// working while new callers pass everything explicitly.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// Config filename override (`--config` / `RENDER_CONFIG`).
+    pub config: Option<String>,
+    /// Print the generated child script instead of running it.
+    pub print_child: bool,
+    /// Pipe-child binary override (`OXDOCK_RENDER_CHILD`).
+    pub child_bin: Option<String>,
+}
+
+/// Execute the render pipeline with explicit options.
+#[allow(clippy::disallowed_types)]
+pub fn run_with_options(repo_root: &Path, opts: RunOptions) -> Result<()> {
+    run_with_plugins_and_options(repo_root, vec![], opts)
+}
+
 /// Execute the render pipeline with extra modules registered
 /// alongside this pipeline's set.
 ///
@@ -68,6 +88,20 @@ pub fn run_with_plugins(
     repo_root: &Path,
     extra_modules: Vec<HostModule<oxdock_process::DefaultProcessManager>>,
 ) -> Result<()> {
+    run_with_plugins_and_options(repo_root, extra_modules, RunOptions::default())
+}
+
+/// Execute the render pipeline with extra modules and explicit
+/// options. Environment remains a fallback only: `opts.config`
+/// wins over `RENDER_CONFIG`, `opts.print_child` ORs with
+/// `RENDER_PRINT_CHILD`, and `opts.child_bin` wins over
+/// `OXDOCK_RENDER_CHILD`.
+#[allow(clippy::disallowed_types)]
+pub fn run_with_plugins_and_options(
+    repo_root: &Path,
+    extra_modules: Vec<HostModule<oxdock_process::DefaultProcessManager>>,
+    opts: RunOptions,
+) -> Result<()> {
     let root = GuardedPath::new_root(repo_root)?;
 
     let mut fs_resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
@@ -75,7 +109,11 @@ pub fn run_with_plugins(
     // Every stage runs through the pipe: the interpreter is always
     // the child binary, never the pipeline binary itself.
     let mut io = ExecIo::new();
-    io.set_interpreter(child_interpreter().context("locate pipe child")?);
+    let child = match opts.child_bin {
+        Some(bin) => bin,
+        None => child_interpreter().context("locate pipe child")?,
+    };
+    io.set_interpreter(child);
     // The pipe child resolves every path against this root: inherit it
     // into every spawn so module-relative child launching cannot skew
     // staging and output paths. The config filename rides the same
@@ -84,12 +122,17 @@ pub fn run_with_plugins(
         oxdock_fs::env::oxdock::WORKSPACE_ROOT,
         root.as_path().to_string_lossy().into_owned(),
     );
-    let config_name = std::env::var(oxdock_fs::env::render::CONFIG)
-        .or_else(|_| resolve_config_name(&fs_resolver, &root))?;
+    let config_name = match opts.config {
+        Some(name) => name,
+        None => std::env::var(oxdock_fs::env::render::CONFIG)
+            .or_else(|_| resolve_config_name(&fs_resolver, &root))?,
+    };
     io.insert_inherit_env(oxdock_fs::env::render::CONFIG, config_name.clone());
+    let print_child = opts.print_child
+        || std::env::var(oxdock_fs::env::render::PRINT_CHILD).is_ok_and(|v| v == "1");
     io.insert_inherit_env(
         oxdock_fs::env::render::PRINT_CHILD,
-        std::env::var(oxdock_fs::env::render::PRINT_CHILD).unwrap_or_else(|_| "0".to_string()),
+        if print_child { "1" } else { "0" }.to_string(),
     );
     // Validate the config before anything runs: unknown keys and
     // mistyped values fail here naming the fix, so a typo like
