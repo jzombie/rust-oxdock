@@ -1642,7 +1642,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
     for segment in TemplateSegments::new(input) {
         match segment {
             TemplateSegment::Text(text) => push_escaped_text(&mut output, text),
-            TemplateSegment::Placeholder { key } => {
+            TemplateSegment::Placeholder { key, .. } => {
                 if key.is_empty() {
                     bail!("empty template placeholder");
                 }

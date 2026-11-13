@@ -3243,8 +3243,7 @@ fn text_contains(
     "###
 )]
 fn len(
-    /// Value to measure: `STRING` counts characters, `LIST` counts
-    /// elements, `MAP` counts entries.
+    /// Value to measure.
     #[union(String, List, Map)]
     value: Value,
 ) -> Result<Value> {

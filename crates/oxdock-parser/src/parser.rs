@@ -2481,6 +2481,85 @@ fn resolve_name(ctx: &ParseCtx, stmt: usize, name: &str) -> Result<String, Token
         .map_err(|e| lower_err(stmt, e))
 }
 
+/// Bare placeholder call shape in a template key: an UPPERCASE head
+/// (statement calls never spell anything else, so lowercase heads
+/// keep today's handling untouched), an optional gap, and a paren
+/// group through the key's end. Mirrors what the runtime
+/// `parse_call` accepts once qualified, minus the `::` it requires.
+/// Returns the head and the paren group onwards (gap included, so
+/// the splice below stays byte-identical past the head).
+fn bare_placeholder_call(key: &str) -> Option<(&str, &str)> {
+    let paren = key.find('(')?;
+    let (head_raw, rest) = key.split_at(paren);
+    if !rest.ends_with(')') {
+        return None;
+    }
+    let head = head_raw.trim_end();
+    if head.is_empty() {
+        return None;
+    }
+    let mut chars = head.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+        return None;
+    }
+    Some((head, rest))
+}
+
+/// Qualify bare placeholder calls in template text through the
+/// shared static resolver, so `{{ NAME(args) }}` obeys exactly the
+/// same scope rule as statement-position calls: `IMPORT [MOD]`
+/// brings the names into scope, unimported names fail naming the
+/// fix, ambiguity fails closed. Qualified (`MOD::FUNC`), variable
+/// (`$x`, `bare_key`), env (`env:K`), and non-call keys pass
+/// through untouched for the runtime to handle exactly as before;
+/// only keys that are entirely one bare call shape are rewritten,
+/// and only the head identifier's bytes change: surrounding
+/// spacing and neighboring placeholders stay byte-identical, so
+/// string payloads never lose formatting. Returns `None` when
+/// nothing qualified, leaving the text completely untouched.
+fn qualify_template_calls(
+    text: &str,
+    ctx: &ParseCtx,
+    stmt: usize,
+) -> Result<Option<String>, TokenError> {
+    use crate::template::{TemplateSegment, TemplateSegments};
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    for segment in TemplateSegments::new(text) {
+        match segment {
+            TemplateSegment::Text(raw) => out.push_str(raw),
+            TemplateSegment::Placeholder { key, raw } => {
+                let head = match bare_placeholder_call(key) {
+                    Some((head, _)) => head,
+                    None => {
+                        out.push_str(raw);
+                        continue;
+                    }
+                };
+                let resolved = resolve_name(ctx, stmt, head)?;
+                if !resolved.contains(MODULE_SEPARATOR) {
+                    // Unqualified resolutions (`INSPECT`) keep today's
+                    // runtime handling untouched.
+                    out.push_str(raw);
+                    continue;
+                }
+                changed = true;
+                // Splice only the head span: the head opens the trimmed
+                // key, so it is `raw`'s first occurrence of that
+                // identifier (braces and padding cannot contain it).
+                let off = raw.find(head).expect("head opens the key");
+                out.push_str(&raw[..off]);
+                out.push_str(&resolved);
+                out.push_str(&raw[off + head.len()..]);
+            }
+        }
+    }
+    if changed { Ok(Some(out)) } else { Ok(None) }
+}
+
 /// Call shape at `pos`: UPPERCASE head plus joint `::` segments and a
 /// paren group (joint iff required: statements forbid the gap;
 /// expressions allow it).
@@ -7069,6 +7148,26 @@ fn lower_stmt_steps(
             step.col = stmt.col;
         }
     }
+    // Qualify bare placeholder calls (`{{ NAME(args) }}`) through
+    // the shared static resolver, so templates obey exactly the
+    // statement-position scope rule. Nested bodies were already
+    // qualified by their own recursive statements with their own
+    // frames, so only direct products are visited here.
+    let mut failed: Option<TokenError> = None;
+    for step in &mut steps {
+        step.kind.walk_raw_strings_mut(&mut |text| {
+            if failed.is_none() {
+                match qualify_template_calls(text, ctx, idx) {
+                    Ok(Some(rewritten)) => *text = rewritten,
+                    Ok(None) => {}
+                    Err(err) => failed = Some(err),
+                }
+            }
+        });
+    }
+    if let Some(err) = failed {
+        return Err(err);
+    }
     Ok(steps)
 }
 
@@ -9044,6 +9143,130 @@ mod tests {
                 assert_eq!(new, old, "v2/token-lex mismatch for {text:?}");
             }
         }
+    }
+
+    #[test]
+    fn placeholder_bare_calls_resolve_like_statements() {
+        // `{{ NAME(args) }}` obeys exactly the statement-position
+        // scope rule: `IMPORT [MOD]` brings the names into scope,
+        // unimported names fail naming the fix, ambiguity fails
+        // closed. The rewrite below is byte-identical past the
+        // qualified head, so expansion sees the same args.
+        use crate::ast::{ModuleFuncs, ModuleTable};
+        use std::collections::{HashMap, HashSet};
+        let table = || ModuleTable {
+            modules: HashMap::from([
+                (
+                    crate::constants::STD_MODULE_NAME.to_string(),
+                    Some(ModuleFuncs {
+                        func_names: HashSet::from(["LEN".to_string()]),
+                    }),
+                ),
+                (
+                    "OTHER".to_string(),
+                    Some(ModuleFuncs {
+                        func_names: HashSet::from(["LEN".to_string()]),
+                    }),
+                ),
+            ]),
+        };
+        fn lower_fn(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
+            test_lower_mock::lower(name, args)
+        }
+        fn echo_text(steps: &[crate::Step]) -> String {
+            match steps {
+                [s] => match &s.kind {
+                    StepKind::Echo(Arg::String(text, _)) => text.clone(),
+                    other => panic!("expected ECHO string, got {other:?}"),
+                },
+                _ => panic!("expected one step, got {steps:?}"),
+            }
+        }
+        fn parse(text: &str, table: ModuleTable) -> ParseResult<Vec<crate::Step>> {
+            crate::parse_script_with_modules(text, lower_fn, HashSet::new(), table)
+        }
+        // Imported bare names qualify; everything else rides through
+        // byte-identical for the runtime to handle as before.
+        let text = "IMPORT [STD]\nECHO \"n: {{ LEN($x) }}\"\n";
+        let out = echo_text(&parse(text, table()).expect("imported bare call parses"));
+        assert_eq!(out, "n: {{ STD::LEN($x) }}", "bare call qualifies: {out}");
+        let text = "IMPORT [STD]\nECHO \"n: {{ STD::LEN($x) }}\"\n";
+        let out = echo_text(&parse(text, table()).expect("qualified parses"));
+        assert_eq!(
+            out, "n: {{ STD::LEN($x) }}",
+            "qualified keys stay untouched: {out}"
+        );
+        let text = "IMPORT [STD]\nECHO \"hi {{ $x }} and {{ bare }} and {{ env:K }}\"\n";
+        let out = echo_text(&parse(text, table()).expect("non-calls parse"));
+        assert_eq!(
+            out, "hi {{ $x }} and {{ bare }} and {{ env:K }}",
+            "non-call keys stay untouched: {out}"
+        );
+        let text = "IMPORT [STD]\nECHO \"lit \\{{ LEN($x) }}\"\n";
+        let out = echo_text(&parse(text, table()).expect("escaped parses"));
+        assert_eq!(
+            out, "lit \\{{ LEN($x) }}",
+            "escaped openers stay literal: {out}"
+        );
+        // Nested bodies resolve against the enclosing imports, exactly
+        // like statement-position calls in the same body.
+        let text = indoc! {r#"
+            IMPORT [STD]
+            FUNC F(): VOID {
+            ECHO "n: {{ LEN($x) }}"
+            }
+        "#};
+        let steps = parse(text, table()).expect("nested bare call parses");
+        let body = steps.iter().find_map(|s| match &s.kind {
+            StepKind::FuncDef { body, .. } => Some(body),
+            _ => None,
+        });
+        match body.map(Vec::as_slice) {
+            Some([inner]) => match &inner.kind {
+                StepKind::Echo(Arg::String(echoed, _)) => assert_eq!(
+                    echoed, "n: {{ STD::LEN($x) }}",
+                    "nested body qualifies: {echoed}"
+                ),
+                other => panic!("expected nested ECHO, got {other:?}"),
+            },
+            _ => panic!("expected one FUNC with one body step, got {steps:?}"),
+        };
+        // Neighboring placeholders keep their exact bytes: only the
+        // head span changes, so payloads never lose formatting.
+        let text = "IMPORT [STD]\nECHO \"Call {{ LEN($x) }} and value {{ $y }}\"\n";
+        let out = echo_text(&parse(text, table()).expect("mixed template parses"));
+        assert_eq!(
+            out, "Call {{ STD::LEN($x) }} and value {{ $y }}",
+            "only the head span changes: {out}"
+        );
+        // Unimported bare names fail exactly like statement position:
+        // qualify it or add the import.
+        let err = parse("ECHO \"n: {{ LEN($x) }}\"\n", table()).expect_err("must fail");
+        assert!(
+            err.to_string().contains("unknown function `LEN`")
+                && err.to_string().contains("or add `IMPORT"),
+            "names the fix: {err}"
+        );
+        // Two exporters fail closed instead of picking one.
+        let err = parse(
+            "IMPORT [STD]\nIMPORT [OTHER]\nECHO \"n: {{ LEN($x) }}\"\n",
+            table(),
+        )
+        .expect_err("must fail");
+        assert!(
+            err.to_string().contains("ambiguous function `LEN`"),
+            "ambiguity fails closed: {err}"
+        );
+        // Both lexing pathways agree on rewritten templates.
+        let text = "IMPORT [STD]\nECHO \"n: {{ LEN($x) }} and {{ $y }}\"\n";
+        let table = table();
+        let old = crate::parse_script_with_modules(text, lower_fn, HashSet::new(), table.clone())
+            .expect("string path parses");
+        let reserved = HashSet::new();
+        let ctx = ParseCtx::empty(&lower_fn, &table, &reserved);
+        let toks = crate::tok::lex_str(text).expect("string lex must succeed");
+        let new = parse_tokens_with_ctx(&toks, &ctx).expect("token path parses");
+        assert_eq!(new, old, "token/string-lex mismatch for {text:?}");
     }
 
     #[test]

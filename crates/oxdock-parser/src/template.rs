@@ -15,15 +15,19 @@
 //!   on an ASCII boundary.
 
 /// One raw segment of template text: literal bytes, or one unescaped
-/// `{{ ... }}` with its trimmed key. Escapes are NOT processed here;
-/// consumers apply them to [`TemplateSegment::Text`] themselves.
+/// `{{ ... }}` with its trimmed key plus the verbatim raw slice.
+/// Escapes are NOT processed here; consumers apply them to
+/// [`TemplateSegment::Text`] themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateSegment<'a> {
     /// Literal text up to the next placeholder (may hold backslashes
     /// and unclosed `{{`, verbatim).
     Text(&'a str),
-    /// An unescaped placeholder; `key` is the trimmed interior.
-    Placeholder { key: &'a str },
+    /// An unescaped placeholder; `key` is the trimmed interior and
+    /// `raw` is the full `{{ ... }}` slice verbatim (braces plus the
+    /// original inner spacing), so rewriters can splice the key
+    /// without touching surrounding bytes.
+    Placeholder { key: &'a str, raw: &'a str },
 }
 
 /// Allocation-free segment iterator over template text. See the module
@@ -33,7 +37,7 @@ pub enum TemplateSegment<'a> {
 pub struct TemplateSegments<'a> {
     text: &'a str,
     pos: usize,
-    pending: Option<(usize, &'a str)>,
+    pending: Option<(usize, &'a str, &'a str)>,
 }
 
 impl<'a> TemplateSegments<'a> {
@@ -51,9 +55,9 @@ impl<'a> Iterator for TemplateSegments<'a> {
     type Item = TemplateSegment<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some((end, key)) = self.pending.take() {
+        if let Some((end, key, raw)) = self.pending.take() {
             self.pos = end;
-            return Some(TemplateSegment::Placeholder { key });
+            return Some(TemplateSegment::Placeholder { key, raw });
         }
         // Copy out: every slice below then ties to `'a`, never to the
         // `&mut self` borrow, so staging `pending` never conflicts.
@@ -88,12 +92,13 @@ impl<'a> Iterator for TemplateSegments<'a> {
                     break;
                 }
                 let key = text[i + 2..j].trim();
+                let raw = &text[i..j + 2];
                 if i > start {
-                    self.pending = Some((j + 2, key));
+                    self.pending = Some((j + 2, key, raw));
                     return Some(TemplateSegment::Text(&text[start..i]));
                 }
                 self.pos = j + 2;
-                return Some(TemplateSegment::Placeholder { key });
+                return Some(TemplateSegment::Placeholder { key, raw });
             }
             i += 1;
         }
@@ -121,7 +126,10 @@ mod tests {
             segments("a{{ $x }}b"),
             vec![
                 TemplateSegment::Text("a"),
-                TemplateSegment::Placeholder { key: "$x" },
+                TemplateSegment::Placeholder {
+                    key: "$x",
+                    raw: "{{ $x }}"
+                },
                 TemplateSegment::Text("b"),
             ],
         );
@@ -131,7 +139,10 @@ mod tests {
     fn keys_trim() {
         assert_eq!(
             segments("{{  env:A  }}"),
-            vec![TemplateSegment::Placeholder { key: "env:A" }],
+            vec![TemplateSegment::Placeholder {
+                key: "env:A",
+                raw: "{{  env:A  }}"
+            }],
         );
     }
 
@@ -149,7 +160,10 @@ mod tests {
             segments("\\\\{{ env:A }}"),
             vec![
                 TemplateSegment::Text("\\\\"),
-                TemplateSegment::Placeholder { key: "env:A" },
+                TemplateSegment::Placeholder {
+                    key: "env:A",
+                    raw: "{{ env:A }}"
+                },
             ],
         );
     }
@@ -176,11 +190,17 @@ mod tests {
     fn empty_and_blank_keys_are_placeholders() {
         assert_eq!(
             segments("{{}}"),
-            vec![TemplateSegment::Placeholder { key: "" }],
+            vec![TemplateSegment::Placeholder {
+                key: "",
+                raw: "{{}}"
+            }],
         );
         assert_eq!(
             segments("{{ }}"),
-            vec![TemplateSegment::Placeholder { key: "" }],
+            vec![TemplateSegment::Placeholder {
+                key: "",
+                raw: "{{ }}"
+            }],
         );
     }
 
@@ -189,8 +209,14 @@ mod tests {
         assert_eq!(
             segments("{{a}}{{b}}"),
             vec![
-                TemplateSegment::Placeholder { key: "a" },
-                TemplateSegment::Placeholder { key: "b" },
+                TemplateSegment::Placeholder {
+                    key: "a",
+                    raw: "{{a}}"
+                },
+                TemplateSegment::Placeholder {
+                    key: "b",
+                    raw: "{{b}}"
+                },
             ],
         );
     }

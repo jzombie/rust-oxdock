@@ -1243,7 +1243,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     fn check_template_env(&self, text: &str, env: &Env, scope: &Scope) -> Result<()> {
         use oxdock_parser::template::{TemplateSegment, TemplateSegments};
         for segment in TemplateSegments::new(text) {
-            let TemplateSegment::Placeholder { key } = segment else {
+            let TemplateSegment::Placeholder { key, .. } = segment else {
                 continue;
             };
             let found = key

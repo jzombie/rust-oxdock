@@ -633,6 +633,86 @@ macro_rules! declare_commands {
     };
 }
 
+/// Generate both raw-string fragment walkers from one match:
+/// helper and closure names arrive as macro arguments (so every
+/// reference shares the invocation's syntax context), types are
+/// fixed per method, and the arm list rides as one trailing brace
+/// group (no repetition, so no follow-token ambiguity). A new
+/// string-carrying variant fails compilation at both expansion
+/// sites until it is added here, and the two walkers can never
+/// disagree about what counts as template text.
+macro_rules! define_raw_string_walkers {
+    ($f:ident, $wa:ident, $wo:ident, $wt:ident, { $($arms:tt)* }) => {
+        /// Visit every immediate raw string fragment (literal argument text
+        /// and mixed-value text fragments). Typed expressions are NOT
+        /// visited here. Boxed sub-kinds and bodies are NOT descended, same
+        /// as [`walk_exprs`](Self::walk_exprs): the caller recurses through
+        /// [`walk_child_kinds`](Self::walk_child_kinds) or the checker's own
+        /// body walk. Exhaustive for the same reason: a new string-carrying
+        /// variant must appear here or env-template checking misses it.
+        pub fn walk_raw_strings(&self, $f: &mut impl FnMut(&str)) {
+            fn $wa(arg: &Arg, $f: &mut impl FnMut(&str)) {
+                match arg {
+                    Arg::String(text, _) => $f(text),
+                    Arg::Expr(_) => {}
+                    Arg::Parts(parts) => {
+                        for part in parts {
+                            if let ArgPart::Text(text, _) = part {
+                                $f(text);
+                            }
+                        }
+                    }
+                }
+            }
+            fn $wo(arg: &Option<Arg>, $f: &mut impl FnMut(&str)) {
+                if let Some(arg) = arg {
+                    $wa(arg, $f);
+                }
+            }
+            fn $wt(target: &AssertTarget, $f: &mut impl FnMut(&str)) {
+                if let AssertTarget::Value(arg) = target {
+                    $wa(arg, $f);
+                }
+            }
+            match self {
+                $($arms)*
+            }
+        }
+        /// Mutable twin of [`walk_raw_strings`](Self::walk_raw_strings):
+        /// same fragments, same non-descending boundary. The parse-time
+        /// placeholder qualifier runs through this; the static env check
+        /// runs through the shared twin, so both agree fragment for fragment.
+        pub fn walk_raw_strings_mut(&mut self, $f: &mut impl FnMut(&mut String)) {
+            fn $wa(arg: &mut Arg, $f: &mut impl FnMut(&mut String)) {
+                match arg {
+                    Arg::String(text, _) => $f(text),
+                    Arg::Expr(_) => {}
+                    Arg::Parts(parts) => {
+                        for part in parts {
+                            if let ArgPart::Text(text, _) = part {
+                                $f(text);
+                            }
+                        }
+                    }
+                }
+            }
+            fn $wo(arg: &mut Option<Arg>, $f: &mut impl FnMut(&mut String)) {
+                if let Some(arg) = arg {
+                    $wa(arg, $f);
+                }
+            }
+            fn $wt(target: &mut AssertTarget, $f: &mut impl FnMut(&mut String)) {
+                if let AssertTarget::Value(arg) = target {
+                    $wa(arg, $f);
+                }
+            }
+            match self {
+                $($arms)*
+            }
+        }
+    };
+}
+
 impl StepKind {
     /// Visit every immediate child expression (arguments, conditions,
     /// durations, initializers). Boxed sub-kinds and bodies are NOT
@@ -776,141 +856,109 @@ impl StepKind {
         }
     }
 
-    /// Visit every immediate raw string fragment (literal argument text
-    /// and mixed-value text fragments). Typed expressions are NOT
-    /// visited here. Boxed sub-kinds and bodies are NOT descended, same
-    /// as [`walk_exprs`](Self::walk_exprs): the caller recurses through
-    /// [`walk_child_kinds`](Self::walk_child_kinds) or the checker's own
-    /// body walk. Exhaustive for the same reason: a new string-carrying
-    /// variant must appear here or env-template checking misses it.
-    pub fn walk_raw_strings(&self, f: &mut impl FnMut(&str)) {
-        fn walk_arg(arg: &Arg, f: &mut impl FnMut(&str)) {
-            match arg {
-                Arg::String(text, _) => f(text),
-                Arg::Expr(_) => {}
-                Arg::Parts(parts) => {
-                    for part in parts {
-                        if let ArgPart::Text(text, _) = part {
-                            f(text);
-                        }
+    define_raw_string_walkers!(f, walk_arg, walk_opt, walk_target, {
+        StepKind::Assign { .. }
+                | StepKind::Set { .. }
+                | StepKind::Call { .. }
+                | StepKind::Return { .. }
+                | StepKind::For { .. }
+                | StepKind::If { .. }
+                | StepKind::While { .. } => {}
+                StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
+                    walk_arg(duration, f);
+                }
+                StepKind::Workdir(arg)
+                | StepKind::Echo(arg)
+                | StepKind::Run(arg)
+                | StepKind::Mkdir(arg)
+                | StepKind::Exit(arg) => walk_arg(arg, f),
+                StepKind::Env { value, .. } => walk_arg(value, f),
+                StepKind::Copy { from, to, .. }
+                | StepKind::Symlink { from, to, .. }
+                | StepKind::Archive {
+                    src: from, dst: to, ..
+                }
+                | StepKind::Install { from, to } => {
+                    walk_arg(from, f);
+                    walk_arg(to, f);
+                }
+                StepKind::SetExecutable { path } => walk_arg(path, f),
+                StepKind::Unarchive {
+                    src,
+                    dst,
+                    max_bytes,
+                } => {
+                    walk_arg(src, f);
+                    walk_arg(dst, f);
+                    walk_opt(max_bytes, f);
+                }
+                StepKind::CopyGit { rev, from, to, .. } => {
+                    walk_arg(rev, f);
+                    walk_arg(from, f);
+                    walk_arg(to, f);
+                }
+                StepKind::Ls(arg) | StepKind::Read(arg) => walk_opt(arg, f),
+                StepKind::Remove { path, .. } => walk_arg(path, f),
+                StepKind::Prompt {
+                    message, default, ..
+                } => {
+                    walk_arg(message, f);
+                    walk_opt(default, f);
+                }
+                StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
+                    walk_arg(path, f);
+                    walk_opt(contents, f);
+                }
+                StepKind::AppendLine { path, contents } => {
+                    walk_arg(path, f);
+                    walk_arg(contents, f);
+                }
+                StepKind::Expand { path, overrides } => {
+                    walk_opt(path, f);
+                    for (_, value) in overrides {
+                        walk_arg(value, f);
                     }
                 }
-            }
-        }
-        fn walk_opt(arg: &Option<Arg>, f: &mut impl FnMut(&str)) {
-            if let Some(arg) = arg {
-                walk_arg(arg, f);
-            }
-        }
-        fn walk_target(target: &AssertTarget, f: &mut impl FnMut(&str)) {
-            if let AssertTarget::Value(arg) = target {
-                walk_arg(arg, f);
-            }
-        }
-        match self {
-            StepKind::Assign { .. }
-            | StepKind::Set { .. }
-            | StepKind::Call { .. }
-            | StepKind::Return { .. }
-            | StepKind::For { .. }
-            | StepKind::If { .. }
-            | StepKind::While { .. } => {}
-            StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
-                walk_arg(duration, f);
-            }
-            StepKind::Workdir(arg)
-            | StepKind::Echo(arg)
-            | StepKind::Run(arg)
-            | StepKind::Mkdir(arg)
-            | StepKind::Exit(arg) => walk_arg(arg, f),
-            StepKind::Env { value, .. } => walk_arg(value, f),
-            StepKind::Copy { from, to, .. }
-            | StepKind::Symlink { from, to, .. }
-            | StepKind::Archive {
-                src: from, dst: to, ..
-            }
-            | StepKind::Install { from, to } => {
-                walk_arg(from, f);
-                walk_arg(to, f);
-            }
-            StepKind::SetExecutable { path } => walk_arg(path, f),
-            StepKind::Unarchive {
-                src,
-                dst,
-                max_bytes,
-            } => {
-                walk_arg(src, f);
-                walk_arg(dst, f);
-                walk_opt(max_bytes, f);
-            }
-            StepKind::CopyGit { rev, from, to, .. } => {
-                walk_arg(rev, f);
-                walk_arg(from, f);
-                walk_arg(to, f);
-            }
-            StepKind::Ls(arg) | StepKind::Read(arg) => walk_opt(arg, f),
-            StepKind::Remove { path, .. } => walk_arg(path, f),
-            StepKind::Prompt {
-                message, default, ..
-            } => {
-                walk_arg(message, f);
-                walk_opt(default, f);
-            }
-            StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
-                walk_arg(path, f);
-                walk_opt(contents, f);
-            }
-            StepKind::AppendLine { path, contents } => {
-                walk_arg(path, f);
-                walk_arg(contents, f);
-            }
-            StepKind::Expand { path, overrides } => {
-                walk_opt(path, f);
-                for (_, value) in overrides {
-                    walk_arg(value, f);
+                StepKind::AssertEq {
+                    actual, expected, ..
                 }
-            }
-            StepKind::AssertEq {
-                actual, expected, ..
-            }
-            | StepKind::AssertNe {
-                actual, expected, ..
-            } => {
-                walk_target(actual, f);
-                walk_opt(expected, f);
-            }
-            StepKind::AssertContains { haystack, needle } => {
-                walk_target(haystack, f);
-                walk_arg(needle, f);
-            }
-            StepKind::ListAppend { item, .. } => walk_arg(item, f),
-            StepKind::RunExec { argv } => {
-                for arg in argv {
-                    walk_arg(arg, f);
+                | StepKind::AssertNe {
+                    actual, expected, ..
+                } => {
+                    walk_target(actual, f);
+                    walk_opt(expected, f);
                 }
-            }
-            StepKind::WithIo { .. }
-            | StepKind::WithIoBlock { .. }
-            | StepKind::TypeAlias { .. }
-            | StepKind::Workspace(_)
-            | StepKind::ImportFile { .. }
-            | StepKind::ImportFuncs { .. }
-            | StepKind::InheritEnv { .. }
-            | StepKind::Isolated { .. }
-            | StepKind::IsolatedInheritEnv { .. }
-            | StepKind::ReadLine { .. }
-            | StepKind::AssignCapture { .. }
-            | StepKind::AwaitCapture { .. }
-            | StepKind::AsyncBlock { .. }
-            | StepKind::AssignAsync { .. }
-            | StepKind::Await { .. }
-            | StepKind::Cancel { .. }
-            | StepKind::RemoteBlock { .. }
-            | StepKind::FuncDef { .. }
-            | StepKind::Break
-            | StepKind::Continue => {}
-        }
-    }
+                StepKind::AssertContains { haystack, needle } => {
+                    walk_target(haystack, f);
+                    walk_arg(needle, f);
+                }
+                StepKind::ListAppend { item, .. } => walk_arg(item, f),
+                StepKind::RunExec { argv } => {
+                    for arg in argv {
+                        walk_arg(arg, f);
+                    }
+                }
+                StepKind::WithIo { .. }
+                | StepKind::WithIoBlock { .. }
+                | StepKind::TypeAlias { .. }
+                | StepKind::Workspace(_)
+                | StepKind::ImportFile { .. }
+                | StepKind::ImportFuncs { .. }
+                | StepKind::InheritEnv { .. }
+                | StepKind::Isolated { .. }
+                | StepKind::IsolatedInheritEnv { .. }
+                | StepKind::ReadLine { .. }
+                | StepKind::AssignCapture { .. }
+                | StepKind::AwaitCapture { .. }
+                | StepKind::AsyncBlock { .. }
+                | StepKind::AssignAsync { .. }
+                | StepKind::Await { .. }
+                | StepKind::Cancel { .. }
+                | StepKind::RemoteBlock { .. }
+                | StepKind::FuncDef { .. }
+                | StepKind::Break
+                | StepKind::Continue => {}
+    });
 
     /// Visit every immediate child kind: boxed sub-commands and the kinds
     /// of every body step. Exhaustive like [`walk_exprs`](Self::walk_exprs):
@@ -2065,7 +2113,10 @@ declare_commands! {
 
             Calls: `{{ MODULE::FUNC(args) }}` invokes a pure registry function
             with `$var.path` references and `STRING`, `INT`, `FLOAT`, and `BOOL`
-            literals as arguments. Arguments check against the registered
+            literals as arguments. A bare `{{ NAME(args) }}` resolves exactly
+            like a statement-position call: `IMPORT [MODULE]` brings the names
+            into scope, unimported names fail naming the fix, ambiguity fails
+            closed. Arguments check against the registered
             signature, so wrong arity or mistyped values fail at the call;
             unknown names fail listing the known functions. Only pure
             functions resolve here: stateful, script-defined, and pipe-backed

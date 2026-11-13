@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - Hook nested relative imports: a hook at `scripts/X.oxfile` doing `IMPORT ["./lanes.oxfile" AS ...]` resolves to `scripts/lanes.oxfile`, not the workspace root. Hooks run via the new file aware entry with a regression test pinning the shape.
 - Missing-comma diagnostics in bracket interiors: a forgotten comma between list items, call arguments, or map entries names the missing comma and points at the offending item's line instead of the statement head (previously `unexpected text in list` at the statement start, or `unknown command` naming a map key). Genuine trailing garbage keeps its message but still points at the garbage. A missing comma in a map no longer falls through to block parsing.
+- Templates honor `IMPORT` scope for bare calls: `{{ LEN($x) }}` now resolves exactly like a statement-position call, so `IMPORT [STD]` covers both positions. Unimported names fail at parse naming the `IMPORT` fix, ambiguity fails closed, and qualified, variable, env, and escaped keys pass through byte-identical. Previously every bare placeholder call failed at runtime as `undefined script variable`.
 
 ### Dependencies
 
