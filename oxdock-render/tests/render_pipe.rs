@@ -11,21 +11,8 @@ use oxdock_core::{Engine, ExecIo};
 use oxdock_fs::{GuardedPath, PathResolver};
 
 fn interpreter() -> String {
-    let exe = std::env::current_exe().expect("test executable path");
-    let debug = exe
-        .parent()
-        .and_then(|deps| deps.parent())
-        .expect("test executable has a target dir");
-    #[cfg(windows)]
-    let candidate = debug.join("oxdock-render-child.exe");
-    #[cfg(not(windows))]
-    let candidate = debug.join("oxdock-render-child");
-    assert!(
-        candidate.is_file(),
-        "pipe-child binary missing at {}: run `cargo build -p oxdock-render` first",
-        candidate.display()
-    );
-    candidate.to_string_lossy().into_owned()
+    oxdock_sys_test_utils::find_built_binary("oxdock-render-child")
+        .expect("pipe-child binary missing: run `cargo build -p oxdock-render` first")
 }
 
 fn engine(root: &GuardedPath) -> Engine<oxdock_process::DefaultProcessManager> {

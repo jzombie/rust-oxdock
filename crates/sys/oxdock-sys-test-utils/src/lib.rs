@@ -148,6 +148,32 @@ pub fn can_create_symlinks(target: &Path) -> bool {
     }
 }
 
+/// Locate a binary the current `cargo test` invocation built, climbing
+/// from the test executable and checking every ancestor directory.
+/// Older cargo places test binaries in `target/<profile>/deps/`, newer
+/// ones in `target/<profile>/build/<pkg>/out/`, so no layout or profile
+/// name is assumed; the first match climbing outward is the current
+/// profile's artifact. Returns `None` when nothing is found (build it
+/// first with `cargo build -p <package>`). The `.exe` suffix lands on
+/// Windows only, so callers pass the bare stem and get back a path
+/// string ready for `set_interpreter` and friends.
+pub fn find_built_binary(stem: &str) -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    #[cfg(windows)]
+    let file_name = format!("{stem}.exe");
+    #[cfg(not(windows))]
+    let file_name = stem.to_string();
+    let mut dir = exe.parent();
+    while let Some(parent) = dir {
+        let candidate = parent.join(&file_name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+        dir = parent.parent();
+    }
+    None
+}
+
 /// Build a process [`std::process::ExitStatus`] from a raw exit code.
 ///
 /// Canonical shared definition used by the mock manager, the Miri synthetic
@@ -179,6 +205,31 @@ mod tests {
     const KEY_A: &str = "OXDOCK_SYS_TEST_UTILS_KEY_A";
     const KEY_B: &str = "OXDOCK_SYS_TEST_UTILS_KEY_B";
     const NESTED: &str = "OXDOCK_SYS_TEST_UTILS_NESTED";
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "current_exe is an unsupported isolation operation under Miri"
+    )]
+    fn find_built_binary_resolves_layout_free() {
+        // The test executable itself always resolves: its parent dir
+        // holds it under its own file name on every cargo layout.
+        let exe = std::env::current_exe().expect("test executable path");
+        let stem = exe
+            .file_stem()
+            .expect("executable file name")
+            .to_string_lossy()
+            .into_owned();
+        let found = super::find_built_binary(&stem).expect("own test binary must resolve");
+        assert_eq!(
+            found,
+            exe.display().to_string(),
+            "the walk starts at the executable's own directory"
+        );
+        // A name no build produces resolves to nothing instead of
+        // wandering: the miss path is what failing harnesses report.
+        assert!(super::find_built_binary("oxdock-no-such-binary-xyz").is_none());
+    }
 
     #[test]
     fn set_guard_restores_absent_state_on_drop() {

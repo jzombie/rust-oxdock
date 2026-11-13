@@ -595,30 +595,17 @@ fn readme_snippets_execute_as_documented() -> Result<()> {
 /// Path of the workspace CLI binary built beside the test profile.
 /// Doc fences that reinvoke the interpreter (`INTERPRETER()` + `RUN`)
 /// run against this binary; the harness binary itself cannot interpret
-/// scripts. Climbs from the test executable checking every level:
-/// older cargo places test binaries in `target/<profile>/deps/`,
-/// newer ones in `target/<profile>/build/<pkg>/out/`, so no layout
-/// or profile name is assumed. The first match climbing outward is
-/// the current profile's artifact. Bails when the binary is missing
+/// scripts. Resolved through the shared layout-free lookup
+/// (`oxdock-sys-test-utils`), so old (`deps/`) and new
+/// (`build/<pkg>/out/`) cargo agree. Bails when the binary is missing
 /// so the failure names the fix (`cargo build -p oxdock`) instead
 /// of spawning nonsense.
 fn conformance_interpreter() -> Result<String> {
-    let exe = std::env::current_exe().context("determine test executable")?;
-    #[cfg(windows)]
-    let bin = "oxdock.exe";
-    #[cfg(not(windows))]
-    let bin = "oxdock";
-    let mut dir = exe.parent();
-    while let Some(parent) = dir {
-        let candidate = parent.join(bin);
-        if candidate.is_file() {
-            return Ok(candidate.to_string_lossy().into_owned());
-        }
-        dir = parent.parent();
-    }
-    Err(anyhow::anyhow!(
-        "interpreter binary missing: no `{bin}` above the test executable; run `cargo build -p oxdock` first"
-    ))
+    oxdock_sys_test_utils::find_built_binary("oxdock").ok_or_else(|| {
+        anyhow::anyhow!(
+            "interpreter binary missing: no `oxdock` above the test executable; run `cargo build -p oxdock` first"
+        )
+    })
 }
 
 /// Pin the project cache dir for doc-fence execution (issue #163).

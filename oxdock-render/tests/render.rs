@@ -10,28 +10,14 @@ use oxdock_func_macro::oxdock_func;
 use oxdock_process::DefaultProcessManager;
 
 /// Absolute path of the pipe-child binary: the executable built
-/// beside the test profile dir. Climbs from the test executable
-/// checking every level instead of assuming one cargo layout:
-/// older cargo places test binaries in `target/<profile>/deps/`,
-/// newer ones in `target/<profile>/build/<pkg>/out/`. Built by
-/// `cargo test` alongside the suite; a missing file fails naming
-/// the required build step.
+/// beside the test profile. Resolved through the shared layout-free
+/// lookup (`oxdock-sys-test-utils`), so old (`deps/`) and new
+/// (`build/<pkg>/out/`) cargo agree. Built by `cargo test` alongside
+/// the suite; a missing file fails naming the required build step.
 #[allow(clippy::disallowed_methods)]
 fn child_bin() -> String {
-    let exe = std::env::current_exe().expect("test executable path");
-    #[cfg(windows)]
-    let bin = "oxdock-render-child.exe";
-    #[cfg(not(windows))]
-    let bin = "oxdock-render-child";
-    let mut dir = exe.parent();
-    while let Some(parent) = dir {
-        let candidate = parent.join(bin);
-        if candidate.is_file() {
-            return candidate.to_string_lossy().into_owned();
-        }
-        dir = parent.parent();
-    }
-    panic!("pipe-child binary missing: no `{bin}` above the test executable");
+    oxdock_sys_test_utils::find_built_binary("oxdock-render-child")
+        .expect("pipe-child binary missing: run `cargo build -p oxdock-render` first")
 }
 
 /// Lifecycle override plus scope contract every fixture config gets:

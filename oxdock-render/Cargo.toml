@@ -46,6 +46,7 @@ toml_edit.workspace = true
 [dev-dependencies]
 indoc.workspace = true
 oxdock-macros.workspace = true
+oxdock-sys-test-utils.workspace = true
 
 [lints]
 workspace = true
