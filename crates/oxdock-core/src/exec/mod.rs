@@ -23,7 +23,9 @@ pub use self::remote::{
     apply_push_symlink,
 };
 
-pub use self::args::{json_to_value, json_to_value_typed, value_to_json, value_to_json_typed};
+pub use self::args::{
+    json_to_value, json_to_value_typed, strip_json_comments, value_to_json, value_to_json_typed,
+};
 #[cfg(any(test, feature = "test-harness"))]
 pub use self::conformance::assert_module_returns_conformance;
 pub use self::engine::{Engine, EngineOutput};

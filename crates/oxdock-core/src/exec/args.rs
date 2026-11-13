@@ -1462,9 +1462,80 @@ pub(crate) fn parse_toml_from_value(value: Value) -> Result<Value> {
 
 /// Parse JSON content into a DSL `Value`.
 pub fn load_json_value(content: &str) -> Result<Value> {
+    let stripped = strip_json_comments(content);
     let json_val: serde_json::Value =
-        serde_json::from_str(content).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
+        serde_json::from_str(&stripped).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
     Ok(json_to_value(json_val))
+}
+
+/// Strip `//` line and `/* */` block comments outside strings, so
+/// config and data files can carry usage notes. Comment bytes become
+/// spaces (newlines kept) to hold error line numbers steady.
+/// `//` inside a `"quoted string"` is data and survives.
+pub fn strip_json_comments(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            continue;
+        }
+        if c == '/' {
+            match chars.peek() {
+                Some('/') => {
+                    chars.next();
+                    out.push(' ');
+                    out.push(' ');
+                    for c2 in chars.by_ref() {
+                        if c2 == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                        out.push(' ');
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    chars.next();
+                    out.push(' ');
+                    out.push(' ');
+                    let mut prev_star = false;
+                    for c2 in chars.by_ref() {
+                        if c2 == '\n' {
+                            out.push('\n');
+                        } else {
+                            out.push(' ');
+                        }
+                        if prev_star && c2 == '/' {
+                            break;
+                        }
+                        prev_star = c2 == '*';
+                    }
+                    continue;
+                }
+                _ => {
+                    out.push(c);
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Value-semantics core of `PARSE_JSON()`: parse JSON text already held
@@ -2687,6 +2758,44 @@ mod tests {
         assert!(parse_toml_from_value(Value::string("a = ".to_string())).is_err());
         assert!(parse_json_from_value(Value::int(1)).is_err());
         assert!(parse_toml_from_value(Value::bool(true)).is_err());
+    }
+
+    #[test]
+    fn json_comments_strip_outside_strings_only() {
+        // Line and block notes vanish; `//` inside a string stays data.
+        let stripped = strip_json_comments("{\"u\": \"http://x/y\"} // note\n");
+        assert!(stripped.contains("http://x/y"), "string kept: {stripped}");
+        let doc = load_json_value(
+            "{\n// leading note\n\"a\": 1, /* mid note */ \"u\": \"http://x/y\"\n}\n",
+        )
+        .expect("commented json parses");
+        let map = doc.as_map().expect("map");
+        assert_eq!(map.get("a").expect("key").as_i64(), Some(1));
+        assert_eq!(map.get("u").expect("key").as_str(), Some("http://x/y"));
+        assert!(load_json_value("{\"a\": 1} // trailing note").is_ok());
+        assert!(load_json_value("{\"a\": 1, /* unterminated").is_err());
+    }
+
+    #[test]
+    fn json_comment_stripping_preserves_error_columns() {
+        // Every consumed comment byte becomes one space (newlines kept),
+        // so `serde_json` line/column offsets still name the original site.
+        let src = "{\"a\": 1 /* note */, bad}";
+        let stripped = strip_json_comments(src);
+        assert_eq!(stripped.len(), src.len(), "columns hold: {stripped:?}");
+        let err = load_json_value(src).expect_err("bad key must fail");
+        assert!(
+            format!("{err:#}").contains("line 1 column 21"),
+            "error names the original column: {err:#}"
+        );
+        let lined = "{\n  \"a\": 1,\n  // note\n  bad\n}";
+        let lined_stripped = strip_json_comments(lined);
+        assert_eq!(lined_stripped.len(), lined.len());
+        let err = load_json_value(lined).expect_err("bad key must fail");
+        assert!(
+            format!("{err:#}").contains("line 4 column 3"),
+            "error names the original line: {err:#}"
+        );
     }
 
     #[test]

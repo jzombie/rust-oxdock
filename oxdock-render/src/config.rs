@@ -25,15 +25,26 @@ const TOP_LEVEL_KEYS: &[&str] = &[
 ];
 
 /// Template `render.json` written by `--init`: the minimal valid
-/// pipeline (workspace root scope, empty hooks). Validates clean.
+/// pipeline (workspace root scope, empty hooks). Comments are
+/// allowed (`//` and `/* */`) in every JSON file the pipeline
+/// reads; they never reach validation. Validates clean.
 pub const INIT_TEMPLATE: &str = r#"{
-  "global_values": "values.json",
-  "scopes": ["."],
-  "generated": [],
+  // Hooks run around the render: `pre` scripts run before any target
+  // renders, `post` scripts run after every target verifies.
+  // Paths are workspace-relative script files; empty lists skip the phase.
   "hooks": {
     "pre": [],
     "post": []
-  }
+  },
+  // Workspace data visible to every target as `$global`.
+  // A string or a list of strings; lists merge in order.
+  "global_values": "values.json",
+  // Scopes searched for `target.json` files: one target set per scope entry.
+  "scopes": ["."],
+  // Derived inputs refreshed before scan: each `key` renders live
+  // through `OXDOCK::GENERATED` and writes to `out`.
+  // Empty when the pipeline has no derived inputs.
+  "generated": []
 }
 "#;
 
@@ -261,7 +272,7 @@ pub(crate) fn configured_plugins(
     let raw = fs
         .read_to_string(&path)
         .with_context(|| format!("read {config_name} for plugin list"))?;
-    let cfg: serde_json::Value = serde_json::from_str(&raw)
+    let cfg: serde_json::Value = serde_json::from_str(&oxdock_core::strip_json_comments(&raw))
         .with_context(|| format!("parse {config_name} for plugin list"))?;
     let files = match cfg.get("lifecycle").and_then(|lc| lc.get("files")) {
         None => return Ok(default_plugins()),
@@ -303,7 +314,7 @@ mod tests {
     use super::*;
 
     fn parse(text: &str) -> serde_json::Value {
-        serde_json::from_str(text).expect("fixture parses")
+        serde_json::from_str(&oxdock_core::strip_json_comments(text)).expect("fixture parses")
     }
 
     #[test]
@@ -311,6 +322,24 @@ mod tests {
         let value = parse(INIT_TEMPLATE);
         validate_config(&value, "render.json").expect("template is valid");
         assert_eq!(hooks_of(&value), Hooks::default());
+    }
+
+    #[test]
+    fn commented_config_parses_like_plain_json() {
+        // `//` and `/* */` notes never reach validation; `//` inside
+        // a string stays data.
+        let value = parse(
+            r#"{
+                // leading note
+                "global_values": "http://x/y", /* trailing note */
+                "scopes": ["."] // after a value
+            }"#,
+        );
+        validate_config(&value, "render.json").expect("comments parse");
+        assert_eq!(
+            value.get("global_values").and_then(|v| v.as_str()),
+            Some("http://x/y")
+        );
     }
 
     #[test]

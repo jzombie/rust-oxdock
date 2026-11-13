@@ -69,7 +69,9 @@ unchanged.
 Each run performs the same steps, in order:
 
 1. Load `render.json`: global values, which files to scan,
-   generated inputs, naming rules, and hooks. Unknown keys fail
+   generated inputs, naming rules, and hooks. Every JSON file
+   the pipeline reads allows `//` and `/* */` comments, so
+   configs document themselves inline. Unknown keys fail
    naming the known set, so a typo can never silently change the
    pipeline. Start from a template with `oxdock-render --init`.
 2. Serve the binary's embedded pipeline scripts from memory and

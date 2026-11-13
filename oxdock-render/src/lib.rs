@@ -101,7 +101,8 @@ pub fn run_with_plugins(
         .read_to_string(&cfg_path)
         .with_context(|| format!("read {config_name}"))?;
     let cfg_json: serde_json::Value =
-        serde_json::from_str(&cfg_raw).with_context(|| format!("parse {config_name}"))?;
+        serde_json::from_str(&oxdock_core::strip_json_comments(&cfg_raw))
+            .with_context(|| format!("parse {config_name}"))?;
     config::validate_config(&cfg_json, &config_name)?;
     let hooks = config::hooks_of(&cfg_json);
     // The pipeline scripts ride in the binary and resolve from memory,
