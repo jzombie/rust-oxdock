@@ -5,14 +5,22 @@
       "out": ".github/actions/setup-oxdock/action.yml",
       "values": ".oxdock/template/github-actions/values.json",
       "template": ".oxdock/template/github-actions/setup-oxdock-action.yml.tmpl",
-      "fragments": {}
+      "fragments": {
+        "local": [
+          ".oxdock/template/github-actions/fragments/*"
+        ]
+      }
     },
     {
       "name": "setup-oxdock-render-action",
       "out": ".github/actions/setup-oxdock-render/action.yml",
       "values": ".oxdock/template/github-actions/values-render.json",
       "template": ".oxdock/template/github-actions/setup-oxdock-render-action.yml.tmpl",
-      "fragments": {}
+      "fragments": {
+        "local": [
+          ".oxdock/template/github-actions/fragments/*"
+        ]
+      }
     }
   ]
 }

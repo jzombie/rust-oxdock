@@ -34,6 +34,7 @@ runs:
       env:
         VERSION: ${{ inputs.version }}
         INSTALL_DIR: ${{ runner.temp }}/oxdock-engine
+        OXDOCK_PRODUCT: oxdock
         OXDOCK_BINARY_NAME: ${{ inputs.binary-name }}
       run: curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash
 
@@ -43,6 +44,7 @@ runs:
       env:
         VERSION: ${{ inputs.version }}
         INSTALL_DIR: ${{ runner.temp }}/oxdock-engine
+        OXDOCK_PRODUCT: oxdock
         OXDOCK_BINARY_NAME: ${{ inputs.binary-name }}
       run: (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 
