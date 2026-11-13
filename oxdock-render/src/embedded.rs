@@ -5,7 +5,7 @@
 //! filesystem wrapper, so consumer repos never receive pipeline files
 //! on disk. What runs is always the binary's version: no written
 //! copies exist that could rot. An on-disk file shadowing an embedded
-//! path is ignored; [`warn_on_shadowed_dist`] names it so repos
+//! path is ignored; `warn_on_shadowed_dist` names it so repos
 //! carrying stale copies from older releases know to delete them.
 
 use anyhow::{Context, Result};

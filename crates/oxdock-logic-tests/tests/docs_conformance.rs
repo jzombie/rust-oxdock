@@ -592,30 +592,33 @@ fn readme_snippets_execute_as_documented() -> Result<()> {
     Ok(())
 }
 
-/// Path of the workspace CLI binary next to the test executable
-/// (`target/debug/deps/<test>` -> `target/debug/oxdock`). Doc fences
-/// that reinvoke the interpreter (`INTERPRETER()` + `RUN`) run against
-/// this binary; the harness binary itself cannot interpret scripts.
-/// Bails when the binary is missing so the failure names the fix
-/// (`cargo build -p oxdock`) instead of spawning nonsense.
+/// Path of the workspace CLI binary built beside the test profile.
+/// Doc fences that reinvoke the interpreter (`INTERPRETER()` + `RUN`)
+/// run against this binary; the harness binary itself cannot interpret
+/// scripts. Climbs from the test executable checking every level:
+/// older cargo places test binaries in `target/<profile>/deps/`,
+/// newer ones in `target/<profile>/build/<pkg>/out/`, so no layout
+/// or profile name is assumed. The first match climbing outward is
+/// the current profile's artifact. Bails when the binary is missing
+/// so the failure names the fix (`cargo build -p oxdock`) instead
+/// of spawning nonsense.
 fn conformance_interpreter() -> Result<String> {
     let exe = std::env::current_exe().context("determine test executable")?;
-    let debug = exe
-        .parent()
-        .and_then(|deps| deps.parent())
-        .ok_or_else(|| anyhow::anyhow!("test executable has no target dir"))?;
     #[cfg(windows)]
-    let candidate = debug.join("oxdock.exe");
+    let bin = "oxdock.exe";
     #[cfg(not(windows))]
-    let candidate = debug.join("oxdock");
-    if candidate.is_file() {
-        Ok(candidate.to_string_lossy().into_owned())
-    } else {
-        Err(anyhow::anyhow!(
-            "interpreter binary missing at {}",
-            candidate.display()
-        ))
+    let bin = "oxdock";
+    let mut dir = exe.parent();
+    while let Some(parent) = dir {
+        let candidate = parent.join(bin);
+        if candidate.is_file() {
+            return Ok(candidate.to_string_lossy().into_owned());
+        }
+        dir = parent.parent();
     }
+    Err(anyhow::anyhow!(
+        "interpreter binary missing: no `{bin}` above the test executable; run `cargo build -p oxdock` first"
+    ))
 }
 
 /// Pin the project cache dir for doc-fence execution (issue #163).
