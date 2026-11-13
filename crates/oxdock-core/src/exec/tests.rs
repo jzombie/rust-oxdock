@@ -1299,6 +1299,38 @@ fn bool_converter_is_strict() {
 }
 
 #[test]
+fn inline_call_comparison_checks_args_in_order() {
+    // Static RPN checking passes call arguments left-to-right, exactly
+    // like runtime evaluation: reversing them made `HAS_KEY($map, $key)`
+    // check the key against the map parameter, failing valid scripts
+    // that compare a call result inline. Same-type multi-arg calls
+    // passed by luck; only mixed member types caught the swap.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $m: MAP<ANY> = PARSE_JSON("{\"a\": 1}")
+        LET $hit: BOOL = HAS_KEY($m, "a") == true
+        LET $miss: BOOL = HAS_KEY($m, "b") == false
+        LET $neq: BOOL = HAS_KEY($m, "a") != false
+        LET $words: BOOL = STD::TEXT_STARTS_WITH("hello", "he") == true
+    "#})
+    .expect("parses");
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("inline comparisons evaluate");
+    for name in ["hit", "miss", "neq", "words"] {
+        assert_eq!(
+            bindings.get(name).and_then(|v| v.as_bool()),
+            Some(true),
+            "{name} binds true: {bindings:?}"
+        );
+    }
+}
+
+#[test]
 fn bool_or_substitutes_default_for_blank() {
     // Blank input resolves to the stated default; present values
     // coerce strictly and garbage fails.

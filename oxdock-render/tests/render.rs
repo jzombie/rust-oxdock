@@ -1230,6 +1230,57 @@ fn failing_pre_hook_halts_before_render() {
     miri,
     ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
 )]
+fn empty_scope_fails_naming_the_scope() {
+    // A scope holding no target.json fails naming the scope instead
+    // of silently contributing nothing: a typo'd scope directory can
+    // never drop a whole target set quietly.
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "render.json")
+        .expect("base tree carries render.json");
+    entry.1 = r#"{"global_values": "base.json", "scopes": ["empty"], "generated": []}"#.to_string();
+    tree.push(("empty/README.md".to_string(), "not a target\n".to_string()));
+    let (_temp, root, _resolver) = fixture(&as_refs(&tree));
+    let err = err_text(oxdock_render::run(root.as_path()).expect_err("empty scope must fail"));
+    assert!(
+        err.contains("failed with status"),
+        "empty scope fails closed: {err}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn missing_hook_file_fails_naming_the_hook() {
+    // A hook path resolving to nothing fails naming the hook instead
+    // of silently skipping the phase: every configured path must
+    // exist, exactly like every other config path.
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "render.json")
+        .expect("base tree carries render.json");
+    entry.1 = HOOK_RENDER.to_string();
+    tree.push((
+        "scripts/pre.oxfile".to_string(),
+        "WRITE pre.txt pre-ran\n".to_string(),
+    ));
+    let (_temp, root, _resolver) = fixture(&as_refs(&tree));
+    let err = err_text(oxdock_render::run(root.as_path()).expect_err("missing hook must fail"));
+    assert!(
+        err.contains("post hook 'scripts/post.oxfile'"),
+        "error names the missing hook: {err}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
 fn failing_post_hook_fails_after_render() {
     // Post hooks run after every target verifies: the artifacts
     // exist, but the run still fails naming the hook.

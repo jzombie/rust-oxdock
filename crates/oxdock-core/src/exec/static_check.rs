@@ -3488,8 +3488,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     if before < *arity {
                         bail!("internal error: RPN stack underflow");
                     }
-                    let mut taken: Vec<StaticTy> = stack.split_off(before - arity);
-                    taken.reverse();
+                    // `split_off` keeps left-to-right order already,
+                    // matching the runtime's pop-then-reverse: no
+                    // second reversal here, or multi-arg calls check
+                    // positionally swapped.
+                    let taken: Vec<StaticTy> = stack.split_off(before - arity);
                     // RPN operands carry no literal forms, so closed
                     // `#[values]` sets cannot be checked here; shape and
                     // arity still are. (Math-position calls are
