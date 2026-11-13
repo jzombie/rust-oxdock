@@ -142,13 +142,13 @@ IF $has_piped {
         [family:windows] LET $home: STRING = "\{{ env:USERPROFILE }}"
 
         IF $home == "" {
-            [family:unix] ECHO "no install directory: HOME is unset, so set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $docs_global.unix_default_suffix }}\")"
-            [family:windows] ECHO "no install directory: USERPROFILE is unset, so set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $docs_global.windows_default_prefix }}{{ $docs_global.windows_default_suffix }}\")"
+            [family:unix] ECHO "no install directory: HOME is unset, so set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $global.unix_default_suffix }}\")"
+            [family:windows] ECHO "no install directory: USERPROFILE is unset, so set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $global.windows_default_prefix }}{{ $global.windows_default_suffix }}\")"
             EXIT 1
         }
 
-        [family:unix] ECHO "no install directory: set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $docs_global.unix_default_suffix }}\")"
-        [family:windows] ECHO "no install directory: set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $docs_global.windows_default_prefix }}{{ $docs_global.windows_default_suffix }}\")"
+        [family:unix] ECHO "no install directory: set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $global.unix_default_suffix }}\")"
+        [family:windows] ECHO "no install directory: set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $global.windows_default_prefix }}{{ $global.windows_default_suffix }}\")"
         EXIT 1
     }
 

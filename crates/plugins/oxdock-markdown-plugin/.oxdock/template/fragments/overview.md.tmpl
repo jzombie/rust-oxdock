@@ -5,7 +5,7 @@ reports and digests: `MAP_TO_MD_TABLE` takes one MAP (or a LIST of
 MAPs sharing keys) and returns aligned pipe-table text with union
 columns, padded cells, and strict errors on shapes with no table in
 them. Import it with `IMPORT [STD, MARKDOWN]` in a runner that
-registers the host module on the [Engine facade]({{ $docs_global.engine_facade_url }}).
+registers the host module on the [Engine facade]({{ $global.engine_facade_url }}).
 It works both as a DSL statement and inside placeholders as
 `\{{ MARKDOWN::MAP_TO_MD_TABLE($var) }}`. Table rendering and cell
 escaping live in the pure `markdown` module, the single source the

@@ -92,8 +92,8 @@ FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): 
             LET $one: MAP<ANY> = LOAD_JSON($vp)
             LIST_APPEND $gvmaps $one
         }
-        LET $docs_global: MAP<ANY> = STD::MERGE_MAPS($gvmaps, $policy)
-        LET $gjson: STRING = TO_JSON($docs_global)
+        LET $global_map: MAP<ANY> = STD::MERGE_MAPS($gvmaps, $policy)
+        LET $gjson: STRING = TO_JSON($global_map)
         WRITE "\{{ $staging }}/_globals.json" $gjson
         LET $run: CTX = {wsroot: $wsroot, config: $cfgpath, staging: $staging, globals: "\{{ $staging }}/_globals.json", exec: false}
         {{ $setup }}LET $seen: MAP<ANY> = {}

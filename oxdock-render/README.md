@@ -1,6 +1,6 @@
 # oxdock-render
 
-Generate text files from templates and data: READMEs, docs, installers, and other release artifacts, rendered deterministically from a single pipeline config.
+Generate text files from templates and data: READMEs, installers, and other release artifacts, rendered deterministically from a single pipeline config.
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
 
@@ -83,8 +83,8 @@ Each run performs the same steps, in order:
    target), piped through a fresh interpreter that never touches
    disk.
 5. Per target: check the target declaration, expand the fragments
-   into the master template, and write the output file. The docs
-   plugin first refreshes generated inputs and re-reads workspace
+   into the master template, and write the output file. The OxDock
+   intake first refreshes generated inputs and re-reads workspace
    metadata.
 6. Run the `post` hooks, if any, then restore executable bits
    declared by targets (so regenerating `install.sh` keeps its
@@ -105,7 +105,7 @@ Behavior arrives through plugin modules linked into the binary:
 
 - `RENDER_ENGINE`: filename and template-expansion helpers.
 - `OXDOCK`: command and function reference data used by the
-  generated docs.
+  generated references.
 - `RUST`: Cargo workspace facts (members, versions, and package
   metadata) used for version stamps and citations.
 
@@ -136,7 +136,7 @@ package name `oxdock`). Crates without a manifest keep static
 values files. Sync writes values only: templates, fragments, and
 target declarations are the author's and are never rewritten.
 Shared strings live in the global values file under scope keys
-(e.g. `{{ $docs_global.* }}`).
+(e.g. `{{ $global.* }}`).
 Workspace-wide facts travel alongside under their own keys: the
 workspace version and the workspace package record (author,
 license, repository) used for citations.

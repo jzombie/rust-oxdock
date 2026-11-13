@@ -22,13 +22,13 @@ fn encode_search_term(term: &str) -> String {
 }
 
 /// Render one contract name cell as a code-search link. The repo
-/// qualifier stays a template global (`$docs_global.code_search_url`,
+/// qualifier stays a template global (`$global.code_search_url`,
 /// single-sourced in `_global/values.json`); only the name encoding
 /// happens here. Quadrupled braces emit the literal `{{ }}`
 /// placeholder for the later template pass.
 fn code_link(name: &str) -> String {
     format!(
-        "[`{}`]({{{{ $docs_global.code_search_url }}}}+{}&type=code)",
+        "[`{}`]({{{{ $global.code_search_url }}}}+{}&type=code)",
         escape_table_cell(name),
         encode_search_term(name),
     )
@@ -104,7 +104,7 @@ mod tests {
         assert_eq!(encode_search_term("CARGO_FEATURE_*"), "CARGO_FEATURE_%2A");
         let link = code_link("ProgramFiles(x86)");
         assert!(
-            link.contains("{{ $docs_global.code_search_url }}+ProgramFiles%28x86%29&type=code"),
+            link.contains("{{ $global.code_search_url }}+ProgramFiles%28x86%29&type=code"),
             "unexpected link: {link}"
         );
         let text = render_env_contracts().expect("renders");

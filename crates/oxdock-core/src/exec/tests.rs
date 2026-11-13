@@ -5337,7 +5337,7 @@ fn merge_maps_rejects_unknown_policy_at_boundary() {
     // Closed-set enforcement lives in the generated extractor: an
     // unknown policy fails before the body runs, naming the allowed
     // values from the same attribute tokens that render the
-    // signature. Valid policies run end to end through the docs-gen
+    // signature. Valid policies run end to end through oxdock-render
     // render suite on every pipeline run.
     let steps = crate::parse_script(indoc! {r#"
         IMPORT [STD]

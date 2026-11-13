@@ -1,7 +1,7 @@
 cff-version: 1.2.0
-message: "If you use {{ $docs_ctx.name }}, please cite it as below."
+message: "If you use {{ $ctx.name }}, please cite it as below."
 type: software
-title: "{{ $docs_ctx.name }}"
+title: "{{ $ctx.name }}"
 version: {{ env:CRATE_VERSION }}
 authors:
   - family-names: "{{ $workspace_pkg.author_family }}"

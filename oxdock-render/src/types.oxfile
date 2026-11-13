@@ -19,8 +19,8 @@ TYPE CTX = MAP<
 >
 TYPE PLUGIN = MAP<path: STRING, as: STRING>
 TYPE VARS = MAP<
-  global: STRING,
-  ctx: STRING,
+  global?: STRING,
+  ctx?: STRING,
   workspace_pkg?: STRING
 >
 TYPE WORKSPACE_SNAPSHOT = MAP<

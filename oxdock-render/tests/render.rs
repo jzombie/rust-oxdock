@@ -32,10 +32,9 @@ fn child_bin() -> String {
 }
 
 /// Lifecycle override plus scope contract every fixture config gets:
-/// the OxDock docs plugin on top of the engine's generic lifecycle.
-/// Scope key names and the version env name are config data, never
-/// hook code: fixtures declaring their own keep them, the rest get
-/// the docs-pipeline mapping.
+/// the OxDock metadata intake on top of the engine's generic
+/// lifecycle. Scope key names default to `global`/`ctx`: fixtures
+/// declaring their own keep them, the rest get the defaults.
 fn with_lifecycle(cfg: &str) -> String {
     let mut v: serde_json::Value =
         serde_json::from_str(cfg).expect("fixture config is a JSON object");
@@ -45,8 +44,8 @@ fn with_lifecycle(cfg: &str) -> String {
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     let vm = vars.as_object_mut().expect("config vars is a map");
     for (key, fallback) in [
-        ("global", "docs_global"),
-        ("ctx", "docs_ctx"),
+        ("global", "global"),
+        ("ctx", "ctx"),
         ("workspace_pkg", "workspace_pkg"),
     ] {
         vm.entry(key)
@@ -137,12 +136,12 @@ fn config(policy: &str) -> String {
 const TARGET: &str = r#"{"targets": [{"name": "t", "out": "out.md", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"]}}]}"#;
 const VALUES: &str = r#"{"n": "1"}"#;
 const MASTER: &str = indoc::indoc! {r#"
-    # {{ $docs_global.title }} {{ $docs_ctx.n }}
+    # {{ $global.title }} {{ $ctx.n }}
     {{ $files.sec.a }}
     {{ $files.sec.b }}
 "#};
-const FRAG_A: &str = "A {{ $docs_global.who }} {{ $docs_ctx.n }}";
-const FRAG_B: &str = "B {{ $docs_global.extra }}";
+const FRAG_A: &str = "A {{ $global.who }} {{ $ctx.n }}";
+const FRAG_B: &str = "B {{ $global.extra }}";
 
 fn base_tree(policy: &str) -> Vec<(String, String)> {
     vec![
@@ -256,7 +255,7 @@ fn unknown_placeholder_fails_strict() {
     let mut tree = base_tree("overwrite");
     tree.push((
         "fragments/sec/c.md.tmpl".to_string(),
-        "C {{ $docs_global.nope }}".to_string(),
+        "C {{ $global.nope }}".to_string(),
     ));
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
     let err = err_text(oxdock_render::run(root.as_path()).expect_err("unknown key must fail"));
@@ -276,7 +275,7 @@ fn escaped_placeholder_stays_literal() {
     let mut tree = base_tree("overwrite");
     tree.push((
         "fragments/sec/c.md.tmpl".to_string(),
-        "C \\{{ $docs_global.title }}".to_string(),
+        "C \\{{ $global.title }}".to_string(),
     ));
     // The extra fragment joins group sec; master stays fixed, so read
     // the staged manifest for the literal instead of the output.
@@ -284,7 +283,7 @@ fn escaped_placeholder_stays_literal() {
     oxdock_render::run(root.as_path()).expect("render");
     let manifest = read(&resolver, &root, "target/t-docs/t.json");
     assert!(
-        manifest.contains("{{ $docs_global.title }}"),
+        manifest.contains("{{ $global.title }}"),
         "escape renders literally: {manifest}"
     );
 }
@@ -346,13 +345,14 @@ fn empty_scopes_fail_closed_instead_of_rendering_nothing() {
 )]
 fn omitted_lifecycle_falls_back_to_generic() {
     // No lifecycle key at all: the engine's generic file runs every
-    // stage. Scope contract still comes from the config, never code.
+    // stage. Scope contract still comes from the config, never code;
+    // vars are omitted too, so the `global`/`ctx` defaults apply.
     let mut tree = base_tree("overwrite");
     let entry = tree
         .iter_mut()
         .find(|(rel, _)| rel == "render.json")
         .expect("base tree carries render.json");
-    entry.1 = r#"{"global_values": ["base.json", "overlay.json"], "merge_policy": "overwrite", "scopes": ["."], "generated": [], "staging_dir": "target/t-docs", "vars": {"global": "docs_global", "ctx": "docs_ctx"}}"#.to_string();
+    entry.1 = r#"{"global_values": ["base.json", "overlay.json"], "merge_policy": "overwrite", "scopes": ["."], "generated": [], "staging_dir": "target/t-docs"}"#.to_string();
     let (_temp, root, resolver) = fixture_opt(&as_refs(&tree), false);
     oxdock_render::run(root.as_path()).expect("render");
     let out = read(&resolver, &root, "out.md");
@@ -422,7 +422,7 @@ fn unknown_generated_key_lists_known_keys() {
         ("values.json".to_string(), VALUES.to_string()),
         (
             "master.md.tmpl".to_string(),
-            "# {{ $docs_global.title }}\n".to_string(),
+            "# {{ $global.title }}\n".to_string(),
         ),
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
@@ -456,10 +456,10 @@ fn slim_and_full_share_fragments_with_split_content() {
             "target.json",
             r#"{"targets": [{"name": "slim", "out": "slim.txt", "template": "slim.txt.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"]}}, {"name": "full", "out": "full.txt", "template": "full.txt.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"]}}]}"#,
         ),
-        ("slim.txt.tmpl", "# {{ $docs_ctx.n }}\n{{ $files.sec.a }}\n"),
+        ("slim.txt.tmpl", "# {{ $ctx.n }}\n{{ $files.sec.a }}\n"),
         (
             "full.txt.tmpl",
-            "# {{ $docs_ctx.n }} full\n{{ $files.sec.a }}\n{{ $files.sec.b }}\n",
+            "# {{ $ctx.n }} full\n{{ $files.sec.a }}\n{{ $files.sec.b }}\n",
         ),
         ("fragments/sec/a.md.tmpl", "shared A"),
         ("fragments/sec/b.md.tmpl", "full B"),
@@ -515,7 +515,7 @@ fn base_prefix_resolves_inputs_under_base() {
         ("sub/values.json".to_string(), VALUES.to_string()),
         (
             "sub/master.md.tmpl".to_string(),
-            "# {{ $docs_ctx.n }}\n{{ $files.sec.a }}\n".to_string(),
+            "# {{ $ctx.n }}\n{{ $files.sec.a }}\n".to_string(),
         ),
         (
             "sub/fragments/sec/a.md.tmpl".to_string(),
@@ -554,7 +554,7 @@ fn base_leaves_shared_patterns_at_wsroot() {
         ("sub/values.json".to_string(), VALUES.to_string()),
         (
             "sub/master.md.tmpl".to_string(),
-            "# {{ $docs_ctx.n }}\n{{ $files.sec.a }}{{ $files.shared.s }}\n".to_string(),
+            "# {{ $ctx.n }}\n{{ $files.sec.a }}{{ $files.shared.s }}\n".to_string(),
         ),
         (
             "sub/fragments/sec/a.md.tmpl".to_string(),
@@ -596,7 +596,7 @@ fn base_not_a_directory_fails_closed() {
         ),
         (
             "master.md.tmpl".to_string(),
-            "# {{ $docs_ctx.n }}\n".to_string(),
+            "# {{ $ctx.n }}\n".to_string(),
         ),
     ];
     let (_temp, root, _resolver) = fixture(&as_refs(&tree));
@@ -631,7 +631,7 @@ fn external_plugin_resolves_in_templates_without_header_changes() {
     let mut tree = base_tree("overwrite");
     tree.push((
         "fragments/sec/c.md.tmpl".to_string(),
-        "C {{ TEST::PING($docs_global.who) }}".to_string(),
+        "C {{ TEST::PING($global.who) }}".to_string(),
     ));
     let (_temp, root, resolver) = fixture(&as_refs(&tree));
     oxdock_render::run_with_plugins(root.as_path(), vec![test_module()]).expect("render");
@@ -660,7 +660,7 @@ fn toc_renders_tree_from_final_readme() {
         (
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
-                # {{ $docs_global.title }}
+                # {{ $global.title }}
                 {{ DEFER::DEFER("MARKDOWN::TOC", [{}]) }}
                 {{ $files.sec.a }}
             "#}
@@ -714,7 +714,7 @@ fn toc_renders_inline_bar_for_single_level() {
         (
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
-                # {{ $docs_global.title }}
+                # {{ $global.title }}
                 {{ DEFER::DEFER("MARKDOWN::TOC", [{format: "inline"}]) }}
                 {{ $files.sec.a }}
             "#}
@@ -758,7 +758,7 @@ fn toc_replaces_multiple_sentinels_independently() {
         (
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
-                # {{ $docs_global.title }}
+                # {{ $global.title }}
                 {{ DEFER::DEFER("MARKDOWN::TOC", [{format: "inline"}]) }}
                 {{ DEFER::DEFER("MARKDOWN::TOC", [{max_level: 2, delimiter: " • "}]) }}
                 {{ $files.sec.a }}
@@ -802,7 +802,7 @@ fn toc_rejects_multi_level_inline_at_dispatch() {
         (
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
-                # {{ $docs_global.title }}
+                # {{ $global.title }}
                 {{ DEFER::DEFER("MARKDOWN::TOC", [{format: "inline", max_level: 3}]) }}
             "#}
             .to_string(),
@@ -840,7 +840,7 @@ fn toc_renders_immediately_without_deferral() {
         (
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
-                # {{ $docs_global.title }}
+                # {{ $global.title }}
                 {{ MARKDOWN::TOC($files.sec.a, {max_level: 2}) }}
             "#}
             .to_string(),
@@ -886,7 +886,7 @@ fn context_reference_renders_once_with_resolving_links() {
         ("values.json", VALUES),
         (
             "master.md.tmpl",
-            "# {{ $docs_global.title }}\n{{ $files.gen.fn }}\n{{ $files.gen.ctx }}\n",
+            "# {{ $global.title }}\n{{ $files.gen.fn }}\n{{ $files.gen.ctx }}\n",
         ),
     ];
     let (_temp, root, resolver) = fixture(&tree);
@@ -946,7 +946,7 @@ fn function_reference_without_context_fragment_leaves_dangling_anchors() {
         ("values.json", VALUES),
         (
             "master.md.tmpl",
-            "# {{ $docs_global.title }}\n{{ $files.gen.fn }}\n",
+            "# {{ $global.title }}\n{{ $files.gen.fn }}\n",
         ),
     ];
     let (_temp, root, resolver) = fixture(&tree);
@@ -977,7 +977,7 @@ fn toc_rejects_unknown_defer_targets_at_dispatch() {
         (
             "master.md.tmpl".to_string(),
             indoc::indoc! {r#"
-                # {{ $docs_global.title }}
+                # {{ $global.title }}
                 {{ DEFER::DEFER("NOPE::MISSING", [{}]) }}
             "#}
             .to_string(),
@@ -1290,7 +1290,7 @@ fn init_scaffold_renders() {
             "target.json",
             r#"{"targets": [{"name": "t", "out": "out.md", "values": "values.json", "template": "master.md.tmpl", "fragments": {}}]}"#,
         ),
-        ("master.md.tmpl", "# {{ $docs_ctx.n }}\n"),
+        ("master.md.tmpl", "# {{ $ctx.n }}\n"),
     ] {
         let path = root.join(rel).expect("join scaffold");
         resolver

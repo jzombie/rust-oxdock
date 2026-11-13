@@ -2,7 +2,7 @@
 
 Every variable the engine seeds into script environments.
 
-> Rendered by `cargo run -p docs-gen` from the contract declaration in
+> Rendered by `cargo run -p oxdock-render` from the contract declaration in
 > `oxdock_process::env_policy`. Do not edit by hand: the declaration is
 > the single source, and the table below renders it verbatim.
 

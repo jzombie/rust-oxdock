@@ -30,10 +30,6 @@ pub const INIT_TEMPLATE: &str = r#"{
   "global_values": "values.json",
   "scopes": ["."],
   "generated": [],
-  "vars": {
-    "global": "docs_global",
-    "ctx": "docs_ctx"
-  },
   "hooks": {
     "pre": [],
     "post": []

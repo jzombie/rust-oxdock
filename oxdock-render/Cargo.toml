@@ -1,8 +1,8 @@
 [package]
 name = "oxdock-render"
-description = "Generate text files from templates and data: READMEs, docs, installers, and other release artifacts, rendered deterministically from a single pipeline config."
+description = "Generate text files from templates and data: READMEs, installers, and other release artifacts, rendered deterministically from a single pipeline config."
 categories = ["command-line-utilities", "development-tools::build-utils"]
-keywords = ["oxdock", "render", "templates", "artifacts", "docs"]
+keywords = ["oxdock", "render", "templates", "artifacts"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -34,8 +34,8 @@ oxdock-fs.workspace = true
 oxdock-func-macro.workspace = true
 oxdock-markdown-plugin.workspace = true
 # Plugin crates are linked so their HostModules can be introspected
-# in-process (static linking requires the edge). The docs path only
-# reads metadata; it never serves, connects, or binds.
+# in-process (static linking requires the edge). The reference path
+# only reads metadata; it never serves, connects, or binds.
 oxdock-net-plugin.workspace = true
 oxdock-parser.workspace = true
 oxdock-process.workspace = true

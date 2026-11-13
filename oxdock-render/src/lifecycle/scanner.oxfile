@@ -23,27 +23,23 @@ FUNC INGEST($ctx: CTX): CTX {
     RETURN $ctx
 }
 
-# SCAN hook: expand every fragment once into the staging source manifest.
+# Scope key names default to `global` and `ctx`; a config `vars`
+# map overrides either (plus `workspace_pkg` when staging is
+# present), so pipelines that accept the defaults declare nothing.
 FUNC SCAN($ctx: CTX): CTX {
     LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)
-    LET $has_vars: BOOL = HAS_KEY($cfg, "vars")
-    IF $has_vars == false {
-        ECHO "scan: config needs a 'vars' map declaring scope key names"
-        EXIT 1
+    LET $vglobal: STRING = "global"
+    LET $vctx: STRING = "ctx"
+    LET $vars: VARS = {}
+    IF HAS_KEY($cfg, "vars") {
+        $vars = $cfg.vars
     }
-    LET $vars: VARS = $cfg.vars
-    LET $has_global: BOOL = HAS_KEY($vars, "global")
-    IF $has_global == false {
-        ECHO "scan: config 'vars' needs a 'global' scope key name"
-        EXIT 1
+    IF HAS_KEY($vars, "global") {
+        $vglobal = $vars.global
     }
-    LET $vglobal: STRING = $vars.global
-    LET $has_vctx: BOOL = HAS_KEY($vars, "ctx")
-    IF $has_vctx == false {
-        ECHO "scan: config 'vars' needs a 'ctx' scope key name"
-        EXIT 1
+    IF HAS_KEY($vars, "ctx") {
+        $vctx = $vars.ctx
     }
-    LET $vctx: STRING = $vars.ctx
     LET $wspt: STRING = PATH_TYPE("{{ $ctx.staging }}/_workspace.json")
     LET $has_ws: BOOL = $wspt == "file"
     LET $vkey: STRING = ""
@@ -57,7 +53,7 @@ FUNC SCAN($ctx: CTX): CTX {
         $vkey = $cfg.version_key
         LET $has_vpkg: BOOL = HAS_KEY($vars, "workspace_pkg")
         IF $has_vpkg == false {
-            ECHO "scan: staging snapshot present but config 'vars' lacks 'workspace_pkg'"
+            ECHO "scan: staging snapshot present but config lacks 'vars.workspace_pkg'"
             EXIT 1
         }
         $vpkg = $vars.workspace_pkg
@@ -65,8 +61,8 @@ FUNC SCAN($ctx: CTX): CTX {
     # Open user data: globals plus values carry pipeline-defined keys,
     # so no record spelling admits them; scope, manifest, and group
     # maps key on config names plus filesystem stems, dynamic likewise.
-    LET $docs_global: MAP<ANY> = LOAD_JSON($ctx.globals)
-    LET $docs_ctx: MAP<ANY> = LOAD_JSON($ctx.values)
+    LET $global_map: MAP<ANY> = LOAD_JSON($ctx.globals)
+    LET $ctx_map: MAP<ANY> = LOAD_JSON($ctx.values)
     LET $ws_version: STRING = ""
     LET $ws_pkg: MAP<ANY> = {}
     IF $has_ws {
@@ -89,8 +85,8 @@ FUNC SCAN($ctx: CTX): CTX {
                 }
                 LET $raw: STRING = READ "{{ $ctx.wsroot }}/{{ $file_rel }}"
                 LET $scope: MAP<ANY> = {}
-                $scope = MAP_SET($scope, $vglobal, $docs_global)
-                $scope = MAP_SET($scope, $vctx, $docs_ctx)
+                $scope = MAP_SET($scope, $vglobal, $global_map)
+                $scope = MAP_SET($scope, $vctx, $ctx_map)
                 LET $envmap: MAP<ANY> = {}
                 IF $has_ws {
                     $scope = MAP_SET($scope, $vpkg, $ws_pkg)

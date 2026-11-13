@@ -1,13 +1,13 @@
 inputs:
   version:
-    description: Full release tag to install (e.g. {{ $docs_ctx.version_example }}), or `latest` to resolve the newest release. Ignored when source is `local`.
+    description: Full release tag to install (e.g. {{ $ctx.version_example }}), or `latest` to resolve the newest release. Ignored when source is `local`.
     required: false
     default: latest
   binary-name:
-    description: Installed executable stem {{ $docs_ctx.binary_note }}.
+    description: Installed executable stem {{ $ctx.binary_note }}.
     required: false
-    default: {{ $docs_ctx.binary_default }}
+    default: {{ $ctx.binary_default }}
   source:
-    description: {{ $docs_ctx.provenance_kind }} provenance (`release` downloads the installer for `version`; `local` builds the caller's checkout with cargo, {{ $docs_ctx.provenance_detail }}). An empty value behaves as `release`, so callers may pass the {{ $docs_ctx.source_var }} workflow variable and select the provenance once in workflow `env:`; deleting that variable restores the release without touching any call site.
+    description: {{ $ctx.provenance_kind }} provenance (`release` downloads the installer for `version`; `local` builds the caller's checkout with cargo, {{ $ctx.provenance_detail }}). An empty value behaves as `release`, so callers may pass the {{ $ctx.source_var }} workflow variable and select the provenance once in workflow `env:`; deleting that variable restores the release without touching any call site.
     required: false
     default: release

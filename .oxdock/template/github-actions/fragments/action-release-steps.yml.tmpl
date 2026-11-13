@@ -1,20 +1,20 @@
-    - name: {{ $docs_ctx.install_label }}
+    - name: {{ $ctx.install_label }}
       if: $\{{ inputs.source != 'local' && runner.os != 'Windows' }}
       shell: bash
       env:
         VERSION: $\{{ inputs.version }}
-        INSTALL_DIR: $\{{ runner.temp }}/{{ $docs_ctx.install_dir }}
-        OXDOCK_PRODUCT: {{ $docs_ctx.product }}
+        INSTALL_DIR: $\{{ runner.temp }}/{{ $ctx.install_dir }}
+        OXDOCK_PRODUCT: {{ $ctx.product }}
         OXDOCK_BINARY_NAME: $\{{ inputs.binary-name }}
-      run: {{ $docs_global.installer_cmd_sh }}
+      run: {{ $global.installer_cmd_sh }}
 
-    - name: {{ $docs_ctx.install_label }}
+    - name: {{ $ctx.install_label }}
       if: $\{{ inputs.source != 'local' && runner.os == 'Windows' }}
       shell: pwsh
       env:
         VERSION: $\{{ inputs.version }}
-        INSTALL_DIR: $\{{ runner.temp }}/{{ $docs_ctx.install_dir }}
-        OXDOCK_PRODUCT: {{ $docs_ctx.product }}
+        INSTALL_DIR: $\{{ runner.temp }}/{{ $ctx.install_dir }}
+        OXDOCK_PRODUCT: {{ $ctx.product }}
         OXDOCK_BINARY_NAME: $\{{ inputs.binary-name }}
-      run: {{ $docs_global.installer_cmd_ps1 }}
+      run: {{ $global.installer_cmd_ps1 }}
 

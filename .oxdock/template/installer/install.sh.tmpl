@@ -2,18 +2,18 @@
 {{ $files.stubs.installer-doc-header }}
 
 #
-#   {{ $docs_global.installer_cmd_sh }}
+#   {{ $global.installer_cmd_sh }}
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   (export VERSION=v{{ env:CRATE_VERSION }}; {{ $docs_global.installer_cmd_sh }})
+#   (export VERSION=v{{ env:CRATE_VERSION }}; {{ $global.installer_cmd_sh }})
 #
 {{ $files.stubs.installer-doc-env }}
 
 set -euo pipefail
 
-REPO="{{ $docs_global.repo }}"
+REPO="{{ $global.repo }}"
 
 VERSION="${VERSION:-}"
 
@@ -37,7 +37,7 @@ if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
   # No `grep -m1`: every stage consumes the body to EOF, else curl
   # fails writing to the closed pipe under `pipefail` (exit 23).
   # The releases endpoint yields exactly one `tag_name` per page entry.
-  VERSION=$(gh_curl "{{ $docs_global.stub_url_releases_latest }}" | grep '"tag_name"' | cut -d'"' -f4)
+  VERSION=$(gh_curl "{{ $global.stub_url_releases_latest }}" | grep '"tag_name"' | cut -d'"' -f4)
 
 fi
 
@@ -114,9 +114,9 @@ mkdir -p "$VDIR"
 verify_asset() {
   asset="$1"
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$VDIR" && grep "$asset\$" {{ $docs_global.stub_name_checksums }} 2>/dev/null | sha256sum -c - >/dev/null 2>&1)
+    (cd "$VDIR" && grep "$asset\$" {{ $global.stub_name_checksums }} 2>/dev/null | sha256sum -c - >/dev/null 2>&1)
   else
-    (cd "$VDIR" && grep "$asset\$" {{ $docs_global.stub_name_checksums }} 2>/dev/null | shasum -a 256 -c - >/dev/null 2>&1)
+    (cd "$VDIR" && grep "$asset\$" {{ $global.stub_name_checksums }} 2>/dev/null | shasum -a 256 -c - >/dev/null 2>&1)
 
   fi
 }
@@ -156,10 +156,10 @@ if [ "$NEEDS_ENGINE" = true ]; then
   fi
 fi
 
-if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/{{ $docs_global.stub_name_checksums }}" ] && [ -f "$VDIR/{{ $docs_global.stub_name_oxfile }}" ] && [ -f "$VDIR/install.sh" ] && verify_asset "$ASSET" && [ "$engine_cached" = true ]; then
-  echo "{{ $docs_global.stub_msg_using_cached }}" >&2
+if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/{{ $global.stub_name_checksums }}" ] && [ -f "$VDIR/{{ $global.stub_name_oxfile }}" ] && [ -f "$VDIR/install.sh" ] && verify_asset "$ASSET" && [ "$engine_cached" = true ]; then
+  echo "{{ $global.stub_msg_using_cached }}" >&2
 else
-  echo "{{ $docs_global.stub_msg_downloading }}" >&2
+  echo "{{ $global.stub_msg_downloading }}" >&2
   if [ "$NEEDS_ENGINE" = true ]; then
     echo "downloading ephemeral interpreter for $PRODUCT install" >&2
   fi
@@ -168,7 +168,7 @@ else
 
   trap 'rm -rf "$tmp"' EXIT
 
-  base="${OXDOCK_RELEASE_BASE:-{{ $docs_global.stub_url_release_base }}}"
+  base="${OXDOCK_RELEASE_BASE:-{{ $global.stub_url_release_base }}}"
 
   base="${base%/}"
 
@@ -182,16 +182,16 @@ else
     gh_curl "$base/$ENGINE_ASSET" -o "$tmp/$ENGINE_ASSET"
   fi
 
-  gh_curl "$base/{{ $docs_global.stub_name_checksums }}" -o "$tmp/{{ $docs_global.stub_name_checksums }}"
+  gh_curl "$base/{{ $global.stub_name_checksums }}" -o "$tmp/{{ $global.stub_name_checksums }}"
 
   # Installer logic rides with the release bundle. An explicit
   # OXDOCK_OXFILE_URL wins over the bundle (pre-merge testing,
   # mirrors). Fetched here, inside population, so warm runs never
   # touch network.
   if [ -n "${OXDOCK_OXFILE_URL:-}" ]; then
-    gh_curl "$OXDOCK_OXFILE_URL" -o "$tmp/{{ $docs_global.stub_name_oxfile }}"
+    gh_curl "$OXDOCK_OXFILE_URL" -o "$tmp/{{ $global.stub_name_oxfile }}"
   else
-    gh_curl "$base/{{ $docs_global.stub_name_oxfile }}" -o "$tmp/{{ $docs_global.stub_name_oxfile }}"
+    gh_curl "$base/{{ $global.stub_name_oxfile }}" -o "$tmp/{{ $global.stub_name_oxfile }}"
 
   fi
 
@@ -203,17 +203,17 @@ else
 
   gh_curl "$base/install.ps1" -o "$tmp/install.ps1"
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$tmp" && grep "$ASSET\$" {{ $docs_global.stub_name_checksums }} | sha256sum -c - >/dev/null)
+    (cd "$tmp" && grep "$ASSET\$" {{ $global.stub_name_checksums }} | sha256sum -c - >/dev/null)
   else
-    (cd "$tmp" && grep "$ASSET\$" {{ $docs_global.stub_name_checksums }} | shasum -a 256 -c - >/dev/null)
+    (cd "$tmp" && grep "$ASSET\$" {{ $global.stub_name_checksums }} | shasum -a 256 -c - >/dev/null)
 
   fi
 
   if [ "$NEEDS_ENGINE" = true ]; then
     if command -v sha256sum >/dev/null 2>&1; then
-      (cd "$tmp" && grep "$ENGINE_ASSET\$" {{ $docs_global.stub_name_checksums }} | sha256sum -c - >/dev/null)
+      (cd "$tmp" && grep "$ENGINE_ASSET\$" {{ $global.stub_name_checksums }} | sha256sum -c - >/dev/null)
     else
-      (cd "$tmp" && grep "$ENGINE_ASSET\$" {{ $docs_global.stub_name_checksums }} | shasum -a 256 -c - >/dev/null)
+      (cd "$tmp" && grep "$ENGINE_ASSET\$" {{ $global.stub_name_checksums }} | shasum -a 256 -c - >/dev/null)
 
     fi
   fi
@@ -224,9 +224,9 @@ else
     mv "$tmp/$ENGINE_ASSET" "$VDIR/$ENGINE_ASSET"
   fi
 
-  mv "$tmp/{{ $docs_global.stub_name_checksums }}" "$VDIR/{{ $docs_global.stub_name_checksums }}"
+  mv "$tmp/{{ $global.stub_name_checksums }}" "$VDIR/{{ $global.stub_name_checksums }}"
 
-  mv "$tmp/{{ $docs_global.stub_name_oxfile }}" "$VDIR/{{ $docs_global.stub_name_oxfile }}"
+  mv "$tmp/{{ $global.stub_name_oxfile }}" "$VDIR/{{ $global.stub_name_oxfile }}"
 
   mv "$tmp/install.sh" "$VDIR/install.sh"
 
@@ -243,15 +243,15 @@ fi
 # instead of surfacing as a bare parse error downstream.
 oxfile_src="${OXDOCK_OXFILE_URL:-release $VERSION}"
 if command -v sha256sum >/dev/null 2>&1; then
-  oxfile_digest=$(sha256sum "$VDIR/{{ $docs_global.stub_name_oxfile }}" | cut -d' ' -f1)
+  oxfile_digest=$(sha256sum "$VDIR/{{ $global.stub_name_oxfile }}" | cut -d' ' -f1)
 else
-  oxfile_digest=$(shasum -a 256 "$VDIR/{{ $docs_global.stub_name_oxfile }}" | cut -d' ' -f1)
+  oxfile_digest=$(shasum -a 256 "$VDIR/{{ $global.stub_name_oxfile }}" | cut -d' ' -f1)
 
 fi
 
 echo "installer oxfile: $oxfile_src $oxfile_digest" >&2
 
-EXPECTED=$(grep "$ASSET\$" "$VDIR/{{ $docs_global.stub_name_checksums }}" | cut -d' ' -f1)
+EXPECTED=$(grep "$ASSET\$" "$VDIR/{{ $global.stub_name_checksums }}" | cut -d' ' -f1)
 
 # The installer runs from the cache, never the network: population
 # above stored the release's own logic beside its bytes.
@@ -259,7 +259,7 @@ tmp=$(mktemp -d)
 
 trap 'rm -rf "$tmp"' EXIT
 
-cp "$VDIR/{{ $docs_global.stub_name_oxfile }}" "$tmp/{{ $docs_global.stub_name_oxfile }}"
+cp "$VDIR/{{ $global.stub_name_oxfile }}" "$tmp/{{ $global.stub_name_oxfile }}"
 
 # Exact primary, tolerating the Windows `.exe` the tarball carries
 # under Git Bash/MSYS (extensionless probes must not leak into
@@ -320,7 +320,7 @@ OXDOCK_DIR="${INSTALL_DIR:-}"
 case "$(uname -s)" in
   MINGW64*|MSYS*|CYGWIN*)
     if [ -z "$OXDOCK_DIR" ] && [ -n "${LOCALAPPDATA:-}" ]; then
-      OXDOCK_DIR="$LOCALAPPDATA\\{{ $docs_global.windows_default_suffix }}"
+      OXDOCK_DIR="$LOCALAPPDATA\\{{ $global.windows_default_suffix }}"
 
     fi
 
@@ -328,7 +328,7 @@ case "$(uname -s)" in
 
   *)
     if [ -z "$OXDOCK_DIR" ] && [ -n "${HOME:-}" ]; then
-      OXDOCK_DIR="$HOME/{{ $docs_global.unix_default_suffix }}"
+      OXDOCK_DIR="$HOME/{{ $global.unix_default_suffix }}"
 
     fi
 
@@ -380,9 +380,9 @@ fi
 # missing or mismatched.
 if [ -z "${OXDOCK_STUB_ACTIVE:-}" ]; then
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$VDIR" && grep " install.sh$" {{ $docs_global.stub_name_checksums }} | sha256sum -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
+    (cd "$VDIR" && grep " install.sh$" {{ $global.stub_name_checksums }} | sha256sum -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
   else
-    (cd "$VDIR" && grep " install.sh$" {{ $docs_global.stub_name_checksums }} | shasum -a 256 -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
+    (cd "$VDIR" && grep " install.sh$" {{ $global.stub_name_checksums }} | shasum -a 256 -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
 
   fi
 
@@ -425,10 +425,10 @@ fi
   OXDOCK_SKIP_DOWNLOAD=false \
   OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" \
   OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" \
-  "$ENGINE" "$tmp/{{ $docs_global.stub_name_oxfile }}") || {
+  "$ENGINE" "$tmp/{{ $global.stub_name_oxfile }}") || {
   code=$?
 
-  echo "{{ $docs_global.stub_msg_install_failed }}" >&2
+  echo "{{ $global.stub_msg_install_failed }}" >&2
 
   exit "$code"
 
@@ -471,10 +471,10 @@ if [ -z "${OXDOCK_PIPED_SCRIPT:-}" ] && [ -n "${GITHUB_PATH:-}" ] && [ -f "$GITH
     OXDOCK_PRIMARY="$PRIMARY" \
     OXDOCK_EXPECTED_VERSION="$VERSION" \
     OXDOCK_SKIP_DOWNLOAD=true \
-    "$TAIL_BIN" "$tmp/{{ $docs_global.stub_name_oxfile }}") || {
+    "$TAIL_BIN" "$tmp/{{ $global.stub_name_oxfile }}") || {
     code=$?
 
-    echo "{{ $docs_global.stub_msg_install_failed }} (fresh tail)" >&2
+    echo "{{ $global.stub_msg_install_failed }} (fresh tail)" >&2
 
     exit "$code"
 

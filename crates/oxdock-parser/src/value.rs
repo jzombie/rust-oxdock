@@ -70,7 +70,7 @@ pub fn type_anchor(name: &str) -> String {
 }
 
 /// Canonical descriptors of the twelve startup types, in a fixed order, for
-/// seeding per-state name directories and static rendering (docs-gen).
+/// seeding per-state name directories and static rendering (oxdock-render).
 /// Each entry is the payload struct's own singleton: no table, no lock.
 pub fn startup_descriptors() -> [(&'static str, &'static TypeDescriptor); 12] {
     [

@@ -909,7 +909,7 @@ pub fn builtin_function_names() -> HashSet<String> {
 }
 
 /// Metadata of every builtin function, sorted by name, for static
-/// rendering (docs-gen). Same single source as `builtin_function_names`:
+/// rendering (oxdock-render). Same single source as `builtin_function_names`:
 /// the `#[oxdock_func]` annotations, never a parallel list.
 pub fn builtin_function_metas() -> Vec<FuncMeta> {
     FunctionRegistry::<DefaultProcessManager>::with_builtins().native_metas()

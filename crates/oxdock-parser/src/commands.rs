@@ -626,7 +626,7 @@ macro_rules! declare_commands {
             ];
             // Structural statements are registered separately (see
             // all_structural_metadata) but documented through the same
-            // pipeline so docs-gen never drifts from the parser.
+            // pipeline so oxdock-render never drifts from the parser.
             out.extend(all_structural_metadata());
             out
         }
@@ -2512,7 +2512,7 @@ declare_commands! {
 // rules rather than `declare_commands!`, so their reference docs live here
 // instead of `crates/docs-gen/src/command_ref.rs` : adding a structural
 // StepKind without registering it here fails `structural_metadata_covers_all_structural_kinds`
-// below, and docs-gen renders these entries dynamically (no hardcoded copy).
+// below, and oxdock-render renders these entries dynamically (no hardcoded copy).
 pub fn all_structural_metadata() -> Vec<CommandMeta> {
     vec![
         CommandMeta {

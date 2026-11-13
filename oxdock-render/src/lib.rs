@@ -137,7 +137,7 @@ pub fn run_with_plugins(
     // Post hooks run after every target verifies: a failing hook
     // fails the run even though the artifacts already wrote.
     run_hooks(&engine, &raw_fs, &root, &hooks.post, config::HOOK_POST)?;
-    eprintln!("docs rendered");
+    eprintln!("render complete");
     Ok(())
 }
 

@@ -11,10 +11,10 @@
 //! type, the latter nothing.)
 //!
 //! Rendered reference: `ENV_CONTRACTS.md` at the repository root
-//! (generated from the live seed tables by `cargo run -p docs-gen`).
+//! (generated from the live seed tables by `cargo run -p oxdock-render`).
 
 //! Rendered reference: `ENV_CONTRACTS.md` at the repository root
-//! (generated from the live seed tables by `cargo run -p docs-gen`).
+//! (generated from the live seed tables by `cargo run -p oxdock-render`).
 
 /// Defines string constants and their module inventory in one place, so
 /// contract rendering cannot miss a name: adding a constant without
