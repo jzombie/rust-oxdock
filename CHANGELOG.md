@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Changed
 
+- String words share their buffer: cloning a `STRING` bumps a refcount in `O(1)` like `LIST` and `MAP` instead of copying the bytes. No script-visible change; variable reads and read-only builtins no longer pay a per-read allocation.
 - [breaking] Scripts are affected: `STD::TEXT_LENGTH` is removed with no alias; use `STD::LEN`, which keeps the exact string semantics (Unicode scalar count) and additionally accepts `LIST` and `MAP`. Callers pass the value straight through (`LEN($pass)`); no other change is needed.
 - [breaking] Scripts are affected: relative paths resolve against the ambient working directory in main scripts and imported modules. Module directory anchoring (`effective_cwd`) and cwd reset on module entry are removed; scope save and restore round trip `WorkspaceSelection` instead, and `IMPORT` still resolves against the importing file. Scripts that relied on module relative resolution landing under the module directory now resolve under the ambient cwd. The `IMPORT` reference documents the ambient semantics.
 - `oxdock-render` CLI fails closed on unknown input: unknown `--` flags, unknown short clusters, and positional arguments fail with the usage text instead of silently rendering with defaults, so a typo like `--confg` never means run anyway. A trailing `--root`/`--config` with no value keeps the lenient read (no override, discovery applies).
