@@ -65,9 +65,9 @@
 //!   structural pairs end mid-line and trailing elements form
 //!   following steps (guards attach to the first only); the `WITH_IO`
 //!   pending wait holds bare brackets across separators.
-//! - Block headers: `IF`/`FOR`/`WHILE`
-//!   conditions miss to generic on expression failure (inline-block
-//!   failures propagate); `FUNC` paren-group params parse with `gap_nl`
+//! - Block headers: `IF`/`FOR`/`WHILE` conditions miss to generic
+//!   on unclassified expression failure (classified callee failures
+//!   and inline-block failures propagate); `FUNC` paren-group params parse with `gap_nl`
 //!   discipline (shared helper, like call args); `REMOTE` targets/blocks/bindings; `TYPE` maximal
 //!   shape match; `IMPORT`/`EXPORT` lists. Shared
 //!   validators are truly shared (`validate_remote_copy_placement`,
@@ -4040,9 +4040,10 @@ fn parse_type_field(toks: &[Tok], pos: usize) -> Option<usize> {
 /// opportunistic `ELSE` chain (a malformed `ELSE` stays for the
 /// element loop, which fails it in lowering exactly like the
 /// grammar). `None` on shape miss (missing/joint-agnostic block or
-/// bad condition: generic fails it); expression failures
-/// with an inline-block failure propagate (blocks lower here, so
-/// their errors surface directly).
+/// unclassified bad condition: generic fails it); classified
+/// expression failures (unknown/ambiguous callees) and inline-block
+/// failures propagate (blocks lower here, so their errors surface
+/// directly).
 fn parse_if_at(
     toks: &[Tok],
     pos: usize,
@@ -4056,6 +4057,10 @@ fn parse_if_at(
     let cond = match parse_expr_checked(&mut cur, ctx) {
         Ok(expr) => expr,
         Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+        // Classified failures (unknown/ambiguous callees) name the
+        // culprit instead of missing to the generic IF hint: the head
+        // is unambiguously `IF`, so there is no alternative parse.
+        Err(e) if e.kind.is_some() => return Err(e),
         Err(_) => return Ok(None),
     };
     let cond_end = pos + 1 + lead.pos + cur.pos;
@@ -4104,6 +4109,10 @@ fn parse_if_at(
             let econd = match parse_expr_checked(&mut ecur, ctx) {
                 Ok(expr) => expr,
                 Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+                // Same classified-error rule as the `IF` head above:
+                // an `ELSE IF` with a resolvable-but-unknown callee
+                // names it instead of silently dropping the branch.
+                Err(e) if e.kind.is_some() => return Err(e),
                 Err(_) => break,
             };
             let ebrace = p + 2 + ecur.pos;
@@ -4253,6 +4262,9 @@ fn parse_for_at(
     let in_expr = match parse_expr_checked(&mut ecur, ctx) {
         Ok(expr) => expr,
         Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+        // Classified failures name the callee: `FOR ... IN` is
+        // committed once the header matched this far.
+        Err(e) if e.kind.is_some() => return Err(e),
         Err(_) => return Ok(None),
     };
     p += ecur.pos;
@@ -4342,9 +4354,10 @@ fn parse_for_at(
 }
 
 /// Single (non-block) `WHILE`: condition plus block. `None` on
-/// shape miss (missing block: generic fails it);
-/// expression failures from inline blocks propagate, others miss
-/// (generic fails them like a committed `instruction` would).
+/// shape miss (missing block: generic fails it); classified
+/// expression failures and inline-block failures propagate, other
+/// expression failures miss (generic fails them like a committed
+/// `instruction` would).
 /// No leading gap-skip: `WHILE` takes `sep`, so a joint follower
 /// never reaches here with a valid shape... (misses fall through
 /// the same way regardless).
@@ -4358,6 +4371,9 @@ fn parse_while_single(
     let cond = match parse_expr_checked(&mut cur, ctx) {
         Ok(expr) => expr,
         Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+        // Same rule as `IF`: the head is unambiguous, so classified
+        // failures name the culprit instead of the generic hint.
+        Err(e) if e.kind.is_some() => return Err(e),
         Err(_) => return Ok(None),
     };
     let brace = pos + 1 + cur.pos;
@@ -9293,6 +9309,45 @@ mod tests {
         let toks = crate::tok::lex_str(text).expect("string lex must succeed");
         let new = parse_tokens_with_ctx(&toks, &ctx).expect("token path parses");
         assert_eq!(new, old, "token/string-lex mismatch for {text:?}");
+    }
+
+    #[test]
+    fn block_conditions_name_unknown_callees() {
+        // Regression: an unknown callee in a block header condition
+        // used to miss to the generic `IF needs a condition and a
+        // block` hint. Classified resolution failures now propagate
+        // and name the culprit on all four speculative headers.
+        use crate::ast::{ModuleFuncs, ModuleTable};
+        use std::collections::{HashMap, HashSet};
+        let table = || ModuleTable {
+            modules: HashMap::from([(
+                crate::constants::STD_MODULE_NAME.to_string(),
+                Some(ModuleFuncs {
+                    func_names: HashSet::from(["LEN".to_string()]),
+                }),
+            )]),
+        };
+        fn lower_fn(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
+            test_lower_mock::lower(name, args)
+        }
+        fn parse(text: &str, table: ModuleTable) -> ParseResult<Vec<crate::Step>> {
+            crate::parse_script_with_modules(text, lower_fn, HashSet::new(), table)
+        }
+        for text in [
+            "IMPORT [STD]\nIF NOPE($x) == 0 {\nECHO hi\n}\n",
+            "IMPORT [STD]\nIF LEN($x) == 0 {\nECHO hi\n} ELSE IF NOPE($x) == 1 {\nECHO yo\n}\n",
+            "IMPORT [STD]\nWHILE NOPE($x) > 0 {\nECHO hi\n}\n",
+            "IMPORT [STD]\nFOR $i: STRING IN NOPE($x) {\nECHO $i\n}\n",
+        ] {
+            let err = parse(text, table()).expect_err("unknown callee must fail");
+            assert!(
+                err.to_string().contains("unknown function `NOPE`"),
+                "names the culprit: {err}"
+            );
+        }
+        // Unclassified shape misses still miss (the exact generic
+        // hint comes from the real dispatcher, which the mock lacks).
+        parse("IF {\nECHO hi\n}\n", table()).expect_err("empty condition must still fail");
     }
 
     #[test]
