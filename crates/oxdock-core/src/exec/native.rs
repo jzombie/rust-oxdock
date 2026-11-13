@@ -223,9 +223,11 @@ impl<P: ProcessManager> HostRegistration<P> {
 /// One user-defined function body (`FUNC NAME($p: TYPE, ...): RET { ... }`).
 /// Param and return types resolve to tags at definition time, where the type
 /// directory is in scope; the registry never holds raw type strings.
+/// The flag marks trailing `?` params the caller may omit (filled with
+/// [`optional_zero_value`] at call time).
 #[derive(Debug, Clone)]
 pub(super) struct FuncDefData {
-    pub(super) params: Vec<(String, TypeTag)>,
+    pub(super) params: Vec<(String, TypeTag, bool)>,
     pub(super) return_type: TypeTag,
     pub(super) return_spelling: String,
     pub(super) is_async: bool,
@@ -235,6 +237,30 @@ pub(super) struct FuncDefData {
     /// lexical frames miss. `None` for entry/REPL definitions, which
     /// stay params-only.
     pub(super) module: Option<String>,
+}
+
+/// Zero value for an omitted trailing optional script param, by
+/// resolved tag. Scalars take falsy empties and collections empty
+/// shapes (mirroring the host optional-`MAP` fill); records qualify
+/// only when every field is optional. Handles, pipes, custom types,
+/// unions, and the remaining words have no zero: omitting those
+/// fails at definition, so the caller passes explicitly.
+pub fn optional_zero_value(tag: &TypeTag) -> Result<Value> {
+    match tag {
+        TypeTag::Bool => Ok(Value::bool(false)),
+        TypeTag::String | TypeTag::Any => Ok(Value::string(String::new())),
+        TypeTag::Int => Ok(Value::int(0)),
+        TypeTag::Float => Ok(Value::float(0.0)),
+        TypeTag::List | TypeTag::ListOf(_) => Ok(Value::list(Vec::new())),
+        TypeTag::Map | TypeTag::MapOf(_) => Ok(Value::map(BTreeMap::new())),
+        TypeTag::Record(fields) if fields.iter().all(|field| field.optional) => {
+            Ok(Value::map(BTreeMap::new()))
+        }
+        other => anyhow::bail!(
+            "no zero value for {}; omit the `?` or pass the argument explicitly",
+            oxdock_parser::render_structural(other)
+        ),
+    }
 }
 
 /// Executable body behind one registry entry: an interpreted script, a
@@ -573,7 +599,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     pub(super) fn define_script(
         &mut self,
         name: &str,
-        params: &[(String, TypeTag)],
+        params: &[(String, TypeTag, bool)],
         return_type: TypeTag,
         return_spelling: &str,
         is_async: bool,
@@ -613,17 +639,26 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     params: Some(
                         params
                             .iter()
-                            .map(|(name, param_type)| FuncParam {
-                                name: name.clone(),
-                                param_type: Some(param_type.clone()),
-                                allowed: None,
-                                // Script `FUNC` params carry no prose:
-                                // declarations have no doc syntax.
-                                docs: "",
-                                options: None,
-                                optional: false,
+                            .map(|(pname, param_type, optional)| {
+                                if *optional {
+                                    optional_zero_value(param_type).map(|_| ()).map_err(|err| {
+                                        anyhow::anyhow!(
+                                            "function `{name}` optional param `${pname}`: {err:#}"
+                                        )
+                                    })?;
+                                }
+                                Ok(FuncParam {
+                                    name: pname.clone(),
+                                    param_type: Some(param_type.clone()),
+                                    allowed: None,
+                                    // Script `FUNC` params carry no prose:
+                                    // declarations have no doc syntax.
+                                    docs: "",
+                                    options: None,
+                                    optional: *optional,
+                                })
                             })
-                            .collect(),
+                            .collect::<Result<_>>()?,
                     ),
                     returns: Some(return_type.clone()),
                     rpn: false,
@@ -663,7 +698,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         depth: usize,
         alias: &str,
         name: &str,
-        params: &[(String, TypeTag)],
+        params: &[(String, TypeTag, bool)],
         return_type: TypeTag,
         return_spelling: &str,
         is_async: bool,
@@ -711,15 +746,24 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     params: Some(
                         params
                             .iter()
-                            .map(|(name, param_type)| FuncParam {
-                                name: name.clone(),
-                                param_type: Some(param_type.clone()),
-                                allowed: None,
-                                docs: "",
-                                options: None,
-                                optional: false,
+                            .map(|(pname, param_type, optional)| {
+                                if *optional {
+                                    optional_zero_value(param_type).map(|_| ()).map_err(|err| {
+                                        anyhow::anyhow!(
+                                            "function `{name}` optional param `${pname}`: {err:#}"
+                                        )
+                                    })?;
+                                }
+                                Ok(FuncParam {
+                                    name: pname.clone(),
+                                    param_type: Some(param_type.clone()),
+                                    allowed: None,
+                                    docs: "",
+                                    options: None,
+                                    optional: *optional,
+                                })
                             })
-                            .collect(),
+                            .collect::<Result<_>>()?,
                     ),
                     returns: Some(return_type.clone()),
                     rpn: false,

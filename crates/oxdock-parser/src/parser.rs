@@ -4430,6 +4430,7 @@ fn parse_func_at(
     };
     p += 1;
     let mut params = Vec::new();
+    let mut seen_optional = false;
     {
         let mut pcur = Cursor::expr(&paren_inner, stmt);
         pcur.skip_gap_nl();
@@ -4437,30 +4438,53 @@ fn parse_func_at(
             loop {
                 let base = pcur.pos;
                 let Some((pname, _)) = peek_dollar_var(&paren_inner, base) else {
-                    return Ok(None);
+                    return Err(fail(format!(
+                        "FUNC {def_name} params must be `$name: TYPE` separated by commas"
+                    )));
                 };
                 pcur.pos = base + 2;
                 pcur.skip_gap_nl();
+                // Optional params carry `?` before the colon
+                // (`$flag?: BOOL`); all params are otherwise required.
+                let optional = pcur.eat_punct('?');
+                pcur.skip_gap_nl();
                 if !pcur.eat_punct(':') {
-                    return Ok(None);
+                    return Err(fail(format!(
+                        "FUNC {def_name} param `${pname}` needs `: TYPE` after the name"
+                    )));
                 }
                 pcur.skip_gap_nl();
                 let tstart = pcur.pos;
                 let Some(tend) = parse_type_shape(&paren_inner, tstart) else {
-                    return Ok(None);
+                    let got = match paren_inner.get(tstart).map(|tok| &tok.kind) {
+                        Some(TokKind::Word(word)) => format!("; got `{word}`"),
+                        _ => String::new(),
+                    };
+                    return Err(fail(format!(
+                        "FUNC {def_name} param `${pname}` needs an uppercase type after `:` (e.g. STRING, INT, BOOL){got}"
+                    )));
                 };
                 // Post-match the span holds words/puncts only, so the
                 // shared renderer cannot fail; stay failed regardless.
                 let ptype =
                     render_type_region(&paren_inner[tstart..tend], stmt).unwrap_or_default();
-                params.push((pname, ptype));
+                if optional {
+                    seen_optional = true;
+                } else if seen_optional {
+                    return Err(fail(format!(
+                        "FUNC {def_name} optional `?` params must be trailing: `${pname}` follows an optional param"
+                    )));
+                }
+                params.push((pname, ptype, optional));
                 pcur.pos = tend;
                 pcur.skip_gap_nl();
                 if pcur.eat_punct(',') {
                     pcur.skip_gap_nl();
                     // Trailing comma misses (a param must follow).
                     if pcur.done() {
-                        return Ok(None);
+                        return Err(fail(format!(
+                            "FUNC {def_name} params must not end with a trailing comma"
+                        )));
                     }
                     continue;
                 }
@@ -4469,7 +4493,9 @@ fn parse_func_at(
             // Trailing junk (including newlines) misses to generic.
             pcur.skip_gap_nl();
             if !pcur.done() {
-                return Ok(None);
+                return Err(fail(format!(
+                    "FUNC {def_name} params must be `$name: TYPE` separated by commas"
+                )));
             }
         }
     }
@@ -4531,7 +4557,7 @@ fn parse_func_at(
         )));
     }
     let mut seen = HashSet::new();
-    for (pname, _) in &params {
+    for (pname, _, _) in &params {
         if !seen.insert(pname.clone()) {
             return Err(fail(format!(
                 "FUNC {def_name} declares duplicate parameter ${pname}"

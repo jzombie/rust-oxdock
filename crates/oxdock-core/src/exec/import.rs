@@ -375,11 +375,11 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 bail!("IMPORT `{path}` has no such function `{name}`");
             };
             let mut resolved_params = Vec::with_capacity(def.0.len());
-            for (pname, ptype) in &def.0 {
+            for (pname, ptype, optional) in &def.0 {
                 let tag = cx.state.resolve_tag(ptype)?;
                 cx.state
                     .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
-                resolved_params.push((pname.clone(), tag));
+                resolved_params.push((pname.clone(), tag, *optional));
             }
             let return_tag = cx.state.resolve_tag(&def.1)?;
             cx.state
@@ -684,13 +684,13 @@ pub(crate) fn import_file<P: ProcessManager>(
                 let qualified = oxdock_parser::qualify(alias, name);
                 if cx.state.functions.get(&qualified).is_none() {
                     let mut resolved_params = Vec::with_capacity(params.len());
-                    for (pname, ptype) in params {
+                    for (pname, ptype, optional) in params {
                         let tag = cx.state.resolve_tag(ptype)?;
                         cx.state.check_declaration_tag(
                             &format!("function `{name}` param `${pname}`"),
                             &tag,
                         )?;
-                        resolved_params.push((pname.clone(), tag));
+                        resolved_params.push((pname.clone(), tag, *optional));
                     }
                     let return_tag = cx.state.resolve_tag(return_type)?;
                     cx.state

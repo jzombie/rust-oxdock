@@ -826,7 +826,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         }),
         ("FUZZ[A-Z0-9_]*", arb_body()).prop_map(|(name, body)| StepKind::FuncDef {
             name,
-            params: vec![("coverage".to_string(), "STRING".to_string())],
+            params: vec![("coverage".to_string(), "STRING".to_string(), false)],
             return_type: "STRING".to_string(),
             is_async: false,
             body,
@@ -1917,7 +1917,7 @@ proptest! {
                 } => {
                     assert_eq!(name, "FOO", "name mismatch: {s}");
                     assert_eq!(got.len(), types.len(), "param count mismatch: {s}");
-                    for (i, ((got_name, got_ty), want_ty)) in
+                    for (i, ((got_name, got_ty, _), want_ty)) in
                         got.iter().zip(types.iter()).enumerate()
                     {
                         assert_eq!(got_name, &format!("p{i}"), "param name mismatch: {s}");
@@ -2235,7 +2235,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         },
         StepKind::FuncDef {
             name: "COVERAGEFUNC".to_string(),
-            params: vec![("coverage".to_string(), "STRING".to_string())],
+            params: vec![("coverage".to_string(), "STRING".to_string(), false)],
             return_type: "STRING".to_string(),
             is_async: false,
             body: vec![Step {

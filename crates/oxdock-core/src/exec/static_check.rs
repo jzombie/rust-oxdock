@@ -83,7 +83,7 @@ use oxdock_process::ProcessManager;
 use super::{
     ExecState, FuncMeta, FuncParam,
     import::{ClosureFile, ClosureSite},
-    required_arity,
+    optional_zero_value, required_arity,
 };
 
 /// Maximum expression nesting and nested-body descent. Parser-bounded
@@ -114,7 +114,7 @@ enum StaticTy {
 /// decides whose shared store the body resolves against.
 #[derive(Clone)]
 struct FuncInfo {
-    params: Vec<(String, TypeTag)>,
+    params: Vec<(String, TypeTag, bool)>,
     declared: TypeTag,
     is_async: bool,
     body: Vec<Step>,
@@ -927,7 +927,7 @@ fn loc(at: Option<&str>) -> String {
 /// Resolved callee for one call: parameter shapes (absent when the
 /// entry declares none), return type, and host closed-set metadata.
 struct Callee {
-    params: Option<Vec<(String, TypeTag)>>,
+    params: Option<Vec<(String, TypeTag, bool)>>,
     ret: StaticTy,
     host_params: Option<Vec<FuncParam>>,
 }
@@ -966,9 +966,9 @@ fn file_env_union(steps: &[Step]) -> HashSet<String> {
 }
 
 impl Env {
-    fn one_frame(bindings: Vec<(String, TypeTag)>) -> Self {
+    fn one_frame(bindings: Vec<(String, TypeTag, bool)>) -> Self {
         let mut top = HashMap::new();
-        for (name, tag) in bindings {
+        for (name, tag, _) in bindings {
             top.insert(name, vec![Binding { tag, guard: None }]);
         }
         Self {
@@ -1291,21 +1291,28 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         &mut self,
         name: &str,
         keys: Vec<String>,
-        params: &[(String, String)],
+        params: &[(String, String, bool)],
         return_type: &str,
         is_async: bool,
         body: &[Step],
         module: Option<&str>,
     ) -> Result<()> {
         let mut resolved = Vec::with_capacity(params.len());
-        for (pname, ptype) in params {
+        for (pname, ptype, optional) in params {
             let tag = self
                 .exec
                 .resolve_tag(ptype)
                 .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
             self.exec
                 .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
-            resolved.push((clean_var(pname), tag));
+            if *optional {
+                super::optional_zero_value(&tag)
+                    .map(|_| ())
+                    .map_err(|err| {
+                        anyhow::anyhow!("function `{name}` optional param `${pname}`: {err:#}")
+                    })?;
+            }
+            resolved.push((clean_var(pname), tag, *optional));
         }
         let declared = self
             .exec
@@ -1973,7 +1980,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 ..
             } => {
                 let mut resolved = Vec::with_capacity(params.len());
-                for (pname, ptype) in params {
+                for (pname, ptype, optional) in params {
                     let tag = self
                         .exec
                         .resolve_tag(ptype)
@@ -1982,7 +1989,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         &format!("function `{name}` param `${pname}`"),
                         &tag,
                     )?;
-                    resolved.push((clean_var(pname), tag));
+                    if *optional {
+                        optional_zero_value(&tag).map(|_| ()).map_err(|err| {
+                            anyhow::anyhow!("function `{name}` optional param `${pname}`: {err:#}")
+                        })?;
+                    }
+                    resolved.push((clean_var(pname), tag, *optional));
                 }
                 let declared = self
                     .exec
@@ -2842,12 +2854,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         (
                             param.name.clone(),
                             param.param_type.clone().unwrap_or(TypeTag::Any),
+                            param.optional,
                         )
                     })
                     .collect()
             });
             // NOTE: host `allowed` sets are checked from the meta
-            // below; the tag triple here carries only shape.
+            // below; the triple here carries shape plus the optional
+            // flag for the arity range.
             return Ok(Callee {
                 params,
                 ret,
@@ -2919,7 +2933,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let (required, total) = match callee.host_params.as_deref() {
             Some(host) => (required_arity(host), host.len()),
             None => match callee.params.as_deref() {
-                Some(shape) => (shape.len(), shape.len()),
+                Some(shape) => (Self::script_required(shape), shape.len()),
                 None => (0, usize::MAX),
             },
         };
@@ -2983,7 +2997,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let (required, total) = match host_params.as_deref() {
             Some(host) => (required_arity(host), host.len()),
             None => match params.as_deref() {
-                Some(shape) => (shape.len(), shape.len()),
+                Some(shape) => (Self::script_required(shape), shape.len()),
                 // INSPECT-like entries skip arity: the dedicated AST
                 // path owns that call shape.
                 None => (0, usize::MAX),
@@ -3010,7 +3024,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             let Some(expected) = params.as_deref().and_then(|list| list.get(position)) else {
                 continue;
             };
-            let (pname, ptype) = expected;
+            let (pname, ptype, _) = expected;
             let pat = format!("{}{display}() argument `${pname}`", loc(at));
             self.check_arg(ptype, (*actual).clone(), &pat)?;
             if let Some(host_list) = host_params.as_deref()
@@ -3383,8 +3397,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
     }
 
+    /// Required script params: total minus trailing `?` (the parser
+    /// enforces trailing-only, so a suffix count is exact). Mirrors
+    /// [`required_arity`] for host metadata.
+    fn script_required(params: &[(String, TypeTag, bool)]) -> usize {
+        params.len() - params.iter().rev().take_while(|entry| entry.2).count()
+    }
+
     /// Ordering (`<`, `<=`, `>`, `>=`) operand rule: numerics pass,
-    /// `ANY` defers to runtime, concrete non-numerics are a static
     /// Type Error mirroring `apply_compare`.
     /// RPN stack simulation over inferred operand tags. Operators
     /// apply the same rules as their AST twins; stack underflow or a

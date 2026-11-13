@@ -2293,6 +2293,14 @@ with a structural guarantee: the declaration must be
 
 Params bind by position, converting each argument to its
 declared parameter type before the body runs.
+A trailing `$name?: TYPE` marks an optional param: callers
+may omit trailing optionals, which fill with zero values
+(`false`, `""`, `0`, `0.0`, `[]`, `{}`) before the body
+binds. A required param after an optional one fails at
+definition, and an optional param with no zero value
+(records with required fields, unions, handles, custom
+types) fails at definition naming the fix: drop the `?`
+or pass the argument explicitly.
 Bodies run in a fresh variable scope; LETs inside do not leak. A nested
 FUNC definition is scoped to its block and reverts on exit. Names share
 one namespace with native and host-registered functions, which a FUNC
@@ -2329,6 +2337,31 @@ ASSERT_EQ $res "ada"
 
 # Statement form: parens stay, the value drops.
 GREET("bex")
+```
+
+**Example: optional params fill zero values**
+
+```oxdock
+IMPORT [STD]
+# Trailing `?` params may be omitted; they fill with
+# zero values (false, empty map) before the body binds,
+# so plain IF works on an omitted BOOL.
+FUNC ENSURE($check?: BOOL, $opts?: MAP<mode?: STRING>): STRING {
+    IF $check {
+        RETURN "checked"
+    }
+    IF HAS_KEY($opts, "mode") {
+        RETURN "opts"
+    }
+    RETURN "plain"
+}
+LET $a: STRING = ENSURE()
+ASSERT_EQ $a "plain"
+LET $b: STRING = ENSURE(true)
+ASSERT_EQ $b "checked"
+LET $opts: MAP<mode?: STRING> = PARSE_JSON("{\"mode\": \"fast\"}")
+LET $c: STRING = ENSURE(false, $opts)
+ASSERT_EQ $c "opts"
 ```
 
 **Example: async func is a handle guarantee**

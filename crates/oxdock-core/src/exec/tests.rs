@@ -1299,6 +1299,119 @@ fn bool_converter_is_strict() {
 }
 
 #[test]
+fn script_optional_params_fill_zero_values() {
+    // Omitted trailing `?` params fill before the body binds, so
+    // plain `IF $flag` works on an omitted BOOL and MAP lookups
+    // see an empty map. Every zeroable type fills in one script.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        FUNC PICK($flag?: BOOL, $s?: STRING, $n?: INT, $f?: FLOAT, $l?: LIST<ANY>, $m?: MAP<ANY>): STRING {
+            IF $flag {
+                RETURN "flag"
+            }
+            IF $s != "" {
+                RETURN "s"
+            }
+            IF $n != 0 {
+                RETURN "n"
+            }
+            IF $f != 0.0 {
+                RETURN "f"
+            }
+            IF LEN($l) != 0 {
+                RETURN "l"
+            }
+            IF HAS_KEY($m, "k") {
+                RETURN "key"
+            }
+            RETURN "plain"
+        }
+        LET $parsed: MAP<ANY> = PARSE_JSON("{\"k\": 1}")
+        LET $a: STRING = PICK()
+        LET $b: STRING = PICK(true)
+        LET $c: STRING = PICK(false, "", 0, 0.0, [], $parsed)
+        FUNC PICK_N($n?: INT): INT {
+            RETURN $n
+        }
+        LET $n: INT = PICK_N()
+    "#})
+    .expect("parses");
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("optionals evaluate");
+    assert_eq!(
+        bindings.get("a").and_then(|v| v.as_str()),
+        Some("plain"),
+        "all omitted fill zeros: {bindings:?}"
+    );
+    assert_eq!(
+        bindings.get("b").and_then(|v| v.as_str()),
+        Some("flag"),
+        "passed BOOL: {bindings:?}"
+    );
+    assert_eq!(
+        bindings.get("c").and_then(|v| v.as_str()),
+        Some("key"),
+        "zero scalars plus passed map: {bindings:?}"
+    );
+    assert_eq!(
+        bindings.get("n").and_then(|v| v.as_i64()),
+        Some(0),
+        "omitted INT fills zero: {bindings:?}"
+    );
+}
+
+#[test]
+fn script_optional_params_check_arity_as_range() {
+    // Static and runtime gates agree: below the required count and
+    // above the total both fail naming the range.
+    for script in [
+        "FUNC F($a: INT, $b?: STRING): STRING {\n  RETURN \"x\"\n}\nF()\n",
+        "FUNC F($a: INT, $b?: STRING): STRING {\n  RETURN \"x\"\n}\nF(1, \"a\", \"extra\")\n",
+    ] {
+        let steps = crate::parse_script(script).expect("parses");
+        let err = run_expect_err(
+            Box::new(MockFs::new()),
+            &steps,
+            MockProcessManager::default(),
+        );
+        assert!(
+            format!("{err:#}").contains("expects 1 to 2 argument(s)"),
+            "{script}: unexpected error: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn script_optional_param_without_zero_value_fails_at_definition() {
+    // Records with required fields have no zero: the definition
+    // fails naming the fix instead of failing at first omission.
+    let steps = crate::parse_script(indoc! {r#"
+        FUNC F($r?: MAP<name: STRING>): STRING {
+            RETURN "x"
+        }
+    "#})
+    .expect("parses");
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:#}").contains("no zero value"),
+        "unexpected error: {err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains("$r"),
+        "names the param: {err:#}"
+    );
+}
+
+#[test]
 fn inline_call_comparison_checks_args_in_order() {
     // Static RPN checking passes call arguments left-to-right, exactly
     // like runtime evaluation: reversing them made `HAS_KEY($map, $key)`

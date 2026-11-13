@@ -2489,7 +2489,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
 pub(crate) fn define_func<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     name: &str,
-    params: &[(String, String)],
+    params: &[(String, String, bool)],
     return_type: &str,
     is_async: bool,
     body: &[Step],
@@ -2498,11 +2498,18 @@ pub(crate) fn define_func<P: ProcessManager>(
     // registry only ever holds tags. Unknown names fail here naming
     // the function and every known type and schema.
     let mut resolved = Vec::with_capacity(params.len());
-    for (pname, ptype) in params {
+    for (pname, ptype, optional) in params {
         let tag = cx.state.resolve_tag(ptype)?;
         cx.state
             .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
-        resolved.push((pname.clone(), tag));
+        if *optional {
+            super::optional_zero_value(&tag)
+                .map(|_| ())
+                .map_err(|err| {
+                    anyhow::anyhow!("function `{name}` optional param `${pname}`: {err:#}")
+                })?;
+        }
+        resolved.push((pname.clone(), tag, *optional));
     }
     let return_tag = cx.state.resolve_tag(return_type)?;
     cx.state
@@ -2571,6 +2578,9 @@ pub(crate) fn call_func_value<P: ProcessManager>(
         }
     }
     // 4. Argument evaluation: only reachable for a valid invocation.
+    // Omitted trailing optionals fill with zero values first, so
+    // binding below always sees a full argument list. The arity gate
+    // above guarantees every missing position is optional.
     let mut arg_vals = Vec::with_capacity(args.len());
     for arg in args {
         arg_vals.push(super::args::evaluate_expr(arg, cx)?);
@@ -2645,8 +2655,26 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                     inherit_env(cx, &inherit_names)?;
                 }
             }
+            // Omitted trailing optionals fill with zero values before
+            // the body binds: the arity gate above guarantees every
+            // missing position is optional, and registration rejects
+            // unzeroable optionals, so the fill cannot fail here.
+            for (pname, ptype, optional) in def.params.iter().skip(arg_vals.len()) {
+                if !optional {
+                    bail!(
+                        "internal error: missing non-optional param `${pname}` in {}()",
+                        super::base_name(name)
+                    );
+                }
+                arg_vals.push(super::optional_zero_value(ptype).with_context(|| {
+                    format!(
+                        "function `{}` optional param `${pname}` has no zero value",
+                        super::base_name(name)
+                    )
+                })?);
+            }
             let outcome: Result<Value> = (|| {
-                for ((pname, ptype), pval) in def.params.iter().zip(arg_vals) {
+                for ((pname, ptype, _), pval) in def.params.iter().zip(arg_vals) {
                     cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
                 }
                 let flow = super::steps::execute_steps(

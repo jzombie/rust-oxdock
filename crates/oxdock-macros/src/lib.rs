@@ -1505,9 +1505,9 @@ fn emit_stepkind(
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             let ps: Vec<_> = params
                 .iter()
-                .map(|(p, t)| {
+                .map(|(p, t, optional)| {
                     let tt = emit_typekind(t);
-                    quote! { (#p.to_string(), #tt) }
+                    quote! { (#p.to_string(), #tt, #optional) }
                 })
                 .collect();
             let docs = match docs {

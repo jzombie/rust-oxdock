@@ -1197,7 +1197,7 @@ declare_commands! {
         IsolatedInheritEnv { keys: Vec<String> },
         RemoteBlock { target: String, vars: Vec<String>, env: Vec<String>, body: Vec<Step> },
         RunExec { argv: Vec<Arg> },
-        FuncDef { name: String, params: Vec<(String, String)>, return_type: String, is_async: bool, body: Vec<Step>, docs: Option<(String, String)> },
+        FuncDef { name: String, params: Vec<(String, String, bool)>, return_type: String, is_async: bool, body: Vec<Step>, docs: Option<(String, String)> },
         Call { name: String, args: Vec<Expr> },
         Return { expr: Box<Expr>, is_bare: bool },
         ImportFile { path: String, alias: String },
@@ -3682,6 +3682,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 Params bind by position, converting each argument to its
                 declared parameter type before the body runs.
+                A trailing `$name?: TYPE` marks an optional param: callers
+                may omit trailing optionals, which fill with zero values
+                (`false`, `""`, `0`, `0.0`, `[]`, `{}`) before the body
+                binds. A required param after an optional one fails at
+                definition, and an optional param with no zero value
+                (records with required fields, unions, handles, custom
+                types) fails at definition naming the fix: drop the `?`
+                or pass the argument explicitly.
                 Bodies run in a fresh variable scope; LETs inside do not leak. A nested
                 FUNC definition is scoped to its block and reverts on exit. Names share
                 one namespace with native and host-registered functions, which a FUNC
@@ -3720,6 +3728,32 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 # Statement form: parens stay, the value drops.
                 GREET("bex")
+            "#},
+                },
+                Example {
+                    name: "optional params fill zero values",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                IMPORT [STD]
+                # Trailing `?` params may be omitted; they fill with
+                # zero values (false, empty map) before the body binds,
+                # so plain IF works on an omitted BOOL.
+                FUNC ENSURE($check?: BOOL, $opts?: MAP<mode?: STRING>): STRING {
+                    IF $check {
+                        RETURN "checked"
+                    }
+                    IF HAS_KEY($opts, "mode") {
+                        RETURN "opts"
+                    }
+                    RETURN "plain"
+                }
+                LET $a: STRING = ENSURE()
+                ASSERT_EQ $a "plain"
+                LET $b: STRING = ENSURE(true)
+                ASSERT_EQ $b "checked"
+                LET $opts: MAP<mode?: STRING> = PARSE_JSON("{\"mode\": \"fast\"}")
+                LET $c: STRING = ENSURE(false, $opts)
+                ASSERT_EQ $c "opts"
             "#},
                 },
                 Example {
@@ -4628,7 +4662,9 @@ impl fmt::Display for StepKind {
                 }
                 let ps: Vec<String> = params
                     .iter()
-                    .map(|(p, t)| format!("${}: {}", p, t))
+                    .map(|(p, t, optional)| {
+                        format!("${}{}: {}", p, if *optional { "?" } else { "" }, t)
+                    })
                     .collect();
                 if *is_async {
                     write!(
@@ -6106,7 +6142,7 @@ mod tests {
         assert_eq!(name, "GREET");
         assert_eq!(
             params,
-            &vec![("name".to_string(), "STRING".to_string())],
+            &vec![("name".to_string(), "STRING".to_string(), false)],
             "{params:?}"
         );
         assert_eq!(return_type, "STRING", "{return_type:?}");
@@ -6119,6 +6155,74 @@ mod tests {
     fn lowercase_func_name_is_rejected() {
         let err = parse_err("FUNC greet($x: STRING) {\n  RETURN $x\n}\n");
         assert!(err.contains("FUNC"), "{err}");
+    }
+
+    #[test]
+    fn func_def_optional_params_parse_with_flag() {
+        let steps = parse_script(
+            "FUNC F($a: STRING, $b?: INT): STRING {\n  RETURN $a\n}\n",
+            lower_command,
+        )
+        .expect("optional params parse");
+        let StepKind::FuncDef { params, .. } = &steps[0].kind else {
+            panic!("expected FuncDef, got {:?}", steps[0].kind);
+        };
+        assert_eq!(
+            params,
+            &vec![
+                ("a".to_string(), "STRING".to_string(), false),
+                ("b".to_string(), "INT".to_string(), true),
+            ],
+            "{params:?}"
+        );
+        assert_eq!(
+            steps[0].kind.to_string(),
+            "FUNC F($a: STRING, $b?: INT): STRING {\n    RETURN $a\n}",
+            "display marks the optional"
+        );
+    }
+
+    #[test]
+    fn func_def_optional_params_must_trail() {
+        let err = parse_err("FUNC F($a?: INT, $b: STRING): STRING {\n  RETURN $b\n}\n");
+        assert!(
+            err.contains("optional `?` params must be trailing"),
+            "{err}"
+        );
+        assert!(err.contains("`$b`"), "{err}");
+    }
+
+    #[test]
+    fn func_def_param_type_must_be_uppercase() {
+        let err = parse_err("FUNC F($q: string): STRING {\n  RETURN $q\n}\n");
+        assert!(err.contains("needs an uppercase type"), "{err}");
+        assert!(err.contains("`string`"), "{err}");
+    }
+
+    #[test]
+    fn func_def_malformed_params_name_the_shape() {
+        for (script, expected) in [
+            (
+                "FUNC F($x?): STRING {\n  RETURN \"hi\"\n}\n",
+                "needs `: TYPE` after the name",
+            ),
+            (
+                "FUNC F(bar): STRING {\n  RETURN \"hi\"\n}\n",
+                "must be `$name: TYPE` separated by commas",
+            ),
+            (
+                "FUNC F($x: STRING,): STRING {\n  RETURN $x\n}\n",
+                "must not end with a trailing comma",
+            ),
+        ] {
+            let err = parse_err(script);
+            assert!(err.contains(expected), "{script}: {err}");
+        }
+        // `FUNC FOO() ECHO hi` still misses to generic: the
+        // header-only invalid syntax echoes just the header.
+        let err = parse_err("FUNC FOO() ECHO hi\n");
+        assert!(err.contains("invalid syntax for command FUNC"), "{err}");
+        assert!(err.contains("got `FOO() ECHO hi`"), "{err}");
     }
 
     #[test]
