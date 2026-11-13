@@ -9,26 +9,29 @@ use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver};
 use oxdock_func_macro::oxdock_func;
 use oxdock_process::DefaultProcessManager;
 
-/// Absolute path of the pipe-child binary: the executable next to
-/// the test binary's target dir. Built by `cargo test` alongside the
-/// suite; a missing file fails naming the required build step.
+/// Absolute path of the pipe-child binary: the executable built
+/// beside the test profile dir. Climbs from the test executable
+/// checking every level instead of assuming one cargo layout:
+/// older cargo places test binaries in `target/<profile>/deps/`,
+/// newer ones in `target/<profile>/build/<pkg>/out/`. Built by
+/// `cargo test` alongside the suite; a missing file fails naming
+/// the required build step.
 #[allow(clippy::disallowed_methods)]
 fn child_bin() -> String {
     let exe = std::env::current_exe().expect("test executable path");
-    let debug = exe
-        .parent()
-        .and_then(|deps| deps.parent())
-        .expect("test executable has a target dir");
     #[cfg(windows)]
-    let candidate = debug.join("oxdock-render-child.exe");
+    let bin = "oxdock-render-child.exe";
     #[cfg(not(windows))]
-    let candidate = debug.join("oxdock-render-child");
-    assert!(
-        candidate.is_file(),
-        "pipe-child binary missing at {}",
-        candidate.display()
-    );
-    candidate.to_string_lossy().into_owned()
+    let bin = "oxdock-render-child";
+    let mut dir = exe.parent();
+    while let Some(parent) = dir {
+        let candidate = parent.join(bin);
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+        dir = parent.parent();
+    }
+    panic!("pipe-child binary missing: no `{bin}` above the test executable");
 }
 
 /// Lifecycle override plus scope contract every fixture config gets:
