@@ -122,7 +122,7 @@ pub trait WorkspaceFs: Send + Sync {
     /// and module-context reset round-trip through this instead of
     /// re-deriving selection from a saved path.
     fn selection(&self) -> WorkspaceSelection;
-    /// Restore a selection previously read from [`selection`].
+    /// Restore a selection previously read from [`Self::selection`].
     /// Equivalent to re-running the matching `switch_to_*`.
     fn restore_selection(&mut self, selection: WorkspaceSelection);
     /// Project root recorded via `set_workspace_root`, when one is set.

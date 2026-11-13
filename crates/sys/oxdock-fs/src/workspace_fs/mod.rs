@@ -522,7 +522,7 @@ impl PathResolver {
         }
     }
 
-    /// Restore a selection previously read from [`selection`].
+    /// Restore a selection previously read from [`Self::selection`].
     /// Equivalent to re-running the matching `switch_to_*`; the cache
     /// guard recomputes purely, so no saved path can go stale.
     pub fn restore_selection(&mut self, selection: WorkspaceSelection) {
