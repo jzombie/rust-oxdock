@@ -2339,6 +2339,40 @@ ASSERT_EQ $res "ada"
 GREET("bex")
 ```
 
+**Example: bind then interpolate**
+
+```oxdock
+# Script FUNCs run as steps, never inside {{ }}.
+FUNC GREET($name: STRING): STRING {
+  RETURN $name
+}
+
+# Call as a step to capture the RETURN.
+LET $res: STRING = GREET("ada")
+
+# {{ }} reads the bound var.
+LET $msg: STRING = "says {{ $res }}"
+
+ASSERT_EQ $msg "says ada"
+```
+
+**Example: script funcs never resolve in placeholders**
+
+```oxdock expect_error:"unknown placeholder function 'SCRIPT::GREET'"
+# Placeholders carry no step context: pure registry only.
+FUNC GREET($name: STRING): STRING {
+  RETURN $name
+}
+
+# Bind the argument as a step var to keep quoting flat.
+LET $who: STRING = "ada"
+
+# This fails naming the pure-only boundary.
+ECHO "{{ SCRIPT::GREET($who) }}"
+```
+
+**Expected error:** `unknown placeholder function 'SCRIPT::GREET'`
+
 **Example: optional params fill zero values**
 
 ```oxdock

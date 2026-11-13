@@ -3731,6 +3731,42 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
+                    name: "bind then interpolate",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Script FUNCs run as steps, never inside {{ }}.
+                FUNC GREET($name: STRING): STRING {
+                  RETURN $name
+                }
+
+                # Call as a step to capture the RETURN.
+                LET $res: STRING = GREET("ada")
+
+                # {{ }} reads the bound var.
+                LET $msg: STRING = "says {{ $res }}"
+
+                ASSERT_EQ $msg "says ada"
+            "#},
+                },
+                Example {
+                    name: "script funcs never resolve in placeholders",
+                    fence_meta: Some(
+                        "expect_error:\"unknown placeholder function 'SCRIPT::GREET'\"",
+                    ),
+                    code: indoc! {r#"
+                # Placeholders carry no step context: pure registry only.
+                FUNC GREET($name: STRING): STRING {
+                  RETURN $name
+                }
+
+                # Bind the argument as a step var to keep quoting flat.
+                LET $who: STRING = "ada"
+
+                # This fails naming the pure-only boundary.
+                ECHO "{{ SCRIPT::GREET($who) }}"
+            "#},
+                },
+                Example {
                     name: "optional params fill zero values",
                     fence_meta: None,
                     code: indoc! {r#"
