@@ -159,7 +159,11 @@ fn template_dir(wsroot: String, abspath: String) -> Result<Value> {
 pub fn module<P: ProcessManager>() -> HostModule<P> {
     HostModule {
         name: "RENDER_ENGINE".to_string(),
-        funcs: vec![FileStem::registration(), TemplateDir::registration(), ExpandTemplate::registration()],
+        funcs: vec![
+            FileStem::registration(),
+            TemplateDir::registration(),
+            ExpandTemplate::registration(),
+        ],
         types: vec![],
         record_schemas: vec![],
         states: Vec::new(),
@@ -191,7 +195,10 @@ mod tests {
                 .to_string()
         };
         assert_eq!(
-            dir("/repo", "/repo/.oxdock/template/github-actions/setup-action.yml.tmpl"),
+            dir(
+                "/repo",
+                "/repo/.oxdock/template/github-actions/setup-action.yml.tmpl"
+            ),
             ".oxdock/template/github-actions"
         );
         // Trailing slash on the root changes nothing.
@@ -205,15 +212,24 @@ mod tests {
         // paths resolve exactly like forward-slash ones.
         assert!(super::template_dir("/repo".to_string(), "/elsewhere/a.tmpl".to_string()).is_err());
         assert_eq!(
-            super::template_dir("C:\\repo".to_string(), "C:\\repo\\.oxdock\\template\\github-actions\\setup-action.yml.tmpl".to_string()).expect("backslash root").as_str(),
+            super::template_dir(
+                "C:\\repo".to_string(),
+                "C:\\repo\\.oxdock\\template\\github-actions\\setup-action.yml.tmpl".to_string()
+            )
+            .expect("backslash root")
+            .as_str(),
             Some(".oxdock/template/github-actions")
         );
         assert_eq!(
-            super::template_dir("C:\\".to_string(), "C:\\a.tmpl".to_string()).expect("backslash drive root").as_str(),
+            super::template_dir("C:\\".to_string(), "C:\\a.tmpl".to_string())
+                .expect("backslash drive root")
+                .as_str(),
             Some("")
         );
         assert_eq!(
-            super::template_dir("/repo".to_string(), "/repo/a.tmpl".to_string()).expect("root template").as_str(),
+            super::template_dir("/repo".to_string(), "/repo/a.tmpl".to_string())
+                .expect("root template")
+                .as_str(),
             Some("")
         );
     }

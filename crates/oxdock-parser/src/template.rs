@@ -202,13 +202,14 @@ pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
     while i < bytes.len() {
         let b = bytes[i];
         // A `"""` opener consumes through its unescaped closer.
-        if b == b'"'
-            && bytes.get(i + 1) == Some(&b'"')
-            && bytes.get(i + 2) == Some(&b'"')
-        {
+        if b == b'"' && bytes.get(i + 1) == Some(&b'"') && bytes.get(i + 2) == Some(&b'"') {
             if let Some(s) = text_from.take() {
                 if s != i {
-                    out.push(Atom { kind: AtomKind::Text, text: &src[s..i], start: s });
+                    out.push(Atom {
+                        kind: AtomKind::Text,
+                        text: &src[s..i],
+                        start: s,
+                    });
                 }
             }
             let start = i;
@@ -231,14 +232,22 @@ pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
                     i += 1;
                 }
             }
-            out.push(Atom { kind: AtomKind::Text, text: &src[start..i], start });
+            out.push(Atom {
+                kind: AtomKind::Text,
+                text: &src[start..i],
+                start,
+            });
             continue;
         }
         // A single-quote opener consumes through its unescaped closer.
         if b == b'"' || b == b'\'' {
             if let Some(s) = text_from.take() {
                 if s != i {
-                    out.push(Atom { kind: AtomKind::Text, text: &src[s..i], start: s });
+                    out.push(Atom {
+                        kind: AtomKind::Text,
+                        text: &src[s..i],
+                        start: s,
+                    });
                 }
             }
             let q = b;
@@ -256,7 +265,11 @@ pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
                 }
                 i += 1;
             }
-            out.push(Atom { kind: AtomKind::Text, text: &src[start..i], start });
+            out.push(Atom {
+                kind: AtomKind::Text,
+                text: &src[start..i],
+                start,
+            });
             continue;
         }
         let kind = match b {
@@ -268,10 +281,18 @@ pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
         if let Some(kind) = kind {
             if let Some(s) = text_from.take() {
                 if s != i {
-                    out.push(Atom { kind: AtomKind::Text, text: &src[s..i], start: s });
+                    out.push(Atom {
+                        kind: AtomKind::Text,
+                        text: &src[s..i],
+                        start: s,
+                    });
                 }
             }
-            out.push(Atom { kind, text: &src[i..i + 1], start: i });
+            out.push(Atom {
+                kind,
+                text: &src[i..i + 1],
+                start: i,
+            });
             i += 1;
         } else {
             if text_from.is_none() {
@@ -282,7 +303,11 @@ pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
     }
     if let Some(s) = text_from.take() {
         if s < bytes.len() {
-            out.push(Atom { kind: AtomKind::Text, text: &src[s..], start: s });
+            out.push(Atom {
+                kind: AtomKind::Text,
+                text: &src[s..],
+                start: s,
+            });
         }
     }
     out
@@ -573,8 +598,7 @@ mod tests {
             vec!["\"\"\"line one\nline two\"\"\"".to_string()],
         );
         // Parens inside blocks never affect the call paren match.
-        let call =
-            parse_placeholder_call("M::F(\"\"\"a(b\"\"\", $x)").expect("block parens parse");
+        let call = parse_placeholder_call("M::F(\"\"\"a(b\"\"\", $x)").expect("block parens parse");
         assert_eq!(call.name, "F");
         assert_eq!(call.args_raw, "\"\"\"a(b\"\"\", $x");
     }

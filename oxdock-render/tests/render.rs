@@ -1526,14 +1526,11 @@ fn generated_comment_rules_hold_canonical_width() {
     let repo_root = GuardedPath::new_root_from_str(repo).expect("repo root");
     let repo_fs = PathResolver::new_guarded(repo_root.clone(), repo_root.clone()).expect("repo fs");
     let mut ruled = 0;
-    for rel in [
-        "action.yml",
-        "install.sh",
-        "install.ps1",
-        "install.oxfile",
-    ] {
+    for rel in ["action.yml", "install.sh", "install.ps1", "install.oxfile"] {
         let path = repo_fs.root().join(rel).expect("generated path");
-        let text = repo_fs.read_to_string(&path).expect("generated file is checked in");
+        let text = repo_fs
+            .read_to_string(&path)
+            .expect("generated file is checked in");
         for line in text.lines() {
             let stripped = line.trim_start();
             if stripped.starts_with("# ===") || stripped.starts_with("# ----") {
