@@ -8,7 +8,7 @@
         OXDOCK_BINARY_NAME: $\{{ inputs.binary-name }}
         GITHUB_TOKEN: $\{{ github.token }}
       run: |
-        {{ $global.installer_cmd_sh_gha }}
+        curl -fsSL ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} {{ $global.stub_url_sh }} | bash
 
     - name: {{ $ctx.install_label }}
       if: $\{{ inputs.source != 'local' && runner.os == 'Windows' }}
@@ -20,5 +20,5 @@
         OXDOCK_BINARY_NAME: $\{{ inputs.binary-name }}
         GITHUB_TOKEN: $\{{ github.token }}
       run: |
-        {{ $global.installer_cmd_ps1_gha }}
+        $h = @{}; if ($env:GITHUB_TOKEN) { $h.Authorization = "Bearer $env:GITHUB_TOKEN" }; (irm '{{ $global.stub_url_ps1 }}' -Headers $h) | iex
 

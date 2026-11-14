@@ -1,12 +1,12 @@
 {{ $files.stubs.installer-doc-header }}
 
 #
-#   {{ $global.installer_cmd_ps1 }}
+#   (irm '{{ $global.stub_url_ps1 }}') | iex
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v{{ env:CRATE_VERSION }}'; {{ $global.installer_cmd_ps1 }}
+#   $env:VERSION = 'v{{ env:CRATE_VERSION }}'; (irm '{{ $global.stub_url_ps1 }}') | iex
 #
 {{ $files.stubs.installer-doc-env }}
 

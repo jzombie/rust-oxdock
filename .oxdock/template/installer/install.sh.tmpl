@@ -2,12 +2,12 @@
 {{ $files.stubs.installer-doc-header }}
 
 #
-#   {{ $global.installer_cmd_sh }}
+#   curl -fsSL {{ $global.stub_url_sh }} | bash
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   (export VERSION=v{{ env:CRATE_VERSION }}; {{ $global.installer_cmd_sh }})
+#   (export VERSION=v{{ env:CRATE_VERSION }}; curl -fsSL {{ $global.stub_url_sh }} | bash)
 #
 {{ $files.stubs.installer-doc-env }}
 
