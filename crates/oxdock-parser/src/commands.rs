@@ -3856,7 +3856,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 },
                 Example {
                     name: "optional params must trail",
-                    fence_meta: Some("expect_error:\"optional `?` params must be trailing\""),
+                    fence_meta: Some("expect_error:\"optional ? params must be trailing\""),
                     code: indoc! {r#"
                 # A required param after an optional one fails at definition.
                 FUNC BAD($a?: STRING, $b: STRING): STRING {
@@ -6294,7 +6294,7 @@ mod tests {
     fn func_def_optional_params_must_trail() {
         let err = parse_err("FUNC F($a?: INT, $b: STRING): STRING {\n  RETURN $b\n}\n");
         assert!(
-            err.contains("optional `?` params must be trailing"),
+            err.contains("optional ? params must be trailing"),
             "{err}"
         );
         assert!(err.contains("`$b`"), "{err}");

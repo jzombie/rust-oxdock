@@ -1270,14 +1270,14 @@ ASSERT_EQ $c "opts"
 
 **Example: optional params must trail**
 
-```oxdock expect_error:"optional `?` params must be trailing"
+```oxdock expect_error:"optional ? params must be trailing"
 # A required param after an optional one fails at definition.
 FUNC BAD($a?: STRING, $b: STRING): STRING {
     RETURN $b
 }
 ```
 
-**Expected error:** `optional `?` params must be trailing`
+**Expected error:** `optional ? params must be trailing`
 
 **Example: async func is a handle guarantee**
 

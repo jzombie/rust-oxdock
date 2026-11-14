@@ -183,9 +183,9 @@ mod tests {
             target_os='linux'
         "#;
         let lines = cfg_env_lines(output);
-        assert!(lines.contains(&"cargo:rustc-env=CARGO_CFG_UNIX=1".to_string()));
-        assert!(lines.contains(&"cargo:rustc-env=CARGO_CFG_TARGET_ARCH=x86_64".to_string()));
-        assert!(lines.contains(&"cargo:rustc-env=CARGO_CFG_TARGET_OS=linux".to_string()));
+        assert!(lines.iter().any(|line| line == "cargo:rustc-env=CARGO_CFG_UNIX=1"));
+        assert!(lines.iter().any(|line| line == "cargo:rustc-env=CARGO_CFG_TARGET_ARCH=x86_64"));
+        assert!(lines.iter().any(|line| line == "cargo:rustc-env=CARGO_CFG_TARGET_OS=linux"));
     }
 
     #[test]
@@ -219,10 +219,10 @@ mod tests {
         // Bare keys are uppercased verbatim (dashes preserved) and flagged =1.
         let lines = cfg_env_lines("target_features=\"+crc,+aes\"\nhas-dash\n\n   \n");
         assert!(
-            lines.contains(&"cargo:rustc-env=CARGO_CFG_TARGET_FEATURES=+crc,+aes".to_string()),
+            lines.iter().any(|line| line == "cargo:rustc-env=CARGO_CFG_TARGET_FEATURES=+crc,+aes"),
             "'=' inside a value must not split the pair: {lines:?}"
         );
-        assert!(lines.contains(&"cargo:rustc-env=CARGO_CFG_HAS-DASH=1".to_string()));
+        assert!(lines.iter().any(|line| line == "cargo:rustc-env=CARGO_CFG_HAS-DASH=1"));
         // Whitespace-only lines produce nothing.
         assert_eq!(lines.len(), 2);
     }

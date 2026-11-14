@@ -4467,7 +4467,7 @@ fn parse_func_at(
                     seen_optional = true;
                 } else if seen_optional {
                     return Err(fail(format!(
-                        "FUNC {def_name} optional `?` params must be trailing: `${pname}` follows an optional param"
+                        "FUNC {def_name} optional ? params must be trailing: `${pname}` follows an optional param"
                     )));
                 }
                 params.push((pname, ptype, optional));
