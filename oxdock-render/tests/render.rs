@@ -1463,11 +1463,20 @@ fn setup_render_action_pins_release_and_local_contract() {
         "source == 'local'",
         "cargo build --release -p oxdock -p oxdock-render --bins --all-features",
         "Invalid source",
+        "OXDOCK_SOURCE: ${{ inputs.source }}",
+        "Invalid source '$OXDOCK_SOURCE'",
         "CARGO_TARGET_DIR",
         "GITHUB_PATH",
     ] {
         assert!(action.contains(needle), "action names {needle}");
     }
+    // The invalid value never interpolates into a script body: it
+    // rides `env:` and is read as a quoted shell variable. `if:`
+    // conditions still use the expression form (not script text).
+    assert!(
+        !action.contains("echo \"Invalid source '${{ inputs.source }}'\""),
+        "validation must not interpolate inputs.source into run:"
+    );
     for absent in [
         "OXDOCK_SKIP_DOWNLOAD",
         "OXDOCK_OXFILE:",

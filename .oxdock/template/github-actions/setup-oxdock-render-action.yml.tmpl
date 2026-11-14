@@ -8,8 +8,10 @@ runs:
     - name: Validate renderer source input
       if: $\{{ inputs.source != '' && inputs.source != 'release' && inputs.source != 'local' }}
       shell: bash
+      env:
+        OXDOCK_SOURCE: $\{{ inputs.source }}
       run: |
-        echo "Invalid source '$\{{ inputs.source }}': must be '', 'release', or 'local'" >&2
+        echo "Invalid source '$OXDOCK_SOURCE': must be '', 'release', or 'local'" >&2
         exit 1
 {{ $files.local.action-release-steps }}
 {{ $files.local.install-rust }}
