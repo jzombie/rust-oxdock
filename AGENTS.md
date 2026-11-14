@@ -56,6 +56,14 @@ Scripts declare logical topology, the runner owns physical infrastructure. This 
 - **Testing**: Prefer `cargo test --workspace --tests` to cover all crates; fixtures for the macros live under `crates/oxdock-logic-tests/fixtures/integration/buildtime_macros`.
 - **Workspace layout**: Internal crates live under `crates`; the CLI & build-time macros sit at the workspace root.
 
+## Parser Single-Ownership
+
+This is mandatory, no exceptions. Every grammar shape parses in exactly one function. One owner per shape: string literals, placeholder args, map and list literals, separators, delimiters.
+
+- **Reuse, never restate**: a new call site calls the owning function. It never restates the branches inline (`starts_with` quote checks, delimiter matching, split loops). A second copy of a parse branch is piecemealing the parser.
+- **Extend the owner**: a new spelling (another quote style, another delimiter) lands inside the owning function so all spellings stay one implementation. Callers gain it without changing.
+- **Enforcement**: duplicated parse logic is duplicate work. Review rejects it, and it is not accepted as delivered work: it is removed or consolidated before the change lands.
+
 ## Code Style
 
 - **Punctuation**: do not use em dashes or en dashes as punctuation in code comments, doc comments, or any other prose. Use periods or colons instead. Hyphens inside code, identifiers, crate names, CLI flags, and versions remain allowed. This extends the README prose-style rule below to all written text in the repo.

@@ -361,6 +361,139 @@ pub fn split_top_level(src: &str, sep: char) -> Vec<String> {
     );
     split_on(src, sep)
 }
+
+/// Parse one string literal in any spelling: `"""` blocks lower
+/// through the shared block lowering, `"..."` and `'...'` unescape
+/// through the shared unescaper. Returns `None` when `src` is not a
+/// single string literal. Single owner for placeholder string syntax:
+/// value and key paths both route here, so a new spelling lands once.
+///
+/// Closer validation rides [`scan_atoms`]: the input must scan as one
+/// quoted text atom spanning all of `src`, and the closer is matched
+/// from the opener with escapes honored. Adjacent literals (`"a" "b"`),
+/// infix expressions (`"a" + "b"`), and trailing-escape inputs (`"foo\"`)
+/// fail closed instead of merging or truncating.
+pub fn parse_string_literal(src: &str) -> Option<anyhow::Result<String>> {
+    let atoms = scan_atoms(src);
+    let [atom] = atoms.as_slice() else {
+        return None;
+    };
+    if atom.kind != AtomKind::Text || atom.start != 0 || atom.text != src {
+        return None;
+    }
+    if src.starts_with("\"\"\"") {
+        return Some(parse_block_literal(src));
+    }
+    for quote in ['"', '\''] {
+        if src.starts_with(quote) {
+            return Some(parse_quoted_literal(src, quote));
+        }
+    }
+    None
+}
+
+/// Match one `"..."` or `'...'` literal from its opener to its first
+/// unescaped closer, which must end the input. `\\` skips the next
+/// byte unconditionally, so a trailing escape fails unterminated.
+fn parse_quoted_literal(src: &str, quote: char) -> anyhow::Result<String> {
+    let bytes = src.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == quote as u8 {
+            if i + 1 != src.len() {
+                anyhow::bail!("unexpected text after string literal: {src:?}");
+            }
+            return unescape_literal(&src[1..i], quote);
+        }
+        i += 1;
+    }
+    anyhow::bail!("unterminated string literal: {src:?}")
+}
+
+/// Match one `"""..."""` block from its opener to its first unescaped
+/// closer triple, which must end the input. Lowers through the shared
+/// block lowering, so placeholder blocks read exactly like statement
+/// block strings.
+fn parse_block_literal(src: &str) -> anyhow::Result<String> {
+    let bytes = src.as_bytes();
+    let mut i = 3;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' && bytes.get(i + 1) == Some(&b'"') && bytes.get(i + 2) == Some(&b'"') {
+            if i + 3 != src.len() {
+                anyhow::bail!("unexpected text after block string literal: {src:?}");
+            }
+            return Ok(crate::command::lower_block_string(src));
+        }
+        i += 1;
+    }
+    anyhow::bail!("unterminated block string literal: {src:?}")
+}
+
+/// Unescape a quoted literal: `\\` and the enclosing quote only.
+/// Anything else keeps its backslash so template text stays predictable.
+fn unescape_literal(src: &str, quote: char) -> anyhow::Result<String> {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some(q) if q == quote => out.push(quote),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => anyhow::bail!("unterminated escape in placeholder string literal"),
+        }
+    }
+    Ok(out)
+}
+
+/// Strip one wrapping delimiter pair, built on [`scan_atoms`] instead
+/// of a local quote loop: the opener at 0 must match the closer at the
+/// end with no earlier top-level closer. `"""` blocks scan as single
+/// text atoms, so brackets inside them never disturb the depth.
+pub fn strip_wrapped_delimiters(src: &str, open: char, close: char) -> Option<&str> {
+    let atoms = scan_atoms(src);
+    let first = atoms.first()?;
+    if first.kind != AtomKind::Open || first.start != 0 || first.text.chars().count() != 1 {
+        return None;
+    }
+    if !first.text.starts_with(open) {
+        return None;
+    }
+    let mut depth = 0usize;
+    for atom in &atoms {
+        match atom.kind {
+            AtomKind::Open => depth += 1,
+            AtomKind::Close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    if atom.start + atom.text.len() != src.len() {
+                        return None;
+                    }
+                    if !atom.text.starts_with(close) {
+                        return None;
+                    }
+                    return Some(&src[open.len_utf8()..src.len() - close.len_utf8()]);
+                }
+            }
+            AtomKind::Text | AtomKind::Sep(_) => {}
+        }
+    }
+    None
+}
 /// Allocation-free segment iterator over template text. See the module
 /// docs for the exact rules; the unit tests below pin every escape
 /// and boundary shape.
@@ -602,5 +735,67 @@ mod tests {
         let call = parse_placeholder_call("M::F(\"\"\"a(b\"\"\", $x)").expect("block parens parse");
         assert_eq!(call.name, "F");
         assert_eq!(call.args_raw, "\"\"\"a(b\"\"\", $x");
+    }
+
+    #[test]
+    fn string_literal_spellings_agree() {
+        use super::parse_string_literal;
+        let plain = parse_string_literal("\"Release installs\"")
+            .expect("quoted")
+            .expect("ok");
+        let single = parse_string_literal("'Release installs'")
+            .expect("single")
+            .expect("ok");
+        let block = parse_string_literal("\"\"\"Release installs\"\"\"")
+            .expect("block")
+            .expect("ok");
+        assert_eq!(plain, "Release installs");
+        assert_eq!(single, plain);
+        assert_eq!(block, plain);
+    }
+
+    #[test]
+    fn string_literal_rejects_merged_and_unterminated() {
+        use super::parse_string_literal;
+        // Adjacent literals and infix expressions scan as several atoms:
+        // not one literal, so the caller rejects them.
+        assert!(parse_string_literal("\"a\" \"b\"").is_none());
+        assert!(parse_string_literal("\"a\" + \"b\"").is_none());
+        assert!(parse_string_literal("\"\"\"a\"\"\" \"\"\"b\"\"\"").is_none());
+        // Trailing escapes and missing closers fail closed.
+        assert!(parse_string_literal("\"foo\\\"").expect("quoted").is_err());
+        assert!(parse_string_literal("'foo\\'").expect("single").is_err());
+        assert!(
+            parse_string_literal("\"\"\"foo\\")
+                .expect("block escape")
+                .is_err()
+        );
+        assert!(
+            parse_string_literal("\"\"\"foo\"\"")
+                .expect("block short")
+                .is_err()
+        );
+        assert!(parse_string_literal("\"foo").expect("open").is_err());
+        assert!(
+            parse_string_literal("\"\"\"foo")
+                .expect("open block")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn wrapped_delimiters_see_through_block_strings() {
+        use super::strip_wrapped_delimiters;
+        assert_eq!(
+            strip_wrapped_delimiters("[\"\"\"a]b\"\"\"]", '[', ']'),
+            Some("\"\"\"a]b\"\"\"")
+        );
+        assert_eq!(
+            strip_wrapped_delimiters("{k: \"\"\"a}b\"\"\"}", '{', '}'),
+            Some("k: \"\"\"a}b\"\"\"")
+        );
+        assert_eq!(strip_wrapped_delimiters("[a, b]", '[', ']'), Some("a, b"));
+        assert!(strip_wrapped_delimiters("[a], [b]", '[', ']').is_none());
+        assert!(strip_wrapped_delimiters("[a", '[', ']').is_none());
     }
 }
