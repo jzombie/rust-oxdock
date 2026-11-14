@@ -1426,7 +1426,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-26.04-arm, macos-latest, windows-latest, windows-11-arm]
     permissions:
       contents: read
     steps:
@@ -1439,7 +1439,7 @@ jobs:
       # stub with `GITHUB_TOKEN` bridged into step env). All other legs
       # pin `source: local` and skip these lines by design; this leg
       # alone proves the outer fetch carries auth on both shells
-      # (ubuntu covers bash, windows covers pwsh).
+      # (unix runners cover bash, windows runners cover pwsh).
       # product: never-local: installs the newest published releases.
       - name: Install OxDock engine (release)
         uses: ./.github/actions/setup-oxdock
