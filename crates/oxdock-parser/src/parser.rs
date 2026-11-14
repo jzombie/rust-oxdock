@@ -5205,7 +5205,7 @@ fn validate_import_alias(alias: &str, ctx: &ParseCtx) -> Result<String, String> 
         ));
     }
     let (_, imports) = ctx.visible_snapshot();
-    if imports.contains(&alias.to_string()) {
+    if imports.iter().any(|i| i == alias) {
         return Err(format!("duplicate IMPORT alias `{alias}`"));
     }
     ctx.import_into_frame(std::slice::from_ref(&alias.to_string()));
