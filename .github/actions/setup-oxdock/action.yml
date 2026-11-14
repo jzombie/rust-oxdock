@@ -56,7 +56,7 @@ runs:
 
     - name: Install Rust
       if: ${{ inputs.source == 'local' }}
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
     - name: Build local OxDock engine
       if: ${{ inputs.source == 'local' && runner.os != 'Windows' }}
