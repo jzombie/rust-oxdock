@@ -6293,10 +6293,7 @@ mod tests {
     #[test]
     fn func_def_optional_params_must_trail() {
         let err = parse_err("FUNC F($a?: INT, $b: STRING): STRING {\n  RETURN $b\n}\n");
-        assert!(
-            err.contains("optional ? params must be trailing"),
-            "{err}"
-        );
+        assert!(err.contains("optional ? params must be trailing"), "{err}");
         assert!(err.contains("`$b`"), "{err}");
     }
 
