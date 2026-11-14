@@ -453,54 +453,11 @@ pub fn parse_placeholder_call(key: &str) -> Option<(String, String, Vec<String>)
 /// Maximum nesting for map and list literals in placeholder call args.
 const MAX_LITERAL_DEPTH: usize = 16;
 
+/// Split on a top-level separator inside placeholder call args.
+/// One shared implementation lives in the parser; this stays as
+/// the local name so map/list lowering reads unchanged.
 fn split_top_level(src: &str, sep: char) -> Vec<String> {
-    if sep == ',' {
-        return oxdock_parser::template::split_placeholder_args(src);
-    }
-    // Map-entry `key: value` split shares the same quoted/bracket
-    // discipline; only the separator differs.
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut quote: u8 = 0;
-    let mut escaped = false;
-    let mut depth: usize = 0;
-    for c in src.chars() {
-        if quote != 0 {
-            current.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == quote as char {
-                quote = 0;
-            }
-            continue;
-        }
-        match c {
-            '"' | '\'' => {
-                quote = c as u8;
-                current.push(c);
-            }
-            '{' | '[' | '(' => {
-                depth += 1;
-                current.push(c);
-            }
-            '}' | ']' | ')' => {
-                depth = depth.saturating_sub(1);
-                current.push(c);
-            }
-            _ if c == sep && depth == 0 => {
-                out.push(current.trim().to_string());
-                current.clear();
-            }
-            _ => current.push(c),
-        }
-    }
-    let last = current.trim();
-    if !(out.is_empty() && last.is_empty()) {
-        out.push(last.to_string());
-    }
-    out
+    oxdock_parser::template::split_top_level(src, sep)
 }
 
 /// Resolve one placeholder call argument against script variables for
@@ -535,6 +492,18 @@ fn resolve_call_value(
     if let Some(path) = src.strip_prefix('$') {
         let parts: Vec<&str> = path.split('.').collect();
         return resolve_value_path(&parts, vars);
+    }
+    if src.starts_with("\"\"\"") {
+        // Block string: same lowering as statement-position `"""`
+        // literals (leading-newline strip, dedent, closing-line pop),
+        // so placeholder args read exactly like script strings.
+        anyhow::ensure!(
+            src.len() >= 6 && src.ends_with("\"\"\""),
+            "unterminated block string in placeholder call argument: {src:?}"
+        );
+        return Ok(oxdock_parser::Value::string(
+            oxdock_parser::command::lower_block_string(src),
+        ));
     }
     if src.len() >= 2 && src.starts_with('"') && src.ends_with('"') {
         return Ok(oxdock_parser::Value::string(unescape_literal(

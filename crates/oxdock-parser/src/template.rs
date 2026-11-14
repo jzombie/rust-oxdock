@@ -113,41 +113,29 @@ pub fn parse_placeholder_call(key: &str) -> Option<PlaceholderCall<'_>> {
         }
         Head::Bare(head)
     };
-    let bytes = rest.as_bytes();
+    // The shared atom scan drives depth: quoted runs (including
+    // `"""` blocks) arrive whole as Text, so parens inside strings
+    // never count. Only structural opens and closes move depth.
     let mut depth: usize = 0;
-    let mut quote: u8 = 0;
-    let mut escaped = false;
     let mut close_at: Option<usize> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if quote != 0 {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == quote {
-                quote = 0;
-            }
-            i += 1;
-            continue;
-        }
-        match b {
-            b'"' | b'\'' => quote = b,
-            b'(' => depth += 1,
-            b')' => {
+    for atom in scan_atoms(rest) {
+        match atom.kind {
+            // Only parens move depth here, exactly as before: quoted
+            // runs arrive whole as Text, and other brackets never
+            // counted. Unbalanced cross-kind input fails closed below.
+            AtomKind::Open if atom.text == "(" => depth += 1,
+            AtomKind::Close if atom.text == ")" => {
                 if depth == 0 {
                     return None;
                 }
                 depth -= 1;
                 if depth == 0 {
-                    close_at = Some(i);
+                    close_at = Some(atom.start);
                     break;
                 }
             }
             _ => {}
         }
-        i += 1;
     }
     let close_at = close_at?;
     if !rest[close_at + 1..].trim().is_empty() {
@@ -176,46 +164,152 @@ pub fn parse_placeholder_call(key: &str) -> Option<PlaceholderCall<'_>> {
     }
 }
 
-/// Split call args on top-level commas, keeping quoted strings and
-/// `{...}` / `[...]` / `(...)` literals intact. Both quote styles
-/// shield commas (with backslash escapes); depth applies to all
-/// three bracket shapes so nested literals never split.
-pub fn split_placeholder_args(src: &str) -> Vec<String> {
+/// One lexical atom of placeholder arg text. Bracket depth tracking
+/// and top-level splitting share this single scan, so quote rules —
+/// including `"""` blocks — can never disagree between the splitter
+/// and the paren matcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomKind {
+    /// One of `([{`.
+    Open,
+    /// One of `)]}`.
+    Close,
+    /// A separator candidate (`,` or `:`); consumers decide which splits.
+    Sep(char),
+    /// Anything else: a maximal run that is either one quoted string
+    /// (`".."`, `'..'`, or a whole `""".."""` block with backslash
+    /// escapes honored) or unquoted text up to the next structural
+    /// character. Commas and brackets inside a quoted run never surface.
+    Text,
+}
+
+/// A scanned atom with its byte offset in the scanned source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Atom<'a> {
+    pub kind: AtomKind,
+    pub text: &'a str,
+    pub start: usize,
+}
+
+/// Scan placeholder arg text into atoms. Unterminated quotes run to
+/// end of input as text; downstream value resolution fails those
+/// closed, exactly as before.
+pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
+    let bytes = src.as_bytes();
     let mut out = Vec::new();
-    let mut current = String::new();
-    let mut quote: u8 = 0;
-    let mut escaped = false;
-    let mut depth: usize = 0;
-    for c in src.chars() {
-        if quote != 0 {
-            current.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == quote as char {
-                quote = 0;
+    let mut i = 0;
+    let mut text_from: Option<usize> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // A `"""` opener consumes through its unescaped closer.
+        if b == b'"'
+            && bytes.get(i + 1) == Some(&b'"')
+            && bytes.get(i + 2) == Some(&b'"')
+        {
+            if let Some(s) = text_from.take() {
+                if s != i {
+                    out.push(Atom { kind: AtomKind::Text, text: &src[s..i], start: s });
+                }
             }
+            let start = i;
+            i += 3;
+            let mut escaped = false;
+            while i < bytes.len() {
+                if escaped {
+                    escaped = false;
+                    i += 1;
+                } else if bytes[i] == b'\\' {
+                    escaped = true;
+                    i += 1;
+                } else if bytes[i] == b'"'
+                    && bytes.get(i + 1) == Some(&b'"')
+                    && bytes.get(i + 2) == Some(&b'"')
+                {
+                    i += 3;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(Atom { kind: AtomKind::Text, text: &src[start..i], start });
             continue;
         }
-        match c {
-            '"' | '\'' => {
-                quote = c as u8;
-                current.push(c);
+        // A single-quote opener consumes through its unescaped closer.
+        if b == b'"' || b == b'\'' {
+            if let Some(s) = text_from.take() {
+                if s != i {
+                    out.push(Atom { kind: AtomKind::Text, text: &src[s..i], start: s });
+                }
             }
-            '{' | '[' | '(' => {
+            let q = b;
+            let start = i;
+            i += 1;
+            let mut escaped = false;
+            while i < bytes.len() {
+                if escaped {
+                    escaped = false;
+                } else if bytes[i] == b'\\' {
+                    escaped = true;
+                } else if bytes[i] == q {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push(Atom { kind: AtomKind::Text, text: &src[start..i], start });
+            continue;
+        }
+        let kind = match b {
+            b'(' | b'[' | b'{' => Some(AtomKind::Open),
+            b')' | b']' | b'}' => Some(AtomKind::Close),
+            b',' | b':' => Some(AtomKind::Sep(b as char)),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            if let Some(s) = text_from.take() {
+                if s != i {
+                    out.push(Atom { kind: AtomKind::Text, text: &src[s..i], start: s });
+                }
+            }
+            out.push(Atom { kind, text: &src[i..i + 1], start: i });
+            i += 1;
+        } else {
+            if text_from.is_none() {
+                text_from = Some(i);
+            }
+            i += 1;
+        }
+    }
+    if let Some(s) = text_from.take() {
+        if s < bytes.len() {
+            out.push(Atom { kind: AtomKind::Text, text: &src[s..], start: s });
+        }
+    }
+    out
+}
+
+/// Split on a top-level separator, keeping quoted strings, `"""`
+/// blocks, and bracket groups intact. Shared by comma arg lists and
+/// map-entry `key: value` pairs; only the separator differs.
+fn split_on(src: &str, sep: char) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth: usize = 0;
+    for atom in scan_atoms(src) {
+        match atom.kind {
+            AtomKind::Open => {
                 depth += 1;
-                current.push(c);
+                current.push_str(atom.text);
             }
-            '}' | ']' | ')' => {
+            AtomKind::Close => {
                 depth = depth.saturating_sub(1);
-                current.push(c);
+                current.push_str(atom.text);
             }
-            ',' if depth == 0 => {
+            AtomKind::Sep(c) if c == sep && depth == 0 => {
                 out.push(current.trim().to_string());
                 current.clear();
             }
-            _ => current.push(c),
+            _ => current.push_str(atom.text),
         }
     }
     let last = current.trim();
@@ -223,6 +317,23 @@ pub fn split_placeholder_args(src: &str) -> Vec<String> {
         out.push(last.to_string());
     }
     out
+}
+
+/// Split call args on top-level commas, keeping quoted strings,
+/// `"""` blocks, and bracket groups intact.
+pub fn split_placeholder_args(src: &str) -> Vec<String> {
+    split_on(src, ',')
+}
+
+/// Split on a top-level separator character. Only `,` and `:` are
+/// tokenized by [`scan_atoms`]; any other `sep` matches nothing and
+/// returns the whole input as one element.
+pub fn split_top_level(src: &str, sep: char) -> Vec<String> {
+    debug_assert!(
+        matches!(sep, ',' | ':'),
+        "scan_atoms only tokenizes ',' and ':' separators"
+    );
+    split_on(src, sep)
 }
 /// Allocation-free segment iterator over template text. See the module
 /// docs for the exact rules; the unit tests below pin every escape
@@ -446,5 +557,25 @@ mod tests {
             split_placeholder_args("$a, \"b,c\", 'd,e'"),
             vec!["$a".to_string(), "\"b,c\"".to_string(), "'d,e'".to_string()],
         );
+    }
+
+    #[test]
+    fn triple_quoted_blocks_split_and_parse_whole() {
+        use super::{parse_placeholder_call, split_placeholder_args};
+        // Commas, parens, and brackets inside `"""` never split depth.
+        assert_eq!(
+            split_placeholder_args("\"\"\"a, b (c) [d]\"\"\", $x"),
+            vec!["\"\"\"a, b (c) [d]\"\"\"".to_string(), "$x".to_string()],
+        );
+        // A block arg spanning lines survives as one arg.
+        assert_eq!(
+            split_placeholder_args("\"\"\"line one\nline two\"\"\""),
+            vec!["\"\"\"line one\nline two\"\"\"".to_string()],
+        );
+        // Parens inside blocks never affect the call paren match.
+        let call =
+            parse_placeholder_call("M::F(\"\"\"a(b\"\"\", $x)").expect("block parens parse");
+        assert_eq!(call.name, "F");
+        assert_eq!(call.args_raw, "\"\"\"a(b\"\"\", $x");
     }
 }

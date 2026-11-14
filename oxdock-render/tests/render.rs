@@ -1509,3 +1509,45 @@ fn setup_render_action_pins_release_and_local_contract() {
         "validation precedes release installation"
     );
 }
+
+/// Ruled comment lines hold one canonical width across every
+/// generated script and action: a `COMMENT` plugin rule or section
+/// divider is 71 columns after stripping template indentation, so a
+/// hand-placed rule that drifts fails here instead of rotting the
+/// file-header voice file by file.
+#[test]
+#[cfg_attr(miri, ignore = "reads the repository checkout; needs real host files")]
+fn generated_comment_rules_hold_canonical_width() {
+    let manifest = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR).expect("manifest dir");
+    let repo = oxdock_fs::to_forward_slashes(&manifest);
+    let repo = repo
+        .strip_suffix("/oxdock-render")
+        .expect("test lives in oxdock-render");
+    let repo_root = GuardedPath::new_root_from_str(repo).expect("repo root");
+    let repo_fs = PathResolver::new_guarded(repo_root.clone(), repo_root.clone()).expect("repo fs");
+    let mut ruled = 0;
+    for rel in [
+        "action.yml",
+        "install.sh",
+        "install.ps1",
+        "install.oxfile",
+    ] {
+        let path = repo_fs.root().join(rel).expect("generated path");
+        let text = repo_fs.read_to_string(&path).expect("generated file is checked in");
+        for line in text.lines() {
+            let stripped = line.trim_start();
+            if stripped.starts_with("# ===") || stripped.starts_with("# ----") {
+                assert_eq!(
+                    stripped.chars().count(),
+                    71,
+                    "ruled comment line must be 71 columns in {rel}: {stripped:?}"
+                );
+                ruled += 1;
+            }
+        }
+    }
+    assert!(
+        ruled >= 10,
+        "expected banner and section rules across the four files, found {ruled}"
+    );
+}

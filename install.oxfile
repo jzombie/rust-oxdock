@@ -1,5 +1,8 @@
+# =====================================================================
 # Installs the downloaded OxDock release binary.
+#
 # Piped stdin runs instead of installing.
+# =====================================================================
 
 IMPORT [STD]
 

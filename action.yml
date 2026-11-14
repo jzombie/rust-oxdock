@@ -39,7 +39,7 @@ inputs:
 runs:
   using: composite
   steps:
-    # ---- Validate inputs -------------------------------------------
+    # ---- Validate inputs ------------------------------------------------
     # Fail fast on typos so a bad value never silently falls through
     # to the release path.
     - name: Validate source input
@@ -60,7 +60,7 @@ runs:
         echo "Invalid product '$OXDOCK_PRODUCT_INPUT': must be 'oxdock' or 'oxdock-render'" >&2
         exit 1
 
-    # ---- Release installs ------------------------------------------
+    # ---- Release installs -----------------------------------------------
     # One leg per shell serves both products: the product flows through
     # `OXDOCK_PRODUCT` and the install dir suffix resolves from it.
     # Each URL appears once; the auth header attaches only when
@@ -91,13 +91,13 @@ runs:
       run: |
         $h = @{}; if ($env:GITHUB_TOKEN) { $h.Authorization = "Bearer $env:GITHUB_TOKEN" }; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1' -Headers $h) | iex
 
-    # ---- Toolchain -------------------------------------------------
+    # ---- Toolchain ------------------------------------------------------
     # `local` builds only: release installs never need cargo.
     - name: Install Rust
       if: ${{ inputs.source == 'local' }}
       uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
-    # ---- Local builds ----------------------------------------------
+    # ---- Local builds ---------------------------------------------------
     # One leg per shell; the product flows through `OXDOCK_PRODUCT`.
     # Only the truly product-specific parts (cargo package set,
     # renderer sidecars) branch on it.

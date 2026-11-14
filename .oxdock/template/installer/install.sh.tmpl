@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 {{ $files.stubs.installer-doc-header }}
 
+{{ COMMENT::RULE("#") }}
+# Install with the default product, or set OXDOCK_PRODUCT.
 #
 #   curl -fsSL {{ $global.stub_url_sh }} | bash
 #
@@ -8,7 +10,7 @@
 # pre-releases, and every release here is `-alpha` until stable):
 #
 #   (export VERSION=v{{ env:CRATE_VERSION }}; curl -fsSL {{ $global.stub_url_sh }} | bash)
-#
+{{ COMMENT::RULE("#") }}
 {{ $files.stubs.installer-doc-env }}
 
 set -euo pipefail

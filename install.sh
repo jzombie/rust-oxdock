@@ -11,6 +11,8 @@
 # reruns need no network once warm (pin VERSION to stay fully offline).
 # Override the cache root with OXDOCK_CACHE_DIR.
 
+# =====================================================================
+# Install with the default product, or set OXDOCK_PRODUCT.
 #
 #   curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash
 #
@@ -18,7 +20,7 @@
 # pre-releases, and every release here is `-alpha` until stable):
 #
 #   (export VERSION=v0.39.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
-#
+# =====================================================================
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
 #
