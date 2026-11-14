@@ -4,7 +4,6 @@
   "comment_head": "Setup OxDock engine for `shell: oxdock` steps (`oxdock-engine` when renamed).",
   "action_title": "Setup OxDock engine",
   "action_summary": "Install the oxdock interpreter so later steps can use shell oxdock.",
-  "version_example": "v0.29.0-alpha",
   "binary_note": "(`oxdock-engine` frees the bare `oxdock` name for a binary under test)",
   "binary_default": "oxdock",
   "provenance_kind": "Engine",

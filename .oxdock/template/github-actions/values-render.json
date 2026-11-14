@@ -4,7 +4,6 @@
   "comment_head": "Setup OxDock renderer for `oxdock-render` steps.",
   "action_title": "Setup OxDock renderer",
   "action_summary": "Install the oxdock-render binary so later steps can render docs.",
-  "version_example": "v0.37.0-alpha",
   "binary_note": "(`oxdock-render` keeps the bare name free for a binary under test only when overridden)",
   "binary_default": "oxdock-render",
   "provenance_kind": "Renderer",
