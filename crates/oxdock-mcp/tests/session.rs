@@ -292,7 +292,12 @@ fn qualified_opaque_export_still_registers() {
     let engine = Engine::new();
     let parsed = parse_script_with_modules_and_exports(script, engine.module_table())
         .expect("export must parse");
-    assert!(parsed.func_exports.contains(&"STD::TEXT_TRIM".to_string()));
+    assert!(
+        parsed
+            .func_exports
+            .iter()
+            .any(|name| name == "STD::TEXT_TRIM")
+    );
     // Stage 2 (oxdock-core): linear session init accepts the export.
     // McpSession is core session machinery (state + registry); despite
     // the name it performs no JSON projection and opens no transport.
@@ -308,7 +313,8 @@ fn qualified_opaque_export_still_registers() {
     assert!(
         session
             .func_exports()
-            .contains(&"STD::TEXT_TRIM".to_string())
+            .iter()
+            .any(|name| name == "STD::TEXT_TRIM")
     );
     // Stage 3 (oxdock-core registry): the qualified name resolves to
     // real function metadata. Registry lookup succeeds; only the
@@ -418,7 +424,12 @@ fn status_reports_generation_and_failure() {
     let (config, root) = handler_config(DEMO);
     let handler = init_handler(config).expect("init");
     assert_eq!(handler.generation(), 1);
-    assert!(handler.tool_names().contains(&STATUS_TOOL_NAME.to_string()));
+    assert!(
+        handler
+            .tool_names()
+            .iter()
+            .any(|name| name == STATUS_TOOL_NAME)
+    );
 
     let payload = handler.status_payload();
     assert_eq!(payload["generation"], 1);
@@ -523,7 +534,7 @@ fn handle_crosses_the_boundary_as_task_id() {
     let metas = session.tool_metas().expect("metas");
     let table = build_tool_table(metas, &HashMap::new()).expect("handle table serves");
     let names: Vec<String> = table.iter().map(|tool| tool.name.clone()).collect();
-    assert!(names.contains(&"TASK_POLL".to_string()), "{names:?}");
+    assert!(names.iter().any(|name| name == "TASK_POLL"), "{names:?}");
     let spawn = table
         .iter()
         .find(|tool| tool.name == "SPAWN_SLOW")

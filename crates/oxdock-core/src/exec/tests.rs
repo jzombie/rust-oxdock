@@ -3802,7 +3802,7 @@ fn timeout_scope_does_not_join_prior_background_work() {
         "TIMEOUT scope must return without joining prior background work"
     );
     assert!(
-        mock.killed().contains(&"server".to_string()),
+        mock.killed().iter().any(|task| task == "server"),
         "CANCEL must still tear down the server task afterwards, got: {:?}",
         mock.killed()
     );

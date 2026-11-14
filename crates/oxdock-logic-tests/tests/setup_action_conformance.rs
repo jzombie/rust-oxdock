@@ -180,8 +180,9 @@ fn ci_tail_smokes_and_publishes() -> Result<()> {
     let run = ci_tail_harness()?;
     execute(&run)?;
     let published = std::fs::read_to_string(run.gh_path.as_path())?;
+    let needle = run.engine_dir.as_path().display().to_string();
     assert!(
-        published.contains(&run.engine_dir.as_path().display().to_string()),
+        published.contains(needle.as_str()),
         "engine directory must land on GITHUB_PATH, got: {published:?}"
     );
     let env_out = std::fs::read_to_string(run.gh_env.as_path())?;
@@ -205,8 +206,9 @@ fn ci_tail_derives_version_when_unbridged() -> Result<()> {
     run.io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
     execute(&run)?;
     let published = std::fs::read_to_string(run.gh_path.as_path())?;
+    let needle = run.engine_dir.as_path().display().to_string();
     assert!(
-        published.contains(&run.engine_dir.as_path().display().to_string()),
+        published.contains(needle.as_str()),
         "engine directory must land on GITHUB_PATH, got: {published:?}"
     );
     Ok(())
@@ -228,8 +230,9 @@ fn ci_tail_derives_version_without_override() -> Result<()> {
     write_fixture_engine(&run.engine_dir.join("oxdock-engine-test")?)?;
     execute(&run)?;
     let published = std::fs::read_to_string(run.gh_path.as_path())?;
+    let needle = run.engine_dir.as_path().display().to_string();
     assert!(
-        published.contains(&run.engine_dir.as_path().display().to_string()),
+        published.contains(needle.as_str()),
         "engine directory must land on GITHUB_PATH, got: {published:?}"
     );
     Ok(())
