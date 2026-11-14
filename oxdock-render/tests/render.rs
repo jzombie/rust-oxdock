@@ -1433,12 +1433,13 @@ fn init_scaffold_renders() {
 #[test]
 #[cfg_attr(miri, ignore = "reads the repository checkout; needs real host files")]
 fn setup_render_action_pins_release_and_local_contract() {
-    // The generated composite action is CI surface: the release legs
-    // (unix plus windows) and the local-build leg must stay wired to
-    // the renderer product, so a template edit that drops one fails
-    // here instead of in a downstream workflow run. Template-to-file
-    // drift stays with the CI `git diff --exit-code` render check;
-    // this pins the semantics the file must keep.
+    // The generated root composite action is CI surface: one release leg
+    // per shell serving both products via `inputs.product`, plus one
+    // local-build leg per shell branching only where the cargo
+    // invocations genuinely differ. A template edit that drops a leg
+    // fails here instead of in a downstream workflow run.
+    // Template-to-file drift stays with the CI `git diff --exit-code`
+    // render check; this pins the semantics the file must keep.
     let manifest = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR).expect("manifest dir");
     let repo = oxdock_fs::to_forward_slashes(&manifest);
     let repo = repo
@@ -1446,27 +1447,31 @@ fn setup_render_action_pins_release_and_local_contract() {
         .expect("test lives in oxdock-render");
     let repo_root = GuardedPath::new_root_from_str(repo).expect("repo root");
     let repo_fs = PathResolver::new_guarded(repo_root.clone(), repo_root.clone()).expect("repo fs");
-    let action_path = repo_fs
-        .root()
-        .join(".github/actions/setup-oxdock-render/action.yml")
-        .expect("action path");
+    let action_path = repo_fs.root().join("action.yml").expect("action path");
     let action = repo_fs
         .read_to_string(&action_path)
         .expect("generated action is checked in");
     for needle in [
-        "name: Setup OxDock renderer",
+        "name: Setup OxDock",
+        "product:",
+        "default: oxdock",
         "binary-name:",
-        "default: oxdock-render",
         "default: release",
         "runner.os != 'Windows'",
         "runner.os == 'Windows'",
         "source == 'local'",
+        "inputs.product",
+        "OXDOCK_PRODUCT: ${{ inputs.product }}",
+        "cargo build --release -p oxdock",
         "cargo build --release -p oxdock -p oxdock-render --bins --all-features",
         "Invalid source",
+        "Invalid product",
         "OXDOCK_SOURCE: ${{ inputs.source }}",
         "Invalid source '$OXDOCK_SOURCE'",
         "CARGO_TARGET_DIR",
         "GITHUB_PATH",
+        "raw.githubusercontent.com",
+        "Authorization",
     ] {
         assert!(action.contains(needle), "action names {needle}");
     }
@@ -1489,16 +1494,57 @@ fn setup_render_action_pins_release_and_local_contract() {
             "action must not contain {absent:?}"
         );
     }
-    // Validation runs before any installer: an invalid `source` must
-    // fail before the release download mutates `GITHUB_PATH`.
-    let validate = action
-        .find("Validate renderer source input")
-        .expect("validation step exists");
-    let release = action
-        .find("Install OxDock renderer")
-        .expect("release step exists");
+    // Validation runs before any installer: invalid `source` or
+    // `product` must fail before the release download mutates
+    // `GITHUB_PATH`.
+    let validate_source = action
+        .find("Validate source input")
+        .expect("source validation step exists");
+    let validate_product = action
+        .find("Validate product input")
+        .expect("product validation step exists");
+    let release = action.find("Install OxDock").expect("release step exists");
     assert!(
-        validate < release,
+        validate_source < release && validate_product < release,
         "validation precedes release installation"
+    );
+}
+
+/// Ruled comment lines hold one canonical width across every
+/// generated script and action: a `COMMENT` plugin rule or section
+/// divider is 71 columns after stripping template indentation, so a
+/// hand-placed rule that drifts fails here instead of rotting the
+/// file-header voice file by file.
+#[test]
+#[cfg_attr(miri, ignore = "reads the repository checkout; needs real host files")]
+fn generated_comment_rules_hold_canonical_width() {
+    let manifest = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR).expect("manifest dir");
+    let repo = oxdock_fs::to_forward_slashes(&manifest);
+    let repo = repo
+        .strip_suffix("/oxdock-render")
+        .expect("test lives in oxdock-render");
+    let repo_root = GuardedPath::new_root_from_str(repo).expect("repo root");
+    let repo_fs = PathResolver::new_guarded(repo_root.clone(), repo_root.clone()).expect("repo fs");
+    let mut ruled = 0;
+    for rel in ["action.yml", "install.sh", "install.ps1", "install.oxfile"] {
+        let path = repo_fs.root().join(rel).expect("generated path");
+        let text = repo_fs
+            .read_to_string(&path)
+            .expect("generated file is checked in");
+        for line in text.lines() {
+            let stripped = line.trim_start();
+            if stripped.starts_with("# ===") || stripped.starts_with("# ----") {
+                assert_eq!(
+                    stripped.chars().count(),
+                    71,
+                    "ruled comment line must be 71 columns in {rel}: {stripped:?}"
+                );
+                ruled += 1;
+            }
+        }
+    }
+    assert!(
+        ruled >= 10,
+        "expected banner and section rules across the four files, found {ruled}"
     );
 }

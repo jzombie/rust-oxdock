@@ -453,54 +453,11 @@ pub fn parse_placeholder_call(key: &str) -> Option<(String, String, Vec<String>)
 /// Maximum nesting for map and list literals in placeholder call args.
 const MAX_LITERAL_DEPTH: usize = 16;
 
+/// Split on a top-level separator inside placeholder call args.
+/// One shared implementation lives in the parser; this stays as
+/// the local name so map/list lowering reads unchanged.
 fn split_top_level(src: &str, sep: char) -> Vec<String> {
-    if sep == ',' {
-        return oxdock_parser::template::split_placeholder_args(src);
-    }
-    // Map-entry `key: value` split shares the same quoted/bracket
-    // discipline; only the separator differs.
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut quote: u8 = 0;
-    let mut escaped = false;
-    let mut depth: usize = 0;
-    for c in src.chars() {
-        if quote != 0 {
-            current.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == quote as char {
-                quote = 0;
-            }
-            continue;
-        }
-        match c {
-            '"' | '\'' => {
-                quote = c as u8;
-                current.push(c);
-            }
-            '{' | '[' | '(' => {
-                depth += 1;
-                current.push(c);
-            }
-            '}' | ']' | ')' => {
-                depth = depth.saturating_sub(1);
-                current.push(c);
-            }
-            _ if c == sep && depth == 0 => {
-                out.push(current.trim().to_string());
-                current.clear();
-            }
-            _ => current.push(c),
-        }
-    }
-    let last = current.trim();
-    if !(out.is_empty() && last.is_empty()) {
-        out.push(last.to_string());
-    }
-    out
+    oxdock_parser::template::split_top_level(src, sep)
 }
 
 /// Resolve one placeholder call argument against script variables for
@@ -536,15 +493,13 @@ fn resolve_call_value(
         let parts: Vec<&str> = path.split('.').collect();
         return resolve_value_path(&parts, vars);
     }
-    if src.len() >= 2 && src.starts_with('"') && src.ends_with('"') {
-        return Ok(oxdock_parser::Value::string(unescape_literal(
-            &src[1..src.len() - 1],
-        )?));
+    if let Some(literal) = oxdock_parser::template::parse_string_literal(src) {
+        return literal.map(oxdock_parser::Value::string);
     }
-    if let Some(inner) = strip_wrapped(src, '{', '}') {
+    if let Some(inner) = oxdock_parser::template::strip_wrapped_delimiters(src, '{', '}') {
         return resolve_call_map(inner, vars, depth);
     }
-    if let Some(inner) = strip_wrapped(src, '[', ']') {
+    if let Some(inner) = oxdock_parser::template::strip_wrapped_delimiters(src, '[', ']') {
         return resolve_call_list(inner, vars, depth);
     }
     match src {
@@ -563,47 +518,8 @@ fn resolve_call_value(
     )
 }
 
-/// Strip one wrapping delimiter pair, rejecting unbalanced closers
-/// inside: the opener at 0 must match the closer at the end with no
-/// earlier top level closer.
-fn strip_wrapped(src: &str, open: char, close: char) -> Option<&str> {
-    if !src.starts_with(open) || !src.ends_with(close) || src.len() < 2 {
-        return None;
-    }
-    let mut quote: u8 = 0;
-    let mut escaped = false;
-    let mut depth: usize = 0;
-    for (idx, c) in src.char_indices() {
-        if quote != 0 {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == quote as char {
-                quote = 0;
-            }
-            continue;
-        }
-        match c {
-            '"' | '\'' => quote = c as u8,
-            _ if c == open => depth += 1,
-            _ if c == close => {
-                depth -= 1;
-                if depth == 0 && idx != src.len() - close.len_utf8() {
-                    return None;
-                }
-            }
-            _ => {}
-        }
-    }
-    if depth != 0 {
-        return None;
-    }
-    Some(&src[open.len_utf8()..src.len() - close.len_utf8()])
-}
-
 /// Resolve a `{key: value}` map literal. Keys are bare ASCII
-/// identifiers or double quoted strings; values recurse through
+/// identifiers or string literals; values recurse through
 /// [`resolve_call_value`].
 fn resolve_call_map(
     inner: &str,
@@ -629,16 +545,18 @@ fn resolve_call_map(
     Ok(oxdock_parser::Value::map(entries))
 }
 
-/// Resolve one map literal key: a bare ASCII identifier or a double
-/// quoted string.
+/// Resolve one map literal key: a bare ASCII identifier or a string
+/// literal in any spelling. String shapes route through the single
+/// `oxdock_parser::template::parse_string_literal` owner, never a
+/// local quote check.
 fn resolve_call_key(src: &str) -> Result<String> {
-    if src.len() >= 2 && src.starts_with('"') && src.ends_with('"') {
-        return unescape_literal(&src[1..src.len() - 1]);
+    if let Some(literal) = oxdock_parser::template::parse_string_literal(src) {
+        return literal;
     }
     if !src.is_empty() && src.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Ok(src.to_string());
     }
-    bail!("invalid map literal key '{src}': use name or \"name\"")
+    bail!("invalid map literal key '{src}': use a bare name or any string spelling")
 }
 
 /// Resolve a `[item]` list literal, elements recursing through
@@ -656,29 +574,6 @@ fn resolve_call_list(
         items.push(resolve_call_value(&item, vars, depth + 1)?);
     }
     Ok(oxdock_parser::Value::list(items))
-}
-
-/// Unescape a double quoted literal: `\\` and `\"` only. Anything else
-/// keeps its backslash so template text stays predictable.
-fn unescape_literal(src: &str) -> Result<String> {
-    let mut out = String::with_capacity(src.len());
-    let mut chars = src.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('\\') => out.push('\\'),
-            Some('"') => out.push('"'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => bail!("unterminated escape in placeholder string literal"),
-        }
-    }
-    Ok(out)
 }
 
 /// Resolve a dotted path against vars, cloning the value for the caller.
@@ -1678,5 +1573,102 @@ mod tests {
                 StreamingExpand::new(&[], &HashMap::new()).with_call_resolver(shape_resolver());
             assert!(expander.expand_string(bad).is_err(), "must fail: {bad}");
         }
+    }
+
+    #[test]
+    fn placeholder_call_rejects_adjacent_string_literals() {
+        // Missing commas and infix expressions must fail, never merge
+        // into one string.
+        for bad in [
+            "{{ T::SHAPE(\"a\" \"b\") }}",
+            "{{ T::SHAPE(\"a\" + \"b\") }}",
+            "{{ T::SHAPE(\"foo\\\") }}",
+        ] {
+            let expander =
+                StreamingExpand::new(&[], &HashMap::new()).with_call_resolver(shape_resolver());
+            assert!(expander.expand_string(bad).is_err(), "must fail: {bad}");
+        }
+    }
+
+    #[test]
+    fn placeholder_call_brackets_inside_block_strings_resolve() {
+        let resolver: PlaceholderCall = Arc::new(|_, _, args| {
+            let first = &args[0];
+            if let Some(items) = first.as_list() {
+                return Ok(oxdock_parser::Value::string(
+                    items[0].as_str().unwrap_or("?").to_string(),
+                ));
+            }
+            if let Some(entries) = first.as_map() {
+                return Ok(oxdock_parser::Value::string(
+                    entries
+                        .get("k")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string(),
+                ));
+            }
+            bail!("expected list or map")
+        });
+        let list = StreamingExpand::new(&[], &HashMap::new())
+            .with_call_resolver(resolver.clone())
+            .expand_string("{{ T::ECHO([\"\"\"a]b\"\"\"]) }}")
+            .unwrap();
+        assert_eq!(list, "a]b");
+        let map = StreamingExpand::new(&[], &HashMap::new())
+            .with_call_resolver(resolver.clone())
+            .expand_string("{{ T::ECHO({k: \"\"\"a}b\"\"\"}) }}")
+            .unwrap();
+        assert_eq!(map, "a}b");
+    }
+
+    #[test]
+    fn placeholder_call_single_quotes_match_double_quotes() {
+        let resolver: PlaceholderCall = Arc::new(|_, _, args| {
+            Ok(oxdock_parser::Value::string(
+                args.iter()
+                    .map(|a| a.as_str().unwrap_or("?").to_string())
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            ))
+        });
+        for (double, single) in [
+            ("{{ T::ECHO(\"hi\") }}", "{{ T::ECHO('hi') }}"),
+            ("{{ T::ECHO(\"a,b\") }}", "{{ T::ECHO('a,b') }}"),
+            ("{{ T::ECHO({k: \"v\"}) }}", "{{ T::ECHO({k: 'v'}) }}"),
+            ("{{ T::ECHO({\"k\": \"v\"}) }}", "{{ T::ECHO({'k': 'v'}) }}"),
+            ("{{ T::ECHO([\"a\"]) }}", "{{ T::ECHO(['a']) }}"),
+        ] {
+            let left = StreamingExpand::new(&[], &HashMap::new())
+                .with_call_resolver(resolver.clone())
+                .expand_string(double)
+                .unwrap();
+            let right = StreamingExpand::new(&[], &HashMap::new())
+                .with_call_resolver(resolver.clone())
+                .expand_string(single)
+                .unwrap();
+            assert_eq!(
+                left, right,
+                "quote style must not matter: {double} vs {single}"
+            );
+        }
+    }
+
+    #[test]
+    fn placeholder_call_triple_quoted_matches_single_line() {
+        let resolver: PlaceholderCall = Arc::new(|_, _, args| {
+            Ok(oxdock_parser::Value::string(
+                args[0].as_str().unwrap_or("?").to_string(),
+            ))
+        });
+        let plain = StreamingExpand::new(&[], &HashMap::new())
+            .with_call_resolver(resolver.clone())
+            .expand_string("{{ T::ECHO(\"Release installs\") }}")
+            .unwrap();
+        let block = StreamingExpand::new(&[], &HashMap::new())
+            .with_call_resolver(resolver.clone())
+            .expand_string("{{ T::ECHO(\"\"\"Release installs\"\"\") }}")
+            .unwrap();
+        assert_eq!(plain, block);
     }
 }

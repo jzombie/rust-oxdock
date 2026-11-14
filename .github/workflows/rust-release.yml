@@ -184,7 +184,7 @@ jobs:
       # published engine predates, so the resolver builds from this
       # checkout like every other branch-DSL leg.
       - name: Setup resolve engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: local
 
@@ -295,7 +295,7 @@ jobs:
       # publishes. The duplicate build is an intentional self-hosting
       # proof, not a candidate for reuse of the step above.
       - name: Setup pack engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: local
 
@@ -409,7 +409,7 @@ jobs:
       # new DSL stays usable here.
       - name: Setup extract engine
         if: ${{ inputs.binaries }}
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: local
 

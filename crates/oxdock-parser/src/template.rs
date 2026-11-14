@@ -113,41 +113,29 @@ pub fn parse_placeholder_call(key: &str) -> Option<PlaceholderCall<'_>> {
         }
         Head::Bare(head)
     };
-    let bytes = rest.as_bytes();
+    // The shared atom scan drives depth: quoted runs (including
+    // `"""` blocks) arrive whole as Text, so parens inside strings
+    // never count. Only structural opens and closes move depth.
     let mut depth: usize = 0;
-    let mut quote: u8 = 0;
-    let mut escaped = false;
     let mut close_at: Option<usize> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if quote != 0 {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == quote {
-                quote = 0;
-            }
-            i += 1;
-            continue;
-        }
-        match b {
-            b'"' | b'\'' => quote = b,
-            b'(' => depth += 1,
-            b')' => {
+    for atom in scan_atoms(rest) {
+        match atom.kind {
+            // Only parens move depth here, exactly as before: quoted
+            // runs arrive whole as Text, and other brackets never
+            // counted. Unbalanced cross-kind input fails closed below.
+            AtomKind::Open if atom.text == "(" => depth += 1,
+            AtomKind::Close if atom.text == ")" => {
                 if depth == 0 {
                     return None;
                 }
                 depth -= 1;
                 if depth == 0 {
-                    close_at = Some(i);
+                    close_at = Some(atom.start);
                     break;
                 }
             }
             _ => {}
         }
-        i += 1;
     }
     let close_at = close_at?;
     if !rest[close_at + 1..].trim().is_empty() {
@@ -176,46 +164,177 @@ pub fn parse_placeholder_call(key: &str) -> Option<PlaceholderCall<'_>> {
     }
 }
 
-/// Split call args on top-level commas, keeping quoted strings and
-/// `{...}` / `[...]` / `(...)` literals intact. Both quote styles
-/// shield commas (with backslash escapes); depth applies to all
-/// three bracket shapes so nested literals never split.
-pub fn split_placeholder_args(src: &str) -> Vec<String> {
+/// One lexical atom of placeholder arg text. Bracket depth tracking
+/// and top-level splitting share this single scan, so quote rules —
+/// including `"""` blocks — can never disagree between the splitter
+/// and the paren matcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomKind {
+    /// One of `([{`.
+    Open,
+    /// One of `)]}`.
+    Close,
+    /// A separator candidate (`,` or `:`); consumers decide which splits.
+    Sep(char),
+    /// Anything else: a maximal run that is either one quoted string
+    /// (`".."`, `'..'`, or a whole `""".."""` block with backslash
+    /// escapes honored) or unquoted text up to the next structural
+    /// character. Commas and brackets inside a quoted run never surface.
+    Text,
+}
+
+/// A scanned atom with its byte offset in the scanned source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Atom<'a> {
+    pub kind: AtomKind,
+    pub text: &'a str,
+    pub start: usize,
+}
+
+/// Scan placeholder arg text into atoms. Unterminated quotes run to
+/// end of input as text; downstream value resolution fails those
+/// closed, exactly as before.
+pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
+    let bytes = src.as_bytes();
     let mut out = Vec::new();
-    let mut current = String::new();
-    let mut quote: u8 = 0;
-    let mut escaped = false;
-    let mut depth: usize = 0;
-    for c in src.chars() {
-        if quote != 0 {
-            current.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == quote as char {
-                quote = 0;
+    let mut i = 0;
+    let mut text_from: Option<usize> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // A `"""` opener consumes through its unescaped closer.
+        if b == b'"' && bytes.get(i + 1) == Some(&b'"') && bytes.get(i + 2) == Some(&b'"') {
+            if let Some(s) = text_from.take()
+                && s != i
+            {
+                out.push(Atom {
+                    kind: AtomKind::Text,
+                    text: &src[s..i],
+                    start: s,
+                });
             }
+            let start = i;
+            i += 3;
+            let mut escaped = false;
+            while i < bytes.len() {
+                if escaped {
+                    escaped = false;
+                    i += 1;
+                } else if bytes[i] == b'\\' {
+                    escaped = true;
+                    i += 1;
+                } else if bytes[i] == b'"'
+                    && bytes.get(i + 1) == Some(&b'"')
+                    && bytes.get(i + 2) == Some(&b'"')
+                {
+                    i += 3;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(Atom {
+                kind: AtomKind::Text,
+                text: &src[start..i],
+                start,
+            });
             continue;
         }
-        match c {
-            '"' | '\'' => {
-                quote = c as u8;
-                current.push(c);
+        // A single-quote opener consumes through its unescaped closer.
+        if b == b'"' || b == b'\'' {
+            if let Some(s) = text_from.take()
+                && s != i
+            {
+                out.push(Atom {
+                    kind: AtomKind::Text,
+                    text: &src[s..i],
+                    start: s,
+                });
             }
-            '{' | '[' | '(' => {
+            let q = b;
+            let start = i;
+            i += 1;
+            let mut escaped = false;
+            while i < bytes.len() {
+                if escaped {
+                    escaped = false;
+                } else if bytes[i] == b'\\' {
+                    escaped = true;
+                } else if bytes[i] == q {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push(Atom {
+                kind: AtomKind::Text,
+                text: &src[start..i],
+                start,
+            });
+            continue;
+        }
+        let kind = match b {
+            b'(' | b'[' | b'{' => Some(AtomKind::Open),
+            b')' | b']' | b'}' => Some(AtomKind::Close),
+            b',' | b':' => Some(AtomKind::Sep(b as char)),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            if let Some(s) = text_from.take()
+                && s != i
+            {
+                out.push(Atom {
+                    kind: AtomKind::Text,
+                    text: &src[s..i],
+                    start: s,
+                });
+            }
+            out.push(Atom {
+                kind,
+                text: &src[i..i + 1],
+                start: i,
+            });
+            i += 1;
+        } else {
+            if text_from.is_none() {
+                text_from = Some(i);
+            }
+            i += 1;
+        }
+    }
+    if let Some(s) = text_from.take()
+        && s < bytes.len()
+    {
+        out.push(Atom {
+            kind: AtomKind::Text,
+            text: &src[s..],
+            start: s,
+        });
+    }
+    out
+}
+
+/// Split on a top-level separator, keeping quoted strings, `"""`
+/// blocks, and bracket groups intact. Shared by comma arg lists and
+/// map-entry `key: value` pairs; only the separator differs.
+fn split_on(src: &str, sep: char) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth: usize = 0;
+    for atom in scan_atoms(src) {
+        match atom.kind {
+            AtomKind::Open => {
                 depth += 1;
-                current.push(c);
+                current.push_str(atom.text);
             }
-            '}' | ']' | ')' => {
+            AtomKind::Close => {
                 depth = depth.saturating_sub(1);
-                current.push(c);
+                current.push_str(atom.text);
             }
-            ',' if depth == 0 => {
+            AtomKind::Sep(c) if c == sep && depth == 0 => {
                 out.push(current.trim().to_string());
                 current.clear();
             }
-            _ => current.push(c),
+            _ => current.push_str(atom.text),
         }
     }
     let last = current.trim();
@@ -223,6 +342,157 @@ pub fn split_placeholder_args(src: &str) -> Vec<String> {
         out.push(last.to_string());
     }
     out
+}
+
+/// Split call args on top-level commas, keeping quoted strings,
+/// `"""` blocks, and bracket groups intact.
+pub fn split_placeholder_args(src: &str) -> Vec<String> {
+    split_on(src, ',')
+}
+
+/// Split on a top-level separator character. Only `,` and `:` are
+/// tokenized by [`scan_atoms`]; anything else is a programming error
+/// and fails fast. (A plain assert: the workspace bans `cfg`-based
+/// macros outside the `sys` crates, so no `debug_assert!` here.)
+pub fn split_top_level(src: &str, sep: char) -> Vec<String> {
+    assert!(
+        matches!(sep, ',' | ':'),
+        "scan_atoms only tokenizes ',' and ':' separators"
+    );
+    split_on(src, sep)
+}
+
+/// Parse one string literal in any spelling: `"""` blocks lower
+/// through the shared block lowering, `"..."` and `'...'` unescape
+/// through the shared unescaper. Returns `None` when `src` is not a
+/// single string literal. Single owner for placeholder string syntax:
+/// value and key paths both route here, so a new spelling lands once.
+///
+/// Closer validation rides [`scan_atoms`]: the input must scan as one
+/// quoted text atom spanning all of `src`, and the closer is matched
+/// from the opener with escapes honored. Adjacent literals (`"a" "b"`),
+/// infix expressions (`"a" + "b"`), and trailing-escape inputs (`"foo\"`)
+/// fail closed instead of merging or truncating.
+pub fn parse_string_literal(src: &str) -> Option<anyhow::Result<String>> {
+    let atoms = scan_atoms(src);
+    let [atom] = atoms.as_slice() else {
+        return None;
+    };
+    if atom.kind != AtomKind::Text || atom.start != 0 || atom.text != src {
+        return None;
+    }
+    if src.starts_with("\"\"\"") {
+        return Some(parse_block_literal(src));
+    }
+    for quote in ['"', '\''] {
+        if src.starts_with(quote) {
+            return Some(parse_quoted_literal(src, quote));
+        }
+    }
+    None
+}
+
+/// Match one `"..."` or `'...'` literal from its opener to its first
+/// unescaped closer, which must end the input. `\\` skips the next
+/// byte unconditionally, so a trailing escape fails unterminated.
+fn parse_quoted_literal(src: &str, quote: char) -> anyhow::Result<String> {
+    let bytes = src.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == quote as u8 {
+            if i + 1 != src.len() {
+                anyhow::bail!("unexpected text after string literal: {src:?}");
+            }
+            return unescape_literal(&src[1..i], quote);
+        }
+        i += 1;
+    }
+    anyhow::bail!("unterminated string literal: {src:?}")
+}
+
+/// Match one `"""..."""` block from its opener to its first unescaped
+/// closer triple, which must end the input. Lowers through the shared
+/// block lowering, so placeholder blocks read exactly like statement
+/// block strings.
+fn parse_block_literal(src: &str) -> anyhow::Result<String> {
+    let bytes = src.as_bytes();
+    let mut i = 3;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' && bytes.get(i + 1) == Some(&b'"') && bytes.get(i + 2) == Some(&b'"') {
+            if i + 3 != src.len() {
+                anyhow::bail!("unexpected text after block string literal: {src:?}");
+            }
+            return Ok(crate::command::lower_block_string(src));
+        }
+        i += 1;
+    }
+    anyhow::bail!("unterminated block string literal: {src:?}")
+}
+
+/// Unescape a quoted literal: `\\` and the enclosing quote only.
+/// Anything else keeps its backslash so template text stays predictable.
+fn unescape_literal(src: &str, quote: char) -> anyhow::Result<String> {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some(q) if q == quote => out.push(quote),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => anyhow::bail!("unterminated escape in placeholder string literal"),
+        }
+    }
+    Ok(out)
+}
+
+/// Strip one wrapping delimiter pair, built on [`scan_atoms`] instead
+/// of a local quote loop: the opener at 0 must match the closer at the
+/// end with no earlier top-level closer. `"""` blocks scan as single
+/// text atoms, so brackets inside them never disturb the depth.
+pub fn strip_wrapped_delimiters(src: &str, open: char, close: char) -> Option<&str> {
+    let atoms = scan_atoms(src);
+    let first = atoms.first()?;
+    if first.kind != AtomKind::Open || first.start != 0 || first.text.chars().count() != 1 {
+        return None;
+    }
+    if !first.text.starts_with(open) {
+        return None;
+    }
+    let mut depth = 0usize;
+    for atom in &atoms {
+        match atom.kind {
+            AtomKind::Open => depth += 1,
+            AtomKind::Close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    if atom.start + atom.text.len() != src.len() {
+                        return None;
+                    }
+                    if !atom.text.starts_with(close) {
+                        return None;
+                    }
+                    return Some(&src[open.len_utf8()..src.len() - close.len_utf8()]);
+                }
+            }
+            AtomKind::Text | AtomKind::Sep(_) => {}
+        }
+    }
+    None
 }
 /// Allocation-free segment iterator over template text. See the module
 /// docs for the exact rules; the unit tests below pin every escape
@@ -446,5 +716,86 @@ mod tests {
             split_placeholder_args("$a, \"b,c\", 'd,e'"),
             vec!["$a".to_string(), "\"b,c\"".to_string(), "'d,e'".to_string()],
         );
+    }
+
+    #[test]
+    fn triple_quoted_blocks_split_and_parse_whole() {
+        use super::{parse_placeholder_call, split_placeholder_args};
+        // Commas, parens, and brackets inside `"""` never split depth.
+        assert_eq!(
+            split_placeholder_args("\"\"\"a, b (c) [d]\"\"\", $x"),
+            vec!["\"\"\"a, b (c) [d]\"\"\"".to_string(), "$x".to_string()],
+        );
+        // A block arg spanning lines survives as one arg.
+        assert_eq!(
+            split_placeholder_args("\"\"\"line one\nline two\"\"\""),
+            vec!["\"\"\"line one\nline two\"\"\"".to_string()],
+        );
+        // Parens inside blocks never affect the call paren match.
+        let call = parse_placeholder_call("M::F(\"\"\"a(b\"\"\", $x)").expect("block parens parse");
+        assert_eq!(call.name, "F");
+        assert_eq!(call.args_raw, "\"\"\"a(b\"\"\", $x");
+    }
+
+    #[test]
+    fn string_literal_spellings_agree() {
+        use super::parse_string_literal;
+        let plain = parse_string_literal("\"Release installs\"")
+            .expect("quoted")
+            .expect("ok");
+        let single = parse_string_literal("'Release installs'")
+            .expect("single")
+            .expect("ok");
+        let block = parse_string_literal("\"\"\"Release installs\"\"\"")
+            .expect("block")
+            .expect("ok");
+        assert_eq!(plain, "Release installs");
+        assert_eq!(single, plain);
+        assert_eq!(block, plain);
+    }
+
+    #[test]
+    fn string_literal_rejects_merged_and_unterminated() {
+        use super::parse_string_literal;
+        // Adjacent literals and infix expressions scan as several atoms:
+        // not one literal, so the caller rejects them.
+        assert!(parse_string_literal("\"a\" \"b\"").is_none());
+        assert!(parse_string_literal("\"a\" + \"b\"").is_none());
+        assert!(parse_string_literal("\"\"\"a\"\"\" \"\"\"b\"\"\"").is_none());
+        // Trailing escapes and missing closers fail closed.
+        assert!(parse_string_literal("\"foo\\\"").expect("quoted").is_err());
+        assert!(parse_string_literal("'foo\\'").expect("single").is_err());
+        assert!(
+            parse_string_literal("\"\"\"foo\\")
+                .expect("block escape")
+                .is_err()
+        );
+        assert!(
+            parse_string_literal("\"\"\"foo\"\"")
+                .expect("block short")
+                .is_err()
+        );
+        assert!(parse_string_literal("\"foo").expect("open").is_err());
+        assert!(
+            parse_string_literal("\"\"\"foo")
+                .expect("open block")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn wrapped_delimiters_see_through_block_strings() {
+        use super::strip_wrapped_delimiters;
+        assert_eq!(
+            strip_wrapped_delimiters("[\"\"\"a]b\"\"\"]", '[', ']'),
+            Some("\"\"\"a]b\"\"\"")
+        );
+        assert_eq!(
+            strip_wrapped_delimiters("{k: \"\"\"a}b\"\"\"}", '{', '}'),
+            Some("k: \"\"\"a}b\"\"\"")
+        );
+        assert_eq!(strip_wrapped_delimiters("[a, b]", '[', ']'), Some("a, b"));
+        assert!(strip_wrapped_delimiters("[a], [b]", '[', ']').is_none());
+        assert!(strip_wrapped_delimiters("[a", '[', ']').is_none());
     }
 }

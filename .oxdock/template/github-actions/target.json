@@ -1,25 +1,12 @@
 {
   "targets": [
     {
-      "name": "setup-oxdock-action",
-      "out": ".github/actions/setup-oxdock/action.yml",
+      "name": "setup-action",
+      "out": "action.yml",
       "values": ".oxdock/template/github-actions/values.json",
-      "template": ".oxdock/template/github-actions/setup-oxdock-action.yml.tmpl",
+      "template": ".oxdock/template/github-actions/setup-action.yml.tmpl",
       "fragments": {
-        "local": [
-          ".oxdock/template/github-actions/fragments/*"
-        ]
-      }
-    },
-    {
-      "name": "setup-oxdock-render-action",
-      "out": ".github/actions/setup-oxdock-render/action.yml",
-      "values": ".oxdock/template/github-actions/values-render.json",
-      "template": ".oxdock/template/github-actions/setup-oxdock-render-action.yml.tmpl",
-      "fragments": {
-        "local": [
-          ".oxdock/template/github-actions/fragments/*"
-        ]
+        "local": []
       }
     }
   ]

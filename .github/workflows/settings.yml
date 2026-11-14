@@ -44,7 +44,7 @@ jobs:
 
       # The pin lives in top-level `env`, not here.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
 

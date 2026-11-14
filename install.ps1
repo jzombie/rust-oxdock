@@ -10,14 +10,16 @@
 # reruns need no network once warm (pin VERSION to stay fully offline).
 # Override the cache root with OXDOCK_CACHE_DIR.
 
+# =====================================================================
+# Install with the default product, or set $env:OXDOCK_PRODUCT.
 #
 #   (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v0.38.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
-#
+#   $env:VERSION = 'v0.39.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
+# =====================================================================
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
 #

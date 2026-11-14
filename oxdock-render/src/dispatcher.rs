@@ -43,6 +43,7 @@ macro_rules! pipeline_modules {
             (DEFER, crate::defer),
             (OXDOCK, crate::plugins::oxdock),
             (RUST, crate::plugins::rust),
+            (COMMENT, crate::plugins::comment),
             (MARKDOWN, oxdock_markdown_plugin)
         }
     };

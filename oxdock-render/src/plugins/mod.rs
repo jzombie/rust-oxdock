@@ -14,5 +14,6 @@
 //! beside the core scripts in `src/`: one file per pipeline
 //! participant, every file exposing the same lifecycle methods.
 
+pub mod comment;
 pub mod oxdock;
 pub mod rust;

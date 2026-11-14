@@ -86,7 +86,7 @@ jobs:
       # loudly here rather than haunting later steps. VERSION pins the
       # engine; the branch under test is built from source next.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
@@ -339,7 +339,7 @@ jobs:
       # bare `oxdock` name stays free for the binary under test. Pinned,
       # so legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -438,7 +438,7 @@ jobs:
       # bare names stay free for the binaries under test. Pinned, so
       # legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -530,7 +530,7 @@ jobs:
       # bare `oxdock` name stays free for the binary under test. Pinned,
       # so legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -645,7 +645,7 @@ jobs:
       # bare `oxdock` name stays free for the binary under test. Pinned,
       # so legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -736,7 +736,7 @@ jobs:
       # bare `oxdock` name stays free for the binary under test. Pinned,
       # so legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -827,7 +827,7 @@ jobs:
       # bare `oxdock` name stays free for the binary under test. Pinned,
       # so legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -913,7 +913,7 @@ jobs:
       # bare `oxdock` name stays free for the binary under test. Pinned,
       # so legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -1016,7 +1016,7 @@ jobs:
       # bare `oxdock` name stays free for the binary under test. Pinned,
       # so legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -1130,7 +1130,7 @@ jobs:
       # bare `oxdock` name stays free for the binary under test. Pinned,
       # so legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -1226,7 +1226,7 @@ jobs:
       # bare `oxdock` name stays free for the binary under test. Pinned,
       # so legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -1356,7 +1356,7 @@ jobs:
       # bare `oxdock` name stays free for the binary under test. Pinned,
       # so legs stay within a stable vocabulary.
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
           binary-name: oxdock-engine
@@ -1418,3 +1418,43 @@ jobs:
 
           LET $gh: STRING = "{{ env:GITHUB_PATH }}"
           RUN ["grep", "-q", "oxdock-prebuilt-bin", "{{ $gh }}"]
+
+  release-path:
+    name: release-path (${{ matrix.os }})
+    needs: [parse]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-26.04-arm, macos-latest, windows-latest, windows-11-arm]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Live release path: default `release` source against the real
+      # network, executing the authenticated stub fetch from the root
+      # action (the branch's own `run:` lines fetch main's stub with
+      # `GITHUB_TOKEN` bridged into step env). All other legs pin
+      # `source: local` and skip these lines by design; this leg alone
+      # proves the outer fetch carries auth on both shells (unix runners
+      # cover bash, windows runners cover pwsh).
+      # product: never-local: installs the newest published releases.
+      - name: Install OxDock (`oxdock`, release)
+        uses: ./
+        with:
+          version: latest
+          product: oxdock
+
+      - name: Install OxDock (`oxdock-render`, release)
+        uses: ./
+        with:
+          version: latest
+          product: oxdock-render
+
+      - name: Verify release installs run
+        shell: bash
+        run: |
+          oxdock --help
+          oxdock-render --help
