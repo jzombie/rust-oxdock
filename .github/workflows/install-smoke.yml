@@ -1418,3 +1418,41 @@ jobs:
 
           LET $gh: STRING = "{{ env:GITHUB_PATH }}"
           RUN ["grep", "-q", "oxdock-prebuilt-bin", "{{ $gh }}"]
+
+  release-path:
+    name: release-path (${{ matrix.os }})
+    needs: [parse]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Live release path: default `release` source against the real
+      # network, executing the authenticated stub fetch rendered from
+      # action-release-steps (the branch's own `run:` lines fetch main's
+      # stub with `GITHUB_TOKEN` bridged into step env). All other legs
+      # pin `source: local` and skip these lines by design; this leg
+      # alone proves the outer fetch carries auth on both shells
+      # (ubuntu covers bash, windows covers pwsh).
+      # product: never-local: installs the newest published releases.
+      - name: Install OxDock engine (release)
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: latest
+
+      - name: Install OxDock renderer (release)
+        uses: ./.github/actions/setup-oxdock-render
+        with:
+          version: latest
+
+      - name: Verify release installs run
+        shell: bash
+        run: |
+          oxdock --help
+          oxdock-render --help
