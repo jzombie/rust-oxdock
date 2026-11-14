@@ -3935,6 +3935,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
+                    name: "optional params must trail",
+                    fence_meta: Some("expect_error:\"optional `?` params must be trailing\""),
+                    code: indoc! {r#"
+                # A required param after an optional one fails at definition.
+                FUNC BAD($a?: STRING, $b: STRING): STRING {
+                    RETURN $b
+                }
+            "#},
+                },
+                Example {
                     name: "async func is a handle guarantee",
                     fence_meta: None,
                     code: indoc! {r#"
