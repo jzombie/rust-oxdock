@@ -191,7 +191,7 @@ impl<P: ProcessManager> ExecState<P> {
             return Ok(tag);
         }
         if let Some(target) = self.type_aliases.get(name) {
-            if resolving.contains(&name.to_string()) {
+            if resolving.iter().any(|s| s.as_str() == name) {
                 resolving.push(name.to_string());
                 bail!("type alias cycle: {}", resolving.join(" -> "));
             }
@@ -572,7 +572,7 @@ impl<P: ProcessManager> ExecState<P> {
             .map(|(name, _)| name.to_string())
             .collect();
         for name in self.types.keys() {
-            if !names.contains(&name.to_string()) {
+            if !names.iter().any(|n| n == name) {
                 names.push(name.clone());
             }
         }
