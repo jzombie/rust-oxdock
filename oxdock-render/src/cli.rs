@@ -5,6 +5,8 @@
 //! silently rendering with defaults (a typo like `--confg` must
 //! never mean "run anyway").
 
+use crate::config::CONFIG_FILENAME;
+
 /// Parsed renderer flags. Paths stay strings here; the caller
 /// converts to guarded paths after parsing.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -41,7 +43,7 @@ pub fn usage() -> String {
 
         Options:
           --root <path>     workspace root (default: discovered)
-          --config <path>   pipeline config (default: render.json)
+          --config <path>   pipeline config (default: {CONFIG_FILENAME})
           --print-child     print the generated script, skip the run
           --init            write a template render.json, then stop
           --help, -h        print this help and exit
