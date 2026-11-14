@@ -43,7 +43,7 @@ config keys fail the run instead of writing wrong outputs.
 
 ### Hooks
 
-`pre` and `post` hooks in `render.json` run ordinary scripts
+`pre` and `post` hooks in `render.json` run ordinary OxDock scripts
 around the render, so codegen or checks ride the same invocation:
 
 ```json
@@ -55,7 +55,7 @@ around the render, so codegen or checks ride the same invocation:
 }
 ```
 
-Hooks execute with the pipeline engine against the workspace
+Hooks are OxDock scripts executed with the pipeline engine against the workspace
 root, in listed order; each hook runs as its own script file, so
 nested imports resolve against the hook's directory like any
 entry script. Either side failing halts the pipeline:
@@ -77,7 +77,7 @@ Each run performs the same steps, in order:
 2. Serve the binary's embedded pipeline scripts from memory and
    check every plugin implements the same stages, failing fast with
    the offender named instead of halfway through a target.
-3. Run the `pre` hooks, if any: ordinary scripts executed with the
+3. Run the `pre` hooks, if any: ordinary OxDock scripts executed with the
    pipeline engine. A failing hook halts the run before any
    target renders.
 4. Build the run script: one step per stage per plugin, in
@@ -88,7 +88,7 @@ Each run performs the same steps, in order:
    into the master template, and write the output file. The OxDock
    intake first refreshes generated inputs and re-reads workspace
    metadata.
-6. Run the `post` hooks, if any, then restore executable bits
+6. Run the `post` hooks, if any (OxDock scripts, like `pre`), then restore executable bits
    declared by targets (so regenerating `install.sh` keeps its
    executable bit), then report. Zero discovered targets fails
    the run. A failing post hook fails the run even though the

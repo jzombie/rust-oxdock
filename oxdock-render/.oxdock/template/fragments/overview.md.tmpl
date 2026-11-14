@@ -37,7 +37,7 @@ config keys fail the run instead of writing wrong outputs.
 
 ### Hooks
 
-`pre` and `post` hooks in `render.json` run ordinary scripts
+`pre` and `post` hooks in `render.json` run ordinary OxDock scripts
 around the render, so codegen or checks ride the same invocation:
 
 ```json
@@ -49,7 +49,7 @@ around the render, so codegen or checks ride the same invocation:
 }
 ```
 
-Hooks execute with the pipeline engine against the workspace
+Hooks are OxDock scripts executed with the pipeline engine against the workspace
 root, in listed order; each hook runs as its own script file, so
 nested imports resolve against the hook's directory like any
 entry script. Either side failing halts the pipeline:
