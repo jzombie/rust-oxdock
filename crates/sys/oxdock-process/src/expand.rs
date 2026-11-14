@@ -402,7 +402,7 @@ fn lookup(
     // 4. Placeholder calls: `MODULE::FUNC(args)` dispatches through the
     // registered resolver. Without one, the shape falls through to the
     // invalid placeholder error below.
-    if let Some((module, func, args_src)) = parse_call(key) {
+    if let Some((module, func, args_src)) = parse_placeholder_call(key) {
         let Some(resolver) = calls else {
             bail!(
                 "placeholder call '{module}::{func}' has no function registry; register one with with_call_resolver"
@@ -412,7 +412,7 @@ fn lookup(
         for src in args_src {
             args.push(resolve_call_arg(&src, vars)?);
         }
-        let result = resolver(module, func, args)?;
+        let result = resolver(&module, &func, args)?;
         return format_value_for_string(&result);
     }
 
@@ -436,82 +436,56 @@ fn lookup(
     );
 }
 
-/// Split a placeholder call body into module, function, and raw args.
-///
-/// Accepts `MODULE::FUNC()` and `MODULE::FUNC(a, b)`. Returns `None` when
-/// the body is not call shaped, so plain key paths keep their own errors.
-fn parse_call(key: &str) -> Option<(&str, &str, Vec<String>)> {
-    let (module, rest) = key.split_once("::")?;
-    if module.is_empty()
-        || !module
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return None;
-    }
-    let (func, args_src) = rest.split_once('(')?;
-    let func = func.trim();
-    if func.is_empty()
-        || !func
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return None;
-    }
-    let args_src = args_src.strip_suffix(')')?;
-    Some((module, func, split_args(args_src)))
-}
-
 /// Split a `MODULE::FUNC(args)` placeholder body for call resolution
 /// outside the streaming expander. Returns `None` when the body is not
-/// call shaped, so plain keys keep their own handling. Shared with
-/// engine-side string expansion so both paths parse identically.
+/// call shaped, so plain keys keep their own handling. Single grammar
+/// behind every phase: parses through the shared
+/// `oxdock_parser::template::parse_placeholder_call`, so runtime
+/// dispatch and parse-time qualification can never disagree on what
+/// counts as one call.
 pub fn parse_placeholder_call(key: &str) -> Option<(String, String, Vec<String>)> {
-    let (module, func, args) = parse_call(key.trim())?;
-    Some((module.to_string(), func.to_string(), args))
+    let call = oxdock_parser::template::parse_placeholder_call(key.trim())?;
+    let module = call.module?.to_string();
+    let args = oxdock_parser::template::split_placeholder_args(call.args_raw);
+    Some((module, call.name.to_string(), args))
 }
 
 /// Maximum nesting for map and list literals in placeholder call args.
 const MAX_LITERAL_DEPTH: usize = 16;
 
-/// Split call args on top level commas, keeping quoted strings and
-/// `{...}` / `[...]` literals intact. Commas nested inside literals
-/// belong to the literal, not the argument list. Nested calls stay
-/// rejected: only data literals nest, never `MODULE::FUNC(...)`.
-fn split_args(src: &str) -> Vec<String> {
-    split_top_level(src, ',')
-}
-
-/// Split on a top level separator, keeping quoted strings and
-/// `{...}` / `[...]` literals intact.
 fn split_top_level(src: &str, sep: char) -> Vec<String> {
+    if sep == ',' {
+        return oxdock_parser::template::split_placeholder_args(src);
+    }
+    // Map-entry `key: value` split shares the same quoted/bracket
+    // discipline; only the separator differs.
     let mut out = Vec::new();
     let mut current = String::new();
-    let mut in_string = false;
+    let mut quote: u8 = 0;
     let mut escaped = false;
     let mut depth: usize = 0;
     for c in src.chars() {
-        if in_string {
+        if quote != 0 {
             current.push(c);
             if escaped {
                 escaped = false;
             } else if c == '\\' {
                 escaped = true;
-            } else if c == '"' {
-                in_string = false;
+            } else if c == quote as char {
+                quote = 0;
             }
             continue;
         }
         match c {
-            '"' => {
-                in_string = true;
+            '"' | '\'' => {
+                quote = c as u8;
                 current.push(c);
             }
-            '{' | '[' => {
+            '{' | '[' | '(' => {
                 depth += 1;
                 current.push(c);
             }
-            '}' | ']' => {
+            '}' | ']' | ')' => {
                 depth = depth.saturating_sub(1);
                 current.push(c);
             }
@@ -596,22 +570,22 @@ fn strip_wrapped(src: &str, open: char, close: char) -> Option<&str> {
     if !src.starts_with(open) || !src.ends_with(close) || src.len() < 2 {
         return None;
     }
-    let mut in_string = false;
+    let mut quote: u8 = 0;
     let mut escaped = false;
     let mut depth: usize = 0;
     for (idx, c) in src.char_indices() {
-        if in_string {
+        if quote != 0 {
             if escaped {
                 escaped = false;
             } else if c == '\\' {
                 escaped = true;
-            } else if c == '"' {
-                in_string = false;
+            } else if c == quote as char {
+                quote = 0;
             }
             continue;
         }
         match c {
-            '"' => in_string = true,
+            '"' | '\'' => quote = c as u8,
             _ if c == open => depth += 1,
             _ if c == close => {
                 depth -= 1;

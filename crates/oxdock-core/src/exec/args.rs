@@ -1759,25 +1759,30 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         }
                     } else if let Some(val) = state.get_var(key) {
                         output.push_str(&format_value_for_string(&val)?);
-                    } else if let Some((module, func, args_src)) =
-                        oxdock_process::parse_placeholder_call(key)
+                    } else if let Some(call) = oxdock_parser::template::parse_placeholder_call(key)
+                        && let Some(module) = call.module
                     {
                         // `{{ MODULE::FUNC(args) }}` through the shared
                         // pure table: the same registry EXPAND
                         // templates resolve, so ordinary strings and
-                        // file templates agree. Dispatch and the
-                        // unknown-name error live in
-                        // [`super::native::placeholder_resolver`];
-                        // anything else falls through to the
-                        // missing-key error below.
+                        // file templates agree. Shape detection is the
+                        // shared template grammar (also behind
+                        // parse-time qualification), so the two can
+                        // never disagree on what counts as one call.
+                        // Dispatch and the unknown-name error live in
+                        // [`super::native::placeholder_resolver`].
+                        // Bare heads fall through to the missing-key
+                        // error below, sharing its single diagnostic.
                         let resolve =
                             super::native::placeholder_resolver(state.pure_function_table());
                         let vars = state.all_vars();
+                        let args_src =
+                            oxdock_parser::template::split_placeholder_args(call.args_raw);
                         let mut args = Vec::with_capacity(args_src.len());
                         for src in args_src {
                             args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
                         }
-                        let result = resolve(module.as_str(), func.as_str(), args)?;
+                        let result = resolve(module, call.name, args)?;
                         output.push_str(&format_value_for_string(&result)?);
                     } else {
                         // Bare key not in DSL vars → hard error: missing

@@ -2481,79 +2481,6 @@ fn resolve_name(ctx: &ParseCtx, stmt: usize, name: &str) -> Result<String, Token
         .map_err(|e| lower_err(stmt, e))
 }
 
-/// Bare placeholder call shape in a template key: an UPPERCASE head
-/// (statement calls never spell anything else, so lowercase heads
-/// keep today's handling untouched), an optional gap, and a paren
-/// group closing exactly at the key's end. Mirrors what the runtime
-/// `parse_call` accepts once qualified, minus the `::` it requires.
-/// Returns the head and the paren group onwards (gap included, so
-/// the splice below stays byte-identical past the head). Compound
-/// placeholders (`{{ LEN($a) + LEN($b) }}`) are not single calls and
-/// return `None` so they pass through untouched instead of being
-/// partially rewritten.
-fn bare_placeholder_call(key: &str) -> Option<(&str, &str)> {
-    let paren = key.find('(')?;
-    let (head_raw, rest) = key.split_at(paren);
-    let head = head_raw.trim_end();
-    if head.is_empty() {
-        return None;
-    }
-    let mut chars = head.chars();
-    if !chars.next().is_some_and(|c| c.is_ascii_uppercase()) {
-        return None;
-    }
-    if !chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
-        return None;
-    }
-    // The paren group must balance and close at the key's end
-    // (modulo trailing whitespace; the key already arrives trimmed).
-    // Scan with string awareness: quoted args may hold parens.
-    // Both quote styles are tracked so a paren inside `'a(b'` or
-    // `"a(b"` never affects depth; the runtime arg grammar decides
-    // which styles it accepts.
-    let bytes = rest.as_bytes();
-    let mut depth: usize = 0;
-    let mut quote: u8 = 0;
-    let mut escaped = false;
-    let mut close_at: Option<usize> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if quote != 0 {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == quote {
-                quote = 0;
-            }
-            i += 1;
-            continue;
-        }
-        match b {
-            b'"' | b'\'' => quote = b,
-            b'(' => depth += 1,
-            b')' => {
-                if depth == 0 {
-                    return None;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    close_at = Some(i);
-                    break;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    let close_at = close_at?;
-    if !rest[close_at + 1..].trim().is_empty() {
-        return None;
-    }
-    Some((head, rest))
-}
-
 /// Qualify bare placeholder calls in template text through the
 /// shared static resolver, so `{{ NAME(args) }}` obeys exactly the
 /// same scope rule as statement-position calls: `IMPORT [MOD]`
@@ -2566,25 +2493,29 @@ fn bare_placeholder_call(key: &str) -> Option<(&str, &str)> {
 /// spacing and neighboring placeholders stay byte-identical, so
 /// string payloads never lose formatting. Returns `None` when
 /// nothing qualified, leaving the text completely untouched.
+/// Shape detection is the shared `template::parse_placeholder_call`
+/// grammar (also behind runtime dispatch), so parse and runtime
+/// can never disagree on what counts as one call.
 fn qualify_template_calls(
     text: &str,
     ctx: &ParseCtx,
     stmt: usize,
 ) -> Result<Option<String>, TokenError> {
-    use crate::template::{TemplateSegment, TemplateSegments};
+    use crate::template::{TemplateSegment, TemplateSegments, parse_placeholder_call};
     let mut out = String::with_capacity(text.len());
     let mut changed = false;
     for segment in TemplateSegments::new(text) {
         match segment {
             TemplateSegment::Text(raw) => out.push_str(raw),
             TemplateSegment::Placeholder { key, raw } => {
-                let head = match bare_placeholder_call(key) {
-                    Some((head, _)) => head,
-                    None => {
+                let call = match parse_placeholder_call(key) {
+                    Some(call) if call.module.is_none() => call,
+                    _ => {
                         out.push_str(raw);
                         continue;
                     }
                 };
+                let head = call.name;
                 let resolved = resolve_name(ctx, stmt, head)?;
                 if !resolved.contains(MODULE_SEPARATOR) {
                     // Unqualified resolutions (`INSPECT`) keep today's
@@ -2593,10 +2524,12 @@ fn qualify_template_calls(
                     continue;
                 }
                 changed = true;
-                // Splice only the head span: the head opens the trimmed
-                // key, so it is `raw`'s first occurrence of that
-                // identifier (braces and padding cannot contain it).
-                let off = raw.find(head).expect("head opens the key");
+                // Splice only the head span: `name_span` is the byte
+                // range of the head inside `key`, and `key` is the
+                // trimmed interior of `raw`, so the raw offset is the
+                // interior start plus the span start.
+                let key_off = raw.find(key).expect("key is trimmed interior");
+                let off = key_off + call.name_span.start;
                 out.push_str(&raw[..off]);
                 out.push_str(&resolved);
                 out.push_str(&raw[off + head.len()..]);

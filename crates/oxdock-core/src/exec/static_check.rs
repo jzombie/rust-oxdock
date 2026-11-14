@@ -1238,14 +1238,24 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// placeholders and reject undeclared names. Runs on the shared
     /// [`TemplateSegments`](oxdock_parser::template::TemplateSegments)
     /// splitter, so what counts as a placeholder here is exactly what
-    /// expands at runtime. Bare keys and `$var` placeholders are not
+    /// expands at runtime. Call shapes use the shared
+    /// `template::parse_placeholder_call` grammar (also behind
+    /// parse-time qualification and runtime dispatch), so env
+    /// detection can never disagree with call detection on what
+    /// counts as one call. Bare keys and `$var` placeholders are not
     /// env reads and are ignored here.
     fn check_template_env(&self, text: &str, env: &Env, scope: &Scope) -> Result<()> {
-        use oxdock_parser::template::{TemplateSegment, TemplateSegments};
+        use oxdock_parser::template::{TemplateSegment, TemplateSegments, parse_placeholder_call};
         for segment in TemplateSegments::new(text) {
             let TemplateSegment::Placeholder { key, .. } = segment else {
                 continue;
             };
+            // Calls are not env reads: skip through the shared call
+            // grammar (not a prefix check) so a future call shape
+            // can never leak into env validation.
+            if parse_placeholder_call(key).is_some() {
+                continue;
+            }
             let found = key
                 .strip_prefix("env:")
                 .map(|name| ("env:", name))
