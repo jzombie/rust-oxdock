@@ -204,7 +204,7 @@ pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
         oxdock_fs::env::oxdock::WORKSPACE_ROOT,
         dir.to_string_lossy().into_owned(),
     );
-    let cfg = child_config().unwrap_or_else(|| "render.json".to_string());
+    let cfg = child_config().unwrap_or_else(|| crate::config::CONFIG_FILENAME.to_string());
     // `Path::join` with an absolute second half replaces the first,
     // so one join covers both shapes with no absolute check.
     let cfg_abs = dir.join(cfg).to_string_lossy().into_owned();

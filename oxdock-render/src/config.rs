@@ -9,21 +9,57 @@ use anyhow::{Context, Result, bail};
 use oxdock_core::Value;
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
 
+/// Canonical `render.json` filename: the neutral default when no
+/// explicit config is given. Named once so the resolver,
+/// `--init`, and the pipe-child fallback can never disagree.
+pub(crate) const CONFIG_FILENAME: &str = "render.json";
+
+/// Known `render.json` keys, named once so validation, readers,
+/// and error text can never disagree. New keys grow this list
+/// and every use follows.
+pub(crate) const KEY_GENERATED: &str = "generated";
+pub(crate) const KEY_GLOBAL_VALUES: &str = "global_values";
+pub(crate) const KEY_HOOKS: &str = "hooks";
+pub(crate) const KEY_LIFECYCLE: &str = "lifecycle";
+pub(crate) const KEY_MERGE_POLICY: &str = "merge_policy";
+pub(crate) const KEY_SCOPES: &str = "scopes";
+pub(crate) const KEY_STAGING_DIR: &str = "staging_dir";
+pub(crate) const KEY_VARS: &str = "vars";
+pub(crate) const KEY_VERSION_KEY: &str = "version_key";
+/// Known `vars` sub-key names.
+pub(crate) const KEY_VARS_GLOBAL: &str = "global";
+pub(crate) const KEY_VARS_CTX: &str = "ctx";
+pub(crate) const KEY_VARS_WORKSPACE_PKG: &str = "workspace_pkg";
+/// Known `lifecycle` sub-key names.
+pub(crate) const KEY_LIFECYCLE_FILES: &str = "files";
+pub(crate) const KEY_LIFECYCLE_TYPES: &str = "types";
+/// Known `generated` entry key names.
+pub(crate) const KEY_GENERATED_KEY: &str = "key";
+pub(crate) const KEY_GENERATED_OUT: &str = "out";
+
 /// Known top-level `render.json` keys. Anything else fails closed so
 /// typos (`scope` for `scopes`) surface instead of silently changing
 /// the pipeline. Mirrors every `$cfg.*` read in the lifecycle
 /// scripts, plus `hooks` below.
 const TOP_LEVEL_KEYS: &[&str] = &[
-    "generated",
-    "global_values",
-    "hooks",
-    "lifecycle",
-    "merge_policy",
-    "scopes",
-    "staging_dir",
-    "vars",
-    "version_key",
+    KEY_GENERATED,
+    KEY_GLOBAL_VALUES,
+    KEY_HOOKS,
+    KEY_LIFECYCLE,
+    KEY_MERGE_POLICY,
+    KEY_SCOPES,
+    KEY_STAGING_DIR,
+    KEY_VARS,
+    KEY_VERSION_KEY,
 ];
+
+/// Known `vars` sub-keys in one list, so the unknown-key gate and
+/// the per-key checks read the same set.
+const VARS_KEYS: &[&str] = &[KEY_VARS_GLOBAL, KEY_VARS_CTX, KEY_VARS_WORKSPACE_PKG];
+/// Known `lifecycle` sub-keys in one list, for the same reason.
+const LIFECYCLE_KEYS: &[&str] = &[KEY_LIFECYCLE_FILES, KEY_LIFECYCLE_TYPES];
+/// Known `generated` entry keys; both are required per entry.
+const GENERATED_ENTRY_KEYS: &[&str] = &[KEY_GENERATED_KEY, KEY_GENERATED_OUT];
 
 /// Template `render.json` written by `--init`: the minimal valid
 /// pipeline (hooks first, workspace root scope). Authored as an
@@ -112,79 +148,92 @@ pub(crate) fn validate_config(value: &serde_json::Value, config_name: &str) -> R
             );
         }
     }
-    let required = ["scopes", "global_values"];
+    let required = [KEY_SCOPES, KEY_GLOBAL_VALUES];
     for key in required {
         if !cfg.contains_key(key) {
             bail!("{config_name}: missing required key '{key}'");
         }
     }
     expect_string_list(
-        cfg.get("scopes").expect("scopes presence checked"),
-        "scopes",
+        cfg.get(KEY_SCOPES).expect("scopes presence checked"),
+        KEY_SCOPES,
         config_name,
     )?;
     let gv = cfg
-        .get("global_values")
+        .get(KEY_GLOBAL_VALUES)
         .expect("global_values presence checked");
     let gv_ok = gv.as_str().is_some()
         || gv
             .as_array()
             .is_some_and(|arr| arr.iter().all(|entry| entry.as_str().is_some()));
     if !gv_ok {
-        bail!("{config_name}: 'global_values' must be a string or a list of strings");
+        bail!("{config_name}: '{KEY_GLOBAL_VALUES}' must be a string or a list of strings");
     }
-    if let Some(vars) = cfg.get("vars") {
-        let vars = expect_object(vars, "vars", config_name)?;
+    if let Some(vars) = cfg.get(KEY_VARS) {
+        let vars = expect_object(vars, KEY_VARS, config_name)?;
         for key in vars.keys() {
-            if !["global", "ctx", "workspace_pkg"].contains(&key.as_str()) {
+            if !VARS_KEYS.contains(&key.as_str()) {
                 bail!(
-                    "{config_name}: unknown vars key '{key}'; known keys: global, ctx, workspace_pkg"
+                    "{config_name}: unknown vars key '{key}'; known keys: {}",
+                    VARS_KEYS.join(", ")
                 );
             }
         }
-        for key in ["global", "ctx", "workspace_pkg"] {
+        for &key in VARS_KEYS {
             if let Some(entry) = vars.get(key) {
-                expect_string(entry, &format!("vars.{key}"), config_name)?;
+                expect_string(entry, &format!("{}.{key}", KEY_VARS), config_name)?;
             }
         }
     }
-    if let Some(lifecycle) = cfg.get("lifecycle") {
-        let lifecycle = expect_object(lifecycle, "lifecycle", config_name)?;
+    if let Some(lifecycle) = cfg.get(KEY_LIFECYCLE) {
+        let lifecycle = expect_object(lifecycle, KEY_LIFECYCLE, config_name)?;
         for key in lifecycle.keys() {
-            if !["files", "types"].contains(&key.as_str()) {
-                bail!("{config_name}: unknown lifecycle key '{key}'; known keys: files, types");
+            if !LIFECYCLE_KEYS.contains(&key.as_str()) {
+                bail!(
+                    "{config_name}: unknown lifecycle key '{key}'; known keys: {}",
+                    LIFECYCLE_KEYS.join(", ")
+                );
             }
         }
-        if let Some(files) = lifecycle.get("files") {
-            expect_string_list(files, "lifecycle.files", config_name)?;
+        if let Some(files) = lifecycle.get(KEY_LIFECYCLE_FILES) {
+            expect_string_list(
+                files,
+                &format!("{}.{}", KEY_LIFECYCLE, KEY_LIFECYCLE_FILES),
+                config_name,
+            )?;
         }
-        if let Some(types) = lifecycle.get("types") {
-            expect_string(types, "lifecycle.types", config_name)?;
+        if let Some(types) = lifecycle.get(KEY_LIFECYCLE_TYPES) {
+            expect_string(
+                types,
+                &format!("{}.{}", KEY_LIFECYCLE, KEY_LIFECYCLE_TYPES),
+                config_name,
+            )?;
         }
     }
-    if let Some(generated) = cfg.get("generated") {
+    if let Some(generated) = cfg.get(KEY_GENERATED) {
         let entries = generated
             .as_array()
-            .with_context(|| format!("{config_name}: 'generated' must be a list"))?;
+            .with_context(|| format!("{config_name}: '{KEY_GENERATED}' must be a list"))?;
         for (idx, entry) in entries.iter().enumerate() {
-            let entry = expect_object(entry, &format!("generated[{idx}]"), config_name)?;
+            let entry = expect_object(entry, &format!("{KEY_GENERATED}[{idx}]"), config_name)?;
             for key in entry.keys() {
-                if !["key", "out"].contains(&key.as_str()) {
+                if !GENERATED_ENTRY_KEYS.contains(&key.as_str()) {
                     bail!(
-                        "{config_name}: unknown generated[{idx}] key '{key}'; known keys: key, out"
+                        "{config_name}: unknown generated[{idx}] key '{key}'; known keys: {}",
+                        GENERATED_ENTRY_KEYS.join(", ")
                     );
                 }
             }
-            for key in ["key", "out"] {
+            for &key in GENERATED_ENTRY_KEYS {
                 let field = entry.get(key).with_context(|| {
-                    format!("{config_name}: 'generated[{idx}]' needs string '{key}'")
+                    format!("{config_name}: '{KEY_GENERATED}[{idx}]' needs string '{key}'")
                 })?;
-                expect_string(field, &format!("generated[{idx}].{key}"), config_name)?;
+                expect_string(field, &format!("{KEY_GENERATED}[{idx}].{key}"), config_name)?;
             }
         }
     }
-    if let Some(hooks) = cfg.get("hooks") {
-        let hooks = expect_object(hooks, "hooks", config_name)?;
+    if let Some(hooks) = cfg.get(KEY_HOOKS) {
+        let hooks = expect_object(hooks, KEY_HOOKS, config_name)?;
         for key in hooks.keys() {
             if !HOOK_PHASES.contains(&key.as_str()) {
                 bail!(
@@ -195,11 +244,11 @@ pub(crate) fn validate_config(value: &serde_json::Value, config_name: &str) -> R
         }
         for phase in HOOK_PHASES {
             if let Some(list) = hooks.get(*phase) {
-                expect_string_list(list, &format!("hooks.{phase}"), config_name)?;
+                expect_string_list(list, &format!("{KEY_HOOKS}.{phase}"), config_name)?;
             }
         }
     }
-    for key in ["staging_dir", "merge_policy", "version_key"] {
+    for key in [KEY_STAGING_DIR, KEY_MERGE_POLICY, KEY_VERSION_KEY] {
         if let Some(entry) = cfg.get(key) {
             expect_string(entry, key, config_name)?;
         }
@@ -214,7 +263,7 @@ pub(crate) fn hooks_of(value: &serde_json::Value) -> Hooks {
     let mut hooks = Hooks::default();
     let get_list = |phase: &str| {
         value
-            .get("hooks")
+            .get(KEY_HOOKS)
             .and_then(|hooks| hooks.get(phase))
             .and_then(|list| list.as_array())
             .map(|list| {
@@ -236,8 +285,8 @@ pub fn init_config_file(root: &GuardedPath) -> Result<GuardedPath> {
     let resolver =
         PathResolver::new_guarded(root.clone(), root.clone()).context("resolver for --init")?;
     let path = root
-        .join("render.json")
-        .context("resolve render.json for --init")?;
+        .join(CONFIG_FILENAME)
+        .with_context(|| format!("resolve {CONFIG_FILENAME} for --init"))?;
     if resolver.entry_kind(&path).is_ok() {
         bail!(
             "{} already exists; refusing to overwrite (delete it to re-scaffold)",
@@ -277,7 +326,10 @@ pub(crate) fn configured_plugins(
         .with_context(|| format!("read {config_name} for plugin list"))?;
     let cfg: serde_json::Value = serde_json::from_str(&oxdock_core::strip_json_comments(&raw))
         .with_context(|| format!("parse {config_name} for plugin list"))?;
-    let files = match cfg.get("lifecycle").and_then(|lc| lc.get("files")) {
+    let files = match cfg
+        .get(KEY_LIFECYCLE)
+        .and_then(|lc| lc.get(KEY_LIFECYCLE_FILES))
+    {
         None => return Ok(default_plugins()),
         Some(files) => files,
     };
@@ -301,12 +353,12 @@ pub(crate) fn resolve_config_name(fs: &dyn WorkspaceFs, root: &GuardedPath) -> R
     if let Ok(name) = std::env::var(oxdock_fs::env::render::CONFIG) {
         return Ok(name);
     }
-    let neutral = root.join("render.json")?;
+    let neutral = root.join(CONFIG_FILENAME)?;
     if fs.metadata(&neutral).is_ok() {
-        return Ok("render.json".to_string());
+        return Ok(CONFIG_FILENAME.to_string());
     }
     anyhow::bail!(
-        "no render.json under {}; pass --config or set {}",
+        "no {CONFIG_FILENAME} under {}; pass --config or set {}",
         root.as_path().to_string_lossy(),
         oxdock_fs::env::render::CONFIG,
     )
