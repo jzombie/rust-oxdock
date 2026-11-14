@@ -29,6 +29,7 @@ path = "src/bin/child.rs"
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+indoc.workspace = true
 oxdock-core.workspace = true
 oxdock-fs.workspace = true
 oxdock-func-macro.workspace = true
@@ -44,7 +45,6 @@ serde_json.workspace = true
 toml_edit.workspace = true
 
 [dev-dependencies]
-indoc.workspace = true
 oxdock-macros.workspace = true
 oxdock-sys-test-utils.workspace = true
 

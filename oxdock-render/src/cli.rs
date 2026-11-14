@@ -32,21 +32,21 @@ pub fn version() -> String {
 /// unknown flags. The version line stamps the built package, so the
 /// text can never drift from the release.
 pub fn usage() -> String {
-    format!(
-        "{version}: {description}\n\
-         \n\
-         Usage: oxdock-render [OPTIONS]\n\
-         \n\
-         Options:\n\
-         \x20 --root <path>     workspace root (default: discovered)\n\
-         \x20 --config <path>   pipeline config (default: render.json)\n\
-         \x20 --print-child     print the generated script, skip the run\n\
-         \x20 --init            write a template render.json, then stop\n\
-         \x20 --help, -h        print this help and exit\n\
-         \x20 --version, -V, -v print the version and exit\n",
-        version = version(),
-        description = env!("CARGO_PKG_DESCRIPTION"),
-    )
+    let version = version();
+    let description = env!("CARGO_PKG_DESCRIPTION");
+    indoc::formatdoc! {"
+        {version}: {description}
+
+        Usage: oxdock-render [OPTIONS]
+
+        Options:
+          --root <path>     workspace root (default: discovered)
+          --config <path>   pipeline config (default: render.json)
+          --print-child     print the generated script, skip the run
+          --init            write a template render.json, then stop
+          --help, -h        print this help and exit
+          --version, -V, -v print the version and exit
+    "}
 }
 
 /// Parse renderer flags, skipping the program name in position zero.
