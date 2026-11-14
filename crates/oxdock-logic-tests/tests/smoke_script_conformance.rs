@@ -245,7 +245,7 @@ fn release_targets_all_have_smoke_legs() -> Result<()> {
         );
     }
 
-    // Smoke side: every `os:` matrix (build plus eleven legs) carries the
+    // Smoke side: every `os:` matrix (build plus twelve legs) carries the
     // full runner set, in order. A leg dropping an architecture fails
     // here instead of silently untesting it.
     let runners: Vec<&str> = coverage.iter().map(|(_, runner, _, _)| *runner).collect();
@@ -265,8 +265,8 @@ fn release_targets_all_have_smoke_legs() -> Result<()> {
         }
     }
     assert_eq!(
-        matrices, 12,
-        "expected build plus eleven leg matrices, found {matrices}"
+        matrices, 13,
+        "expected build plus twelve leg matrices, found {matrices}"
     );
 
     // DSL side: each mapping's arch branch and asset name resolve in the
