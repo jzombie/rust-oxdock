@@ -12,9 +12,6 @@
   <a href="https://docs.rs/oxdock">
     <img src="https://img.shields.io/docsrs/oxdock" alt="docs.rs" />
   </a>
-  <!-- <a href="https://deepwiki.com/jzombie/rust-oxdock">
-    <img src="https://deepwiki.com/badge.svg" alt="DeepWiki" />
-    </a> -->
   <a href="https://coveralls.io/github/jzombie/rust-oxdock?branch=main">
     <img src="https://coveralls.io/repos/github/jzombie/rust-oxdock/badge.svg?branch=main" alt="Coverage Status" />
   </a>
