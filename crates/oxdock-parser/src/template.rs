@@ -203,14 +203,14 @@ pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
         let b = bytes[i];
         // A `"""` opener consumes through its unescaped closer.
         if b == b'"' && bytes.get(i + 1) == Some(&b'"') && bytes.get(i + 2) == Some(&b'"') {
-            if let Some(s) = text_from.take() {
-                if s != i {
-                    out.push(Atom {
-                        kind: AtomKind::Text,
-                        text: &src[s..i],
-                        start: s,
-                    });
-                }
+            if let Some(s) = text_from.take()
+                && s != i
+            {
+                out.push(Atom {
+                    kind: AtomKind::Text,
+                    text: &src[s..i],
+                    start: s,
+                });
             }
             let start = i;
             i += 3;
@@ -241,14 +241,14 @@ pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
         }
         // A single-quote opener consumes through its unescaped closer.
         if b == b'"' || b == b'\'' {
-            if let Some(s) = text_from.take() {
-                if s != i {
-                    out.push(Atom {
-                        kind: AtomKind::Text,
-                        text: &src[s..i],
-                        start: s,
-                    });
-                }
+            if let Some(s) = text_from.take()
+                && s != i
+            {
+                out.push(Atom {
+                    kind: AtomKind::Text,
+                    text: &src[s..i],
+                    start: s,
+                });
             }
             let q = b;
             let start = i;
@@ -279,14 +279,14 @@ pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
             _ => None,
         };
         if let Some(kind) = kind {
-            if let Some(s) = text_from.take() {
-                if s != i {
-                    out.push(Atom {
-                        kind: AtomKind::Text,
-                        text: &src[s..i],
-                        start: s,
-                    });
-                }
+            if let Some(s) = text_from.take()
+                && s != i
+            {
+                out.push(Atom {
+                    kind: AtomKind::Text,
+                    text: &src[s..i],
+                    start: s,
+                });
             }
             out.push(Atom {
                 kind,
@@ -301,14 +301,14 @@ pub fn scan_atoms(src: &str) -> Vec<Atom<'_>> {
             i += 1;
         }
     }
-    if let Some(s) = text_from.take() {
-        if s < bytes.len() {
-            out.push(Atom {
-                kind: AtomKind::Text,
-                text: &src[s..],
-                start: s,
-            });
-        }
+    if let Some(s) = text_from.take()
+        && s < bytes.len()
+    {
+        out.push(Atom {
+            kind: AtomKind::Text,
+            text: &src[s..],
+            start: s,
+        });
     }
     out
 }
@@ -351,10 +351,11 @@ pub fn split_placeholder_args(src: &str) -> Vec<String> {
 }
 
 /// Split on a top-level separator character. Only `,` and `:` are
-/// tokenized by [`scan_atoms`]; any other `sep` matches nothing and
-/// returns the whole input as one element.
+/// tokenized by [`scan_atoms`]; anything else is a programming error
+/// and fails fast. (A plain assert: the workspace bans `cfg`-based
+/// macros outside the `sys` crates, so no `debug_assert!` here.)
 pub fn split_top_level(src: &str, sep: char) -> Vec<String> {
-    debug_assert!(
+    assert!(
         matches!(sep, ',' | ':'),
         "scan_atoms only tokenizes ',' and ':' separators"
     );
