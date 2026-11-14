@@ -47,7 +47,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
@@ -208,7 +208,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
@@ -301,7 +301,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
@@ -386,7 +386,7 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
@@ -502,7 +502,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
+        uses: ./
         with:
           source: ${{ env.OXDOCK_ENGINE_SOURCE }}
 
