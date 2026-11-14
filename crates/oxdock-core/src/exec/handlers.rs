@@ -87,7 +87,7 @@ pub(super) fn workdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) ->
     cx.state.cwd = cx
         .state
         .fs
-        .resolve_workdir(&cx.state.effective_cwd(), path)
+        .resolve_workdir(&cx.state.cwd, path)
         .with_context(|| format!("WORKDIR {}", path))?;
     Ok(())
 }
@@ -703,7 +703,7 @@ pub(super) fn copy<P: ProcessManager>(
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), to)
+        .resolve_write(&cx.state.cwd, to)
         .with_context(|| format!("COPY {} {}", from, to))?;
     let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
         .with_context(|| format!("COPY {} {}", from, to))?;
@@ -753,7 +753,7 @@ pub(super) fn copy_git<P: ProcessManager>(
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), to)
+        .resolve_write(&cx.state.cwd, to)
         .with_context(|| format!("COPY_GIT {} {} {}", rev, from, to))?;
     cx.state
         .fs
@@ -789,15 +789,15 @@ fn resolve_archive_src<P: ProcessManager>(
         return cx
             .state
             .fs
-            .resolve_read(&cx.state.effective_cwd(), src)
+            .resolve_read(&cx.state.cwd, src)
             .with_context(|| tag.to_string());
     }
     let parent_abs = if parent.is_empty() {
-        cx.state.effective_cwd()
+        cx.state.cwd.clone()
     } else {
         cx.state
             .fs
-            .resolve_read(&cx.state.effective_cwd(), &parent)
+            .resolve_read(&cx.state.cwd, &parent)
             .with_context(|| tag.to_string())?
     };
     let mut matched = false;
@@ -827,7 +827,7 @@ fn resolve_archive_src<P: ProcessManager>(
         return cx
             .state
             .fs
-            .resolve_read(&cx.state.effective_cwd(), src)
+            .resolve_read(&cx.state.cwd, src)
             .with_context(|| tag.to_string());
     }
     parent_abs.join(&name).with_context(|| tag.to_string())
@@ -968,7 +968,7 @@ pub(super) fn archive<P: ProcessManager>(
     let dst_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), dst)
+        .resolve_write(&cx.state.cwd, dst)
         .with_context(|| tag.clone())?;
     // Opening the destination truncates it: an archive landing on its
     // own source would destroy inputs before their bytes stream, so
@@ -1040,12 +1040,12 @@ pub(super) fn unarchive<P: ProcessManager>(
     let src_abs = cx
         .state
         .fs
-        .resolve_read(&cx.state.effective_cwd(), src)
+        .resolve_read(&cx.state.cwd, src)
         .with_context(|| tag.clone())?;
     let dst_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), dst)
+        .resolve_write(&cx.state.cwd, dst)
         .with_context(|| tag.clone())?;
     cx.state
         .fs
@@ -1190,7 +1190,7 @@ pub(super) fn symlink<P: ProcessManager>(
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), to)
+        .resolve_write(&cx.state.cwd, to)
         .with_context(|| format!("SYMLINK {} {}", from, to))?;
     let from_abs = if let Some(target) = from_workspace {
         cx.state
@@ -1240,7 +1240,7 @@ pub(super) fn mkdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) -> R
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), path)
+        .resolve_write(&cx.state.cwd, path)
         .with_context(|| format!("MKDIR {}", path))?;
     cx.state
         .fs
@@ -1253,7 +1253,7 @@ pub(super) fn set_executable<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), path)
+        .resolve_write(&cx.state.cwd, path)
         .with_context(|| format!("SET_EXECUTABLE {path}"))?;
     cx.state
         .fs
@@ -1266,7 +1266,7 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
     let target_dir = if let Some(p) = arg {
         cx.state
             .fs
-            .resolve_read(&cx.state.effective_cwd(), p)
+            .resolve_read(&cx.state.cwd, p)
             .with_context(|| format!("LS {}", p))?
     } else {
         // Bare `LS` lists the current directory: ride the choke point so a
@@ -1274,7 +1274,7 @@ pub(super) fn ls<P: ProcessManager>(cx: &mut StepCtx<'_, P>, arg: &Option<String
         // explicit-path branch above. Local roots resolve with zero I/O.
         cx.state
             .fs
-            .resolve_read(&cx.state.effective_cwd(), ".")
+            .resolve_read(&cx.state.cwd, ".")
             .with_context(|| "LS".to_string())?
     };
     let mut entries = cx
@@ -1301,7 +1301,7 @@ pub(super) fn read<P: ProcessManager>(
         let target = cx
             .state
             .fs
-            .resolve_read(&cx.state.effective_cwd(), path)
+            .resolve_read(&cx.state.cwd, path)
             .with_context(|| format!("READ {}", path))?;
         let mut reader = cx
             .state
@@ -1465,7 +1465,7 @@ pub(super) fn write<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), path)
+        .resolve_write(&cx.state.cwd, path)
         .with_context(|| format!("WRITE {}", path))?;
     cx.state
         .fs
@@ -1516,7 +1516,7 @@ pub(super) fn append<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), path)
+        .resolve_write(&cx.state.cwd, path)
         .with_context(|| format!("APPEND {}", path))?;
     cx.state
         .fs
@@ -1583,7 +1583,7 @@ pub(super) fn replace<P: ProcessManager>(
             let target = cx
                 .state
                 .fs
-                .resolve_read(&cx.state.effective_cwd(), path)
+                .resolve_read(&cx.state.cwd, path)
                 .with_context(|| format!("EXPAND {}", path))?;
             let mut reader = cx
                 .state
@@ -2489,7 +2489,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
 pub(crate) fn define_func<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     name: &str,
-    params: &[(String, String)],
+    params: &[(String, String, bool)],
     return_type: &str,
     is_async: bool,
     body: &[Step],
@@ -2497,13 +2497,7 @@ pub(crate) fn define_func<P: ProcessManager>(
     // Resolve param and return type names where the directory lives, so the
     // registry only ever holds tags. Unknown names fail here naming
     // the function and every known type and schema.
-    let mut resolved = Vec::with_capacity(params.len());
-    for (pname, ptype) in params {
-        let tag = cx.state.resolve_tag(ptype)?;
-        cx.state
-            .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
-        resolved.push((pname.clone(), tag));
-    }
+    let resolved = super::resolve_script_params(cx.state, name, params)?;
     let return_tag = cx.state.resolve_tag(return_type)?;
     cx.state
         .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
@@ -2571,6 +2565,9 @@ pub(crate) fn call_func_value<P: ProcessManager>(
         }
     }
     // 4. Argument evaluation: only reachable for a valid invocation.
+    // Omitted trailing optionals fill with zero values first, so
+    // binding below always sees a full argument list. The arity gate
+    // above guarantees every missing position is optional.
     let mut arg_vals = Vec::with_capacity(args.len());
     for arg in args {
         arg_vals.push(super::args::evaluate_expr(arg, cx)?);
@@ -2582,15 +2579,12 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // then reset to their own below, and the pop restores the
             // caller on every path.
             let module_key = def.module.clone();
-            let module_ctx = module_key.as_deref().and_then(|key| {
-                cx.state.modules.get(key).map(|record| {
-                    (
-                        record.dir.clone(),
-                        record
-                            .init
-                            .as_ref()
-                            .map(|init| (init.envs.clone(), init.inherit_names.clone())),
-                    )
+            let module_env = module_key.as_deref().and_then(|key| {
+                cx.state.modules.get(key).and_then(|record| {
+                    record
+                        .init
+                        .as_ref()
+                        .map(|init| (init.envs.clone(), init.inherit_names.clone()))
                 })
             });
             cx.state.call_depth += 1;
@@ -2600,7 +2594,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // Own-module bindings stay visible through the
             // module-store fallback in every accessor, so this only
             // cuts importer frames, never module state.
-            let saved_vars = if module_ctx.as_ref().is_some_and(|(_, init)| init.is_some()) {
+            let saved_vars = if module_env.as_ref().is_some() {
                 Some(std::mem::take(&mut cx.state.var_scopes))
             } else {
                 None
@@ -2629,26 +2623,45 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // entry functions params-only even when called from module
             // code. Balanced below on every exit path.
             cx.state.module_stack.push(module_key);
-            // A module must not inherit its caller's context (#115):
-            // env resets to the seed plus the module init's own
-            // contributions, cwd to the defining file's directory, and
-            // the workspace to the run-initial root. Declared
-            // `INHERIT_ENV` names re-read from the host here (a
-            // re-inherit of an already-present value leaves no init
-            // delta, yet must still admit the name). A module that
-            // reads outside that (e.g. the host checkout) declares its
-            // own `WORKSPACE`/`WORKDIR` in-function. When the module is
+            // A module must not inherit its caller's namespace
+            // (#115): env resets to the seed plus the module init's
+            // own contributions. Workspace selection and cwd flow
+            // through untouched, so module code observes the same
+            // workspace its importer does. Declared `INHERIT_ENV`
+            // names re-read from the host here (a re-inherit of an
+            // already-present value leaves no init delta, yet must
+            // still admit the name). A module that reads outside that
+            // (e.g. the host checkout) declares its own
+            // `WORKSPACE`/`WORKDIR` in-function. When the module is
             // still initializing (reentrant init-time self-call) there
             // is no stored env yet: the init scope stays as-is, since
             // it is the module's own in-progress context.
-            if let Some((dir, Some((envs, inherit_names)))) = module_ctx {
-                cx.state.reset_module_context(dir, envs);
+            if let Some((envs, inherit_names)) = module_env {
+                cx.state.reset_module_env(envs);
                 if !inherit_names.is_empty() {
                     inherit_env(cx, &inherit_names)?;
                 }
             }
+            // Omitted trailing optionals fill with zero values before
+            // the body binds: the arity gate above guarantees every
+            // missing position is optional, and registration rejects
+            // unzeroable optionals, so the fill cannot fail here.
+            for (pname, ptype, optional) in def.params.iter().skip(arg_vals.len()) {
+                if !optional {
+                    bail!(
+                        "internal error: missing non-optional param `${pname}` in {}()",
+                        super::base_name(name)
+                    );
+                }
+                arg_vals.push(super::optional_zero_value(ptype).with_context(|| {
+                    format!(
+                        "function `{}` optional param `${pname}` has no zero value",
+                        super::base_name(name)
+                    )
+                })?);
+            }
             let outcome: Result<Value> = (|| {
-                for ((pname, ptype), pval) in def.params.iter().zip(arg_vals) {
+                for ((pname, ptype, _), pval) in def.params.iter().zip(arg_vals) {
                     cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
                 }
                 let flow = super::steps::execute_steps(
@@ -3556,12 +3569,12 @@ pub(super) fn install<P: ProcessManager>(
     let from_abs = cx
         .state
         .fs
-        .resolve_read(&cx.state.effective_cwd(), from)
+        .resolve_read(&cx.state.cwd, from)
         .with_context(|| format!("INSTALL {from} {to}"))?;
     let to_abs = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), to)
+        .resolve_write(&cx.state.cwd, to)
         .with_context(|| format!("INSTALL {from} {to}"))?;
     cx.state
         .fs
@@ -3806,7 +3819,7 @@ pub(super) fn append_line<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), path)
+        .resolve_write(&cx.state.cwd, path)
         .with_context(|| format!("APPEND_LINE {path}"))?;
     cx.state
         .fs
@@ -3826,11 +3839,11 @@ pub(super) fn remove<P: ProcessManager>(
     path: &str,
     recursive: bool,
 ) -> Result<()> {
-    // Removal resolves against the effective base (module-owned code
-    // anchors to its file). The deletion guard below compares against
-    // the real run cwd and roots, so a module can never remove the
-    // caller's working directory out from under it.
-    let cwd = cx.state.effective_cwd();
+    // Removal resolves against the ambient cwd. The deletion guard
+    // below compares against the real run cwd and roots, so a module
+    // can never remove the caller's working directory out from
+    // under it.
+    let cwd = cx.state.cwd.clone();
     let target = cx
         .state
         .fs
@@ -3842,7 +3855,7 @@ pub(super) fn remove<P: ProcessManager>(
     // the host root, so fail closed before any filesystem driver runs.
     // Both sides compare canonicalized: symlinked prefixes would
     // otherwise defeat a lexical equality check. Guarded against the
-    // real run cwd, never the module-anchored base.
+    // ambient cwd, which is the same in every file.
     let guard_cwd = cx.state.cwd.clone();
     let cwd_canon = cx
         .state

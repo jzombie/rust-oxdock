@@ -37,7 +37,7 @@ pub use workspace_fs::git::{GitIdentity, current_head_commit, ensure_git_identit
 pub use workspace_fs::policy::{GuardPolicy, PolicyPath};
 pub use workspace_fs::{
     CargoScratch, CopySourceRoot, DirEntry, EntryKind, GuardedPath, GuardedTempDir,
-    LazyGuardedTempDir, PathResolver, reserve_cargo_scratch,
+    LazyGuardedTempDir, PathResolver, WorkspaceSelection, reserve_cargo_scratch,
 };
 pub use workspace_fs::{
     SpillFile, command_path, embed_path, join_native, normalized_path, to_forward_slashes,
@@ -117,7 +117,14 @@ pub trait WorkspaceFs: Send + Sync {
 
     fn root(&self) -> &GuardedPath;
     fn build_context(&self) -> &GuardedPath;
-    fn set_root(&mut self, root: &GuardedPath);
+    /// Selection last applied through `switch_to_*`: the four-way
+    /// workspace selector plus the cache flavor. Scope save/restore
+    /// and module-context reset round-trip through this instead of
+    /// re-deriving selection from a saved path.
+    fn selection(&self) -> WorkspaceSelection;
+    /// Restore a selection previously read from [`Self::selection`].
+    /// Equivalent to re-running the matching `switch_to_*`.
+    fn restore_selection(&mut self, selection: WorkspaceSelection);
     /// Project root recorded via `set_workspace_root`, when one is set.
     fn workspace_root(&self) -> Option<&GuardedPath>;
 
@@ -308,8 +315,12 @@ impl WorkspaceFs for PathResolver {
         PathResolver::build_context(self)
     }
 
-    fn set_root(&mut self, root: &GuardedPath) {
-        PathResolver::set_root(self, root)
+    fn selection(&self) -> WorkspaceSelection {
+        PathResolver::selection(self)
+    }
+
+    fn restore_selection(&mut self, selection: WorkspaceSelection) {
+        PathResolver::restore_selection(self, selection)
     }
 
     fn switch_to_snapshot(&mut self) {

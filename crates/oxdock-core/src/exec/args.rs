@@ -562,7 +562,7 @@ pub(crate) fn path_type_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), &path_str)
+        .resolve_write(&cx.state.cwd, &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
     let kind = match cx.state.fs.entry_kind_no_follow(&target) {
         Ok(EntryKind::Symlink) => "symlink",
@@ -703,11 +703,7 @@ fn is_executable_candidate<P: ProcessManager>(
     candidate: &str,
     exts: &[String],
 ) -> bool {
-    let Ok(guard) = cx
-        .state
-        .fs
-        .resolve_read(&cx.state.effective_cwd(), candidate)
-    else {
+    let Ok(guard) = cx.state.fs.resolve_read(&cx.state.cwd, candidate) else {
         return false;
     };
     if !matches!(
@@ -765,7 +761,7 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_write(&cx.state.effective_cwd(), &path_str)
+        .resolve_write(&cx.state.cwd, &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
     let mut current = target;
     loop {
@@ -781,7 +777,7 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
                     return Ok(Value::bool(false));
                 };
                 if parent.as_path().as_os_str().is_empty() {
-                    let cwd = cx.state.effective_cwd();
+                    let cwd = cx.state.cwd.clone();
                     let anchor =
                         cx.state.fs.resolve_write(&cwd, ".").map_err(|e| {
                             anyhow::anyhow!("failed to resolve working directory: {e}")
@@ -1377,7 +1373,7 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
     // pending snapshot materializes here (a snapshot read), while local
     // roots resolve with zero I/O. The listing below then runs on concrete
     // paths in both cases.
-    let _ = cx.state.fs.resolve_read(&cx.state.effective_cwd(), ".")?;
+    let _ = cx.state.fs.resolve_read(&cx.state.cwd, ".")?;
     let root = cx.state.fs.root().clone();
     let root_path = root.as_path().to_path_buf();
     let mut entries: Vec<Value> = root
@@ -1409,7 +1405,7 @@ pub(crate) fn load_toml_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_read(&cx.state.effective_cwd(), &path_str)
+        .resolve_read(&cx.state.cwd, &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve TOML path '{}': {}", path_str, e))?;
     let content = cx
         .state
@@ -1436,7 +1432,7 @@ pub(crate) fn load_json_from_value<P: ProcessManager>(
     let target = cx
         .state
         .fs
-        .resolve_read(&cx.state.effective_cwd(), &path_str)
+        .resolve_read(&cx.state.cwd, &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve JSON path '{}': {}", path_str, e))?;
     let content = cx
         .state
@@ -1466,9 +1462,80 @@ pub(crate) fn parse_toml_from_value(value: Value) -> Result<Value> {
 
 /// Parse JSON content into a DSL `Value`.
 pub fn load_json_value(content: &str) -> Result<Value> {
+    let stripped = strip_json_comments(content);
     let json_val: serde_json::Value =
-        serde_json::from_str(content).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
+        serde_json::from_str(&stripped).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
     Ok(json_to_value(json_val))
+}
+
+/// Strip `//` line and `/* */` block comments outside strings, so
+/// config and data files can carry usage notes. Comment bytes become
+/// spaces (newlines kept) to hold error line numbers steady.
+/// `//` inside a `"quoted string"` is data and survives.
+pub fn strip_json_comments(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            continue;
+        }
+        if c == '/' {
+            match chars.peek() {
+                Some('/') => {
+                    chars.next();
+                    out.push(' ');
+                    out.push(' ');
+                    for c2 in chars.by_ref() {
+                        if c2 == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                        out.push(' ');
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    chars.next();
+                    out.push(' ');
+                    out.push(' ');
+                    let mut prev_star = false;
+                    for c2 in chars.by_ref() {
+                        if c2 == '\n' {
+                            out.push('\n');
+                        } else {
+                            out.push(' ');
+                        }
+                        if prev_star && c2 == '/' {
+                            break;
+                        }
+                        prev_star = c2 == '*';
+                    }
+                    continue;
+                }
+                _ => {
+                    out.push(c);
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Value-semantics core of `PARSE_JSON()`: parse JSON text already held
@@ -1646,7 +1713,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
     for segment in TemplateSegments::new(input) {
         match segment {
             TemplateSegment::Text(text) => push_escaped_text(&mut output, text),
-            TemplateSegment::Placeholder { key } => {
+            TemplateSegment::Placeholder { key, .. } => {
                 if key.is_empty() {
                     bail!("empty template placeholder");
                 }
@@ -1692,25 +1759,30 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         }
                     } else if let Some(val) = state.get_var(key) {
                         output.push_str(&format_value_for_string(&val)?);
-                    } else if let Some((module, func, args_src)) =
-                        oxdock_process::parse_placeholder_call(key)
+                    } else if let Some(call) = oxdock_parser::template::parse_placeholder_call(key)
+                        && let Some(module) = call.module
                     {
                         // `{{ MODULE::FUNC(args) }}` through the shared
                         // pure table: the same registry EXPAND
                         // templates resolve, so ordinary strings and
-                        // file templates agree. Dispatch and the
-                        // unknown-name error live in
-                        // [`super::native::placeholder_resolver`];
-                        // anything else falls through to the
-                        // missing-key error below.
+                        // file templates agree. Shape detection is the
+                        // shared template grammar (also behind
+                        // parse-time qualification), so the two can
+                        // never disagree on what counts as one call.
+                        // Dispatch and the unknown-name error live in
+                        // [`super::native::placeholder_resolver`].
+                        // Bare heads fall through to the missing-key
+                        // error below, sharing its single diagnostic.
                         let resolve =
                             super::native::placeholder_resolver(state.pure_function_table());
                         let vars = state.all_vars();
+                        let args_src =
+                            oxdock_parser::template::split_placeholder_args(call.args_raw);
                         let mut args = Vec::with_capacity(args_src.len());
                         for src in args_src {
                             args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
                         }
-                        let result = resolve(module.as_str(), func.as_str(), args)?;
+                        let result = resolve(module, call.name, args)?;
                         output.push_str(&format_value_for_string(&result)?);
                     } else {
                         // Bare key not in DSL vars → hard error: missing
@@ -2691,6 +2763,44 @@ mod tests {
         assert!(parse_toml_from_value(Value::string("a = ".to_string())).is_err());
         assert!(parse_json_from_value(Value::int(1)).is_err());
         assert!(parse_toml_from_value(Value::bool(true)).is_err());
+    }
+
+    #[test]
+    fn json_comments_strip_outside_strings_only() {
+        // Line and block notes vanish; `//` inside a string stays data.
+        let stripped = strip_json_comments("{\"u\": \"http://x/y\"} // note\n");
+        assert!(stripped.contains("http://x/y"), "string kept: {stripped}");
+        let doc = load_json_value(
+            "{\n// leading note\n\"a\": 1, /* mid note */ \"u\": \"http://x/y\"\n}\n",
+        )
+        .expect("commented json parses");
+        let map = doc.as_map().expect("map");
+        assert_eq!(map.get("a").expect("key").as_i64(), Some(1));
+        assert_eq!(map.get("u").expect("key").as_str(), Some("http://x/y"));
+        assert!(load_json_value("{\"a\": 1} // trailing note").is_ok());
+        assert!(load_json_value("{\"a\": 1, /* unterminated").is_err());
+    }
+
+    #[test]
+    fn json_comment_stripping_preserves_error_columns() {
+        // Every consumed comment byte becomes one space (newlines kept),
+        // so `serde_json` line/column offsets still name the original site.
+        let src = "{\"a\": 1 /* note */, bad}";
+        let stripped = strip_json_comments(src);
+        assert_eq!(stripped.len(), src.len(), "columns hold: {stripped:?}");
+        let err = load_json_value(src).expect_err("bad key must fail");
+        assert!(
+            format!("{err:#}").contains("line 1 column 21"),
+            "error names the original column: {err:#}"
+        );
+        let lined = "{\n  \"a\": 1,\n  // note\n  bad\n}";
+        let lined_stripped = strip_json_comments(lined);
+        assert_eq!(lined_stripped.len(), lined.len());
+        let err = load_json_value(lined).expect_err("bad key must fail");
+        assert!(
+            format!("{err:#}").contains("line 4 column 3"),
+            "error names the original line: {err:#}"
+        );
     }
 
     #[test]

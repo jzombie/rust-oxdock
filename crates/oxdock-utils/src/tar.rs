@@ -358,8 +358,8 @@ mod tests {
         .unwrap();
         assert_eq!(seen.get("b.txt").unwrap(), &data_a);
         assert_eq!(seen.get("a/nested.txt").unwrap(), &data_b);
-        assert!(names.contains(&"dir:a".to_string()));
-        assert!(names.contains(&"dir:empty".to_string()));
+        assert!(names.iter().any(|name| name == "dir:a"));
+        assert!(names.iter().any(|name| name == "dir:empty"));
     }
 
     #[test]

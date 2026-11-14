@@ -770,6 +770,49 @@ impl Expr {
             Expr::Not(inner) => inner.walk(f),
         }
     }
+
+    /// Mutable twin of [`walk`](Self::walk): visits this expression and
+    /// every descendant depth first. `Block` interiors are skipped:
+    /// inline bodies were lowered as their own statements with their
+    /// own `FUNC`/import frames, so outer-scope qualification must
+    /// never rewrite them. `CompiledMath` stays opaque like above.
+    /// Exhaustive over variants, so new shapes fail compilation here.
+    pub fn walk_mut(&mut self, f: &mut impl FnMut(&mut Expr)) {
+        f(self);
+        match self {
+            Expr::Literal(_)
+            | Expr::Var(_)
+            | Expr::Env(_)
+            | Expr::KeyPath { .. }
+            | Expr::Inspect(_)
+            | Expr::FreshPipe
+            | Expr::UnsignedIntBoundary(_) => {}
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    arg.walk_mut(f);
+                }
+            }
+            Expr::List(items) => {
+                for item in items {
+                    item.walk_mut(f);
+                }
+            }
+            Expr::Map(entries) => {
+                for (_, value) in entries {
+                    value.walk_mut(f);
+                }
+            }
+            Expr::Block(_) => {}
+            Expr::Compare { left, right, .. }
+            | Expr::Arithmetic { left, right, .. }
+            | Expr::Logical { left, right, .. } => {
+                left.walk_mut(f);
+                right.walk_mut(f);
+            }
+            Expr::CompiledMath(_) => {}
+            Expr::Not(inner) => inner.walk_mut(f),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

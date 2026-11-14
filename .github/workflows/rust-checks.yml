@@ -135,45 +135,6 @@ jobs:
           ENV CARGO_TARGET_DIR="{{ $targetdir }}"
           RUN ["cargo", "sort", "--workspace", "--check"]
 
-      # Publish guard: any crate named `docs-gen` must stay
-      # `publish = false` (the old pipeline name and the compat
-      # pointer both). A missing key or any truthy value fails naming
-      # the member, so the name can never become public API by
-      # accident. Reads every workspace member manifest; no cargo
-      # metadata needed.
-      - name: Check docs-gen publish guard
-        shell: oxdock --script {0}
-        run: |
-          IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE]
-          WORKSPACE SYSTEM
-          WORKDIR {{ env:GITHUB_WORKSPACE }}
-          LET $targetdir: STRING = PATH_JOIN("{{ env:GITHUB_WORKSPACE }}", "target")
-          ENV CARGO_TARGET_DIR="{{ $targetdir }}"
-          LET $root: MAP<ANY> = LOAD_TOML("Cargo.toml")
-          LET $members: LIST<STRING> = $root.workspace.members
-          FOR $m: STRING IN $members {
-            LET $manifest: MAP<ANY> = LOAD_TOML("{{ $m }}/Cargo.toml")
-            IF HAS_KEY($manifest, "package") {
-              LET $pkg: MAP<ANY> = $manifest.package
-              IF $pkg.name == "docs-gen" {
-                IF !HAS_KEY($pkg, "publish") {
-                  ECHO "member '{{ $m }}' is named docs-gen but sets no publish flag; it must stay publish = false"
-                  EXIT 1
-                }
-                IF TYPE_OF($pkg.publish) != "BOOL" {
-                  ECHO "member '{{ $m }}' is named docs-gen with a non-boolean publish flag; it must stay publish = false"
-                  EXIT 1
-                }
-                IF $pkg.publish {
-                  ECHO "member '{{ $m }}' is named docs-gen but is publishable; it must stay publish = false"
-                  EXIT 1
-                }
-              }
-            }
-          }
-          ECHO "publish guard holds: every docs-gen crate is publish = false"
-
       - name: Check formatting
         shell: oxdock --script {0}
         run: |
@@ -519,10 +480,10 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path-to-lcov: lcov.info
 
-  # Dogfoods the reusable docs pipeline against this repo itself:
+  # Dogfoods the reusable render pipeline against this repo itself:
   # same render plus drift check a downstream caller gets.
   docs-fresh:
-    name: docs-fresh (docs-gen output matches checked-in docs)
+    name: docs-fresh (oxdock-render output matches checked-in docs)
     uses: ./.github/workflows/docs.yml
     permissions:
       contents: read

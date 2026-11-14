@@ -67,30 +67,23 @@ FUNC ASSEMBLE($ctx: CTX): CTX {
 
 # RENDER hook: expand the master template over the manifest scope.
 # User data stays in open maps; the CTX boundary stays exact. Scope
-# key names and the version env name come from the config, never
-# from this file. The workspace snapshot below is optional staging
-# data (see ASSEMBLE); when absent, scope carries only the
-# configured maps.
+# key names default to `global` and `ctx`; a config `vars`
+# map overrides either (plus `workspace_pkg` when staging is
+# present), so pipelines that accept the defaults declare nothing.
 FUNC RENDER($ctx: CTX): CTX {
     LET $cfg: MAP<ANY> = LOAD_JSON($ctx.config)
-    LET $has_vars: BOOL = HAS_KEY($cfg, "vars")
-    IF $has_vars == false {
-        ECHO "render: config needs a 'vars' map declaring scope key names"
-        EXIT 1
+    LET $vglobal: STRING = "global"
+    LET $vctx: STRING = "ctx"
+    LET $vars: VARS = {}
+    IF HAS_KEY($cfg, "vars") {
+        $vars = $cfg.vars
     }
-    LET $vars: VARS = $cfg.vars
-    LET $has_global: BOOL = HAS_KEY($vars, "global")
-    IF $has_global == false {
-        ECHO "render: config 'vars' needs a 'global' scope key name"
-        EXIT 1
+    IF HAS_KEY($vars, "global") {
+        $vglobal = $vars.global
     }
-    LET $vglobal: STRING = $vars.global
-    LET $has_vctx: BOOL = HAS_KEY($vars, "ctx")
-    IF $has_vctx == false {
-        ECHO "render: config 'vars' needs a 'ctx' scope key name"
-        EXIT 1
+    IF HAS_KEY($vars, "ctx") {
+        $vctx = $vars.ctx
     }
-    LET $vctx: STRING = $vars.ctx
     LET $wspt: STRING = PATH_TYPE("{{ $ctx.staging }}/_workspace.json")
     LET $has_ws: BOOL = $wspt == "file"
     LET $vkey: STRING = ""
@@ -104,7 +97,7 @@ FUNC RENDER($ctx: CTX): CTX {
         $vkey = $cfg.version_key
         LET $has_vpkg: BOOL = HAS_KEY($vars, "workspace_pkg")
         IF $has_vpkg == false {
-            ECHO "render: staging snapshot present but config 'vars' lacks 'workspace_pkg'"
+            ECHO "render: staging snapshot present but config lacks 'vars.workspace_pkg'"
             EXIT 1
         }
         $vpkg = $vars.workspace_pkg
@@ -112,12 +105,12 @@ FUNC RENDER($ctx: CTX): CTX {
     # Open user data: globals, values, plus the staged manifest carry
     # pipeline-defined keys, so no record spelling admits them; scope
     # keys on config names, dynamic likewise.
-    LET $docs_global: MAP<ANY> = LOAD_JSON($ctx.globals)
-    LET $docs_ctx: MAP<ANY> = LOAD_JSON($ctx.values)
+    LET $global_map: MAP<ANY> = LOAD_JSON($ctx.globals)
+    LET $ctx_map: MAP<ANY> = LOAD_JSON($ctx.values)
     LET $files: MAP<ANY> = LOAD_JSON("{{ $ctx.staging }}/{{ $ctx.target }}.json")
     LET $scope: MAP<ANY> = {}
-    $scope = MAP_SET($scope, $vglobal, $docs_global)
-    $scope = MAP_SET($scope, $vctx, $docs_ctx)
+    $scope = MAP_SET($scope, $vglobal, $global_map)
+    $scope = MAP_SET($scope, $vctx, $ctx_map)
     $scope = MAP_SET($scope, "files", $files)
     LET $envmap: MAP<ANY> = {}
     IF $has_ws {

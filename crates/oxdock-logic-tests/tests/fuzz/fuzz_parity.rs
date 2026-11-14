@@ -229,7 +229,7 @@ fn arb_expr_with_depth(depth: u32) -> BoxedStrategy<Expr> {
         arb_arith_with_depth(0).boxed(),
         arb_bool_with_depth(0).boxed(),
         safe_string().prop_map(|s| Expr::Call {
-            name: "STD::TEXT_LENGTH".to_string(),
+            name: "STD::LEN".to_string(),
             args: vec![Expr::Literal(Value::string(s))],
         }),
         arb_flat_block_body().prop_map(Expr::Block),
@@ -826,7 +826,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         }),
         ("FUZZ[A-Z0-9_]*", arb_body()).prop_map(|(name, body)| StepKind::FuncDef {
             name,
-            params: vec![("coverage".to_string(), "STRING".to_string())],
+            params: vec![("coverage".to_string(), "STRING".to_string(), false)],
             return_type: "STRING".to_string(),
             is_async: false,
             body,
@@ -877,7 +877,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         }),
         Just(StepKind::Call {
-            name: "STD::TEXT_LENGTH".to_string(),
+            name: "STD::LEN".to_string(),
             args: vec![Expr::Literal(Value::string("coverage".to_string()))],
         }),
         // File-backed, but the parity pathways only parse: no files are
@@ -1917,7 +1917,7 @@ proptest! {
                 } => {
                     assert_eq!(name, "FOO", "name mismatch: {s}");
                     assert_eq!(got.len(), types.len(), "param count mismatch: {s}");
-                    for (i, ((got_name, got_ty), want_ty)) in
+                    for (i, ((got_name, got_ty, _), want_ty)) in
                         got.iter().zip(types.iter()).enumerate()
                     {
                         assert_eq!(got_name, &format!("p{i}"), "param name mismatch: {s}");
@@ -2190,7 +2190,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             var: "coverage".to_string(),
             decl_type: "INT".to_string(),
             expr: Expr::Call {
-                name: "STD::TEXT_LENGTH".to_string(),
+                name: "STD::LEN".to_string(),
                 args: vec![Expr::Literal(Value::string("coverage".to_string()))],
             },
         },
@@ -2235,7 +2235,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         },
         StepKind::FuncDef {
             name: "COVERAGEFUNC".to_string(),
-            params: vec![("coverage".to_string(), "STRING".to_string())],
+            params: vec![("coverage".to_string(), "STRING".to_string(), false)],
             return_type: "STRING".to_string(),
             is_async: false,
             body: vec![Step {
@@ -2337,7 +2337,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         },
         StepKind::Call {
-            name: "STD::TEXT_LENGTH".to_string(),
+            name: "STD::LEN".to_string(),
             args: vec![Expr::Literal(Value::string("coverage".to_string()))],
         },
         StepKind::Isolated {
@@ -2557,7 +2557,7 @@ fn sample_covered_exprs() -> Vec<Expr> {
             col: 0,
         }]),
         Expr::Call {
-            name: "STD::TEXT_LENGTH".to_string(),
+            name: "STD::LEN".to_string(),
             args: vec![Expr::Literal(Value::string("coverage".to_string()))],
         },
         Expr::Compare {

@@ -11,10 +11,10 @@
 //! type, the latter nothing.)
 //!
 //! Rendered reference: `ENV_CONTRACTS.md` at the repository root
-//! (generated from the live seed tables by `cargo run -p docs-gen`).
+//! (generated from the live seed tables by `cargo run -p oxdock-render`).
 
 //! Rendered reference: `ENV_CONTRACTS.md` at the repository root
-//! (generated from the live seed tables by `cargo run -p docs-gen`).
+//! (generated from the live seed tables by `cargo run -p oxdock-render`).
 
 /// Defines string constants and their module inventory in one place, so
 /// contract rendering cannot miss a name: adding a constant without
@@ -26,6 +26,19 @@ macro_rules! define_names {
         /// Inventory of every name in this module, for contract rendering.
         pub const ALL: &[&str] = &[ $( $name ),* ];
     };
+}
+
+/// Names owned by the oxdock-render pipeline: config selection,
+/// child interpreter override, and child debug output.
+pub mod render {
+    define_names! {
+        /// Config filename override; the neutral default applies otherwise.
+        CONFIG = "RENDER_CONFIG",
+        /// Debug flag printing the generated child script instead of running it.
+        PRINT_CHILD = "RENDER_PRINT_CHILD",
+        /// Pipe-child interpreter override for tests and harnesses.
+        CHILD = "OXDOCK_RENDER_CHILD",
+    }
 }
 
 /// Names owned by OxDock itself: engine plumbing, asset pipeline,
@@ -177,8 +190,8 @@ pub struct PlumbingEntry {
     pub name: &'static str,
 }
 
-/// Engine-plumbing inventory: every `oxdock::` / `cargo::` name with
-/// its owning module. Built from the module `ALL` arrays the
+/// Engine-plumbing inventory: every `oxdock::` / `cargo::` / `render::`
+/// name with its owning module. Built from the module `ALL` arrays the
 /// `define_names!` macro emits, so a new constant appears here with
 /// no extra registration.
 pub fn plumbing() -> Vec<PlumbingEntry> {
@@ -198,6 +211,12 @@ pub fn plumbing() -> Vec<PlumbingEntry> {
     for name in cargo::build::ALL {
         out.push(PlumbingEntry {
             owner: "cargo::build",
+            name,
+        });
+    }
+    for name in render::ALL {
+        out.push(PlumbingEntry {
+            owner: "render",
             name,
         });
     }
@@ -228,6 +247,7 @@ mod tests {
             ("oxdock", oxdock::ALL),
             ("cargo", cargo::ALL),
             ("cargo::build", cargo::build::ALL),
+            ("render", render::ALL),
             ("os::unix", os::unix::ALL),
             ("os::windows", os::windows::ALL),
         ] {
@@ -256,9 +276,13 @@ mod tests {
             os::windows::ALL.contains(&os::windows::WINDIR),
             "windows inventory must name WINDIR"
         );
+        assert!(
+            render::ALL.contains(&render::CONFIG),
+            "plumbing must name render CONFIG"
+        );
         assert_eq!(
             plumbing().len(),
-            oxdock::ALL.len() + cargo::ALL.len() + cargo::build::ALL.len()
+            oxdock::ALL.len() + cargo::ALL.len() + cargo::build::ALL.len() + render::ALL.len()
         );
     }
 }

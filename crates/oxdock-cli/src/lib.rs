@@ -67,7 +67,7 @@ oxdock_embed! {
               --mcp              serve EXPORTed FUNCs as MCP tools over stdio (requires the `mcp` feature)
             {{ $net_flags }}
               --help, -h         print this help and exit
-              --version, -V      print the version and exit
+              --version, -V, -v   print the version and exit
 
             With no script given, reads the script from stdin (must be piped unless `--shell`).
             {{ $tail }}
@@ -170,6 +170,29 @@ fn cli_host_types() -> Vec<&'static TypeDescriptor> {
     #[cfg(not(feature = "ssh"))]
     let ssh: &[&'static TypeDescriptor] = &[];
     net.iter().chain(ssh.iter()).copied().collect()
+}
+
+/// Run parsed steps with the CLI host surface under a lazy snapshot:
+/// one place where the CLI module set, types, and entry file meet the
+/// lazy-snapshot runner, so the net/non-net module wiring lives here
+/// instead of at every call site. Callers differ only in IO setup
+/// (stdin handling, remote runners) and what they do with the output.
+fn run_cli_steps(
+    workspace_root: &GuardedPath,
+    steps: &[Step],
+    io: ExecIo,
+    #[cfg(feature = "net")] registry: Option<&Arc<EndpointRegistry>>,
+    #[cfg(not(feature = "net"))] registry: Option<&Arc<()>>,
+    entry_file: Option<GuardedPath>,
+) -> Result<oxdock_core::exec::LazyRunOutput> {
+    run_steps_with_lazy_snapshot_and_modules_and_entry(
+        workspace_root,
+        steps,
+        io,
+        cli_host_modules_with(registry),
+        cli_host_types(),
+        entry_file,
+    )
 }
 
 /// Parse a CLI script against STD plus any bundled host modules. Without
@@ -467,7 +490,7 @@ impl Options {
                 Long("help") | Short('h') => {
                     bail!("{}", usage());
                 }
-                Long("version") | Short('V') => {
+                Long("version") | Short('V') | Short('v') => {
                     bail!("{}", version());
                 }
                 Value(value) => {
@@ -516,7 +539,7 @@ fn value_string(value: std::ffi::OsString) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("argument must be UTF-8"))
 }
 
-/// Human-readable CLI version, printed for `--version`/`-V`.
+/// Human-readable CLI version, printed for `--version`/`-V`/`-v`.
 pub fn version() -> String {
     format!("oxdock {}", env!("CARGO_PKG_VERSION"))
 }
@@ -619,27 +642,17 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
         };
         let entry_file = entry_file_of(&opts.script);
         #[cfg(feature = "net")]
-        let output = {
+        let io_cfg = {
             let mut io_cfg = ExecIo::new();
             register_remote_runners(&mut io_cfg, &inventory);
-            run_steps_with_lazy_snapshot_and_modules_and_entry(
-                &workspace_root,
-                &steps,
-                io_cfg,
-                cli_host_modules_with(Some(&registry)),
-                cli_host_types(),
-                entry_file,
-            )?
+            io_cfg
         };
         #[cfg(not(feature = "net"))]
-        let output = run_steps_with_lazy_snapshot_and_modules_and_entry(
-            &workspace_root,
-            &steps,
-            ExecIo::new(),
-            cli_host_modules_with(None),
-            cli_host_types(),
-            entry_file,
-        )?;
+        let io_cfg = ExecIo::new();
+        #[cfg(feature = "net")]
+        let output = run_cli_steps(&workspace_root, &steps, io_cfg, Some(&registry), entry_file)?;
+        #[cfg(not(feature = "net"))]
+        let output = run_cli_steps(&workspace_root, &steps, io_cfg, None, entry_file)?;
         final_cwd = output.final_cwd;
         return Ok(ExecutionResult {
             snapshot: output.snapshot,
@@ -884,23 +897,9 @@ where
         register_remote_runners(&mut io_cfg, &inventory);
         let entry_file = entry_file_of(&opts.script);
         #[cfg(feature = "net")]
-        let output = run_steps_with_lazy_snapshot_and_modules_and_entry(
-            &workspace_root,
-            &steps,
-            io_cfg,
-            cli_host_modules_with(Some(&registry)),
-            cli_host_types(),
-            entry_file,
-        )?;
+        let output = run_cli_steps(&workspace_root, &steps, io_cfg, Some(&registry), entry_file)?;
         #[cfg(not(feature = "net"))]
-        let output = run_steps_with_lazy_snapshot_and_modules_and_entry(
-            &workspace_root,
-            &steps,
-            io_cfg,
-            cli_host_modules_with(None),
-            cli_host_types(),
-            entry_file,
-        )?;
+        let output = run_cli_steps(&workspace_root, &steps, io_cfg, None, entry_file)?;
         final_cwd = output.final_cwd;
         snapshot = output.snapshot;
         fs = Some(output.fs);
@@ -1454,7 +1453,7 @@ mod tests {
         // (parse must not exit the process itself: it is public library
         // API). Print it and succeed so the binary exits 0.
         let workspace = GuardedPath::tempdir().expect("tempdir");
-        for flag in ["--version", "-V"] {
+        for flag in ["--version", "-V", "-v"] {
             let mut args = vec![flag.to_string()].into_iter();
             let err = Options::parse(&mut args, workspace.as_guarded_path())
                 .expect_err("version flag must not parse as options");

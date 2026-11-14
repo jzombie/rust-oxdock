@@ -1,0 +1,15 @@
+{
+  "name": "setup-oxdock-render",
+  "description": "Setup OxDock renderer composite action for CI legs.",
+  "comment_head": "Setup OxDock renderer for `oxdock-render` steps.",
+  "action_title": "Setup OxDock renderer",
+  "action_summary": "Install the oxdock-render binary so later steps can render docs.",
+  "binary_note": "(`oxdock-render` keeps the bare name free for a binary under test only when overridden)",
+  "binary_default": "oxdock-render",
+  "provenance_kind": "Renderer",
+  "provenance_detail": "so unreleased renderer behavior is testable before any tag exists",
+  "source_var": "OXDOCK_RENDER_SOURCE",
+  "install_label": "Install OxDock renderer",
+  "install_dir": "oxdock-render",
+  "product": "oxdock-render"
+}

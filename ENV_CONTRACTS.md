@@ -2,7 +2,7 @@
 
 Every variable the engine seeds into script environments.
 
-> Rendered by `cargo run -p docs-gen` from the contract declaration in
+> Rendered by `cargo run -p oxdock-render` from the contract declaration in
 > `oxdock_process::env_policy`. Do not edit by hand: the declaration is
 > the single source, and the table below renders it verbatim.
 
@@ -118,3 +118,6 @@ sanctioned seed or explicit routing. Nothing flows ambiently.
 | [`TARGET`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TARGET&type=code) | cargo::build |
 | [`PROFILE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+PROFILE&type=code) | cargo::build |
 | [`RUSTC`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+RUSTC&type=code) | cargo::build |
+| [`RENDER_CONFIG`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+RENDER_CONFIG&type=code) | render |
+| [`RENDER_PRINT_CHILD`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+RENDER_PRINT_CHILD&type=code) | render |
+| [`OXDOCK_RENDER_CHILD`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_RENDER_CHILD&type=code) | render |

@@ -1,18 +1,18 @@
 {{ $files.stubs.installer-doc-header }}
 
 #
-#   {{ $docs_global.installer_cmd_ps1 }}
+#   {{ $global.installer_cmd_ps1 }}
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v{{ env:CRATE_VERSION }}'; {{ $docs_global.installer_cmd_ps1 }}
+#   $env:VERSION = 'v{{ env:CRATE_VERSION }}'; {{ $global.installer_cmd_ps1 }}
 #
 {{ $files.stubs.installer-doc-env }}
 
 $ErrorActionPreference = 'Stop'
 
-$Repo = "{{ $docs_global.repo }}"
+$Repo = "{{ $global.repo }}"
 
 $Version = $env:VERSION
 
@@ -25,7 +25,7 @@ $ApiHeaders = @{}
 if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $($env:GITHUB_TOKEN)" }
 
 if (-not $Version -or $Version -eq 'latest') {
-  $Version = (Invoke-RestMethod "{{ $docs_global.stub_url_releases_latest }}" -Headers $ApiHeaders)[0].tag_name
+  $Version = (Invoke-RestMethod "{{ $global.stub_url_releases_latest }}" -Headers $ApiHeaders)[0].tag_name
 
 }
 
@@ -62,11 +62,11 @@ $VDir = Join-Path $CacheRoot $Version
 New-Item -ItemType Directory -Force -Path $VDir | Out-Null
 
 function Test-CachedAsset {
-  $sums = Join-Path $VDir '{{ $docs_global.stub_name_checksums }}'
+  $sums = Join-Path $VDir '{{ $global.stub_name_checksums }}'
 
   $path = Join-Path $VDir $Asset
 
-  $logic = Join-Path $VDir '{{ $docs_global.stub_name_oxfile }}'
+  $logic = Join-Path $VDir '{{ $global.stub_name_oxfile }}'
 
   $stub = Join-Path $VDir 'install.ps1'
 
@@ -116,15 +116,15 @@ function Expand-TarballExe {
 # writes: Write-Warning follows stdout when stdout is redirected, so
 # pipe captures would miss the announcement.
 if (Test-CachedAsset) {
-  [Console]::Error.WriteLine("{{ $docs_global.stub_msg_using_cached }}")
+  [Console]::Error.WriteLine("{{ $global.stub_msg_using_cached }}")
 } else {
-  [Console]::Error.WriteLine("{{ $docs_global.stub_msg_downloading }}")
+  [Console]::Error.WriteLine("{{ $global.stub_msg_downloading }}")
 
   $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
 
   New-Item -ItemType Directory -Force -Path $tmp | Out-Null
   try {
-    $base = if ($env:OXDOCK_RELEASE_BASE) { $env:OXDOCK_RELEASE_BASE.TrimEnd('/') } else { "{{ $docs_global.stub_url_release_base }}" }
+    $base = if ($env:OXDOCK_RELEASE_BASE) { $env:OXDOCK_RELEASE_BASE.TrimEnd('/') } else { "{{ $global.stub_url_release_base }}" }
 
     Invoke-WebRequest "$base/$Asset" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'asset.tar.gz')
 
@@ -134,10 +134,10 @@ if (Test-CachedAsset) {
       Invoke-WebRequest "$base/$EngineAsset" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'engine.tar.gz')
     }
 
-    Invoke-WebRequest "$base/{{ $docs_global.stub_name_checksums }}" -Headers $ApiHeaders -OutFile (Join-Path $tmp '{{ $docs_global.stub_name_checksums }}')
+    Invoke-WebRequest "$base/{{ $global.stub_name_checksums }}" -Headers $ApiHeaders -OutFile (Join-Path $tmp '{{ $global.stub_name_checksums }}')
 
-    $line = (Get-Content (Join-Path $tmp '{{ $docs_global.stub_name_checksums }}')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1
-    if (-not $line) { throw "asset $Asset missing from {{ $docs_global.stub_name_checksums }}" }
+    $line = (Get-Content (Join-Path $tmp '{{ $global.stub_name_checksums }}')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1
+    if (-not $line) { throw "asset $Asset missing from {{ $global.stub_name_checksums }}" }
     $expected = ($line -split '\s+')[0]
 
     $actual = (Get-FileHash (Join-Path $tmp 'asset.tar.gz') -Algorithm SHA256).Hash
@@ -146,8 +146,8 @@ if (Test-CachedAsset) {
     # The engine tarball verifies against the same checksums file,
     # which is why this runs after its download above.
     if ($NeedsEngine) {
-      $engineLine = (Get-Content (Join-Path $tmp '{{ $docs_global.stub_name_checksums }}')) | Where-Object { $_ -match "$EngineAsset" } | Select-Object -First 1
-      if (-not $engineLine) { throw "asset $EngineAsset missing from {{ $docs_global.stub_name_checksums }}" }
+      $engineLine = (Get-Content (Join-Path $tmp '{{ $global.stub_name_checksums }}')) | Where-Object { $_ -match "$EngineAsset" } | Select-Object -First 1
+      if (-not $engineLine) { throw "asset $EngineAsset missing from {{ $global.stub_name_checksums }}" }
       $engineExpected = ($engineLine -split '\s+')[0]
 
       $engineActual = (Get-FileHash (Join-Path $tmp 'engine.tar.gz') -Algorithm SHA256).Hash
@@ -159,9 +159,9 @@ if (Test-CachedAsset) {
     # mirrors). Fetched here, inside population, so warm runs never
     # touch network.
     if ($env:OXDOCK_OXFILE_URL) {
-      Invoke-WebRequest $env:OXDOCK_OXFILE_URL -Headers $ApiHeaders -OutFile (Join-Path $tmp '{{ $docs_global.stub_name_oxfile }}')
+      Invoke-WebRequest $env:OXDOCK_OXFILE_URL -Headers $ApiHeaders -OutFile (Join-Path $tmp '{{ $global.stub_name_oxfile }}')
     } else {
-      Invoke-WebRequest "$base/{{ $docs_global.stub_name_oxfile }}" -Headers $ApiHeaders -OutFile (Join-Path $tmp '{{ $docs_global.stub_name_oxfile }}')
+      Invoke-WebRequest "$base/{{ $global.stub_name_oxfile }}" -Headers $ApiHeaders -OutFile (Join-Path $tmp '{{ $global.stub_name_oxfile }}')
 
     }
 
@@ -179,9 +179,9 @@ if (Test-CachedAsset) {
       Move-Item (Join-Path $tmp 'engine.tar.gz') (Join-Path $VDir $EngineAsset) -Force
     }
 
-    Move-Item (Join-Path $tmp '{{ $docs_global.stub_name_checksums }}') (Join-Path $VDir '{{ $docs_global.stub_name_checksums }}') -Force
+    Move-Item (Join-Path $tmp '{{ $global.stub_name_checksums }}') (Join-Path $VDir '{{ $global.stub_name_checksums }}') -Force
 
-    Move-Item (Join-Path $tmp '{{ $docs_global.stub_name_oxfile }}') (Join-Path $VDir '{{ $docs_global.stub_name_oxfile }}') -Force
+    Move-Item (Join-Path $tmp '{{ $global.stub_name_oxfile }}') (Join-Path $VDir '{{ $global.stub_name_oxfile }}') -Force
 
     Move-Item (Join-Path $tmp 'install.ps1') (Join-Path $VDir 'install.ps1') -Force
 
@@ -198,7 +198,7 @@ if (Test-CachedAsset) {
 # prevents re-entry: the re-executed copy skips this block. Digest
 # verification fails closed when the entry is missing or mismatched.
 if (-not $env:OXDOCK_STUB_ACTIVE) {
-  $stubWant = (((Get-Content (Join-Path $VDir '{{ $docs_global.stub_name_checksums }}')) | Where-Object { $_ -match " install.ps1" } | Select-Object -First 1) -split '\s+')[0]
+  $stubWant = (((Get-Content (Join-Path $VDir '{{ $global.stub_name_checksums }}')) | Where-Object { $_ -match " install.ps1" } | Select-Object -First 1) -split '\s+')[0]
 
   $stubGot = (Get-FileHash (Join-Path $VDir 'install.ps1') -Algorithm SHA256).Hash
   if ($stubWant.ToLowerInvariant() -ne $stubGot.ToLowerInvariant()) { throw "installer stub failed verification" }
@@ -265,18 +265,18 @@ if (-not $env:OXDOCK_STUB_ACTIVE) {
 # instead of surfacing as a bare parse error downstream.
 $oxfileSrc = if ($env:OXDOCK_OXFILE_URL) { $env:OXDOCK_OXFILE_URL } else { "release $Version" }
 
-$oxfileDigest = (Get-FileHash (Join-Path $VDir '{{ $docs_global.stub_name_oxfile }}') -Algorithm SHA256).Hash
+$oxfileDigest = (Get-FileHash (Join-Path $VDir '{{ $global.stub_name_oxfile }}') -Algorithm SHA256).Hash
 
 [Console]::Error.WriteLine("installer oxfile: $oxfileSrc $oxfileDigest")
 
-$Expected = ((Get-Content (Join-Path $VDir '{{ $docs_global.stub_name_checksums }}')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1) -split '\s+' | Select-Object -First 1
+$Expected = ((Get-Content (Join-Path $VDir '{{ $global.stub_name_checksums }}')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1) -split '\s+' | Select-Object -First 1
 
 # The installer runs from the cache, never the network.
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
 
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 try {
-  Copy-Item (Join-Path $VDir '{{ $docs_global.stub_name_oxfile }}') (Join-Path $tmp '{{ $docs_global.stub_name_oxfile }}') -Force
+  Copy-Item (Join-Path $VDir '{{ $global.stub_name_oxfile }}') (Join-Path $tmp '{{ $global.stub_name_oxfile }}') -Force
 
   New-Item -ItemType Directory -Force -Path (Join-Path $tmp 'x') | Out-Null
 
@@ -301,7 +301,7 @@ try {
 
   # Destination default lives here in native shell; empty keeps the
   # installer's loud gate. The engine normalizes separators itself.
-  if ($env:INSTALL_DIR) { $env:OXDOCK_DIR = $env:INSTALL_DIR } elseif ($env:LOCALAPPDATA) { $env:OXDOCK_DIR = Join-Path $env:LOCALAPPDATA '{{ $docs_global.windows_default_suffix }}' }
+  if ($env:INSTALL_DIR) { $env:OXDOCK_DIR = $env:INSTALL_DIR } elseif ($env:LOCALAPPDATA) { $env:OXDOCK_DIR = Join-Path $env:LOCALAPPDATA '{{ $global.windows_default_suffix }}' }
 
   $env:OXDOCK_SHA = $Expected
 
@@ -332,11 +332,11 @@ try {
     # Absolute script path: the engine resolves relative script names
     # against the workspace root, which would run the checkout's copy
     # instead of the fetched payload above.
-    & $Engine (Join-Path $tmp '{{ $docs_global.stub_name_oxfile }}')
+    & $Engine (Join-Path $tmp '{{ $global.stub_name_oxfile }}')
 
     $code = $LASTEXITCODE
 
-    if ($code -ne 0) { throw "{{ $docs_global.stub_msg_install_failed }}" }
+    if ($code -ne 0) { throw "{{ $global.stub_msg_install_failed }}" }
 
     # CI tail under the proof binary: the oxfile above verified and
     # placed; re-running the same file with SKIP=1 verifies placement
@@ -364,7 +364,7 @@ try {
       $env:OXDOCK_SKIP_DOWNLOAD = 'true'
 
       try {
-        & $TailBin (Join-Path $tmp '{{ $docs_global.stub_name_oxfile }}')
+        & $TailBin (Join-Path $tmp '{{ $global.stub_name_oxfile }}')
 
         $freshCode = $LASTEXITCODE
 

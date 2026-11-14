@@ -76,7 +76,7 @@ fn heap_words_clone_independently_then_drop() {
     let clone = original.clone();
     assert_eq!(&clone, &original);
     drop(original);
-    // The clone owns a separate box: usable after the original drops.
+    // The clone shares the buffer: usable after the original drops.
     assert_eq!(format!("{clone}"), "\"hello\"");
     drop(clone);
 
@@ -119,15 +119,16 @@ fn heap_words_clone_independently_then_drop() {
 }
 
 #[test]
-fn shared_containers_share_buffers_then_drop() {
-    // `LIST` and `MAP` are shared heaps (issue #152): cloning bumps the
+fn shared_heaps_share_buffers_then_drop() {
+    // `STRING`, `LIST`, and `MAP` are shared heaps: cloning bumps the
     // strong count in O(1) with no allocation, so clones point at the same
-    // buffer and stay usable after the original drops. Exclusive heaps
-    // (`STRING`) still deep-copy: pointers differ.
+    // buffer and stay usable after the original drops.
     let text = Value::string("hello".to_string());
     let text_clone = text.clone();
-    assert_ne!(text.heap_ptr(), text_clone.heap_ptr());
+    assert_eq!(text.heap_ptr(), text_clone.heap_ptr());
+    assert_eq!(&text_clone, &text);
     drop(text);
+    assert_eq!(format!("{text_clone}"), "\"hello\"");
     drop(text_clone);
 
     let list = Value::list(vec![Value::int(1), Value::string("x".to_string())]);

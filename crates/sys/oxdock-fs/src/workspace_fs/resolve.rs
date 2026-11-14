@@ -314,7 +314,7 @@ impl PathResolver {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{command_path, to_forward_slashes};
+    use super::super::{WorkspaceSelection, command_path, to_forward_slashes};
     use super::*;
     use crate::GuardedPath;
 
@@ -740,11 +740,11 @@ mod tests {
         resolver.resolve_write(&cwd, "ok.txt").unwrap();
     }
 
-    /// `set_root` restores four-way selection (issue #163): scope push/pop
-    /// round-trips through every root without collapsing CACHE or SYSTEM
-    /// onto snapshot or local.
+    /// Selection round-trips through all four roots (issue #163): scope
+    /// push/pop restores the saved selection, never a re-derived one,
+    /// without collapsing CACHE or SYSTEM onto snapshot or local.
     #[test]
-    fn set_root_restores_all_four_selections() {
+    fn selection_restores_all_four_roots() {
         let pin_temp = GuardedPath::tempdir().unwrap();
         let pin_root = pin_temp.as_guarded_path().clone();
         let _env = pin_cache_dir(&pin_root);
@@ -760,27 +760,32 @@ mod tests {
         let cache_root = resolver.root().clone();
         resolver.switch_to_system();
         let system_root = resolver.root().clone();
+        let system_selection = resolver.selection();
+        assert_eq!(system_selection, WorkspaceSelection::System);
 
-        resolver.set_root(&cache_root);
+        resolver.restore_selection(WorkspaceSelection::Cache { local: false });
         assert_eq!(resolver.root(), &cache_root);
         let cache_cwd = resolver.root().clone();
         resolver.resolve_write(&cache_cwd, "c.txt").unwrap();
 
-        resolver.set_root(&system_root);
+        resolver.restore_selection(system_selection);
+        assert_eq!(resolver.root(), &system_root);
         let system_cwd = resolver.root().clone();
         let sys_target = resolver.resolve_write(&system_cwd, "s.txt").unwrap();
         assert!(sys_target.as_path().is_absolute());
 
-        resolver.set_root(&local_root);
+        resolver.restore_selection(WorkspaceSelection::Local);
         assert_eq!(resolver.root(), &local);
-        resolver.set_root(&snapshot_root);
+        assert_eq!(resolver.root(), &local_root);
+        resolver.restore_selection(WorkspaceSelection::Snapshot);
+        assert_eq!(resolver.root(), &snapshot_root);
         assert!(resolver.is_snapshot_pending());
     }
 
-    /// Cross-flavor scope restore: a saved guard from the non-current
-    /// cache flavor restores CACHE (with its flavor), never Snapshot.
+    /// Cross-flavor scope restore: a saved OS-native selection restores
+    /// CACHE with its flavor, never Snapshot; same for project-local.
     #[test]
-    fn set_root_restores_cache_across_flavors() {
+    fn selection_restores_cache_flavor() {
         let pin_temp = GuardedPath::tempdir().unwrap();
         let pin_root = pin_temp.as_guarded_path().clone();
         let _env = pin_cache_dir(&pin_root);
@@ -792,12 +797,14 @@ mod tests {
 
         resolver.switch_to_cache(false);
         let os_guard = resolver.root().clone();
+        let os_selection = resolver.selection();
+        assert_eq!(os_selection, WorkspaceSelection::Cache { local: false });
         resolver.switch_to_cache(true);
         let local_guard = resolver.root().clone();
         assert_ne!(os_guard, local_guard);
 
-        // Restore the saved OS-native guard while local is selected.
-        resolver.set_root(&os_guard);
+        // Restore the saved OS-native selection while local is selected.
+        resolver.restore_selection(os_selection);
         assert_eq!(resolver.root(), &os_guard);
         let target = resolver
             .resolve_write(&resolver.root().clone(), "flavor.txt")
@@ -805,7 +812,7 @@ mod tests {
         assert!(target.as_path().starts_with(pin_root.as_path()));
 
         // And back the other way.
-        resolver.set_root(&local_guard);
+        resolver.restore_selection(WorkspaceSelection::Cache { local: true });
         assert_eq!(resolver.root(), &local_guard);
         let target = resolver
             .resolve_write(&resolver.root().clone(), "flavor.txt")

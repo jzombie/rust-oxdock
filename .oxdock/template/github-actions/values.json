@@ -1,4 +1,15 @@
 {
   "name": "setup-oxdock",
-  "description": "Setup OxDock engine composite action for CI legs."
+  "description": "Setup OxDock engine composite action for CI legs.",
+  "comment_head": "Setup OxDock engine for `shell: oxdock` steps (`oxdock-engine` when renamed).",
+  "action_title": "Setup OxDock engine",
+  "action_summary": "Install the oxdock interpreter so later steps can use shell oxdock.",
+  "binary_note": "(`oxdock-engine` frees the bare `oxdock` name for a binary under test)",
+  "binary_default": "oxdock",
+  "provenance_kind": "Engine",
+  "provenance_detail": "so unreleased DSL is testable before any tag exists",
+  "source_var": "OXDOCK_ENGINE_SOURCE",
+  "install_label": "Install OxDock engine",
+  "install_dir": "oxdock-engine",
+  "product": "oxdock"
 }

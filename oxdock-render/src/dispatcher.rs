@@ -2,15 +2,15 @@
 //!
 //! Rust owns the module set, the child interpreter lookup, and the
 //! environment the pipe child inherits. The child script itself is
-//! rendered in the DSL (`render.oxfile` `RENDER_ALL` plus
-//! `PIPE_RUN`); Rust never assembles script text.
+//! rendered in the DSL (`render.oxfile` `RENDER_ALL`, piped through
+//! by the entry script); Rust never assembles script text.
 
 use anyhow::{Context, Result};
 use oxdock_core::{Engine, ExecIo, HostModule, OxDockFn, TypeTag, Value};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
 use oxdock_func_macro::oxdock_func;
 
-use crate::lifecycle::provision_dist;
+use crate::embedded::EmbeddedFiles;
 
 /// `run()`'s module set, written once.
 ///
@@ -117,7 +117,7 @@ pub(crate) fn pipeline_full_engine(
 /// `INTERPRETER()` alone is unusable here: it returns the pipeline
 /// binary, which cannot interpret scripts.
 pub(crate) fn child_interpreter() -> Result<String> {
-    if let Ok(path) = std::env::var("OXDOCK_RENDER_CHILD") {
+    if let Ok(path) = std::env::var(oxdock_fs::env::render::CHILD) {
         return Ok(path);
     }
     let exe = std::env::current_exe().context("locate current executable")?;
@@ -129,8 +129,9 @@ pub(crate) fn child_interpreter() -> Result<String> {
         Ok(child.to_string_lossy().into_owned())
     } else {
         anyhow::bail!(
-            "pipe-child binary missing at {}: set OXDOCK_RENDER_CHILD explicitly",
-            child.display()
+            "pipe-child binary missing at {}: set {} explicitly",
+            child.display(),
+            oxdock_fs::env::render::CHILD,
         )
     }
 }
@@ -171,7 +172,7 @@ fn child_config() -> Option<String> {
             None => break,
         }
     }
-    std::env::var("RENDER_CONFIG").ok()
+    std::env::var(oxdock_fs::env::render::CONFIG).ok()
 }
 
 /// Run one piped stage script: the child entry point. Reads the full
@@ -191,8 +192,9 @@ pub fn run_child_script(script: &str) -> Result<()> {
 pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
     let root = GuardedPath::new_root(dir)?;
     let resolver = PathResolver::new(root.as_path(), root.as_path())?;
-    // Standalone child runs provision too; the piped flow already did.
-    provision_dist(&resolver, &root).context("provision pipeline files")?;
+    // No shadow warning here: the parent pipeline already warned once
+    // before piping (see `run_with_plugins`). Warning in both
+    // processes prints the same drift twice on every run.
     let mut io = ExecIo::new();
     // The child's INHERIT_ENV reads these overrides; it never sees the
     // parent's script environment through the spawn boundary. Paths are
@@ -202,14 +204,17 @@ pub fn run_child_script_on(script: &str, dir: &std::path::Path) -> Result<()> {
         oxdock_fs::env::oxdock::WORKSPACE_ROOT,
         dir.to_string_lossy().into_owned(),
     );
-    let cfg = child_config().unwrap_or_else(|| "render.json".to_string());
+    let cfg = child_config().unwrap_or_else(|| crate::config::CONFIG_FILENAME.to_string());
     // `Path::join` with an absolute second half replaces the first,
     // so one join covers both shapes with no absolute check.
     let cfg_abs = dir.join(cfg).to_string_lossy().into_owned();
-    io.insert_inherit_env("RENDER_CONFIG", cfg_abs);
+    io.insert_inherit_env(oxdock_fs::env::render::CONFIG, cfg_abs);
     let engine = pipeline_full_engine(vec![], io);
+    let steps = oxdock_core::parse_script_with_modules(script, engine.module_table())
+        .context("parse child script")?;
+    let fs: Box<dyn WorkspaceFs> = Box::new(EmbeddedFiles::new(resolver));
     engine
-        .run_script(&root, script)
+        .run_steps_on(fs, &steps, oxdock_process::default_process_manager())
         .context("child script failed")?;
     Ok(())
 }

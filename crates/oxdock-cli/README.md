@@ -11,7 +11,7 @@ The default build (with the `net` feature) prints the following for
 omitted:
 
 ```text
-oxdock 0.37.0-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
+oxdock 0.38.0-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
 
 Usage: oxdock [OPTIONS] [SCRIPT]
   SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
@@ -24,7 +24,7 @@ Usage: oxdock [OPTIONS] [SCRIPT]
   --offline          open no sockets (conflicts with --listen/-p)
   --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
   --help, -h         print this help and exit
-  --version, -V      print the version and exit
+  --version, -V, -v   print the version and exit
 
 With no script given, reads the script from stdin (must be piped unless `--shell`).
 Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.

@@ -65,9 +65,9 @@
 //!   structural pairs end mid-line and trailing elements form
 //!   following steps (guards attach to the first only); the `WITH_IO`
 //!   pending wait holds bare brackets across separators.
-//! - Block headers: `IF`/`FOR`/`WHILE`
-//!   conditions miss to generic on expression failure (inline-block
-//!   failures propagate); `FUNC` paren-group params parse with `gap_nl`
+//! - Block headers: `IF`/`FOR`/`WHILE` conditions miss to generic
+//!   on unclassified expression failure (classified callee failures
+//!   and inline-block failures propagate); `FUNC` paren-group params parse with `gap_nl`
 //!   discipline (shared helper, like call args); `REMOTE` targets/blocks/bindings; `TYPE` maximal
 //!   shape match; `IMPORT`/`EXPORT` lists. Shared
 //!   validators are truly shared (`validate_remote_copy_placement`,
@@ -2481,6 +2481,64 @@ fn resolve_name(ctx: &ParseCtx, stmt: usize, name: &str) -> Result<String, Token
         .map_err(|e| lower_err(stmt, e))
 }
 
+/// Qualify bare placeholder calls in template text through the
+/// shared static resolver, so `{{ NAME(args) }}` obeys exactly the
+/// same scope rule as statement-position calls: `IMPORT [MOD]`
+/// brings the names into scope, unimported names fail naming the
+/// fix, ambiguity fails closed. Qualified (`MOD::FUNC`), variable
+/// (`$x`, `bare_key`), env (`env:K`), and non-call keys pass
+/// through untouched for the runtime to handle exactly as before;
+/// only keys that are entirely one bare call shape are rewritten,
+/// and only the head identifier's bytes change: surrounding
+/// spacing and neighboring placeholders stay byte-identical, so
+/// string payloads never lose formatting. Returns `None` when
+/// nothing qualified, leaving the text completely untouched.
+/// Shape detection is the shared `template::parse_placeholder_call`
+/// grammar (also behind runtime dispatch), so parse and runtime
+/// can never disagree on what counts as one call.
+fn qualify_template_calls(
+    text: &str,
+    ctx: &ParseCtx,
+    stmt: usize,
+) -> Result<Option<String>, TokenError> {
+    use crate::template::{TemplateSegment, TemplateSegments, parse_placeholder_call};
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    for segment in TemplateSegments::new(text) {
+        match segment {
+            TemplateSegment::Text(raw) => out.push_str(raw),
+            TemplateSegment::Placeholder { key, raw } => {
+                let call = match parse_placeholder_call(key) {
+                    Some(call) if call.module.is_none() => call,
+                    _ => {
+                        out.push_str(raw);
+                        continue;
+                    }
+                };
+                let head = call.name;
+                let resolved = resolve_name(ctx, stmt, head)?;
+                if !resolved.contains(MODULE_SEPARATOR) {
+                    // Unqualified resolutions (`INSPECT`) keep today's
+                    // runtime handling untouched.
+                    out.push_str(raw);
+                    continue;
+                }
+                changed = true;
+                // Splice only the head span: `name_span` is the byte
+                // range of the head inside `key`, and `key` is the
+                // trimmed interior of `raw`, so the raw offset is the
+                // interior start plus the span start.
+                let key_off = raw.find(key).expect("key is trimmed interior");
+                let off = key_off + call.name_span.start;
+                out.push_str(&raw[..off]);
+                out.push_str(&resolved);
+                out.push_str(&raw[off + head.len()..]);
+            }
+        }
+    }
+    if changed { Ok(Some(out)) } else { Ok(None) }
+}
+
 /// Call shape at `pos`: UPPERCASE head plus joint `::` segments and a
 /// paren group (joint iff required: statements forbid the gap;
 /// expressions allow it).
@@ -2552,7 +2610,13 @@ fn parse_call_args(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Vec<Exp
         break;
     }
     if !cur.done() {
-        return Err(cur.err("unexpected text in call"));
+        return Err(trailing_items_error(
+            &cur,
+            ctx,
+            stmt,
+            "call arguments",
+            "unexpected text in call",
+        ));
     }
     Ok(args)
 }
@@ -2609,6 +2673,40 @@ enum BracketItems {
     Exec,
 }
 
+/// Trailing-content error for comma-separated positions (list
+/// items, call arguments): stamps the offending token's position so
+/// the caret names the line that actually fails instead of the
+/// statement head, and names the likely missing comma when the
+/// remainder parses as another item. Genuine trailing garbage keeps
+/// the previous message verbatim. Error-path only, so the probe
+/// parse costs nothing on success.
+fn trailing_items_error(
+    cur: &Cursor,
+    ctx: &ParseCtx,
+    stmt: usize,
+    missing_what: &str,
+    fallback: &str,
+) -> TokenError {
+    let (line, col) = cur
+        .toks
+        .get(cur.pos)
+        .map(|t| (t.line, t.col))
+        .unwrap_or((0, 0));
+    let mut probe = Cursor::expr(&cur.toks[cur.pos.min(cur.toks.len())..], stmt);
+    let msg = if parse_expr_checked(&mut probe, ctx).is_ok() {
+        format!("missing comma between {missing_what}")
+    } else {
+        fallback.to_string()
+    };
+    TokenError {
+        stmt,
+        line,
+        col,
+        msg,
+        kind: None,
+    }
+}
+
 /// Shared comma-separated `[...]` core behind every bracket position.
 /// There is exactly one list loop: one empty rule, one comma rule, one
 /// trailing-content rule, newlines riding every gap. A bracket group
@@ -2655,7 +2753,13 @@ fn parse_bracket_list(
     }
     if !cur.done() {
         return match items {
-            BracketItems::Expr => Err(cur.err("unexpected text in list")),
+            BracketItems::Expr => Err(trailing_items_error(
+                &cur,
+                ctx,
+                stmt,
+                "list items",
+                "unexpected text in list",
+            )),
             BracketItems::Exec => Ok(None),
         };
     }
@@ -3915,9 +4019,10 @@ fn parse_type_field(toks: &[Tok], pos: usize) -> Option<usize> {
 /// opportunistic `ELSE` chain (a malformed `ELSE` stays for the
 /// element loop, which fails it in lowering exactly like the
 /// grammar). `None` on shape miss (missing/joint-agnostic block or
-/// bad condition: generic fails it); expression failures
-/// with an inline-block failure propagate (blocks lower here, so
-/// their errors surface directly).
+/// unclassified bad condition: generic fails it); classified
+/// expression failures (unknown/ambiguous callees) and inline-block
+/// failures propagate (blocks lower here, so their errors surface
+/// directly).
 fn parse_if_at(
     toks: &[Tok],
     pos: usize,
@@ -3931,6 +4036,10 @@ fn parse_if_at(
     let cond = match parse_expr_checked(&mut cur, ctx) {
         Ok(expr) => expr,
         Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+        // Classified failures (unknown/ambiguous callees) name the
+        // culprit instead of missing to the generic IF hint: the head
+        // is unambiguously `IF`, so there is no alternative parse.
+        Err(e) if e.kind.is_some() => return Err(e),
         Err(_) => return Ok(None),
     };
     let cond_end = pos + 1 + lead.pos + cur.pos;
@@ -3979,6 +4088,10 @@ fn parse_if_at(
             let econd = match parse_expr_checked(&mut ecur, ctx) {
                 Ok(expr) => expr,
                 Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+                // Same classified-error rule as the `IF` head above:
+                // an `ELSE IF` with a resolvable-but-unknown callee
+                // names it instead of silently dropping the branch.
+                Err(e) if e.kind.is_some() => return Err(e),
                 Err(_) => break,
             };
             let ebrace = p + 2 + ecur.pos;
@@ -4128,6 +4241,9 @@ fn parse_for_at(
     let in_expr = match parse_expr_checked(&mut ecur, ctx) {
         Ok(expr) => expr,
         Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+        // Classified failures name the callee: `FOR ... IN` is
+        // committed once the header matched this far.
+        Err(e) if e.kind.is_some() => return Err(e),
         Err(_) => return Ok(None),
     };
     p += ecur.pos;
@@ -4217,9 +4333,10 @@ fn parse_for_at(
 }
 
 /// Single (non-block) `WHILE`: condition plus block. `None` on
-/// shape miss (missing block: generic fails it);
-/// expression failures from inline blocks propagate, others miss
-/// (generic fails them like a committed `instruction` would).
+/// shape miss (missing block: generic fails it); classified
+/// expression failures and inline-block failures propagate, other
+/// expression failures miss (generic fails them like a committed
+/// `instruction` would).
 /// No leading gap-skip: `WHILE` takes `sep`, so a joint follower
 /// never reaches here with a valid shape... (misses fall through
 /// the same way regardless).
@@ -4233,6 +4350,9 @@ fn parse_while_single(
     let cond = match parse_expr_checked(&mut cur, ctx) {
         Ok(expr) => expr,
         Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+        // Same rule as `IF`: the head is unambiguous, so classified
+        // failures name the culprit instead of the generic hint.
+        Err(e) if e.kind.is_some() => return Err(e),
         Err(_) => return Ok(None),
     };
     let brace = pos + 1 + cur.pos;
@@ -4305,6 +4425,7 @@ fn parse_func_at(
     };
     p += 1;
     let mut params = Vec::new();
+    let mut seen_optional = false;
     {
         let mut pcur = Cursor::expr(&paren_inner, stmt);
         pcur.skip_gap_nl();
@@ -4312,30 +4433,53 @@ fn parse_func_at(
             loop {
                 let base = pcur.pos;
                 let Some((pname, _)) = peek_dollar_var(&paren_inner, base) else {
-                    return Ok(None);
+                    return Err(fail(format!(
+                        "FUNC {def_name} params must be `$name: TYPE` separated by commas"
+                    )));
                 };
                 pcur.pos = base + 2;
                 pcur.skip_gap_nl();
+                // Optional params carry `?` before the colon
+                // (`$flag?: BOOL`); all params are otherwise required.
+                let optional = pcur.eat_punct('?');
+                pcur.skip_gap_nl();
                 if !pcur.eat_punct(':') {
-                    return Ok(None);
+                    return Err(fail(format!(
+                        "FUNC {def_name} param `${pname}` needs `: TYPE` after the name"
+                    )));
                 }
                 pcur.skip_gap_nl();
                 let tstart = pcur.pos;
                 let Some(tend) = parse_type_shape(&paren_inner, tstart) else {
-                    return Ok(None);
+                    let got = match paren_inner.get(tstart).map(|tok| &tok.kind) {
+                        Some(TokKind::Word(word)) => format!("; got `{word}`"),
+                        _ => String::new(),
+                    };
+                    return Err(fail(format!(
+                        "FUNC {def_name} param `${pname}` needs an uppercase type after `:` (e.g. STRING, INT, BOOL){got}"
+                    )));
                 };
                 // Post-match the span holds words/puncts only, so the
                 // shared renderer cannot fail; stay failed regardless.
                 let ptype =
                     render_type_region(&paren_inner[tstart..tend], stmt).unwrap_or_default();
-                params.push((pname, ptype));
+                if optional {
+                    seen_optional = true;
+                } else if seen_optional {
+                    return Err(fail(format!(
+                        "FUNC {def_name} optional ? params must be trailing: `${pname}` follows an optional param"
+                    )));
+                }
+                params.push((pname, ptype, optional));
                 pcur.pos = tend;
                 pcur.skip_gap_nl();
                 if pcur.eat_punct(',') {
                     pcur.skip_gap_nl();
                     // Trailing comma misses (a param must follow).
                     if pcur.done() {
-                        return Ok(None);
+                        return Err(fail(format!(
+                            "FUNC {def_name} params must not end with a trailing comma"
+                        )));
                     }
                     continue;
                 }
@@ -4344,7 +4488,9 @@ fn parse_func_at(
             // Trailing junk (including newlines) misses to generic.
             pcur.skip_gap_nl();
             if !pcur.done() {
-                return Ok(None);
+                return Err(fail(format!(
+                    "FUNC {def_name} params must be `$name: TYPE` separated by commas"
+                )));
             }
         }
     }
@@ -4406,7 +4552,7 @@ fn parse_func_at(
         )));
     }
     let mut seen = HashSet::new();
-    for (pname, _) in &params {
+    for (pname, _, _) in &params {
         if !seen.insert(pname.clone()) {
             return Err(fail(format!(
                 "FUNC {def_name} declares duplicate parameter ${pname}"
@@ -5059,7 +5205,7 @@ fn validate_import_alias(alias: &str, ctx: &ParseCtx) -> Result<String, String> 
         ));
     }
     let (_, imports) = ctx.visible_snapshot();
-    if imports.contains(&alias.to_string()) {
+    if imports.iter().any(|i| i == alias) {
         return Err(format!("duplicate IMPORT alias `{alias}`"));
     }
     ctx.import_into_frame(std::slice::from_ref(&alias.to_string()));
@@ -6102,6 +6248,12 @@ fn parse_list_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr
 /// Any entry failing the shape is not a map: the caller reports the
 /// deferred block slice (the grammar tries `block` next, which fails
 /// the same inputs at this stage).
+/// Marker message for a map entry run that ends without a comma
+/// where another entry follows. Matched by exact equality in
+/// [`parse_map_or_block`], never by prefix, so wording changes stay
+/// local to this const and its one reader.
+const MISSING_MAP_COMMA_MSG: &str = "missing comma between map entries";
+
 fn parse_map_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     let mut entries = Vec::new();
     // Empty (or blank/comment-only) braces are an empty map.
@@ -6114,35 +6266,72 @@ fn parse_map_literal(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr,
     for part in split_top_commas(inner) {
         let mut sub = Cursor::expr(part, stmt);
         sub.skip_gap_nl();
-        let key = match sub.toks.get(sub.pos).map(|t| &t.kind) {
-            Some(TokKind::Str { text, .. }) => {
-                let key = text.clone();
-                sub.pos += 1;
-                key
-            }
-            Some(TokKind::BlockStr(full)) => {
-                let key = crate::command::lower_block_string(full);
-                sub.pos += 1;
-                key
-            }
-            Some(TokKind::Word(_)) | Some(TokKind::Punct('-')) | Some(TokKind::Punct('/')) => {
-                map_bare_key(&mut sub)?
-            }
-            _ => return Err(sub.err("not a map literal")),
-        };
-        sub.skip_gap();
-        if !sub.eat_punct(':') {
-            return Err(sub.err("not a map literal"));
-        }
-        let val = parse_expr_checked(&mut sub, ctx)?;
-        reject_boundary(&lowering_ctx(stmt), &val).map_err(|e| sub.err(e.to_string()))?;
+        let (key, val) = parse_map_entry(&mut sub, ctx, stmt)?;
         sub.skip_gap_nl();
         if !sub.done() {
-            return Err(sub.err("not a map literal"));
+            return Err(map_trailing_error(&sub, ctx, stmt));
         }
         entries.push((key, val));
     }
     Ok(Expr::Map(entries))
+}
+
+/// One `key: value` map entry: string, block-string, or bare key,
+/// a colon, then a full checked expression. Every failure reads
+/// `not a map literal` exactly like the old inline loop, so only
+/// the trailing rule changes the surface.
+fn parse_map_entry(
+    sub: &mut Cursor,
+    ctx: &ParseCtx,
+    stmt: usize,
+) -> Result<(String, Expr), TokenError> {
+    let key = match sub.toks.get(sub.pos).map(|t| &t.kind) {
+        Some(TokKind::Str { text, .. }) => {
+            let key = text.clone();
+            sub.pos += 1;
+            key
+        }
+        Some(TokKind::BlockStr(full)) => {
+            let key = crate::command::lower_block_string(full);
+            sub.pos += 1;
+            key
+        }
+        Some(TokKind::Word(_)) | Some(TokKind::Punct('-')) | Some(TokKind::Punct('/')) => {
+            map_bare_key(sub)?
+        }
+        _ => return Err(sub.err("not a map literal")),
+    };
+    sub.skip_gap();
+    if !sub.eat_punct(':') {
+        return Err(sub.err("not a map literal"));
+    }
+    let val = parse_expr_checked(sub, ctx)?;
+    reject_boundary(&lowering_ctx(stmt), &val).map_err(|e| sub.err(e.to_string()))?;
+    Ok((key, val))
+}
+
+/// Trailing content after a complete map entry: stamps the
+/// offending token and names the likely missing comma when the
+/// remainder parses as another entry. Anything else keeps the old
+/// `not a map literal` text. Error-path only.
+fn map_trailing_error(sub: &Cursor, ctx: &ParseCtx, stmt: usize) -> TokenError {
+    let (line, col) = sub
+        .toks
+        .get(sub.pos)
+        .map(|t| (t.line, t.col))
+        .unwrap_or((0, 0));
+    let mut probe = Cursor::expr(&sub.toks[sub.pos.min(sub.toks.len())..], stmt);
+    probe.skip_gap_nl();
+    if parse_map_entry(&mut probe, ctx, stmt).is_ok() {
+        return TokenError {
+            stmt,
+            line,
+            col,
+            msg: MISSING_MAP_COMMA_MSG.to_string(),
+            kind: None,
+        };
+    }
+    sub.err("not a map literal")
 }
 
 /// Bare map key: joint `-/.'/'`-run, mirroring the bare-word charset
@@ -6204,6 +6393,12 @@ fn map_bare_key(sub: &mut Cursor) -> Result<String, TokenError> {
 fn parse_map_or_block(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Expr, TokenError> {
     match parse_map_literal(inner, stmt, ctx) {
         Ok(map) => Ok(map),
+        // A detected missing comma is never a block: its `key:`
+        // remainder cannot parse as a statement (a `name: "a"` line
+        // fails as `unknown command`), so the block path can only
+        // misreport it. Surface the map error instead; every other
+        // map failure keeps the block fallback exactly as before.
+        Err(e) if e.msg == MISSING_MAP_COMMA_MSG => Err(e),
         Err(_) => Ok(Expr::Block(parse_body_steps(inner, stmt, ctx, false)?)),
     }
 }
@@ -6974,7 +7169,128 @@ fn lower_stmt_steps(
             step.col = stmt.col;
         }
     }
+    // Qualify bare placeholder calls (`{{ NAME(args) }}`) through
+    // the shared static resolver, so templates obey exactly the
+    // statement-position scope rule. Nested bodies were already
+    // qualified by their own recursive statements with their own
+    // frames, so only direct products are visited here. Both
+    // `Arg::String` fragments (via `walk_raw_strings_mut`) and
+    // `Expr::Literal` strings (LET/SET/RETURN/call args/list/map
+    // literals/parenthesized args) are qualified: expression
+    // positions expand through the same `expand_string` at runtime,
+    // so they must see the same parse-time rewrite. `WithIo` and
+    // `AssignCapture` box their inner command directly (no recursive
+    // statement pass), so the helper descends into them; all other
+    // bodies were already qualified with their own frames.
+    // `Step.guards` carry no template text (`Guard::Attr` triples
+    // evaluated via `guard_allows`, never expanded), so there is
+    // nothing to qualify there.
+    let mut failed: Option<TokenError> = None;
+    for step in &mut steps {
+        qualify_step_templates(step, ctx, idx, &mut failed);
+        if failed.is_some() {
+            break;
+        }
+    }
+    if let Some(err) = failed {
+        return Err(err);
+    }
     Ok(steps)
+}
+
+/// Qualify one direct statement product plus any boxed `WithIo` /
+/// `AssignCapture` inner command (same scope frame, never a
+/// recursive statement pass). Body vectors are skipped: their steps
+/// were qualified by their own recursive statements.
+fn qualify_step_templates(
+    step: &mut Step,
+    ctx: &ParseCtx,
+    stmt: usize,
+    failed: &mut Option<TokenError>,
+) {
+    qualify_kind_templates(&mut step.kind, ctx, stmt, failed);
+}
+
+/// Qualify one `StepKind` plus boxed inner commands sharing the
+/// same scope frame.
+fn qualify_kind_templates(
+    kind: &mut StepKind,
+    ctx: &ParseCtx,
+    stmt: usize,
+    failed: &mut Option<TokenError>,
+) {
+    kind.walk_raw_strings_mut(&mut |text| {
+        if failed.is_none() {
+            match qualify_template_calls(text, ctx, stmt) {
+                Ok(Some(rewritten)) => *text = rewritten,
+                Ok(None) => {}
+                Err(err) => *failed = Some(err),
+            }
+        }
+    });
+    if failed.is_some() {
+        return;
+    }
+    kind.walk_exprs_mut(&mut |expr| {
+        if failed.is_some() {
+            return;
+        }
+        expr.walk_mut(&mut |node| {
+            if failed.is_some() {
+                return;
+            }
+            if let Expr::Literal(value) = node
+                && let Some(text) = value.as_str()
+            {
+                match qualify_template_calls(text, ctx, stmt) {
+                    Ok(Some(rewritten)) => {
+                        *value = Value::string(rewritten);
+                    }
+                    Ok(None) => {}
+                    Err(err) => *failed = Some(err),
+                }
+            }
+        });
+    });
+    if failed.is_some() {
+        return;
+    }
+    // Boxed single commands share the outer scope frame (no recursive
+    // statement pass built them): qualify the inner kind directly.
+    match kind {
+        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
+            qualify_kind_templates(cmd, ctx, stmt, failed);
+        }
+        _ => {}
+    }
+    if failed.is_some() {
+        return;
+    }
+    // Single-command synthetic bodies share the outer frame: `TIMEOUT 5s
+    // <cmd>`, `ISOLATED <cmd>`, `ASYNC <cmd>`, and `AssignAsync` wrappers
+    // build their `body` inline via `parse_single_inner` with no recursive
+    // `lower_stmt_steps` pass, so their one synthetic step needs this one.
+    // Brace-delimited bodies are NEVER re-walked here: they were already
+    // lowered via `parse_body_steps` with their own frames and statement
+    // indices (mirroring `Expr::walk_mut` skipping `Expr::Block`), and
+    // re-resolving under the outer frame would corrupt scope isolation
+    // and error attribution. The match names only the synthetic carriers;
+    // any other body (If/For/While/FuncDef/RemoteBlock/WithIoBlock) stays
+    // exactly as its own recursive pass left it.
+    match kind {
+        StepKind::Timeout { body, .. }
+        | StepKind::Isolated { body }
+        | StepKind::AsyncBlock { body }
+        | StepKind::AssignAsync { body, .. } => {
+            for step in body.iter_mut() {
+                if failed.is_some() {
+                    return;
+                }
+                qualify_step_templates(step, ctx, stmt, failed);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Statement-head `{...}` dispatcher. Template braces fail (the
@@ -8268,6 +8584,7 @@ fn docs_above(lines: &[&str], line_no: usize) -> Option<(String, String)> {
 mod tests {
     use super::*;
     use crate::test_lower_mock;
+    use indoc::indoc;
 
     fn lower(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
         test_lower_mock::lower(name, args)
@@ -8617,6 +8934,76 @@ mod tests {
     }
 
     #[test]
+    fn missing_comma_points_at_the_item() {
+        // A forgotten comma between items names the missing
+        // comma and points at the item's line, not the statement
+        // head. Lists and call arguments share the rule.
+        let text = indoc! {r#"
+            LET $x: LIST<STRING> = [
+            "a"
+            "b",
+            "c"
+            ]
+        "#};
+        let err = crate::parse_script(text, lower).expect_err("missing comma must fail");
+        assert!(
+            err.to_string().contains("missing comma between list items"),
+            "wrong error: {err}"
+        );
+        assert_eq!(err.line(), 3, "caret names the item line: {err}");
+        // Same shape on one line.
+        let err = crate::parse_script("LET $x: LIST<STRING> = [\"a\" \"b\"]\n", lower)
+            .expect_err("missing comma must fail");
+        assert!(
+            err.to_string().contains("missing comma between list items"),
+            "wrong error: {err}"
+        );
+        assert_eq!(err.line(), 1, "single-line points at line 1: {err}");
+        // Call arguments share the rule.
+        let err = crate::parse_script("LET $x: STRING = FOO(\"a\" \"b\")\n", lower)
+            .expect_err("missing comma must fail");
+        assert!(
+            err.to_string()
+                .contains("missing comma between call arguments"),
+            "wrong error: {err}"
+        );
+        // Genuine trailing garbage keeps the old message but still
+        // points at the garbage instead of the statement head.
+        let err = crate::parse_script("LET $x: LIST<STRING> = [\"a\" : \"b\"]\n", lower)
+            .expect_err("garbage must fail");
+        assert!(
+            err.to_string().contains("unexpected text in list"),
+            "wrong error: {err}"
+        );
+        // Maps share the rule: a forgotten comma between entries
+        // names it at the entry's line instead of misreporting the
+        // key as an unknown command.
+        let text = indoc! {r#"
+            LET $m: MAP<name: STRING> = {
+            name: "a"
+            value: "b"
+            }
+        "#};
+        let err = crate::parse_script(text, lower).expect_err("missing comma must fail");
+        assert!(
+            err.to_string()
+                .contains("missing comma between map entries"),
+            "wrong error: {err}"
+        );
+        assert_eq!(err.line(), 3, "caret names the entry line: {err}");
+        let err = crate::parse_script(
+            "LET $m: MAP<name: STRING> = {name: \"a\" value: \"b\"}\n",
+            lower,
+        )
+        .expect_err("missing comma must fail");
+        assert!(
+            err.to_string()
+                .contains("missing comma between map entries"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
     fn spaced_comparisons_still_end_the_statement() {
         // A spaced `<` is a comparison, never a generic open: the
         // newline still ends the statement.
@@ -8804,19 +9191,19 @@ mod tests {
             modules: HashMap::from([(
                 crate::constants::STD_MODULE_NAME.to_string(),
                 Some(ModuleFuncs {
-                    func_names: HashSet::from(["TEXT_LENGTH".to_string()]),
+                    func_names: HashSet::from(["LEN".to_string()]),
                 }),
             )]),
         };
         fn lower_fn(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
             test_lower_mock::lower(name, args)
         }
-        // One table for both pathways: STD exports TEXT_LENGTH.
+        // One table for both pathways: STD exports LEN.
         // Rebuilt per case (parse-time only, keeps borrows local).
         for text in [
-            "LET $n: INT = STD::TEXT_LENGTH(\"hi\")",
-            "STD::TEXT_LENGTH(\"hi\")",
-            "LET $n: INT = STD::TEXT_LENGTH(\"a\", \"b\")",
+            "LET $n: INT = STD::LEN(\"hi\")",
+            "STD::LEN(\"hi\")",
+            "LET $n: INT = STD::LEN(\"a\", \"b\")",
             "LET $s: STRING = INSPECT($x)",
             "INSPECT($x)",
             "LET $x: STRING = ECHO hi",
@@ -8853,11 +9240,11 @@ mod tests {
             "COPY a b",
             "ECHO foo[bar]baz",
             "LET $x: STRING = FOOBAR",
-            "STD::TEXT_LENGTH(\"hi\") ECHO bye",
-            "LET $n: INT = STD::TEXT_LENGTH(\"a\") ECHO bye",
-            "TIMEOUT 10s STD::TEXT_LENGTH(\"hi\")",
-            "TIMEOUT 10s STD::TEXT_LENGTH(\"hi\") ECHO bye",
-            "LET $n: INT = STD::TEXT_LENGTH(\"a\")STD::TEXT_LENGTH(\"b\")",
+            "STD::LEN(\"hi\") ECHO bye",
+            "LET $n: INT = STD::LEN(\"a\") ECHO bye",
+            "TIMEOUT 10s STD::LEN(\"hi\")",
+            "TIMEOUT 10s STD::LEN(\"hi\") ECHO bye",
+            "LET $n: INT = STD::LEN(\"a\")STD::LEN(\"b\")",
         ] {
             let table = std_table();
             let old =
@@ -8878,6 +9265,336 @@ mod tests {
                 assert_eq!(new, old, "v2/token-lex mismatch for {text:?}");
             }
         }
+    }
+
+    #[test]
+    fn placeholder_bare_calls_resolve_like_statements() {
+        // `{{ NAME(args) }}` obeys exactly the statement-position
+        // scope rule: `IMPORT [MOD]` brings the names into scope,
+        // unimported names fail naming the fix, ambiguity fails
+        // closed. The rewrite below is byte-identical past the
+        // qualified head, so expansion sees the same args.
+        use crate::ast::{ModuleFuncs, ModuleTable};
+        use std::collections::{HashMap, HashSet};
+        let table = || ModuleTable {
+            modules: HashMap::from([
+                (
+                    crate::constants::STD_MODULE_NAME.to_string(),
+                    Some(ModuleFuncs {
+                        func_names: HashSet::from(["LEN".to_string()]),
+                    }),
+                ),
+                (
+                    "OTHER".to_string(),
+                    Some(ModuleFuncs {
+                        func_names: HashSet::from(["LEN".to_string()]),
+                    }),
+                ),
+            ]),
+        };
+        fn lower_fn(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
+            test_lower_mock::lower(name, args)
+        }
+        fn echo_text(steps: &[crate::Step]) -> String {
+            match steps {
+                [s] => match &s.kind {
+                    StepKind::Echo(Arg::String(text, _)) => text.clone(),
+                    other => panic!("expected ECHO string, got {other:?}"),
+                },
+                _ => panic!("expected one step, got {steps:?}"),
+            }
+        }
+        fn parse(text: &str, table: ModuleTable) -> ParseResult<Vec<crate::Step>> {
+            crate::parse_script_with_modules(text, lower_fn, HashSet::new(), table)
+        }
+        // Imported bare names qualify; everything else rides through
+        // byte-identical for the runtime to handle as before.
+        let text = "IMPORT [STD]\nECHO \"n: {{ LEN($x) }}\"\n";
+        let out = echo_text(&parse(text, table()).expect("imported bare call parses"));
+        assert_eq!(out, "n: {{ STD::LEN($x) }}", "bare call qualifies: {out}");
+        let text = "IMPORT [STD]\nECHO \"n: {{ STD::LEN($x) }}\"\n";
+        let out = echo_text(&parse(text, table()).expect("qualified parses"));
+        assert_eq!(
+            out, "n: {{ STD::LEN($x) }}",
+            "qualified keys stay untouched: {out}"
+        );
+        let text = "IMPORT [STD]\nECHO \"hi {{ $x }} and {{ bare }} and {{ env:K }}\"\n";
+        let out = echo_text(&parse(text, table()).expect("non-calls parse"));
+        assert_eq!(
+            out, "hi {{ $x }} and {{ bare }} and {{ env:K }}",
+            "non-call keys stay untouched: {out}"
+        );
+        let text = "IMPORT [STD]\nECHO \"lit \\{{ LEN($x) }}\"\n";
+        let out = echo_text(&parse(text, table()).expect("escaped parses"));
+        assert_eq!(
+            out, "lit \\{{ LEN($x) }}",
+            "escaped openers stay literal: {out}"
+        );
+        // Nested bodies resolve against the enclosing imports, exactly
+        // like statement-position calls in the same body.
+        let text = indoc! {r#"
+            IMPORT [STD]
+            FUNC F(): VOID {
+            ECHO "n: {{ LEN($x) }}"
+            }
+        "#};
+        let steps = parse(text, table()).expect("nested bare call parses");
+        let body = steps.iter().find_map(|s| match &s.kind {
+            StepKind::FuncDef { body, .. } => Some(body),
+            _ => None,
+        });
+        match body.map(Vec::as_slice) {
+            Some([inner]) => match &inner.kind {
+                StepKind::Echo(Arg::String(echoed, _)) => assert_eq!(
+                    echoed, "n: {{ STD::LEN($x) }}",
+                    "nested body qualifies: {echoed}"
+                ),
+                other => panic!("expected nested ECHO, got {other:?}"),
+            },
+            _ => panic!("expected one FUNC with one body step, got {steps:?}"),
+        };
+        // Neighboring placeholders keep their exact bytes: only the
+        // head span changes, so payloads never lose formatting.
+        let text = "IMPORT [STD]\nECHO \"Call {{ LEN($x) }} and value {{ $y }}\"\n";
+        let out = echo_text(&parse(text, table()).expect("mixed template parses"));
+        assert_eq!(
+            out, "Call {{ STD::LEN($x) }} and value {{ $y }}",
+            "only the head span changes: {out}"
+        );
+        // Unimported bare names fail exactly like statement position:
+        // qualify it or add the import.
+        let err = parse("ECHO \"n: {{ LEN($x) }}\"\n", table()).expect_err("must fail");
+        assert!(
+            err.to_string().contains("unknown function `LEN`")
+                && err.to_string().contains("or add `IMPORT"),
+            "names the fix: {err}"
+        );
+        // Two exporters fail closed instead of picking one.
+        let err = parse(
+            "IMPORT [STD]\nIMPORT [OTHER]\nECHO \"n: {{ LEN($x) }}\"\n",
+            table(),
+        )
+        .expect_err("must fail");
+        assert!(
+            err.to_string().contains("ambiguous function `LEN`"),
+            "ambiguity fails closed: {err}"
+        );
+        // Both lexing pathways agree on rewritten templates.
+        let text = "IMPORT [STD]\nECHO \"n: {{ LEN($x) }} and {{ $y }}\"\n";
+        let table = table();
+        let old = crate::parse_script_with_modules(text, lower_fn, HashSet::new(), table.clone())
+            .expect("string path parses");
+        let reserved = HashSet::new();
+        let ctx = ParseCtx::empty(&lower_fn, &table, &reserved);
+        let toks = crate::tok::lex_str(text).expect("string lex must succeed");
+        let new = parse_tokens_with_ctx(&toks, &ctx).expect("token path parses");
+        assert_eq!(new, old, "token/string-lex mismatch for {text:?}");
+    }
+
+    #[test]
+    fn placeholder_bare_calls_qualify_in_expr_positions() {
+        // Regression: `walk_raw_strings_mut` skips `Assign`/`Set`/
+        // `Call`/`Return`/`If`/`For`/`While`, so `LET`/`RETURN`/call
+        // args/list/map literals never qualified and failed at
+        // runtime as undefined variables. Both carriers now qualify.
+        use crate::ast::{ModuleFuncs, ModuleTable};
+        use std::collections::{HashMap, HashSet};
+        let table = || ModuleTable {
+            modules: HashMap::from([(
+                crate::constants::STD_MODULE_NAME.to_string(),
+                Some(ModuleFuncs {
+                    func_names: HashSet::from(["LEN".to_string()]),
+                }),
+            )]),
+        };
+        fn lower_fn(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
+            test_lower_mock::lower(name, args)
+        }
+        fn parse(text: &str, table: ModuleTable) -> ParseResult<Vec<crate::Step>> {
+            crate::parse_script_with_modules(text, lower_fn, HashSet::new(), table)
+        }
+        // LET string literal qualifies.
+        let steps = parse(
+            "IMPORT [STD]\nLET $s: STRING = \"n: {{ LEN($x) }}\"\n",
+            table(),
+        )
+        .expect("LET template parses");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => match expr {
+                Expr::Literal(value) => assert_eq!(
+                    value.as_str().unwrap_or_default(),
+                    "n: {{ STD::LEN($x) }}",
+                    "LET qualifies"
+                ),
+                other => panic!("expected literal, got {other:?}"),
+            },
+            other => panic!("expected Assign, got {other:?}"),
+        }
+        // RETURN string literal qualifies.
+        let steps = parse(
+            "IMPORT [STD]\nFUNC F(): STRING {\nRETURN \"n: {{ LEN($x) }}\"\n}\n",
+            table(),
+        )
+        .expect("RETURN template parses");
+        let body = steps.iter().find_map(|s| match &s.kind {
+            StepKind::FuncDef { body, .. } => Some(body),
+            _ => None,
+        });
+        match body.map(Vec::as_slice) {
+            Some([inner]) => match &inner.kind {
+                StepKind::Return { expr, .. } => match &**expr {
+                    Expr::Literal(value) => assert_eq!(
+                        value.as_str().unwrap_or_default(),
+                        "n: {{ STD::LEN($x) }}",
+                        "RETURN qualifies"
+                    ),
+                    other => panic!("expected literal, got {other:?}"),
+                },
+                other => panic!("expected RETURN, got {other:?}"),
+            },
+            _ => panic!("expected one FUNC, got {steps:?}"),
+        }
+        // Call args, list and map literals qualify.
+        let steps = parse(
+            "IMPORT [STD]\nLET $y: INT = LEN(\"b: {{ LEN($x) }}\")\n",
+            table(),
+        )
+        .expect("call-arg template parses");
+        let rendered = format!("{:?}", steps[0].kind);
+        assert!(
+            rendered.contains("STD::LEN"),
+            "call arg qualifies: {rendered}"
+        );
+        let steps = parse(
+            "IMPORT [STD]\nLET $l: LIST<STRING> = [\"{{ LEN($x) }}\"]\n",
+            table(),
+        )
+        .expect("list template parses");
+        let rendered = format!("{:?}", steps[0].kind);
+        assert!(rendered.contains("STD::LEN"), "list qualifies: {rendered}");
+        // Compound placeholders are not single calls: they pass
+        // through untouched (no partial rewrite) for the runtime to
+        // fail closed on the whole key.
+        let text = "IMPORT [STD]\nECHO \"v: {{ LEN($a) + LEN($b) }}\"\n";
+        let steps = parse(text, table()).expect("compound parses");
+        match &steps[0].kind {
+            StepKind::Echo(Arg::String(echoed, _)) => assert_eq!(
+                echoed, "v: {{ LEN($a) + LEN($b) }}",
+                "compound untouched: {echoed}"
+            ),
+            other => panic!("expected ECHO string, got {other:?}"),
+        }
+        // Quoted parens inside args do not end the call early.
+        let text = "IMPORT [STD]\nECHO 'v: {{ LEN(\"a(b\") }}'\n";
+        let steps = parse(text, table()).expect("quoted paren parses");
+        match &steps[0].kind {
+            StepKind::Echo(Arg::String(echoed, _)) => assert_eq!(
+                echoed, "v: {{ STD::LEN(\"a(b\") }}",
+                "quoted paren qualifies: {echoed}"
+            ),
+            other => panic!("expected ECHO string, got {other:?}"),
+        }
+        // Single-quoted args balance the same way.
+        let text = "IMPORT [STD]\nECHO \"v: {{ LEN('a(b') }}\"\n";
+        let steps = parse(text, table()).expect("single-quoted paren parses");
+        match &steps[0].kind {
+            StepKind::Echo(Arg::String(echoed, _)) => assert_eq!(
+                echoed, "v: {{ STD::LEN('a(b') }}",
+                "single-quoted paren qualifies: {echoed}"
+            ),
+            other => panic!("expected ECHO string, got {other:?}"),
+        }
+        // `WithIo` boxes its inner command directly (no recursive
+        // statement pass), so the qualifier must descend into it.
+        // `LET $p: PIPE` plus bindings keep the shape realistic.
+        let text = "IMPORT [STD]\nLET $p: PIPE\nWITH_IO [stdout=$p] ECHO 'v: {{ LEN($x) }}'\n";
+        let steps = parse(text, table()).expect("with-io template parses");
+        match &steps[1].kind {
+            StepKind::WithIo { cmd, .. } => {
+                let rendered = format!("{cmd:?}");
+                assert!(
+                    rendered.contains("STD::LEN"),
+                    "with-io inner qualifies: {rendered}"
+                );
+            }
+            other => panic!("expected WithIo, got {other:?}"),
+        }
+        // Single-command wrappers build synthetic body steps without a
+        // recursive pass: `TIMEOUT 5s <cmd>` and `ASYNC <cmd>` share
+        // the outer frame, so the qualifier must descend into bodies.
+        let text = "IMPORT [STD]\nTIMEOUT 5s ECHO 't: {{ LEN($x) }}'\n";
+        let steps = parse(text, table()).expect("timeout template parses");
+        let rendered = format!("{:?}", steps[0].kind);
+        assert!(
+            rendered.contains("STD::LEN"),
+            "timeout single qualifies: {rendered}"
+        );
+        let text = "IMPORT [STD]\nLET $h: HANDLE<ANY> = ASYNC ECHO 'a: {{ LEN($x) }}'\n";
+        let steps = parse(text, table()).expect("async template parses");
+        let rendered = format!("{:?}", steps[0].kind);
+        assert!(
+            rendered.contains("STD::LEN"),
+            "async single qualifies: {rendered}"
+        );
+        // Brace bodies keep their own frames: the outer qualifier must
+        // never re-walk them. A valid nested body qualifies via its own
+        // recursive pass, and an unknown callee inside one fails with
+        // the inner position, never re-resolved against the outer frame.
+        let text = "IMPORT [STD]\nIF true {\nECHO 'v: {{ LEN($x) }}'\n}\n";
+        let steps = parse(text, table()).expect("nested body qualifies");
+        let rendered = format!("{:?}", steps[0].kind);
+        assert!(
+            rendered.contains("STD::LEN"),
+            "nested IF body qualifies via its own frame: {rendered}"
+        );
+        let err = parse(
+            "IMPORT [STD]\nIF true {\nECHO 'v: {{ NOPE($x) }}'\n}\n",
+            table(),
+        )
+        .expect_err("nested unknown must fail");
+        assert!(
+            err.to_string().contains("unknown function `NOPE`"),
+            "nested unknown names culprit: {err}"
+        );
+    }
+
+    #[test]
+    fn block_conditions_name_unknown_callees() {
+        // Regression: an unknown callee in a block header condition
+        // used to miss to the generic `IF needs a condition and a
+        // block` hint. Classified resolution failures now propagate
+        // and name the culprit on all four speculative headers.
+        use crate::ast::{ModuleFuncs, ModuleTable};
+        use std::collections::{HashMap, HashSet};
+        let table = || ModuleTable {
+            modules: HashMap::from([(
+                crate::constants::STD_MODULE_NAME.to_string(),
+                Some(ModuleFuncs {
+                    func_names: HashSet::from(["LEN".to_string()]),
+                }),
+            )]),
+        };
+        fn lower_fn(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
+            test_lower_mock::lower(name, args)
+        }
+        fn parse(text: &str, table: ModuleTable) -> ParseResult<Vec<crate::Step>> {
+            crate::parse_script_with_modules(text, lower_fn, HashSet::new(), table)
+        }
+        for text in [
+            "IMPORT [STD]\nIF NOPE($x) == 0 {\nECHO hi\n}\n",
+            "IMPORT [STD]\nIF LEN($x) == 0 {\nECHO hi\n} ELSE IF NOPE($x) == 1 {\nECHO yo\n}\n",
+            "IMPORT [STD]\nWHILE NOPE($x) > 0 {\nECHO hi\n}\n",
+            "IMPORT [STD]\nFOR $i: STRING IN NOPE($x) {\nECHO $i\n}\n",
+        ] {
+            let err = parse(text, table()).expect_err("unknown callee must fail");
+            assert!(
+                err.to_string().contains("unknown function `NOPE`"),
+                "names the culprit: {err}"
+            );
+        }
+        // Unclassified shape misses still miss (the exact generic
+        // hint comes from the real dispatcher, which the mock lacks).
+        parse("IF {\nECHO hi\n}\n", table()).expect_err("empty condition must still fail");
     }
 
     #[test]

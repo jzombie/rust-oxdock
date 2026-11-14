@@ -1,0 +1,52 @@
+{{ $files.local.action-header }}
+
+{{ $files.local.action-inputs }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate renderer source input
+      if: $\{{ inputs.source != '' && inputs.source != 'release' && inputs.source != 'local' }}
+      shell: bash
+      env:
+        OXDOCK_SOURCE: $\{{ inputs.source }}
+      run: |
+        echo "Invalid source '$OXDOCK_SOURCE': must be '', 'release', or 'local'" >&2
+        exit 1
+{{ $files.local.action-release-steps }}
+{{ $files.local.install-rust }}
+    - name: Build local OxDock renderer
+      if: $\{{ inputs.source == 'local' && runner.os != 'Windows' }}
+      shell: bash
+      working-directory: $\{{ github.workspace }}
+      env:
+        OXDOCK_BINARY_NAME: $\{{ inputs.binary-name }}
+      run: |
+        set -euo pipefail
+        TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+        cargo build --release -p oxdock -p oxdock-render --bins --all-features
+        INSTALL_DIR="$\{{ runner.temp }}/oxdock-render"
+        mkdir -p "$INSTALL_DIR"
+        BINARY_NAME="${OXDOCK_BINARY_NAME:-oxdock-render}"
+        cp "$TARGET_DIR/release/oxdock-render" "$INSTALL_DIR/$BINARY_NAME"
+        for f in "$TARGET_DIR"/release/oxdock-render-*; do
+          [ -f "$f" ] || continue
+          case "$f" in *.d|*.pdb) continue;; *) cp "$f" "$INSTALL_DIR/";; esac
+        done
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+    - name: Build local OxDock renderer
+      if: $\{{ inputs.source == 'local' && runner.os == 'Windows' }}
+      shell: pwsh
+      working-directory: $\{{ github.workspace }}
+      env:
+        OXDOCK_BINARY_NAME: $\{{ inputs.binary-name }}
+      run: |
+        $ErrorActionPreference='Stop'
+        $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }
+        cargo build --release -p oxdock -p oxdock-render --bins --all-features
+        $installDir = "$env:RUNNER_TEMP/oxdock-render"
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+        $binaryName = if ($env:OXDOCK_BINARY_NAME) { $env:OXDOCK_BINARY_NAME } else { 'oxdock-render' }
+        Copy-Item (Join-Path $targetDir 'release/oxdock-render.exe') (Join-Path $installDir "$binaryName.exe")
+        Get-ChildItem (Join-Path $targetDir 'release/oxdock-render-*') -File | Where-Object { $_.Extension -notin @('.d', '.pdb') } | ForEach-Object { Copy-Item $_.FullName $installDir }
+        Add-Content -Path $env:GITHUB_PATH -Value $installDir

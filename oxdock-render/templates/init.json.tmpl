@@ -1,0 +1,22 @@
+{
+  // Hooks run around the render: `pre` scripts run before any target
+  // renders, `post` scripts run after every target verifies.
+  // Paths are workspace-relative OxDock script files (`.oxfile`)
+  // executed with the pipeline engine; empty lists skip the phase.
+  "hooks": {
+    "pre": [],
+    "post": []
+  },
+
+  // Workspace data visible to every target as `$global`.
+  // A string or a list of strings; lists merge in order.
+  "global_values": "values.json",
+
+  // Scopes searched for `target.json` files: one target set per scope entry.
+  "scopes": ["."],
+
+  // Derived inputs refreshed before scan: each `key` renders live
+  // through `OXDOCK::GENERATED` and writes to `out`.
+  // Empty when the pipeline has no derived inputs.
+  "generated": []
+}

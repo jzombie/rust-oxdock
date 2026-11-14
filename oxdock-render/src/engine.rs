@@ -213,17 +213,14 @@ mod tests {
     fn fragment_expansion_mirrors_pipeline_scope() {
         let vars = map(&[
             (
-                "docs_global",
+                "global",
                 map(&[("workspace", Value::string("OxDock".to_string()))]),
             ),
-            (
-                "docs_ctx",
-                map(&[("name", Value::string("oxdock".to_string()))]),
-            ),
+            ("ctx", map(&[("name", Value::string("oxdock".to_string()))])),
         ]);
         let env = map(&[("CRATE_VERSION", Value::string("1.2.3".to_string()))]);
         let out = render_fragment(
-            "# {{ $docs_ctx.name }} {{ $docs_global.workspace }} {{ env:CRATE_VERSION }}\n",
+            "# {{ $ctx.name }} {{ $global.workspace }} {{ env:CRATE_VERSION }}\n",
             &vars,
             &env,
             None,

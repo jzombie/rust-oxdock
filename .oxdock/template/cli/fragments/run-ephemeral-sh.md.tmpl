@@ -1,1 +1,1 @@
-printf 'IMPORT [STD]\nECHO "{{ $docs_ctx.ephemeral_payload }}"\n' | bash <({{ $docs_ctx.ephemeral_stub_src_sh }})
+printf 'IMPORT [STD]\nECHO "{{ $ctx.ephemeral_payload }}"\n' | bash <({{ $ctx.ephemeral_stub_src_sh }})

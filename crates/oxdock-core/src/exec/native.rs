@@ -223,9 +223,11 @@ impl<P: ProcessManager> HostRegistration<P> {
 /// One user-defined function body (`FUNC NAME($p: TYPE, ...): RET { ... }`).
 /// Param and return types resolve to tags at definition time, where the type
 /// directory is in scope; the registry never holds raw type strings.
+/// The flag marks trailing `?` params the caller may omit (filled with
+/// [`optional_zero_value`] at call time).
 #[derive(Debug, Clone)]
 pub(super) struct FuncDefData {
-    pub(super) params: Vec<(String, TypeTag)>,
+    pub(super) params: Vec<(String, TypeTag, bool)>,
     pub(super) return_type: TypeTag,
     pub(super) return_spelling: String,
     pub(super) is_async: bool,
@@ -235,6 +237,70 @@ pub(super) struct FuncDefData {
     /// lexical frames miss. `None` for entry/REPL definitions, which
     /// stay params-only.
     pub(super) module: Option<String>,
+}
+
+/// Zero value for an omitted trailing optional script param, by
+/// resolved tag. Scalars take falsy empties and collections empty
+/// shapes (mirroring the host optional-`MAP` fill); records qualify
+/// only when every field is optional. Handles, pipes, custom types,
+/// unions, and the remaining words have no zero: omitting those
+/// fails at definition, so the caller passes explicitly.
+pub fn optional_zero_value(tag: &TypeTag) -> Result<Value> {
+    match tag {
+        TypeTag::Bool => Ok(Value::bool(false)),
+        TypeTag::String | TypeTag::Any => Ok(Value::string(String::new())),
+        TypeTag::Int => Ok(Value::int(0)),
+        TypeTag::Float => Ok(Value::float(0.0)),
+        TypeTag::List | TypeTag::ListOf(_) => Ok(Value::list(Vec::new())),
+        TypeTag::Map | TypeTag::MapOf(_) => Ok(Value::map(BTreeMap::new())),
+        TypeTag::Record(fields) if fields.iter().all(|field| field.optional) => {
+            Ok(Value::map(BTreeMap::new()))
+        }
+        other => anyhow::bail!(
+            "no zero value for {}; omit the `?` or pass the argument explicitly",
+            oxdock_parser::render_structural(other)
+        ),
+    }
+}
+
+/// Resolve script `FUNC` param spellings to tags in one place: tag
+/// resolution, declaration checks, and optional zero-value validation.
+/// All definition paths (direct, static check, file import) funnel
+/// here, so a required-after-optional or zero-less optional fails
+/// identically everywhere instead of drifting by call site.
+pub fn resolve_script_params<P: ProcessManager>(
+    state: &ExecState<P>,
+    func_name: &str,
+    params: &[(String, String, bool)],
+) -> Result<Vec<(String, TypeTag, bool)>> {
+    let mut resolved = Vec::with_capacity(params.len());
+    for (pname, ptype, optional) in params {
+        let clean = pname.trim_start_matches('$').to_string();
+        let tag = state
+            .resolve_tag(ptype)
+            .map_err(|err| anyhow::anyhow!("function `{func_name}`: {err:#}"))?;
+        state.check_declaration_tag(&format!("function `{func_name}` param `${clean}`"), &tag)?;
+        if *optional {
+            optional_zero_value(&tag).map(|_| ()).map_err(|err| {
+                anyhow::anyhow!("function `{func_name}` optional param `${clean}`: {err:#}")
+            })?;
+        }
+        resolved.push((clean, tag, *optional));
+    }
+    Ok(resolved)
+}
+
+/// Validate already-resolved script param tags: the zero-value gate
+/// for registry insertion paths that never see spellings.
+pub fn check_script_param_tags(func_name: &str, params: &[(String, TypeTag, bool)]) -> Result<()> {
+    for (pname, tag, optional) in params {
+        if *optional {
+            optional_zero_value(tag).map(|_| ()).map_err(|err| {
+                anyhow::anyhow!("function `{func_name}` optional param `${pname}`: {err:#}")
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Executable body behind one registry entry: an interpreted script, a
@@ -449,7 +515,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TextStartsWith::registration(),
             TextEndsWith::registration(),
             TextContains::registration(),
-            TextLength::registration(),
+            Len::registration(),
             TextCount::registration(),
             TextCountMatches::registration(),
             TextGrep::registration(),
@@ -573,7 +639,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     pub(super) fn define_script(
         &mut self,
         name: &str,
-        params: &[(String, TypeTag)],
+        params: &[(String, TypeTag, bool)],
         return_type: TypeTag,
         return_spelling: &str,
         is_async: bool,
@@ -603,6 +669,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         {
             anyhow::bail!("duplicate function `{name}` in same scope");
         }
+        check_script_param_tags(name, params)?;
         let old = self.entries.insert(
             qualified.clone(),
             FuncEntry {
@@ -613,17 +680,19 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     params: Some(
                         params
                             .iter()
-                            .map(|(name, param_type)| FuncParam {
-                                name: name.clone(),
-                                param_type: Some(param_type.clone()),
-                                allowed: None,
-                                // Script `FUNC` params carry no prose:
-                                // declarations have no doc syntax.
-                                docs: "",
-                                options: None,
-                                optional: false,
+                            .map(|(pname, param_type, optional)| {
+                                Ok(FuncParam {
+                                    name: pname.clone(),
+                                    param_type: Some(param_type.clone()),
+                                    allowed: None,
+                                    // Script `FUNC` params carry no prose:
+                                    // declarations have no doc syntax.
+                                    docs: "",
+                                    options: None,
+                                    optional: *optional,
+                                })
                             })
-                            .collect(),
+                            .collect::<Result<_>>()?,
                     ),
                     returns: Some(return_type.clone()),
                     rpn: false,
@@ -663,7 +732,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         depth: usize,
         alias: &str,
         name: &str,
-        params: &[(String, TypeTag)],
+        params: &[(String, TypeTag, bool)],
         return_type: TypeTag,
         return_spelling: &str,
         is_async: bool,
@@ -701,6 +770,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         {
             anyhow::bail!("duplicate function `{name}` in same scope");
         }
+        check_script_param_tags(name, params)?;
         let old = self.entries.insert(
             qualified.clone(),
             FuncEntry {
@@ -711,15 +781,17 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     params: Some(
                         params
                             .iter()
-                            .map(|(name, param_type)| FuncParam {
-                                name: name.clone(),
-                                param_type: Some(param_type.clone()),
-                                allowed: None,
-                                docs: "",
-                                options: None,
-                                optional: false,
+                            .map(|(pname, param_type, optional)| {
+                                Ok(FuncParam {
+                                    name: pname.clone(),
+                                    param_type: Some(param_type.clone()),
+                                    allowed: None,
+                                    docs: "",
+                                    options: None,
+                                    optional: *optional,
+                                })
                             })
-                            .collect(),
+                            .collect::<Result<_>>()?,
                     ),
                     returns: Some(return_type.clone()),
                     rpn: false,
@@ -909,7 +981,7 @@ pub fn builtin_function_names() -> HashSet<String> {
 }
 
 /// Metadata of every builtin function, sorted by name, for static
-/// rendering (docs-gen). Same single source as `builtin_function_names`:
+/// rendering (oxdock-render). Same single source as `builtin_function_names`:
 /// the `#[oxdock_func]` annotations, never a parallel list.
 pub fn builtin_function_metas() -> Vec<FuncMeta> {
     FunctionRegistry::<DefaultProcessManager>::with_builtins().native_metas()
@@ -3210,11 +3282,13 @@ fn text_contains(
     Ok(Value::bool(text.contains(needle.as_str())))
 }
 
-/// Count the characters in text as Unicode scalars.
+/// Count the elements of a text, list, or map as an `INT`.
 ///
-/// Multibyte characters count once each, so this is not the byte
-/// length: `"héllo"` binds 5, not 6. The `${#var}` and `wc -m`
-/// counterpart for scripts that size tags and digests.
+/// Strings count Unicode scalars: multibyte characters count once
+/// each, so this is not the byte length (`"héllo"` binds 5, not 6).
+/// Lists count elements, maps count entries; empty values bind 0.
+/// The `${#var}` and `wc -m` counterpart for scripts that size tags,
+/// digests, and table rows.
 ///
 #[oxdock_func(pure, returns = TypeTag::Int)]
 #[example(
@@ -3222,19 +3296,42 @@ fn text_contains(
     code = r###"
     # Plain text counts one per character.
     IMPORT [STD]
-    LET $n: INT = TEXT_LENGTH("hello")
+    LET $n: INT = LEN("hello")
     ASSERT_EQ $n 5
 
     # Multibyte characters count once each, not per byte.
-    LET $wide: INT = TEXT_LENGTH("héllo")
+    LET $wide: INT = LEN("héllo")
     ASSERT_EQ $wide 5
+
+    # Lists count elements, maps count entries.
+    LET $items: LIST<STRING> = ["a", "b", "c"]
+    LET $nitems: INT = LEN($items)
+    ASSERT_EQ $nitems 3
+    LET $row: MAP<name: STRING> = {name: "ada"}
+    LET $nkeys: INT = LEN($row)
+    ASSERT_EQ $nkeys 1
+    LET $empty: INT = LEN([])
+    ASSERT_EQ $empty 0
     "###
 )]
-fn text_length(
-    /// Text to measure.
-    text: String,
+fn len(
+    /// Value to measure.
+    #[union(String, List, Map)]
+    value: Value,
 ) -> Result<Value> {
-    Ok(Value::int(text.chars().count() as i64))
+    if let Some(text) = value.as_str() {
+        return Ok(Value::int(text.chars().count() as i64));
+    }
+    if let Some(items) = value.as_list() {
+        return Ok(Value::int(items.len() as i64));
+    }
+    if let Some(entries) = value.as_map() {
+        return Ok(Value::int(entries.len() as i64));
+    }
+    Err(anyhow::anyhow!(
+        "LEN needs a STRING, LIST, or MAP value, got {}",
+        value.type_name()
+    ))
 }
 
 /// Count non-overlapping literal occurrences of a needle.

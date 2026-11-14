@@ -18,6 +18,7 @@ use oxdock_fs::{GuardedPath, WorkspaceFs};
 use oxdock_parser::{ModuleTable, Step, StepKind, Value};
 use oxdock_process::ProcessManager;
 
+use super::resolve_script_params;
 use super::state::ExecState;
 use super::steps::{Flow, StepCtx, execute_steps};
 
@@ -374,13 +375,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             }) else {
                 bail!("IMPORT `{path}` has no such function `{name}`");
             };
-            let mut resolved_params = Vec::with_capacity(def.0.len());
-            for (pname, ptype) in &def.0 {
-                let tag = cx.state.resolve_tag(ptype)?;
-                cx.state
-                    .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
-                resolved_params.push((pname.clone(), tag));
-            }
+            let resolved_params = resolve_script_params(cx.state, name, &def.0)?;
             let return_tag = cx.state.resolve_tag(&def.1)?;
             cx.state
                 .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
@@ -683,15 +678,7 @@ pub(crate) fn import_file<P: ProcessManager>(
             {
                 let qualified = oxdock_parser::qualify(alias, name);
                 if cx.state.functions.get(&qualified).is_none() {
-                    let mut resolved_params = Vec::with_capacity(params.len());
-                    for (pname, ptype) in params {
-                        let tag = cx.state.resolve_tag(ptype)?;
-                        cx.state.check_declaration_tag(
-                            &format!("function `{name}` param `${pname}`"),
-                            &tag,
-                        )?;
-                        resolved_params.push((pname.clone(), tag));
-                    }
+                    let resolved_params = resolve_script_params(cx.state, name, params)?;
                     let return_tag = cx.state.resolve_tag(return_type)?;
                     cx.state
                         .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
@@ -789,7 +776,9 @@ pub(crate) fn import_file<P: ProcessManager>(
         let env_before: std::collections::HashMap<String, String> = (*cx.state.envs).clone();
         // The init body runs with its module on the context stack so
         // nested definitions owner-tag correctly; lexical reads still
-        // resolve through the pushed frames first.
+        // resolve through the pushed frames first. Relative paths in
+        // the init body resolve against the ambient cwd like any
+        // other code: there is no module-dir anchoring.
         cx.state.module_stack.push(Some(key.clone()));
         let flow = execute_steps(
             cx.state,
@@ -1305,14 +1294,12 @@ fn load_file<P: ProcessManager>(
         table,
     )
     .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed to parse: {e}"))?;
-    let dir = resolved.parent();
     state.modules.insert(
         key,
         super::state::ModuleRecord {
             steps: parsed.steps.clone(),
             func_exports: parsed.func_exports.clone(),
             type_exports: parsed.type_exports.clone(),
-            dir,
             init: None,
         },
     );

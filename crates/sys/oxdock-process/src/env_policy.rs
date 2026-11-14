@@ -18,7 +18,7 @@
 //! own overlay and diagnostics, so the rule cannot drift per call site.
 //!
 //! Rendered reference: `ENV_CONTRACTS.md` at the repository root
-//! (generated from the declaration below by `cargo run -p docs-gen`;
+//! (generated from the declaration below by `cargo run -p oxdock-render`;
 //! templates link it through the `env_contracts_url` global).
 
 use anyhow::{Result, bail};

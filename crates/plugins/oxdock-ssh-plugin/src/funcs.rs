@@ -1106,7 +1106,7 @@ fn ssh_exec<P: ProcessManager>(
 
     # Fresh draws mint 64 hex chars with no committed secret.
     LET $pass: STRING = SSH_GENERATE_PASSWORD()
-    LET $len: INT = TEXT_LENGTH($pass)
+    LET $len: INT = LEN($pass)
     ASSERT_EQ $len 64
 
     # The minted value serves directly as a server password.

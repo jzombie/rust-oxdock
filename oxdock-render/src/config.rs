@@ -1,11 +1,303 @@
 //! Pipeline config surface: filename default plus plugin registry.
 //!
-//! Rust owns only the filename edge (flag, env, neutral default) and
-//! reading the plugin path list out of JSON. Lifecycle defaults and
-//! all sequencing stay in the DSL (`render.oxfile`).
+//! Rust owns only the filename edge (flag, env, neutral default),
+//! strict config validation, the `--init` template, and reading the
+//! plugin path list out of JSON. Lifecycle defaults and all
+//! sequencing stay in the DSL (`render.oxfile`).
 
-use anyhow::{Context, Result};
-use oxdock_fs::{GuardedPath, PathResolver};
+use anyhow::{Context, Result, bail};
+use oxdock_core::Value;
+use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
+
+/// Canonical `render.json` filename: the neutral default when no
+/// explicit config is given. Named once so the resolver,
+/// `--init`, and the pipe-child fallback can never disagree.
+pub(crate) const CONFIG_FILENAME: &str = "render.json";
+
+/// Known `render.json` keys, named once so validation, readers,
+/// and error text can never disagree. New keys grow this list
+/// and every use follows.
+pub(crate) const KEY_GENERATED: &str = "generated";
+pub(crate) const KEY_GLOBAL_VALUES: &str = "global_values";
+pub(crate) const KEY_HOOKS: &str = "hooks";
+pub(crate) const KEY_LIFECYCLE: &str = "lifecycle";
+pub(crate) const KEY_MERGE_POLICY: &str = "merge_policy";
+pub(crate) const KEY_SCOPES: &str = "scopes";
+pub(crate) const KEY_STAGING_DIR: &str = "staging_dir";
+pub(crate) const KEY_VARS: &str = "vars";
+pub(crate) const KEY_VERSION_KEY: &str = "version_key";
+/// Known `vars` sub-key names.
+pub(crate) const KEY_VARS_GLOBAL: &str = "global";
+pub(crate) const KEY_VARS_CTX: &str = "ctx";
+pub(crate) const KEY_VARS_WORKSPACE_PKG: &str = "workspace_pkg";
+/// Known `lifecycle` sub-key names.
+pub(crate) const KEY_LIFECYCLE_FILES: &str = "files";
+pub(crate) const KEY_LIFECYCLE_TYPES: &str = "types";
+/// Known `generated` entry key names.
+pub(crate) const KEY_GENERATED_KEY: &str = "key";
+pub(crate) const KEY_GENERATED_OUT: &str = "out";
+
+/// Known top-level `render.json` keys. Anything else fails closed so
+/// typos (`scope` for `scopes`) surface instead of silently changing
+/// the pipeline. Mirrors every `$cfg.*` read in the lifecycle
+/// scripts, plus `hooks` below.
+const TOP_LEVEL_KEYS: &[&str] = &[
+    KEY_GENERATED,
+    KEY_GLOBAL_VALUES,
+    KEY_HOOKS,
+    KEY_LIFECYCLE,
+    KEY_MERGE_POLICY,
+    KEY_SCOPES,
+    KEY_STAGING_DIR,
+    KEY_VARS,
+    KEY_VERSION_KEY,
+];
+
+/// Known `vars` sub-keys in one list, so the unknown-key gate and
+/// the per-key checks read the same set.
+const VARS_KEYS: &[&str] = &[KEY_VARS_GLOBAL, KEY_VARS_CTX, KEY_VARS_WORKSPACE_PKG];
+/// Known `lifecycle` sub-keys in one list, for the same reason.
+const LIFECYCLE_KEYS: &[&str] = &[KEY_LIFECYCLE_FILES, KEY_LIFECYCLE_TYPES];
+/// Known `generated` entry keys; both are required per entry.
+const GENERATED_ENTRY_KEYS: &[&str] = &[KEY_GENERATED_KEY, KEY_GENERATED_OUT];
+
+/// Template `render.json` written by `--init`: the minimal valid
+/// pipeline (hooks first, workspace root scope). Authored as an
+/// OxDock template (`init.json.tmpl`) and expanded through the
+/// pipeline's own fragment engine before writing, so the suggested
+/// starting point is always engine-rendered output. Comments are
+/// allowed (`//` and `/* */`) in every JSON file the pipeline
+/// reads; they never reach validation. Validates clean.
+pub const INIT_TEMPLATE: &str = include_str!("../templates/init.json.tmpl");
+
+/// Expand the init template through the pipeline's own fragment
+/// engine with an empty scope, restoring the trailing newline the
+/// engine strips (mirroring the `RENDER` stage). Any `{{ }}`
+/// typo in the template fails here instead of shipping a broken
+/// starting point.
+pub(crate) fn render_init_template() -> Result<String> {
+    let empty = Value::map(std::collections::BTreeMap::new());
+    let text = crate::engine::render_fragment(INIT_TEMPLATE, &empty, &empty, None)?
+        .as_str()
+        .expect("fragment expansion renders a string")
+        .to_string();
+    if INIT_TEMPLATE.ends_with('\n') && !text.ends_with('\n') {
+        return Ok(format!("{text}\n"));
+    }
+    Ok(text)
+}
+
+/// Hook phases: scripts that run before the entry assembles the
+/// child (`pre`) and after every target verifies (`post`). Named
+/// here so call sites and validation never repeat the strings.
+pub(crate) const HOOK_PRE: &str = "pre";
+pub(crate) const HOOK_POST: &str = "post";
+pub(crate) const HOOK_PHASES: &[&str] = &[HOOK_PRE, HOOK_POST];
+
+/// Hook scripts from a validated config, keyed by phase. Either
+/// side failing halts the pipeline.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Hooks {
+    pub(crate) pre: Vec<String>,
+    pub(crate) post: Vec<String>,
+}
+
+fn expect_object<'v>(
+    value: &'v serde_json::Value,
+    what: &str,
+    config_name: &str,
+) -> Result<&'v serde_json::Map<String, serde_json::Value>> {
+    value
+        .as_object()
+        .with_context(|| format!("{config_name}: '{what}' must be a JSON object"))
+}
+
+fn expect_string(value: &serde_json::Value, what: &str, config_name: &str) -> Result<String> {
+    value
+        .as_str()
+        .with_context(|| format!("{config_name}: '{what}' must be a string"))
+        .map(str::to_string)
+}
+
+fn expect_string_list(
+    value: &serde_json::Value,
+    what: &str,
+    config_name: &str,
+) -> Result<Vec<String>> {
+    let arr = value
+        .as_array()
+        .with_context(|| format!("{config_name}: '{what}' must be a list of strings"))?;
+    arr.iter()
+        .map(|entry| expect_string(entry, what, config_name))
+        .collect()
+}
+
+/// Strict `render.json` validation: unknown keys fail naming the
+/// known set, mistyped values name the expected shape. Presence is
+/// required only for keys the entry script reads unconditionally
+/// (`scopes`, `global_values`); everything else is optional but
+/// type-checked when present, so custom lifecycles that skip
+/// `vars` or `generated` keep working.
+pub(crate) fn validate_config(value: &serde_json::Value, config_name: &str) -> Result<()> {
+    let cfg = expect_object(value, "config", config_name)?;
+    for key in cfg.keys() {
+        if !TOP_LEVEL_KEYS.contains(&key.as_str()) {
+            bail!(
+                "{config_name}: unknown key '{key}'; known keys: {}",
+                TOP_LEVEL_KEYS.join(", ")
+            );
+        }
+    }
+    let required = [KEY_SCOPES, KEY_GLOBAL_VALUES];
+    for key in required {
+        if !cfg.contains_key(key) {
+            bail!("{config_name}: missing required key '{key}'");
+        }
+    }
+    expect_string_list(
+        cfg.get(KEY_SCOPES).expect("scopes presence checked"),
+        KEY_SCOPES,
+        config_name,
+    )?;
+    let gv = cfg
+        .get(KEY_GLOBAL_VALUES)
+        .expect("global_values presence checked");
+    let gv_ok = gv.as_str().is_some()
+        || gv
+            .as_array()
+            .is_some_and(|arr| arr.iter().all(|entry| entry.as_str().is_some()));
+    if !gv_ok {
+        bail!("{config_name}: '{KEY_GLOBAL_VALUES}' must be a string or a list of strings");
+    }
+    if let Some(vars) = cfg.get(KEY_VARS) {
+        let vars = expect_object(vars, KEY_VARS, config_name)?;
+        for key in vars.keys() {
+            if !VARS_KEYS.contains(&key.as_str()) {
+                bail!(
+                    "{config_name}: unknown vars key '{key}'; known keys: {}",
+                    VARS_KEYS.join(", ")
+                );
+            }
+        }
+        for &key in VARS_KEYS {
+            if let Some(entry) = vars.get(key) {
+                expect_string(entry, &format!("{}.{key}", KEY_VARS), config_name)?;
+            }
+        }
+    }
+    if let Some(lifecycle) = cfg.get(KEY_LIFECYCLE) {
+        let lifecycle = expect_object(lifecycle, KEY_LIFECYCLE, config_name)?;
+        for key in lifecycle.keys() {
+            if !LIFECYCLE_KEYS.contains(&key.as_str()) {
+                bail!(
+                    "{config_name}: unknown lifecycle key '{key}'; known keys: {}",
+                    LIFECYCLE_KEYS.join(", ")
+                );
+            }
+        }
+        if let Some(files) = lifecycle.get(KEY_LIFECYCLE_FILES) {
+            expect_string_list(
+                files,
+                &format!("{}.{}", KEY_LIFECYCLE, KEY_LIFECYCLE_FILES),
+                config_name,
+            )?;
+        }
+        if let Some(types) = lifecycle.get(KEY_LIFECYCLE_TYPES) {
+            expect_string(
+                types,
+                &format!("{}.{}", KEY_LIFECYCLE, KEY_LIFECYCLE_TYPES),
+                config_name,
+            )?;
+        }
+    }
+    if let Some(generated) = cfg.get(KEY_GENERATED) {
+        let entries = generated
+            .as_array()
+            .with_context(|| format!("{config_name}: '{KEY_GENERATED}' must be a list"))?;
+        for (idx, entry) in entries.iter().enumerate() {
+            let entry = expect_object(entry, &format!("{KEY_GENERATED}[{idx}]"), config_name)?;
+            for key in entry.keys() {
+                if !GENERATED_ENTRY_KEYS.contains(&key.as_str()) {
+                    bail!(
+                        "{config_name}: unknown generated[{idx}] key '{key}'; known keys: {}",
+                        GENERATED_ENTRY_KEYS.join(", ")
+                    );
+                }
+            }
+            for &key in GENERATED_ENTRY_KEYS {
+                let field = entry.get(key).with_context(|| {
+                    format!("{config_name}: '{KEY_GENERATED}[{idx}]' needs string '{key}'")
+                })?;
+                expect_string(field, &format!("{KEY_GENERATED}[{idx}].{key}"), config_name)?;
+            }
+        }
+    }
+    if let Some(hooks) = cfg.get(KEY_HOOKS) {
+        let hooks = expect_object(hooks, KEY_HOOKS, config_name)?;
+        for key in hooks.keys() {
+            if !HOOK_PHASES.contains(&key.as_str()) {
+                bail!(
+                    "{config_name}: unknown hooks key '{key}'; known keys: {}",
+                    HOOK_PHASES.join(", ")
+                );
+            }
+        }
+        for phase in HOOK_PHASES {
+            if let Some(list) = hooks.get(*phase) {
+                expect_string_list(list, &format!("{KEY_HOOKS}.{phase}"), config_name)?;
+            }
+        }
+    }
+    for key in [KEY_STAGING_DIR, KEY_MERGE_POLICY, KEY_VERSION_KEY] {
+        if let Some(entry) = cfg.get(key) {
+            expect_string(entry, key, config_name)?;
+        }
+    }
+    Ok(())
+}
+
+/// Hook script paths from an already-validated config. Lenient by
+/// construction: validation guarantees the shape, so anything
+/// unexpected here reads as empty.
+pub(crate) fn hooks_of(value: &serde_json::Value) -> Hooks {
+    let mut hooks = Hooks::default();
+    let get_list = |phase: &str| {
+        value
+            .get(KEY_HOOKS)
+            .and_then(|hooks| hooks.get(phase))
+            .and_then(|list| list.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    hooks.pre = get_list(HOOK_PRE);
+    hooks.post = get_list(HOOK_POST);
+    hooks
+}
+
+/// Write the template config into a directory without touching an
+/// existing `render.json`: returns the written path, or fails naming
+/// the file to delete first. Used by `--init`.
+pub fn init_config_file(root: &GuardedPath) -> Result<GuardedPath> {
+    let resolver =
+        PathResolver::new_guarded(root.clone(), root.clone()).context("resolver for --init")?;
+    let path = root
+        .join(CONFIG_FILENAME)
+        .with_context(|| format!("resolve {CONFIG_FILENAME} for --init"))?;
+    if resolver.entry_kind(&path).is_ok() {
+        bail!(
+            "{} already exists; refusing to overwrite (delete it to re-scaffold)",
+            path.display()
+        );
+    }
+    resolver
+        .write_file(&path, render_init_template()?.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
 
 /// The engine's default lifecycle providers: the source scanner
 /// plus the generic stage owner. Used when the config names no
@@ -24,17 +316,20 @@ pub(crate) fn default_plugins() -> Vec<String> {
 /// plugin file exposes the same lifecycle methods, so there is
 /// nothing else to declare.
 pub(crate) fn configured_plugins(
-    resolver: &PathResolver,
+    fs: &dyn WorkspaceFs,
     root: &GuardedPath,
     config_name: &str,
 ) -> Result<Vec<String>> {
     let path = root.join(config_name)?;
-    let raw = resolver
+    let raw = fs
         .read_to_string(&path)
         .with_context(|| format!("read {config_name} for plugin list"))?;
-    let cfg: serde_json::Value = serde_json::from_str(&raw)
+    let cfg: serde_json::Value = serde_json::from_str(&oxdock_core::strip_json_comments(&raw))
         .with_context(|| format!("parse {config_name} for plugin list"))?;
-    let files = match cfg.get("lifecycle").and_then(|lc| lc.get("files")) {
+    let files = match cfg
+        .get(KEY_LIFECYCLE)
+        .and_then(|lc| lc.get(KEY_LIFECYCLE_FILES))
+    {
         None => return Ok(default_plugins()),
         Some(files) => files,
     };
@@ -54,16 +349,154 @@ pub(crate) fn configured_plugins(
 /// Config filename: explicit `RENDER_CONFIG` wins, else the one
 /// neutral name. Anything else fails closed naming what was looked
 /// for; the DSL never carries a filename default.
-pub(crate) fn resolve_config_name(resolver: &PathResolver, root: &GuardedPath) -> Result<String> {
-    if let Ok(name) = std::env::var("RENDER_CONFIG") {
+pub(crate) fn resolve_config_name(fs: &dyn WorkspaceFs, root: &GuardedPath) -> Result<String> {
+    if let Ok(name) = std::env::var(oxdock_fs::env::render::CONFIG) {
         return Ok(name);
     }
-    let neutral = root.join("render.json")?;
-    if resolver.metadata(&neutral).is_ok() {
-        return Ok("render.json".to_string());
+    let neutral = root.join(CONFIG_FILENAME)?;
+    if fs.metadata(&neutral).is_ok() {
+        return Ok(CONFIG_FILENAME.to_string());
     }
     anyhow::bail!(
-        "no render.json under {}; pass --config or set RENDER_CONFIG",
-        root.as_path().to_string_lossy()
+        "no {CONFIG_FILENAME} under {}; pass --config or set {}",
+        root.as_path().to_string_lossy(),
+        oxdock_fs::env::render::CONFIG,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str) -> serde_json::Value {
+        serde_json::from_str(&oxdock_core::strip_json_comments(text)).expect("fixture parses")
+    }
+
+    #[test]
+    fn init_template_validates_clean() {
+        // Self-parse verification: the suggested template is expanded
+        // through the pipeline's own fragment engine first, and the
+        // rendered bytes (what `--init` actually writes) must parse
+        // and validate. A template the pipeline cannot read back is
+        // a broken suggestion, so this fails instead of shipping it.
+        let rendered = render_init_template().expect("init renders");
+        assert_eq!(
+            rendered, INIT_TEMPLATE,
+            "template carries no live placeholders; a deliberate {{ }} must wire scope explicitly"
+        );
+        let value = parse(&rendered);
+        validate_config(&value, "render.json").expect("template is valid");
+        assert_eq!(hooks_of(&value), Hooks::default());
+    }
+
+    #[test]
+    fn commented_config_parses_like_plain_json() {
+        // `//` and `/* */` notes never reach validation; `//` inside
+        // a string stays data.
+        let value = parse(
+            r#"{
+                // leading note
+                "global_values": "http://x/y", /* trailing note */
+                "scopes": ["."] // after a value
+            }"#,
+        );
+        validate_config(&value, "render.json").expect("comments parse");
+        assert_eq!(
+            value.get("global_values").and_then(|v| v.as_str()),
+            Some("http://x/y")
+        );
+    }
+
+    #[test]
+    fn minimal_config_validates() {
+        let value = parse(r#"{"global_values": "v.json", "scopes": ["."]}"#);
+        validate_config(&value, "render.json").expect("minimal is valid");
+        assert_eq!(hooks_of(&value), Hooks::default());
+    }
+
+    #[test]
+    fn full_config_validates_with_hooks() {
+        let value = parse(
+            r#"{
+                "global_values": ["a.json", "b.json"],
+                "scopes": [".", "extra"],
+                "generated": [{"key": "k", "out": "o.tmpl"}],
+                "vars": {"global": "g", "ctx": "c", "workspace_pkg": "w"},
+                "lifecycle": {"files": ["a.oxfile"], "types": "t.oxfile"},
+                "staging_dir": "target/x",
+                "merge_policy": "overwrite",
+                "version_key": "V",
+                "hooks": {"pre": ["a.oxfile"], "post": ["b.oxfile", "c.oxfile"]}
+            }"#,
+        );
+        validate_config(&value, "render.json").expect("full is valid");
+        assert_eq!(
+            hooks_of(&value),
+            Hooks {
+                pre: vec!["a.oxfile".to_string()],
+                post: vec!["b.oxfile".to_string(), "c.oxfile".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_top_level_key_fails_naming_known_keys() {
+        let value = parse(r#"{"global_values": "v.json", "scopes": ["."], "scope": ["."]}"#);
+        let err = validate_config(&value, "render.json").expect_err("typo must fail");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("unknown key 'scope'"), "{rendered}");
+        assert!(rendered.contains("scopes"), "{rendered}");
+    }
+
+    #[test]
+    fn unknown_nested_keys_fail() {
+        let value =
+            parse(r#"{"global_values": "v.json", "scopes": ["."], "hooks": {"prelude": []}}"#);
+        let err = validate_config(&value, "r.json").expect_err("bad hooks key must fail");
+        assert!(format!("{err:#}").contains("unknown hooks key 'prelude'"));
+
+        let value = parse(
+            r#"{"global_values": "v.json", "scopes": ["."], "vars": {"global": "g", "ctx": "c", "extra": 1}}"#,
+        );
+        let err = validate_config(&value, "r.json").expect_err("bad vars key must fail");
+        assert!(format!("{err:#}").contains("unknown vars key 'extra'"));
+
+        let value = parse(
+            r#"{"global_values": "v.json", "scopes": ["."], "generated": [{"key": "k", "output": "o"}]}"#,
+        );
+        let err = validate_config(&value, "r.json").expect_err("bad entry key must fail");
+        assert!(format!("{err:#}").contains("unknown generated[0] key 'output'"));
+    }
+
+    #[test]
+    fn mistyped_values_fail_naming_shapes() {
+        let value = parse(r#"{"global_values": "v.json", "scopes": "all"}"#);
+        let err = validate_config(&value, "r.json").expect_err("scopes must be a list");
+        assert!(format!("{err:#}").contains("'scopes' must be a list of strings"));
+
+        let value = parse(r#"{"global_values": 42, "scopes": []}"#);
+        let err = validate_config(&value, "r.json").expect_err("global_values must be str|list");
+        assert!(
+            format!("{err:#}").contains("'global_values' must be a string or a list of strings")
+        );
+
+        let value =
+            parse(r#"{"global_values": "v.json", "scopes": [], "hooks": {"pre": "a.oxfile"}}"#);
+        let err = validate_config(&value, "r.json").expect_err("hooks.pre must be a list");
+        assert!(format!("{err:#}").contains("'hooks.pre' must be a list of strings"));
+    }
+
+    #[test]
+    fn missing_required_keys_fail() {
+        let value = parse(r#"{"global_values": "v.json"}"#);
+        let err = validate_config(&value, "r.json").expect_err("scopes is required");
+        assert!(format!("{err:#}").contains("missing required key 'scopes'"));
+    }
+
+    #[test]
+    fn non_object_config_fails() {
+        let value = parse(r#"["scopes"]"#);
+        let err = validate_config(&value, "r.json").expect_err("array is not an object");
+        assert!(format!("{err:#}").contains("must be a JSON object"));
+    }
 }

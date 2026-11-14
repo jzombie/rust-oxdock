@@ -92,14 +92,20 @@ FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): 
             LET $one: MAP<ANY> = LOAD_JSON($vp)
             LIST_APPEND $gvmaps $one
         }
-        LET $docs_global: MAP<ANY> = STD::MERGE_MAPS($gvmaps, $policy)
-        LET $gjson: STRING = TO_JSON($docs_global)
+        LET $global_map: MAP<ANY> = STD::MERGE_MAPS($gvmaps, $policy)
+        LET $gjson: STRING = TO_JSON($global_map)
         WRITE "\{{ $staging }}/_globals.json" $gjson
         LET $run: CTX = {wsroot: $wsroot, config: $cfgpath, staging: $staging, globals: "\{{ $staging }}/_globals.json", exec: false}
         {{ $setup }}LET $seen: MAP<ANY> = {}
         LET $count: INT = 0
         FOR $scope: STRING IN $cfg.scopes {
-            FOR $tj: STRING IN GLOB("\{{ $scope }}/**/target.json") {
+            LET $tjs: LIST<STRING> = GLOB("\{{ $scope }}/**/target.json")
+            LET $nfound: INT = LEN($tjs)
+            IF $nfound == 0 {
+                ECHO "render: scope '\{{ $scope }}' holds no target.json; check 'scopes' in \{{ $cfgpath }}"
+                EXIT 1
+            }
+            FOR $tj: STRING IN $tjs {
                 LET $file: TARGET_FILE = LOAD_JSON($tj)
                 FOR $t: TARGET IN $file.targets {
                     LET $tname: STRING = $t.name
@@ -193,17 +199,7 @@ FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): 
     RETURN $mod
 }
 
-FUNC PIPE_RUN($mod: STRING, $wsroot: STRING, $cfgpath: STRING): STRING {
-    WORKSPACE LOCAL
-    LET $exe: STRING = STD::INTERPRETER()
-    LET $child: PIPE
-    WITH_IO [stdout=$child] ECHO "{{ $mod }}"
-    LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe, "--root", $wsroot, "--config", $cfgpath]
-    RETURN $out
-}
-
 EXPORT RENDER_ALL
-EXPORT PIPE_RUN
 
 # Lifecycle files from the config, or the engine's own lifecycle
 # files when the config names none. Entries stay plain paths: every

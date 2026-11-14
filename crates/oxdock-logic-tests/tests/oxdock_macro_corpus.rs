@@ -461,7 +461,7 @@ fn macro_prompt_binds_default_off_terminal() {
 fn macro_std_call_through_import() {
     let steps = oxdock! {
         IMPORT [STD]
-        LET $n: INT = STD::TEXT_LENGTH("hello")
+        LET $n: INT = STD::LEN("hello")
         ASSERT_EQ $n 5
     };
     let temp = GuardedPath::tempdir().unwrap();

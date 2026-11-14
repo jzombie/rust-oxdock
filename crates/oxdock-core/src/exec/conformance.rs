@@ -349,7 +349,6 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         cargo_scratch: oxdock_fs::reserve_cargo_scratch().expect("cargo scratch"),
         seed: Arc::new(HashMap::new()),
         cwd: fs.root().clone(),
-        initial_root: fs.root().clone(),
         envs: Arc::new(HashMap::new()),
         bg_children: Vec::new(),
         scope_stack: Vec::new(),

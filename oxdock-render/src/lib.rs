@@ -9,12 +9,14 @@
 //!
 //! Rust owns only the boundaries the DSL has no primitives for:
 //! [`config`] (filename default, plugin registry read),
-//! [`lifecycle`] (embedded file provisioning, uniformity check), and
+//! [`lifecycle`] (embedded pipeline serving, uniformity check), and
 //! [`dispatcher`] (engine wiring, pipe spawn). Sequencing and all
 //! writes live in the DSL as named `FUNC` stages.
+pub mod cli;
 pub mod config;
 pub mod defer;
 pub mod dispatcher;
+pub mod embedded;
 pub mod engine;
 pub mod lifecycle;
 pub mod plugins;
@@ -30,13 +32,14 @@ pub use dispatcher::{run_child_script, run_child_script_on};
 
 use config::resolve_config_name;
 use dispatcher::{child_interpreter, pipeline_full_engine};
-use lifecycle::{check_plugin_uniformity, provision_dist, read_support};
+use embedded::{EmbeddedFiles, warn_on_shadowed_dist};
+use lifecycle::{check_plugin_uniformity, read_support};
 
-/// Execute the render pipeline: provision the embedded files,
-/// check every registered plugin exposes the same lifecycle
+/// Execute the render pipeline: serve the embedded pipeline from
+/// memory, check every registered plugin exposes the same lifecycle
 /// methods, then run the entry script, which assembles the child from
 /// the plugin registry and pipes it through the interpreter. Static
-/// scripts are byte-copied from the tree (see [`lifecycle`]);
+/// scripts are served from the binary (see [`embedded`]);
 /// sequencing and all writes live in the DSL while Rust owns only
 /// the boundaries above.
 ///
@@ -47,6 +50,26 @@ use lifecycle::{check_plugin_uniformity, provision_dist, read_support};
 #[allow(clippy::disallowed_types)]
 pub fn run(repo_root: &Path) -> Result<()> {
     run_with_plugins(repo_root, vec![])
+}
+
+/// Explicit pipeline options: no process-global `env::set_var`
+/// needed. `None` falls back to the corresponding environment
+/// variable (then the built-in default), so existing harnesses keep
+/// working while new callers pass everything explicitly.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// Config filename override (`--config` / `RENDER_CONFIG`).
+    pub config: Option<String>,
+    /// Print the generated child script instead of running it.
+    pub print_child: bool,
+    /// Pipe-child binary override (`OXDOCK_RENDER_CHILD`).
+    pub child_bin: Option<String>,
+}
+
+/// Execute the render pipeline with explicit options.
+#[allow(clippy::disallowed_types)]
+pub fn run_with_options(repo_root: &Path, opts: RunOptions) -> Result<()> {
+    run_with_plugins_and_options(repo_root, vec![], opts)
 }
 
 /// Execute the render pipeline with extra modules registered
@@ -65,6 +88,20 @@ pub fn run_with_plugins(
     repo_root: &Path,
     extra_modules: Vec<HostModule<oxdock_process::DefaultProcessManager>>,
 ) -> Result<()> {
+    run_with_plugins_and_options(repo_root, extra_modules, RunOptions::default())
+}
+
+/// Execute the render pipeline with extra modules and explicit
+/// options. Environment remains a fallback only: `opts.config`
+/// wins over `RENDER_CONFIG`, `opts.print_child` ORs with
+/// `RENDER_PRINT_CHILD`, and `opts.child_bin` wins over
+/// `OXDOCK_RENDER_CHILD`.
+#[allow(clippy::disallowed_types)]
+pub fn run_with_plugins_and_options(
+    repo_root: &Path,
+    extra_modules: Vec<HostModule<oxdock_process::DefaultProcessManager>>,
+    opts: RunOptions,
+) -> Result<()> {
     let root = GuardedPath::new_root(repo_root)?;
 
     let mut fs_resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
@@ -72,7 +109,11 @@ pub fn run_with_plugins(
     // Every stage runs through the pipe: the interpreter is always
     // the child binary, never the pipeline binary itself.
     let mut io = ExecIo::new();
-    io.set_interpreter(child_interpreter().context("locate pipe child")?);
+    let child = match opts.child_bin {
+        Some(bin) => bin,
+        None => child_interpreter().context("locate pipe child")?,
+    };
+    io.set_interpreter(child);
     // The pipe child resolves every path against this root: inherit it
     // into every spawn so module-relative child launching cannot skew
     // staging and output paths. The config filename rides the same
@@ -81,33 +122,94 @@ pub fn run_with_plugins(
         oxdock_fs::env::oxdock::WORKSPACE_ROOT,
         root.as_path().to_string_lossy().into_owned(),
     );
-    let config_name =
-        std::env::var("RENDER_CONFIG").or_else(|_| resolve_config_name(&fs_resolver, &root))?;
-    io.insert_inherit_env("RENDER_CONFIG", config_name.clone());
+    let config_name = match opts.config {
+        Some(name) => name,
+        None => std::env::var(oxdock_fs::env::render::CONFIG)
+            .or_else(|_| resolve_config_name(&fs_resolver, &root))?,
+    };
+    io.insert_inherit_env(oxdock_fs::env::render::CONFIG, config_name.clone());
+    let print_child = opts.print_child
+        || std::env::var(oxdock_fs::env::render::PRINT_CHILD).is_ok_and(|v| v == "1");
     io.insert_inherit_env(
-        "RENDER_PRINT_CHILD",
-        std::env::var("RENDER_PRINT_CHILD").unwrap_or_else(|_| "0".to_string()),
+        oxdock_fs::env::render::PRINT_CHILD,
+        if print_child { "1" } else { "0" }.to_string(),
     );
-    // Binary-only repos have no checkout: lay the embedded pipeline
-    // files down first (write-if-missing, customizations win), so the
-    // entry read below and every DSL import resolve.
-    provision_dist(&fs_resolver, &root).context("provision pipeline files")?;
+    // Validate the config before anything runs: unknown keys and
+    // mistyped values fail here naming the fix, so a typo like
+    // `scope` for `scopes` can never silently change the pipeline.
+    let cfg_path = root
+        .join(&config_name)
+        .with_context(|| format!("resolve {config_name}"))?;
+    let cfg_raw = fs_resolver
+        .read_to_string(&cfg_path)
+        .with_context(|| format!("read {config_name}"))?;
+    let cfg_json: serde_json::Value =
+        serde_json::from_str(&oxdock_core::strip_json_comments(&cfg_raw))
+            .with_context(|| format!("parse {config_name}"))?;
+    config::validate_config(&cfg_json, &config_name)?;
+    let hooks = config::hooks_of(&cfg_json);
+    // The pipeline scripts ride in the binary and resolve from memory,
+    // so consumer repos never receive pipeline files on disk. On-disk
+    // copies shadowing the embedded paths are ignored; warn naming
+    // them so stale provisioned copies get deleted.
+    warn_on_shadowed_dist(&fs_resolver, &root);
+    // User hooks execute on the raw host filesystem, never the
+    // embedded pipeline overlay: a hook read of a dist path must see
+    // user disk bytes, never the binary's pipeline payload.
+    // `EmbeddedFiles` stays exclusive to the internal pipeline below
+    // (uniformity check, entry support read, entry run).
+    let raw_fs = fs_resolver.clone();
+    let embedded = EmbeddedFiles::new(fs_resolver);
     let engine = pipeline_full_engine(extra_modules, io);
     // Every lifecycle plugin exposes the same methods; registration
     // order is execution order. Fail fast here naming the outlier
     // instead of mid-pipeline at first use.
-    check_plugin_uniformity(&fs_resolver, &root, &engine, &config_name)
+    check_plugin_uniformity(&embedded, &root, &engine, &config_name)
         .context("check plugin lifecycle methods")?;
-    // The pipeline entry is one static script, byte-copied from the
-    // tree: it reads the config, assembles the child from the plugin
+    // Pre hooks run before the entry script assembles the child: a
+    // failing hook halts the pipeline before any target renders.
+    run_hooks(&engine, &raw_fs, &root, &hooks.pre, config::HOOK_PRE)?;
+    // The pipeline entry is one static script, served from memory:
+    // it reads the config, assembles the child from the plugin
     // registry, and pipes it through the interpreter. What runs is
-    // what the tree holds, never Rust-assembled text.
-    let entry = read_support(&fs_resolver, &root, "oxdock-render/src/run.oxfile")?;
-    let fs: Box<dyn WorkspaceFs> = Box::new(fs_resolver);
+    // the binary's version, never a stale on-disk copy.
+    let entry = read_support(&embedded, &root, "oxdock-render/src/run.oxfile")?;
+    let fs: Box<dyn WorkspaceFs> = Box::new(embedded);
     engine
         .run_script_on(fs, &entry, default_process_manager())
         .context("render pipeline")?;
-    eprintln!("docs rendered");
+    // Post hooks run after every target verifies: a failing hook
+    // fails the run even though the artifacts already wrote.
+    run_hooks(&engine, &raw_fs, &root, &hooks.post, config::HOOK_POST)?;
+    eprintln!("render complete");
+    Ok(())
+}
+
+/// Run one hook phase on the raw host filesystem: each script
+/// executes top to bottom with the pipeline engine, so hooks read
+/// the same modules and resolve the same workspace. User disk bytes
+/// are authoritative here; the embedded pipeline overlay never
+/// participates. The first failure halts the pipeline naming the
+/// hook. Each hook runs as its own script file, so nested imports
+/// resolve against the hook's directory, exactly like entry scripts.
+fn run_hooks(
+    engine: &Engine<oxdock_process::DefaultProcessManager>,
+    fs: &dyn WorkspaceFs,
+    root: &GuardedPath,
+    hooks: &[String],
+    phase: &str,
+) -> Result<()> {
+    for rel in hooks {
+        let path = root
+            .join(rel)
+            .with_context(|| format!("{phase} hook '{rel}' cannot be resolved"))?;
+        let script = fs
+            .read_to_string(&path)
+            .with_context(|| format!("{phase} hook '{rel}' cannot be read"))?;
+        engine
+            .run_script_file_on(fs.clone_box(), &path, &script, default_process_manager())
+            .with_context(|| format!("{phase} hook '{rel}' failed"))?;
+    }
     Ok(())
 }
 

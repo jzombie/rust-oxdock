@@ -23,7 +23,9 @@ pub use self::remote::{
     apply_push_symlink,
 };
 
-pub use self::args::{json_to_value, json_to_value_typed, value_to_json, value_to_json_typed};
+pub use self::args::{
+    json_to_value, json_to_value_typed, strip_json_comments, value_to_json, value_to_json_typed,
+};
 #[cfg(any(test, feature = "test-harness"))]
 pub use self::conformance::assert_module_returns_conformance;
 pub use self::engine::{Engine, EngineOutput};
@@ -51,8 +53,8 @@ pub use self::mcp::{McpCallOutput, McpSession};
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
     OxDockFn, ParamOption, PreRunCheck, PureFn, PureTable, RecordSchema, builtin_function_metas,
-    builtin_function_names, fill_optional_args, placeholder_resolver, required_arity,
-    std_module_table,
+    builtin_function_names, check_script_param_tags, fill_optional_args, optional_zero_value,
+    placeholder_resolver, required_arity, resolve_script_params, std_module_table,
 };
 pub use self::state::ExecState;
 pub use self::state::MAX_RUNNING_TASKS;
@@ -437,7 +439,6 @@ pub(crate) fn new_state<P: ProcessManager>(
         cargo_scratch,
         seed,
         cwd: cwd.clone(),
-        initial_root: cwd,
         envs,
         bg_children: Vec::new(),
         scope_stack: Vec::new(),

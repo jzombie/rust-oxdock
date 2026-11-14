@@ -36,7 +36,7 @@ fn map_to_md_table(
 ///
 /// Pure and pass-agnostic: takes document text plus options and returns
 /// the TOC in one call, with zero knowledge of sentinels, passes, or
-/// docs-gen. Deferred pipelines wrap this with `DOCS::DEFER` instead
+/// oxdock-render. Deferred pipelines wrap this with `DOCS::DEFER` instead
 /// of calling it during expansion. Links render GitHub-style
 /// (`[text](#github-slug)` with `-1` dedup), so output pastes into any
 /// GitHub-rendered document with working anchors.

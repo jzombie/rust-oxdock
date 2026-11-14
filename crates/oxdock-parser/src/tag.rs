@@ -285,7 +285,7 @@ impl TypeTag {
 /// Render one tag structurally: shaped tags name their contents
 /// (`LIST<MAP>`, `MAP<name: TYPE, ...>`), so signatures show the
 /// generics the extractor enforces instead of the coarse word
-/// kind. Single renderer for `DESCRIBE` and docs-gen alike.
+/// kind. Single renderer for `DESCRIBE` and oxdock-render alike.
 pub fn render_structural(tag: &TypeTag) -> String {
     match tag {
         TypeTag::ListOf(inner) => format!("LIST<{}>", render_structural(inner)),

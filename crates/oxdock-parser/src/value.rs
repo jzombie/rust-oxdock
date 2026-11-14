@@ -6,8 +6,8 @@
 //! 64 bits (integers, floats, booleans, handles, and host scalars annotated
 //! `#[oxdock_type(inline)]`) ride directly in the payload; everything else
 //! rides behind a thin pointer to either an owned `Box<T>` (exclusive heaps:
-//! `STRING`, `PATH`, `DURATION`, `PIPE`, most host types) or a shared
-//! `Arc<T>` (shared heaps: `LIST`, `MAP`, and host types annotated
+//! `PATH`, `DURATION`, most host types) or an `Arc<T>` (shared heaps:
+//! `STRING`, `LIST`, `MAP`, `PIPE`, and host types annotated
 //! `#[oxdock_type(shared)]`). The vtable owns the lifecycle (`clone`, `drop`)
 //! and operations (`eq`, `fmt`), so `Clone`/`Drop`/`PartialEq`/`Display` on
 //! [`Value`] delegate instead of matching. There are no dynamic trait
@@ -30,8 +30,8 @@
 //!   a new box; `drop` frees it. No sharing, no aliasing. Because each box
 //!   holds a concrete sized `T`, its pointer is thin: no double-boxing, no
 //!   fat pointer casts, no metadata to lose.
-//! - Shared heap [`Value`]s (`LIST`, `MAP`) co-own an `Arc<T>` buffer.
-//!   `clone` bumps the strong count in `O(1)` with no allocation; `drop`
+//! - Shared heap [`Value`]s (`STRING`, `LIST`, `MAP`) co-own an `Arc<T>`
+//!   buffer. `clone` bumps the strong count in `O(1)` with no allocation; `drop`
 //!   releases one count and frees only the final word's drop. Because the
 //!   DSL exposes no interior mutability, aliases, or reference syntax,
 //!   container graphs are strictly acyclic trees, so refcounting reclaims
@@ -70,7 +70,7 @@ pub fn type_anchor(name: &str) -> String {
 }
 
 /// Canonical descriptors of the twelve startup types, in a fixed order, for
-/// seeding per-state name directories and static rendering (docs-gen).
+/// seeding per-state name directories and static rendering (oxdock-render).
 /// Each entry is the payload struct's own singleton: no table, no lock.
 pub fn startup_descriptors() -> [(&'static str, &'static TypeDescriptor); 12] {
     [
@@ -108,10 +108,12 @@ struct IntValue(pub i64);
 struct FloatValue(pub f64);
 
 /// Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` interpolates.
+/// Shared heap: cloning bumps a refcount, never copies the bytes.
 #[oxdock_type(
     crate_path = "::oxdock_parser",
     name = "STRING",
-    summary = "Arbitrary text."
+    summary = "Arbitrary text.",
+    shared
 )]
 #[derive(Debug, Clone, PartialEq)]
 struct StringValue(pub String);
@@ -567,9 +569,9 @@ impl Value {
         Self::mint_inline(HandleValue::descriptor(), HandleValue(id))
     }
 
-    /// Construct a string word.
+    /// Construct a string word (shared heap: clones share the buffer).
     pub fn string(s: String) -> Self {
-        Self::mint_heap(StringValue::descriptor(), StringValue(s))
+        Self::mint_heap_shared(StringValue::descriptor(), StringValue(s))
     }
 
     /// Construct a list word (shared heap: clones share the buffer).

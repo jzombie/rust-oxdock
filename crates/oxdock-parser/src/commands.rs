@@ -626,45 +626,188 @@ macro_rules! declare_commands {
             ];
             // Structural statements are registered separately (see
             // all_structural_metadata) but documented through the same
-            // pipeline so docs-gen never drifts from the parser.
+            // pipeline so oxdock-render never drifts from the parser.
             out.extend(all_structural_metadata());
             out
         }
     };
 }
 
-impl StepKind {
-    /// Visit every immediate child expression (arguments, conditions,
-    /// durations, initializers). Boxed sub-kinds and bodies are NOT
-    /// descended: pair with [`walk_child_kinds`](Self::walk_child_kinds)
-    /// or use [`walk_step_exprs`](Self::walk_step_exprs) for the full
-    /// tree. Exhaustive: a new variant fails compilation here, so AST
-    /// passes built on this visitor can never silently miss a command.
-    pub fn walk_exprs(&self, f: &mut impl FnMut(&Expr)) {
-        fn walk_arg(arg: &Arg, f: &mut impl FnMut(&Expr)) {
-            match arg {
-                Arg::Expr(expr) => f(expr),
-                Arg::Parts(parts) => {
-                    for part in parts {
-                        if let ArgPart::Expr(expr) = part {
-                            f(expr);
+/// Generate both raw-string fragment walkers from one match:
+/// helper and closure names arrive as macro arguments (so every
+/// reference shares the invocation's syntax context), types are
+/// fixed per method, and the arm list rides as one trailing brace
+/// group (no repetition, so no follow-token ambiguity). A new
+/// string-carrying variant fails compilation at both expansion
+/// sites until it is added here, and the two walkers can never
+/// disagree about what counts as template text.
+macro_rules! define_raw_string_walkers {
+    ($f:ident, $wa:ident, $wo:ident, $wt:ident, { $($arms:tt)* }) => {
+        /// Visit every immediate raw string fragment (literal argument text
+        /// and mixed-value text fragments). Typed expressions are NOT
+        /// visited here. Boxed sub-kinds and bodies are NOT descended, same
+        /// as [`walk_exprs`](Self::walk_exprs): the caller recurses through
+        /// [`walk_child_kinds`](Self::walk_child_kinds) or the checker's own
+        /// body walk. Exhaustive for the same reason: a new string-carrying
+        /// variant must appear here or env-template checking misses it.
+        pub fn walk_raw_strings(&self, $f: &mut impl FnMut(&str)) {
+            // One `Arg`: literal text and mixed-text fragments; typed expressions are skipped.
+            fn $wa(arg: &Arg, $f: &mut impl FnMut(&str)) {
+                match arg {
+                    Arg::String(text, _) => $f(text),
+                    Arg::Expr(_) => {}
+                    Arg::Parts(parts) => {
+                        for part in parts {
+                            if let ArgPart::Text(text, _) = part {
+                                $f(text);
+                            }
                         }
                     }
                 }
-                Arg::String(..) => {}
+            }
+            // An optional `Arg`, when present.
+            fn $wo(arg: &Option<Arg>, $f: &mut impl FnMut(&str)) {
+                if let Some(arg) = arg {
+                    $wa(arg, $f);
+                }
+            }
+            // An assertion target holding a value.
+            fn $wt(target: &AssertTarget, $f: &mut impl FnMut(&str)) {
+                if let AssertTarget::Value(arg) = target {
+                    $wa(arg, $f);
+                }
+            }
+            match self {
+                $($arms)*
             }
         }
-        fn walk_opt(arg: &Option<Arg>, f: &mut impl FnMut(&Expr)) {
-            if let Some(arg) = arg {
-                walk_arg(arg, f);
+        /// Mutable twin of [`walk_raw_strings`](Self::walk_raw_strings):
+        /// same fragments, same non-descending boundary. The parse-time
+        /// placeholder qualifier runs through this; the static env check
+        /// runs through the shared twin, so both agree fragment for fragment.
+        pub fn walk_raw_strings_mut(&mut self, $f: &mut impl FnMut(&mut String)) {
+            // One `Arg`: literal text and mixed-text fragments; typed expressions are skipped.
+            fn $wa(arg: &mut Arg, $f: &mut impl FnMut(&mut String)) {
+                match arg {
+                    Arg::String(text, _) => $f(text),
+                    Arg::Expr(_) => {}
+                    Arg::Parts(parts) => {
+                        for part in parts {
+                            if let ArgPart::Text(text, _) = part {
+                                $f(text);
+                            }
+                        }
+                    }
+                }
+            }
+            // An optional `Arg`, when present.
+            fn $wo(arg: &mut Option<Arg>, $f: &mut impl FnMut(&mut String)) {
+                if let Some(arg) = arg {
+                    $wa(arg, $f);
+                }
+            }
+            // An assertion target holding a value.
+            fn $wt(target: &mut AssertTarget, $f: &mut impl FnMut(&mut String)) {
+                if let AssertTarget::Value(arg) = target {
+                    $wa(arg, $f);
+                }
+            }
+            match self {
+                $($arms)*
             }
         }
-        fn walk_target(target: &AssertTarget, f: &mut impl FnMut(&Expr)) {
-            if let AssertTarget::Value(arg) = target {
-                walk_arg(arg, f);
+    };
+}
+
+// Generate both expression walkers from one match:
+/// helper and closure names arrive as macro arguments (so every
+/// reference shares the invocation's syntax context), types are
+/// fixed per method, and the arm list rides as one trailing brace
+/// group (no repetition, so no follow-token ambiguity). A new
+/// expression-carrying variant fails compilation at both expansion
+/// sites until it is added here, and the two walkers can never
+/// disagree about what counts as an immediate child expression.
+macro_rules! define_expr_walkers {
+    ($f:ident, $wa:ident, $wo:ident, $wt:ident, { $($arms:tt)* }) => {
+        /// Visit every immediate child expression (arguments, conditions,
+        /// durations, initializers). Boxed sub-kinds and bodies are NOT
+        /// descended: pair with [`walk_child_kinds`](Self::walk_child_kinds)
+        /// or use [`walk_step_exprs`](Self::walk_step_exprs) for the full
+        /// tree. Exhaustive: a new variant fails compilation here, so AST
+        /// passes built on this visitor can never silently miss a command.
+        pub fn walk_exprs(&self, $f: &mut impl FnMut(&Expr)) {
+            // One `Arg`: the typed expressions inside; literal text is skipped.
+            fn $wa(arg: &Arg, $f: &mut impl FnMut(&Expr)) {
+                match arg {
+                    Arg::Expr(expr) => $f(expr),
+                    Arg::Parts(parts) => {
+                        for part in parts {
+                            if let ArgPart::Expr(expr) = part {
+                                $f(expr);
+                            }
+                        }
+                    }
+                    Arg::String(..) => {}
+                }
+            }
+            // An optional `Arg`, when present.
+            fn $wo(arg: &Option<Arg>, $f: &mut impl FnMut(&Expr)) {
+                if let Some(arg) = arg {
+                    $wa(arg, $f);
+                }
+            }
+            // An assertion target holding a value.
+            fn $wt(target: &AssertTarget, $f: &mut impl FnMut(&Expr)) {
+                if let AssertTarget::Value(arg) = target {
+                    $wa(arg, $f);
+                }
+            }
+            match self {
+                $($arms)*
             }
         }
-        match self {
+        /// Mutable twin of [`walk_exprs`](Self::walk_exprs): visits every
+        /// immediate child expression mutably. Bodies are NOT descended,
+        /// matching the immutable boundary: the parse-time placeholder
+        /// qualifier recurses per statement with its own frames.
+        /// Exhaustive for the same reason: new expression carriers fail
+        /// compilation here.
+        pub fn walk_exprs_mut(&mut self, $f: &mut impl FnMut(&mut Expr)) {
+            // One `Arg`: the typed expressions inside; literal text is skipped.
+            fn $wa(arg: &mut Arg, $f: &mut impl FnMut(&mut Expr)) {
+                match arg {
+                    Arg::Expr(expr) => $f(expr),
+                    Arg::Parts(parts) => {
+                        for part in parts {
+                            if let ArgPart::Expr(expr) = part {
+                                $f(expr);
+                            }
+                        }
+                    }
+                    Arg::String(..) => {}
+                }
+            }
+            // An optional `Arg`, when present.
+            fn $wo(arg: &mut Option<Arg>, $f: &mut impl FnMut(&mut Expr)) {
+                if let Some(arg) = arg {
+                    $wa(arg, $f);
+                }
+            }
+            // An assertion target holding a value.
+            fn $wt(target: &mut AssertTarget, $f: &mut impl FnMut(&mut Expr)) {
+                if let AssertTarget::Value(arg) = target {
+                    $wa(arg, $f);
+                }
+            }
+            match self {
+                $($arms)*
+            }
+        }
+    };
+}
+
+impl StepKind {
+    define_expr_walkers!(f, walk_arg, walk_opt, walk_target, {
             StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => f(expr),
             StepKind::Return { expr, .. } => f(expr),
             StepKind::Call { args, .. } => {
@@ -773,144 +916,111 @@ impl StepKind {
             | StepKind::FuncDef { .. }
             | StepKind::Break
             | StepKind::Continue => {}
-        }
-    }
+    });
 
-    /// Visit every immediate raw string fragment (literal argument text
-    /// and mixed-value text fragments). Typed expressions are NOT
-    /// visited here. Boxed sub-kinds and bodies are NOT descended, same
-    /// as [`walk_exprs`](Self::walk_exprs): the caller recurses through
-    /// [`walk_child_kinds`](Self::walk_child_kinds) or the checker's own
-    /// body walk. Exhaustive for the same reason: a new string-carrying
-    /// variant must appear here or env-template checking misses it.
-    pub fn walk_raw_strings(&self, f: &mut impl FnMut(&str)) {
-        fn walk_arg(arg: &Arg, f: &mut impl FnMut(&str)) {
-            match arg {
-                Arg::String(text, _) => f(text),
-                Arg::Expr(_) => {}
-                Arg::Parts(parts) => {
-                    for part in parts {
-                        if let ArgPart::Text(text, _) = part {
-                            f(text);
-                        }
+    define_raw_string_walkers!(f, walk_arg, walk_opt, walk_target, {
+        StepKind::Assign { .. }
+                | StepKind::Set { .. }
+                | StepKind::Call { .. }
+                | StepKind::Return { .. }
+                | StepKind::For { .. }
+                | StepKind::If { .. }
+                | StepKind::While { .. } => {}
+                StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
+                    walk_arg(duration, f);
+                }
+                StepKind::Workdir(arg)
+                | StepKind::Echo(arg)
+                | StepKind::Run(arg)
+                | StepKind::Mkdir(arg)
+                | StepKind::Exit(arg) => walk_arg(arg, f),
+                StepKind::Env { value, .. } => walk_arg(value, f),
+                StepKind::Copy { from, to, .. }
+                | StepKind::Symlink { from, to, .. }
+                | StepKind::Archive {
+                    src: from, dst: to, ..
+                }
+                | StepKind::Install { from, to } => {
+                    walk_arg(from, f);
+                    walk_arg(to, f);
+                }
+                StepKind::SetExecutable { path } => walk_arg(path, f),
+                StepKind::Unarchive {
+                    src,
+                    dst,
+                    max_bytes,
+                } => {
+                    walk_arg(src, f);
+                    walk_arg(dst, f);
+                    walk_opt(max_bytes, f);
+                }
+                StepKind::CopyGit { rev, from, to, .. } => {
+                    walk_arg(rev, f);
+                    walk_arg(from, f);
+                    walk_arg(to, f);
+                }
+                StepKind::Ls(arg) | StepKind::Read(arg) => walk_opt(arg, f),
+                StepKind::Remove { path, .. } => walk_arg(path, f),
+                StepKind::Prompt {
+                    message, default, ..
+                } => {
+                    walk_arg(message, f);
+                    walk_opt(default, f);
+                }
+                StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
+                    walk_arg(path, f);
+                    walk_opt(contents, f);
+                }
+                StepKind::AppendLine { path, contents } => {
+                    walk_arg(path, f);
+                    walk_arg(contents, f);
+                }
+                StepKind::Expand { path, overrides } => {
+                    walk_opt(path, f);
+                    for (_, value) in overrides {
+                        walk_arg(value, f);
                     }
                 }
-            }
-        }
-        fn walk_opt(arg: &Option<Arg>, f: &mut impl FnMut(&str)) {
-            if let Some(arg) = arg {
-                walk_arg(arg, f);
-            }
-        }
-        fn walk_target(target: &AssertTarget, f: &mut impl FnMut(&str)) {
-            if let AssertTarget::Value(arg) = target {
-                walk_arg(arg, f);
-            }
-        }
-        match self {
-            StepKind::Assign { .. }
-            | StepKind::Set { .. }
-            | StepKind::Call { .. }
-            | StepKind::Return { .. }
-            | StepKind::For { .. }
-            | StepKind::If { .. }
-            | StepKind::While { .. } => {}
-            StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
-                walk_arg(duration, f);
-            }
-            StepKind::Workdir(arg)
-            | StepKind::Echo(arg)
-            | StepKind::Run(arg)
-            | StepKind::Mkdir(arg)
-            | StepKind::Exit(arg) => walk_arg(arg, f),
-            StepKind::Env { value, .. } => walk_arg(value, f),
-            StepKind::Copy { from, to, .. }
-            | StepKind::Symlink { from, to, .. }
-            | StepKind::Archive {
-                src: from, dst: to, ..
-            }
-            | StepKind::Install { from, to } => {
-                walk_arg(from, f);
-                walk_arg(to, f);
-            }
-            StepKind::SetExecutable { path } => walk_arg(path, f),
-            StepKind::Unarchive {
-                src,
-                dst,
-                max_bytes,
-            } => {
-                walk_arg(src, f);
-                walk_arg(dst, f);
-                walk_opt(max_bytes, f);
-            }
-            StepKind::CopyGit { rev, from, to, .. } => {
-                walk_arg(rev, f);
-                walk_arg(from, f);
-                walk_arg(to, f);
-            }
-            StepKind::Ls(arg) | StepKind::Read(arg) => walk_opt(arg, f),
-            StepKind::Remove { path, .. } => walk_arg(path, f),
-            StepKind::Prompt {
-                message, default, ..
-            } => {
-                walk_arg(message, f);
-                walk_opt(default, f);
-            }
-            StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
-                walk_arg(path, f);
-                walk_opt(contents, f);
-            }
-            StepKind::AppendLine { path, contents } => {
-                walk_arg(path, f);
-                walk_arg(contents, f);
-            }
-            StepKind::Expand { path, overrides } => {
-                walk_opt(path, f);
-                for (_, value) in overrides {
-                    walk_arg(value, f);
+                StepKind::AssertEq {
+                    actual, expected, ..
                 }
-            }
-            StepKind::AssertEq {
-                actual, expected, ..
-            }
-            | StepKind::AssertNe {
-                actual, expected, ..
-            } => {
-                walk_target(actual, f);
-                walk_opt(expected, f);
-            }
-            StepKind::AssertContains { haystack, needle } => {
-                walk_target(haystack, f);
-                walk_arg(needle, f);
-            }
-            StepKind::ListAppend { item, .. } => walk_arg(item, f),
-            StepKind::RunExec { argv } => {
-                for arg in argv {
-                    walk_arg(arg, f);
+                | StepKind::AssertNe {
+                    actual, expected, ..
+                } => {
+                    walk_target(actual, f);
+                    walk_opt(expected, f);
                 }
-            }
-            StepKind::WithIo { .. }
-            | StepKind::WithIoBlock { .. }
-            | StepKind::TypeAlias { .. }
-            | StepKind::Workspace(_)
-            | StepKind::ImportFile { .. }
-            | StepKind::ImportFuncs { .. }
-            | StepKind::InheritEnv { .. }
-            | StepKind::Isolated { .. }
-            | StepKind::IsolatedInheritEnv { .. }
-            | StepKind::ReadLine { .. }
-            | StepKind::AssignCapture { .. }
-            | StepKind::AwaitCapture { .. }
-            | StepKind::AsyncBlock { .. }
-            | StepKind::AssignAsync { .. }
-            | StepKind::Await { .. }
-            | StepKind::Cancel { .. }
-            | StepKind::RemoteBlock { .. }
-            | StepKind::FuncDef { .. }
-            | StepKind::Break
-            | StepKind::Continue => {}
-        }
-    }
+                StepKind::AssertContains { haystack, needle } => {
+                    walk_target(haystack, f);
+                    walk_arg(needle, f);
+                }
+                StepKind::ListAppend { item, .. } => walk_arg(item, f),
+                StepKind::RunExec { argv } => {
+                    for arg in argv {
+                        walk_arg(arg, f);
+                    }
+                }
+                StepKind::WithIo { .. }
+                | StepKind::WithIoBlock { .. }
+                | StepKind::TypeAlias { .. }
+                | StepKind::Workspace(_)
+                | StepKind::ImportFile { .. }
+                | StepKind::ImportFuncs { .. }
+                | StepKind::InheritEnv { .. }
+                | StepKind::Isolated { .. }
+                | StepKind::IsolatedInheritEnv { .. }
+                | StepKind::ReadLine { .. }
+                | StepKind::AssignCapture { .. }
+                | StepKind::AwaitCapture { .. }
+                | StepKind::AsyncBlock { .. }
+                | StepKind::AssignAsync { .. }
+                | StepKind::Await { .. }
+                | StepKind::Cancel { .. }
+                | StepKind::RemoteBlock { .. }
+                | StepKind::FuncDef { .. }
+                | StepKind::Break
+                | StepKind::Continue => {}
+    });
 
     /// Visit every immediate child kind: boxed sub-commands and the kinds
     /// of every body step. Exhaustive like [`walk_exprs`](Self::walk_exprs):
@@ -1149,7 +1259,7 @@ declare_commands! {
         IsolatedInheritEnv { keys: Vec<String> },
         RemoteBlock { target: String, vars: Vec<String>, env: Vec<String>, body: Vec<Step> },
         RunExec { argv: Vec<Arg> },
-        FuncDef { name: String, params: Vec<(String, String)>, return_type: String, is_async: bool, body: Vec<Step>, docs: Option<(String, String)> },
+        FuncDef { name: String, params: Vec<(String, String, bool)>, return_type: String, is_async: bool, body: Vec<Step>, docs: Option<(String, String)> },
         Call { name: String, args: Vec<Expr> },
         Return { expr: Box<Expr>, is_bare: bool },
         ImportFile { path: String, alias: String },
@@ -2065,7 +2175,10 @@ declare_commands! {
 
             Calls: `{{ MODULE::FUNC(args) }}` invokes a pure registry function
             with `$var.path` references and `STRING`, `INT`, `FLOAT`, and `BOOL`
-            literals as arguments. Arguments check against the registered
+            literals as arguments. A bare `{{ NAME(args) }}` resolves exactly
+            like a statement-position call: `IMPORT [MODULE]` brings the names
+            into scope, unimported names fail naming the fix, ambiguity fails
+            closed. Arguments check against the registered
             signature, so wrong arity or mistyped values fail at the call;
             unknown names fail listing the known functions. Only pure
             functions resolve here: stateful, script-defined, and pipe-backed
@@ -2461,7 +2574,7 @@ declare_commands! {
 // rules rather than `declare_commands!`, so their reference docs live here
 // instead of `crates/docs-gen/src/command_ref.rs` : adding a structural
 // StepKind without registering it here fails `structural_metadata_covers_all_structural_kinds`
-// below, and docs-gen renders these entries dynamically (no hardcoded copy).
+// below, and oxdock-render renders these entries dynamically (no hardcoded copy).
 pub fn all_structural_metadata() -> Vec<CommandMeta> {
     vec![
         CommandMeta {
@@ -3631,6 +3744,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 Params bind by position, converting each argument to its
                 declared parameter type before the body runs.
+                A trailing `$name?: TYPE` marks an optional param: callers
+                may omit trailing optionals, which fill with zero values
+                (`false`, `""`, `0`, `0.0`, `[]`, `{}`) before the body
+                binds. A required param after an optional one fails at
+                definition, and an optional param with no zero value
+                (records with required fields, unions, handles, custom
+                types) fails at definition naming the fix: drop the `?`
+                or pass the argument explicitly.
                 Bodies run in a fresh variable scope; LETs inside do not leak. A nested
                 FUNC definition is scoped to its block and reverts on exit. Names share
                 one namespace with native and host-registered functions, which a FUNC
@@ -3669,6 +3790,78 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 # Statement form: parens stay, the value drops.
                 GREET("bex")
+            "#},
+                },
+                Example {
+                    name: "bind then interpolate",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Script FUNCs run as steps, never inside {{ }}.
+                FUNC GREET($name: STRING): STRING {
+                  RETURN $name
+                }
+
+                # Call as a step to capture the RETURN.
+                LET $res: STRING = GREET("ada")
+
+                # {{ }} reads the bound var.
+                LET $msg: STRING = "says {{ $res }}"
+
+                ASSERT_EQ $msg "says ada"
+            "#},
+                },
+                Example {
+                    name: "script funcs never resolve in placeholders",
+                    fence_meta: Some(
+                        "expect_error:\"unknown placeholder function 'SCRIPT::GREET'\"",
+                    ),
+                    code: indoc! {r#"
+                # Placeholders carry no step context: pure registry only.
+                FUNC GREET($name: STRING): STRING {
+                  RETURN $name
+                }
+
+                # Bind the argument as a step var to keep quoting flat.
+                LET $who: STRING = "ada"
+
+                # This fails naming the pure-only boundary.
+                ECHO "{{ SCRIPT::GREET($who) }}"
+            "#},
+                },
+                Example {
+                    name: "optional params fill zero values",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                IMPORT [STD]
+                # Trailing `?` params may be omitted; they fill with
+                # zero values (false, empty map) before the body binds,
+                # so plain IF works on an omitted BOOL.
+                FUNC ENSURE($check?: BOOL, $opts?: MAP<mode?: STRING>): STRING {
+                    IF $check {
+                        RETURN "checked"
+                    }
+                    IF HAS_KEY($opts, "mode") {
+                        RETURN "opts"
+                    }
+                    RETURN "plain"
+                }
+                LET $a: STRING = ENSURE()
+                ASSERT_EQ $a "plain"
+                LET $b: STRING = ENSURE(true)
+                ASSERT_EQ $b "checked"
+                LET $opts: MAP<mode?: STRING> = PARSE_JSON("{\"mode\": \"fast\"}")
+                LET $c: STRING = ENSURE(false, $opts)
+                ASSERT_EQ $c "opts"
+            "#},
+                },
+                Example {
+                    name: "optional params must trail",
+                    fence_meta: Some("expect_error:\"optional ? params must be trailing\""),
+                    code: indoc! {r#"
+                # A required param after an optional one fails at definition.
+                FUNC BAD($a?: STRING, $b: STRING): STRING {
+                    RETURN $b
+                }
             "#},
                 },
                 Example {
@@ -3937,9 +4130,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 - Workspace-side, against the importing file's
                   directory (entry parent at top level; off-workspace
                   entries resolve like stdin against the root).
-                - Module-owned relative paths resolve against the
-                  module file's own directory, not the caller cwd.
-                  Entry code keeps resolving against the run cwd.
+                - Relative operation paths resolve against the ambient
+                  cwd in every file, module or entry alike. `WORKSPACE`
+                  and `WORKDIR` mean the same everywhere.
                 - Missing files fail before the first step runs.
                   Write-then-import in one script is rejected; check
                   libraries into the tree, or combine them at runtime
@@ -3947,21 +4140,22 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   examples below).
 
                 Module rules (every file import is a module):
-                - Context: never inherits the caller. Env resets to
-                  the seed plus the module init's own contributions
-                  (declared `INHERIT_ENV` names re-read from the host
-                  on every call), cwd to the defining file's
-                  directory, workspace to the run-initial root.
-                - Determinism: the same file behaves identically no
-                  matter who imports it.
+                - Context: never inherits the caller's namespace. Env
+                  resets to the seed plus the module init's own
+                  contributions (declared `INHERIT_ENV` names re-read
+                  from the host on every call). Workspace selection
+                  and cwd flow through untouched, so module code
+                  observes the same workspace its importer does.
+                - Determinism: behavior is a pure function of the
+                  script. The same file with the same ambient cwd and
+                  selection behaves identically no matter who imports
+                  it.
                 - State: one init per file, shared by every alias.
                   Top-level `LET` bindings drain into a single store
                   visible to all of the module's functions.
-                - Workspace: declare `WORKSPACE` or `WORKDIR`
-                  in-function to read outside the module directory.
-                  Without it the reset leaves the module on the
-                  run-initial root (snapshot by default), even when
-                  the caller switched away.
+                - Workspace: `WORKSPACE` and `WORKDIR` mean the same
+                  in module scope as in entry code, selecting the
+                  shared workspace and moving the shared cwd.
                 - Exports: only `EXPORT`ed top-level `FUNC`s and
                   `EXPORT TYPE` aliases cross. Variables never cross.
                 - Imports: whole-file or harvest, only exported
@@ -4576,7 +4770,9 @@ impl fmt::Display for StepKind {
                 }
                 let ps: Vec<String> = params
                     .iter()
-                    .map(|(p, t)| format!("${}: {}", p, t))
+                    .map(|(p, t, optional)| {
+                        format!("${}{}: {}", p, if *optional { "?" } else { "" }, t)
+                    })
                     .collect();
                 if *is_async {
                     write!(
@@ -6054,7 +6250,7 @@ mod tests {
         assert_eq!(name, "GREET");
         assert_eq!(
             params,
-            &vec![("name".to_string(), "STRING".to_string())],
+            &vec![("name".to_string(), "STRING".to_string(), false)],
             "{params:?}"
         );
         assert_eq!(return_type, "STRING", "{return_type:?}");
@@ -6067,6 +6263,71 @@ mod tests {
     fn lowercase_func_name_is_rejected() {
         let err = parse_err("FUNC greet($x: STRING) {\n  RETURN $x\n}\n");
         assert!(err.contains("FUNC"), "{err}");
+    }
+
+    #[test]
+    fn func_def_optional_params_parse_with_flag() {
+        let steps = parse_script(
+            "FUNC F($a: STRING, $b?: INT): STRING {\n  RETURN $a\n}\n",
+            lower_command,
+        )
+        .expect("optional params parse");
+        let StepKind::FuncDef { params, .. } = &steps[0].kind else {
+            panic!("expected FuncDef, got {:?}", steps[0].kind);
+        };
+        assert_eq!(
+            params,
+            &vec![
+                ("a".to_string(), "STRING".to_string(), false),
+                ("b".to_string(), "INT".to_string(), true),
+            ],
+            "{params:?}"
+        );
+        assert_eq!(
+            steps[0].kind.to_string(),
+            "FUNC F($a: STRING, $b?: INT): STRING {\n    RETURN $a\n}",
+            "display marks the optional"
+        );
+    }
+
+    #[test]
+    fn func_def_optional_params_must_trail() {
+        let err = parse_err("FUNC F($a?: INT, $b: STRING): STRING {\n  RETURN $b\n}\n");
+        assert!(err.contains("optional ? params must be trailing"), "{err}");
+        assert!(err.contains("`$b`"), "{err}");
+    }
+
+    #[test]
+    fn func_def_param_type_must_be_uppercase() {
+        let err = parse_err("FUNC F($q: string): STRING {\n  RETURN $q\n}\n");
+        assert!(err.contains("needs an uppercase type"), "{err}");
+        assert!(err.contains("`string`"), "{err}");
+    }
+
+    #[test]
+    fn func_def_malformed_params_name_the_shape() {
+        for (script, expected) in [
+            (
+                "FUNC F($x?): STRING {\n  RETURN \"hi\"\n}\n",
+                "needs `: TYPE` after the name",
+            ),
+            (
+                "FUNC F(bar): STRING {\n  RETURN \"hi\"\n}\n",
+                "must be `$name: TYPE` separated by commas",
+            ),
+            (
+                "FUNC F($x: STRING,): STRING {\n  RETURN $x\n}\n",
+                "must not end with a trailing comma",
+            ),
+        ] {
+            let err = parse_err(script);
+            assert!(err.contains(expected), "{script}: {err}");
+        }
+        // `FUNC FOO() ECHO hi` still misses to generic: the
+        // header-only invalid syntax echoes just the header.
+        let err = parse_err("FUNC FOO() ECHO hi\n");
+        assert!(err.contains("invalid syntax for command FUNC"), "{err}");
+        assert!(err.contains("got `FOO() ECHO hi`"), "{err}");
     }
 
     #[test]

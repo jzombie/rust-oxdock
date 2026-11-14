@@ -83,7 +83,7 @@ use oxdock_process::ProcessManager;
 use super::{
     ExecState, FuncMeta, FuncParam,
     import::{ClosureFile, ClosureSite},
-    required_arity,
+    required_arity, resolve_script_params,
 };
 
 /// Maximum expression nesting and nested-body descent. Parser-bounded
@@ -114,7 +114,7 @@ enum StaticTy {
 /// decides whose shared store the body resolves against.
 #[derive(Clone)]
 struct FuncInfo {
-    params: Vec<(String, TypeTag)>,
+    params: Vec<(String, TypeTag, bool)>,
     declared: TypeTag,
     is_async: bool,
     body: Vec<Step>,
@@ -927,7 +927,7 @@ fn loc(at: Option<&str>) -> String {
 /// Resolved callee for one call: parameter shapes (absent when the
 /// entry declares none), return type, and host closed-set metadata.
 struct Callee {
-    params: Option<Vec<(String, TypeTag)>>,
+    params: Option<Vec<(String, TypeTag, bool)>>,
     ret: StaticTy,
     host_params: Option<Vec<FuncParam>>,
 }
@@ -966,9 +966,9 @@ fn file_env_union(steps: &[Step]) -> HashSet<String> {
 }
 
 impl Env {
-    fn one_frame(bindings: Vec<(String, TypeTag)>) -> Self {
+    fn one_frame(bindings: Vec<(String, TypeTag, bool)>) -> Self {
         let mut top = HashMap::new();
-        for (name, tag) in bindings {
+        for (name, tag, _) in bindings {
             top.insert(name, vec![Binding { tag, guard: None }]);
         }
         Self {
@@ -1238,14 +1238,24 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// placeholders and reject undeclared names. Runs on the shared
     /// [`TemplateSegments`](oxdock_parser::template::TemplateSegments)
     /// splitter, so what counts as a placeholder here is exactly what
-    /// expands at runtime. Bare keys and `$var` placeholders are not
+    /// expands at runtime. Call shapes use the shared
+    /// `template::parse_placeholder_call` grammar (also behind
+    /// parse-time qualification and runtime dispatch), so env
+    /// detection can never disagree with call detection on what
+    /// counts as one call. Bare keys and `$var` placeholders are not
     /// env reads and are ignored here.
     fn check_template_env(&self, text: &str, env: &Env, scope: &Scope) -> Result<()> {
-        use oxdock_parser::template::{TemplateSegment, TemplateSegments};
+        use oxdock_parser::template::{TemplateSegment, TemplateSegments, parse_placeholder_call};
         for segment in TemplateSegments::new(text) {
-            let TemplateSegment::Placeholder { key } = segment else {
+            let TemplateSegment::Placeholder { key, .. } = segment else {
                 continue;
             };
+            // Calls are not env reads: skip through the shared call
+            // grammar (not a prefix check) so a future call shape
+            // can never leak into env validation.
+            if parse_placeholder_call(key).is_some() {
+                continue;
+            }
             let found = key
                 .strip_prefix("env:")
                 .map(|name| ("env:", name))
@@ -1291,22 +1301,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         &mut self,
         name: &str,
         keys: Vec<String>,
-        params: &[(String, String)],
+        params: &[(String, String, bool)],
         return_type: &str,
         is_async: bool,
         body: &[Step],
         module: Option<&str>,
     ) -> Result<()> {
-        let mut resolved = Vec::with_capacity(params.len());
-        for (pname, ptype) in params {
-            let tag = self
-                .exec
-                .resolve_tag(ptype)
-                .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-            self.exec
-                .check_declaration_tag(&format!("function `{name}` param `${pname}`"), &tag)?;
-            resolved.push((clean_var(pname), tag));
-        }
+        let resolved = resolve_script_params(self.exec, name, params)?;
         let declared = self
             .exec
             .resolve_tag(return_type)
@@ -1972,18 +1973,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 body,
                 ..
             } => {
-                let mut resolved = Vec::with_capacity(params.len());
-                for (pname, ptype) in params {
-                    let tag = self
-                        .exec
-                        .resolve_tag(ptype)
-                        .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-                    self.exec.check_declaration_tag(
-                        &format!("function `{name}` param `${pname}`"),
-                        &tag,
-                    )?;
-                    resolved.push((clean_var(pname), tag));
-                }
+                let resolved = resolve_script_params(self.exec, name, params)?;
                 let declared = self
                     .exec
                     .resolve_tag(return_type)
@@ -2842,12 +2832,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         (
                             param.name.clone(),
                             param.param_type.clone().unwrap_or(TypeTag::Any),
+                            param.optional,
                         )
                     })
                     .collect()
             });
             // NOTE: host `allowed` sets are checked from the meta
-            // below; the tag triple here carries only shape.
+            // below; the triple here carries shape plus the optional
+            // flag for the arity range.
             return Ok(Callee {
                 params,
                 ret,
@@ -2919,7 +2911,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let (required, total) = match callee.host_params.as_deref() {
             Some(host) => (required_arity(host), host.len()),
             None => match callee.params.as_deref() {
-                Some(shape) => (shape.len(), shape.len()),
+                Some(shape) => (Self::script_required(shape), shape.len()),
                 None => (0, usize::MAX),
             },
         };
@@ -2983,7 +2975,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let (required, total) = match host_params.as_deref() {
             Some(host) => (required_arity(host), host.len()),
             None => match params.as_deref() {
-                Some(shape) => (shape.len(), shape.len()),
+                Some(shape) => (Self::script_required(shape), shape.len()),
                 // INSPECT-like entries skip arity: the dedicated AST
                 // path owns that call shape.
                 None => (0, usize::MAX),
@@ -3010,7 +3002,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             let Some(expected) = params.as_deref().and_then(|list| list.get(position)) else {
                 continue;
             };
-            let (pname, ptype) = expected;
+            let (pname, ptype, _) = expected;
             let pat = format!("{}{display}() argument `${pname}`", loc(at));
             self.check_arg(ptype, (*actual).clone(), &pat)?;
             if let Some(host_list) = host_params.as_deref()
@@ -3383,8 +3375,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
     }
 
+    /// Required script params: total minus trailing `?` (the parser
+    /// enforces trailing-only, so a suffix count is exact). Mirrors
+    /// [`required_arity`] for host metadata.
+    fn script_required(params: &[(String, TypeTag, bool)]) -> usize {
+        params.len() - params.iter().rev().take_while(|entry| entry.2).count()
+    }
+
     /// Ordering (`<`, `<=`, `>`, `>=`) operand rule: numerics pass,
-    /// `ANY` defers to runtime, concrete non-numerics are a static
     /// Type Error mirroring `apply_compare`.
     /// RPN stack simulation over inferred operand tags. Operators
     /// apply the same rules as their AST twins; stack underflow or a
@@ -3488,8 +3486,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     if before < *arity {
                         bail!("internal error: RPN stack underflow");
                     }
-                    let mut taken: Vec<StaticTy> = stack.split_off(before - arity);
-                    taken.reverse();
+                    // `split_off` keeps left-to-right order already,
+                    // matching the runtime's pop-then-reverse: no
+                    // second reversal here, or multi-arg calls check
+                    // positionally swapped.
+                    let taken: Vec<StaticTy> = stack.split_off(before - arity);
                     // RPN operands carry no literal forms, so closed
                     // `#[values]` sets cannot be checked here; shape and
                     // arity still are. (Math-position calls are
