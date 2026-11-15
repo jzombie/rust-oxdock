@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.39.1-alpha] - 2026-11-15
+
+### Fixed
+
+- Script-scope `LET` bindings are visible inside entry `FUNC` bodies in every position (#303): `RUN ["docker", "build", "-t", $container_image, "."]` inside `FUNC BUILD(): VOID` no longer fails the pre-pass with `undefined variable`, matching the `ECHO "{{ $var }}"` template form, which already resolved. Entry function bodies now seed the entry's top-level `LET`s beneath their parameters (module functions already seeded their file's), and `{{ }}` variable reads (`$var`, bare keys, nested call-arg refs) check through the same gate as expression reads, so undeclared names fail identically in both forms.
+
 ## [0.39.0-alpha] - 2026-11-14
 
 ### Added
