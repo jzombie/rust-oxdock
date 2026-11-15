@@ -504,7 +504,7 @@ pub enum TemplateVar {
 }
 
 /// Variable reads inside one placeholder key. `$` paths parse through
-/// the single [`parse_var_path`] owner; bare keys stay literal. Call
+/// the single path parser below; bare keys stay literal. Call
 /// args recurse through the shared literal owners
 /// (`parse_string_literal`, `strip_wrapped_delimiters`,
 /// `split_top_level`), so new arg spellings land once, here.
