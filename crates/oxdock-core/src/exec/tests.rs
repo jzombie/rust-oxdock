@@ -6864,6 +6864,74 @@ fn file_import_function_read_of_caller_var_fails() {
     );
 }
 
+/// Entry capture: an entry `FUNC` observes the entry's top-level
+/// `LET`s in `RUN [...]` args, exactly like straight-line code.
+/// Regression for #303, where script-scope `LET $container_image`
+/// resolved in `ECHO` templates but failed the pre-pass in `RUN`
+/// args with `undefined variable`.
+#[test]
+fn entry_function_run_argv_sees_entry_let() {
+    let fs = MockFs::new();
+    let mock = MockProcessManager::default();
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD]
+        WORKSPACE LOCAL
+        LET $container_image: STRING = "mock-container-image"
+        FUNC BUILD(): VOID {
+            RUN ["docker", "build", "-t", $container_image, "."]
+        }
+        FUNC PROBE(): VOID {
+            ECHO "probing {{ $container_image }}"
+        }
+        BUILD()
+        PROBE()
+    "#});
+    run_steps_with_manager(Box::new(fs), &steps, mock.clone(), ExecIo::new())
+        .expect("entry lets resolve in RUN argv and templates inside FUNC");
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1, "one RUN argv dispatch: {runs:?}");
+    assert_eq!(
+        runs[0].argv,
+        vec!["docker", "build", "-t", "mock-container-image", "."],
+        "the script-scope LET flows into RUN args inside FUNC"
+    );
+}
+
+/// Entry capture, failure leg: an undeclared name fails the same way
+/// in `RUN [...]` args and in `{{ }}` templates, never later at
+/// runtime for one and at the gate for the other.
+#[test]
+fn entry_function_arg_and_template_share_one_gate() {
+    let fs = MockFs::new();
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD]
+        WORKSPACE LOCAL
+        FUNC FOO(): VOID {
+            RUN ["echo", "hi", $nope]
+        }
+        FOO()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:?}").contains("undefined variable $nope"),
+        "RUN args reject undeclared names: {err:?}"
+    );
+    let fs = MockFs::new();
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD]
+        WORKSPACE LOCAL
+        FUNC FOO(): VOID {
+            ECHO "hi {{ $nope }}"
+        }
+        FOO()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:?}").contains("undefined variable $nope"),
+        "templates reject undeclared names through the same gate: {err:?}"
+    );
+}
+
 /// Module law, vars/append leg: `LIST_APPEND` from a module function
 /// targets the module-global list, never a same-named caller list.
 #[test]

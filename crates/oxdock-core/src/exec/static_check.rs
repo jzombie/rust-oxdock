@@ -228,6 +228,11 @@ struct Checker<'a, P: ProcessManager> {
     /// the environment when checking module-owned function bodies, so
     /// static resolution sees the same store the runtime drains into.
     module_lets: HashMap<String, Vec<(String, TypeTag)>>,
+    /// Entry top-level `LET`s: seeded beneath params when checking
+    /// entry function bodies, mirroring the runtime outer scope that
+    /// calls observe. Order-free like the env union: a function may
+    /// run after any top-level step.
+    entry_lets: Vec<(String, TypeTag)>,
     /// The entry's top-level `ENV` / `INHERIT_ENV` union, plus one per
     /// module key. Function bodies seed from the union covering their
     /// file: a module function sees its own file's prelude
@@ -338,10 +343,11 @@ pub(crate) fn harvest_touches_module<P: ProcessManager>(
     Ok(None)
 }
 
-/// Top-level `LET` bindings of a module body (#115): the declarations
-/// that drain into the shared store on first initialization. Names
-/// resolve through the same tags execution uses; dead-guarded steps
-/// are skipped exactly like collection skips them.
+/// Top-level `LET` bindings of one file body: the declarations that
+/// execution makes visible to that file's functions (drained into the
+/// shared store for modules, held in the outer scope for the entry).
+/// Names resolve through the same tags execution uses; dead-guarded
+/// steps are skipped exactly like collection skips them.
 fn module_lets<P: ProcessManager>(
     steps: &[Step],
     exec: &ExecState<P>,
@@ -351,17 +357,16 @@ fn module_lets<P: ProcessManager>(
         if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
             continue;
         }
-        // Every top-level binding form drains into the shared store at
-        // runtime (`import_file` takes the whole init frame), so every
-        // form seeds here too: a module using capture/async/readline
-        // initializers must resolve, exactly like plain `LET`.
+        // Every top-level binding form counts, so a file using
+        // capture/async/readline initializers resolves exactly like
+        // one using plain `LET`.
         match &step.kind {
             StepKind::Assign { var, decl_type, .. }
             | StepKind::AssignCapture { var, decl_type, .. }
             | StepKind::AssignAsync { var, decl_type, .. } => {
                 let tag = exec
                     .resolve_tag(decl_type)
-                    .map_err(|err| anyhow::anyhow!("module variable `${var}`: {err:#}"))?;
+                    .map_err(|err| anyhow::anyhow!("variable `${var}`: {err:#}"))?;
                 out.push((clean_var(var), tag));
             }
             StepKind::ReadLine { var } | StepKind::Prompt { var, .. } => {
@@ -555,10 +560,12 @@ pub fn validate_script_closure<P: ProcessManager>(
         let entry_defs: Vec<(String, String)> = super::typing::collect_type_aliases(entry, exec)?
             .into_iter()
             .collect();
+        let mut entry_lets: Vec<(String, TypeTag)> = Vec::new();
         with_scope_aliases(exec, &entry_defs, |exec| {
             let mut checker = Checker::new(exec);
             checker.collect(entry)?;
             all_funcs.extend(checker.funcs);
+            entry_lets = module_lets(entry, exec)?;
             Ok(())
         })?;
         for file in files {
@@ -599,8 +606,15 @@ pub fn validate_script_closure<P: ProcessManager>(
                     .unwrap_or_default(),
             };
             with_scope_aliases(exec, &defs, |exec| {
-                let mut checker =
-                    seeded_checker(exec, &all_funcs, &all_lets, &inferred, entry, files);
+                let mut checker = seeded_checker(
+                    exec,
+                    &all_funcs,
+                    &all_lets,
+                    &entry_lets,
+                    &inferred,
+                    entry,
+                    files,
+                );
                 let ty = checker.func_return(&key, 0)?;
                 inferred.insert(key.clone(), ty);
                 Ok(())
@@ -611,12 +625,14 @@ pub fn validate_script_closure<P: ProcessManager>(
         // against the pre-inferred signatures; bodies never see
         // another file's defs.
         /// Fresh checker seeded with the collected functions, module lets,
-        /// and environment unions. Built per scope so every check runs with
-        /// exactly its own file's aliases plus the shared harvests visible.
+        /// entry lets, and environment unions. Built per scope so every
+        /// check runs with exactly its own file's aliases plus the shared
+        /// harvests visible.
         fn seeded_checker<'a, P: ProcessManager>(
             exec: &'a mut ExecState<P>,
             funcs: &HashMap<String, FuncInfo>,
             lets: &HashMap<String, Vec<(String, TypeTag)>>,
+            entry_lets: &[(String, TypeTag)],
             inferred: &HashMap<String, StaticTy>,
             entry: &[Step],
             files: &[ClosureFile],
@@ -624,13 +640,22 @@ pub fn validate_script_closure<P: ProcessManager>(
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
             checker.module_lets = lets.clone();
+            checker.entry_lets = entry_lets.to_vec();
             checker.inferred = inferred.clone();
             checker.build_env_unions(entry, files);
             checker
         }
         with_scope_aliases(exec, &entry_defs, |exec| {
-            seeded_checker(exec, &all_funcs, &all_lets, &inferred, entry, files)
-                .check_top_level(entry)
+            seeded_checker(
+                exec,
+                &all_funcs,
+                &all_lets,
+                &entry_lets,
+                &inferred,
+                entry,
+                files,
+            )
+            .check_top_level(entry)
         })?;
         for file in files {
             let defs: Vec<(String, String)> =
@@ -638,8 +663,16 @@ pub fn validate_script_closure<P: ProcessManager>(
                     .into_iter()
                     .collect();
             with_scope_aliases(exec, &defs, |exec| {
-                seeded_checker(exec, &all_funcs, &all_lets, &inferred, entry, files)
-                    .check_import_body(&file.key, &file.steps, Some(&file.key))
+                seeded_checker(
+                    exec,
+                    &all_funcs,
+                    &all_lets,
+                    &entry_lets,
+                    &inferred,
+                    entry,
+                    files,
+                )
+                .check_import_body(&file.key, &file.steps, Some(&file.key))
             })?;
         }
         Ok(())
@@ -670,6 +703,7 @@ pub fn validate_script_types_counted<P: ProcessManager>(
 ) -> Result<u64> {
     let mut checker = Checker::new(exec);
     checker.entry_env_union = file_env_union(steps);
+    checker.entry_lets = module_lets(steps, exec)?;
     checker.collect(steps)?;
     checker.check_top_level(steps)?;
     for key in checker.func_keys() {
@@ -1154,6 +1188,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             exec,
             funcs: HashMap::new(),
             module_lets: HashMap::new(),
+            entry_lets: Vec::new(),
             module_env_unions: HashMap::new(),
             entry_env_union: HashSet::new(),
             seeded_env: oxdock_process::seeded_env_names()
@@ -1234,26 +1269,34 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         Ok(())
     }
 
-    /// Scan raw string text for `{{ env:KEY }}` / `{{ script_env:KEY }}`
-    /// placeholders and reject undeclared names. Runs on the shared
-    /// [`TemplateSegments`](oxdock_parser::template::TemplateSegments)
+    /// Scan raw string text for `{{ ... }}` reads: `env:` names through
+    /// the declaration gate, `$var` and bare keys through expression
+    /// inference. Runs on the shared [`TemplateSegments`](oxdock_parser::template::TemplateSegments)
     /// splitter, so what counts as a placeholder here is exactly what
     /// expands at runtime. Call shapes use the shared
     /// `template::parse_placeholder_call` grammar (also behind
-    /// parse-time qualification and runtime dispatch), so env
+    /// parse-time qualification and runtime dispatch), and call args
+    /// use the shared `template::placeholder_vars` extraction, so var
     /// detection can never disagree with call detection on what
-    /// counts as one call. Bare keys and `$var` placeholders are not
-    /// env reads and are ignored here.
-    fn check_template_env(&self, text: &str, env: &Env, scope: &Scope) -> Result<()> {
-        use oxdock_parser::template::{TemplateSegment, TemplateSegments, parse_placeholder_call};
+    /// counts as one call or one variable.
+    fn check_template_env(
+        &mut self,
+        text: &str,
+        env: &mut Env,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        use oxdock_parser::template::{
+            TemplateSegment, TemplateSegments, parse_placeholder_call, placeholder_vars,
+        };
         for segment in TemplateSegments::new(text) {
             let TemplateSegment::Placeholder { key, .. } = segment else {
                 continue;
             };
-            // Calls are not env reads: skip through the shared call
-            // grammar (not a prefix check) so a future call shape
-            // can never leak into env validation.
             if parse_placeholder_call(key).is_some() {
+                for var in placeholder_vars(key) {
+                    self.check_template_var(&var, env, scope, depth)?;
+                }
                 continue;
             }
             let found = key
@@ -1268,8 +1311,44 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 if !name.is_empty() {
                     self.check_env_name(env, name, prefix, scope)?;
                 }
+                continue;
+            }
+            for var in placeholder_vars(key) {
+                self.check_template_var(&var, env, scope, depth)?;
             }
         }
+        Ok(())
+    }
+
+    /// One template variable read through expression inference, so
+    /// templates and code agree on every error. `$a.b` traverses like
+    /// `KeyPath`; bare keys read like `Var`.
+    fn check_template_var(
+        &mut self,
+        var: &oxdock_parser::template::TemplateVar,
+        env: &mut Env,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        use oxdock_parser::template::TemplateVar;
+        let expr = match var {
+            TemplateVar::Path(parts) => {
+                let (base, rest) = parts
+                    .split_first()
+                    .expect("placeholder_vars never emits empty paths");
+                if rest.is_empty() {
+                    Expr::Var(base.clone())
+                } else {
+                    Expr::KeyPath {
+                        base: base.clone(),
+                        keys: rest.to_vec(),
+                    }
+                }
+            }
+            TemplateVar::Bare(name) => Expr::Var(name.clone()),
+        };
+        let idx = scope.idx;
+        let _ = self.infer_expr(&expr, env, scope, idx, depth + 1)?;
         Ok(())
     }
 
@@ -1645,7 +1724,24 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     env.declare_env(name.clone());
                 }
             }
-        } else if !self.entry_env_union.is_empty() {
+        } else {
+            // Entry functions capture the entry's top-level `LET`s
+            // through the runtime outer scope, so the body seeds from
+            // the same union. Params stay on top: re-`LET` inside the
+            // body shadows instead of redeclaring.
+            if !self.entry_lets.is_empty() {
+                let mut bottom = HashMap::new();
+                for (name, tag) in &self.entry_lets {
+                    bottom.insert(
+                        name.clone(),
+                        vec![Binding {
+                            tag: tag.clone(),
+                            guard: None,
+                        }],
+                    );
+                }
+                env.frames.insert(0, bottom);
+            }
             // Entry top-level declarations persist globally for later
             // calls, so entry functions seed from the entry union.
             for name in self.entry_env_union.clone() {
@@ -2482,14 +2578,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         if let Some(err) = failed {
             return Err(err);
         }
-        // Embedded `{{ env:KEY }}` placeholders in literal text expand
+        // Embedded `{{ ... }}` placeholders in literal text expand
         // at runtime through the same `expand_string` as whole-arg
         // expressions, so they read through the same declaration gate.
         // `Arg::String` and `ArgPart::Text` carry nothing else.
         let mut failed: Option<anyhow::Error> = None;
         kind.walk_raw_strings(&mut |text| {
             if failed.is_none()
-                && let Err(err) = self.check_template_env(text, env, scope)
+                && let Err(err) = self.check_template_env(text, env, scope, depth)
             {
                 failed = Some(err);
             }
@@ -3187,11 +3283,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let at = || format!("step {}", idx + 1);
         match expr {
             Expr::Literal(value) => {
-                // String literals expand `{{ env:KEY }}` at runtime
+                // String literals expand `{{ ... }}` at runtime
                 // through `expand_string`, so embedded reads gate here
                 // exactly like whole-arg expressions.
                 if let Some(text) = value.as_str() {
-                    self.check_template_env(text, env, scope)?;
+                    self.check_template_env(text, env, scope, depth)?;
                 }
                 Ok(StaticTy::Ty(literal_tag(value)))
             }
@@ -3403,7 +3499,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             match op {
                 MathOp::PushConst(value) => {
                     if let Some(text) = value.as_str() {
-                        self.check_template_env(text, env, scope)?;
+                        self.check_template_env(text, env, scope, depth)?;
                     }
                     stack.push(StaticTy::Ty(literal_tag(value)))
                 }

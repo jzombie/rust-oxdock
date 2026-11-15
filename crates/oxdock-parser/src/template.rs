@@ -494,6 +494,94 @@ pub fn strip_wrapped_delimiters(src: &str, open: char, close: char) -> Option<&s
     }
     None
 }
+/// One variable read inside a `{{ ... }}` key: a `$a.b` path as its
+/// dotted parts, or a bare `key` as one literal lookup. Call args
+/// contribute their nested `$` refs; env keys contribute nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateVar {
+    Path(Vec<String>),
+    Bare(String),
+}
+
+/// Variable reads inside one placeholder key. `$` paths parse through
+/// the single [`parse_var_path`] owner; bare keys stay literal. Call
+/// args recurse through the shared literal owners
+/// (`parse_string_literal`, `strip_wrapped_delimiters`,
+/// `split_top_level`), so new arg spellings land once, here.
+pub fn placeholder_vars(key: &str) -> Vec<TemplateVar> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Vec::new();
+    }
+    if key.starts_with('$') {
+        return parse_var_path(key).into_iter().collect();
+    }
+    if key.starts_with("env:") || key.starts_with("script_env:") {
+        return Vec::new();
+    }
+    if let Some(call) = parse_placeholder_call(key) {
+        let mut out = Vec::new();
+        for arg in split_placeholder_args(call.args_raw) {
+            collect_call_arg_vars(&arg, &mut out);
+        }
+        return out;
+    }
+    vec![TemplateVar::Bare(key.to_string())]
+}
+
+/// One `$a.b` path: split on `.` with each part trimmed, exactly like
+/// runtime expansion. Empty paths (`$`, `$a.`, `$.a`) are `None`:
+/// runtime owns that error. Single owner for `$` path syntax, shared
+/// by placeholder keys and nested call args.
+fn parse_var_path(src: &str) -> Option<TemplateVar> {
+    let rest = src.strip_prefix('$')?;
+    let parts: Vec<String> = rest
+        .split('.')
+        .map(|part| part.trim().to_string())
+        .collect();
+    if parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    Some(TemplateVar::Path(parts))
+}
+
+/// Nested `$` refs inside one call arg. Strings, numbers, bools, and
+/// empty literals hold none; maps and lists recurse; anything else is
+/// runtime-owned invalid syntax and contributes nothing here.
+fn collect_call_arg_vars(src: &str, out: &mut Vec<TemplateVar>) {
+    let src = src.trim();
+    if src.is_empty() {
+        return;
+    }
+    if src.starts_with('$') {
+        out.extend(parse_var_path(src));
+        return;
+    }
+    if parse_string_literal(src).is_some() {
+        return;
+    }
+    if let Some(inner) = strip_wrapped_delimiters(src, '{', '}') {
+        if inner.trim().is_empty() {
+            return;
+        }
+        for entry in split_top_level(inner, ',') {
+            let parts = split_top_level(&entry, ':');
+            if parts.len() != 2 {
+                continue;
+            }
+            collect_call_arg_vars(&parts[1], out);
+        }
+        return;
+    }
+    if let Some(inner) = strip_wrapped_delimiters(src, '[', ']') {
+        if inner.trim().is_empty() {
+            return;
+        }
+        for item in split_top_level(inner, ',') {
+            collect_call_arg_vars(&item, out);
+        }
+    }
+}
 /// Allocation-free segment iterator over template text. See the module
 /// docs for the exact rules; the unit tests below pin every escape
 /// and boundary shape.
@@ -716,6 +804,40 @@ mod tests {
             split_placeholder_args("$a, \"b,c\", 'd,e'"),
             vec!["$a".to_string(), "\"b,c\"".to_string(), "'d,e'".to_string()],
         );
+    }
+
+    #[test]
+    fn placeholder_vars_cover_keys_calls_and_bad_paths() {
+        use super::{TemplateVar, placeholder_vars};
+        assert_eq!(
+            placeholder_vars("$x"),
+            vec![TemplateVar::Path(vec!["x".to_string()])],
+        );
+        assert_eq!(
+            placeholder_vars(" $a.b.c "),
+            vec![TemplateVar::Path(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ])],
+        );
+        assert_eq!(
+            placeholder_vars("key"),
+            vec![TemplateVar::Bare("key".to_string())],
+        );
+        assert!(placeholder_vars("env:FOO").is_empty());
+        assert!(placeholder_vars("script_env:BAR").is_empty());
+        assert!(placeholder_vars("").is_empty());
+        assert_eq!(
+            placeholder_vars("M::F($a, {k: [$b, \"ignored\"]}, 'ignored', \"\"\"ignored\"\"\")"),
+            vec![
+                TemplateVar::Path(vec!["a".to_string()]),
+                TemplateVar::Path(vec!["b".to_string()]),
+            ],
+        );
+        assert!(placeholder_vars("$").is_empty());
+        assert!(placeholder_vars("$a.").is_empty());
+        assert!(placeholder_vars("$.a").is_empty());
     }
 
     #[test]
