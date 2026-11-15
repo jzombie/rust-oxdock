@@ -360,6 +360,7 @@ fn lookup(
     vars: &HashMap<String, oxdock_parser::Value>,
     calls: Option<&PlaceholderCall>,
 ) -> Result<String> {
+    use oxdock_parser::template::{PlaceholderKey, classify_placeholder_key, split_var_path};
     let key = raw_key.trim();
 
     // 1. Explicit overrides (command-level CLI flags: KEY=val)
@@ -367,69 +368,83 @@ fn lookup(
         return Ok(val.clone());
     }
 
-    // 2. Environment variables: must be prefixed with "env:"
-    if let Some(env_key) = key.strip_prefix("env:") {
-        if let Some(val) = overrides.get(env_key).or_else(|| env.get(env_key)) {
-            return Ok(val.clone());
+    // Shapes below come from the single template owner: this keeps
+    // its own order (overrides first), sources, and errors.
+    match classify_placeholder_key(key) {
+        // 2. Environment variables: must be prefixed with "env:"
+        PlaceholderKey::Env(env_key) => {
+            if let Some(val) = overrides.get(env_key).or_else(|| env.get(env_key)) {
+                return Ok(val.clone());
+            }
+            let hint = if vars.contains_key(env_key) {
+                format!("; did you mean '${env_key}' (script variable)?")
+            } else {
+                String::new()
+            };
+            bail!("undefined environment variable: '{env_key}'{hint}");
         }
-        let hint = if vars.contains_key(env_key) {
-            format!("; did you mean '${env_key}' (script variable)?")
-        } else {
-            String::new()
-        };
-        bail!("undefined environment variable: '{env_key}'{hint}");
-    }
 
-    // 3. Script variables: must be prefixed with "$"
-    if let Some(var_key) = key.strip_prefix('$') {
-        if var_key.contains('.') {
-            let parts: Vec<&str> = var_key.split('.').collect();
+        // 3. Script variables: must be prefixed with "$". Path split
+        // through the single template owner; dotted paths traverse
+        // strictly, plain names read directly.
+        PlaceholderKey::Dollar(rest) => {
+            let parts = split_var_path(rest);
+            if parts.len() == 1 {
+                if let Some(val) = vars.get(&parts[0]) {
+                    return format_value_for_string(val);
+                }
+                let hint = if env.contains_key(rest) {
+                    format!("; did you mean 'env:{rest}' (environment variable)?")
+                } else if overrides.contains_key(rest) {
+                    format!("; did you mean '{rest}' (step override)?")
+                } else {
+                    String::new()
+                };
+                bail!("undefined script variable: '${rest}'{hint}");
+            }
             return resolve_key_path_strict(&parts, vars);
         }
-        if let Some(val) = vars.get(var_key) {
-            return format_value_for_string(val);
-        }
-        let hint = if env.contains_key(var_key) {
-            format!("; did you mean 'env:{var_key}' (environment variable)?")
-        } else if overrides.contains_key(var_key) {
-            format!("; did you mean '{var_key}' (step override)?")
-        } else {
-            String::new()
-        };
-        bail!("undefined script variable: '${var_key}'{hint}");
-    }
 
-    // 4. Placeholder calls: `MODULE::FUNC(args)` dispatches through the
-    // registered resolver. Without one, the shape falls through to the
-    // invalid placeholder error below.
-    if let Some((module, func, args_src)) = parse_placeholder_call(key) {
-        let Some(resolver) = calls else {
-            bail!(
-                "placeholder call '{module}::{func}' has no function registry; register one with with_call_resolver"
-            );
-        };
-        let mut args = Vec::with_capacity(args_src.len());
-        for src in args_src {
-            args.push(resolve_call_arg(&src, vars)?);
+        // 4. Placeholder calls: `MODULE::FUNC(args)` dispatches through
+        // the registered resolver. Without one, the shape falls through
+        // to the invalid placeholder error below. Bare call heads are
+        // not calls here either: they fall through the same way.
+        PlaceholderKey::Call(_) => {
+            if let Some((module, func, args_src)) = parse_placeholder_call(key) {
+                let Some(resolver) = calls else {
+                    bail!(
+                        "placeholder call '{module}::{func}' has no function registry; register one with with_call_resolver"
+                    );
+                };
+                let mut args = Vec::with_capacity(args_src.len());
+                for src in args_src {
+                    args.push(resolve_call_arg(&src, vars)?);
+                }
+                let result = resolver(&module, &func, args)?;
+                return format_value_for_string(&result);
+            }
         }
-        let result = resolver(&module, &func, args)?;
-        return format_value_for_string(&result);
-    }
 
-    // 5. Unprefixed key: could be a missing step override or invalid syntax
-    if !key.is_empty()
-        && key
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-    {
-        let hint = if vars.contains_key(key) {
-            format!("; did you mean '${key}' (script variable)?")
-        } else if env.contains_key(key) {
-            format!("; did you mean 'env:{key}' (environment variable)?")
-        } else {
-            String::new()
-        };
-        bail!("missing required step override argument: '{key}'{hint}");
+        // 5. Unprefixed key: could be a missing step override or invalid
+        // syntax. `script_env:` has no meaning in this context: it reads
+        // as invalid exactly like any other non-shape.
+        PlaceholderKey::Bare(name) => {
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                let hint = if vars.contains_key(name) {
+                    format!("; did you mean '${name}' (script variable)?")
+                } else if env.contains_key(name) {
+                    format!("; did you mean 'env:{name}' (environment variable)?")
+                } else {
+                    String::new()
+                };
+                bail!("missing required step override argument: '{name}'{hint}");
+            }
+        }
+        PlaceholderKey::Empty | PlaceholderKey::ScriptEnv(_) => {}
     }
     bail!(
         "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
@@ -439,12 +454,15 @@ fn lookup(
 /// Split a `MODULE::FUNC(args)` placeholder body for call resolution
 /// outside the streaming expander. Returns `None` when the body is not
 /// call shaped, so plain keys keep their own handling. Single grammar
-/// behind every phase: parses through the shared
-/// `oxdock_parser::template::parse_placeholder_call`, so runtime
+/// behind every phase: classifies through the shared
+/// `oxdock_parser::template::classify_placeholder_key`, so runtime
 /// dispatch and parse-time qualification can never disagree on what
 /// counts as one call.
 pub fn parse_placeholder_call(key: &str) -> Option<(String, String, Vec<String>)> {
-    let call = oxdock_parser::template::parse_placeholder_call(key.trim())?;
+    use oxdock_parser::template::{PlaceholderKey, classify_placeholder_key};
+    let PlaceholderKey::Call(call) = classify_placeholder_key(key.trim()) else {
+        return None;
+    };
     let module = call.module?.to_string();
     let args = oxdock_parser::template::split_placeholder_args(call.args_raw);
     Some((module, call.name.to_string(), args))
@@ -489,9 +507,10 @@ fn resolve_call_value(
     if depth > MAX_LITERAL_DEPTH {
         bail!("placeholder call argument nests too deep (limit {MAX_LITERAL_DEPTH})");
     }
-    if let Some(path) = src.strip_prefix('$') {
-        let parts: Vec<&str> = path.split('.').collect();
-        return resolve_value_path(&parts, vars);
+    if let Some(rest) = src.strip_prefix('$') {
+        // `$` refs split through the single template owner; the empty
+        // check below keeps the historical malformed-argument error.
+        return resolve_value_path(&oxdock_parser::template::split_var_path(rest), vars);
     }
     if let Some(literal) = oxdock_parser::template::parse_string_literal(src) {
         return literal.map(oxdock_parser::Value::string);
@@ -580,18 +599,18 @@ fn resolve_call_list(
 /// Mirrors `resolve_key_path_strict` but returns the value instead of
 /// its string form so calls receive typed arguments.
 fn resolve_value_path(
-    parts: &[&str],
+    parts: &[String],
     vars: &HashMap<String, oxdock_parser::Value>,
 ) -> Result<oxdock_parser::Value> {
     if parts.is_empty() || parts[0].is_empty() {
         bail!("invalid placeholder call argument: empty variable reference");
     }
-    let root_key = parts[0];
+    let root_key = parts[0].as_str();
     let mut current = vars
         .get(root_key)
         .ok_or_else(|| anyhow!("undefined script variable: '${root_key}'"))?
         .clone();
-    for &segment in &parts[1..] {
+    for segment in &parts[1..] {
         if segment.contains('(') || segment.contains(')') {
             bail!("nested calls are not supported in placeholder arguments");
         }
@@ -625,15 +644,15 @@ fn resolve_value_path(
 /// Fails explicitly on missing object keys, out-of-bounds array indices,
 /// or type mismatches (e.g. trying to access a property on a primitive).
 fn resolve_key_path_strict(
-    parts: &[&str],
+    parts: &[String],
     vars: &HashMap<String, oxdock_parser::Value>,
 ) -> Result<String> {
-    let root_key = parts[0];
+    let root_key = parts[0].as_str();
     let mut current = vars
         .get(root_key)
         .ok_or_else(|| anyhow!("undefined script variable: '${root_key}'"))?;
 
-    for &segment in &parts[1..] {
+    for segment in &parts[1..] {
         if let Some(map) = current.as_map() {
             current = map
                 .get(segment)

@@ -1708,98 +1708,108 @@ pub(crate) fn expand_string<P: ProcessManager>(
     env: &std::collections::HashMap<String, String>,
     state: &ExecState<P>,
 ) -> Result<String> {
-    use oxdock_parser::template::{TemplateSegment, TemplateSegments};
+    use oxdock_parser::template::{
+        PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key, split_var_path,
+    };
     let mut output = String::with_capacity(input.len());
+    // One diagnostic for every unresolvable bare key: missing keys
+    // never render empty. Bare keys read the same store as $vars, so
+    // a miss suggests the sigil form (or the env form when the host
+    // bridges that name).
+    let missing_key = |key: &str| {
+        let mut msg = format!("undefined script variable: '{key}'");
+        if env.contains_key(key) || state.get_env(key).is_some() {
+            msg.push_str(&format!(
+                "; did you mean 'env:{key}' (environment variable)?"
+            ));
+        } else {
+            msg.push_str(&format!("; did you mean '${key}'?"));
+        }
+        anyhow::anyhow!("{msg}")
+    };
     for segment in TemplateSegments::new(input) {
         match segment {
             TemplateSegment::Text(text) => push_escaped_text(&mut output, text),
-            TemplateSegment::Placeholder { key, .. } => {
-                if key.is_empty() {
+            TemplateSegment::Placeholder { key, .. } => match classify_placeholder_key(key) {
+                PlaceholderKey::Empty => {
                     bail!("empty template placeholder");
                 }
-                if let Some(var_expr) = key.strip_prefix('$') {
+                PlaceholderKey::Dollar(rest) => {
                     // {{ $var }} or {{ $var.path.0 }} : same hard
                     // resolution as expression-position key paths, so
                     // templates and code agree on every error. Bare
                     // $var never reads the environment; use {{ env:KEY }}.
-                    let parts: Vec<String> =
-                        var_expr.split('.').map(|s| s.trim().to_string()).collect();
-                    let (base, rest) = parts.split_first().expect("split always yields one");
-                    let value = resolve_key_path_value(state, base, rest)?;
+                    // Split through the single template owner; the base
+                    // lookup below mirrors `resolve_key_path_value`.
+                    let parts = split_var_path(rest);
+                    let (base, segs) = parts.split_first().expect("split always yields one");
+                    let value = resolve_key_path_value(state, base, segs)?;
                     output.push_str(&format_value_for_string(&value)?);
-                } else {
-                    // `{{ env:KEY }}` reads the script env: absent names
-                    // read empty. Undeclared names never reach here: the
-                    // static gate rejects them before any step runs, so
-                    // a runtime miss is always a declared name the host
-                    // did not bridge.
-                    // `{{ script_env:KEY }}` reads the explicit
-                    // script env only. `{{ bare_key }}` reads DSL
-                    // variables only, never env.
-                    if let Some(env_key) = key.strip_prefix("env:") {
-                        // Whitespace-tolerant like the static gate: the
-                        // shared splitter trims the whole key, and the
-                        // name trims here, so `{{ env: FOO }}` resolves
-                        // exactly what the checker admitted.
-                        let env_key = env_key.trim();
-                        let val = env
-                            .get(env_key)
-                            .map(String::as_str)
-                            .or_else(|| state.get_env(env_key));
-                        // Absent reads empty: undeclared names never
-                        // reach here, the static gate rejects them
-                        // before any step runs.
-                        if let Some(v) = val {
-                            output.push_str(v);
-                        }
-                    } else if let Some(env_key) = key.strip_prefix("script_env:") {
-                        let env_key = env_key.trim();
-                        if let Some(v) = env.get(env_key).map(String::as_str) {
-                            output.push_str(v);
-                        }
-                    } else if let Some(val) = state.get_var(key) {
-                        output.push_str(&format_value_for_string(&val)?);
-                    } else if let Some(call) = oxdock_parser::template::parse_placeholder_call(key)
-                        && let Some(module) = call.module
-                    {
-                        // `{{ MODULE::FUNC(args) }}` through the shared
-                        // pure table: the same registry EXPAND
-                        // templates resolve, so ordinary strings and
-                        // file templates agree. Shape detection is the
-                        // shared template grammar (also behind
-                        // parse-time qualification), so the two can
-                        // never disagree on what counts as one call.
-                        // Dispatch and the unknown-name error live in
-                        // [`super::native::placeholder_resolver`].
-                        // Bare heads fall through to the missing-key
-                        // error below, sharing its single diagnostic.
-                        let resolve =
-                            super::native::placeholder_resolver(state.pure_function_table());
-                        let vars = state.all_vars();
-                        let args_src =
-                            oxdock_parser::template::split_placeholder_args(call.args_raw);
-                        let mut args = Vec::with_capacity(args_src.len());
-                        for src in args_src {
-                            args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
-                        }
-                        let result = resolve(module, call.name, args)?;
-                        output.push_str(&format_value_for_string(&result)?);
-                    } else {
-                        // Bare key not in DSL vars → hard error: missing
-                        // keys never render empty. Bare keys read the
-                        // same store as $vars, so suggest the sigil form.
-                        let mut msg = format!("undefined script variable: '{key}'");
-                        if env.contains_key(key) || state.get_env(key).is_some() {
-                            msg.push_str(&format!(
-                                "; did you mean 'env:{key}' (environment variable)?"
-                            ));
-                        } else {
-                            msg.push_str(&format!("; did you mean '${key}'?"));
-                        }
-                        bail!("{msg}");
+                }
+                // `{{ env:KEY }}` reads the script env: absent names
+                // read empty. Undeclared names never reach here: the
+                // static gate rejects them before any step runs, so
+                // a runtime miss is always a declared name the host
+                // did not bridge.
+                PlaceholderKey::Env(env_key) => {
+                    // Whitespace-tolerant like the static gate: the
+                    // shared splitter trims the whole key, and the
+                    // name trims here, so `{{ env: FOO }}` resolves
+                    // exactly what the checker admitted.
+                    let env_key = env_key.trim();
+                    let val = env
+                        .get(env_key)
+                        .map(String::as_str)
+                        .or_else(|| state.get_env(env_key));
+                    // Absent reads empty: undeclared names never
+                    // reach here, the static gate rejects them
+                    // before any step runs.
+                    if let Some(v) = val {
+                        output.push_str(v);
                     }
                 }
-            }
+                // `{{ script_env:KEY }}` reads the explicit
+                // script env only.
+                PlaceholderKey::ScriptEnv(env_key) => {
+                    let env_key = env_key.trim();
+                    if let Some(v) = env.get(env_key).map(String::as_str) {
+                        output.push_str(v);
+                    }
+                }
+                // `{{ bare_key }}` reads DSL variables only, never env.
+                PlaceholderKey::Bare(key) => {
+                    if let Some(val) = state.get_var(key) {
+                        output.push_str(&format_value_for_string(&val)?);
+                    } else {
+                        return Err(missing_key(key));
+                    }
+                }
+                PlaceholderKey::Call(call) => {
+                    let Some(module) = call.module else {
+                        // Bare heads fall through to the missing-key
+                        // error, sharing its single diagnostic.
+                        return Err(missing_key(key));
+                    };
+                    // `{{ MODULE::FUNC(args) }}` through the shared
+                    // pure table: the same registry EXPAND
+                    // templates resolve, so ordinary strings and
+                    // file templates agree. Shape detection is the
+                    // shared template grammar (also behind
+                    // parse-time qualification), so the two can
+                    // never disagree on what counts as one call.
+                    // Dispatch and the unknown-name error live in
+                    // [`super::native::placeholder_resolver`].
+                    let resolve = super::native::placeholder_resolver(state.pure_function_table());
+                    let vars = state.all_vars();
+                    let args_src = oxdock_parser::template::split_placeholder_args(call.args_raw);
+                    let mut args = Vec::with_capacity(args_src.len());
+                    for src in args_src {
+                        args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
+                    }
+                    let result = resolve(module, call.name, args)?;
+                    output.push_str(&format_value_for_string(&result)?);
+                }
+            },
         }
     }
     Ok(output)

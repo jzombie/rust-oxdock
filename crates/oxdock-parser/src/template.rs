@@ -503,42 +503,95 @@ pub enum TemplateVar {
     Bare(String),
 }
 
-/// Variable reads inside one placeholder key. `$` paths parse through
-/// the single path parser below; bare keys stay literal. Call
-/// args recurse through the shared literal owners
+/// One `{{ ... }}` key, classified. The single grammar behind every
+/// expansion and check phase: parse-time qualification, the static
+/// gate, script-engine expansion, and override-map expansion all route
+/// through this, so the phases can never disagree on what shape a key
+/// is. Payloads stay raw (untrimmed, unsplit): trimming, splitting,
+/// lookup sources, and errors belong to the caller, whose contracts
+/// differ. Input must arrive trimmed: every producer trims at its
+/// boundary (`TemplateSegments` yields trimmed keys; the streaming
+/// expander trims on extract).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceholderKey<'a> {
+    /// Empty key: every phase rejects it.
+    Empty,
+    /// `$` plus the raw rest: split through [`split_var_path`].
+    Dollar(&'a str),
+    /// `env:` plus the raw name.
+    Env(&'a str),
+    /// `script_env:` plus the raw name.
+    ScriptEnv(&'a str),
+    /// One `[MODULE::]FUNC(args)` body, through the shared
+    /// [`parse_placeholder_call`] grammar.
+    Call(PlaceholderCall<'a>),
+    /// Anything else, verbatim: script-var lookup, step-override
+    /// lookup, or a hard error, per the caller's contract.
+    Bare(&'a str),
+}
+
+/// Classify one trimmed placeholder key. Shape only, no resolution:
+/// runtimes keep their own check order (e.g. overrides-first) and
+/// their own trimming, sources, and errors.
+pub fn classify_placeholder_key(key: &str) -> PlaceholderKey<'_> {
+    if key.is_empty() {
+        return PlaceholderKey::Empty;
+    }
+    if let Some(rest) = key.strip_prefix('$') {
+        return PlaceholderKey::Dollar(rest);
+    }
+    if let Some(rest) = key.strip_prefix("env:") {
+        return PlaceholderKey::Env(rest);
+    }
+    if let Some(rest) = key.strip_prefix("script_env:") {
+        return PlaceholderKey::ScriptEnv(rest);
+    }
+    if let Some(call) = parse_placeholder_call(key) {
+        return PlaceholderKey::Call(call);
+    }
+    PlaceholderKey::Bare(key)
+}
+
+/// One `$a.b` path split: on `.` with each part trimmed, exactly like
+/// runtime expansion. No validity judgment: callers decide what empty
+/// parts mean under their own contract.
+pub fn split_var_path(rest: &str) -> Vec<String> {
+    rest.split('.')
+        .map(|part| part.trim().to_string())
+        .collect()
+}
+
+/// Variable reads inside one placeholder key, routed through the
+/// single [`classify_placeholder_key`] owner: `$` paths parse through
+/// the single path parser below, env keys contribute nothing, call
+/// shapes contribute their nested arg refs, and bare keys stay
+/// literal.
+/// Call args recurse through the shared literal owners
 /// (`parse_string_literal`, `strip_wrapped_delimiters`,
 /// `split_top_level`), so new arg spellings land once, here.
 pub fn placeholder_vars(key: &str) -> Vec<TemplateVar> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Vec::new();
-    }
-    if key.starts_with('$') {
-        return parse_var_path(key).into_iter().collect();
-    }
-    if key.starts_with("env:") || key.starts_with("script_env:") {
-        return Vec::new();
-    }
-    if let Some(call) = parse_placeholder_call(key) {
-        let mut out = Vec::new();
-        for arg in split_placeholder_args(call.args_raw) {
-            collect_call_arg_vars(&arg, &mut out);
+    match classify_placeholder_key(key.trim()) {
+        PlaceholderKey::Empty => Vec::new(),
+        PlaceholderKey::Dollar(rest) => parse_dollar_path(rest).into_iter().collect(),
+        PlaceholderKey::Env(_) | PlaceholderKey::ScriptEnv(_) => Vec::new(),
+        PlaceholderKey::Call(call) => {
+            let mut out = Vec::new();
+            for arg in split_placeholder_args(call.args_raw) {
+                collect_call_arg_vars(&arg, &mut out);
+            }
+            out
         }
-        return out;
+        PlaceholderKey::Bare(key) => vec![TemplateVar::Bare(key.to_string())],
     }
-    vec![TemplateVar::Bare(key.to_string())]
 }
 
-/// One `$a.b` path: split on `.` with each part trimmed, exactly like
-/// runtime expansion. Empty paths (`$`, `$a.`, `$.a`) are `None`:
-/// runtime owns that error. Single owner for `$` path syntax, shared
-/// by placeholder keys and nested call args.
-fn parse_var_path(src: &str) -> Option<TemplateVar> {
-    let rest = src.strip_prefix('$')?;
-    let parts: Vec<String> = rest
-        .split('.')
-        .map(|part| part.trim().to_string())
-        .collect();
+/// One `$a.b` path from its post-`$` rest: split through the single
+/// [`split_var_path`] owner, rejecting empty parts (`$`, `$a.`,
+/// `$.a`). `None` means malformed: runtime owns that error. Single
+/// owner for `$` path syntax, shared by placeholder keys and nested
+/// call args.
+fn parse_dollar_path(rest: &str) -> Option<TemplateVar> {
+    let parts = split_var_path(rest);
     if parts.iter().any(|part| part.is_empty()) {
         return None;
     }
@@ -553,8 +606,8 @@ fn collect_call_arg_vars(src: &str, out: &mut Vec<TemplateVar>) {
     if src.is_empty() {
         return;
     }
-    if src.starts_with('$') {
-        out.extend(parse_var_path(src));
+    if let PlaceholderKey::Dollar(rest) = classify_placeholder_key(src) {
+        out.extend(parse_dollar_path(rest));
         return;
     }
     if parse_string_literal(src).is_some() {

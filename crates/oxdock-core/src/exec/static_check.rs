@@ -1287,34 +1287,36 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         depth: usize,
     ) -> Result<()> {
         use oxdock_parser::template::{
-            TemplateSegment, TemplateSegments, parse_placeholder_call, placeholder_vars,
+            PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
+            placeholder_vars,
         };
         for segment in TemplateSegments::new(text) {
             let TemplateSegment::Placeholder { key, .. } = segment else {
                 continue;
             };
-            if parse_placeholder_call(key).is_some() {
-                for var in placeholder_vars(key) {
-                    self.check_template_var(&var, env, scope, depth)?;
+            match classify_placeholder_key(key) {
+                // Empty keys never declare: runtime owns that error.
+                PlaceholderKey::Empty => {}
+                PlaceholderKey::Env(name) => {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        self.check_env_name(env, name, "env:", scope)?;
+                    }
                 }
-                continue;
-            }
-            let found = key
-                .strip_prefix("env:")
-                .map(|name| ("env:", name))
-                .or_else(|| {
-                    key.strip_prefix("script_env:")
-                        .map(|name| ("script_env:", name))
-                });
-            if let Some((prefix, name)) = found {
-                let name = name.trim();
-                if !name.is_empty() {
-                    self.check_env_name(env, name, prefix, scope)?;
+                PlaceholderKey::ScriptEnv(name) => {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        self.check_env_name(env, name, "script_env:", scope)?;
+                    }
                 }
-                continue;
-            }
-            for var in placeholder_vars(key) {
-                self.check_template_var(&var, env, scope, depth)?;
+                // `$`, call-arg, and bare reads all flow through the
+                // single var extractor plus expression inference, so
+                // templates and code agree on every error.
+                PlaceholderKey::Dollar(_) | PlaceholderKey::Call(_) | PlaceholderKey::Bare(_) => {
+                    for var in placeholder_vars(key) {
+                        self.check_template_var(&var, env, scope, depth)?;
+                    }
+                }
             }
         }
         Ok(())
