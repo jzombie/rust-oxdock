@@ -254,6 +254,12 @@ struct Checker<'a, P: ProcessManager> {
     inferred: HashMap<String, StaticTy>,
     inferring: Vec<String>,
     visits: u64,
+    /// File-import aliases visible to the checked unit: every `AS ALIAS`
+    /// across the closure (entry steps plus every file's import sites),
+    /// whether or not the imported file defines functions. Scoped to
+    /// the closure pass: single-file validation leaves it empty and
+    /// keeps the `ANY` leniency for unknown qualified names.
+    imported_aliases: HashSet<String>,
     /// Nesting depth inside `ISOLATED` bodies: the isolated allowlist node
     /// is legal only below an `ISOLATED` head, at any depth including
     /// through nested blocks and nested `ISOLATED` itself.
@@ -557,6 +563,19 @@ pub fn validate_script_closure<P: ProcessManager>(
         // (bare harvests stay bare); bodies check below.
         let mut all_funcs = HashMap::new();
         let mut all_lets: HashMap<String, Vec<(String, TypeTag)>> = HashMap::new();
+        // Every file-import alias in the closure: entry steps plus
+        // every file's import sites (nested included). Zero-function
+        // modules contribute no `ALIAS::` func keys, so the alias set
+        // (not a func-key prefix scan) proves the namespace known.
+        let mut imported_aliases = HashSet::new();
+        import_aliases(entry, &mut imported_aliases);
+        for file in files {
+            for site in &file.sites {
+                if let Some(alias) = site.alias.as_deref() {
+                    imported_aliases.insert(alias.to_string());
+                }
+            }
+        }
         let entry_defs: Vec<(String, String)> = super::typing::collect_type_aliases(entry, exec)?
             .into_iter()
             .collect();
@@ -614,6 +633,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &inferred,
                     entry,
                     files,
+                    &imported_aliases,
                 );
                 let ty = checker.func_return(&key, 0)?;
                 inferred.insert(key.clone(), ty);
@@ -628,6 +648,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         /// entry lets, and environment unions. Built per scope so every
         /// check runs with exactly its own file's aliases plus the shared
         /// harvests visible.
+        #[allow(clippy::too_many_arguments)]
         fn seeded_checker<'a, P: ProcessManager>(
             exec: &'a mut ExecState<P>,
             funcs: &HashMap<String, FuncInfo>,
@@ -636,12 +657,14 @@ pub fn validate_script_closure<P: ProcessManager>(
             inferred: &HashMap<String, StaticTy>,
             entry: &[Step],
             files: &[ClosureFile],
+            imported_aliases: &HashSet<String>,
         ) -> Checker<'a, P> {
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
             checker.module_lets = lets.clone();
             checker.entry_lets = entry_lets.to_vec();
             checker.inferred = inferred.clone();
+            checker.imported_aliases = imported_aliases.clone();
             checker.build_env_unions(entry, files);
             checker
         }
@@ -654,6 +677,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 &inferred,
                 entry,
                 files,
+                &imported_aliases,
             )
             .check_top_level(entry)
         })?;
@@ -671,6 +695,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &inferred,
                     entry,
                     files,
+                    &imported_aliases,
                 )
                 .check_import_body(&file.key, &file.steps, Some(&file.key))
             })?;
@@ -999,6 +1024,31 @@ fn file_env_union(steps: &[Step]) -> HashSet<String> {
     union
 }
 
+/// Every file-import alias visible to one step tree: each `AS ALIAS`
+/// on whole-file imports (always aliased) and aliased harvests,
+/// descending into nested bodies. Conservative like expansion:
+/// conditional imports count, since validation checks every path.
+/// Single owner for the closure's alias set; `resolve_call` reads it,
+/// so a zero-function module still proves its alias known.
+fn import_aliases(steps: &[Step], out: &mut HashSet<String>) {
+    for step in steps {
+        match &step.kind {
+            StepKind::ImportFile { alias, .. } => {
+                out.insert(alias.clone());
+            }
+            StepKind::ImportFuncs {
+                alias: Some(alias), ..
+            } => {
+                out.insert(alias.clone());
+            }
+            _ => {}
+        }
+        for body in super::import::child_bodies(&step.kind) {
+            import_aliases(body, out);
+        }
+    }
+}
+
 impl Env {
     fn one_frame(bindings: Vec<(String, TypeTag, bool)>) -> Self {
         let mut top = HashMap::new();
@@ -1199,6 +1249,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             inferred: HashMap::new(),
             inferring: Vec::new(),
             visits: 0,
+            imported_aliases: HashSet::new(),
             isolated_depth: 0,
         }
     }
@@ -2903,7 +2954,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Resolve a callee: script functions (bare or `SCRIPT::`-qualified)
     /// win over host metas, matching runtime shadowing. Unknown names
     /// yield `ANY`: the parse-time unknown-function gate owns that
-    /// error, not this pass.
+    /// error, not this pass. One exception: a qualified name whose
+    /// alias is a known file import (the closure's explicit alias set,
+    /// which covers zero-function modules too) but whose full name is
+    /// absent. The closure pass knows every export under a file alias,
+    /// while the parse-time gate treats file aliases as opaque, so
+    /// only this pass can reject `ALIAS::TYPO`. Passes without that
+    /// knowledge (single-file validation, touch probes) keep the
+    /// `ANY` leniency: an absent alias means "unknown here", not
+    /// "known absent".
     fn resolve_call(&mut self, name: &str, depth: usize) -> Result<Callee> {
         if let Some(info) = self.funcs.get(name) {
             let info = info.clone();
@@ -2943,6 +3002,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 ret,
                 host_params: meta.params.clone(),
             });
+        }
+        if let Some((alias, _)) = name.split_once("::")
+            && self.imported_aliases.contains(alias)
+        {
+            bail!("unknown function `{name}`");
         }
         Ok(Callee {
             params: None,

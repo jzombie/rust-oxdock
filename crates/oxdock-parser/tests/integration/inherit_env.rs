@@ -91,3 +91,17 @@ fn inherit_env_cannot_be_deeply_nested_under_guards_and_io() {
             || err.to_string().contains("cannot be nested")
     );
 }
+
+#[test]
+fn inherit_env_may_follow_file_imports() {
+    // #305: file and harvest imports stay prelude (module bodies run
+    // isolated, so they neither read nor disturb inherited env).
+    // Host-only `IMPORT [MOD]` emits no step, which is why it never
+    // tripped the gate; file imports must behave the same.
+    let script = indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        INHERIT_ENV [FOO]"#};
+    let steps = parse_script(script, mock_lower).expect("INHERIT_ENV after IMPORT parses");
+    assert!(matches!(&steps[0].kind, StepKind::ImportFile { .. }));
+    assert!(matches!(&steps[1].kind, StepKind::InheritEnv { .. }));
+}

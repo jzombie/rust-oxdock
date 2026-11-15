@@ -48,8 +48,10 @@ pub fn init_handler(config: McpServerConfig) -> Result<OxDockHandler> {
         config.modules.clone(),
         config.types.clone(),
         &config.workspace_root,
+        Some(&config.script_path),
     )?;
-    let handler = OxDockHandler::from_built(built, &config.script)?;
+    let handler = OxDockHandler::from_built(built, &config.script)?
+        .with_script_path(config.script_path.clone());
     if config.watch {
         Ok(handler.with_watch(WatchConfig {
             script_path: config.script_path,

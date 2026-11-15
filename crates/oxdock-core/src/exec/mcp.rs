@@ -54,6 +54,9 @@ impl<P: ProcessManager> McpSession<P> {
     /// Build the session: create state with capture sinks, register
     /// modules, install script docs, run static validation, execute the
     /// linear steps once, then validate `EXPORT`. Never discards steps.
+    /// `entry_file` anchors top-level relative `IMPORT` paths to the
+    /// script's directory, exactly like script mode; `None` resolves
+    /// against the workspace root.
     #[allow(clippy::too_many_arguments)]
     pub fn init(
         fs: Box<dyn WorkspaceFs>,
@@ -61,6 +64,7 @@ impl<P: ProcessManager> McpSession<P> {
         modules: Vec<HostModule<P>>,
         types: Vec<&'static TypeDescriptor>,
         parsed: &ParsedScript,
+        entry_file: Option<oxdock_fs::GuardedPath>,
     ) -> Result<Self> {
         let stdout_buf: Arc<Mutex<TailRing>> = Arc::new(Mutex::new(TailRing {
             buf: Vec::new(),
@@ -77,6 +81,7 @@ impl<P: ProcessManager> McpSession<P> {
         io.set_stderr(Some(stderr_sink));
 
         let mut state = super::new_state(fs, io)?;
+        state.entry_file = entry_file;
         for module in &modules {
             module.check_pre_run(&parsed.steps)?;
         }

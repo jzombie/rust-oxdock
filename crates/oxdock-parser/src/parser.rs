@@ -913,18 +913,23 @@ fn splice_arg_groups(body: &[Tok], stmt: usize) -> Result<Vec<Tok>, TokenError> 
                 delim: GroupDelim::Brace,
                 ..
             } => out.push(tok.clone()),
+            // Call parens stay structural: exploding them to puncts
+            // would strand full-region calls (`MAKE()` in arg position)
+            // as raw text, disagreeing with assignment values and
+            // RUN-exec items, which both parse calls. Brackets keep
+            // the raw-text splicing below (whitespace splits inside
+            // them, strings de-quote to words).
             TokKind::Group {
-                delim,
+                delim: GroupDelim::Paren,
+                ..
+            } => out.push(tok.clone()),
+            TokKind::Group {
+                delim: GroupDelim::Bracket,
                 inner,
                 close_joint,
                 ..
             } => {
-                let (open, close) = match delim {
-                    GroupDelim::Bracket => ('[', ']'),
-                    GroupDelim::Paren => ('(', ')'),
-                    GroupDelim::Brace => unreachable!(),
-                };
-                out.push(Tok::fresh(TokKind::Punct(open), tok.joint));
+                out.push(Tok::fresh(TokKind::Punct('['), tok.joint));
                 // Inside brackets raw-text rules apply: quotes are
                 // characters, blocks never dedent, and whitespace splits
                 // runs (`['a b']` is args `"['a"` + `"b']"`). Convert
@@ -941,7 +946,7 @@ fn splice_arg_groups(body: &[Tok], stmt: usize) -> Result<Vec<Tok>, TokenError> 
                         _ => out.push(t),
                     }
                 }
-                out.push(Tok::fresh(TokKind::Punct(close), *close_joint));
+                out.push(Tok::fresh(TokKind::Punct(']'), *close_joint));
             }
             _ => out.push(tok.clone()),
         }
@@ -1013,6 +1018,36 @@ fn at_assign_boundary(toks: &[Tok], pos: usize) -> bool {
         Some((_, end)) => matches!(toks.get(end).map(|t| &t.kind), Some(TokKind::Punct('='))),
         None => false,
     }
+}
+
+/// Line breaks nested in a raw paren run fail like flat ones did
+/// before parens stayed structural: splicing used to surface every
+/// `;`/newline to `render_raw_text`'s reject arm. Brace contents are
+/// skipped (templates and blocks render whole, then and now);
+/// brackets nested in parens were spliced before, so their breaks
+/// fail here too. Single owner for the rule; both raw fallbacks
+/// (positional args, assignment values) ride `render_raw_text`.
+fn reject_paren_line_breaks(inner: &[Tok], stmt: usize) -> Result<(), TokenError> {
+    for tok in inner {
+        match &tok.kind {
+            TokKind::Newline | TokKind::Semicolon => {
+                return Err(TokenError {
+                    stmt,
+                    msg: "unexpected line break in argument".to_string(),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                });
+            }
+            TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            } => {}
+            TokKind::Group { inner, .. } => reject_paren_line_breaks(inner, stmt)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Raw-text render of one gap-run (or value span): words/puncts
@@ -1108,7 +1143,16 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
                 open_joint,
                 close_joint,
                 ..
-            } => out.push_str(&render_group('(', ')', inner, *open_joint, *close_joint)),
+            } => {
+                // Parens stayed structural (call shapes need them), so
+                // surface the breaks splicing used to expose: a `;` or
+                // newline anywhere inside fails exactly like a flat one
+                // did. Brace contents keep the verbatim whole-render
+                // below; brackets nested in parens were spliced before,
+                // so their breaks fail here too.
+                reject_paren_line_breaks(inner, stmt)?;
+                out.push_str(&render_group('(', ')', inner, *open_joint, *close_joint))
+            }
             TokKind::Newline | TokKind::Semicolon => {
                 return Err(TokenError {
                     stmt,
@@ -1130,11 +1174,15 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
 /// stays typed (calls resolve through the shared resolver, matching
 /// `assign_expr`); everything else renders raw. A quoted unit followed
 /// by joint content errors (probed: `K="a"b` fails), like the grammar.
+/// Lone-shape failures stash into `deferred` and render raw: the
+/// command's own lowering error (if any) takes precedence, and the
+/// stashed call error surfaces only when lowering succeeds.
 fn build_value_arg(
     region: &[Tok],
     stmt: usize,
     ctx: &ParseCtx,
     lone_ok: bool,
+    deferred: &mut Option<TokenError>,
 ) -> Result<Arg, TokenError> {
     if region.is_empty() {
         return Ok(Arg::String(String::new(), false));
@@ -1172,8 +1220,15 @@ fn build_value_arg(
     }
     // Lone typed values apply only at a true end/boundary, never
     // past a comment (the grammar's `!assign_expr_cont` guard).
-    if lone_ok && let Some(expr) = try_lone_value_expr(region, stmt, ctx)? {
-        return Ok(expr);
+    // Failures stash (see above) so command syntax owns precedence.
+    if lone_ok {
+        match try_lone_value_expr(region, stmt, ctx) {
+            Ok(Some(expr)) => return Ok(expr),
+            Ok(None) => {}
+            Err(err) => {
+                deferred.get_or_insert(err);
+            }
+        }
     }
     Ok(Arg::String(render_raw_text(region, stmt)?, false))
 }
@@ -1289,7 +1344,25 @@ fn try_lone_value_expr(
     }
     // Full-region call: resolve and keep typed (canonical rendering
     // happens per command: verbatim for ENV/EXPAND, `K=`-joined text
-    // elsewhere, all from the same `Arg::Expr`).
+    // elsewhere, all from the same `Arg::Expr`). Single owner for the
+    // call tail; positional args share it (see `build_arg_tokens`).
+    if let Some(arg) = try_lone_call_expr(region, stmt, ctx)? {
+        return Ok(Some(arg));
+    }
+    Ok(None)
+}
+
+/// Full-region call shape (`NAME(...)`, `MOD::NAME(...)`) over one
+/// argument run: parse args through the shared call owner and resolve
+/// through the shared resolver, so assignment values, RUN-exec items,
+/// and generic positional args can never disagree on what a call is.
+/// `None` on shape miss (caller renders raw); errors propagate, so a
+/// misspelled callee fails loud instead of going literal.
+fn try_lone_call_expr(
+    region: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<Arg>, TokenError> {
     if let Some((name, paren)) = call_shape_at(region, 0, false)
         && paren + 1 == region.len()
         && let TokKind::Group { inner, .. } = &region[paren].kind
@@ -1405,12 +1478,14 @@ fn build_arg_tokens(
     toks: &[Tok],
     stmt: usize,
     ctx: &ParseCtx,
-) -> Result<Vec<InsToken>, TokenError> {
-    // Splice bracket/paren groups first: they read as ordinary
+) -> Result<(Vec<InsToken>, Option<TokenError>), TokenError> {
+    // Splice bracket groups first: they read as ordinary
     // characters (whitespace splits inside them), with strings
-    // re-quoted back to word text. Brace groups stay structural
+    // re-quoted back to word text. Paren groups stay structural (see
+    // `splice_arg_groups`); brace groups stay structural
     // (templates render whole; blocks parse as expressions).
     let flat = splice_arg_groups(toks, stmt)?;
+    let mut deferred: Option<TokenError> = None;
     let mut out = Vec::new();
     let mut pos = 0;
     while pos < flat.len() {
@@ -1487,7 +1562,8 @@ fn build_arg_tokens(
                     kind: None,
                 });
             }
-            let value = build_value_arg(&flat[key_end + 1..vend], stmt, ctx, lone_ok)?;
+            let value =
+                build_value_arg(&flat[key_end + 1..vend], stmt, ctx, lone_ok, &mut deferred)?;
             out.push(InsToken::Assign(key, value));
             pos = vend;
             continue;
@@ -1588,7 +1664,7 @@ fn build_arg_tokens(
                     continue;
                 }
                 // Re-quoted standalone strings (spliced from groups)
-                // strip exactly like structural ones (`( "hi" )` gives
+                // strip exactly like structural ones (`["hi"]` gives
                 // `hi`); glued quotes stay literal (`['a` keeps its
                 // mark). Triple-quote pieces never qualify.
                 TokKind::Word(w) if quoted_word_inner(w).is_some() => {
@@ -1602,13 +1678,30 @@ fn build_arg_tokens(
                 _ => {}
             }
         }
+        // Bare full-region calls stay typed like assignment values and
+        // RUN-exec items (same owner, `try_lone_call_expr`), so every
+        // argument position evaluates them instead of one silently
+        // appending the source text. Failures stash: the command's own
+        // lowering error (if any) takes precedence, and the stashed
+        // call error surfaces only when lowering succeeds.
+        match try_lone_call_expr(run, stmt, ctx) {
+            Ok(Some(arg)) => {
+                out.push(InsToken::Pos(arg));
+                pos = run_end;
+                continue;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                deferred.get_or_insert(err);
+            }
+        }
         out.push(InsToken::Pos(Arg::String(
             render_raw_text(run, stmt)?,
             false,
         )));
         pos = run_end;
     }
-    Ok(out)
+    Ok((out, deferred))
 }
 
 /// A raw run starting with `//` or `/*` (a slash-pair: `/` plus a
@@ -8089,8 +8182,15 @@ fn parse_inner_command(
             return Ok((kind, 2));
         }
     }
-    let tokens = build_arg_tokens(&body[1..], stmt, ctx)?;
+    let (tokens, deferred) = build_arg_tokens(&body[1..], stmt, ctx)?;
     let kind = lower_generic_args(&head, tokens, stmt, ctx)?;
+    // Stashed call errors surface only for otherwise well-formed
+    // statements: the command head owns its syntax, so a malformed
+    // header keeps its tailored error instead of being masked by an
+    // argument-position resolution failure.
+    if let Some(err) = deferred {
+        return Err(err);
+    }
     Ok((kind, body.len()))
 }
 
@@ -8144,7 +8244,17 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
                             kind: None,
                         });
                     }
-                    seen_non_prelude = true;
+                    // File and harvest imports stay prelude: module bodies
+                    // run isolated (seed plus init contributions), so they
+                    // neither read nor disturb the inherited environment.
+                    // Host-only IMPORTs emit no step at all, which is why
+                    // they never tripped this gate.
+                    if !matches!(
+                        kind,
+                        StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. }
+                    ) {
+                        seen_non_prelude = true;
+                    }
                 }
             }
         }
@@ -9226,7 +9336,6 @@ mod tests {
             "ECHO a $x b",
             "ECHO 5 + 3",
             "WRITE f ( \"hi\" )",
-            "ECHO FOO(\"a\")",
             "ECHO [a, b] hi",
             "ECHO {{x}}",
             "ECHO {{ $x }}",
@@ -9681,6 +9790,7 @@ mod tests {
             "LET $bs: STRING = a\\nb",
             "FOO(\"a\")",
             "FOO (\"a\")",
+            "ECHO FOO(\"a\")",
             "ECHO(\"hi\")",
             "RUN [a] extra",
             "RUN[\"a\"]",

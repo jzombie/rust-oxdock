@@ -6719,6 +6719,145 @@ fn file_import_registers_alias_and_calls() {
 }
 
 #[test]
+fn file_import_qualified_call_ignores_shadowing_local() {
+    // #305: a qualified `ALIAS::FUNC` call resolves against the
+    // imported module's exports, never a same-named local FUNC. The
+    // local takes two args, the import takes one; the one-arg
+    // qualified call must validate against the import.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC DENIED($base: STRING): BOOL {
+                 RETURN false
+                }
+                EXPORT DENIED
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS CB]
+        FUNC DENIED($path: STRING, $deny: LIST<STRING>): BOOL {
+         RETURN false
+        }
+        FUNC T($base: STRING): BOOL {
+         LET $hit: BOOL = CB::DENIED($base)
+         RETURN $hit
+        }
+        LET $r: BOOL = T("x")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("qualified call resolves to the import, not the local shadow");
+    assert_eq!(bindings.get("r").and_then(|v| v.as_bool()), Some(false));
+}
+
+#[test]
+fn file_import_unknown_qualified_function_fails_statically() {
+    // #305: the closure pass knows every export under a file alias,
+    // so `ALIAS::TYPO` fails at validation instead of passing
+    // dry-run and failing only at runtime.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC DENIED($base: STRING): BOOL {
+                 RETURN false
+                }
+                EXPORT DENIED
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS CB]
+        FUNC T($base: STRING): BOOL {
+         LET $hit: BOOL = CB::NO_SUCH_FUNC($base)
+         RETURN $hit
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function `CB::NO_SUCH_FUNC`"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn list_append_evaluates_call_shaped_item() {
+    // A bare call in command-arg position evaluates (same as
+    // assignment values, RUN-exec items, and statement calls):
+    // the list gains the return value, never the source text.
+    fn strings(v: Option<&Value>) -> Vec<String> {
+        v.and_then(|v| v.as_list())
+            .map(|l| {
+                l.iter()
+                    .map(|i| i.as_str().unwrap_or("?").to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    let steps = parse_entry(indoc! {r#"
+        FUNC MAKE(): STRING { RETURN "made" }
+        LET $a: LIST<STRING> = []
+        LIST_APPEND $a MAKE()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("call-shaped item evaluates");
+    assert_eq!(strings(bindings.get("a")), vec!["made".to_string()]);
+}
+
+#[test]
+fn list_append_unknown_call_shaped_item_fails_loud() {
+    // Unknown callees in arg position fail (unknown-function),
+    // never silently append the source text and poison the list.
+    let err = crate::parse_script(indoc! {r#"
+        LET $a: LIST<STRING> = []
+        LIST_APPEND $a NOPE()
+    "#})
+    .expect_err("unknown call-shaped item must fail");
+    assert!(
+        format!("{err:#}").contains("unknown function `NOPE`"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn file_import_unknown_call_in_zero_function_module_fails() {
+    // The alias set (not a func-key prefix scan) proves the namespace
+    // known: a module exporting only a TYPE still rejects `T::TYPO`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "types.oxdock",
+        indoc! {r#"
+                TYPE ID = STRING
+                EXPORT TYPE ID
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["types.oxdock" AS T]
+        FUNC U($x: STRING): STRING {
+         LET $y: STRING = T::NO_SUCH_FUNC($x)
+         RETURN $y
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function `T::NO_SUCH_FUNC`"),
+        "{err:#}"
+    );
+}
+
+#[test]
 fn file_import_let_capture_binds_top_level_return() {
     let fs = MockFs::new();
     seed_lib(

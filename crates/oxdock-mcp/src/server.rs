@@ -96,6 +96,12 @@ pub struct WatchConfig {
 pub struct OxDockHandler {
     inner: Arc<Mutex<HandlerInner>>,
     watch: Option<WatchConfig>,
+    /// Script file the session was built from: anchors relative
+    /// `IMPORT` resolution on every `reload`, whether or not file
+    /// watching is attached. `None` only for handlers built without
+    /// a script file (programmatic `new`); those resolve relative
+    /// to the workspace root.
+    script_path: Option<GuardedPath>,
 }
 
 impl OxDockHandler {
@@ -139,12 +145,20 @@ impl OxDockHandler {
                 status,
             })),
             watch,
+            script_path: None,
         })
     }
 
     /// Attach file watching. The next `serve_stdio` spawns the poll task.
     pub fn with_watch(mut self, watch: WatchConfig) -> Self {
         self.watch = Some(watch);
+        self
+    }
+
+    /// Anchor relative `IMPORT` resolution to the script file's
+    /// directory on every `reload`, with or without watching.
+    pub fn with_script_path(mut self, script_path: GuardedPath) -> Self {
+        self.script_path = Some(script_path);
         self
     }
 
@@ -167,7 +181,13 @@ impl OxDockHandler {
         types: Vec<&'static oxdock_core::TypeDescriptor>,
         workspace_root: &GuardedPath,
     ) -> Result<()> {
-        let outcome = match Self::build_inner(script_text, modules, types, workspace_root) {
+        let outcome = match Self::build_inner(
+            script_text,
+            modules,
+            types,
+            workspace_root,
+            self.script_path.as_ref(),
+        ) {
             Ok(outcome) => outcome,
             Err(err) => {
                 self.note_failed_reload(format!("{err:#}"));
@@ -803,6 +823,7 @@ impl OxDockHandler {
         modules: Vec<oxdock_core::HostModule<oxdock_process::DefaultProcessManager>>,
         types: Vec<&'static oxdock_core::TypeDescriptor>,
         workspace_root: &GuardedPath,
+        script_path: Option<&GuardedPath>,
     ) -> Result<BuiltInner> {
         let mut engine = oxdock_core::Engine::new();
         for module in &modules {
@@ -827,6 +848,7 @@ impl OxDockHandler {
             modules,
             types,
             &parsed,
+            script_path.cloned(),
         )?;
         let metas = session.tool_metas()?;
         reject_reserved_metas(&metas)?;
