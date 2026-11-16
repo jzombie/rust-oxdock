@@ -161,7 +161,10 @@ impl<P: ProcessManager> McpSession<P> {
             }
         }
 
-        state.functions.exported_metas(&parsed.func_exports)?;
+        state.functions.exported_metas(
+            &parsed.func_exports,
+            &super::import::active_unit_alias_targets(&state),
+        )?;
         drain_buf(&stdout_buf);
         drain_buf(&stderr_buf);
 
@@ -188,9 +191,13 @@ impl<P: ProcessManager> McpSession<P> {
     }
 
     /// Tool metadata for the export list, in source order. Fails fast
-    /// naming the first missing export.
+    /// naming the first missing export. Re-exported file functions
+    /// resolve through the entry unit's recorded alias targets.
     pub fn tool_metas(&self) -> Result<Vec<FuncMeta>> {
-        self.state.functions.exported_metas(&self.func_exports)
+        self.state.functions.exported_metas(
+            &self.func_exports,
+            &super::import::active_unit_alias_targets(&self.state),
+        )
     }
 
     /// Script `#` docs for a qualified name, if collected at parse.

@@ -194,8 +194,27 @@ fn dry_run_resolve(
             // every backend via the same trait object.
             fs.build_context().clone()
         });
+        // Canonicalize before comparing: `dir` may arrive through a
+        // symlinked path (e.g. `/var` vs `/private/var` on macOS)
+        // while the workspace root is canonical, and a raw
+        // `starts_with` would then misread an in-workspace
+        // subdirectory as outside and wrongly fall back to the root.
+        // Canonicalization failures keep the raw paths (today's
+        // behavior), never newly fail the preview.
+        // Canonicalize before comparing: `dir` may arrive through
+        // a symlinked spelling (e.g. `/var` vs `/private/var` on
+        // macOS, verbatim `\\?\` prefixes on Windows) while the
+        // workspace root is canonical, and a raw `starts_with` would
+        // then misread an in-workspace subdirectory as outside and
+        // wrongly fall back to the root. Canonicalization failures
+        // keep the raw paths (today's behavior), never newly fail the
+        // preview.
+        let dir_canon = fs.canonicalize(dir).unwrap_or_else(|_| dir.clone());
+        let fallback_canon = fs
+            .canonicalize(&fallback)
+            .unwrap_or_else(|_| fallback.clone());
         if fallback != *dir
-            && !dir.as_path().starts_with(fallback.as_path())
+            && !dir_canon.as_path().starts_with(fallback_canon.as_path())
             && let Ok(candidate) = fallback.join(path)
             && fs.entry_kind(&candidate).is_ok()
         {
@@ -425,11 +444,12 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
             // Owner-tagged with the module: calls resolve names against
             // the shared store. Re-imports skip already-registered
-            // names, so shared views stay idempotent.
+            // names, so shared views stay idempotent. The guard reads
+            // the canonical file key, never the importer alias.
             match alias {
                 Some(alias) => {
-                    let qualified = oxdock_parser::qualify(alias, name);
-                    if cx.state.functions.get(&qualified).is_none() {
+                    let canonical = super::native::file_func_key(&key, name);
+                    if cx.state.functions.get(&canonical).is_none() {
                         cx.state.functions.define_aliased_in(
                             alias_frame,
                             alias,
@@ -742,8 +762,8 @@ pub(crate) fn import_file<P: ProcessManager>(
             } = &step.kind
                 && func_exported.contains(name.as_str())
             {
-                let qualified = oxdock_parser::qualify(alias, name);
-                if cx.state.functions.get(&qualified).is_none() {
+                let canonical = super::native::file_func_key(&key, name);
+                if cx.state.functions.get(&canonical).is_none() {
                     let resolved_params = resolve_script_params(cx.state, name, params)?;
                     let return_tag = cx.state.resolve_tag(return_type)?;
                     cx.state

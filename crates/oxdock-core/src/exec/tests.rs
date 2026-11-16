@@ -8559,6 +8559,166 @@ fn dry_run_in_workspace_subdir_does_not_fall_back_to_root() {
 }
 
 #[test]
+fn dry_run_canonical_root_spelling_does_not_fall_back_to_root() {
+    // Containment compares canonicalized paths: a workspace root
+    // reached through its canonical spelling still contains its
+    // subdirectories, so the preview fails like validation and
+    // execution instead of inheriting root-only siblings. This pins
+    // the canonical-root configuration to the same verdict as the
+    // raw-root one above.
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+    resolver
+        .write_file(
+            &root.join("lib.oxdock").expect("lib path"),
+            b"FUNC F(): STRING {\n RETURN \"root\"\n}\nEXPORT F\n",
+        )
+        .expect("seed root lib");
+    let sub = root.join("sub").expect("subdir");
+    resolver.create_dir_all(&sub).expect("seed subdir");
+    let canon = resolver.canonicalize(&root).expect("canonical root");
+    let fs = Box::new(PathResolver::new_guarded(canon.clone(), canon).expect("canon resolver"));
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $v: STRING = LIB::F()
+    "#});
+    let table = oxdock_parser::ModuleTable::default();
+    let result = crate::exec::dry_run_closure(&steps, "sub/main.oxdock", &sub, fs.as_ref(), &table);
+    assert!(
+        result.is_err(),
+        "symlinked subdir must not inherit root lib, got: {result:?}"
+    );
+}
+
+#[test]
+fn host_harvest_alias_does_not_inherit_sibling_file_target() {
+    // Item-2 gate: an entry holding a host type-harvest alias never
+    // imports the sibling file another unit loads under the same
+    // alias. The alias resolves with an empty target set, so the
+    // sibling's function stays unknown instead of leaking across
+    // units (previously the missing-targets lookup bypassed the
+    // sibling gate and the call succeeded).
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "h.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "m.oxdock",
+        indoc! {r#"
+                IMPORT ["h.oxdock" AS ALIAS]
+                FUNC USE(): STRING {
+                 RETURN ALIAS::F("ok")
+                }
+                EXPORT USE
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [TYPE PIPE FROM STD AS ALIAS]
+        IMPORT ["m.oxdock" AS M]
+        LET $v: STRING = ALIAS::F("v")
+        LET $w: STRING = M::USE()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function `ALIAS::F`"),
+        "host-harvest alias must not resolve the sibling file, got: {err:#}"
+    );
+}
+
+#[test]
+fn dead_guarded_import_leaves_alias_unknown() {
+    // Dead (unsatisfiable-guard) imports never execute, so the alias
+    // stays unknown everywhere: expression calls fail unknown, and
+    // templates report an unknown placeholder instead of claiming a
+    // known alias with no function under it.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "h.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        [os:macos, os:windows] IMPORT ["h.oxdock" AS ALIAS]
+        LET $v: STRING = ALIAS::F("v")
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function"),
+        "dead import must leave the alias unknown, got: {err:#}"
+    );
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "h.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        [os:macos, os:windows] IMPORT ["h.oxdock" AS ALIAS]
+        ECHO "{{ ALIAS::F() }}"
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown placeholder function 'ALIAS::F'"),
+        "dead import must leave the placeholder unknown, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("no function"),
+        "dead import must not claim a known alias, got: {rendered}"
+    );
+}
+
+#[test]
+fn malformed_dollar_placeholder_fails_static_gate() {
+    // Empty `$` segments (`{{ $ }}`, `{{ $a. }}`) fail in the static
+    // template gate like they do in template call arguments, instead
+    // of passing silently when the extractor yields no variables.
+    let steps = parse_entry(indoc! {r#"
+        ECHO "{{ $ }}"
+    "#});
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:#}").contains("invalid placeholder variable: empty variable reference"),
+        "malformed `$` must fail statically, got: {err:#}"
+    );
+    let steps = parse_entry(indoc! {r#"
+        ECHO "{{ $a. }}"
+    "#});
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:#}").contains("invalid placeholder variable: empty variable reference"),
+        "trailing-dot `$` must fail statically, got: {err:#}"
+    );
+}
+
+#[test]
 fn file_import_body_env_does_not_leak() {
     // Isolation boundary (`state.rs::push_scope` snapshots envs): ENV
     // set in an imported body reverts on return, so run-state
@@ -8615,9 +8775,11 @@ fn file_import_module_env_without_inherit_fails_statically() {
         "{msg}"
     );
     // Attribution names the offending file position: the read sits on
-    // line 2 of the helper, inside the qualified function.
+    // line 2 of the helper, inside the qualified function. The label
+    // is the canonical defining-file key (entries are keyed by
+    // defining file, never importer alias), not the call-site alias.
     assert!(msg.contains("line 2"), "{msg}");
-    assert!(msg.contains("H::WHERE"), "{msg}");
+    assert!(msg.contains("helper.oxdock::WHERE"), "{msg}");
 }
 
 #[test]
@@ -10310,8 +10472,12 @@ fn template_colliding_alias_reports_alias_not_script() {
 }
 
 #[test]
-fn same_alias_same_func_name_collides_loud() {
-    // Same `LIB::FOO` from two files must not silently overwrite.
+fn same_alias_same_func_name_resolves_per_unit() {
+    // Per-unit alias isolation: `a` and `b` each import a different
+    // file under the same local alias `LIB`, both exporting `FOO`.
+    // Each unit resolves its own file: no cross-unit collision, no
+    // overwrite. Previously this failed loud on the global `LIB::FOO`
+    // key; entries are keyed by defining file now.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -10347,11 +10513,62 @@ fn same_alias_same_func_name_collides_loud() {
     let steps = parse_entry(indoc! {r#"
         IMPORT ["a.oxdock" AS LIB]
         IMPORT ["b.oxdock" AS B]
-        LET $x: STRING = B::USE_IT()
+        LET $x: STRING = LIB::FOO()
+        LET $y: STRING = B::USE_IT()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("per-unit aliases resolve independently");
+    assert_eq!(bindings.get("x").and_then(|v| v.as_str()), Some("a"));
+    assert_eq!(bindings.get("y").and_then(|v| v.as_str()), Some("c"));
+}
+
+#[test]
+fn same_unit_same_alias_two_files_fails_ambiguous_on_use() {
+    // One unit importing one alias from two files is genuinely
+    // ambiguous: same-frame duplicates never parse, but separate
+    // frames (here, two function bodies) each register. The imports
+    // succeed, but any `ALIAS::FUNC` call in that unit fails loud
+    // instead of silently picking first-wins.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "a"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "c"
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        FUNC USE_A(): STRING {
+         IMPORT ["a.oxdock" AS LIB]
+         RETURN LIB::FOO()
+        }
+        FUNC USE_C(): STRING {
+         IMPORT ["c.oxdock" AS LIB]
+         RETURN LIB::FOO()
+        }
+        LET $x: STRING = USE_A()
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:#}").contains("duplicate function `LIB::FOO`"),
-        "collision must fail loud, got: {err:#}"
+        format!("{err:#}").contains("is ambiguous: alias `LIB` is imported from multiple files"),
+        "ambiguous alias must fail loud on use, got: {err:#}"
     );
 }

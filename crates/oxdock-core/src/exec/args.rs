@@ -412,8 +412,17 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         Expr::Block(body) => super::handlers::block_value(cx, body),
         Expr::Call { name, args } => {
             // DSL-defined functions run through the call path so arity,
-            // depth budget, and scoping apply uniformly.
-            if cx.state.functions.contains_script(name.as_str()) {
+            // depth budget, and scoping apply uniformly. File-aliased
+            // spellings resolve to the canonical defining-file key
+            // first (entries are keyed by defining file, never
+            // importer alias); ambiguity fails loud here, like the
+            // call path does.
+            let canonical = super::native::resolve_file_call_key(
+                &super::import::active_unit_alias_targets(cx.state),
+                name.as_str(),
+            )?;
+            let lookup_name: &str = canonical.as_deref().unwrap_or(name.as_str());
+            if cx.state.functions.contains_script(lookup_name) {
                 return super::handlers::call_func_value(cx, name, args);
             }
             // Native entries gate before effects too: existence, the depth

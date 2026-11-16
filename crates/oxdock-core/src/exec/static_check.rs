@@ -75,8 +75,8 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{
-    CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag, Value,
-    qualify, render_structural,
+    CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, SCRIPT_MODULE_NAME, Step, StepKind,
+    TypeTag, Value, qualify, render_structural,
 };
 use oxdock_process::ProcessManager;
 
@@ -1111,6 +1111,12 @@ fn file_env_union(steps: &[Step]) -> HashSet<String> {
 /// so a zero-function module still proves its alias known.
 fn import_aliases(steps: &[Step], out: &mut HashSet<String>) {
     for step in steps {
+        // Dead steps never execute, so their imports never register at
+        // runtime either; skip them like `module_lets` and collection
+        // do instead of marking unreachable aliases known.
+        if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+            continue;
+        }
         match &step.kind {
             StepKind::ImportFile { alias, .. } => {
                 out.insert(alias.clone());
@@ -1143,6 +1149,11 @@ fn outbound_alias_targets(
     entry_parent: Option<&GuardedPath>,
 ) {
     for step in steps {
+        // Dead imports never execute: the runtime records nothing for
+        // them, so the static targets must not either.
+        if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+            continue;
+        }
         let (path, alias) = match &step.kind {
             StepKind::ImportFile { path, alias } => (path.clone(), Some(alias.clone())),
             StepKind::ImportFuncs {
@@ -1153,11 +1164,16 @@ fn outbound_alias_targets(
             _ => (String::new(), None),
         };
         if let Some(alias) = alias {
+            // Always record the alias, even when the target is not a
+            // closure file (host-module harvests): the runtime records
+            // the same empty set, so the gate below reads `Some` and
+            // rejects instead of bypassing on a missing entry.
+            let targets = out.entry(alias).or_default();
             let is_entry = entry_parent.is_some();
             if let Some(key) =
                 super::import::resolve_static_top_level(entry_parent, dir, files, &path, is_entry)
             {
-                out.entry(alias).or_default().insert(key);
+                targets.insert(key);
             }
         }
         for body in super::import::child_bodies(&step.kind) {
@@ -1167,10 +1183,13 @@ fn outbound_alias_targets(
 }
 
 /// Merge one collected map into `all_funcs`, failing loud on same-name
-/// different-owner collisions instead of last-wins overwrite. Same file
+/// different-owner collisions instead of last-wins overwrite. Only
+/// global-namespace keys (bare, `SCRIPT::`) can collide now: aliased
+/// file functions register under canonical defining-file keys, so
+/// independent units reuse local aliases freely and the same file
+/// re-imported under any alias merges identically. Same file
 /// re-imported under the same alias re-registers identically and stays
-/// silent; different files claiming one `ALIAS::FUNC` is a programmer
-/// error.
+/// silent; two global names claiming one key is a programmer error.
 fn extend_funcs_checked(
     all_funcs: &mut HashMap<String, FuncInfo>,
     incoming: HashMap<String, FuncInfo>,
@@ -1542,12 +1561,26 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 // `$` and bare reads flow through the single var
                 // extractor plus expression inference, so templates and
-                // code agree on every error. Call shapes additionally
-                // resolve the callee: bare heads fail like runtime
-                // (undefined script variable), qualified heads resolve
-                // like expression calls (unknown `ALIAS::TYPO` fails
-                // here, never at runtime).
-                PlaceholderKey::Dollar(_) | PlaceholderKey::Bare(_) => {
+                // code agree on every error. Malformed `$` paths (empty
+                // segments like `{{ $ }}`) fail here like they do in
+                // template call arguments, instead of passing silently
+                // when the extractor yields no variables. Call shapes
+                // additionally resolve the callee: bare heads fail like
+                // runtime (undefined script variable), qualified heads
+                // resolve like expression calls (unknown `ALIAS::TYPO`
+                // fails here, never at runtime).
+                PlaceholderKey::Dollar(rest) => {
+                    if oxdock_parser::template::split_var_path(rest)
+                        .iter()
+                        .any(|part| part.is_empty())
+                    {
+                        bail!("invalid placeholder variable: empty variable reference");
+                    }
+                    for var in placeholder_vars(key) {
+                        self.check_template_var(&var, env, scope, depth)?;
+                    }
+                }
+                PlaceholderKey::Bare(_) => {
                     for var in placeholder_vars(key) {
                         self.check_template_var(&var, env, scope, depth)?;
                     }
@@ -1618,11 +1651,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let Some(meta) = self.pure_hosts.get(&qualified).cloned() else {
             // Sibling-leakage gate, mirroring `resolve_call`: a known
             // file-aliased function is only a script function to units
-            // that import its alias from the defining file. `SCRIPT::`
-            // and bare names resolve globally; unimported aliases fall
-            // through to unknown instead of naming a sibling's function
-            // and instructing a call that can never resolve.
-            let is_script_visible = self.funcs.get(&qualified).is_some_and(|info| {
+            // whose alias targets resolve to its defining file (registry
+            // entries are keyed by defining file, never importer alias).
+            // `SCRIPT::` and bare names resolve globally by spelling;
+            // unimported aliases fall through to unknown instead of
+            // naming a sibling's function and instructing a call that
+            // can never resolve. One unit importing one alias from
+            // several files is ambiguous and fails loud.
+            let mut is_script_visible = self.funcs.get(&qualified).is_some_and(|info| {
                 super::native::script_visible_to_unit(
                     info.module.as_deref(),
                     module,
@@ -1630,6 +1666,25 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     self.alias_targets.get(module),
                 )
             });
+            if let Some(targets) = self.alias_targets.get(module) {
+                if targets.len() == 1 {
+                    let defining = targets.iter().next().expect("singleton checked");
+                    let canonical = super::native::file_func_key(defining, name);
+                    is_script_visible = self.funcs.get(&canonical).is_some_and(|info| {
+                        super::native::script_visible_to_unit(
+                            info.module.as_deref(),
+                            module,
+                            self.imported_aliases.contains(module),
+                            self.alias_targets.get(module),
+                        )
+                    });
+                } else if targets.len() > 1 {
+                    bail!(
+                        "{}",
+                        super::native::ambiguous_alias_message(module, name, targets)
+                    );
+                }
+            }
             if let Some(text) = super::native::describe_placeholder_miss(
                 module,
                 name,
@@ -2046,10 +2101,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     continue;
                 }
                 match alias {
-                    Some(alias) => {
+                    Some(_) => {
+                        // Canonical file key, never the importer alias:
+                        // independent units reuse local aliases without
+                        // colliding; resolution maps each unit's alias to
+                        // this key through its own targets.
                         self.define_collected(
                             name,
-                            vec![format!("{alias}::{name}")],
+                            vec![super::native::file_func_key(module, name)],
                             params,
                             return_type,
                             *is_async,
@@ -2077,11 +2136,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
         // Harvests never execute the file body: any wanted function
         // that observes module state has nothing to read, so fail the
-        // site with the fix attached.
+        // site with the fix attached. Keys are canonical (defining
+        // file, never importer alias).
         if let Some(names) = func_names {
             for name in names {
                 let key = match alias {
-                    Some(alias) => format!("{alias}::{name}"),
+                    Some(_) => super::native::file_func_key(module, name),
                     None => name.clone(),
                 };
                 if self.func_touches_module(&key)? {
@@ -3410,41 +3470,51 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Resolve a callee: script functions (bare or `SCRIPT::`-qualified)
     /// win over host metas, matching runtime shadowing. Unknown names
     /// yield `ANY`: the parse-time unknown-function gate owns that
-    /// error, not this pass. Two exceptions, both scoped to the active
-    /// unit's own outbound imports: a qualified name whose alias the
-    /// unit imports but whose full name is absent (`ALIAS::TYPO`), and
-    /// a known `ALIAS::FUNC` the unit never imported (sibling leakage).
-    /// The closure pass knows every export under a file alias, while
-    /// the parse-time gate treats file aliases as opaque, so only this
-    /// pass can reject these. Passes without that knowledge
-    /// (single-file validation, touch probes) keep the `ANY` leniency:
-    /// an absent alias means "unknown here", not "known absent".
-    /// `SCRIPT::` always resolves (entry-owned); host names bypass the
-    /// alias gate entirely.
+    /// error, not this pass. File-aliased spellings resolve through
+    /// the active unit's own outbound targets to the defining file's
+    /// canonical key (registry entries are keyed by defining file,
+    /// never importer alias). Three exceptions, all scoped to the
+    /// unit's imports: an alias the unit imports with no recorded
+    /// target (host-module harvests) or whose full canonical name is
+    /// absent (`ALIAS::TYPO`) is unknown; one alias imported from
+    /// several files is ambiguous and fails loud; a known
+    /// `ALIAS::FUNC` the unit never imported (sibling leakage) is
+    /// unknown. Passes without that knowledge (single-file
+    /// validation, touch probes) keep the `ANY` leniency: an absent
+    /// alias means "unknown here", not "known absent". `SCRIPT::`
+    /// always resolves (entry-owned); host names bypass the alias
+    /// gate entirely.
     fn resolve_call(&mut self, name: &str, depth: usize) -> Result<Callee> {
-        if let Some(info) = self.funcs.get(name) {
-            // Sibling-leakage gate: a known file-aliased function is
-            // only visible to units that import its alias from the
-            // defining file. `SCRIPT::` and bare names resolve globally;
-            // hosts never land here. Alias membership alone is not
-            // enough: same alias in different units maps to different
-            // files, so the defining file must be among this unit's
-            // targets for the alias.
-            if let Some((alias, _)) = name.split_once("::")
-                && alias != "SCRIPT"
-            {
-                if !self.imported_aliases.contains(alias) {
+        // Canonical lookup key: file-aliased spellings map through the
+        // unit's targets, everything else resolves as spelled.
+        let mut lookup = name.to_string();
+        if let Some((alias, base)) = name.split_once("::")
+            && alias != SCRIPT_MODULE_NAME
+        {
+            match self.alias_targets.get(alias) {
+                Some(targets) if targets.len() == 1 => {
+                    let defining = targets.iter().next().expect("singleton checked");
+                    lookup = super::native::file_func_key(defining, base);
+                }
+                Some(targets) if targets.is_empty() => {
                     bail!("unknown function `{name}`");
                 }
-                if let Some(defining) = info.module.clone()
-                    && let Some(targets) = self.alias_targets.get(alias)
-                    && !targets.contains(&defining)
-                {
-                    bail!("unknown function `{name}`");
+                Some(targets) => {
+                    bail!(
+                        "{}",
+                        super::native::ambiguous_alias_message(alias, base, targets)
+                    );
+                }
+                None => {
+                    if self.imported_aliases.contains(alias) {
+                        bail!("unknown function `{name}`");
+                    }
                 }
             }
+        }
+        if let Some(info) = self.funcs.get(&lookup) {
             let info = info.clone();
-            let ret = self.func_return_owned(&info, name, depth)?;
+            let ret = self.func_return_owned(&info, &lookup, depth)?;
             let params = info.params;
             return Ok(Callee {
                 params: Some(params),

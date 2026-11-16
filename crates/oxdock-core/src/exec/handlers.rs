@@ -2551,7 +2551,20 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     args: &[Expr],
 ) -> Result<Value> {
     // 1. Registry lookup: the single source for every callable.
-    let Some(entry) = cx.state.functions.get(name) else {
+    // File-aliased spellings resolve through the calling unit's
+    // recorded targets to the defining file's canonical key (entries
+    // are keyed by defining file, never importer alias, so units
+    // reuse aliases freely). Ambiguous aliases (one unit, several
+    // files) fail here, never by silent first-wins. Anything the
+    // unit never imported falls through to the global spelling:
+    // hosts resolve, everything else keeps the unknown-function
+    // error below.
+    let canonical = super::native::resolve_file_call_key(
+        &super::import::active_unit_alias_targets(cx.state),
+        name,
+    )?;
+    let lookup_name: &str = canonical.as_deref().unwrap_or(name);
+    let Some(entry) = cx.state.functions.get(lookup_name) else {
         bail!("unknown function `{name}`");
     };
     // 2. Global recursion check.
