@@ -449,12 +449,17 @@ fn merge_harvest<P: ProcessManager>(
     path: &str,
     alias: Option<&str>,
     type_names: &[String],
+    is_entry: bool,
 ) -> Result<()> {
-    let resolved = dir
-        .join(path)
-        .map_err(|err| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {err}"))?;
-    let key = resolved.display();
-    let Some(file) = files.iter().find(|f| f.key == key) else {
+    // Entry-first resolution shared with expansion: `resolve_static_top_level`
+    // probes the entry dir before `dir` for entry-unit imports, so an
+    // outside-workspace entry finds its sibling lib instead of aborting
+    // with "not in the import closure". Nested file units resolve purely
+    // against their own directory.
+    let entry_parent = exec.entry_file.as_ref().and_then(|entry| entry.parent());
+    let Some(key) =
+        super::import::resolve_static_top_level(entry_parent.as_ref(), dir, files, path, is_entry)
+    else {
         if exec.module_table.modules.contains_key(path) {
             for name in type_names {
                 exec.resolve_tag(name).map_err(|err| {
@@ -463,6 +468,9 @@ fn merge_harvest<P: ProcessManager>(
             }
             return Ok(());
         }
+        anyhow::bail!("IMPORT `{path}` cannot be read: not in the import closure");
+    };
+    let Some(file) = files.iter().find(|f| f.key == key) else {
         anyhow::bail!("IMPORT `{path}` cannot be read: not in the import closure");
     };
     let aliases = super::typing::collect_type_aliases(&file.steps, exec)?;
@@ -480,11 +488,14 @@ fn merge_harvest<P: ProcessManager>(
 
 /// Merge every `IMPORT [TYPE ...]` harvest in `steps` (including
 /// nested bodies: validation is conservative, like expansion).
+/// `is_entry` selects entry-first closure-key resolution for the entry
+/// unit; file units resolve purely against their own directory.
 fn merge_harvests_in<P: ProcessManager>(
     exec: &mut ExecState<P>,
     files: &[ClosureFile],
     dir: &GuardedPath,
     steps: &[Step],
+    is_entry: bool,
 ) -> Result<()> {
     for step in steps {
         if let StepKind::ImportFuncs {
@@ -495,10 +506,18 @@ fn merge_harvests_in<P: ProcessManager>(
         } = &step.kind
             && !type_names.is_empty()
         {
-            merge_harvest(exec, files, dir, path, alias.as_deref(), type_names)?;
+            merge_harvest(
+                exec,
+                files,
+                dir,
+                path,
+                alias.as_deref(),
+                type_names,
+                is_entry,
+            )?;
         }
         for body in super::import::child_bodies(&step.kind) {
-            merge_harvests_in(exec, files, dir, body)?;
+            merge_harvests_in(exec, files, dir, body, is_entry)?;
         }
     }
     Ok(())
@@ -545,9 +564,9 @@ pub fn validate_script_closure<P: ProcessManager>(
     let saved_global = exec.type_aliases.clone();
     let outcome: Result<()> = (|| {
         let entry_base = super::import::import_base(exec);
-        merge_harvests_in(exec, files, &entry_base, entry)?;
+        merge_harvests_in(exec, files, &entry_base, entry, true)?;
         for file in files {
-            merge_harvests_in(exec, files, &file.dir, &file.steps)?;
+            merge_harvests_in(exec, files, &file.dir, &file.steps, false)?;
         }
         // Qualified exports: a bare `IMPORT ["f" AS C]` exposes the
         // file's EXPORTed types only as `C::NAME`, mirroring func
@@ -603,12 +622,19 @@ pub fn validate_script_closure<P: ProcessManager>(
         // different defining files; `resolve_call` requires the defining
         // file to be among the current unit's targets.
         let entry_base = super::import::import_base(exec);
+        let entry_parent = exec.entry_file.as_ref().and_then(|entry| entry.parent());
         let mut entry_targets: HashMap<String, HashSet<String>> = HashMap::new();
-        outbound_alias_targets(entry, &entry_base, files, &mut entry_targets);
+        outbound_alias_targets(
+            entry,
+            &entry_base,
+            files,
+            &mut entry_targets,
+            entry_parent.as_ref(),
+        );
         let mut file_targets: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
         for file in files {
             let mut targets = HashMap::new();
-            outbound_alias_targets(&file.steps, &file.dir, files, &mut targets);
+            outbound_alias_targets(&file.steps, &file.dir, files, &mut targets, None);
             file_targets.insert(file.key.clone(), targets);
         }
         let entry_defs: Vec<(String, String)> = super::typing::collect_type_aliases(entry, exec)?
@@ -1106,12 +1132,15 @@ fn import_aliases(steps: &[Step], out: &mut HashSet<String>) {
 /// file keys it imports under that alias, resolved through the closure
 /// without filesystem reads. Nested bodies count, mirroring
 /// `import_aliases`. Bare harvests (`alias None`) stay global by design
-/// and record nothing here.
+/// and record nothing here. `entry_parent` enables entry-first key
+/// matching for the entry unit (outside-workspace siblings); file
+/// units pass `None` and resolve purely against their own directory.
 fn outbound_alias_targets(
     steps: &[Step],
     dir: &GuardedPath,
     files: &[ClosureFile],
     out: &mut HashMap<String, HashSet<String>>,
+    entry_parent: Option<&GuardedPath>,
 ) {
     for step in steps {
         let (path, alias) = match &step.kind {
@@ -1123,16 +1152,16 @@ fn outbound_alias_targets(
             } => (path.clone(), Some(alias.clone())),
             _ => (String::new(), None),
         };
-        if let Some(alias) = alias
-            && let Ok(resolved) = dir.join(&path)
-        {
-            let key = resolved.display();
-            if files.iter().any(|f| f.key == key) {
+        if let Some(alias) = alias {
+            let is_entry = entry_parent.is_some();
+            if let Some(key) =
+                super::import::resolve_static_top_level(entry_parent, dir, files, &path, is_entry)
+            {
                 out.entry(alias).or_default().insert(key);
             }
         }
         for body in super::import::child_bodies(&step.kind) {
-            outbound_alias_targets(body, dir, files, out);
+            outbound_alias_targets(body, dir, files, out, entry_parent);
         }
     }
 }

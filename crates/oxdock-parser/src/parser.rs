@@ -2493,6 +2493,11 @@ pub struct ParseCtx<'a> {
     /// (forward references allowed). Separate from func exports so the
     /// MCP server never confuses a type for a tool.
     pub type_exports: RefCell<Vec<String>>,
+    /// Top-level `FUNC` names pre-declared before lowering, so forward
+    /// references resolve regardless of order. Separate from `funcs`
+    /// frames so duplicate detection in `declare_func` stays intact;
+    /// `visible_snapshot` unions this set.
+    pub forward: RefCell<Vec<HashSet<String>>>,
     /// 1-based source line of the statement currently lowering (the
     /// innermost split statement; updated per statement by the body
     /// loops, read as the base for nested splits). Lets every error
@@ -2516,6 +2521,7 @@ impl<'a> ParseCtx<'a> {
             imports: RefCell::new(vec![Vec::new()]),
             func_exports: RefCell::new(Vec::new()),
             type_exports: RefCell::new(Vec::new()),
+            forward: RefCell::new(vec![HashSet::new()]),
             current_line: RefCell::new(0),
         }
     }
@@ -2528,6 +2534,12 @@ impl<'a> ParseCtx<'a> {
         for scope in self.funcs.borrow().iter() {
             funcs.extend(scope.iter().cloned());
         }
+        funcs.extend(
+            self.forward
+                .borrow()
+                .iter()
+                .flat_map(|frame| frame.iter().cloned()),
+        );
         let mut imports = Vec::new();
         for frame in self.imports.borrow().iter() {
             for module in frame {
@@ -2572,6 +2584,84 @@ fn resolve_name(ctx: &ParseCtx, stmt: usize, name: &str) -> Result<String, Token
     let (funcs, imports) = ctx.visible_snapshot();
     resolve_call_name(ctx.modules, &funcs, &imports, &lowering_ctx(stmt), name)
         .map_err(|e| lower_err(stmt, e))
+}
+
+/// Pre-declare `FUNC` names before lowering, so forward references
+/// resolve regardless of order. Only valid non-reserved headers hoist:
+/// the head (`FUNC NAME`, `ASYNC FUNC NAME`), a parameter Paren group,
+/// a `:` return-type shape (via the shared `parse_type_shape` owner),
+/// and a trailing non-template Brace body. Malformed headers
+/// (`FUNC FOO() ECHO hi`) and reserved names (`FUNC LEN`) stay silent
+/// here so the main pass owns their diagnostics. Runs per scope: the
+/// caller pre-declares each statement list into its own frame, so
+/// nested blocks resolve forward without leaking outward.
+fn predeclare_forward_funcs(stmts: &[Stmt], ctx: &ParseCtx) {
+    // Guarded definitions hoist like unguarded ones: `parse_func_at`
+    // registers the name in `ctx.funcs` unconditionally, so the
+    // forward set must see the same statement regardless of its
+    // guard, or forward calls to `[os:macos] FUNC FOO` would fail
+    // while backward calls resolve.
+    for stmt in stmts {
+        let body = &stmt.body;
+        let name_idx = match body.first().map(|t| &t.kind) {
+            Some(TokKind::Word(w)) if w == KEYWORD_FUNC => 1,
+            Some(TokKind::Word(w)) if w == KEYWORD_ASYNC => match body.get(1).map(|t| &t.kind) {
+                Some(TokKind::Word(next)) if next == KEYWORD_FUNC => 2,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let Some(tok) = body.get(name_idx) else {
+            continue;
+        };
+        let TokKind::Word(name) = &tok.kind else {
+            continue;
+        };
+        if crate::resolve::check_func_ident(&lowering_ctx(0), name).is_err() {
+            continue;
+        }
+        if ctx.reserved.contains(name) || ctx.modules.reserved_base_names().contains(name) {
+            continue;
+        }
+        let Some(paren) = body.get(name_idx + 1) else {
+            continue;
+        };
+        if !matches!(
+            &paren.kind,
+            TokKind::Group {
+                delim: GroupDelim::Paren,
+                ..
+            }
+        ) {
+            continue;
+        }
+        let colon_pos = name_idx + 2;
+        if !matches!(
+            body.get(colon_pos).map(|t| &t.kind),
+            Some(TokKind::Punct(':'))
+        ) {
+            continue;
+        }
+        let Some(ret_end) = parse_type_shape(body, colon_pos + 1) else {
+            continue;
+        };
+        let Some(block) = body.get(ret_end) else {
+            continue;
+        };
+        if !matches!(
+            &block.kind,
+            TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            }
+        ) || is_template_brace(block)
+        {
+            continue;
+        }
+        if let Some(frame) = ctx.forward.borrow_mut().last_mut() {
+            frame.insert(name.clone());
+        }
+    }
 }
 
 /// Qualify bare placeholder calls in template text through the
@@ -3648,6 +3738,7 @@ fn parse_body_steps(
     // exit runs on failure.
     ctx.funcs.borrow_mut().push(HashSet::new());
     ctx.imports.borrow_mut().push(Vec::new());
+    ctx.forward.borrow_mut().push(HashSet::new());
     // Nested splits count lines from the enclosing statement's line
     // (headers are single-line, so the brace shares it). Save and
     // restore the discipline around the loop: sibling bodies after
@@ -3655,18 +3746,21 @@ fn parse_body_steps(
     // (On error the parse aborts and the context is discarded.)
     let saved = *ctx.current_line.borrow();
     let mut out = Vec::new();
-    for s in split_statements(inner, saved)? {
+    let stmts = split_statements(inner, saved)?;
+    predeclare_forward_funcs(&stmts, ctx);
+    for s in &stmts {
         // The innermost statement owns error positions: record it for
         // nested splits and stamp failures that have none yet (deeper
         // frames stamp first, so this never overwrites real positions).
         *ctx.current_line.borrow_mut() = s.line;
         out.extend(
-            lower_stmt_steps(&s, stmt, ctx, true, mark).map_err(|e| stamp_pos(e, s.line, s.col))?,
+            lower_stmt_steps(s, stmt, ctx, true, mark).map_err(|e| stamp_pos(e, s.line, s.col))?,
         );
     }
     *ctx.current_line.borrow_mut() = saved;
     ctx.funcs.borrow_mut().pop();
     ctx.imports.borrow_mut().pop();
+    ctx.forward.borrow_mut().pop();
     Ok(out)
 }
 
@@ -8254,7 +8348,9 @@ pub fn parse_tokens(
 pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, TokenError> {
     let mut out = Vec::new();
     *ctx.current_line.borrow_mut() = 1;
-    for (i, s) in split_statements(toks, 1)?.iter().enumerate() {
+    let stmts = split_statements(toks, 1)?;
+    predeclare_forward_funcs(&stmts, ctx);
+    for (i, s) in stmts.iter().enumerate() {
         *ctx.current_line.borrow_mut() = s.line;
         out.extend(
             lower_stmt_steps(s, i, ctx, false, true).map_err(|e| stamp_pos(e, s.line, s.col))?,
@@ -9991,5 +10087,41 @@ mod tests {
                 "deferred must beat InvalidSyntax for {text:?}, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn forward_reference_resolves_regardless_of_order() {
+        // `CALLER` calls `CALLEE` defined later. Top-level
+        // pre-declaration hoists names before lowering, so order
+        // does not matter. Runtime still executes sequentially;
+        // the call below runs after both definitions.
+        let steps = crate::parse_script(
+            "FUNC CALLER(): STRING { RETURN CALLEE() }\nFUNC CALLEE(): STRING { RETURN \"forward-ok\" }\n",
+            lower,
+        )
+        .expect("forward ref must parse");
+        assert!(
+            matches!(&steps[0].kind, crate::StepKind::FuncDef { name, .. } if name == "CALLER"),
+            "first def kept, got: {:?}",
+            steps[0].kind
+        );
+    }
+
+    #[test]
+    fn forward_reference_to_guarded_func_resolves() {
+        // Guarded definitions hoist like unguarded ones: `parse_func_at`
+        // registers `[os:macos] FUNC FOO` unconditionally, so a forward
+        // call before the definition must resolve identically to a
+        // backward call after it.
+        let steps = crate::parse_script(
+            "LET $x: STRING = FOO()\n[os:macos] FUNC FOO(): STRING { RETURN \"guarded\" }\n",
+            lower,
+        )
+        .expect("forward guarded ref must parse");
+        assert!(
+            matches!(&steps[1].kind, crate::StepKind::FuncDef { name, .. } if name == "FOO"),
+            "guarded def kept, got: {:?}",
+            steps[1].kind
+        );
     }
 }

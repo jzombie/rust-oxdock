@@ -6691,6 +6691,37 @@ fn parse_entry(src: &str) -> Vec<Step> {
 }
 
 #[test]
+fn forward_reference_caller_before_callee_runs() {
+    // Item 4: callees resolve regardless of definition order.
+    // Parse-time pre-declaration hoists top-level names; the LET
+    // below runs after both definitions so runtime order holds.
+    // Note: `{{ CALLER() }}` stays an unknown placeholder by
+    // design (script funcs never resolve in templates); bind
+    // through LET instead.
+    let fs = MockFs::new();
+    let steps = parse_entry(indoc! {r#"
+        FUNC CALLER(): STRING {
+         RETURN CALLEE()
+        }
+        FUNC CALLEE(): STRING {
+         RETURN "forward-ok"
+        }
+        LET $x: STRING = CALLER()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("forward ref runs");
+    assert_eq!(
+        bindings.get("x").and_then(|v| v.as_str()),
+        Some("forward-ok")
+    );
+}
+
+#[test]
 fn file_import_registers_alias_and_calls() {
     let fs = MockFs::new();
     seed_lib(
@@ -8283,6 +8314,131 @@ fn file_import_outside_entry_resolves_against_workspace_root() {
     )
     .expect("outside entry falls back to workspace root");
     assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("staged"));
+}
+
+#[test]
+fn file_import_outside_entry_prefers_sibling_lib() {
+    // Entry-first resolution: an outside-workspace entry finds the
+    // sibling lib in its own dir even when a same-named workspace lib
+    // shadows it. Static harvest merge, alias targets, and runtime all
+    // share `resolve_top_level`, so `LIB::F` calls the sibling.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN "workspace"
+                }
+                EXPORT F
+            "#},
+    );
+    let outside = GuardedPath::tempdir().expect("outside tempdir");
+    let sibling = outside
+        .as_guarded_path()
+        .join("lib.oxdock")
+        .expect("sibling lib path");
+    fs.write_file(
+        &sibling,
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN "sibling"
+                }
+                EXPORT F
+            "#}
+        .as_bytes(),
+    )
+    .expect("seed sibling lib");
+    let entry = outside
+        .as_guarded_path()
+        .join("main.oxdock")
+        .expect("entry path");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $v: STRING = LIB::F("x")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager_with_modules_and_entry(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+        Vec::new(),
+        Vec::new(),
+        Some(entry),
+    )
+    .expect("outside entry prefers sibling lib");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("sibling"));
+}
+
+#[test]
+fn file_import_outside_entry_type_harvest_prefers_sibling() {
+    // Same entry-first rule for `[[TYPE T FROM ...]]` harvests: the
+    // static harvest merge resolves through the closure keys recorded
+    // by entry-first expansion, not the workspace fallback.
+    let fs = MockFs::new();
+    let outside = GuardedPath::tempdir().expect("outside tempdir");
+    let sibling = outside
+        .as_guarded_path()
+        .join("lib.oxdock")
+        .expect("sibling lib path");
+    fs.write_file(
+        &sibling,
+        indoc! {r#"
+                TYPE PERSON = MAP<name: STRING>
+                EXPORT TYPE PERSON
+            "#}
+        .as_bytes(),
+    )
+    .expect("seed sibling lib");
+    let entry = outside
+        .as_guarded_path()
+        .join("main.oxdock")
+        .expect("entry path");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[TYPE PERSON FROM "lib.oxdock"]]
+        LET $p: PERSON = {name: "bob"}
+    "#});
+    let (_, _, bindings) = run_steps_with_manager_with_modules_and_entry(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+        Vec::new(),
+        Vec::new(),
+        Some(entry),
+    )
+    .expect("outside entry type harvest prefers sibling");
+    assert!(bindings.contains_key("p"));
+}
+
+#[test]
+fn dry_run_in_workspace_subdir_does_not_fall_back_to_root() {
+    // `dry_run_resolve` falls back to the workspace root only for
+    // outside-workspace dirs. An in-workspace subdirectory script
+    // importing a root-only sibling must fail the preview exactly
+    // like validation and execution, not silently inherit it.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F(): STRING {
+                 RETURN "root"
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $v: STRING = LIB::F()
+    "#});
+    let sub = fs.root().join("sub").expect("subdir");
+    let table = oxdock_parser::ModuleTable::default();
+    let result = crate::exec::dry_run_closure(&steps, "sub/main.oxdock", &sub, &fs, &table);
+    assert!(
+        result.is_err(),
+        "in-workspace subdir must not inherit root lib, got: {result:?}"
+    );
 }
 
 #[test]

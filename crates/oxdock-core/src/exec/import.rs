@@ -144,10 +144,10 @@ fn dry_run_load(
     cache: &mut HashMap<String, Vec<Step>>,
 ) -> Result<(String, Vec<Step>, GuardedPath)> {
     // Same workspace-side join as execution: imported files live in the
-    // source tree, never the snapshot.
-    let resolved = dir
-        .join(path)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))?;
+    // source tree, never the snapshot. Top-level staged scripts (entry
+    // outside the workspace) fall back to the workspace root like
+    // validation and execution, so the preview lists what the run loads.
+    let resolved = dry_run_resolve(fs, dir, path, stack.is_empty())?;
     let key = resolved.display();
     if stack.iter().any(|p| p == &key) {
         let mut chain = stack.to_vec();
@@ -168,6 +168,42 @@ fn dry_run_load(
     let parsed = read_and_parse_import(fs, &resolved, path, table)?;
     cache.insert(key.clone(), parsed.clone());
     Ok((key, parsed, nested_dir))
+}
+
+/// Preview-phase twin of [`resolve_top_level`]: no entry handle here,
+/// so the workspace root is the fallback directly. Tries `dir` first;
+/// at top level (`is_top`) a miss falls back to the workspace root
+/// (then build context) only when `dir` sits outside it, matching
+/// `import_base` for staged outside-workspace scripts. In-workspace
+/// subdirectory scripts never inherit root-level siblings. Nested
+/// imports stay importer-relative.
+fn dry_run_resolve(
+    fs: &dyn WorkspaceFs,
+    dir: &GuardedPath,
+    path: &str,
+    is_top: bool,
+) -> Result<GuardedPath> {
+    if let Ok(candidate) = dir.join(path)
+        && fs.entry_kind(&candidate).is_ok()
+    {
+        return Ok(candidate);
+    }
+    if is_top {
+        let fallback = fs.workspace_root().cloned().unwrap_or_else(|| {
+            // WorkspaceFs is object-safe; build_context is available on
+            // every backend via the same trait object.
+            fs.build_context().clone()
+        });
+        if fallback != *dir
+            && !dir.as_path().starts_with(fallback.as_path())
+            && let Ok(candidate) = fallback.join(path)
+            && fs.entry_kind(&candidate).is_ok()
+        {
+            return Ok(candidate);
+        }
+    }
+    dir.join(path)
+        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))
 }
 
 /// Preview a harvest target: only its top-level nested imports load,
@@ -298,11 +334,11 @@ pub(crate) fn import_funcs<P: ProcessManager>(
     // dependency and fails fast on typos. Mixed func+type harvests from
     // host modules stay unsupported: use `IMPORT [MOD]` for host funcs.
     if func_names.is_empty() && !type_names.is_empty() {
+        // Entry-first probe shared with expansion: a sibling file named
+        // like a host module routes to the file when present.
         let base = import_base(cx.state);
-        let resolved_opt = base.join(path).ok();
-        let file_exists = resolved_opt
-            .as_ref()
-            .is_some_and(|r| cx.state.fs.entry_kind(r).is_ok());
+        let stack = cx.state.import_stack.clone();
+        let file_exists = top_level_file_exists(cx.state, &base, &stack, path);
         if !file_exists && cx.state.module_table.modules.contains_key(path) {
             for name in type_names {
                 cx.state.resolve_tag(name).map_err(|e| {
@@ -962,14 +998,13 @@ fn expand_walk<P: ProcessManager>(
             } => {
                 // Host plugin types share the harvest syntax: a type-only
                 // harvest naming a known host module validates the types
-                // resolve globally and records no file. Mixed func+type
-                // harvests from host modules stay unsupported (use
+                // resolve globally and records no file. Entry-first probe
+                // (see `top_level_file_exists`): a sibling file named like
+                // a host module routes to the file when present. Mixed
+                // func+type harvests from host modules stay unsupported (use
                 // `IMPORT [MOD]` for host funcs).
                 if func_names.is_empty() && !type_names.is_empty() {
-                    let resolved_opt = dir.join(path).ok();
-                    let file_exists = resolved_opt
-                        .as_ref()
-                        .is_some_and(|r| state.fs.entry_kind(r).is_ok());
+                    let file_exists = top_level_file_exists(state, dir, stack, path);
                     if !file_exists && state.module_table.modules.contains_key(path) {
                         for name in type_names {
                             state.resolve_tag(name).map_err(|e| {
@@ -1038,13 +1073,10 @@ fn expand_walk_top<P: ProcessManager>(
                 func_names,
                 type_names,
             } => {
-                // Host type-only harvests record no file (same rule as
-                // `expand_walk` above).
+                // Host type-only harvests record no file (same entry-first
+                // probe as `expand_walk` above).
                 if func_names.is_empty() && !type_names.is_empty() {
-                    let resolved_opt = dir.join(path).ok();
-                    let file_exists = resolved_opt
-                        .as_ref()
-                        .is_some_and(|r| state.fs.entry_kind(r).is_ok());
+                    let file_exists = top_level_file_exists(state, dir, stack, path);
                     if !file_exists && state.module_table.modules.contains_key(path) {
                         for name in type_names {
                             state.resolve_tag(name).map_err(|e| {
@@ -1177,9 +1209,7 @@ fn expand_load<P: ProcessManager>(
     stack: &[GuardedPath],
     path: &str,
 ) -> Result<ExpandedImport> {
-    let resolved = dir
-        .join(path)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))?;
+    let resolved = resolve_top_level(state, dir, stack, path)?;
     let key = resolved.display();
     if stack.iter().any(|p| p == &resolved) {
         let mut chain: Vec<String> = stack.iter().map(|p| p.display()).collect();
@@ -1253,10 +1283,10 @@ fn load_file<P: ProcessManager>(
     // lexically under the importer's own guard instead of routing
     // through the run resolver's snapshot root. `join` enforces the
     // base root's containment (`..` escapes fail here); `read_file`
-    // re-validates on the backend.
-    let resolved = base
-        .join(path)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))?;
+    // re-validates on the backend. Top-level outside-workspace
+    // entries try the entry dir first (see `resolve_top_level`),
+    // preserving the staged-temp fallback to the workspace root.
+    let resolved = resolve_top_level(state, base, stack, path)?;
     let key = resolved.display();
     if stack.iter().any(|p| p == &resolved) {
         let mut chain: Vec<String> = stack.iter().map(|p| p.display()).collect();
@@ -1338,4 +1368,76 @@ pub(crate) fn import_base<P: ProcessManager>(state: &ExecState<P>) -> GuardedPat
         return root.clone();
     }
     state.fs.build_context().clone()
+}
+
+/// Resolve a top-level import against the entry dir first when the
+/// entry sits outside the workspace, falling back to `dir`
+/// (the workspace root). Entries staged outside the workspace (CI
+/// temp dirs) keep resolving workspace libs like stdin runs, while
+/// real outside entries (entry plus sibling lib) resolve
+/// entry-relative. Nested imports (`stack` non-empty) always stay
+/// importer-relative with no fallback. Probes through the run
+/// filesystem so memory-backed tests answer from their own state.
+/// Shared by expansion (`expand_load`, `load_file`), runtime host-type
+/// probes, and the static closure pass, so every top-level import
+/// resolves identically.
+pub(crate) fn resolve_top_level<P: ProcessManager>(
+    state: &ExecState<P>,
+    dir: &GuardedPath,
+    stack: &[GuardedPath],
+    path: &str,
+) -> Result<GuardedPath> {
+    if stack.is_empty()
+        && let Some(eparent) = state.entry_file.as_ref().and_then(|entry| entry.parent())
+        && eparent != *dir
+        && let Ok(candidate) = eparent.join(path)
+        && state.fs.entry_kind(&candidate).is_ok()
+    {
+        return Ok(candidate);
+    }
+    dir.join(path)
+        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))
+}
+
+/// Static-phase twin of [`resolve_top_level`]: no filesystem reads.
+/// Tries the entry dir first for entry-unit imports when it differs
+/// from `dir`, matching on closure keys (recorded by `expand_load`
+/// through `resolve_top_level`); falls back to `dir.join`.
+/// Nested file units pass `is_entry=false` and resolve purely
+/// against their own directory.
+pub(crate) fn resolve_static_top_level(
+    entry_parent: Option<&GuardedPath>,
+    dir: &GuardedPath,
+    files: &[ClosureFile],
+    path: &str,
+    is_entry: bool,
+) -> Option<String> {
+    if is_entry
+        && let Some(eparent) = entry_parent
+        && eparent != dir
+        && let Ok(candidate) = eparent.join(path)
+    {
+        let key = candidate.display();
+        if files.iter().any(|f| f.key == key) {
+            return Some(key);
+        }
+    }
+    dir.join(path).ok().and_then(|resolved| {
+        let key = resolved.display();
+        files.iter().any(|f| f.key == key).then_some(key)
+    })
+}
+
+/// Top-level file-existence probe shared by host-type harvest checks:
+/// entry dir first (outside-workspace siblings), then `dir`. Mirrors
+/// [`resolve_top_level`] without failing on unresolvable joins, so a
+/// file named like a host module routes to the file when present.
+pub(crate) fn top_level_file_exists<P: ProcessManager>(
+    state: &ExecState<P>,
+    dir: &GuardedPath,
+    stack: &[GuardedPath],
+    path: &str,
+) -> bool {
+    resolve_top_level(state, dir, stack, path)
+        .is_ok_and(|resolved| state.fs.entry_kind(&resolved).is_ok())
 }
