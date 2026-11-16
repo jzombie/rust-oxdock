@@ -1664,7 +1664,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         literal_depth: usize,
     ) -> Result<StaticTy> {
         use oxdock_parser::template::{
-            parse_string_literal, split_top_level, split_var_path, strip_wrapped_delimiters,
+            parse_string_literal, split_var_path, strip_wrapped_delimiters,
         };
         const MAX_TEMPLATE_LITERAL_DEPTH: usize = 16;
         if literal_depth > MAX_TEMPLATE_LITERAL_DEPTH {
