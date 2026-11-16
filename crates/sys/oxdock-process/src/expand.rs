@@ -407,22 +407,31 @@ fn lookup(
 
         // 4. Placeholder calls: `MODULE::FUNC(args)` dispatches through
         // the registered resolver. Without one, the shape falls through
-        // to the invalid placeholder error below. Bare call heads are
-        // not calls here either: they fall through the same way.
-        PlaceholderKey::Call(_) => {
-            if let Some((module, func, args_src)) = parse_placeholder_call(key) {
-                let Some(resolver) = calls else {
-                    bail!(
-                        "placeholder call '{module}::{func}' has no function registry; register one with with_call_resolver"
-                    );
-                };
-                let mut args = Vec::with_capacity(args_src.len());
-                for src in args_src {
-                    args.push(resolve_call_arg(&src, vars)?);
-                }
-                let result = resolver(&module, &func, args)?;
-                return format_value_for_string(&result);
+        // to the invalid placeholder error below. Bare heads are not
+        // resolvable here: they fail as invalid placeholders, never as
+        // missing keys.
+        PlaceholderKey::Call(call) => {
+            let Some(module) = call.module else {
+                // Bare `FUNC(...)` has no registry entry in override
+                // expansion: explicit invalid-format error, never silent
+                // fallthrough.
+                bail!(
+                    "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
+                );
+            };
+            let (name, args_raw) = (call.name, call.args_raw);
+            let Some(resolver) = calls else {
+                bail!(
+                    "placeholder call '{module}::{name}' has no function registry; register one with with_call_resolver"
+                );
+            };
+            let args_src = oxdock_parser::template::split_placeholder_args(args_raw);
+            let mut args = Vec::with_capacity(args_src.len());
+            for src in args_src {
+                args.push(resolve_call_arg(&src, vars)?);
             }
+            let result = resolver(module, name, args)?;
+            return format_value_for_string(&result);
         }
 
         // 5. Unprefixed key: could be a missing step override or invalid
@@ -1377,6 +1386,18 @@ mod tests {
     fn malformed_symbol_placeholder_errors() {
         let expander = StreamingExpand::new(&[], &HashMap::new());
         let result = expander.expand_string("{{ @invalid! }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid placeholder format"), "got: {msg}");
+    }
+
+    #[test]
+    fn bare_call_head_fails_as_invalid_placeholder() {
+        // Directive 3: bare `FUNC(...)` has no registry entry in
+        // override expansion. The `Call` arm handles `module == None`
+        // explicitly instead of silently falling through.
+        let expander = StreamingExpand::new(&[], &HashMap::new());
+        let result = expander.expand_string("{{ FOO() }}");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("invalid placeholder format"), "got: {msg}");

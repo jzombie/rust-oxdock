@@ -53,13 +53,15 @@ pub fn init_handler(config: McpServerConfig) -> Result<OxDockHandler> {
     let handler = OxDockHandler::from_built(built, &config.script)?
         .with_script_path(config.script_path.clone());
     if config.watch {
-        Ok(handler.with_watch(WatchConfig {
-            script_path: config.script_path,
-            workspace_root: config.workspace_root,
-            modules: config.modules,
-            types: config.types,
-            poll_ms: WATCH_POLL_MS,
-        }))
+        Ok(handler.with_watch(
+            config.script_path.clone(),
+            WatchConfig {
+                workspace_root: config.workspace_root,
+                modules: config.modules,
+                types: config.types,
+                poll_ms: WATCH_POLL_MS,
+            },
+        ))
     } else {
         Ok(handler)
     }

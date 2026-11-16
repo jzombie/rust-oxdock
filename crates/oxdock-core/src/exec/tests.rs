@@ -9495,3 +9495,237 @@ fn workflow_inline_scripts_pass_static_gate() {
         }
     }
 }
+
+#[test]
+fn entry_guarded_top_level_let_requires_guarded_read() {
+    // Directive 1: a single-platform top-level `LET` carries its guard
+    // into entry `FUNC` bodies, so an unguarded read fails coverage
+    // instead of passing statically and aborting at runtime.
+    let steps = parse_entry(indoc! {r#"
+        [os:macos] LET $target: STRING = "mac"
+        FUNC READ_IT(): STRING {
+            RETURN $target
+        }
+    "#});
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:#}").contains("not guaranteed to be defined"),
+        "guarded entry let must enforce coverage, got: {err:#}"
+    );
+}
+
+#[test]
+fn entry_disjoint_guarded_lets_accumulate_per_platform() {
+    // Directive 1: disjoint guarded bindings for one name accumulate
+    // instead of overwriting, so a macos-guarded read sees the macos
+    // binding instead of `undefined variable` from the overwrite.
+    let steps = parse_entry(indoc! {r#"
+        [os:macos] LET $x: INT = 1
+        [os:linux] LET $x: STRING = "lin"
+        FUNC READ_MAC(): INT {
+            [os:macos] RETURN $x
+            RETURN 0
+        }
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("disjoint guarded entry lets resolve per platform");
+    let _ = bindings;
+}
+
+#[test]
+fn template_bare_call_fails_statically() {
+    // Directive 2: `{{ BARE_FUNC() }}` resolves the callee, not just
+    // nested args. Parse-time qualification already rejects unknown
+    // bare heads, so this pins the parse gate; the static gate mirrors
+    // it for any shape that reaches validation.
+    let err = crate::parse_script(indoc! {r#"
+        LET $x: STRING = "v"
+        FUNC T(): STRING {
+            RETURN "{{ BARE_FUNC() }}"
+        }
+    "#})
+    .expect_err("bare template call must fail");
+    assert!(
+        format!("{err:#}").contains("BARE_FUNC"),
+        "bare template call must name culprit, got: {err:#}"
+    );
+}
+
+#[test]
+fn template_qualified_typo_fails_statically() {
+    // Directive 2: `{{ ALIAS::TYPO($x) }}` validates the callee through
+    // `resolve_call`, so the closure pass names the culprit before
+    // runtime expansion.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS CB]
+        LET $x: STRING = "v"
+        FUNC T(): STRING {
+            RETURN "{{ CB::TYPO($x) }}"
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown placeholder function 'CB::TYPO'"),
+        "template typo must fail, got: {err:#}"
+    );
+}
+
+#[test]
+fn sibling_alias_does_not_leak_across_files() {
+    // Directive 4: per-unit alias scopes keep sibling modules from
+    // cross-resolving. Entry imports `a` as LIBA; `b` imports `c` as
+    // LIBB. Entry calling `LIBB::BAR` must fail even though the
+    // function exists globally. Parse-time scoping already rejects the
+    // unknown module here; the static per-unit gate mirrors it for any
+    // shape that reaches validation.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "foo"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC BAR(): STRING {
+                 RETURN "bar"
+                }
+                EXPORT BAR
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                IMPORT ["c.oxdock" AS LIBB]
+                FUNC USE_IT(): STRING {
+                 RETURN LIBB::BAR()
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    let err = crate::parse_script(indoc! {r#"
+        IMPORT ["a.oxdock" AS LIBA]
+        IMPORT ["b.oxdock" AS B]
+        FUNC T(): STRING {
+         RETURN LIBB::BAR()
+        }
+    "#})
+    .expect_err("sibling alias must not leak");
+    assert!(
+        format!("{err:#}").contains("LIBB"),
+        "sibling alias must name culprit, got: {err:#}"
+    );
+}
+
+#[test]
+fn template_rejects_script_and_stateful_callees_with_pure_arity() {
+    // Pure-table gate: script `SCRIPT::FOO`, file `CB::F`, and unknown
+    // `STD::TYPO` all fail as unknown placeholder functions, while
+    // `STD::LEN()` fails arity and `STD::LEN(123)` fails type.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    for (body, needle) in [
+        (
+            "{{ SCRIPT::FOO() }}",
+            "unknown placeholder function 'SCRIPT::FOO'",
+        ),
+        ("{{ CB::F($x) }}", "unknown placeholder function 'CB::F'"),
+        (
+            "{{ STD::TYPO() }}",
+            "unknown placeholder function 'STD::TYPO'",
+        ),
+        ("{{ STD::LEN() }}", "expects 1 argument"),
+    ] {
+        let steps = parse_entry(&format!(
+            "IMPORT [\"lib.oxdock\" AS CB]\nLET $x: STRING = \"v\"\nFUNC T(): STRING {{\n RETURN \"{body}\"\n}}\n"
+        ));
+        let err = run_expect_err(Box::new(fs.clone()), &steps, MockProcessManager::default());
+        assert!(
+            format!("{err:#}").contains(needle),
+            "template `{body}` must fail with `{needle}`, got: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn same_alias_same_func_name_collides_loud() {
+    // Same `LIB::FOO` from two files must not silently overwrite.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "a"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "c"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                IMPORT ["c.oxdock" AS LIB]
+                FUNC USE_IT(): STRING {
+                 RETURN LIB::FOO()
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["a.oxdock" AS LIB]
+        IMPORT ["b.oxdock" AS B]
+        LET $x: STRING = B::USE_IT()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("duplicate function `LIB::FOO`"),
+        "collision must fail loud, got: {err:#}"
+    );
+}

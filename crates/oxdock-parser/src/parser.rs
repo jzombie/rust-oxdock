@@ -1034,8 +1034,8 @@ fn reject_paren_line_breaks(inner: &[Tok], stmt: usize) -> Result<(), TokenError
                 return Err(TokenError {
                     stmt,
                     msg: "unexpected line break in argument".to_string(),
-                    line: 0,
-                    col: 0,
+                    line: tok.line,
+                    col: tok.col,
                     kind: None,
                 });
             }
@@ -8183,15 +8183,58 @@ fn parse_inner_command(
         }
     }
     let (tokens, deferred) = build_arg_tokens(&body[1..], stmt, ctx)?;
-    let kind = lower_generic_args(&head, tokens, stmt, ctx)?;
-    // Stashed call errors surface only for otherwise well-formed
-    // statements: the command head owns its syntax, so a malformed
-    // header keeps its tailored error instead of being masked by an
-    // argument-position resolution failure.
-    if let Some(err) = deferred {
-        return Err(err);
+    let lowered = lower_generic_args(&head, tokens, stmt, ctx);
+    match lowered {
+        Ok(kind) => {
+            // Stashed call errors surface only for otherwise well-formed
+            // statements: the command head owns its syntax, so a malformed
+            // header keeps its tailored error instead of being masked by an
+            // argument-position resolution failure.
+            if let Some(err) = deferred {
+                return Err(err);
+            }
+            Ok((kind, body.len()))
+        }
+        Err(lower_err) => {
+            // Fallback raw strings (`NOPE()` rendered as text) can fail
+            // argument-shape lowering with a misleading error. On a
+            // recognized head the stashed unknown-callee error names the
+            // real culprit, so it wins over argument-level failures
+            // (`Validation`, `Syntax`, `InvalidSyntax`, or the `None`
+            // classification that `ENV`/`EXPAND` lowering uses). Only
+            // head-identity errors (`UnknownCommand`, `Structural`) keep
+            // their tailored diagnostic. Definition headers (`FUNC`, etc.)
+            // keep theirs: the stashed name there is the definiendum,
+            // not an argument-position call.
+            let is_header_syntax = matches!(
+                lower_err.kind,
+                Some(crate::error::ParseErrorKind::InvalidSyntax { .. })
+            ) && matches!(
+                head.as_str(),
+                KEYWORD_FUNC
+                    | KEYWORD_LET
+                    | KEYWORD_IF
+                    | KEYWORD_FOR
+                    | KEYWORD_WHILE
+                    | KEYWORD_TYPE
+                    | KEYWORD_IMPORT
+                    | KEYWORD_EXPORT
+            );
+            if let Some(deferred_err) = deferred
+                && !is_header_syntax
+                && matches!(
+                    lower_err.kind,
+                    Some(crate::error::ParseErrorKind::Validation { .. })
+                        | Some(crate::error::ParseErrorKind::Syntax)
+                        | Some(crate::error::ParseErrorKind::InvalidSyntax { .. })
+                        | None
+                )
+            {
+                return Err(deferred_err);
+            }
+            Err(lower_err)
+        }
     }
-    Ok((kind, body.len()))
 }
 
 /// Parse a token stream (either lexer) into steps. Markers normalize to
@@ -8244,15 +8287,15 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
                             kind: None,
                         });
                     }
-                    // File and harvest imports stay prelude: module bodies
-                    // run isolated (seed plus init contributions), so they
+                    // Harvest imports stay prelude: they bind functions
+                    // and types without executing module bodies, so they
                     // neither read nor disturb the inherited environment.
-                    // Host-only IMPORTs emit no step at all, which is why
-                    // they never tripped this gate.
-                    if !matches!(
-                        kind,
-                        StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. }
-                    ) {
+                    // File imports execute arbitrary top-level steps on
+                    // import, so they end the prelude like any other
+                    // side-effecting command. Host-only IMPORTs emit no
+                    // step at all, which is why they never tripped this
+                    // gate.
+                    if !matches!(kind, StepKind::ImportFuncs { .. }) {
                         seen_non_prelude = true;
                     }
                 }
@@ -9907,5 +9950,46 @@ mod tests {
         }
         // No deferred shapes remain: every statement-level block and
         // inline-block expression parses natively.
+    }
+
+    #[test]
+    fn deferred_unknown_callee_beats_validation_arg_error() {
+        // Directive 5: `WORKSPACE NOPE()` stashes `unknown function
+        // NOPE` while the fallback raw string fails `WORKSPACE`
+        // validation. On a well-formed header the stashed callee error
+        // names the culprit instead of the misleading arg-shape error.
+        let err =
+            crate::parse_script("WORKSPACE NOPE()", lower).expect_err("unknown callee must fail");
+        assert!(
+            err.to_string().contains("unknown function `NOPE`"),
+            "deferred must beat validation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn paren_line_break_reports_token_position() {
+        // Directive 5: multiline paren breaks carry the offending
+        // token's line/col, not a stamped 0/0. The break sits on line 2
+        // while the statement opens on line 1.
+        let err = crate::parse_script("ECHO (a\nb)", lower).expect_err("break must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("unexpected line break"),
+            "break must report, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn deferred_unknown_callee_beats_invalid_syntax_arg_error() {
+        // Fallback raw strings can trigger `InvalidSyntax` lowering
+        // (for example `COPY NOPE()`). The stashed unknown-callee error
+        // still names the culprit on a recognized head.
+        for text in ["COPY NOPE()", "WRITE NOPE()"] {
+            let err = crate::parse_script(text, lower).expect_err("unknown callee must fail");
+            assert!(
+                err.to_string().contains("unknown function `NOPE`"),
+                "deferred must beat InvalidSyntax for {text:?}, got: {err}"
+            );
+        }
     }
 }

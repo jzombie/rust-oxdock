@@ -908,6 +908,21 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         out
     }
 
+    /// Metadata for template-capable entries only: `Pure` plus `Both`
+    /// (dual entries contribute their template arm to `{{ }}`).
+    /// `Ctx` and `Script` never resolve in placeholder expansion, so
+    /// the static template gate reads this instead of `all_metas`.
+    pub(super) fn pure_metas(&self) -> Vec<FuncMeta> {
+        let mut out: Vec<FuncMeta> = Vec::new();
+        for entry in self.entries.values() {
+            if matches!(entry.body, FuncBody::Pure(_) | FuncBody::Both { .. }) {
+                out.push(entry.meta.clone());
+            }
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
     /// Every entry's metadata, scripts included, sorted by name. Backs
     /// runtime `FUNCTIONS()` listings.
     fn entries_metas(&self) -> Vec<FuncMeta> {

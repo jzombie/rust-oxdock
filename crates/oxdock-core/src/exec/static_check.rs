@@ -121,6 +121,13 @@ struct FuncInfo {
     module: Option<String>,
 }
 
+/// One top-level binding with its declaration guard. Guards ride along
+/// so platform-specific `LET`s enforce coverage instead of reading as
+/// unconditional.
+type GuardedLet = (String, TypeTag, Option<GuardExpr>);
+/// Module-owned bindings by module key.
+type ModuleLets = HashMap<String, Vec<GuardedLet>>;
+
 /// Lexical environment: a stack of frames mirroring the runtime
 /// `var_scopes`. Frames push on `scope_enter` markers, branch and
 /// loop bodies, and function entries; they pop on `scope_exit` or are
@@ -162,13 +169,14 @@ struct Env {
 /// Module-shared bindings plus a fork-shared touch flag. `Rc` (not
 /// `Arc`): the checker is single-threaded; forks clone the `Rc` so a
 /// touch on any conditional path is still observed after the fork is
-/// discarded.
+/// discarded. Bindings keep per-declaration guards, so platform-guarded
+/// top-level `LET`s enforce the same coverage as lexical frames.
 #[derive(Clone, Debug)]
 struct ModuleScope {
     /// Owning module key, so nested checks re-seed from the checker's
     /// module table instead of inheriting possibly-stale bindings.
     key: String,
-    lets: HashMap<String, TypeTag>,
+    lets: HashMap<String, Vec<Binding>>,
     touched: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
@@ -227,12 +235,15 @@ struct Checker<'a, P: ProcessManager> {
     /// Module-owned top-level `LET`s by module key (#115): seeded into
     /// the environment when checking module-owned function bodies, so
     /// static resolution sees the same store the runtime drains into.
-    module_lets: HashMap<String, Vec<(String, TypeTag)>>,
+    /// Each entry carries its declaration guard, so platform-guarded
+    /// bindings enforce path coverage instead of reading unconditionally.
+    module_lets: ModuleLets,
     /// Entry top-level `LET`s: seeded beneath params when checking
     /// entry function bodies, mirroring the runtime outer scope that
     /// calls observe. Order-free like the env union: a function may
-    /// run after any top-level step.
-    entry_lets: Vec<(String, TypeTag)>,
+    /// run after any top-level step. Guards preserved per binding so
+    /// disjoint platform declarations accumulate instead of overwriting.
+    entry_lets: Vec<GuardedLet>,
     /// The entry's top-level `ENV` / `INHERIT_ENV` union, plus one per
     /// module key. Function bodies seed from the union covering their
     /// file: a module function sees its own file's prelude
@@ -251,6 +262,11 @@ struct Checker<'a, P: ProcessManager> {
     /// explicitly through `INHERIT_ENV`.
     seeded_env: HashSet<String>,
     hosts: HashMap<String, FuncMeta>,
+    /// Template-capable host metadata only (`Pure` plus `Both` template
+    /// arms). Runtime `{{ MODULE::FUNC }}` resolves through
+    /// `pure_function_table`, never `Ctx` or `Script`, so the template
+    /// gate reads this instead of `hosts`.
+    pure_hosts: HashMap<String, FuncMeta>,
     inferred: HashMap<String, StaticTy>,
     inferring: Vec<String>,
     visits: u64,
@@ -260,6 +276,11 @@ struct Checker<'a, P: ProcessManager> {
     /// the closure pass: single-file validation leaves it empty and
     /// keeps the `ANY` leniency for unknown qualified names.
     imported_aliases: HashSet<String>,
+    /// Outbound alias targets for the checked unit: `ALIAS` to defining
+    /// file keys this unit imports under that alias. `resolve_call`
+    /// requires the defining file to be among the targets, so same-alias
+    /// different-file imports cannot cross-resolve.
+    alias_targets: HashMap<String, HashSet<String>>,
     /// Nesting depth inside `ISOLATED` bodies: the isolated allowlist node
     /// is legal only below an `ISOLATED` head, at any depth including
     /// through nested blocks and nested `ISOLATED` itself.
@@ -353,11 +374,10 @@ pub(crate) fn harvest_touches_module<P: ProcessManager>(
 /// execution makes visible to that file's functions (drained into the
 /// shared store for modules, held in the outer scope for the entry).
 /// Names resolve through the same tags execution uses; dead-guarded
-/// steps are skipped exactly like collection skips them.
-fn module_lets<P: ProcessManager>(
-    steps: &[Step],
-    exec: &ExecState<P>,
-) -> Result<Vec<(String, TypeTag)>> {
+/// steps are skipped exactly like collection skips them. Each binding
+/// keeps its declaration guard so guarded top-level `LET`s enforce
+/// path coverage instead of reading as unconditional.
+fn module_lets<P: ProcessManager>(steps: &[Step], exec: &ExecState<P>) -> Result<Vec<GuardedLet>> {
     let mut out = Vec::new();
     for step in steps {
         if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
@@ -373,10 +393,10 @@ fn module_lets<P: ProcessManager>(
                 let tag = exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("variable `${var}`: {err:#}"))?;
-                out.push((clean_var(var), tag));
+                out.push((clean_var(var), tag, step.guard.clone()));
             }
             StepKind::ReadLine { var } | StepKind::Prompt { var, .. } => {
-                out.push((clean_var(var), TypeTag::String));
+                out.push((clean_var(var), TypeTag::String, step.guard.clone()));
             }
             _ => {}
         }
@@ -562,28 +582,43 @@ pub fn validate_script_closure<P: ProcessManager>(
         // file's scope. Harvested funcs land under their import alias
         // (bare harvests stay bare); bodies check below.
         let mut all_funcs = HashMap::new();
-        let mut all_lets: HashMap<String, Vec<(String, TypeTag)>> = HashMap::new();
-        // Every file-import alias in the closure: entry steps plus
-        // every file's import sites (nested included). Zero-function
-        // modules contribute no `ALIAS::` func keys, so the alias set
-        // (not a func-key prefix scan) proves the namespace known.
-        let mut imported_aliases = HashSet::new();
-        import_aliases(entry, &mut imported_aliases);
+        let mut all_lets: ModuleLets = HashMap::new();
+        // Per-unit file-import aliases: the entry's own outbound imports
+        // plus each file's own outbound imports (nested included).
+        // Zero-function modules contribute no `ALIAS::` func keys, so
+        // the alias set (not a func-key prefix scan) proves the
+        // namespace known. Scoped per unit so sibling modules cannot
+        // cross-resolve each other's `AS` aliases.
+        let mut entry_aliases = HashSet::new();
+        import_aliases(entry, &mut entry_aliases);
+        let mut file_aliases: HashMap<String, HashSet<String>> = HashMap::new();
         for file in files {
-            for site in &file.sites {
-                if let Some(alias) = site.alias.as_deref() {
-                    imported_aliases.insert(alias.to_string());
-                }
-            }
+            let mut set = HashSet::new();
+            import_aliases(&file.steps, &mut set);
+            file_aliases.insert(file.key.clone(), set);
+        }
+        // Outbound targets per unit, resolved through the closure keys.
+        // Entry resolves against the import base; files resolve against
+        // their own directories. Same alias in different units maps to
+        // different defining files; `resolve_call` requires the defining
+        // file to be among the current unit's targets.
+        let entry_base = super::import::import_base(exec);
+        let mut entry_targets: HashMap<String, HashSet<String>> = HashMap::new();
+        outbound_alias_targets(entry, &entry_base, files, &mut entry_targets);
+        let mut file_targets: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
+        for file in files {
+            let mut targets = HashMap::new();
+            outbound_alias_targets(&file.steps, &file.dir, files, &mut targets);
+            file_targets.insert(file.key.clone(), targets);
         }
         let entry_defs: Vec<(String, String)> = super::typing::collect_type_aliases(entry, exec)?
             .into_iter()
             .collect();
-        let mut entry_lets: Vec<(String, TypeTag)> = Vec::new();
+        let mut entry_lets: Vec<GuardedLet> = Vec::new();
         with_scope_aliases(exec, &entry_defs, |exec| {
             let mut checker = Checker::new(exec);
             checker.collect(entry)?;
-            all_funcs.extend(checker.funcs);
+            extend_funcs_checked(&mut all_funcs, checker.funcs, "entry")?;
             entry_lets = module_lets(entry, exec)?;
             Ok(())
         })?;
@@ -597,7 +632,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 for site in &file.sites {
                     checker.collect_site(site, file)?;
                 }
-                all_funcs.extend(checker.funcs);
+                extend_funcs_checked(&mut all_funcs, checker.funcs, &file.path)?;
                 all_lets.insert(file.key.clone(), module_lets(&file.steps, exec)?);
                 Ok(())
             })?;
@@ -612,17 +647,28 @@ pub fn validate_script_closure<P: ProcessManager>(
         keys.sort();
         for key in keys {
             let owner = all_funcs.get(&key).and_then(|info| info.module.clone());
-            let defs: Vec<(String, String)> = match owner {
+            let defs: Vec<(String, String)> = match &owner {
                 None => entry_defs.clone(),
                 Some(module) => files
                     .iter()
-                    .find(|f| f.key == module)
+                    .find(|f| f.key == *module)
                     .map(|file| {
                         super::typing::collect_type_aliases(&file.steps, exec)
                             .map(|aliases| aliases.into_iter().collect())
                     })
                     .transpose()?
                     .unwrap_or_default(),
+            };
+            // Inference runs under the owner's own alias scope, so a
+            // sibling module's alias never makes an unknown callee look
+            // known while inferring.
+            let owner_aliases: HashSet<String> = match &owner {
+                None => entry_aliases.clone(),
+                Some(module) => file_aliases.get(module).cloned().unwrap_or_default(),
+            };
+            let owner_targets: HashMap<String, HashSet<String>> = match &owner {
+                None => entry_targets.clone(),
+                Some(module) => file_targets.get(module).cloned().unwrap_or_default(),
             };
             with_scope_aliases(exec, &defs, |exec| {
                 let mut checker = seeded_checker(
@@ -633,7 +679,8 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &inferred,
                     entry,
                     files,
-                    &imported_aliases,
+                    &owner_aliases,
+                    &owner_targets,
                 );
                 let ty = checker.func_return(&key, 0)?;
                 inferred.insert(key.clone(), ty);
@@ -652,12 +699,13 @@ pub fn validate_script_closure<P: ProcessManager>(
         fn seeded_checker<'a, P: ProcessManager>(
             exec: &'a mut ExecState<P>,
             funcs: &HashMap<String, FuncInfo>,
-            lets: &HashMap<String, Vec<(String, TypeTag)>>,
-            entry_lets: &[(String, TypeTag)],
+            lets: &ModuleLets,
+            entry_lets: &[GuardedLet],
             inferred: &HashMap<String, StaticTy>,
             entry: &[Step],
             files: &[ClosureFile],
             imported_aliases: &HashSet<String>,
+            alias_targets: &HashMap<String, HashSet<String>>,
         ) -> Checker<'a, P> {
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
@@ -665,6 +713,7 @@ pub fn validate_script_closure<P: ProcessManager>(
             checker.entry_lets = entry_lets.to_vec();
             checker.inferred = inferred.clone();
             checker.imported_aliases = imported_aliases.clone();
+            checker.alias_targets = alias_targets.clone();
             checker.build_env_unions(entry, files);
             checker
         }
@@ -677,7 +726,8 @@ pub fn validate_script_closure<P: ProcessManager>(
                 &inferred,
                 entry,
                 files,
-                &imported_aliases,
+                &entry_aliases,
+                &entry_targets,
             )
             .check_top_level(entry)
         })?;
@@ -686,6 +736,8 @@ pub fn validate_script_closure<P: ProcessManager>(
                 super::typing::collect_type_aliases(&file.steps, exec)?
                     .into_iter()
                     .collect();
+            let aliases = file_aliases.get(&file.key).cloned().unwrap_or_default();
+            let targets = file_targets.get(&file.key).cloned().unwrap_or_default();
             with_scope_aliases(exec, &defs, |exec| {
                 seeded_checker(
                     exec,
@@ -695,7 +747,8 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &inferred,
                     entry,
                     files,
-                    &imported_aliases,
+                    &aliases,
+                    &targets,
                 )
                 .check_import_body(&file.key, &file.steps, Some(&file.key))
             })?;
@@ -1049,6 +1102,62 @@ fn import_aliases(steps: &[Step], out: &mut HashSet<String>) {
     }
 }
 
+/// Outbound alias targets for one unit: `ALIAS` to the set of defining
+/// file keys it imports under that alias, resolved through the closure
+/// without filesystem reads. Nested bodies count, mirroring
+/// `import_aliases`. Bare harvests (`alias None`) stay global by design
+/// and record nothing here.
+fn outbound_alias_targets(
+    steps: &[Step],
+    dir: &GuardedPath,
+    files: &[ClosureFile],
+    out: &mut HashMap<String, HashSet<String>>,
+) {
+    for step in steps {
+        let (path, alias) = match &step.kind {
+            StepKind::ImportFile { path, alias } => (path.clone(), Some(alias.clone())),
+            StepKind::ImportFuncs {
+                path,
+                alias: Some(alias),
+                ..
+            } => (path.clone(), Some(alias.clone())),
+            _ => (String::new(), None),
+        };
+        if let Some(alias) = alias
+            && let Ok(resolved) = dir.join(&path)
+        {
+            let key = resolved.display();
+            if files.iter().any(|f| f.key == key) {
+                out.entry(alias).or_default().insert(key);
+            }
+        }
+        for body in super::import::child_bodies(&step.kind) {
+            outbound_alias_targets(body, dir, files, out);
+        }
+    }
+}
+
+/// Merge one collected map into `all_funcs`, failing loud on same-name
+/// different-owner collisions instead of last-wins overwrite. Same file
+/// re-imported under the same alias re-registers identically and stays
+/// silent; different files claiming one `ALIAS::FUNC` is a programmer
+/// error.
+fn extend_funcs_checked(
+    all_funcs: &mut HashMap<String, FuncInfo>,
+    incoming: HashMap<String, FuncInfo>,
+    display: &str,
+) -> Result<()> {
+    for (key, info) in incoming {
+        if let Some(existing) = all_funcs.get(&key)
+            && existing.module != info.module
+        {
+            bail!("duplicate function `{key}` from `{display}` collides across imports");
+        }
+        all_funcs.insert(key, info);
+    }
+    Ok(())
+}
+
 impl Env {
     fn one_frame(bindings: Vec<(String, TypeTag, bool)>) -> Self {
         let mut top = HashMap::new();
@@ -1162,11 +1271,47 @@ impl Env {
         }
         // Module-shared bindings sit beneath every lexical frame (#115):
         // a hit marks the body as state-dependent for the harvest gate.
+        // Guards apply exactly like lexical frames: only overlapping
+        // entries are live, and guarded-only sets enforce coverage.
         if let Some(scope) = &self.module
-            && let Some(tag) = scope.lets.get(key)
+            && let Some(entries) = scope.lets.get(key)
         {
-            scope.touched.set(true);
-            return Ok((tag.clone(), None));
+            let live: Vec<&Binding> = entries
+                .iter()
+                .filter(|entry| oxdock_parser::guards_overlap(entry.guard.as_ref(), site))
+                .collect();
+            if !live.is_empty() {
+                let any_bare = live.iter().any(|entry| entry.guard.is_none());
+                if !any_bare {
+                    let mut atoms: Vec<GuardExpr> = Vec::new();
+                    if let Some(site_expr) = site {
+                        atoms.push(site_expr.clone());
+                    }
+                    for entry in &live {
+                        if let Some(guard) = entry.guard.as_ref() {
+                            atoms.push(GuardExpr::Not(Box::new(guard.clone())));
+                        }
+                    }
+                    if oxdock_parser::guard_satisfiable(&GuardExpr::All(atoms)) {
+                        bail!(
+                            "variable '${key}' is not guaranteed to be defined on all reachable paths for this step"
+                        );
+                    }
+                }
+                let mut unified: Option<TypeTag> = None;
+                for entry in live {
+                    unified = Some(match unified {
+                        None => entry.tag.clone(),
+                        Some(acc) => unify(
+                            acc,
+                            entry.tag.clone(),
+                            &format!("${key} across platform guards"),
+                        )?,
+                    });
+                }
+                scope.touched.set(true);
+                return Ok((unified.expect("live never empty"), None));
+            }
         }
         bail!("undefined variable ${key}");
     }
@@ -1234,6 +1379,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         for meta in exec.functions.all_metas() {
             hosts.insert(meta.name.clone(), meta);
         }
+        let mut pure_hosts = HashMap::new();
+        for meta in exec.functions.pure_metas() {
+            pure_hosts.insert(meta.name.clone(), meta);
+        }
         Self {
             exec,
             funcs: HashMap::new(),
@@ -1246,10 +1395,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 .map(|name| name.to_string())
                 .collect(),
             hosts,
+            pure_hosts,
             inferred: HashMap::new(),
             inferring: Vec::new(),
             visits: 0,
             imported_aliases: HashSet::new(),
+            alias_targets: HashMap::new(),
             isolated_depth: 0,
         }
     }
@@ -1360,13 +1511,26 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         self.check_env_name(env, name, "script_env:", scope)?;
                     }
                 }
-                // `$`, call-arg, and bare reads all flow through the
-                // single var extractor plus expression inference, so
-                // templates and code agree on every error.
-                PlaceholderKey::Dollar(_) | PlaceholderKey::Call(_) | PlaceholderKey::Bare(_) => {
+                // `$` and bare reads flow through the single var
+                // extractor plus expression inference, so templates and
+                // code agree on every error. Call shapes additionally
+                // resolve the callee: bare heads fail like runtime
+                // (undefined script variable), qualified heads resolve
+                // like expression calls (unknown `ALIAS::TYPO` fails
+                // here, never at runtime).
+                PlaceholderKey::Dollar(_) | PlaceholderKey::Bare(_) => {
                     for var in placeholder_vars(key) {
                         self.check_template_var(&var, env, scope, depth)?;
                     }
+                }
+                PlaceholderKey::Call(call) => {
+                    for var in placeholder_vars(key) {
+                        self.check_template_var(&var, env, scope, depth)?;
+                    }
+                    let Some(module) = call.module else {
+                        bail!("undefined script variable: '{key}'");
+                    };
+                    self.check_template_call(module, call.name, call.args_raw, env, scope, depth)?;
                 }
             }
         }
@@ -1403,6 +1567,243 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let idx = scope.idx;
         let _ = self.infer_expr(&expr, env, scope, idx, depth + 1)?;
         Ok(())
+    }
+
+    /// Validate one `{{ MODULE::FUNC(args) }}` against the pure host
+    /// table, the same registry runtime placeholder expansion reads.
+    /// Script, file-aliased, and stateful (`Ctx`) callees never resolve
+    /// in templates; unknown pure names fail here with the runtime
+    /// `unknown placeholder function` diagnostic, and arity plus
+    /// argument types enforce through `check_arg`.
+    fn check_template_call(
+        &mut self,
+        module: &str,
+        name: &str,
+        args_raw: &str,
+        env: &mut Env,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        let qualified = format!("{module}::{name}");
+        let Some(meta) = self.pure_hosts.get(&qualified).cloned() else {
+            bail!("unknown placeholder function '{qualified}'");
+        };
+        let args_src = oxdock_parser::template::split_placeholder_args(args_raw);
+        if let Some(host_params) = meta.params.as_deref() {
+            let required = super::required_arity(host_params);
+            let total = host_params.len();
+            if args_src.len() < required || args_src.len() > total {
+                if required == total {
+                    bail!(
+                        "{} in {}: {}() expects {} argument(s), got {}",
+                        step_pos(scope.line, scope.col, scope.idx),
+                        scope.label,
+                        qualified,
+                        total,
+                        args_src.len()
+                    );
+                }
+                bail!(
+                    "{} in {}: {}() expects {} to {} argument(s), got {}",
+                    step_pos(scope.line, scope.col, scope.idx),
+                    scope.label,
+                    qualified,
+                    required,
+                    total,
+                    args_src.len()
+                );
+            }
+            for (position, src) in args_src.iter().enumerate() {
+                let trimmed = src.trim();
+                let actual = self.infer_template_arg(trimmed, env, scope, depth, 0)?;
+                if let Some(param) = host_params.get(position) {
+                    if let Some(expected) = param.param_type.clone() {
+                        let pat = format!(
+                            "{} in {}: {}() argument `${}`",
+                            step_pos(scope.line, scope.col, scope.idx),
+                            scope.label,
+                            qualified,
+                            param.name
+                        );
+                        self.check_arg(&expected, actual, &pat)?;
+                    }
+                    if let Some(allowed) = param.allowed
+                        && let Some(s) = self.template_arg_literal(trimmed)
+                        && !allowed.contains(&s.as_str())
+                    {
+                        bail!(
+                            "{} in {}: {}() argument `${}` must be one of: {}, got {s:?}",
+                            step_pos(scope.line, scope.col, scope.idx),
+                            scope.label,
+                            qualified,
+                            param.name,
+                            allowed.join(", ")
+                        );
+                    }
+                }
+            }
+            return Ok(());
+        }
+        for src in args_src.iter() {
+            let _ = self.infer_template_arg(src.trim(), env, scope, depth, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Infer one template call argument type through the single-owner
+    /// template helpers, mirroring runtime `resolve_call_value` shapes
+    /// without needing values. Depth caps at the runtime literal limit.
+    /// `$` paths reject empty segments, containers validate structure
+    /// and infer homogeneous element types, scalars map to their tags.
+    fn infer_template_arg(
+        &mut self,
+        src: &str,
+        env: &mut Env,
+        scope: &Scope,
+        depth: usize,
+        literal_depth: usize,
+    ) -> Result<StaticTy> {
+        use oxdock_parser::template::{
+            parse_string_literal, split_top_level, split_var_path, strip_wrapped_delimiters,
+        };
+        const MAX_TEMPLATE_LITERAL_DEPTH: usize = 16;
+        if literal_depth > MAX_TEMPLATE_LITERAL_DEPTH {
+            bail!("placeholder call argument nests too deep (limit {MAX_TEMPLATE_LITERAL_DEPTH})");
+        }
+        if let Some(rest) = src.strip_prefix('$') {
+            let parts = split_var_path(rest);
+            if parts.iter().any(|part| part.is_empty()) {
+                bail!("invalid placeholder call argument: empty variable reference");
+            }
+            let (base, segs) = parts.split_first().expect("split always yields one");
+            let expr = if segs.is_empty() {
+                Expr::Var(base.clone())
+            } else {
+                Expr::KeyPath {
+                    base: base.clone(),
+                    keys: segs.to_vec(),
+                }
+            };
+            return self.infer_expr(&expr, env, scope, scope.idx, depth + 1);
+        }
+        if let Some(literal) = parse_string_literal(src) {
+            let _ = literal.map_err(|err| anyhow::anyhow!("{err:#}"))?;
+            return Ok(StaticTy::Ty(TypeTag::String));
+        }
+        if let Some(inner) = strip_wrapped_delimiters(src, '{', '}') {
+            return self.infer_template_map(inner, env, scope, depth, literal_depth);
+        }
+        if let Some(inner) = strip_wrapped_delimiters(src, '[', ']') {
+            return self.infer_template_list(inner, env, scope, depth, literal_depth);
+        }
+        match src {
+            "true" | "false" => return Ok(StaticTy::Ty(TypeTag::Bool)),
+            _ => {}
+        }
+        if src.parse::<i64>().is_ok() {
+            return Ok(StaticTy::Ty(TypeTag::Int));
+        }
+        if src.parse::<f64>().is_ok() {
+            return Ok(StaticTy::Ty(TypeTag::Float));
+        }
+        bail!("invalid placeholder call argument '{src}'")
+    }
+
+    /// Infer one `{key: value}` literal: keys validate as bare identifiers
+    /// or string literals with duplicate rejection, values recurse.
+    /// Homogeneous value types yield `MapOf`, heterogeneous or empty
+    /// yield bare `Map` so `check_exact` enforces shaped parameters.
+    fn infer_template_map(
+        &mut self,
+        inner: &str,
+        env: &mut Env,
+        scope: &Scope,
+        depth: usize,
+        literal_depth: usize,
+    ) -> Result<StaticTy> {
+        use oxdock_parser::template::{parse_string_literal, split_top_level};
+        if inner.trim().is_empty() {
+            return Ok(StaticTy::Ty(TypeTag::Map));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut value_tags: Vec<TypeTag> = Vec::new();
+        for entry in split_top_level(inner, ',') {
+            let parts = split_top_level(&entry, ':');
+            if parts.len() != 2 {
+                bail!("invalid map literal entry '{entry}': use key: value");
+            }
+            let key_src = parts[0].trim();
+            let key = if let Some(literal) = parse_string_literal(key_src) {
+                literal.map_err(|err| anyhow::anyhow!("{err:#}"))?
+            } else if !key_src.is_empty()
+                && key_src
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                key_src.to_string()
+            } else {
+                bail!(
+                    "invalid map literal key '{key_src}': use a bare name or any string spelling"
+                );
+            };
+            if !seen.insert(key.clone()) {
+                bail!("duplicate key '{key}' in map literal");
+            }
+            let value_ty =
+                self.infer_template_arg(parts[1].trim(), env, scope, depth, literal_depth + 1)?;
+            let StaticTy::Ty(tag) = value_ty else {
+                bail!("VOID has no value to pass");
+            };
+            value_tags.push(tag);
+        }
+        let mut iter = value_tags.into_iter();
+        let Some(first) = iter.next() else {
+            return Ok(StaticTy::Ty(TypeTag::Map));
+        };
+        if iter.all(|tag| tags_equal(&tag, &first)) {
+            return Ok(StaticTy::Ty(TypeTag::MapOf(std::sync::Arc::new(first))));
+        }
+        Ok(StaticTy::Ty(TypeTag::Map))
+    }
+
+    /// Infer one `[item]` literal: elements recurse, homogeneous element
+    /// types yield `ListOf`, heterogeneous or empty yield bare `List`.
+    fn infer_template_list(
+        &mut self,
+        inner: &str,
+        env: &mut Env,
+        scope: &Scope,
+        depth: usize,
+        literal_depth: usize,
+    ) -> Result<StaticTy> {
+        use oxdock_parser::template::split_top_level;
+        if inner.trim().is_empty() {
+            return Ok(StaticTy::Ty(TypeTag::List));
+        }
+        let mut element_tags: Vec<TypeTag> = Vec::new();
+        for item in split_top_level(inner, ',') {
+            let element_ty =
+                self.infer_template_arg(item.trim(), env, scope, depth, literal_depth + 1)?;
+            let StaticTy::Ty(tag) = element_ty else {
+                bail!("VOID has no value to pass");
+            };
+            element_tags.push(tag);
+        }
+        let mut iter = element_tags.into_iter();
+        let Some(first) = iter.next() else {
+            return Ok(StaticTy::Ty(TypeTag::List));
+        };
+        if iter.all(|tag| tags_equal(&tag, &first)) {
+            return Ok(StaticTy::Ty(TypeTag::ListOf(std::sync::Arc::new(first))));
+        }
+        Ok(StaticTy::Ty(TypeTag::List))
+    }
+
+    /// Best-effort literal string for `allowed` closed-set checks:
+    /// quoted strings only, mirroring runtime literal resolution.
+    fn template_arg_literal(&self, src: &str) -> Option<String> {
+        use oxdock_parser::template::parse_string_literal;
+        parse_string_literal(src)?.ok()
     }
 
     /// Collect every `[env:KEY]` guard reference in a guard tree.
@@ -1654,9 +2055,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     ) -> Result<()> {
         let mut env = Env::one_frame(Vec::new());
         if let Some(module) = module {
-            let mut lets = HashMap::new();
-            for (name, tag) in self.module_lets.get(module).cloned().unwrap_or_default() {
-                lets.insert(name, tag);
+            let mut lets: HashMap<String, Vec<Binding>> = HashMap::new();
+            for (name, tag, guard) in self.module_lets.get(module).cloned().unwrap_or_default() {
+                lets.entry(name).or_default().push(Binding { tag, guard });
             }
             env.module = Some(ModuleScope {
                 key: module.to_string(),
@@ -1758,9 +2159,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         if let Some(module) = info.module.as_deref() {
             let lets = self.module_lets.get(module).cloned().unwrap_or_default();
             let touched = probe.unwrap_or_default();
-            let mut module_lets = HashMap::new();
-            for (name, tag) in lets {
-                module_lets.insert(name, tag);
+            let mut module_lets: HashMap<String, Vec<Binding>> = HashMap::new();
+            for (name, tag, guard) in lets {
+                module_lets
+                    .entry(name)
+                    .or_default()
+                    .push(Binding { tag, guard });
             }
             env.module = Some(ModuleScope {
                 key: module.to_string(),
@@ -1781,17 +2185,16 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             // Entry functions capture the entry's top-level `LET`s
             // through the runtime outer scope, so the body seeds from
             // the same union. Params stay on top: re-`LET` inside the
-            // body shadows instead of redeclaring.
+            // body shadows instead of redeclaring. Guards accumulate
+            // per name so disjoint platform declarations enforce
+            // coverage instead of overwriting.
             if !self.entry_lets.is_empty() {
-                let mut bottom = HashMap::new();
-                for (name, tag) in &self.entry_lets {
-                    bottom.insert(
-                        name.clone(),
-                        vec![Binding {
-                            tag: tag.clone(),
-                            guard: None,
-                        }],
-                    );
+                let mut bottom: HashMap<String, Vec<Binding>> = HashMap::new();
+                for (name, tag, guard) in &self.entry_lets {
+                    bottom.entry(name.clone()).or_default().push(Binding {
+                        tag: tag.clone(),
+                        guard: guard.clone(),
+                    });
                 }
                 env.frames.insert(0, bottom);
             }
@@ -2954,17 +3357,39 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Resolve a callee: script functions (bare or `SCRIPT::`-qualified)
     /// win over host metas, matching runtime shadowing. Unknown names
     /// yield `ANY`: the parse-time unknown-function gate owns that
-    /// error, not this pass. One exception: a qualified name whose
-    /// alias is a known file import (the closure's explicit alias set,
-    /// which covers zero-function modules too) but whose full name is
-    /// absent. The closure pass knows every export under a file alias,
-    /// while the parse-time gate treats file aliases as opaque, so
-    /// only this pass can reject `ALIAS::TYPO`. Passes without that
-    /// knowledge (single-file validation, touch probes) keep the
-    /// `ANY` leniency: an absent alias means "unknown here", not
-    /// "known absent".
+    /// error, not this pass. Two exceptions, both scoped to the active
+    /// unit's own outbound imports: a qualified name whose alias the
+    /// unit imports but whose full name is absent (`ALIAS::TYPO`), and
+    /// a known `ALIAS::FUNC` the unit never imported (sibling leakage).
+    /// The closure pass knows every export under a file alias, while
+    /// the parse-time gate treats file aliases as opaque, so only this
+    /// pass can reject these. Passes without that knowledge
+    /// (single-file validation, touch probes) keep the `ANY` leniency:
+    /// an absent alias means "unknown here", not "known absent".
+    /// `SCRIPT::` always resolves (entry-owned); host names bypass the
+    /// alias gate entirely.
     fn resolve_call(&mut self, name: &str, depth: usize) -> Result<Callee> {
         if let Some(info) = self.funcs.get(name) {
+            // Sibling-leakage gate: a known file-aliased function is
+            // only visible to units that import its alias from the
+            // defining file. `SCRIPT::` and bare names resolve globally;
+            // hosts never land here. Alias membership alone is not
+            // enough: same alias in different units maps to different
+            // files, so the defining file must be among this unit's
+            // targets for the alias.
+            if let Some((alias, _)) = name.split_once("::")
+                && alias != "SCRIPT"
+            {
+                if !self.imported_aliases.contains(alias) {
+                    bail!("unknown function `{name}`");
+                }
+                if let Some(defining) = info.module.clone()
+                    && let Some(targets) = self.alias_targets.get(alias)
+                    && !targets.contains(&defining)
+                {
+                    bail!("unknown function `{name}`");
+                }
+            }
             let info = info.clone();
             let ret = self.func_return_owned(&info, name, depth)?;
             let params = info.params;
