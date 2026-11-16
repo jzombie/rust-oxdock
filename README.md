@@ -1738,7 +1738,7 @@ ASSERT_EQ $msg "says ada"
 
 **Example: script funcs never resolve in placeholders**
 
-```oxdock expect_error:"unknown placeholder function 'SCRIPT::GREET'"
+```oxdock expect_error:"placeholder function 'SCRIPT::GREET' is a script function"
 # Placeholders carry no step context: pure registry only.
 FUNC GREET($name: STRING): STRING {
   RETURN $name
@@ -1751,7 +1751,7 @@ LET $who: STRING = "ada"
 ECHO "{{ SCRIPT::GREET($who) }}"
 ```
 
-**Expected error:** `unknown placeholder function 'SCRIPT::GREET'`
+**Expected error:** `placeholder function 'SCRIPT::GREET' is a script function`
 
 **Example: optional params fill zero values**
 

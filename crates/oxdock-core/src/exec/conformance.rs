@@ -372,6 +372,7 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         entry_file: None,
         import_stack: Vec::new(),
         import_alias_frame: None,
+        executed_alias_targets: std::collections::HashMap::new(),
         modules: HashMap::new(),
         validated_modules: HashSet::new(),
         module_stack: Vec::new(),

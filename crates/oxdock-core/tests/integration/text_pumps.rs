@@ -175,7 +175,7 @@ fn template_calls_reject_stateful_functions() {
     "#};
     let err = run_script(&root, script).expect_err("stateful call in template must fail");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'STD::FUNCTIONS'"),
-        "error names the missing registry entry: {err:#}"
+        format!("{err:#}").contains("placeholder function 'STD::FUNCTIONS' is stateful"),
+        "error names the stateful boundary: {err:#}"
     );
 }

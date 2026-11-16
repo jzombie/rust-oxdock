@@ -3813,7 +3813,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 Example {
                     name: "script funcs never resolve in placeholders",
                     fence_meta: Some(
-                        "expect_error:\"unknown placeholder function 'SCRIPT::GREET'\"",
+                        "expect_error:\"placeholder function 'SCRIPT::GREET' is a script function\"",
                     ),
                     code: indoc! {r#"
                 # Placeholders carry no step context: pure registry only.

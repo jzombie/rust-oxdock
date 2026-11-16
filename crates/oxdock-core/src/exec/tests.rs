@@ -952,6 +952,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         entry_file: None,
         import_stack: Vec::new(),
         import_alias_frame: None,
+        executed_alias_targets: std::collections::HashMap::new(),
         modules: std::collections::HashMap::new(),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
@@ -6722,6 +6723,122 @@ fn forward_reference_caller_before_callee_runs() {
 }
 
 #[test]
+fn file_scope_top_level_let_visible_in_func_and_template() {
+    // Issue A: top-level `LET $NAME: TYPE = ...` is the supported
+    // file-scope constant idiom. The entry binding below reads inside
+    // a `FUNC` body and inside `{{ }}` with no per-FUNC rebinding.
+    let fs = MockFs::new();
+    let steps = parse_entry(indoc! {r#"
+        LET $OUT: STRING = "shared"
+        FUNC GET(): STRING {
+         RETURN $OUT
+        }
+        LET $v: STRING = GET()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("top-level LET reads in FUNC");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("shared"));
+}
+
+#[test]
+fn file_import_module_top_level_let_visible_through_func() {
+    // Issue A (module side): a lib top-level `LET` seeds the module
+    // environment its exported FUNCs resolve against, so shared
+    // config lives once in the lib instead of as zero-arg FUNCs.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                LET $SEG: STRING = ".oxdock-codebook"
+                FUNC SEG(): STRING {
+                 RETURN $SEG
+                }
+                EXPORT SEG
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS CB]
+        LET $v: STRING = CB::SEG()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("module LET reads through FUNC view");
+    assert_eq!(
+        bindings.get("v").and_then(|v| v.as_str()),
+        Some(".oxdock-codebook")
+    );
+}
+
+#[test]
+fn template_bare_harvest_direct_call_fails_bind_via_let() {
+    // Issue B: `{{ WHERE() }}` on a bare-harvested script FUNC fails
+    // by design (placeholders resolve only the pure-host table;
+    // script bodies never execute in template position). The LET
+    // binding is the supported path: it resolves through the
+    // harvest and interpolates via `{{ $w }}`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC WHERE(): STRING {
+                 RETURN "common-ok"
+                }
+                EXPORT WHERE
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD, [FUNC WHERE FROM "lib.oxdock"]]
+        LET $w: STRING = WHERE()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("harvest resolves in LET position");
+    assert_eq!(
+        bindings.get("w").and_then(|v| v.as_str()),
+        Some("common-ok")
+    );
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC WHERE(): STRING {
+                 RETURN "common-ok"
+                }
+                EXPORT WHERE
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD, [FUNC WHERE FROM "lib.oxdock"]]
+        ECHO "direct: {{ WHERE() }}"
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("placeholder function 'SCRIPT::WHERE' is a script function"),
+        "bare-harvest placeholder must name the qualified culprit, got: {err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains("bind the result first with LET"),
+        "placeholder error must point at the LET binding path, got: {err:#}"
+    );
+}
+
+#[test]
 fn file_import_registers_alias_and_calls() {
     let fs = MockFs::new();
     seed_lib(
@@ -9627,6 +9744,7 @@ fn workflow_inline_scripts_pass_static_gate() {
                 entry_file: None,
                 import_stack: Vec::new(),
                 import_alias_frame: None,
+                executed_alias_targets: std::collections::HashMap::new(),
                 modules: std::collections::HashMap::new(),
                 validated_modules: std::collections::HashSet::new(),
                 module_stack: Vec::new(),
@@ -9741,7 +9859,8 @@ fn template_qualified_typo_fails_statically() {
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:#}").contains("unknown placeholder function 'CB::TYPO'"),
+        format!("{err:#}")
+            .contains("placeholder function 'CB::TYPO': no function 'TYPO' under file alias 'CB'"),
         "template typo must fail, got: {err:#}"
     );
 }
@@ -9802,9 +9921,10 @@ fn sibling_alias_does_not_leak_across_files() {
 
 #[test]
 fn template_rejects_script_and_stateful_callees_with_pure_arity() {
-    // Pure-table gate: script `SCRIPT::FOO`, file `CB::F`, and unknown
-    // `STD::TYPO` all fail as unknown placeholder functions, while
-    // `STD::LEN()` fails arity and `STD::LEN(123)` fails type.
+    // Pure-table gate: genuinely unknown `SCRIPT::FOO` and `STD::TYPO`
+    // keep the unknown-function diagnostic, while the known script
+    // `CB::F` names itself as a script function; `STD::LEN()` fails
+    // arity and `STD::LEN(123)` fails type.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -9821,7 +9941,10 @@ fn template_rejects_script_and_stateful_callees_with_pure_arity() {
             "{{ SCRIPT::FOO() }}",
             "unknown placeholder function 'SCRIPT::FOO'",
         ),
-        ("{{ CB::F($x) }}", "unknown placeholder function 'CB::F'"),
+        (
+            "{{ CB::F($x) }}",
+            "placeholder function 'CB::F' is a script function",
+        ),
         (
             "{{ STD::TYPO() }}",
             "unknown placeholder function 'STD::TYPO'",
@@ -9837,6 +9960,353 @@ fn template_rejects_script_and_stateful_callees_with_pure_arity() {
             "template `{body}` must fail with `{needle}`, got: {err:#}"
         );
     }
+}
+
+#[test]
+fn template_sibling_alias_does_not_leak_script_hint() {
+    // Sibling-leakage gate for templates: entry imports `a` AS LIBA
+    // while `b` imports `c` AS LIBB. Parse leaves qualified heads
+    // opaque, so `{{ LIBB::BAR() }}` reaches the static gate, which
+    // must fail it as unknown (the entry never imports LIBB) instead
+    // of naming a sibling module's function with a LET hint.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "foo"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC BAR(): STRING {
+                 RETURN "bar"
+                }
+                EXPORT BAR
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                IMPORT ["c.oxdock" AS LIBB]
+                FUNC USE_IT(): STRING {
+                 RETURN LIBB::BAR()
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["a.oxdock" AS LIBA]
+        IMPORT ["b.oxdock" AS B]
+        FUNC T(): STRING {
+         RETURN "{{ LIBB::BAR() }}"
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown placeholder function 'LIBB::BAR'"),
+        "sibling alias must fail unknown, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("bind the result first with LET"),
+        "unimported sibling must never suggest LET, got: {rendered}"
+    );
+}
+
+#[test]
+fn template_in_module_body_uses_module_aliases_not_importer() {
+    // Module-body scope at runtime: entry imports `lib` AS CB, but
+    // `m` never imports CB. The template below lives in a data file,
+    // not a string literal, so the static gate cannot see it; the
+    // `EXPAND` inside M's body must still resolve against M's own
+    // imports. `{{ CB::F }}` fails unknown with the pure-table
+    // listing instead of naming the importer's function.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "m.oxdock",
+        indoc! {r#"
+                FUNC USE_IT(): STRING {
+                 LET $o: STRING = EXPAND "t.txt"
+                 RETURN $o
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    fs.write_file(
+        &fs.root().join("t.txt").expect("template path"),
+        b"{{ CB::F(\"v\") }}",
+    )
+    .expect("seed template file");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["m.oxdock" AS M, "lib.oxdock" AS CB]
+        LET $r: STRING = M::USE_IT()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown placeholder function 'CB::F'"),
+        "module body must not see the importer's alias, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("known functions:"),
+        "runtime miss must list the pure table, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("is a script function"),
+        "module body must never suggest LET for an unimported alias, got: {rendered}"
+    );
+}
+
+#[test]
+fn template_in_module_body_sees_module_own_alias() {
+    // Positive half: when `m` itself imports `lib` AS CB, the same
+    // file-backed `EXPAND` inside M's body resolves through M's own
+    // import and names the script function with its LET hint.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "m.oxdock",
+        indoc! {r#"
+                IMPORT ["lib.oxdock" AS CB]
+                FUNC USE_IT(): STRING {
+                 LET $o: STRING = EXPAND "t.txt"
+                 RETURN $o
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    fs.write_file(
+        &fs.root().join("t.txt").expect("template path"),
+        b"{{ CB::F(\"v\") }}",
+    )
+    .expect("seed template file");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["m.oxdock" AS M]
+        LET $r: STRING = M::USE_IT()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("placeholder function 'CB::F' is a script function"),
+        "module's own alias must resolve, got: {rendered}"
+    );
+}
+
+#[test]
+fn template_module_init_inside_entry_func_resolves_against_module() {
+    // Entry-boundary shape: entry FUNC T conditionally imports M,
+    // so M's init runs with the entry frame (`None`) on the module
+    // stack and M on the import stack. M's init EXPANDs a data file
+    // holding `{{ CB::F }}` (CB known to the entry, never to M).
+    // The EXPAND step is M's text, so both the static per-unit gate
+    // and the runtime unit attribution resolve against M: unknown,
+    // with no entry-alias leak and no LET hint.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "m.oxdock",
+        indoc! {r#"
+                LET $o: STRING = EXPAND "t.txt"
+                FUNC GET(): STRING {
+                 RETURN $o
+                }
+                EXPORT GET
+            "#},
+    );
+    fs.write_file(
+        &fs.root().join("t.txt").expect("template path"),
+        b"{{ CB::F(\"v\") }}",
+    )
+    .expect("seed template file");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS CB]
+        FUNC T(): STRING {
+         IMPORT ["m.oxdock" AS M]
+         LET $r: STRING = M::GET()
+         RETURN $r
+        }
+        LET $t: STRING = T()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown placeholder function 'CB::F'"),
+        "module init must not inherit the entry frame's aliases, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("is a script function"),
+        "module init must never suggest LET for an unimported alias, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("no function 'F' under file alias"),
+        "module init must not claim an alias it never imported, got: {rendered}"
+    );
+}
+
+#[test]
+fn template_module_init_call_into_other_uses_callee_aliases() {
+    // Cross-module calls during init: `m` imports `lib` AS CB and
+    // calls `OTHER::USE_IT()` at top level; `other` imports nothing.
+    // `USE_IT` EXPANDs a data file holding `{{ CB::F }}` (CB known
+    // only to `m`). The EXPAND executes inside `OTHER`, so both the
+    // static per-file gate and the runtime unit attribution resolve
+    // against `other`, never the initializing caller `m`: unknown
+    // with the pure-table listing, never `m`'s script function.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "other.oxdock",
+        indoc! {r#"
+                FUNC USE_IT(): STRING {
+                 LET $o: STRING = EXPAND "t.txt"
+                 RETURN $o
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "m.oxdock",
+        indoc! {r#"
+                IMPORT ["lib.oxdock" AS CB]
+                IMPORT ["other.oxdock" AS OTHER]
+                LET $r: STRING = OTHER::USE_IT()
+                FUNC GET(): STRING {
+                 RETURN $r
+                }
+                EXPORT GET
+            "#},
+    );
+    fs.write_file(
+        &fs.root().join("t.txt").expect("template path"),
+        b"{{ CB::F(\"v\") }}",
+    )
+    .expect("seed template file");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["m.oxdock" AS M]
+        LET $v: STRING = M::GET()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown placeholder function 'CB::F'"),
+        "callee must resolve against its own imports, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("known functions:"),
+        "runtime miss must list the pure table, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("is a script function"),
+        "callee must never inherit the initializer's alias, got: {rendered}"
+    );
+}
+
+#[test]
+fn template_colliding_alias_reports_alias_not_script() {
+    // Same-alias collision in templates: entry imports `a` AS LIB
+    // (FOO) while `b` imports `c` AS LIB (BAR). `{{ LIB::BAR() }}`
+    // in the entry resolves through the entry's alias to the wrong
+    // defining file, so it must report no function under the alias,
+    // never a script-function LET hint for a call that cannot run.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "foo"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC BAR(): STRING {
+                 RETURN "bar"
+                }
+                EXPORT BAR
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                IMPORT ["c.oxdock" AS LIB]
+                FUNC USE_IT(): STRING {
+                 RETURN LIB::BAR()
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["a.oxdock" AS LIB]
+        IMPORT ["b.oxdock" AS B]
+        FUNC T(): STRING {
+         RETURN "{{ LIB::BAR() }}"
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered
+            .contains("placeholder function 'LIB::BAR': no function 'BAR' under file alias 'LIB'"),
+        "collision must report the alias, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("is a script function"),
+        "collision must not suggest LET for an unresolvable call, got: {rendered}"
+    );
 }
 
 #[test]

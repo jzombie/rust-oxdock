@@ -76,7 +76,7 @@ use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{
     CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag, Value,
-    render_structural,
+    qualify, render_structural,
 };
 use oxdock_process::ProcessManager;
 
@@ -1601,9 +1601,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Validate one `{{ MODULE::FUNC(args) }}` against the pure host
     /// table, the same registry runtime placeholder expansion reads.
     /// Script, file-aliased, and stateful (`Ctx`) callees never resolve
-    /// in templates; unknown pure names fail here with the runtime
-    /// `unknown placeholder function` diagnostic, and arity plus
-    /// argument types enforce through `check_arg`.
+    /// in templates; each names the culprit plus the supported path
+    /// (only genuinely unknown names keep the runtime `unknown
+    /// placeholder function` diagnostic), and arity plus argument types
+    /// enforce through `check_arg`.
     fn check_template_call(
         &mut self,
         module: &str,
@@ -1613,8 +1614,31 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         depth: usize,
     ) -> Result<()> {
-        let qualified = format!("{module}::{name}");
+        let qualified = qualify(module, name);
         let Some(meta) = self.pure_hosts.get(&qualified).cloned() else {
+            // Sibling-leakage gate, mirroring `resolve_call`: a known
+            // file-aliased function is only a script function to units
+            // that import its alias from the defining file. `SCRIPT::`
+            // and bare names resolve globally; unimported aliases fall
+            // through to unknown instead of naming a sibling's function
+            // and instructing a call that can never resolve.
+            let is_script_visible = self.funcs.get(&qualified).is_some_and(|info| {
+                super::native::script_visible_to_unit(
+                    info.module.as_deref(),
+                    module,
+                    self.imported_aliases.contains(module),
+                    self.alias_targets.get(module),
+                )
+            });
+            if let Some(text) = super::native::describe_placeholder_miss(
+                module,
+                name,
+                is_script_visible,
+                self.hosts.contains_key(&qualified),
+                self.imported_aliases.contains(module),
+            ) {
+                bail!("{text}");
+            }
             bail!("unknown placeholder function '{qualified}'");
         };
         let args_src = oxdock_parser::template::split_placeholder_args(args_raw);

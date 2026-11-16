@@ -1798,7 +1798,11 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     // parse-time qualification), so the two can
                     // never disagree on what counts as one call.
                     // Dispatch and the unknown-name error live in
-                    // [`super::native::placeholder_resolver`].
+                    // [`super::native::placeholder_resolver`]; known
+                    // script, stateful, and aliased callees get the
+                    // descriptive static-gate wording instead of the
+                    // unknown-function listing (file-backed templates
+                    // skip static validation, so runtime names them).
                     let resolve = super::native::placeholder_resolver(state.pure_function_table());
                     let vars = state.all_vars();
                     let args_src = oxdock_parser::template::split_placeholder_args(call.args_raw);
@@ -1806,7 +1810,22 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     for src in args_src {
                         args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
                     }
-                    let result = resolve(module, call.name, args)?;
+                    let result = match resolve(module, call.name, args) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            // Single lazy classifier, invoked only on
+                            // resolver failure so the hot path stays
+                            // allocation-free.
+                            if let Some(text) = state.functions.describe_unit_placeholder_miss(
+                                &super::import::active_unit_alias_targets(state),
+                                module,
+                                call.name,
+                            ) {
+                                bail!("{text}");
+                            }
+                            return Err(err);
+                        }
+                    };
                     output.push_str(&format_value_for_string(&result)?);
                 }
             },

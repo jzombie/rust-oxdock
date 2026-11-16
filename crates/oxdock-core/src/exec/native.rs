@@ -403,6 +403,91 @@ pub fn placeholder_resolver(table: Arc<PureTable>) -> oxdock_process::Placeholde
     })
 }
 
+/// Descriptive `{{ MODULE::FUNC }}` miss wording, shared by the static
+/// gate and the runtime fallbacks: known callees are never called
+/// "unknown". Returns `None` when the callee is genuinely unknown
+/// everywhere (callers keep the unknown-function diagnostic with its
+/// known-functions listing). `{{ }}` runs without step context, so
+/// the fix always routes through a prior `LET` binding.
+pub(super) fn describe_placeholder_miss(
+    module: &str,
+    name: &str,
+    is_script: bool,
+    is_stateful: bool,
+    alias_known: bool,
+) -> Option<String> {
+    let qualified = qualify(module, name);
+    if is_script {
+        let call = if module == SCRIPT_MODULE_NAME {
+            format!("{name}(...)")
+        } else {
+            format!("{qualified}(...)")
+        };
+        return Some(format!(
+            "placeholder function '{qualified}' is a script function and cannot run in {{{{ }}}}; bind the result first with LET $v = {call} then interpolate {{{{ $v }}}}"
+        ));
+    }
+    if is_stateful {
+        return Some(format!(
+            "placeholder function '{qualified}' is stateful and cannot run in {{{{ }}}}; capture it first with LET then interpolate {{{{ $v }}}}"
+        ));
+    }
+    if alias_known {
+        return Some(format!(
+            "placeholder function '{qualified}': no function '{name}' under file alias '{module}'; check the file's EXPORT list and the IMPORT harvest, or bind a known function first with LET then interpolate {{{{ $v }}}}"
+        ));
+    }
+    None
+}
+
+/// Whether a script function is visible to a unit for template
+/// purposes: `SCRIPT` names resolve globally, other modules need the
+/// alias imported with the defining file among the unit's recorded
+/// targets. Single owner; the static gate, the lazy runtime
+/// classifier, and the `EXPAND` snapshot all route through it,
+/// mirroring `Checker::resolve_call`'s sibling-leakage gate.
+pub(super) fn script_visible_to_unit(
+    defining: Option<&str>,
+    module: &str,
+    is_imported: bool,
+    targets: Option<&HashSet<String>>,
+) -> bool {
+    if module == SCRIPT_MODULE_NAME {
+        return true;
+    }
+    if !is_imported {
+        return false;
+    }
+    match defining {
+        Some(defining) => targets.is_some_and(|targets| targets.contains(defining)),
+        None => true,
+    }
+}
+
+/// Owned placeholder classes for `'static` closures (notably `EXPAND`
+/// streaming): the resolver closure cannot borrow the registry, so
+/// these name sets are the minimal owned snapshot (name strings only;
+/// bodies and step ASTs never move). The hot inline path classifies
+/// lazily through `describe_unit_placeholder_miss` instead.
+pub(super) struct PlaceholderClasses {
+    pub script: HashSet<String>,
+    pub stateful: HashSet<String>,
+    pub aliases: HashSet<String>,
+}
+
+impl PlaceholderClasses {
+    pub(super) fn describe(&self, module: &str, name: &str) -> Option<String> {
+        let qualified = qualify(module, name);
+        describe_placeholder_miss(
+            module,
+            name,
+            self.script.contains(&qualified),
+            self.stateful.contains(&qualified),
+            self.aliases.contains(module),
+        )
+    }
+}
+
 pub struct FunctionRegistry<P: ProcessManager> {
     entries: HashMap<String, FuncEntry<P>>,
     scopes: Vec<ScopeFrame<P>>,
@@ -537,6 +622,86 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// Single lookup for every callable: script, pure, or stateful.
     pub(super) fn get(&self, name: &str) -> Option<FuncEntry<P>> {
         self.entries.get(name).cloned()
+    }
+
+    /// Single lazy miss classifier for every runtime placeholder path
+    /// with registry access (inline `{{ }}` expansion): one borrow, no
+    /// `FuncEntry` clones, invoked only on resolver failure. Pure and
+    /// dual bodies return `None` (the resolver hit them, so the error
+    /// is execution failure and the original diagnostic stands).
+    /// `SCRIPT` stays globally visible; file aliases need the defining
+    /// file among the unit's recorded targets, exactly like the static
+    /// gate; anything else falls back to unknown.
+    pub(super) fn describe_unit_placeholder_miss(
+        &self,
+        unit_targets: &HashMap<String, HashSet<String>>,
+        module: &str,
+        name: &str,
+    ) -> Option<String> {
+        let qualified = qualify(module, name);
+        if let Some(entry) = self.entries.get(&qualified) {
+            match &entry.body {
+                FuncBody::Script(def) => {
+                    if script_visible_to_unit(
+                        def.module.as_deref(),
+                        module,
+                        unit_targets.contains_key(module),
+                        unit_targets.get(module),
+                    ) {
+                        return describe_placeholder_miss(module, name, true, false, false);
+                    }
+                }
+                FuncBody::Ctx(_) => {
+                    return describe_placeholder_miss(module, name, false, true, false);
+                }
+                FuncBody::Pure(_) | FuncBody::Both { .. } => return None,
+            }
+        }
+        if unit_targets.contains_key(module) {
+            return describe_placeholder_miss(module, name, false, false, true);
+        }
+        None
+    }
+
+    /// Owned snapshot for `'static` placeholder closures (notably
+    /// `EXPAND` streaming): the resolver closure cannot borrow the
+    /// registry, so these name sets are the minimal owned snapshot
+    /// (name strings only; bodies and step ASTs never move). Computed
+    /// once per `EXPAND`, an IO-bound step; inline expansion classifies
+    /// lazily through `describe_unit_placeholder_miss` instead.
+    pub(super) fn placeholder_snapshot(
+        &self,
+        unit_targets: &HashMap<String, HashSet<String>>,
+    ) -> PlaceholderClasses {
+        let mut script = HashSet::new();
+        let mut stateful = HashSet::new();
+        for (key, entry) in self.entries.iter() {
+            let Some((module, _)) = split_qualified(key) else {
+                continue;
+            };
+            match &entry.body {
+                FuncBody::Script(def) => {
+                    if script_visible_to_unit(
+                        def.module.as_deref(),
+                        module,
+                        unit_targets.contains_key(module),
+                        unit_targets.get(module),
+                    ) {
+                        script.insert(key.clone());
+                    }
+                }
+                FuncBody::Ctx(_) => {
+                    stateful.insert(key.clone());
+                }
+                FuncBody::Pure(_) | FuncBody::Both { .. } => {}
+            }
+        }
+        let aliases = unit_targets.keys().cloned().collect();
+        PlaceholderClasses {
+            script,
+            stateful,
+            aliases,
+        }
     }
 
     fn insert_native(&mut self, name: String, meta: FuncMeta, body: FuncBody<P>) {

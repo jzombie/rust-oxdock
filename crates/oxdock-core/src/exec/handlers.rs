@@ -1571,7 +1571,27 @@ pub(super) fn replace<P: ProcessManager>(
     // entries never appear here: placeholders evaluate without a step
     // context and must stay side effect free. Lookup and the
     // unknown-name error live in [`super::native::placeholder_resolver`].
-    let calls = super::native::placeholder_resolver(cx.state.pure_function_table());
+    // Known callees reuse the static-gate wording through an owned
+    // snapshot: the `'static` streaming closure cannot borrow the
+    // registry, so the name sets are computed once per EXPAND (name
+    // strings only; bodies and step ASTs never move). Inline
+    // expansion instead classifies lazily on resolver failure.
+    let table = cx.state.pure_function_table();
+    let snapshot = cx
+        .state
+        .functions
+        .placeholder_snapshot(&super::import::active_unit_alias_targets(cx.state));
+    let inner = super::native::placeholder_resolver(table);
+    let calls: oxdock_process::PlaceholderCall =
+        std::sync::Arc::new(move |module, func, args| match inner(module, func, args) {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if let Some(text) = snapshot.describe(module, func) {
+                    return Err(anyhow::anyhow!("{text}"));
+                }
+                Err(err)
+            }
+        });
 
     let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs())
         .with_vars(&vars)

@@ -348,8 +348,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             if let Some(alias) = alias {
                 // Harvest aliases register like file imports so later
                 // top-level imports re-latch cleanly; no funcs to define.
+                // Recorded with no defining file so the runtime
+                // placeholder gate still treats the alias as known.
                 let _ = enter_alias_frame(cx.state);
-                let _ = alias;
+                record_executed_alias(cx.state, alias, None);
             }
             return Ok(());
         }
@@ -361,6 +363,12 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         type_exports,
     } = load_import(cx.state, path)?;
     let key = resolved.display();
+    if let Some(alias) = alias {
+        // Record under the importing unit for the runtime placeholder
+        // gate (see `import_file`): zero-function harvests leave no
+        // registry keys, so only this record keeps the alias known.
+        record_executed_alias(cx.state, alias, Some(key.clone()));
+    }
     let alias_frame = enter_alias_frame(cx.state);
     // Join the import stack like a full import: nested loads need this
     // file on the chain for cycle/depth detection and for
@@ -467,11 +475,20 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             }
         }
         // Nested imports are the harvested functions' dependencies: run
-        // them per their own form. Anything else stays unrunned.
+        // them per their own form. Anything else stays unrunned. They
+        // belong textually to the harvested file, so they execute with
+        // its module on the context stack (mirroring import_file phase
+        // 2): unit attribution and any nested lookups resolve against
+        // it, never the importer.
+        cx.state.module_stack.push(Some(key.clone()));
+        let mut nested_cause: Option<anyhow::Error> = None;
         for step in &steps {
             match &step.kind {
                 StepKind::ImportFile { path, alias } => {
-                    import_file(cx, path, alias)?;
+                    if let Err(e) = import_file(cx, path, alias) {
+                        nested_cause = Some(e);
+                        break;
+                    }
                 }
                 StepKind::ImportFuncs {
                     path,
@@ -479,10 +496,19 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                     func_names,
                     type_names: nested_types,
                 } => {
-                    import_funcs(cx, path, alias.as_deref(), func_names, nested_types)?;
+                    if let Err(e) =
+                        import_funcs(cx, path, alias.as_deref(), func_names, nested_types)
+                    {
+                        nested_cause = Some(e);
+                        break;
+                    }
                 }
                 _ => {}
             }
+        }
+        let _ = cx.state.module_stack.pop();
+        if let Some(e) = nested_cause {
+            return Err(e);
         }
         Ok(())
     })();
@@ -669,6 +695,10 @@ pub(crate) fn import_file<P: ProcessManager>(
         type_exports,
     } = load_import(cx.state, path)?;
     let key = resolved.display();
+    // Record under the importing unit for the runtime placeholder gate:
+    // zero-function imports leave no registry keys, so only this record
+    // keeps the alias known (mirrors static `imported_aliases`).
+    record_executed_alias(cx.state, alias, Some(key.clone()));
     let alias_frame = enter_alias_frame(cx.state);
     // Merge the imported file's type aliases for its own validation and
     // execution; restored after the import returns so aliases never leak
@@ -1397,6 +1427,62 @@ pub(crate) fn resolve_top_level<P: ProcessManager>(
     }
     dir.join(path)
         .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))
+}
+
+/// Unit key for entry steps in
+/// [`ExecState::executed_alias_targets`]. File keys are resolved
+/// display paths, which never equal this sentinel.
+pub(crate) const ENTRY_UNIT: &str = "entry";
+
+/// Active unit for runtime alias attribution: the innermost module
+/// on the context stack, else the entry. This mirrors
+/// [`ExecState::current_module`]: a callee's steps belong to the
+/// callee's file even when a different module's import is still on
+/// the import chain (e.g. `OTHER::FOO()` called from `M`'s init must
+/// resolve against `OTHER`, not `M`). The import stack stays out of
+/// it: it tracks the loading chain for cycle detection and relative
+/// resolution, not the executing unit. Entry functions push `None`,
+/// so entry execution (including entry code reached anywhere in the
+/// chain) always attributes to the entry.
+pub(crate) fn active_unit_key<P: ProcessManager>(state: &ExecState<P>) -> String {
+    if let Some(key) = state.current_module() {
+        return key;
+    }
+    ENTRY_UNIT.to_string()
+}
+
+/// Alias targets for the active unit: executed imports only. Mirrors
+/// the static per-unit `outbound_alias_targets` for runs. Conditional
+/// imports that never execute stay absent and fall back to unknown.
+pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
+    state: &ExecState<P>,
+) -> HashMap<String, std::collections::HashSet<String>> {
+    state
+        .executed_alias_targets
+        .get(&active_unit_key(state))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Record one executed file import under the importing unit: alias to
+/// its defining file key (`None` for host-only harvests, which keep
+/// the alias known with an empty target set, mirroring the static
+/// host fallback).
+pub(crate) fn record_executed_alias<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    alias: &str,
+    defining: Option<String>,
+) {
+    let unit = active_unit_key(state);
+    let targets = state
+        .executed_alias_targets
+        .entry(unit)
+        .or_default()
+        .entry(alias.to_string())
+        .or_default();
+    if let Some(key) = defining {
+        targets.insert(key);
+    }
 }
 
 /// Static-phase twin of [`resolve_top_level`]: no filesystem reads.

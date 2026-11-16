@@ -201,6 +201,18 @@ pub struct ExecState<P: ProcessManager> {
     /// params-only and never see module state). Reads and mutations
     /// consult the topmost `Some` store after lexical frames miss.
     pub(super) module_stack: Vec<Option<String>>,
+    /// Executed file-import alias targets per unit (#115): alias to
+    /// defining file keys for imports that actually ran, keyed by the
+    /// importing unit (`"entry"` for entry steps, the file key for
+    /// module bodies). Mirrors the static per-unit
+    /// `outbound_alias_targets` for the runtime placeholder gate, so
+    /// file-backed `EXPAND` templates (invisible to static checking)
+    /// classify known aliases identically: zero-function and
+    /// types-only imports record their alias with an empty target set,
+    /// and module bodies resolve against their own file's imports,
+    /// never the importer's.
+    pub(super) executed_alias_targets:
+        HashMap<String, HashMap<String, std::collections::HashSet<String>>>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -730,6 +742,7 @@ impl<P: ProcessManager> ExecState<P> {
             modules: self.modules.clone(),
             validated_modules: self.validated_modules.clone(),
             module_stack: self.module_stack.clone(),
+            executed_alias_targets: self.executed_alias_targets.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
