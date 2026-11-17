@@ -43,7 +43,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Streaming `env:` lookups trim up front like the static gate and the script-engine expansion, so `{{ env: FOO }}` resolves `FOO` on every layer instead of missing on the padded spelling.
 - Entry function bodies seed only earlier top-level `LET`s: each entry function observes the bindings declared before its earliest reachable call site (transitively through callers), so calling before a declaration fails statically instead of crashing at runtime with undefined variable; uncalled functions and single-file probes keep the full union.
 - Unimported qualified calls fail closed on the closure pass: any `ALIAS::FUNC` spelling the matcher reads as global (a sibling unit's alias, a typo'd host) bails unknown instead of passing through `ANY`; bare names, `SCRIPT::`, known hosts, and single-file/probe checkers keep their leniency. The parallel imported-alias set is gone: the target map's key set is the alias set.
-- Malformed headers keep their diagnostics on every command: lowering `InvalidSyntax` always stands except on the raw-text fallback commands (`COPY`, `WRITE`), replacing the 8-keyword allowlist; forward pre-declaration no longer hoists `FUNC` headers with trailing tokens after the body block.
 - Empty `env:` / `script_env:` names bail everywhere: the static gate reports the undeclared-env diagnostic, and both runtime expansions reject with undefined-variable instead of interpolating empty.
 
 ## [0.39.0-alpha] - 2026-11-14
