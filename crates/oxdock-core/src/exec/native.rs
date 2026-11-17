@@ -1409,7 +1409,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             // Bare names are script FUNCs; qualified names resolve
             // through the unit's alias targets first, falling back to
             // the global spelling for hosts and entry-owned scripts.
-            let qualified = match name.split_once("::") {
+            let qualified = match split_qualified(name) {
                 None => qualify(SCRIPT_MODULE_NAME, name),
                 Some(_) => name.clone(),
             };
