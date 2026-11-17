@@ -8735,6 +8735,190 @@ fn disjoint_alias_unified_signature_checks_arity() {
 }
 
 #[test]
+fn disjoint_param_names_unify_positionally() {
+    // Calls are positional: differing parameter variable names across
+    // disjoint targets (`$mac_path` vs `$lin_path`) still unify when
+    // types and optionality match, so arity checks stay precise
+    // instead of degrading to `ANY`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO($mac_path: STRING): STRING {
+                    RETURN $mac_path
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "lin.oxdock",
+        indoc! {r#"
+                FUNC FOO($lin_path: STRING): STRING {
+                    RETURN $lin_path
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+            [os:macos] IMPORT ["mac.oxdock" AS LIB]
+            LET $v: STRING = LIB::FOO("a", "b")
+        }
+        IF $go {
+            [not(os:macos)] IMPORT ["lin.oxdock" AS LIB]
+            LET $w: STRING = LIB::FOO("a", "b")
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("expects 1 argument"),
+        "positional unification must keep arity checks, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("ambiguous"),
+        "disjoint aliases must not fail ambiguous, got: {rendered}"
+    );
+}
+
+#[test]
+fn disjoint_differing_inferred_returns_fall_back_to_any() {
+    // Both branches declare `: ANY` but infer different returns
+    // (`STRING` vs `INT`). The unified callee must be `ANY` rather
+    // than one arbitrary branch's inferred type: returning it where
+    // `STRING` is declared fails with an `ANY` (not `INT`/`STRING`)
+    // mismatch, deterministically on every run.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO(): ANY {
+                    RETURN "mac"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "lin.oxdock",
+        indoc! {r#"
+                FUNC FOO(): ANY {
+                    RETURN 42
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        FUNC WRAP_STR(): STRING {
+         LET $inner: BOOL = true
+         IF $inner {
+            [os:macos] IMPORT ["mac.oxdock" AS LIB]
+            RETURN LIB::FOO()
+         }
+         IF $inner {
+            [not(os:macos)] IMPORT ["lin.oxdock" AS LIB]
+            RETURN LIB::FOO()
+         }
+         RETURN "fallback"
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("yields ANY"),
+        "differing inferred returns must unify to ANY, got: {rendered}"
+    );
+}
+
+#[test]
+fn disjoint_host_harvest_branch_fails_unknown() {
+    // A host-harvest branch holds no file functions: pairing a file
+    // import with a disjoint host harvest under one alias must fail
+    // unknown (the host platform has no `FOO`), never collapse to
+    // `Canonical` on the file branch.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                    RETURN "mac"
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+            [os:macos] IMPORT ["mac.oxdock" AS LIB]
+            LET $v: STRING = LIB::FOO()
+        }
+        IF $go {
+         [not(os:macos)] IMPORT [TYPE PIPE FROM STD AS LIB]
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function `LIB::FOO`"),
+        "host-harvest branch must fail unknown, got: {err:#}"
+    );
+}
+
+#[test]
+fn same_named_block_local_functions_keep_own_overlays() {
+    // Same-named `FUNC`s in distinct blocks key overlays by definition
+    // site: the first `HELPER` resolves against `a.oxdock`, even
+    // though a later block redefines `HELPER` against `b.oxdock`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC F(): STRING {
+                    RETURN "a"
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                FUNC G(): STRING {
+                    RETURN "b"
+                }
+                EXPORT G
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $c: BOOL = true
+        IF $c {
+         FUNC HELPER(): STRING {
+            IMPORT ["a.oxdock" AS LIB]
+            RETURN LIB::F()
+         }
+        }
+        IF $c {
+         FUNC HELPER(): STRING {
+            IMPORT ["b.oxdock" AS LIB]
+            RETURN LIB::G()
+         }
+        }
+    "#});
+    run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("same-named block-local functions must keep their own overlays");
+}
+
+#[test]
 fn host_harvest_alias_does_not_inherit_sibling_file_target() {
     // Item-2 gate: an entry holding a host type-harvest alias never
     // imports the sibling file another unit loads under the same

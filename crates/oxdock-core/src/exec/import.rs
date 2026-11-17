@@ -1510,7 +1510,7 @@ pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
 
 /// Record one executed file import under the importing unit: alias to
 /// its defining file key (`None` for host-only harvests, which keep
-/// the alias known with an empty target set, mirroring the static
+/// the alias known with an explicit host branch, mirroring the static
 /// host fallback). Runtime imports execute unconditionally once
 /// taken, so they record no guard.
 pub(crate) fn record_executed_alias<P: ProcessManager>(
@@ -1525,9 +1525,7 @@ pub(crate) fn record_executed_alias<P: ProcessManager>(
         .or_default()
         .entry(alias.to_string())
         .or_default();
-    if let Some(key) = defining {
-        targets.push((key, None));
-    }
+    targets.push((defining, None));
 }
 
 /// Static-phase twin of [`resolve_top_level`]: no filesystem reads.

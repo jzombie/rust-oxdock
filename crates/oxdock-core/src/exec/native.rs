@@ -67,10 +67,14 @@ pub(super) enum AliasResolution {
     },
     /// Several files hold the name under disjoint guards: the caller
     /// validates every target instead of failing outright
-    /// (platform-conditional imports).
+    /// (platform-conditional imports). `has_host` marks a disjoint
+    /// host-harvest branch (a `(None, guard)` target) alongside the
+    /// files: that branch holds no file functions, so any file-backed
+    /// call misses there.
     Any {
         base: String,
         files: HashSet<String>,
+        has_host: bool,
     },
 }
 
@@ -80,7 +84,7 @@ pub(super) enum AliasResolution {
 /// different files under one alias are ambiguous); unguarded imports
 /// overlap everything. Runtime records `None` (its imports execute
 /// once taken).
-pub(super) type AliasTargets = HashMap<String, Vec<(String, Option<GuardExpr>)>>;
+pub(super) type AliasTargets = HashMap<String, Vec<(Option<String>, Option<GuardExpr>)>>;
 
 /// Classify one call spelling under a unit's alias targets. Single
 /// entry point for alias-target matching: splits the spelling,
@@ -104,21 +108,44 @@ pub(super) fn classify_alias_call(
     if entries.is_empty() {
         return AliasResolution::Unknown;
     }
-    // Distinct defining files in first-seen order.
+    // Distinct defining files in first-seen order; `(None, guard)`
+    // entries are host-harvest branches holding no file functions.
     let mut files: Vec<(&str, Vec<Option<&GuardExpr>>)> = Vec::new();
+    let mut host_guards: Vec<Option<&GuardExpr>> = Vec::new();
     for (file, guard) in entries {
-        match files.iter_mut().find(|(known, _)| *known == file) {
-            Some((_, guards)) => guards.push(guard.as_ref()),
-            None => files.push((file, vec![guard.as_ref()])),
+        match file {
+            Some(path) => match files.iter_mut().find(|(known, _)| *known == path) {
+                Some((_, guards)) => guards.push(guard.as_ref()),
+                None => files.push((path, vec![guard.as_ref()])),
+            },
+            None => host_guards.push(guard.as_ref()),
         }
     }
-    if files.len() == 1 {
-        return AliasResolution::Canonical(file_func_key(files[0].0, base));
+    if files.is_empty() {
+        return AliasResolution::Unknown;
     }
     let overlaps = |left: &[Option<&GuardExpr>], right: &[Option<&GuardExpr>]| {
         left.iter()
             .any(|a| right.iter().any(|b| guards_overlap(*a, *b)))
     };
+    if files.len() == 1 {
+        // A lone file target stays canonical unless a host-harvest
+        // branch is disjoint from it: on that platform the alias
+        // holds no file function, so the call misses there.
+        let disjoint_host = host_guards
+            .iter()
+            .any(|host| !overlaps(&files[0].1, &[*host]));
+        if !disjoint_host {
+            return AliasResolution::Canonical(file_func_key(files[0].0, base));
+        }
+        let mut all = HashSet::new();
+        all.insert(files[0].0.to_string());
+        return AliasResolution::Any {
+            base: base.to_string(),
+            files: all,
+            has_host: true,
+        };
+    }
     let mut ambiguous = HashSet::new();
     for (i, (file, guards)) in files.iter().enumerate() {
         for (other, other_guards) in files.iter().skip(i + 1) {
@@ -142,6 +169,7 @@ pub(super) fn classify_alias_call(
         return AliasResolution::Any {
             base: base.to_string(),
             files: all,
+            has_host: !host_guards.is_empty(),
         };
     }
     AliasResolution::Unknown
@@ -157,7 +185,10 @@ pub(super) fn spellings_for_defining_file(
     let mut direct = Vec::new();
     let mut ambiguous = Vec::new();
     for (alias, files) in unit_targets {
-        if !files.iter().any(|(file, _)| file == defining) {
+        if !files
+            .iter()
+            .any(|(file, _)| file.as_deref() == Some(defining))
+        {
             continue;
         }
         let spelling = qualify(alias, base);
@@ -750,7 +781,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     /// Single lazy miss classifier for runtime placeholder paths with
     /// registry access: one borrow, no `FuncEntry` clones, invoked only
-    /// on resolver failure.
+    /// on resolver failure. Classification runs first (matching
+    /// `exported_metas`); the shared body helper below owns the
+    /// `Script`/`Ctx` wording, so the match appears once.
     pub(super) fn describe_unit_placeholder_miss(
         &self,
         unit_targets: &AliasTargets,
@@ -758,19 +791,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         name: &str,
     ) -> Option<String> {
         let qualified = qualify(module, name);
-        if let Some(entry) = self.entries.get(&qualified) {
-            // `SCRIPT` and host spellings resolve globally; canonical
-            // file keys never match a call-site spelling.
-            match &entry.body {
-                FuncBody::Script(_) => {
-                    return describe_placeholder_miss(module, name, true, false, false);
-                }
-                FuncBody::Ctx(_) => {
-                    return describe_placeholder_miss(module, name, false, true, false);
-                }
-                FuncBody::Pure(_) | FuncBody::Both { .. } => return None,
-            }
-        }
         // File-aliased spellings classify through the shared matcher.
         // A canonical miss means the alias is known but holds no such
         // function; Global/Any carry no miss of their own.
@@ -779,17 +799,23 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         }) {
             AliasResolution::Canonical(canonical) => {
                 if let Some(entry) = self.entries.get(&canonical) {
-                    match &entry.body {
-                        FuncBody::Script(_) => {
-                            return describe_placeholder_miss(module, name, true, false, false);
-                        }
-                        FuncBody::Ctx(_) => {
-                            return describe_placeholder_miss(module, name, false, true, false);
-                        }
-                        FuncBody::Pure(_) | FuncBody::Both { .. } => return None,
+                    if let Some(miss) = Self::placeholder_miss_for_body(module, name, &entry.body) {
+                        return Some(miss);
                     }
+                    return None;
                 }
                 return describe_placeholder_miss(module, name, false, false, true);
+            }
+            AliasResolution::Global => {
+                if let Some(entry) = self.entries.get(&qualified) {
+                    // `SCRIPT` and host spellings resolve globally;
+                    // canonical file keys never match a call-site
+                    // spelling.
+                    if let Some(miss) = Self::placeholder_miss_for_body(module, name, &entry.body) {
+                        return Some(miss);
+                    }
+                }
+                return None;
             }
             AliasResolution::Ambiguous { files, .. } => {
                 return Some(ambiguous_alias_message(module, name, &files));
@@ -797,9 +823,20 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             AliasResolution::Unknown => {
                 return describe_placeholder_miss(module, name, false, false, true);
             }
-            AliasResolution::Any { .. } | AliasResolution::Global => {}
+            AliasResolution::Any { .. } => {}
         }
         None
+    }
+
+    /// Single owner for the `FuncBody` miss wording: script and
+    /// stateful bodies report their kind, template-capable bodies
+    /// (`Pure`/`Both`) report no miss.
+    fn placeholder_miss_for_body(module: &str, name: &str, body: &FuncBody<P>) -> Option<String> {
+        match body {
+            FuncBody::Script(_) => describe_placeholder_miss(module, name, true, false, false),
+            FuncBody::Ctx(_) => describe_placeholder_miss(module, name, false, true, false),
+            FuncBody::Pure(_) | FuncBody::Both { .. } => None,
+        }
     }
 
     /// Owned snapshot for `'static` placeholder closures (notably

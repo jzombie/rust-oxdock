@@ -121,8 +121,12 @@ struct FuncInfo {
     module: Option<String>,
     /// Base name for per-function import overlays (see
     /// `body_alias_scopes`): the call-site spellings vary, the
-    /// (owner, name) pair does not.
+    /// (owner, name, definition site) triple does not.
     name: String,
+    /// Definition site: distinguishes same-named block-local
+    /// functions in different blocks of one unit.
+    line: usize,
+    col: usize,
 }
 
 /// One top-level binding with its declaration guard. Guards ride along
@@ -372,6 +376,8 @@ pub(crate) fn harvest_touches_module<P: ProcessManager>(
             is_async,
             &body,
             Some(module),
+            0,
+            0,
         )?;
         if checker.func_touches_module(&probe_key)? {
             return Ok(Some(name.clone()));
@@ -1176,11 +1182,12 @@ fn unit_imports(
             aliases.insert(alias.clone());
             let unit = targets.entry(alias).or_default();
             let is_entry = entry_parent.is_some();
-            if let Some(key) =
-                super::import::resolve_static_top_level(entry_parent, dir, files, &path, is_entry)
-            {
-                unit.push((key, step.guard.clone()));
-            }
+            // Host harvests have no closure file: record an explicit
+            // host branch so disjoint file+host aliases never collapse
+            // to `Canonical` (see `classify_alias_call`).
+            let defining =
+                super::import::resolve_static_top_level(entry_parent, dir, files, &path, is_entry);
+            unit.push((defining, step.guard.clone()));
         }
         for body in super::import::child_bodies(&step.kind) {
             unit_imports(body, dir, files, entry_parent, aliases, targets);
@@ -1191,10 +1198,13 @@ fn unit_imports(
 /// Per-function import overlay: the union of the enclosing unit's
 /// top-level imports with the function's own direct imports (nested
 /// function bodies get their own overlays). Keyed by (owner module
-/// key, `"entry"` for entry functions, function name). Single owner
-/// for function-local alias visibility; `check_function_body_probed`
-/// swaps it in while checking that body.
-type BodyScopes = HashMap<(String, String), (HashSet<String>, super::native::AliasTargets)>;
+/// key, function name, definition line, definition column) so
+/// same-named block-local functions in distinct blocks never
+/// overwrite each other's overlays. Single owner for function-local
+/// alias visibility; `check_function_body_probed` swaps it in while
+/// checking that body.
+type BodyScopes =
+    HashMap<(String, String, usize, usize), (HashSet<String>, super::native::AliasTargets)>;
 
 /// Collect one overlay per `FUNC` definition under `steps`: each
 /// overlay is the parent scope plus that body's own direct imports.
@@ -1218,7 +1228,10 @@ fn collect_body_scopes(
         if let StepKind::FuncDef { name, body, .. } = &step.kind {
             let mut scope = parent.clone();
             unit_imports(body, dir, files, entry_parent, &mut scope.0, &mut scope.1);
-            out.insert((module_key.to_string(), name.clone()), scope.clone());
+            out.insert(
+                (module_key.to_string(), name.clone(), step.line, step.col),
+                scope.clone(),
+            );
             collect_body_scopes(body, module_key, dir, files, entry_parent, &scope, out);
         } else {
             for nested in super::import::child_bodies(&step.kind) {
@@ -1720,7 +1733,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // name is a script function, so the template call
                 // needs the `LET` path; with no candidate holding
                 // it the miss wording below applies instead.
-                super::native::AliasResolution::Any { base, files } => {
+                super::native::AliasResolution::Any { base, files, .. } => {
                     is_script_visible = files.iter().any(|file| {
                         self.funcs
                             .contains_key(&super::native::file_func_key(file, &base))
@@ -1979,6 +1992,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         is_async: bool,
         body: &[Step],
         module: Option<&str>,
+        line: usize,
+        col: usize,
     ) -> Result<()> {
         let resolved = resolve_script_params(self.exec, name, params)?;
         let declared = self
@@ -1998,6 +2013,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     body: body.to_vec(),
                     module: module.map(|m| m.to_string()),
                     name: name.to_string(),
+                    line,
+                    col,
                 },
             );
         }
@@ -2024,6 +2041,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     *is_async,
                     body,
                     module,
+                    step.line,
+                    step.col,
                 )?;
             }
             StepKind::If {
@@ -2147,6 +2166,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             *is_async,
                             body,
                             Some(module),
+                            step.line,
+                            step.col,
                         )?;
                     }
                     None => {
@@ -2158,6 +2179,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             *is_async,
                             body,
                             Some(module),
+                            step.line,
+                            step.col,
                         )?;
                     }
                 }
@@ -2365,7 +2388,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let unit = info.module.as_deref().unwrap_or(super::import::ENTRY_UNIT);
         let overlay = self
             .body_scopes
-            .get(&(unit.to_string(), info.name.clone()))
+            .get(&(unit.to_string(), info.name.clone(), info.line, info.col))
             .cloned();
         let saved = overlay.map(|(aliases, targets)| {
             (
@@ -2705,6 +2728,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     body: body.clone(),
                     module: env.module.as_ref().map(|scope| scope.key.clone()),
                     name: name.clone(),
+                    line: step.line,
+                    col: step.col,
                 };
                 self.check_function_body(name, &info, depth + 1)?;
                 Ok(live)
@@ -3549,31 +3574,39 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // export the name (a missing branch fails the call on
                 // its platform); identical signatures check precisely,
                 // differing ones fall back to `ANY`.
-                super::native::AliasResolution::Any { base, files } => {
+                super::native::AliasResolution::Any {
+                    base,
+                    files,
+                    has_host,
+                } => {
+                    // A host-harvest branch holds no file functions, so
+                    // any file-backed call misses there.
+                    if has_host {
+                        bail!("unknown function `{name}`");
+                    }
                     // Every disjoint target must export the name: a
                     // missing branch fails the call on its platform.
                     let mut canonicals = Vec::new();
-                    for file in &files {
-                        let canonical = super::native::file_func_key(file, &base);
+                    for file in files {
+                        let canonical = super::native::file_func_key(file.as_str(), base.as_str());
                         let Some(info) = self.funcs.get(&canonical) else {
                             bail!("unknown function `{name}`");
                         };
                         canonicals.push((canonical, info.clone()));
                     }
+                    // Deterministic order: `files` is a `HashSet` with
+                    // per-process randomized iteration.
+                    canonicals.sort_by(|a, b| a.0.cmp(&b.0));
                     // Identical signatures check precisely against the
                     // shared shape; differing ones fall back to `ANY`
-                    // since the active branch is unknowable.
+                    // since the active branch is unknowable. Calls are
+                    // positional, so parameter names never participate.
                     let (_, first) = canonicals.first().expect("Any is never empty");
                     let unified = canonicals.iter().all(|(_, info)| {
                         info.params.len() == first.params.len()
                             && info.params.iter().zip(first.params.iter()).all(
-                                |(
-                                    (param_name, param_tag, optional),
-                                    (first_name, first_tag, first_optional),
-                                )| {
-                                    param_name == first_name
-                                        && optional == first_optional
-                                        && tags_equal(param_tag, first_tag)
+                                |((_, param_tag, optional), (_, first_tag, first_optional))| {
+                                    optional == first_optional && tags_equal(param_tag, first_tag)
                                 },
                             )
                             && tags_equal(&info.declared, &first.declared)
@@ -3585,12 +3618,35 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             host_params: None,
                         });
                     }
-                    let (first_key, first_info) =
-                        canonicals.into_iter().next().expect("Any is never empty");
-                    let ret = self.func_return_owned(&first_info, &first_key, depth)?;
+                    // Infer every branch and unify: differing inferred
+                    // returns (including a bare `ANY` on any branch)
+                    // widen to `ANY` instead of picking one `HashSet`
+                    // slot at random.
+                    let mut inferred = Vec::new();
+                    for (key, info) in &canonicals {
+                        inferred.push(self.func_return_owned(info, key, depth)?);
+                    }
+                    let (_, first) = canonicals.first().expect("Any is never empty");
+                    let first_ret = inferred.first().expect("Any is never empty");
+                    let returns_unified = inferred.iter().all(|ty| match (ty, first_ret) {
+                        (StaticTy::Void, StaticTy::Void) => true,
+                        (StaticTy::Ty(left), StaticTy::Ty(right)) => tags_equal(left, right),
+                        _ => false,
+                    });
+                    let any_branch = inferred.iter().any(|ty| match ty {
+                        StaticTy::Ty(tag) => tags_equal(tag, &TypeTag::Any),
+                        StaticTy::Void => false,
+                    });
+                    if !returns_unified || any_branch {
+                        return Ok(Callee {
+                            params: None,
+                            ret: StaticTy::Ty(TypeTag::Any),
+                            host_params: None,
+                        });
+                    }
                     return Ok(Callee {
-                        params: Some(first_info.params.clone()),
-                        ret,
+                        params: Some(first.params.clone()),
+                        ret: first_ret.clone(),
                         host_params: None,
                     });
                 }
