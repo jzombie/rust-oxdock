@@ -1397,7 +1397,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     /// Metadata for single-file `EXPORT` names in source order. Errors
     /// name the first missing export; callers fail fast before serving.
-    /// Qualified names resolve through [`resolve_file_call_key`], so
+    /// Qualified names resolve through `resolve_file_call_key`, so
     /// re-exported file functions serve under the export spelling.
     pub fn exported_metas(
         &self,

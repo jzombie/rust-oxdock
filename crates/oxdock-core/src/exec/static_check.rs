@@ -1817,7 +1817,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// Scan raw string text for `{{ ... }}` reads: `env:` names through
     /// the declaration gate, `$var` and bare keys through expression
-    /// inference. Runs on the shared [`TemplateSegments`](oxdock_parser::template::TemplateSegments)
+    /// inference. Runs on the shared [`TemplateSegments`]
     /// splitter, so what counts as a placeholder here is exactly what
     /// expands at runtime. Call shapes use the shared
     /// `template::parse_placeholder_call` grammar (also behind
