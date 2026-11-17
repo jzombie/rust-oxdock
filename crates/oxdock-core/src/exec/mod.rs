@@ -463,6 +463,7 @@ pub(crate) fn new_state<P: ProcessManager>(
         import_stack: Vec::new(),
         import_alias_frame: None,
         executed_alias_targets: std::collections::HashMap::new(),
+        call_alias_frames: Vec::new(),
         modules: std::collections::HashMap::new(),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),

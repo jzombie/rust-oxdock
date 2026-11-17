@@ -1495,30 +1495,66 @@ pub(crate) fn active_unit_key<P: ProcessManager>(state: &ExecState<P>) -> String
     ENTRY_UNIT.to_string()
 }
 
-/// Alias targets for the active unit: executed imports only. Mirrors
-/// the static per-unit `outbound_alias_targets` for runs. Conditional
-/// imports that never execute stay absent and fall back to unknown.
+/// Alias targets for the active unit: executed top-level imports plus
+/// the innermost live call frame for this unit, if any. Mirrors the
+/// static per-function overlays (unit top-level plus the body's own
+/// imports, appended in the same order): a callee never sees its
+/// caller's function-local imports. Conditional imports that never
+/// execute stay absent and fall back to unknown.
 pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
     state: &ExecState<P>,
 ) -> super::native::AliasTargets {
-    state
+    let unit = active_unit_key(state);
+    let mut out = state
         .executed_alias_targets
-        .get(&active_unit_key(state))
+        .get(&unit)
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some((_, frame)) = state
+        .call_alias_frames
+        .iter()
+        .rev()
+        .find(|(key, _)| *key == unit)
+    {
+        // Append, never overwrite: the static overlay appends the
+        // body's own imports onto the unit top-level, so the same
+        // alias in both layers overlaps (ambiguous) here too instead
+        // of the frame silently shadowing the unit map.
+        for (alias, targets) in frame {
+            out.entry(alias.clone())
+                .or_default()
+                .extend(targets.iter().cloned());
+        }
+    }
+    out
 }
 
-/// Record one executed file import under the importing unit: alias to
-/// its defining file key (`None` for host-only harvests, which keep
-/// the alias known with an explicit host branch, mirroring the static
-/// host fallback). Runtime imports execute unconditionally once
-/// taken, so they record no guard.
+/// Record one executed import under the importing unit: alias to its
+/// defining file key (`None` for host-only harvests, which keep the
+/// alias known with an explicit host branch, mirroring the static
+/// host fallback). Inside a function body the record lands on the
+/// innermost call frame for the active unit, never the shared
+/// unit-top map, so sibling and caller scopes stay isolated.
+/// Top-level imports land on the unit-top map. Runtime imports execute
+/// unconditionally once taken, so they record no guard.
 pub(crate) fn record_executed_alias<P: ProcessManager>(
     state: &mut ExecState<P>,
     alias: &str,
     defining: Option<String>,
 ) {
     let unit = active_unit_key(state);
+    if let Some((_, frame)) = state
+        .call_alias_frames
+        .iter_mut()
+        .rev()
+        .find(|(key, _)| *key == unit)
+    {
+        frame
+            .entry(alias.to_string())
+            .or_default()
+            .push((defining, None));
+        return;
+    }
     let targets = state
         .executed_alias_targets
         .entry(unit)

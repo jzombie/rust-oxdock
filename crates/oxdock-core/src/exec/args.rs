@@ -1760,8 +1760,14 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     // Whitespace-tolerant like the static gate: the
                     // shared splitter trims the whole key, and the
                     // name trims here, so `{{ env: FOO }}` resolves
-                    // exactly what the checker admitted.
+                    // exactly what the checker admitted. Empty names
+                    // bail like the streaming layer instead of reading
+                    // empty: the static gate rejects them before any
+                    // step runs.
                     let env_key = env_key.trim();
+                    if env_key.is_empty() {
+                        bail!("undefined environment variable: ''");
+                    }
                     let val = env
                         .get(env_key)
                         .map(String::as_str)
@@ -1774,9 +1780,13 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     }
                 }
                 // `{{ script_env:KEY }}` reads the explicit
-                // script env only.
+                // script env only. Empty names bail like `env:` and
+                // the streaming layer instead of reading empty.
                 PlaceholderKey::ScriptEnv(env_key) => {
                     let env_key = env_key.trim();
+                    if env_key.is_empty() {
+                        bail!("undefined environment variable: ''");
+                    }
                     if let Some(v) = env.get(env_key).map(String::as_str) {
                         output.push_str(v);
                     }

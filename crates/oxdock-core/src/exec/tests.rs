@@ -953,6 +953,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         import_stack: Vec::new(),
         import_alias_frame: None,
         executed_alias_targets: std::collections::HashMap::new(),
+        call_alias_frames: Vec::new(),
         modules: std::collections::HashMap::new(),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
@@ -8919,6 +8920,326 @@ fn same_named_block_local_functions_keep_own_overlays() {
 }
 
 #[test]
+fn callee_does_not_inherit_caller_function_local_imports() {
+    // Function-local imports scope to the invocation: `F` importing
+    // `a.oxdock AS LIB` and calling `G` (same unit) must not make
+    // `G`'s own `LIB` import ambiguous, and `G` must not resolve
+    // `F`'s locals. `G` sees only the unit top-level plus its own
+    // imports, mirroring the static per-function overlays.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC AF(): STRING {
+                 RETURN "a"
+                }
+                EXPORT AF
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                FUNC BF(): STRING {
+                 RETURN "b"
+                }
+                EXPORT BF
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        FUNC G(): STRING {
+         IMPORT ["b.oxdock" AS LIB]
+         RETURN LIB::BF()
+        }
+        FUNC F(): STRING {
+         IMPORT ["a.oxdock" AS LIB]
+         RETURN G()
+        }
+        LET $v: STRING = F()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("callee resolves its own locals without ambiguity");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("b"));
+}
+
+#[test]
+fn entry_func_call_before_let_fails_static() {
+    // Flow-sensitive entry lets: calling `GET` before `$late` is
+    // declared fails the static gate instead of crashing at runtime
+    // with undefined variable.
+    let steps = parse_entry(indoc! {r#"
+        FUNC GET(): STRING { RETURN $late }
+        LET $v: STRING = GET()
+        LET $late: STRING = "late"
+    "#});
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("call-before-let must fail statically");
+    assert!(
+        format!("{err:#}").contains("undefined variable"),
+        "call-before-let must report undefined variable, got: {err:#}"
+    );
+}
+
+#[test]
+fn entry_func_call_after_let_passes() {
+    // The same program with the declaration first validates and runs:
+    // earliest-call seeding includes `$late` for the call at step 3.
+    let steps = parse_entry(indoc! {r#"
+        LET $late: STRING = "late"
+        FUNC GET(): STRING { RETURN $late }
+        LET $v: STRING = GET()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("call-after-let must pass");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("late"));
+}
+
+#[test]
+fn transitive_call_before_let_fails_static() {
+    // Earliest-call propagates through callers: `F` calls `G`, `G`
+    // reads `$late`, and the top-level call to `F` precedes the
+    // declaration, so `G` must not observe it either.
+    let steps = parse_entry(indoc! {r#"
+        FUNC G(): STRING { RETURN $late }
+        FUNC F(): STRING { RETURN G() }
+        LET $v: STRING = F()
+        LET $late: STRING = "late"
+    "#});
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("transitive call-before-let must fail statically");
+    assert!(
+        format!("{err:#}").contains("undefined variable"),
+        "transitive call-before-let must report undefined variable, got: {err:#}"
+    );
+}
+
+#[test]
+fn block_nested_call_before_let_fails_static() {
+    // Calls inside top-level `If` / `For` / `While` bodies count at
+    // the enclosing step index: the `GET()` call inside the `IF`
+    // block precedes `LET $late`, so `GET` must not observe it.
+    // (The old walker only inspected the `If` head's own strings
+    // and missed block-nested calls, seeding the full union and
+    // crashing at runtime with undefined variable.)
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        FUNC GET(): STRING { RETURN $late }
+        IF $go {
+         LET $v: STRING = GET()
+        }
+        LET $late: STRING = "late"
+    "#});
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("block-nested call-before-let must fail statically");
+    assert!(
+        format!("{err:#}").contains("undefined variable"),
+        "block-nested call-before-let must report undefined variable, got: {err:#}"
+    );
+}
+
+#[test]
+fn uncalled_nested_funcdef_calls_do_not_advance_earliest() {
+    // Calls inside an uncalled nested `FuncDef` never run, so they
+    // must not pull the enclosing function's earliest call site
+    // earlier: with `enter_funcdefs == false` the nested body is
+    // skipped at every level (the old walker descended into it via
+    // expression recursion and leaked the callee).
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        FUNC GET(): STRING { RETURN "early" }
+        IF $go {
+         FUNC INNER(): STRING { RETURN GET() }
+         LET $late: STRING = "late"
+        }
+        LET $v: STRING = GET()
+        ECHO "{{ $v }}"
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("uncalled nested calls must not disturb seeding");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("early"));
+}
+
+#[test]
+fn nested_funcdef_does_not_inherit_enclosing_alias() {
+    // Function-local imports scope to the invocation, including for
+    // lexically nested definitions: `INNER` runs under its own fresh
+    // frame, never `OUTER`'s, so the static overlay isolates nested
+    // bodies to the unit top-level exactly like the runtime.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "a"
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        FUNC OUTER(): STRING {
+         IMPORT ["a.oxdock" AS LIB]
+         FUNC INNER(): STRING { RETURN LIB::FOO() }
+         RETURN INNER()
+        }
+        LET $v: STRING = OUTER()
+    "#});
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("nested body must not see enclosing alias");
+    assert!(
+        format!("{err:#}").contains("unknown function `LIB::FOO`"),
+        "nested alias use must fail closed, got: {err:#}"
+    );
+}
+
+#[test]
+fn same_step_let_not_visible_inside_called_func() {
+    // `LET $v = F()` binds `$v` after `F` returns, so `F` reading `$v`
+    // fails statically even though the declaration shares the call's
+    // step index.
+    let steps = parse_entry(indoc! {r#"
+        FUNC F(): STRING { RETURN $v }
+        LET $v: STRING = F()
+    "#});
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("same-step let must not be visible inside the callee");
+    assert!(
+        format!("{err:#}").contains("undefined variable"),
+        "same-step let must report undefined variable, got: {err:#}"
+    );
+}
+
+#[test]
+fn empty_env_names_bail_everywhere() {
+    // Empty `env:` / `script_env:` names never interpolate empty: the
+    // static gate rejects them with the undeclared-env wording, and
+    // the script-engine expansion bails like the streaming layer.
+    for body in ["{{ env: }}", "{{ script_env: }}"] {
+        let steps = parse_entry(&format!("ECHO \"{body}\"\n"));
+        let err = run_expect_err(
+            Box::new(MockFs::new()),
+            &steps,
+            MockProcessManager::default(),
+        );
+        assert!(
+            format!("{err:#}").contains("undeclared environment variable"),
+            "{body} must fail statically, got: {err:#}"
+        );
+    }
+    let state = create_exec_state(MockFs::new());
+    let env = HashMap::new();
+    for text in ["{{ env: }}", "{{ script_env: }}"] {
+        let err = super::args::expand_string(text, &env, &state)
+            .expect_err(&format!("{text} must fail expansion"));
+        assert!(
+            err.to_string().contains("undefined environment variable"),
+            "{text} must report undefined variable, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn dead_alias_call_fails_in_static_gate() {
+    // The strict tail fires in the static gate, not just at runtime:
+    // a dead-guarded import is parse-visible but statically absent, so
+    // the expression call fails `validate_closure_for_run` instead of
+    // passing through `ANY` to a runtime failure.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "h.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                    RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        [os:macos, os:windows] IMPORT ["h.oxdock" AS ALIAS]
+        LET $v: STRING = ALIAS::F("v")
+    "#});
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("static gate must fail closed on dead aliases");
+    assert!(
+        format!("{err:#}").contains("unknown function `ALIAS::F`"),
+        "dead alias must fail static unknown, got: {err:#}"
+    );
+}
+
+#[test]
+fn template_disjoint_host_branch_does_not_suggest_let() {
+    // `check_template_call` agrees with `resolve_call` on disjoint
+    // aliases: with a host-harvest branch competing, `{{ LIB::FOO() }}`
+    // must read as a miss (no function under the alias), never as the
+    // script-function `LET` hint for a call the expression checker
+    // rejects as unknown.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                    RETURN "mac"
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+            [os:macos] IMPORT ["mac.oxdock" AS LIB]
+        }
+        IF $go {
+            [not(os:macos)] IMPORT [TYPE PIPE FROM STD AS LIB]
+        }
+        ECHO "{{ LIB::FOO() }}"
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("no function 'FOO' under file alias 'LIB'"),
+        "template must report the miss, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("bind the result first"),
+        "template must not suggest LET for a call resolve_call rejects, got: {rendered}"
+    );
+}
+
+#[test]
 fn host_harvest_alias_does_not_inherit_sibling_file_target() {
     // Item-2 gate: an entry holding a host type-harvest alias never
     // imports the sibling file another unit loads under the same
@@ -10234,6 +10555,7 @@ fn workflow_inline_scripts_pass_static_gate() {
                 import_stack: Vec::new(),
                 import_alias_frame: None,
                 executed_alias_targets: std::collections::HashMap::new(),
+                call_alias_frames: Vec::new(),
                 modules: std::collections::HashMap::new(),
                 validated_modules: std::collections::HashSet::new(),
                 module_stack: Vec::new(),

@@ -74,6 +74,9 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
+use oxdock_parser::template::{
+    PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
+};
 use oxdock_parser::{
     CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag, Value,
     qualify, render_structural,
@@ -246,12 +249,20 @@ struct Checker<'a, P: ProcessManager> {
     /// Each entry carries its declaration guard, so platform-guarded
     /// bindings enforce path coverage instead of reading unconditionally.
     module_lets: ModuleLets,
-    /// Entry top-level `LET`s: seeded beneath params when checking
-    /// entry function bodies, mirroring the runtime outer scope that
-    /// calls observe. Order-free like the env union: a function may
-    /// run after any top-level step. Guards preserved per binding so
-    /// disjoint platform declarations accumulate instead of overwriting.
+    /// Entry top-level `LET`s: the full union, fallback for uncalled
+    /// functions and single-file probes. Reachable entry bodies seed
+    /// from `entry_let_scopes` instead: only bindings declared before
+    /// the function's earliest reachable call site, mirroring the
+    /// runtime outer scope the call actually observes. Guards preserved
+    /// per binding so disjoint platform declarations accumulate instead
+    /// of overwriting.
     entry_lets: Vec<GuardedLet>,
+    /// Per-entry-function top-level `LET` view: bindings declared
+    /// before the function's earliest reachable call site, keyed by
+    /// (name, line, col) like `body_scopes`. Missing entries (uncalled
+    /// dead code, single-file probes) fall back to the full
+    /// `entry_lets` union.
+    entry_let_scopes: HashMap<(String, usize, usize), Vec<GuardedLet>>,
     /// The entry's top-level `ENV` / `INHERIT_ENV` union, plus one per
     /// module key. Function bodies seed from the union covering their
     /// file: a module function sees its own file's prelude
@@ -278,12 +289,13 @@ struct Checker<'a, P: ProcessManager> {
     inferred: HashMap<String, StaticTy>,
     inferring: Vec<String>,
     visits: u64,
-    /// File-import aliases visible to the checked unit: every `AS ALIAS`
-    /// across the closure (entry steps plus every file's import sites),
-    /// whether or not the imported file defines functions. Scoped to
-    /// the closure pass: single-file validation leaves it empty and
-    /// keeps the `ANY` leniency for unknown qualified names.
-    imported_aliases: HashSet<String>,
+    /// Fail closed on qualified calls no table can resolve: set for
+    /// the closure pass (which sees every unit's imports) so sibling
+    /// aliases and typos bail instead of reading `ANY`. Bare
+    /// `Checker::new` uses (single-file validation, collect-phase
+    /// touch probes) stay lenient: without the closure they cannot
+    /// tell an unimported alias from a not-yet-collected one.
+    strict_qualified: bool,
     /// Outbound alias targets for the checked unit: `ALIAS` to
     /// (defining file, import guard) pairs. `resolve_call` requires a
     /// unique resolvable target, so same-alias different-file imports
@@ -394,8 +406,22 @@ pub(crate) fn harvest_touches_module<P: ProcessManager>(
 /// keeps its declaration guard so guarded top-level `LET`s enforce
 /// path coverage instead of reading as unconditional.
 fn module_lets<P: ProcessManager>(steps: &[Step], exec: &ExecState<P>) -> Result<Vec<GuardedLet>> {
+    Ok(module_lets_indexed(steps, exec)?
+        .into_iter()
+        .map(|(binding, _)| binding)
+        .collect())
+}
+
+/// Top-level `LET` declarations with their step indices: backs
+/// earliest-call seeding so entry functions only observe bindings
+/// declared before their first reachable call. Single owner for the
+/// binding-form match; [`module_lets`] strips the indices.
+fn module_lets_indexed<P: ProcessManager>(
+    steps: &[Step],
+    exec: &ExecState<P>,
+) -> Result<Vec<(GuardedLet, usize)>> {
     let mut out = Vec::new();
-    for step in steps {
+    for (idx, step) in steps.iter().enumerate() {
         if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
             continue;
         }
@@ -409,10 +435,10 @@ fn module_lets<P: ProcessManager>(steps: &[Step], exec: &ExecState<P>) -> Result
                 let tag = exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("variable `${var}`: {err:#}"))?;
-                out.push((clean_var(var), tag, step.guard.clone()));
+                out.push(((clean_var(var), tag, step.guard.clone()), idx));
             }
             StepKind::ReadLine { var } | StepKind::Prompt { var, .. } => {
-                out.push((clean_var(var), TypeTag::String, step.guard.clone()));
+                out.push(((clean_var(var), TypeTag::String, step.guard.clone()), idx));
             }
             _ => {}
         }
@@ -624,7 +650,6 @@ pub fn validate_script_closure<P: ProcessManager>(
         // the alias set (not a func-key prefix scan) proves the
         // namespace known. Scoped per unit so sibling modules cannot
         // cross-resolve each other's `AS` aliases.
-        let mut entry_aliases = HashSet::new();
         let entry_base = super::import::import_base(exec);
         let entry_parent = exec.entry_file.as_ref().and_then(|entry| entry.parent());
         let mut entry_targets: super::native::AliasTargets = HashMap::new();
@@ -633,16 +658,12 @@ pub fn validate_script_closure<P: ProcessManager>(
             &entry_base,
             files,
             entry_parent.as_ref(),
-            &mut entry_aliases,
             &mut entry_targets,
         );
-        let mut file_aliases: HashMap<String, HashSet<String>> = HashMap::new();
         let mut file_targets: HashMap<String, super::native::AliasTargets> = HashMap::new();
         for file in files {
-            let mut set = HashSet::new();
             let mut targets = HashMap::new();
-            unit_imports(&file.steps, &file.dir, files, None, &mut set, &mut targets);
-            file_aliases.insert(file.key.clone(), set);
+            unit_imports(&file.steps, &file.dir, files, None, &mut targets);
             file_targets.insert(file.key.clone(), targets);
         }
         // Per-function overlays: file-top imports plus each body
@@ -656,7 +677,7 @@ pub fn validate_script_closure<P: ProcessManager>(
             &entry_base,
             files,
             entry_parent.as_ref(),
-            &(entry_aliases.clone(), entry_targets.clone()),
+            &entry_targets,
             &mut body_scopes,
         );
         for file in files {
@@ -666,10 +687,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 &file.dir,
                 files,
                 None,
-                &(
-                    file_aliases.get(&file.key).cloned().unwrap_or_default(),
-                    file_targets.get(&file.key).cloned().unwrap_or_default(),
-                ),
+                &file_targets.get(&file.key).cloned().unwrap_or_default(),
                 &mut body_scopes,
             );
         }
@@ -699,6 +717,10 @@ pub fn validate_script_closure<P: ProcessManager>(
                 Ok(())
             })?;
         }
+        // Earliest-call LET views for entry functions (entry runs
+        // top level sequentially, so calls only observe earlier
+        // bindings; module bodies keep their whole-file union).
+        let entry_let_scopes = entry_let_scopes(entry, &all_funcs, exec)?;
         // Infer every collected function under its owner's scope
         // FIRST, into one shared memo, so call sites reuse
         // owner-checked signatures instead of inferring in whatever
@@ -724,10 +746,6 @@ pub fn validate_script_closure<P: ProcessManager>(
             // Inference runs under the owner's own alias scope, so a
             // sibling module's alias never makes an unknown callee look
             // known while inferring.
-            let owner_aliases: HashSet<String> = match &owner {
-                None => entry_aliases.clone(),
-                Some(module) => file_aliases.get(module).cloned().unwrap_or_default(),
-            };
             let owner_targets: super::native::AliasTargets = match &owner {
                 None => entry_targets.clone(),
                 Some(module) => file_targets.get(module).cloned().unwrap_or_default(),
@@ -741,9 +759,9 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &inferred,
                     entry,
                     files,
-                    &owner_aliases,
                     &owner_targets,
                     &body_scopes,
+                    &entry_let_scopes,
                 );
                 let ty = checker.func_return(&key, 0)?;
                 inferred.insert(key.clone(), ty);
@@ -767,16 +785,17 @@ pub fn validate_script_closure<P: ProcessManager>(
             inferred: &HashMap<String, StaticTy>,
             entry: &[Step],
             files: &[ClosureFile],
-            imported_aliases: &HashSet<String>,
             alias_targets: &super::native::AliasTargets,
             body_scopes: &BodyScopes,
+            entry_let_scopes: &HashMap<(String, usize, usize), Vec<GuardedLet>>,
         ) -> Checker<'a, P> {
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
             checker.module_lets = lets.clone();
             checker.entry_lets = entry_lets.to_vec();
+            checker.entry_let_scopes = entry_let_scopes.clone();
             checker.inferred = inferred.clone();
-            checker.imported_aliases = imported_aliases.clone();
+            checker.strict_qualified = true;
             checker.alias_targets = alias_targets.clone();
             checker.body_scopes = body_scopes.clone();
             checker.build_env_unions(entry, files);
@@ -791,9 +810,9 @@ pub fn validate_script_closure<P: ProcessManager>(
                 &inferred,
                 entry,
                 files,
-                &entry_aliases,
                 &entry_targets,
                 &body_scopes,
+                &entry_let_scopes,
             )
             .check_top_level(entry)
         })?;
@@ -802,7 +821,6 @@ pub fn validate_script_closure<P: ProcessManager>(
                 super::typing::collect_type_aliases(&file.steps, exec)?
                     .into_iter()
                     .collect();
-            let aliases = file_aliases.get(&file.key).cloned().unwrap_or_default();
             let targets = file_targets.get(&file.key).cloned().unwrap_or_default();
             with_scope_aliases(exec, &defs, |exec| {
                 seeded_checker(
@@ -813,9 +831,9 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &inferred,
                     entry,
                     files,
-                    &aliases,
                     &targets,
                     &body_scopes,
+                    &entry_let_scopes,
                 )
                 .check_import_body(&file.key, &file.steps, Some(&file.key))
             })?;
@@ -1144,19 +1162,19 @@ fn file_env_union(steps: &[Step]) -> HashSet<String> {
     union
 }
 
-/// Outbound imports of one step tree in a single walk: every visible
-/// `AS` alias plus each alias's defining file keys. `entry_parent`
+/// Outbound imports of one step tree in a single walk: each visible
+/// `AS` alias mapped to its defining file keys. `entry_parent`
 /// enables entry-first key matching for the entry unit; file units
 /// pass `None`. Single owner for the closure's per-unit import view;
 /// dead steps register nowhere, `FUNC` bodies never leak into the
 /// enclosing scope (they own per-function overlays), bare harvests
-/// stay global.
+/// stay global. The target map's key set is the alias set: no
+/// parallel `HashSet` is kept.
 fn unit_imports(
     steps: &[Step],
     dir: &GuardedPath,
     files: &[ClosureFile],
     entry_parent: Option<&GuardedPath>,
-    aliases: &mut HashSet<String>,
     targets: &mut super::native::AliasTargets,
 ) {
     for step in steps {
@@ -1179,7 +1197,6 @@ fn unit_imports(
             _ => (String::new(), None),
         };
         if let Some(alias) = alias {
-            aliases.insert(alias.clone());
             let unit = targets.entry(alias).or_default();
             let is_entry = entry_parent.is_some();
             // Host harvests have no closure file: record an explicit
@@ -1190,27 +1207,242 @@ fn unit_imports(
             unit.push((defining, step.guard.clone()));
         }
         for body in super::import::child_bodies(&step.kind) {
-            unit_imports(body, dir, files, entry_parent, aliases, targets);
+            unit_imports(body, dir, files, entry_parent, targets);
         }
     }
 }
 
-/// Per-function import overlay: the union of the enclosing unit's
-/// top-level imports with the function's own direct imports (nested
-/// function bodies get their own overlays). Keyed by (owner module
-/// key, function name, definition line, definition column) so
+/// Bare/`SCRIPT::` call names mentioned in one step's subtree:
+/// statement calls, expression calls (including compiled-math calls
+/// and `{{ }}` string templates), and template call heads. `FUNC`
+/// bodies contribute only when `enter_funcdefs` (edge collection is
+/// conservatively inclusive; the top-level scan excludes definitions,
+/// whose bodies run at call time, not at their step). Single owner
+/// for the entry call graph behind earliest-call seeding: a new call
+/// position arrives here, not in a second walker.
+fn step_call_names(kind: &StepKind, enter_funcdefs: bool, out: &mut Vec<String>) {
+    if !enter_funcdefs && matches!(kind, StepKind::FuncDef { .. }) {
+        return;
+    }
+    // Immediate expressions only, recursed manually below: nested
+    // bodies arrive through the explicit `walk_child_kinds` recursion
+    // and `Block` delegation, so the `FuncDef` exclusion holds at
+    // every level (unlike `walk_step_exprs`, which descends into
+    // nested definitions unconditionally and would leak uncalled
+    // block-local callees into the top-level graph).
+    kind.walk_exprs(&mut |expr| expr_call_names(expr, enter_funcdefs, out));
+    // Immediate raw strings only (`walk_raw_strings` never descends),
+    // so `If` / `For` / `While` / `WithIo` / `Isolated` bodies arrive
+    // through the recursion below instead of being missed.
+    kind.walk_raw_strings(&mut |text| template_call_names(text, out));
+    kind.walk_child_kinds(&mut |sub| step_call_names(sub, enter_funcdefs, out));
+}
+
+/// Call names in one immediate expression. `Block` steps recurse
+/// through [`step_call_names`] (not `Expr::walk`, which descends into
+/// nested `FuncDef` bodies unconditionally), so excluded definitions
+/// stay excluded inside inline blocks too. Mirrors `Expr::walk` arm
+/// for arm; a new expression variant fails compilation here.
+fn expr_call_names(expr: &Expr, enter_funcdefs: bool, out: &mut Vec<String>) {
+    match expr {
+        Expr::Call { name, args } => {
+            push_entry_call_name(name, out);
+            for arg in args {
+                expr_call_names(arg, enter_funcdefs, out);
+            }
+        }
+        Expr::CompiledMath(ops) => {
+            for op in ops {
+                match op {
+                    MathOp::Call { name, .. } => push_entry_call_name(name, out),
+                    MathOp::PushConst(value) => {
+                        if let Some(text) = value.as_str() {
+                            template_call_names(text, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Expr::Literal(value) => {
+            if let Some(text) = value.as_str() {
+                template_call_names(text, out);
+            }
+        }
+        Expr::Block(steps) => {
+            for step in steps {
+                step_call_names(&step.kind, enter_funcdefs, out);
+            }
+        }
+        Expr::List(items) => {
+            for item in items {
+                expr_call_names(item, enter_funcdefs, out);
+            }
+        }
+        Expr::Map(entries) => {
+            for (_, value) in entries {
+                expr_call_names(value, enter_funcdefs, out);
+            }
+        }
+        Expr::Compare { left, right, .. }
+        | Expr::Arithmetic { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            expr_call_names(left, enter_funcdefs, out);
+            expr_call_names(right, enter_funcdefs, out);
+        }
+        Expr::Not(inner) => expr_call_names(inner, enter_funcdefs, out),
+        Expr::Var(_)
+        | Expr::Env(_)
+        | Expr::KeyPath { .. }
+        | Expr::Inspect(_)
+        | Expr::FreshPipe
+        | Expr::UnsignedIntBoundary(_) => {}
+    }
+}
+
+/// One call spelling snapped to entry-namespace names: bare heads and
+/// `SCRIPT::` heads; file aliases and hosts belong to other units.
+fn push_entry_call_name(name: &str, out: &mut Vec<String>) {
+    if let Some((module, base)) = name.split_once("::") {
+        if module == oxdock_parser::SCRIPT_MODULE_NAME {
+            out.push(base.to_string());
+        }
+    } else {
+        out.push(name.to_string());
+    }
+}
+
+/// Bare/`SCRIPT::` template call heads in one text.
+fn template_call_names(text: &str, out: &mut Vec<String>) {
+    for segment in TemplateSegments::new(text) {
+        if let TemplateSegment::Placeholder { key, .. } = segment
+            && let PlaceholderKey::Call(call) = classify_placeholder_key(key)
+        {
+            match call.module {
+                None => out.push(call.name.to_string()),
+                Some(module) if module == oxdock_parser::SCRIPT_MODULE_NAME => {
+                    out.push(call.name.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Per-entry-function top-level `LET` view: bindings declared before
+/// the function's earliest reachable call site. Entry scripts run top
+/// level sequentially (unlike module files, whose whole body executes
+/// before any call can land), so a call before a `LET` executes reads
+/// uninitialized memory at runtime; the static gate must fail it
+/// instead of seeding the full union. Uncalled functions keep the
+/// full union: dead code observes nothing, so it stays lenient like
+/// the single-file probes.
+fn entry_let_scopes<P: ProcessManager>(
+    entry: &[Step],
+    all_funcs: &HashMap<String, FuncInfo>,
+    exec: &ExecState<P>,
+) -> Result<HashMap<(String, usize, usize), Vec<GuardedLet>>> {
+    let indexed = module_lets_indexed(entry, exec)?;
+    // Direct top-level mentions per bare name (definitions excluded:
+    // their bodies run at call time, not at their step).
+    let mut top_direct: HashMap<String, usize> = HashMap::new();
+    for (idx, step) in entry.iter().enumerate() {
+        if matches!(step.kind, StepKind::FuncDef { .. }) {
+            continue;
+        }
+        let mut names = Vec::new();
+        step_call_names(&step.kind, false, &mut names);
+        for name in names {
+            top_direct
+                .entry(name)
+                .and_modify(|at| *at = (*at).min(idx))
+                .or_insert(idx);
+        }
+    }
+    // Caller edges among entry functions (module-owned bodies belong
+    // to other units and never read entry lets).
+    let mut funcs: Vec<(String, usize, usize)> = Vec::new();
+    let mut callees: HashMap<(String, usize, usize), Vec<String>> = HashMap::new();
+    for info in all_funcs.values() {
+        if info.module.is_some() {
+            continue;
+        }
+        let key = (info.name.clone(), info.line, info.col);
+        if callees.contains_key(&key) {
+            continue;
+        }
+        let mut names = Vec::new();
+        for step in &info.body {
+            step_call_names(&step.kind, true, &mut names);
+        }
+        funcs.push(key.clone());
+        callees.insert(key, names);
+    }
+    // Least fixpoint: a callee runs no later than its earliest caller.
+    let mut earliest: HashMap<(String, usize, usize), usize> = HashMap::new();
+    for key in &funcs {
+        earliest.insert(
+            key.clone(),
+            top_direct.get(&key.0).copied().unwrap_or(usize::MAX),
+        );
+    }
+    for _ in 0..funcs.len() {
+        let mut changed = false;
+        for caller in &funcs {
+            let at = earliest[caller];
+            if at == usize::MAX {
+                continue;
+            }
+            for callee_name in callees[caller].clone() {
+                for callee in funcs.iter().filter(|key| key.0 == callee_name) {
+                    if earliest[callee] > at {
+                        earliest.insert(callee.clone(), at);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // Seed each reachable function with the bindings declared before
+    // its earliest call; the `LET $v = F()` step's own `$v` is
+    // excluded (it binds after the call returns), matching execution.
+    let mut out = HashMap::new();
+    for key in &funcs {
+        let Some(&at) = earliest.get(key) else {
+            continue;
+        };
+        if at == usize::MAX {
+            continue;
+        }
+        let scoped: Vec<GuardedLet> = indexed
+            .iter()
+            .filter(|(_, idx)| *idx < at)
+            .map(|(binding, _)| binding.clone())
+            .collect();
+        out.insert(key.clone(), scoped);
+    }
+    Ok(out)
+}
+/// Per-function import overlay: the enclosing unit's top-level imports
+/// plus the function's own direct imports. Nested function bodies get
+/// their own overlays isolated to the unit top-level (never the
+/// lexically enclosing function's locals), matching the runtime call
+/// frames where each invocation pushes a fresh frame. Keyed by (owner
+/// module key, function name, definition line, definition column) so
 /// same-named block-local functions in distinct blocks never
 /// overwrite each other's overlays. Single owner for function-local
 /// alias visibility; `check_function_body_probed` swaps it in while
 /// checking that body.
-type BodyScopes =
-    HashMap<(String, String, usize, usize), (HashSet<String>, super::native::AliasTargets)>;
+type BodyScopes = HashMap<(String, String, usize, usize), super::native::AliasTargets>;
 
 /// Collect one overlay per `FUNC` definition under `steps`: each
-/// overlay is the parent scope plus that body's own direct imports.
-/// Nested definitions inherit the enclosing overlay. `module_key`
-/// names the owning unit (`ENTRY_UNIT` for entry functions). Dead
-/// steps contribute nothing, like the unit walk.
+/// overlay is the unit top-level plus that body's own direct imports.
+/// `unit_top` is the unit's own table (never an enclosing function's
+/// overlay), so nested definitions stay isolated exactly like the
+/// runtime frames. Dead steps contribute nothing, like the unit walk.
 #[allow(clippy::too_many_arguments)]
 fn collect_body_scopes(
     steps: &[Step],
@@ -1218,7 +1450,7 @@ fn collect_body_scopes(
     dir: &GuardedPath,
     files: &[ClosureFile],
     entry_parent: Option<&GuardedPath>,
-    parent: &(HashSet<String>, super::native::AliasTargets),
+    unit_top: &super::native::AliasTargets,
     out: &mut BodyScopes,
 ) {
     for step in steps {
@@ -1226,16 +1458,19 @@ fn collect_body_scopes(
             continue;
         }
         if let StepKind::FuncDef { name, body, .. } = &step.kind {
-            let mut scope = parent.clone();
-            unit_imports(body, dir, files, entry_parent, &mut scope.0, &mut scope.1);
+            let mut scope = unit_top.clone();
+            unit_imports(body, dir, files, entry_parent, &mut scope);
             out.insert(
                 (module_key.to_string(), name.clone(), step.line, step.col),
-                scope.clone(),
+                scope,
             );
-            collect_body_scopes(body, module_key, dir, files, entry_parent, &scope, out);
+            // Nested definitions isolate to the unit top-level too:
+            // at runtime the nested body runs under its own fresh
+            // frame, never the enclosing function's frame.
+            collect_body_scopes(body, module_key, dir, files, entry_parent, unit_top, out);
         } else {
             for nested in super::import::child_bodies(&step.kind) {
-                collect_body_scopes(nested, module_key, dir, files, entry_parent, parent, out);
+                collect_body_scopes(nested, module_key, dir, files, entry_parent, unit_top, out);
             }
         }
     }
@@ -1506,7 +1741,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             inferred: HashMap::new(),
             inferring: Vec::new(),
             visits: 0,
-            imported_aliases: HashSet::new(),
+            strict_qualified: false,
+            entry_let_scopes: HashMap::new(),
             alias_targets: HashMap::new(),
             body_scopes: HashMap::new(),
             isolated_depth: 0,
@@ -1609,15 +1845,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 PlaceholderKey::Empty => {}
                 PlaceholderKey::Env(name) => {
                     let name = name.trim();
-                    if !name.is_empty() {
-                        self.check_env_name(env, name, "env:", scope)?;
-                    }
+                    // Empty names bail like any undeclared read: `""`
+                    // is never declared, so the shared gate reports it
+                    // instead of silently skipping (runtime layers
+                    // reject it too, never interpolating empty).
+                    self.check_env_name(env, name, "env:", scope)?;
                 }
                 PlaceholderKey::ScriptEnv(name) => {
                     let name = name.trim();
-                    if !name.is_empty() {
-                        self.check_env_name(env, name, "script_env:", scope)?;
-                    }
+                    self.check_env_name(env, name, "script_env:", scope)?;
                 }
                 // `$` and bare reads flow through the single var
                 // extractor plus expression inference, so templates and
@@ -1729,15 +1965,26 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     );
                 }
                 // Platform-conditional aliases: the active branch is
-                // unknowable statically. Any candidate holding the
-                // name is a script function, so the template call
-                // needs the `LET` path; with no candidate holding
-                // it the miss wording below applies instead.
-                super::native::AliasResolution::Any { base, files, .. } => {
-                    is_script_visible = files.iter().any(|file| {
-                        self.funcs
-                            .contains_key(&super::native::file_func_key(file, &base))
-                    });
+                // unknowable statically. The single miss helper decides
+                // with `resolve_call` semantics (universal, host-aware),
+                // so the gate renders word for word what the lazy
+                // runtime path and the EXPAND snapshot report.
+                super::native::AliasResolution::Any {
+                    base,
+                    files,
+                    has_host,
+                } => {
+                    bail!(
+                        "{}",
+                        super::native::disjoint_alias_placeholder_miss(
+                            module,
+                            name,
+                            &base,
+                            &files,
+                            has_host,
+                            &|key| self.funcs.contains_key(key),
+                        )
+                    );
                 }
                 super::native::AliasResolution::Unknown => {}
             }
@@ -1746,7 +1993,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 name,
                 is_script_visible,
                 self.hosts.contains_key(&qualified),
-                self.imported_aliases.contains(module),
+                self.alias_targets.contains_key(module),
             ) {
                 bail!("{text}");
             }
@@ -2353,13 +2600,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         } else {
             // Entry functions capture the entry's top-level `LET`s
             // through the runtime outer scope, so the body seeds from
-            // the same union. Params stay on top: re-`LET` inside the
-            // body shadows instead of redeclaring. Guards accumulate
-            // per name so disjoint platform declarations enforce
-            // coverage instead of overwriting.
-            if !self.entry_lets.is_empty() {
+            // the bindings declared before its earliest reachable call
+            // site (a call before a `LET` executes reads uninitialized
+            // memory at runtime). Uncalled functions and single-file
+            // probes keep the full union. Params stay on top: re-`LET`
+            // inside the body shadows instead of redeclaring. Guards
+            // accumulate per name so disjoint platform declarations
+            // enforce coverage instead of overwriting.
+            let scoped = self
+                .entry_let_scopes
+                .get(&(info.name.clone(), info.line, info.col))
+                .cloned()
+                .unwrap_or_else(|| self.entry_lets.clone());
+            if !scoped.is_empty() {
                 let mut bottom: HashMap<String, Vec<Binding>> = HashMap::new();
-                for (name, tag, guard) in &self.entry_lets {
+                for (name, tag, guard) in &scoped {
                     bottom.entry(name.clone()).or_default().push(Binding {
                         tag: tag.clone(),
                         guard: guard.clone(),
@@ -2390,15 +2645,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             .body_scopes
             .get(&(unit.to_string(), info.name.clone(), info.line, info.col))
             .cloned();
-        let saved = overlay.map(|(aliases, targets)| {
-            (
-                std::mem::replace(&mut self.imported_aliases, aliases),
-                std::mem::replace(&mut self.alias_targets, targets),
-            )
-        });
+        let saved = overlay.map(|targets| std::mem::replace(&mut self.alias_targets, targets));
         let out = self.walk_body(&info.body, &mut env, &scope, depth + 1);
-        if let Some((aliases, targets)) = saved {
-            self.imported_aliases = aliases;
+        if let Some(targets) = saved {
             self.alias_targets = targets;
         }
         let out = out?;
@@ -3691,8 +3940,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 host_params: meta.params.clone(),
             });
         }
-        if let Some((alias, _)) = name.split_once("::")
-            && self.imported_aliases.contains(alias)
+        // Unimported qualified calls fail closed on the closure pass:
+        // a known-alias miss already bailed above, so anything reaching
+        // here with an `ALIAS::FUNC` shape the matcher reads as global
+        // (a sibling unit's alias, a typo'd host) is unknown. Bare
+        // names stay lenient: the parse-time unknown-function gate owns
+        // those. `SCRIPT::` keeps its leniency for the same reason.
+        // Single-file and probe checkers stay lenient: without the
+        // closure they cannot tell unimported from uncollected.
+        if self.strict_qualified
+            && let Some((alias, _)) = name.split_once("::")
+            && alias != oxdock_parser::SCRIPT_MODULE_NAME
+            && !self.hosts.contains_key(name)
         {
             bail!("unknown function `{name}`");
         }

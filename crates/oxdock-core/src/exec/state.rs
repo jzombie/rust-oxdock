@@ -204,14 +204,23 @@ pub struct ExecState<P: ProcessManager> {
     /// Executed file-import alias targets per unit (#115): alias to
     /// defining file keys for imports that actually ran, keyed by the
     /// importing unit (`"entry"` for entry steps, the file key for
-    /// module bodies). Mirrors the static per-unit
-    /// `outbound_alias_targets` for the runtime placeholder gate, so
-    /// file-backed `EXPAND` templates (invisible to static checking)
-    /// classify known aliases identically: zero-function and
-    /// types-only imports record their alias with an empty target set,
-    /// and module bodies resolve against their own file's imports,
-    /// never the importer's.
+    /// module bodies). Unit-top layer only: top-level (non-`FUNC`-body)
+    /// imports land here; function-local imports land on the innermost
+    /// [`ExecState::call_alias_frames`] entry instead, so a caller
+    /// function's locals never leak into a callee. Mirrors the static
+    /// per-unit `outbound_alias_targets` for the runtime placeholder
+    /// gate, so file-backed `EXPAND` templates (invisible to static
+    /// checking) classify known aliases identically: host harvests
+    /// record an explicit host branch, and module bodies resolve
+    /// against their own file's imports, never the importer's.
     pub(super) executed_alias_targets: HashMap<String, super::native::AliasTargets>,
+    /// Active function-call import frames: one entry per live
+    /// [`call_func_value`](super::handlers::call_func_value) invocation,
+    /// holding that invocation's own local imports. The innermost frame
+    /// for the active unit shadows the unit-top map exactly like the
+    /// static per-function overlays shadow the unit imports; popping on
+    /// return (via an RAII guard) restores the caller's view.
+    pub(super) call_alias_frames: Vec<(String, super::native::AliasTargets)>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -742,6 +751,7 @@ impl<P: ProcessManager> ExecState<P> {
             validated_modules: self.validated_modules.clone(),
             module_stack: self.module_stack.clone(),
             executed_alias_targets: self.executed_alias_targets.clone(),
+            call_alias_frames: self.call_alias_frames.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),

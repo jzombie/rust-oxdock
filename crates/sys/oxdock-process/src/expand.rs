@@ -373,6 +373,15 @@ fn lookup(
     match classify_placeholder_key(key) {
         // 2. Environment variables: must be prefixed with "env:"
         PlaceholderKey::Env(env_key) => {
+            // Trim once up front like the static gate and the
+            // script-engine expansion, so `{{ env: FOO }}` looks up
+            // `FOO` (never the padded spelling) on every layer.
+            let env_key = env_key.trim();
+            // Empty names bail explicitly (same message as the miss
+            // below) instead of relying on the lookup miss alone.
+            if env_key.is_empty() {
+                bail!("undefined environment variable: ''");
+            }
             if let Some(val) = overrides.get(env_key).or_else(|| env.get(env_key)) {
                 return Ok(val.clone());
             }
@@ -453,7 +462,15 @@ fn lookup(
                 bail!("missing required step override argument: '{name}'{hint}");
             }
         }
-        PlaceholderKey::Empty | PlaceholderKey::ScriptEnv(_) => {}
+        PlaceholderKey::ScriptEnv(name) => {
+            // Empty names bail explicitly; non-empty `script_env:`
+            // has no meaning here and falls through to the invalid
+            // placeholder error below, as before.
+            if name.trim().is_empty() {
+                bail!("undefined environment variable: ''");
+            }
+        }
+        PlaceholderKey::Empty => {}
     }
     bail!(
         "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
@@ -852,6 +869,30 @@ mod tests {
                 .contains("undefined environment variable"),
             "error should mention undefined environment variable"
         );
+    }
+
+    #[test]
+    fn spaced_env_name_resolves_trimmed() {
+        // `{{ env: FOO }}` looks up `FOO` on every layer: the lookup
+        // trims up front like the static gate and the script engine,
+        // instead of missing on the padded spelling.
+        let mut env = HashMap::new();
+        env.insert("FOO".into(), "bar".into());
+        let expander = StreamingExpand::new(&[], &env);
+        assert_eq!(expander.expand_string("{{ env: FOO }}").unwrap(), "bar");
+    }
+
+    #[test]
+    fn empty_env_names_bail() {
+        // Empty `env:` / `script_env:` names never interpolate empty:
+        // every layer rejects them, matching the static gate and the
+        // script-engine expansion.
+        let env = HashMap::new();
+        for text in ["{{ env: }}", "{{ script_env: }}", "{{ script_env:   }}"] {
+            let expander = StreamingExpand::new(&[], &env);
+            let result = expander.expand_string(text);
+            assert!(result.is_err(), "{text:?} must fail");
+        }
     }
 
     #[test]

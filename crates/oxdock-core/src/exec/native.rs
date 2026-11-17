@@ -175,12 +175,52 @@ pub(super) fn classify_alias_call(
     AliasResolution::Unknown
 }
 
+/// Whether a disjoint-alias template call names a script function,
+/// owned here so every placeholder path agrees with `resolve_call`:
+/// visible only when no host-harvest branch competes (`!has_host`)
+/// and **every** candidate file defines `base` (universal, not
+/// existential: a missing branch fails the `LET` path, so the
+/// template must not suggest it). `exists` probes canonical
+/// file-function keys for script definitions.
+pub(super) fn disjoint_template_script_visible(
+    base: &str,
+    files: &HashSet<String>,
+    has_host: bool,
+    exists: &dyn Fn(&str) -> bool,
+) -> bool {
+    !has_host && !files.is_empty() && files.iter().all(|file| exists(&file_func_key(file, base)))
+}
+
+/// Miss wording for a disjoint-alias placeholder call, shared by the
+/// static gate, the lazy runtime path, and (via the script set) the
+/// EXPAND snapshot. Script-visible branches read as script misses
+/// (the `LET` path); otherwise the alias is known but holds no
+/// callable function here. Always renders: `Any` only arises for a
+/// known alias, so the generic unknown wording never applies.
+pub(super) fn disjoint_alias_placeholder_miss(
+    module: &str,
+    name: &str,
+    base: &str,
+    files: &HashSet<String>,
+    has_host: bool,
+    is_script: &dyn Fn(&str) -> bool,
+) -> String {
+    let script = disjoint_template_script_visible(base, files, has_host, is_script);
+    describe_placeholder_miss(module, name, script, false, !script)
+        .expect("disjoint miss always renders")
+}
+
 /// Every local spelling of one defining file's function in a unit.
 /// Inverted direction of [`classify_alias_call`]; shares its matcher.
+/// `is_script` probes the caller's registry for script bodies, so
+/// disjoint platform aliases covering every branch with a script
+/// definition read as direct spellings (matching the static gate and
+/// the lazy path through [`disjoint_alias_placeholder_miss`]).
 pub(super) fn spellings_for_defining_file(
     unit_targets: &AliasTargets,
     defining: &str,
     base: &str,
+    is_script: &dyn Fn(&str) -> bool,
 ) -> (Vec<String>, Vec<(String, HashSet<String>)>) {
     let mut direct = Vec::new();
     let mut ambiguous = Vec::new();
@@ -199,7 +239,16 @@ pub(super) fn spellings_for_defining_file(
             AliasResolution::Ambiguous { files, .. } => {
                 ambiguous.push((spelling, files));
             }
-            AliasResolution::Global | AliasResolution::Unknown | AliasResolution::Any { .. } => {}
+            AliasResolution::Any {
+                base,
+                files,
+                has_host,
+            } => {
+                if disjoint_template_script_visible(&base, &files, has_host, is_script) {
+                    direct.push(spelling);
+                }
+            }
+            AliasResolution::Global | AliasResolution::Unknown => {}
         }
     }
     (direct, ambiguous)
@@ -793,7 +842,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         let qualified = qualify(module, name);
         // File-aliased spellings classify through the shared matcher.
         // A canonical miss means the alias is known but holds no such
-        // function; Global/Any carry no miss of their own.
+        // function; disjoint aliases share the static owner's verdict
+        // (script-visible branches read as script misses).
         match classify_alias_call(unit_targets, &qualified, &|key| {
             self.entries.contains_key(key)
         }) {
@@ -802,9 +852,10 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     if let Some(miss) = Self::placeholder_miss_for_body(module, name, &entry.body) {
                         return Some(miss);
                     }
-                    return None;
+                    None
+                } else {
+                    describe_placeholder_miss(module, name, false, false, true)
                 }
-                return describe_placeholder_miss(module, name, false, false, true);
             }
             AliasResolution::Global => {
                 if let Some(entry) = self.entries.get(&qualified) {
@@ -815,17 +866,30 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                         return Some(miss);
                     }
                 }
-                return None;
+                None
             }
             AliasResolution::Ambiguous { files, .. } => {
-                return Some(ambiguous_alias_message(module, name, &files));
+                Some(ambiguous_alias_message(module, name, &files))
             }
-            AliasResolution::Unknown => {
-                return describe_placeholder_miss(module, name, false, false, true);
-            }
-            AliasResolution::Any { .. } => {}
+            AliasResolution::Unknown => describe_placeholder_miss(module, name, false, false, true),
+            // Disjoint aliases share the static owner's verdict through
+            // the single miss helper, so lazy inline expansion agrees
+            // with the static gate word for word (script-visible
+            // branches read as script misses, the rest as known-alias
+            // misses, never the generic unknown wording).
+            AliasResolution::Any {
+                base,
+                files,
+                has_host,
+            } => Some(disjoint_alias_placeholder_miss(
+                module,
+                name,
+                &base,
+                &files,
+                has_host,
+                &|key| matches!(self.entries.get(key), Some(entry) if matches!(entry.body, FuncBody::Script(_))),
+            )),
         }
-        None
     }
 
     /// Single owner for the `FuncBody` miss wording: script and
@@ -858,13 +922,19 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                         continue;
                     }
                     // Canonical file key: every local spelling in this
-                    // unit, singletons into the script set and several
-                    // files into the ambiguity map, through the shared
-                    // matcher so `describe` matches call sites exactly
-                    // like the static gate and lazy path.
+                    // unit, singletons (plus disjoint platform branches
+                    // covered everywhere by script definitions) into
+                    // the script set and several files into the
+                    // ambiguity map, through the shared matcher so
+                    // `describe` matches call sites exactly like the
+                    // static gate and lazy path.
                     let defining = def.module.as_deref().unwrap_or(module);
-                    let (direct, ambiguous_here) =
-                        spellings_for_defining_file(unit_targets, defining, base);
+                    let (direct, ambiguous_here) = spellings_for_defining_file(
+                        unit_targets,
+                        defining,
+                        base,
+                        &|key| matches!(self.entries.get(key), Some(entry) if matches!(entry.body, FuncBody::Script(_))),
+                    );
                     script.extend(direct);
                     for (spelling, files) in ambiguous_here {
                         ambiguous.entry(spelling).or_default().extend(files);

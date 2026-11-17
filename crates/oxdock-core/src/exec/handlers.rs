@@ -2679,17 +2679,18 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                 })?);
             }
             let outcome: Result<Value> = (|| {
-                // Function-local imports scope to the dynamic extent:
-                // snapshot this function's own unit map so nested
-                // imports attribute while running, then restore on
-                // return. Other units (including module inits that ran
-                // in this extent) are untouched. Static per-function
-                // overlays mirror this exactly.
+                // Function-local imports scope to this invocation: push
+                // a fresh frame for this unit so the body's imports
+                // land here (never the shared unit-top map) and the
+                // callee never sees the caller's locals. The pop below
+                // runs on every path (the closure captures the outcome
+                // as a value first), matching the `push_scope` /
+                // `pop_scope` pattern with no unsafe.
                 let unit_key = def
                     .module
                     .clone()
                     .unwrap_or_else(|| super::import::ENTRY_UNIT.to_string());
-                let saved_unit_aliases = cx.state.executed_alias_targets.get(&unit_key).cloned();
+                cx.state.call_alias_frames.push((unit_key, HashMap::new()));
                 let flow = (|| {
                     for ((pname, ptype, _), pval) in def.params.iter().zip(arg_vals) {
                         cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
@@ -2707,14 +2708,12 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                         false,
                     )
                 })();
-                match saved_unit_aliases {
-                    Some(saved) => {
-                        cx.state.executed_alias_targets.insert(unit_key, saved);
-                    }
-                    None => {
-                        cx.state.executed_alias_targets.remove(&unit_key);
-                    }
-                }
+                // Unconditional pop before `?` propagates: errors and
+                // early boundary exits never leak the frame, matching
+                // `pop_scope` below. (Panics propagate without popping,
+                // exactly like the scope stack: no `catch_unwind`
+                // anywhere unwraps them.)
+                let _ = cx.state.call_alias_frames.pop();
                 let flow = flow?;
                 match flow {
                     Flow::Done => Ok(Value::string(String::new())),
