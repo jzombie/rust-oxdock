@@ -4743,7 +4743,7 @@ fn parse_func_at(
     // Phase 1 (pure shape) through the single header owner:
     // adorn content errors with the `FUNC` / `ASYNC FUNC` keyword,
     // miss to generic on shape miss exactly as before.
-    let Some((header, used)) = parse_func_header(toks, pos, stmt, keyword).map_err(&fail)? else {
+    let Some((header, used)) = parse_func_header(toks, pos, stmt, keyword).map_err(fail)? else {
         return Ok(None);
     };
     let FuncHeader {
