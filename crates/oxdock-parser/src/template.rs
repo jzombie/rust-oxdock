@@ -494,6 +494,237 @@ pub fn strip_wrapped_delimiters(src: &str, open: char, close: char) -> Option<&s
     }
     None
 }
+/// One variable read inside a `{{ ... }}` key: a `$a.b` path as its
+/// dotted parts, or a bare `key` as one literal lookup. Call args
+/// contribute their nested `$` refs; env keys contribute nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateVar {
+    Path(Vec<String>),
+    Bare(String),
+}
+
+/// One `{{ ... }}` key, classified. The single grammar behind every
+/// expansion and check phase: parse-time qualification, the static
+/// gate, script-engine expansion, and override-map expansion all route
+/// through this, so the phases can never disagree on what shape a key
+/// is. Payloads stay raw (untrimmed, unsplit): trimming, splitting,
+/// lookup sources, and errors belong to the caller, whose contracts
+/// differ. Input must arrive trimmed: every producer trims at its
+/// boundary (`TemplateSegments` yields trimmed keys; the streaming
+/// expander trims on extract).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceholderKey<'a> {
+    /// Empty key: every phase rejects it.
+    Empty,
+    /// `$` plus the raw rest: split through [`split_var_path`].
+    Dollar(&'a str),
+    /// `env:` plus the raw name.
+    Env(&'a str),
+    /// `script_env:` plus the raw name.
+    ScriptEnv(&'a str),
+    /// One `[MODULE::]FUNC(args)` body, through the shared
+    /// [`parse_placeholder_call`] grammar.
+    Call(PlaceholderCall<'a>),
+    /// Anything else, verbatim: script-var lookup, step-override
+    /// lookup, or a hard error, per the caller's contract.
+    Bare(&'a str),
+}
+
+/// Classify one trimmed placeholder key. Shape only, no resolution:
+/// runtimes keep their own check order (e.g. overrides-first) and
+/// their own trimming, sources, and errors.
+pub fn classify_placeholder_key(key: &str) -> PlaceholderKey<'_> {
+    if key.is_empty() {
+        return PlaceholderKey::Empty;
+    }
+    if let Some(rest) = key.strip_prefix('$') {
+        return PlaceholderKey::Dollar(rest);
+    }
+    if let Some(rest) = key.strip_prefix("env:") {
+        return PlaceholderKey::Env(rest);
+    }
+    if let Some(rest) = key.strip_prefix("script_env:") {
+        return PlaceholderKey::ScriptEnv(rest);
+    }
+    if let Some(call) = parse_placeholder_call(key) {
+        return PlaceholderKey::Call(call);
+    }
+    PlaceholderKey::Bare(key)
+}
+
+/// One `$a.b` path split: on `.` with each part trimmed, exactly like
+/// runtime expansion. No validity judgment: callers decide what empty
+/// parts mean under their own contract.
+pub fn split_var_path(rest: &str) -> Vec<String> {
+    rest.split('.')
+        .map(|part| part.trim().to_string())
+        .collect()
+}
+
+/// Variable reads inside one placeholder key, routed through the
+/// single [`classify_placeholder_key`] owner: `$` paths parse through
+/// the single path parser below, env keys contribute nothing, call
+/// shapes contribute their nested arg refs, and bare keys stay
+/// literal.
+/// Call args recurse through the shared literal owners
+/// (`parse_string_literal`, `strip_wrapped_delimiters`,
+/// `split_top_level`), so new arg spellings land once, here.
+pub fn placeholder_vars(key: &str) -> Vec<TemplateVar> {
+    match classify_placeholder_key(key.trim()) {
+        PlaceholderKey::Empty => Vec::new(),
+        PlaceholderKey::Dollar(rest) => parse_dollar_path(rest).into_iter().collect(),
+        PlaceholderKey::Env(_) | PlaceholderKey::ScriptEnv(_) => Vec::new(),
+        PlaceholderKey::Call(call) => {
+            let mut out = Vec::new();
+            for arg in split_placeholder_args(call.args_raw) {
+                collect_call_arg_vars(&arg, &mut out);
+            }
+            out
+        }
+        PlaceholderKey::Bare(key) => vec![TemplateVar::Bare(key.to_string())],
+    }
+}
+
+/// One `$a.b` path from its post-`$` rest. `None` means malformed:
+/// the caller owns that error. Single owner for `$` path syntax.
+pub fn parse_var_path(rest: &str) -> Option<Vec<String>> {
+    let parts = split_var_path(rest);
+    if parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    Some(parts)
+}
+
+/// Maximum nesting for map and list literals in placeholder call
+/// args. Single depth budget shared by static inference and runtime
+/// resolution.
+pub const MAX_TEMPLATE_ARG_DEPTH: usize = 16;
+
+/// One placeholder call argument's shape. Single owner for the
+/// argument grammar: every path classifies here, then acts on the
+/// result with its own types and errors.
+pub enum TemplateArg<'a> {
+    /// `$` variable path: raw rest after `$` (validate with
+    /// [`parse_var_path`]).
+    Dollar(&'a str),
+    /// String literal source in any spelling (parse with
+    /// [`parse_string_literal`]).
+    Str(&'a str),
+    /// `{...}` map inner source.
+    Map(&'a str),
+    /// `[...]` list inner source.
+    List(&'a str),
+    /// Bare scalar source (`true`, `false`, numbers; see
+    /// [`parse_scalar_literal`]).
+    Scalar(&'a str),
+    /// Anything else: the caller owns the invalid-syntax error.
+    Invalid(&'a str),
+}
+
+/// Classify one call argument by shape. Inputs arrive trimmed from
+/// [`split_placeholder_args`].
+pub fn classify_template_arg(src: &str) -> TemplateArg<'_> {
+    let src = src.trim();
+    if let Some(rest) = src.strip_prefix('$') {
+        return TemplateArg::Dollar(rest);
+    }
+    if parse_string_literal(src).is_some() {
+        return TemplateArg::Str(src);
+    }
+    if let Some(inner) = strip_wrapped_delimiters(src, '{', '}') {
+        return TemplateArg::Map(inner);
+    }
+    if let Some(inner) = strip_wrapped_delimiters(src, '[', ']') {
+        return TemplateArg::List(inner);
+    }
+    if parse_scalar_literal(src).is_some() {
+        return TemplateArg::Scalar(src);
+    }
+    TemplateArg::Invalid(src)
+}
+
+/// One bare scalar literal's value shape. Shared by static inference
+/// (tags) and runtime resolution (values), which map the same shapes
+/// instead of restating the cascade.
+pub enum ScalarLit {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+}
+
+/// Parse one bare scalar literal: `true`/`false`, then int, then
+/// float. `None` means not scalar-shaped at all.
+pub fn parse_scalar_literal(src: &str) -> Option<ScalarLit> {
+    match src {
+        "true" => Some(ScalarLit::Bool(true)),
+        "false" => Some(ScalarLit::Bool(false)),
+        _ => src
+            .parse::<i64>()
+            .map(ScalarLit::Int)
+            .ok()
+            .or_else(|| src.parse::<f64>().map(ScalarLit::Float).ok()),
+    }
+}
+
+/// One `{key: value}` entry's key and value sources, split once on a
+/// top-level `:`. `None` when the entry is not exactly one pair.
+pub fn split_map_entry(entry: &str) -> Option<(String, String)> {
+    let mut parts = split_top_level(entry, ':');
+    if parts.len() != 2 {
+        return None;
+    }
+    let value = parts.pop().expect("split_map_entry checked len");
+    let key = parts.pop().expect("split_map_entry checked len");
+    Some((key, value))
+}
+
+/// One map literal key: a string literal in any spelling or a bare
+/// ASCII identifier. Shared by static inference and runtime
+/// resolution, which report identical diagnostics.
+pub fn parse_map_key(src: &str) -> anyhow::Result<String> {
+    if let Some(literal) = parse_string_literal(src) {
+        return literal.map_err(|err| anyhow::anyhow!("{err:#}"));
+    }
+    if !src.is_empty() && src.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Ok(src.to_string());
+    }
+    anyhow::bail!("invalid map literal key '{src}': use a bare name or any string spelling")
+}
+
+fn parse_dollar_path(rest: &str) -> Option<TemplateVar> {
+    parse_var_path(rest).map(TemplateVar::Path)
+}
+
+/// Nested `$` refs inside one call arg, through the shared argument
+/// classifier: strings, scalars, and invalid shapes hold none; maps
+/// and lists recurse into their entries; malformed entries are
+/// runtime-owned invalid syntax and contribute nothing here.
+fn collect_call_arg_vars(src: &str, out: &mut Vec<TemplateVar>) {
+    match classify_template_arg(src) {
+        TemplateArg::Dollar(rest) => {
+            out.extend(parse_dollar_path(rest));
+        }
+        TemplateArg::Map(inner) => {
+            if inner.trim().is_empty() {
+                return;
+            }
+            for entry in split_top_level(inner, ',') {
+                if let Some((_, value)) = split_map_entry(&entry) {
+                    collect_call_arg_vars(&value, out);
+                }
+            }
+        }
+        TemplateArg::List(inner) => {
+            if inner.trim().is_empty() {
+                return;
+            }
+            for item in split_top_level(inner, ',') {
+                collect_call_arg_vars(&item, out);
+            }
+        }
+        TemplateArg::Str(_) | TemplateArg::Scalar(_) | TemplateArg::Invalid(_) => {}
+    }
+}
 /// Allocation-free segment iterator over template text. See the module
 /// docs for the exact rules; the unit tests below pin every escape
 /// and boundary shape.
@@ -716,6 +947,40 @@ mod tests {
             split_placeholder_args("$a, \"b,c\", 'd,e'"),
             vec!["$a".to_string(), "\"b,c\"".to_string(), "'d,e'".to_string()],
         );
+    }
+
+    #[test]
+    fn placeholder_vars_cover_keys_calls_and_bad_paths() {
+        use super::{TemplateVar, placeholder_vars};
+        assert_eq!(
+            placeholder_vars("$x"),
+            vec![TemplateVar::Path(vec!["x".to_string()])],
+        );
+        assert_eq!(
+            placeholder_vars(" $a.b.c "),
+            vec![TemplateVar::Path(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ])],
+        );
+        assert_eq!(
+            placeholder_vars("key"),
+            vec![TemplateVar::Bare("key".to_string())],
+        );
+        assert!(placeholder_vars("env:FOO").is_empty());
+        assert!(placeholder_vars("script_env:BAR").is_empty());
+        assert!(placeholder_vars("").is_empty());
+        assert_eq!(
+            placeholder_vars("M::F($a, {k: [$b, \"ignored\"]}, 'ignored', \"\"\"ignored\"\"\")"),
+            vec![
+                TemplateVar::Path(vec!["a".to_string()]),
+                TemplateVar::Path(vec!["b".to_string()]),
+            ],
+        );
+        assert!(placeholder_vars("$").is_empty());
+        assert!(placeholder_vars("$a.").is_empty());
+        assert!(placeholder_vars("$.a").is_empty());
     }
 
     #[test]

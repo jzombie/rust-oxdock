@@ -38,3 +38,13 @@ version = "0.2.0"
 allow = ["CDLA-Permissive-2.0"]
 name = "webpki-roots"
 version = "1.0.9"
+
+[advisories]
+# RUSTSEC-2026-0543: chrono is unmaintained (all versions affected, no
+# safe upgrade available). It arrives transitively via rmcp 3.x (MCP)
+# and russh-util 0.52 (SSH); both still require chrono at their latest
+# releases, so this ignore stands until upstream migrates (e.g. to
+# jiff/time). Scoped to this advisory ID only.
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "transitive via rmcp/russh-util, no safe upgrade; awaiting upstream migration" },
+]

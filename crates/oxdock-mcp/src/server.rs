@@ -79,8 +79,6 @@ pub const STATUS_TOOL_NAME: &str = "MCP_STATUS";
 /// File-watch settings for hot reload. Cloned into the watcher task.
 #[derive(Clone)]
 pub struct WatchConfig {
-    /// Script file to poll, read through the workspace guard.
-    pub script_path: GuardedPath,
     /// Workspace root for session filesystems.
     pub workspace_root: GuardedPath,
     /// Host modules re-registered on every reload.
@@ -96,6 +94,12 @@ pub struct WatchConfig {
 pub struct OxDockHandler {
     inner: Arc<Mutex<HandlerInner>>,
     watch: Option<WatchConfig>,
+    /// Script file the session was built from: anchors relative
+    /// `IMPORT` resolution on every `reload`, whether or not file
+    /// watching is attached. `None` only for handlers built without
+    /// a script file (programmatic `new`); those resolve relative
+    /// to the workspace root.
+    script_path: Option<GuardedPath>,
 }
 
 impl OxDockHandler {
@@ -139,12 +143,25 @@ impl OxDockHandler {
                 status,
             })),
             watch,
+            script_path: None,
         })
     }
 
     /// Attach file watching. The next `serve_stdio` spawns the poll task.
-    pub fn with_watch(mut self, watch: WatchConfig) -> Self {
+    /// The reload anchor is the handler's single `script_path`: polling
+    /// and `reload` read the same field, so they cannot diverge. The
+    /// path is required here so enabling watch mode always guarantees
+    /// a valid anchor.
+    pub fn with_watch(mut self, script_path: GuardedPath, watch: WatchConfig) -> Self {
+        self.script_path = Some(script_path);
         self.watch = Some(watch);
+        self
+    }
+
+    /// Anchor relative `IMPORT` resolution to the script file's
+    /// directory on every `reload`, with or without watching.
+    pub fn with_script_path(mut self, script_path: GuardedPath) -> Self {
+        self.script_path = Some(script_path);
         self
     }
 
@@ -167,7 +184,13 @@ impl OxDockHandler {
         types: Vec<&'static oxdock_core::TypeDescriptor>,
         workspace_root: &GuardedPath,
     ) -> Result<()> {
-        let outcome = match Self::build_inner(script_text, modules, types, workspace_root) {
+        let outcome = match Self::build_inner(
+            script_text,
+            modules,
+            types,
+            workspace_root,
+            self.script_path.as_ref(),
+        ) {
             Ok(outcome) => outcome,
             Err(err) => {
                 self.note_failed_reload(format!("{err:#}"));
@@ -248,17 +271,20 @@ impl OxDockHandler {
         let Some(watch) = self.watch.clone() else {
             return;
         };
+        let Some(script_path) = self.script_path.clone() else {
+            return;
+        };
         let handler = self.clone();
         tokio::spawn(async move {
             // Seed with the live text so the first tick never rebuilds.
-            let mut last: Option<String> = read_guarded(&watch.script_path).ok();
+            let mut last: Option<String> = read_guarded(&script_path).ok();
             let mut ticker = tokio::time::interval(Duration::from_millis(watch.poll_ms.max(100)));
             loop {
                 ticker.tick().await;
                 // Debounce editors that write in stages (temp file plus
                 // rename): settle before reading so a torn write parses.
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                let text = match read_guarded(&watch.script_path) {
+                let text = match read_guarded(&script_path) {
                     Ok(text) => text,
                     Err(err) => {
                         eprintln!("mcp reload: cannot read script: {err:#}");
@@ -279,7 +305,7 @@ impl OxDockHandler {
                         eprintln!(
                             "mcp reload: serving {} tool(s) from {}",
                             handler.tool_names().len(),
-                            watch.script_path.display()
+                            script_path.display()
                         );
                         if let Some(peer) = &peer {
                             let note = ServerNotification::ToolListChangedNotification(
@@ -803,6 +829,7 @@ impl OxDockHandler {
         modules: Vec<oxdock_core::HostModule<oxdock_process::DefaultProcessManager>>,
         types: Vec<&'static oxdock_core::TypeDescriptor>,
         workspace_root: &GuardedPath,
+        script_path: Option<&GuardedPath>,
     ) -> Result<BuiltInner> {
         let mut engine = oxdock_core::Engine::new();
         for module in &modules {
@@ -827,6 +854,7 @@ impl OxDockHandler {
             modules,
             types,
             &parsed,
+            script_path.cloned(),
         )?;
         let metas = session.tool_metas()?;
         reject_reserved_metas(&metas)?;
@@ -1016,5 +1044,38 @@ mod tests {
         over.recv_timeout(std::time::Duration::from_secs(5))
             .expect("forwarder must exit on disconnect");
         assert!(collected_bytes(&collected).is_empty());
+    }
+
+    #[test]
+    fn watch_and_reload_share_single_script_anchor() {
+        // Single source: polling and `reload` both read the handler's
+        // `script_path`. `with_watch` requires the path, so the watched
+        // file and the import anchor cannot diverge.
+        use oxdock_fs::GuardedPath;
+        let root = GuardedPath::tempdir().expect("tempdir");
+        let base = root.as_guarded_path().clone();
+        let script_path = base.join("main.oxdock").expect("script path");
+        let watch = WatchConfig {
+            workspace_root: base.clone(),
+            modules: Vec::new(),
+            types: Vec::new(),
+            poll_ms: 100,
+        };
+        let session_text = "FUNC F(): STRING { RETURN \"x\" }\nEXPORT F\n";
+        let built = OxDockHandler::build_inner(
+            session_text,
+            Vec::new(),
+            Vec::new(),
+            &base,
+            Some(&script_path),
+        )
+        .expect("build");
+        let handler = OxDockHandler::from_built(built, session_text)
+            .expect("handler")
+            .with_watch(script_path.clone(), watch);
+        assert_eq!(
+            handler.script_path.as_ref().map(|p| p.display()),
+            Some(script_path.display())
+        );
     }
 }

@@ -135,11 +135,15 @@ jobs:
           # fetches through the stub from loopback, so branch bytes
           # prove and no published tag is involved. Layout mirrors a
           # real release asset dir; the target mapping mirrors the stub.
-          [os:macos] LET $target: STRING = "aarch64-apple-darwin"
-          [os:linux, arch:x86_64] LET $target: STRING = "x86_64-unknown-linux-musl"
-          [os:linux, arch:aarch64] LET $target: STRING = "aarch64-unknown-linux-musl"
-          [os:windows, arch:x86_64] LET $target: STRING = "x86_64-pc-windows-msvc"
-          [os:windows, arch:aarch64] LET $target: STRING = "aarch64-pc-windows-msvc"
+          # Unconditional fallback first: the static gate requires the
+          # name on every path, and guarded re-LETs would shadow
+          # instead of covering the bare read below.
+          LET $target: STRING = "unsupported-platform"
+          [os:macos] $target = "aarch64-apple-darwin"
+          [os:linux, arch:x86_64] $target = "x86_64-unknown-linux-musl"
+          [os:linux, arch:aarch64] $target = "aarch64-unknown-linux-musl"
+          [os:windows, arch:x86_64] $target = "x86_64-pc-windows-msvc"
+          [os:windows, arch:aarch64] $target = "aarch64-pc-windows-msvc"
           [family:unix] LET $assetbin: STRING = "oxdock"
           [family:windows] LET $assetbin: STRING = "oxdock.exe"
           LET $asset: STRING = "oxdock-{{ $target }}.tar.gz"
@@ -237,16 +241,19 @@ jobs:
           # stub would fetch for this runner. macOS qualifies by arch
           # because no x86_64-apple-darwin asset is published: an Intel
           # runner must fail naming that fact, never silently fetch
-          # the ARM64 binary into a Bad-CPU-type execution.
-          [os:macos, arch:aarch64] LET $target: STRING = "aarch64-apple-darwin"
+          # the ARM64 binary into a Bad-CPU-type execution. Unguarded
+          # fallback first: the gate requires the name on every path,
+          # and the Intel branch exits before any read.
+          LET $target: STRING = "unsupported-platform"
+          [os:macos, arch:aarch64] $target = "aarch64-apple-darwin"
           [os:macos, arch:x86_64] {
             ECHO "no Intel macOS asset is published; refusing the ARM64 binary"
             EXIT 1
           }
-          [os:linux, arch:x86_64] LET $target: STRING = "x86_64-unknown-linux-musl"
-          [os:linux, arch:aarch64] LET $target: STRING = "aarch64-unknown-linux-musl"
-          [os:windows, arch:x86_64] LET $target: STRING = "x86_64-pc-windows-msvc"
-          [os:windows, arch:aarch64] LET $target: STRING = "aarch64-pc-windows-msvc"
+          [os:linux, arch:x86_64] $target = "x86_64-unknown-linux-musl"
+          [os:linux, arch:aarch64] $target = "aarch64-unknown-linux-musl"
+          [os:windows, arch:x86_64] $target = "x86_64-pc-windows-msvc"
+          [os:windows, arch:aarch64] $target = "aarch64-pc-windows-msvc"
 
           # Two engines, two roles: the branch binary (outer, runs this
           # script) proves the new code; the previous-release binary
@@ -1079,11 +1086,12 @@ jobs:
           WITH_IO [stdin=$h1] READ_LINE $help1
           ASSERT_EQ $help1 "oxdock {{ $manifest.workspace.package.version }}"
 
-          [os:macos] LET $asset: STRING = "oxdock-aarch64-apple-darwin.tar.gz"
-          [os:linux, arch:x86_64] LET $asset: STRING = "oxdock-x86_64-unknown-linux-musl.tar.gz"
-          [os:linux, arch:aarch64] LET $asset: STRING = "oxdock-aarch64-unknown-linux-musl.tar.gz"
-          [os:windows, arch:x86_64] LET $asset: STRING = "oxdock-x86_64-pc-windows-msvc.tar.gz"
-          [os:windows, arch:aarch64] LET $asset: STRING = "oxdock-aarch64-pc-windows-msvc.tar.gz"
+          LET $asset: STRING = "unsupported-platform"
+          [os:macos] $asset = "oxdock-aarch64-apple-darwin.tar.gz"
+          [os:linux, arch:x86_64] $asset = "oxdock-x86_64-unknown-linux-musl.tar.gz"
+          [os:linux, arch:aarch64] $asset = "oxdock-aarch64-unknown-linux-musl.tar.gz"
+          [os:windows, arch:x86_64] $asset = "oxdock-x86_64-pc-windows-msvc.tar.gz"
+          [os:windows, arch:aarch64] $asset = "oxdock-aarch64-pc-windows-msvc.tar.gz"
           LET $cacheroot: STRING = "{{ env:OXDOCK_CACHE_DIR }}"
           IF $cacheroot == "" {
               [family:unix] $cacheroot = "{{ env:HOME }}/.cache/oxdock"
@@ -1381,11 +1389,12 @@ jobs:
 
           # Target mapping mirrors the stub: this leg unpacks what the
           # stub would fetch for this runner.
-          [os:macos] LET $target: STRING = "aarch64-apple-darwin"
-          [os:linux, arch:x86_64] LET $target: STRING = "x86_64-unknown-linux-musl"
-          [os:linux, arch:aarch64] LET $target: STRING = "aarch64-unknown-linux-musl"
-          [os:windows, arch:x86_64] LET $target: STRING = "x86_64-pc-windows-msvc"
-          [os:windows, arch:aarch64] LET $target: STRING = "aarch64-pc-windows-msvc"
+          LET $target: STRING = "unsupported-platform"
+          [os:macos] $target = "aarch64-apple-darwin"
+          [os:linux, arch:x86_64] $target = "x86_64-unknown-linux-musl"
+          [os:linux, arch:aarch64] $target = "aarch64-unknown-linux-musl"
+          [os:windows, arch:x86_64] $target = "x86_64-pc-windows-msvc"
+          [os:windows, arch:aarch64] $target = "aarch64-pc-windows-msvc"
           LET $asset: STRING = "oxdock-{{ $target }}.tar.gz"
           LET $stage: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-stage")
           LET $work: STRING = PATH_JOIN("{{ env:RUNNER_TEMP }}", "oxdock-prebuilt")

@@ -913,18 +913,23 @@ fn splice_arg_groups(body: &[Tok], stmt: usize) -> Result<Vec<Tok>, TokenError> 
                 delim: GroupDelim::Brace,
                 ..
             } => out.push(tok.clone()),
+            // Call parens stay structural: exploding them to puncts
+            // would strand full-region calls (`MAKE()` in arg position)
+            // as raw text, disagreeing with assignment values and
+            // RUN-exec items, which both parse calls. Brackets keep
+            // the raw-text splicing below (whitespace splits inside
+            // them, strings de-quote to words).
             TokKind::Group {
-                delim,
+                delim: GroupDelim::Paren,
+                ..
+            } => out.push(tok.clone()),
+            TokKind::Group {
+                delim: GroupDelim::Bracket,
                 inner,
                 close_joint,
                 ..
             } => {
-                let (open, close) = match delim {
-                    GroupDelim::Bracket => ('[', ']'),
-                    GroupDelim::Paren => ('(', ')'),
-                    GroupDelim::Brace => unreachable!(),
-                };
-                out.push(Tok::fresh(TokKind::Punct(open), tok.joint));
+                out.push(Tok::fresh(TokKind::Punct('['), tok.joint));
                 // Inside brackets raw-text rules apply: quotes are
                 // characters, blocks never dedent, and whitespace splits
                 // runs (`['a b']` is args `"['a"` + `"b']"`). Convert
@@ -941,7 +946,7 @@ fn splice_arg_groups(body: &[Tok], stmt: usize) -> Result<Vec<Tok>, TokenError> 
                         _ => out.push(t),
                     }
                 }
-                out.push(Tok::fresh(TokKind::Punct(close), *close_joint));
+                out.push(Tok::fresh(TokKind::Punct(']'), *close_joint));
             }
             _ => out.push(tok.clone()),
         }
@@ -1013,6 +1018,36 @@ fn at_assign_boundary(toks: &[Tok], pos: usize) -> bool {
         Some((_, end)) => matches!(toks.get(end).map(|t| &t.kind), Some(TokKind::Punct('='))),
         None => false,
     }
+}
+
+/// Line breaks nested in a raw paren run fail like flat ones did
+/// before parens stayed structural: splicing used to surface every
+/// `;`/newline to `render_raw_text`'s reject arm. Brace contents are
+/// skipped (templates and blocks render whole, then and now);
+/// brackets nested in parens were spliced before, so their breaks
+/// fail here too. Single owner for the rule; both raw fallbacks
+/// (positional args, assignment values) ride `render_raw_text`.
+fn reject_paren_line_breaks(inner: &[Tok], stmt: usize) -> Result<(), TokenError> {
+    for tok in inner {
+        match &tok.kind {
+            TokKind::Newline | TokKind::Semicolon => {
+                return Err(TokenError {
+                    stmt,
+                    msg: "unexpected line break in argument".to_string(),
+                    line: tok.line,
+                    col: tok.col,
+                    kind: None,
+                });
+            }
+            TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            } => {}
+            TokKind::Group { inner, .. } => reject_paren_line_breaks(inner, stmt)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Raw-text render of one gap-run (or value span): words/puncts
@@ -1108,7 +1143,16 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
                 open_joint,
                 close_joint,
                 ..
-            } => out.push_str(&render_group('(', ')', inner, *open_joint, *close_joint)),
+            } => {
+                // Parens stayed structural (call shapes need them), so
+                // surface the breaks splicing used to expose: a `;` or
+                // newline anywhere inside fails exactly like a flat one
+                // did. Brace contents keep the verbatim whole-render
+                // below; brackets nested in parens were spliced before,
+                // so their breaks fail here too.
+                reject_paren_line_breaks(inner, stmt)?;
+                out.push_str(&render_group('(', ')', inner, *open_joint, *close_joint))
+            }
             TokKind::Newline | TokKind::Semicolon => {
                 return Err(TokenError {
                     stmt,
@@ -1130,11 +1174,15 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
 /// stays typed (calls resolve through the shared resolver, matching
 /// `assign_expr`); everything else renders raw. A quoted unit followed
 /// by joint content errors (probed: `K="a"b` fails), like the grammar.
+/// Lone-shape failures stash into `deferred` and render raw: the
+/// command's own lowering error (if any) takes precedence, and the
+/// stashed call error surfaces only when lowering succeeds.
 fn build_value_arg(
     region: &[Tok],
     stmt: usize,
     ctx: &ParseCtx,
     lone_ok: bool,
+    deferred: &mut Option<TokenError>,
 ) -> Result<Arg, TokenError> {
     if region.is_empty() {
         return Ok(Arg::String(String::new(), false));
@@ -1172,8 +1220,15 @@ fn build_value_arg(
     }
     // Lone typed values apply only at a true end/boundary, never
     // past a comment (the grammar's `!assign_expr_cont` guard).
-    if lone_ok && let Some(expr) = try_lone_value_expr(region, stmt, ctx)? {
-        return Ok(expr);
+    // Failures stash (see above) so command syntax owns precedence.
+    if lone_ok {
+        match try_lone_value_expr(region, stmt, ctx) {
+            Ok(Some(expr)) => return Ok(expr),
+            Ok(None) => {}
+            Err(err) => {
+                deferred.get_or_insert(err);
+            }
+        }
     }
     Ok(Arg::String(render_raw_text(region, stmt)?, false))
 }
@@ -1289,7 +1344,25 @@ fn try_lone_value_expr(
     }
     // Full-region call: resolve and keep typed (canonical rendering
     // happens per command: verbatim for ENV/EXPAND, `K=`-joined text
-    // elsewhere, all from the same `Arg::Expr`).
+    // elsewhere, all from the same `Arg::Expr`). Single owner for the
+    // call tail; positional args share it (see `build_arg_tokens`).
+    if let Some(arg) = try_lone_call_expr(region, stmt, ctx)? {
+        return Ok(Some(arg));
+    }
+    Ok(None)
+}
+
+/// Full-region call shape (`NAME(...)`, `MOD::NAME(...)`) over one
+/// argument run: parse args through the shared call owner and resolve
+/// through the shared resolver, so assignment values, RUN-exec items,
+/// and generic positional args can never disagree on what a call is.
+/// `None` on shape miss (caller renders raw); errors propagate, so a
+/// misspelled callee fails loud instead of going literal.
+fn try_lone_call_expr(
+    region: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<Arg>, TokenError> {
     if let Some((name, paren)) = call_shape_at(region, 0, false)
         && paren + 1 == region.len()
         && let TokKind::Group { inner, .. } = &region[paren].kind
@@ -1405,12 +1478,14 @@ fn build_arg_tokens(
     toks: &[Tok],
     stmt: usize,
     ctx: &ParseCtx,
-) -> Result<Vec<InsToken>, TokenError> {
-    // Splice bracket/paren groups first: they read as ordinary
+) -> Result<(Vec<InsToken>, Option<TokenError>), TokenError> {
+    // Splice bracket groups first: they read as ordinary
     // characters (whitespace splits inside them), with strings
-    // re-quoted back to word text. Brace groups stay structural
+    // re-quoted back to word text. Paren groups stay structural (see
+    // `splice_arg_groups`); brace groups stay structural
     // (templates render whole; blocks parse as expressions).
     let flat = splice_arg_groups(toks, stmt)?;
+    let mut deferred: Option<TokenError> = None;
     let mut out = Vec::new();
     let mut pos = 0;
     while pos < flat.len() {
@@ -1487,7 +1562,8 @@ fn build_arg_tokens(
                     kind: None,
                 });
             }
-            let value = build_value_arg(&flat[key_end + 1..vend], stmt, ctx, lone_ok)?;
+            let value =
+                build_value_arg(&flat[key_end + 1..vend], stmt, ctx, lone_ok, &mut deferred)?;
             out.push(InsToken::Assign(key, value));
             pos = vend;
             continue;
@@ -1588,7 +1664,7 @@ fn build_arg_tokens(
                     continue;
                 }
                 // Re-quoted standalone strings (spliced from groups)
-                // strip exactly like structural ones (`( "hi" )` gives
+                // strip exactly like structural ones (`["hi"]` gives
                 // `hi`); glued quotes stay literal (`['a` keeps its
                 // mark). Triple-quote pieces never qualify.
                 TokKind::Word(w) if quoted_word_inner(w).is_some() => {
@@ -1602,13 +1678,30 @@ fn build_arg_tokens(
                 _ => {}
             }
         }
+        // Bare full-region calls stay typed like assignment values and
+        // RUN-exec items (same owner, `try_lone_call_expr`), so every
+        // argument position evaluates them instead of one silently
+        // appending the source text. Failures stash: the command's own
+        // lowering error (if any) takes precedence, and the stashed
+        // call error surfaces only when lowering succeeds.
+        match try_lone_call_expr(run, stmt, ctx) {
+            Ok(Some(arg)) => {
+                out.push(InsToken::Pos(arg));
+                pos = run_end;
+                continue;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                deferred.get_or_insert(err);
+            }
+        }
         out.push(InsToken::Pos(Arg::String(
             render_raw_text(run, stmt)?,
             false,
         )));
         pos = run_end;
     }
-    Ok(out)
+    Ok((out, deferred))
 }
 
 /// A raw run starting with `//` or `/*` (a slash-pair: `/` plus a
@@ -2400,6 +2493,11 @@ pub struct ParseCtx<'a> {
     /// (forward references allowed). Separate from func exports so the
     /// MCP server never confuses a type for a tool.
     pub type_exports: RefCell<Vec<String>>,
+    /// Top-level `FUNC` names pre-declared before lowering, so forward
+    /// references resolve regardless of order. Separate from `funcs`
+    /// frames so duplicate detection in `declare_func` stays intact;
+    /// `visible_snapshot` unions this set.
+    pub forward: RefCell<Vec<HashSet<String>>>,
     /// 1-based source line of the statement currently lowering (the
     /// innermost split statement; updated per statement by the body
     /// loops, read as the base for nested splits). Lets every error
@@ -2423,6 +2521,7 @@ impl<'a> ParseCtx<'a> {
             imports: RefCell::new(vec![Vec::new()]),
             func_exports: RefCell::new(Vec::new()),
             type_exports: RefCell::new(Vec::new()),
+            forward: RefCell::new(vec![HashSet::new()]),
             current_line: RefCell::new(0),
         }
     }
@@ -2435,6 +2534,12 @@ impl<'a> ParseCtx<'a> {
         for scope in self.funcs.borrow().iter() {
             funcs.extend(scope.iter().cloned());
         }
+        funcs.extend(
+            self.forward
+                .borrow()
+                .iter()
+                .flat_map(|frame| frame.iter().cloned()),
+        );
         let mut imports = Vec::new();
         for frame in self.imports.borrow().iter() {
             for module in frame {
@@ -2479,6 +2584,62 @@ fn resolve_name(ctx: &ParseCtx, stmt: usize, name: &str) -> Result<String, Token
     let (funcs, imports) = ctx.visible_snapshot();
     resolve_call_name(ctx.modules, &funcs, &imports, &lowering_ctx(stmt), name)
         .map_err(|e| lower_err(stmt, e))
+}
+
+/// Pre-declare `FUNC` names before lowering, so forward references
+/// resolve regardless of order. Only valid non-reserved headers hoist:
+/// the head (`FUNC NAME`, `ASYNC FUNC NAME`), a parameter Paren group,
+/// a `:` return-type shape (via the shared `parse_type_shape` owner),
+/// and a trailing non-template Brace body. Malformed headers
+/// (`FUNC FOO() ECHO hi`) and reserved names (`FUNC LEN`) stay silent
+/// here so the main pass owns their diagnostics. Runs per scope: the
+/// caller pre-declares each statement list into its own frame, so
+/// nested blocks resolve forward without leaking outward.
+fn predeclare_forward_funcs(stmts: &[Stmt], ctx: &ParseCtx) {
+    // Guarded definitions hoist like unguarded ones: `parse_func_at`
+    // registers the name in `ctx.funcs` unconditionally, so the
+    // forward set must see the same statement regardless of its
+    // guard, or forward calls to `[os:macos] FUNC FOO` would fail
+    // while backward calls resolve.
+    for stmt in stmts {
+        let body = &stmt.body;
+        // `ASYNC FUNC` carries the prefix; the shared header owner
+        // takes `pos` at `FUNC` in both cases.
+        let pos = match body.first().map(|t| &t.kind) {
+            Some(TokKind::Word(w)) if w == KEYWORD_FUNC => 0,
+            Some(TokKind::Word(w)) if w == KEYWORD_ASYNC => match body.get(1).map(|t| &t.kind) {
+                Some(TokKind::Word(next)) if next == KEYWORD_FUNC => 1,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        // Header grammar lives in the single owner: parameter lists,
+        // return types, and trailing tokens validate exactly like the
+        // real path, so malformed headers never hoist. Diagnostics
+        // drop here (silent skip); the main pass owns the error.
+        let Ok(Some((header, _))) = parse_func_header(body, pos, 0, KEYWORD_FUNC) else {
+            continue;
+        };
+        if ctx.reserved.contains(&header.name)
+            || ctx.modules.reserved_base_names().contains(&header.name)
+        {
+            continue;
+        }
+        // Trailing tokens after the body block are malformed (the real
+        // path consumes the header exactly, leaving them to fail as the
+        // next element), so such headers never hoist into `forward`:
+        // only gap trivia may follow.
+        if body.len() != header.block + 1
+            && !body[header.block + 1..]
+                .iter()
+                .all(|t| matches!(&t.kind, TokKind::Newline | TokKind::Comment(_)))
+        {
+            continue;
+        }
+        if let Some(frame) = ctx.forward.borrow_mut().last_mut() {
+            frame.insert(header.name.clone());
+        }
+    }
 }
 
 /// Qualify bare placeholder calls in template text through the
@@ -3555,6 +3716,7 @@ fn parse_body_steps(
     // exit runs on failure.
     ctx.funcs.borrow_mut().push(HashSet::new());
     ctx.imports.borrow_mut().push(Vec::new());
+    ctx.forward.borrow_mut().push(HashSet::new());
     // Nested splits count lines from the enclosing statement's line
     // (headers are single-line, so the brace shares it). Save and
     // restore the discipline around the loop: sibling bodies after
@@ -3562,18 +3724,21 @@ fn parse_body_steps(
     // (On error the parse aborts and the context is discarded.)
     let saved = *ctx.current_line.borrow();
     let mut out = Vec::new();
-    for s in split_statements(inner, saved)? {
+    let stmts = split_statements(inner, saved)?;
+    predeclare_forward_funcs(&stmts, ctx);
+    for s in &stmts {
         // The innermost statement owns error positions: record it for
         // nested splits and stamp failures that have none yet (deeper
         // frames stamp first, so this never overwrites real positions).
         *ctx.current_line.borrow_mut() = s.line;
         out.extend(
-            lower_stmt_steps(&s, stmt, ctx, true, mark).map_err(|e| stamp_pos(e, s.line, s.col))?,
+            lower_stmt_steps(s, stmt, ctx, true, mark).map_err(|e| stamp_pos(e, s.line, s.col))?,
         );
     }
     *ctx.current_line.borrow_mut() = saved;
     ctx.funcs.borrow_mut().pop();
     ctx.imports.borrow_mut().pop();
+    ctx.forward.borrow_mut().pop();
     Ok(out)
 }
 
@@ -4378,30 +4543,35 @@ fn parse_while_single(
     Ok(Some((kind, brace + 1 - pos)))
 }
 
-/// Single (non-block) `FUNC`: name, parenthesized params, block. The
-/// shape parses purely first (misses fall to generic, declaring
-/// nothing — the grammar only lowers matched pairs); then the name
-/// declares in the enclosing scope before the body lowers (so
-/// recursion resolves), and the body pushes a fresh scope.
-/// Duplicates, reserved shadows, and parameter dupes fail loudly.
-fn parse_func_at(
+/// Validated `FUNC` header shape: name, parameter list, return type,
+/// and body block. Single owner for the header grammar, shared by
+/// `parse_func_at` and `predeclare_forward_funcs` so the hoist set can
+/// never admit what the real path rejects (or reject what it admits).
+/// Returns the header plus tokens consumed; `None` on shape miss
+/// (lowercase names, missing paren/colon/block all miss to generic,
+/// probed). Content failures (bad params, missing return type, bad
+/// trailing tokens) carry the bare diagnostic: `parse_func_at`
+/// adorns it, pre-declaration drops it (silent skip, letting the main
+/// pass own the error).
+struct FuncHeader {
+    name: String,
+    params: Vec<(String, String, bool)>,
+    return_type: String,
+    block: usize,
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_func_header(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
-    ctx: &ParseCtx,
-    is_async: bool,
-) -> Result<Option<(StepKind, usize)>, TokenError> {
-    let keyword = if is_async { "ASYNC FUNC" } else { KEYWORD_FUNC };
-    let fail = |msg: String| TokenError {
-        stmt,
-        msg,
-        line: 0,
-        col: 0,
-        kind: Some(ParseErrorKind::Validation {
-            command: KEYWORD_FUNC.to_string(),
-        }),
-    };
-    // Phase 1 (pure shape): name, parens, params, block presence.
+    keyword: &str,
+) -> Result<Option<(FuncHeader, usize)>, String> {
+    // Head word: `FUNC` (callers normalize `ASYNC FUNC` to `pos`
+    // first, so the header shape stays prefix-free).
+    if !matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_FUNC) {
+        return Ok(None);
+    }
     // Name: UPPERCASE ident (lowercase misses to generic, probed).
     let def_name = match toks.get(pos + 1).map(|t| &t.kind) {
         Some(TokKind::Word(w))
@@ -4433,9 +4603,9 @@ fn parse_func_at(
             loop {
                 let base = pcur.pos;
                 let Some((pname, _)) = peek_dollar_var(&paren_inner, base) else {
-                    return Err(fail(format!(
+                    return Err(format!(
                         "FUNC {def_name} params must be `$name: TYPE` separated by commas"
-                    )));
+                    ));
                 };
                 pcur.pos = base + 2;
                 pcur.skip_gap_nl();
@@ -4444,9 +4614,9 @@ fn parse_func_at(
                 let optional = pcur.eat_punct('?');
                 pcur.skip_gap_nl();
                 if !pcur.eat_punct(':') {
-                    return Err(fail(format!(
+                    return Err(format!(
                         "FUNC {def_name} param `${pname}` needs `: TYPE` after the name"
-                    )));
+                    ));
                 }
                 pcur.skip_gap_nl();
                 let tstart = pcur.pos;
@@ -4455,9 +4625,9 @@ fn parse_func_at(
                         Some(TokKind::Word(word)) => format!("; got `{word}`"),
                         _ => String::new(),
                     };
-                    return Err(fail(format!(
+                    return Err(format!(
                         "FUNC {def_name} param `${pname}` needs an uppercase type after `:` (e.g. STRING, INT, BOOL){got}"
-                    )));
+                    ));
                 };
                 // Post-match the span holds words/puncts only, so the
                 // shared renderer cannot fail; stay failed regardless.
@@ -4466,9 +4636,9 @@ fn parse_func_at(
                 if optional {
                     seen_optional = true;
                 } else if seen_optional {
-                    return Err(fail(format!(
+                    return Err(format!(
                         "FUNC {def_name} optional ? params must be trailing: `${pname}` follows an optional param"
-                    )));
+                    ));
                 }
                 params.push((pname, ptype, optional));
                 pcur.pos = tend;
@@ -4477,9 +4647,9 @@ fn parse_func_at(
                     pcur.skip_gap_nl();
                     // Trailing comma misses (a param must follow).
                     if pcur.done() {
-                        return Err(fail(format!(
+                        return Err(format!(
                             "FUNC {def_name} params must not end with a trailing comma"
-                        )));
+                        ));
                     }
                     continue;
                 }
@@ -4488,9 +4658,9 @@ fn parse_func_at(
             // Trailing junk (including newlines) misses to generic.
             pcur.skip_gap_nl();
             if !pcur.done() {
-                return Err(fail(format!(
+                return Err(format!(
                     "FUNC {def_name} params must be `$name: TYPE` separated by commas"
-                )));
+                ));
             }
         }
     }
@@ -4509,22 +4679,19 @@ fn parse_func_at(
             })
         ) && toks.get(p).is_some_and(|t| !is_template_brace(t));
         if is_brace {
-            return Err(fail(format!(
+            return Err(format!(
                 "{keyword} {def_name} requires a return type : TYPE (e.g. : VOID, : STRING)"
-            )));
+            ));
         }
         return Ok(None);
     }
     let Some(ret_end) = parse_type_shape(toks, p + 1) else {
-        return Err(fail(format!(
+        return Err(format!(
             "{keyword} {def_name} requires a return type : TYPE after ':'"
-        )));
+        ));
     };
-    let return_type = render_type_region(&toks[p + 1..ret_end], stmt).map_err(|_| {
-        fail(format!(
-            "{keyword} {def_name} requires a return type : TYPE after ':'"
-        ))
-    })?;
+    let return_type = render_type_region(&toks[p + 1..ret_end], stmt)
+        .map_err(|_| format!("{keyword} {def_name} requires a return type : TYPE after ':'"))?;
     let return_type = crate::canonicalize_spelling(&return_type);
     p = ret_end;
     // Block at any gap (never a template); missing blocks miss to
@@ -4539,6 +4706,52 @@ fn parse_func_at(
     if !block_ok {
         return Ok(None);
     }
+    Ok(Some((
+        FuncHeader {
+            name: def_name,
+            params,
+            return_type,
+            block: p,
+        },
+        p + 1 - pos,
+    )))
+}
+
+/// Single (non-block) `FUNC`: name, parenthesized params, block. The
+/// shape parses purely first (misses fall to generic, declaring
+/// nothing — the grammar only lowers matched pairs); then the name
+/// declares in the enclosing scope before the body lowers (so
+/// recursion resolves), and the body pushes a fresh scope.
+/// Duplicates, reserved shadows, and parameter dupes fail loudly.
+fn parse_func_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+    is_async: bool,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let keyword = if is_async { "ASYNC FUNC" } else { KEYWORD_FUNC };
+    let fail = |msg: String| TokenError {
+        stmt,
+        msg,
+        line: 0,
+        col: 0,
+        kind: Some(ParseErrorKind::Validation {
+            command: KEYWORD_FUNC.to_string(),
+        }),
+    };
+    // Phase 1 (pure shape) through the single header owner:
+    // adorn content errors with the `FUNC` / `ASYNC FUNC` keyword,
+    // miss to generic on shape miss exactly as before.
+    let Some((header, used)) = parse_func_header(toks, pos, stmt, keyword).map_err(fail)? else {
+        return Ok(None);
+    };
+    let FuncHeader {
+        name: def_name,
+        params,
+        return_type,
+        block: p,
+    } = header;
     // Phase 2 (effects): reserved shadows and same-scope duplicates
     // fail at the definition line, verbatim.
     if ctx.reserved.contains(&def_name) || ctx.modules.reserved_base_names().contains(&def_name) {
@@ -4572,7 +4785,7 @@ fn parse_func_at(
         body,
         docs: None,
     };
-    Ok(Some((kind, p + 1 - pos)))
+    Ok(Some((kind, used)))
 }
 
 /// `REMOTE` header bindings `[$var, env:KEY]` over a bracket
@@ -8089,9 +8302,69 @@ fn parse_inner_command(
             return Ok((kind, 2));
         }
     }
-    let tokens = build_arg_tokens(&body[1..], stmt, ctx)?;
-    let kind = lower_generic_args(&head, tokens, stmt, ctx)?;
-    Ok((kind, body.len()))
+    let (tokens, deferred) = build_arg_tokens(&body[1..], stmt, ctx)?;
+    let lowered = lower_generic_args(&head, tokens, stmt, ctx);
+    match lowered {
+        Ok(kind) => {
+            // Stashed call errors surface only for otherwise well-formed
+            // statements: the command head owns its syntax, so a malformed
+            // header keeps its tailored error instead of being masked by an
+            // argument-position resolution failure.
+            if let Some(err) = deferred {
+                return Err(err);
+            }
+            Ok((kind, body.len()))
+        }
+        Err(lower_err) => {
+            // Fallback raw strings (`NOPE()` rendered as text) can fail
+            // argument-shape lowering with a misleading error. The
+            // stashed unknown-callee error names the real culprit, so
+            // it wins over every argument-level failure (`Validation`,
+            // `Syntax`, `InvalidSyntax`, or the `None` classification
+            // that `ENV`/`EXPAND` lowering uses). Heads owned by a
+            // statement-header parser (`FUNC`, `LET`, `IF`, `FOR`,
+            // `WHILE`, `TYPE`, `IMPORT`, `EXPORT`, `REMOTE`, `WITH_IO`)
+            // keep their lowering `InvalidSyntax`: those parsers miss to
+            // this path on shape miss (e.g. `FUNC FOO() ECHO hi` has no
+            // body block), so the lowering error names the malformed
+            // header while the stashed name is its definiendum, never an
+            // argument-position call. Every other head is a plain
+            // command, so a lowering `InvalidSyntax` there is an
+            // argument-shape failure from the raw-text fallback, and
+            // the stashed callee names the culprit. Only
+            // head-identity errors (`UnknownCommand`, `Structural`)
+            // keep their tailored diagnostic everywhere.
+            let is_header_syntax = matches!(
+                head.as_str(),
+                KEYWORD_FUNC
+                    | KEYWORD_LET
+                    | KEYWORD_IF
+                    | KEYWORD_FOR
+                    | KEYWORD_WHILE
+                    | KEYWORD_TYPE
+                    | KEYWORD_IMPORT
+                    | KEYWORD_EXPORT
+                    | KEYWORD_REMOTE
+                    | KEYWORD_WITH_IO
+            ) && matches!(
+                lower_err.kind,
+                Some(crate::error::ParseErrorKind::InvalidSyntax { .. })
+            );
+            if let Some(deferred_err) = deferred
+                && !is_header_syntax
+                && matches!(
+                    lower_err.kind,
+                    Some(crate::error::ParseErrorKind::Validation { .. })
+                        | Some(crate::error::ParseErrorKind::Syntax)
+                        | Some(crate::error::ParseErrorKind::InvalidSyntax { .. })
+                        | None
+                )
+            {
+                return Err(deferred_err);
+            }
+            Err(lower_err)
+        }
+    }
 }
 
 /// Parse a token stream (either lexer) into steps. Markers normalize to
@@ -8111,7 +8384,9 @@ pub fn parse_tokens(
 pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, TokenError> {
     let mut out = Vec::new();
     *ctx.current_line.borrow_mut() = 1;
-    for (i, s) in split_statements(toks, 1)?.iter().enumerate() {
+    let stmts = split_statements(toks, 1)?;
+    predeclare_forward_funcs(&stmts, ctx);
+    for (i, s) in stmts.iter().enumerate() {
         *ctx.current_line.borrow_mut() = s.line;
         out.extend(
             lower_stmt_steps(s, i, ctx, false, true).map_err(|e| stamp_pos(e, s.line, s.col))?,
@@ -8144,7 +8419,17 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
                             kind: None,
                         });
                     }
-                    seen_non_prelude = true;
+                    // Harvest imports stay prelude: they bind functions
+                    // and types without executing module bodies, so they
+                    // neither read nor disturb the inherited environment.
+                    // File imports execute arbitrary top-level steps on
+                    // import, so they end the prelude like any other
+                    // side-effecting command. Host-only IMPORTs emit no
+                    // step at all, which is why they never tripped this
+                    // gate.
+                    if !matches!(kind, StepKind::ImportFuncs { .. }) {
+                        seen_non_prelude = true;
+                    }
                 }
             }
         }
@@ -9226,7 +9511,6 @@ mod tests {
             "ECHO a $x b",
             "ECHO 5 + 3",
             "WRITE f ( \"hi\" )",
-            "ECHO FOO(\"a\")",
             "ECHO [a, b] hi",
             "ECHO {{x}}",
             "ECHO {{ $x }}",
@@ -9681,6 +9965,7 @@ mod tests {
             "LET $bs: STRING = a\\nb",
             "FOO(\"a\")",
             "FOO (\"a\")",
+            "ECHO FOO(\"a\")",
             "ECHO(\"hi\")",
             "RUN [a] extra",
             "RUN[\"a\"]",
@@ -9797,5 +10082,140 @@ mod tests {
         }
         // No deferred shapes remain: every statement-level block and
         // inline-block expression parses natively.
+    }
+
+    #[test]
+    fn deferred_unknown_callee_beats_validation_arg_error() {
+        // Directive 5: `WORKSPACE NOPE()` stashes `unknown function
+        // NOPE` while the fallback raw string fails `WORKSPACE`
+        // validation. On a well-formed header the stashed callee error
+        // names the culprit instead of the misleading arg-shape error.
+        let err =
+            crate::parse_script("WORKSPACE NOPE()", lower).expect_err("unknown callee must fail");
+        assert!(
+            err.to_string().contains("unknown function `NOPE`"),
+            "deferred must beat validation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn paren_line_break_reports_token_position() {
+        // Directive 5: multiline paren breaks carry the offending
+        // token's line/col, not a stamped 0/0. The break sits on line 2
+        // while the statement opens on line 1.
+        let err = crate::parse_script("ECHO (a\nb)", lower).expect_err("break must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("unexpected line break"),
+            "break must report, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn deferred_unknown_callee_beats_invalid_syntax_arg_error() {
+        // Fallback raw strings can trigger `InvalidSyntax` lowering
+        // (for example `COPY NOPE()`). The stashed unknown-callee error
+        // still names the culprit on a recognized head.
+        for text in ["COPY NOPE()", "WRITE NOPE()"] {
+            let err = crate::parse_script(text, lower).expect_err("unknown callee must fail");
+            assert!(
+                err.to_string().contains("unknown function `NOPE`"),
+                "deferred must beat InvalidSyntax for {text:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_beats_lowering_invalid_syntax_on_plain_heads() {
+        // Plain command heads own no header grammar, so a lowering
+        // `InvalidSyntax` there is an argument-shape failure from the
+        // raw-text fallback: the stashed unknown-callee names the
+        // culprit on every such head (no per-command allowlist).
+        let lower_invalid =
+            |name: &str, _args: Vec<crate::Arg>| -> crate::ParseResult<crate::StepKind> {
+                Err(crate::ParseError::invalid_syntax(
+                    name,
+                    format!("{name} header is malformed"),
+                    None,
+                    Vec::new(),
+                    None,
+                    &crate::error::SpanContext::line_only(0),
+                ))
+            };
+        for text in [
+            "ASSERT_EQ $a NOSUCHFUNC()",
+            "SYMLINK $a NOSUCHFUNC()",
+            "COPY $a NOSUCHFUNC()",
+            "WRITE $a NOSUCHFUNC()",
+        ] {
+            let err = crate::parse_script(text, lower_invalid).expect_err("arg error must fail");
+            assert!(
+                err.to_string().contains("unknown function `NOSUCHFUNC`"),
+                "deferred must beat lowering InvalidSyntax for {text:?}, got: {err}"
+            );
+        }
+        // Header-owned heads keep their lowering `InvalidSyntax`: the
+        // native parser missed to the generic path on shape miss, so
+        // the lowering error names the malformed header while the
+        // stashed name is its definiendum, never a call.
+        let err = crate::parse_script("FUNC $a NOSUCHFUNC()", lower_invalid)
+            .expect_err("header syntax must fail");
+        assert!(
+            err.to_string().contains("header is malformed"),
+            "header InvalidSyntax must stand on FUNC, got: {err}"
+        );
+    }
+
+    #[test]
+    fn trailing_tokens_after_func_block_never_hoist() {
+        // A `FUNC` header with trailing tokens after the body block is
+        // malformed (the real path rejects it), so pre-declaration
+        // must not hoist the name: the forward call fails instead of
+        // resolving.
+        let err = crate::parse_script(
+            "LET $x: STRING = FOO()\nFUNC FOO(): STRING { RETURN \"a\" } TRAILING\n",
+            lower,
+        )
+        .expect_err("trailing tokens must fail");
+        assert!(
+            err.to_string().contains("unknown function `FOO`"),
+            "unhoisted forward call must fail, got: {err}"
+        );
+    }
+
+    #[test]
+    fn forward_reference_resolves_regardless_of_order() {
+        // `CALLER` calls `CALLEE` defined later. Top-level
+        // pre-declaration hoists names before lowering, so order
+        // does not matter. Runtime still executes sequentially;
+        // the call below runs after both definitions.
+        let steps = crate::parse_script(
+            "FUNC CALLER(): STRING { RETURN CALLEE() }\nFUNC CALLEE(): STRING { RETURN \"forward-ok\" }\n",
+            lower,
+        )
+        .expect("forward ref must parse");
+        assert!(
+            matches!(&steps[0].kind, crate::StepKind::FuncDef { name, .. } if name == "CALLER"),
+            "first def kept, got: {:?}",
+            steps[0].kind
+        );
+    }
+
+    #[test]
+    fn forward_reference_to_guarded_func_resolves() {
+        // Guarded definitions hoist like unguarded ones: `parse_func_at`
+        // registers `[os:macos] FUNC FOO` unconditionally, so a forward
+        // call before the definition must resolve identically to a
+        // backward call after it.
+        let steps = crate::parse_script(
+            "LET $x: STRING = FOO()\n[os:macos] FUNC FOO(): STRING { RETURN \"guarded\" }\n",
+            lower,
+        )
+        .expect("forward guarded ref must parse");
+        assert!(
+            matches!(&steps[1].kind, crate::StepKind::FuncDef { name, .. } if name == "FOO"),
+            "guarded def kept, got: {:?}",
+            steps[1].kind
+        );
     }
 }

@@ -3813,7 +3813,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 Example {
                     name: "script funcs never resolve in placeholders",
                     fence_meta: Some(
-                        "expect_error:\"unknown placeholder function 'SCRIPT::GREET'\"",
+                        "expect_error:\"placeholder function 'SCRIPT::GREET' is a script function\"",
                     ),
                     code: indoc! {r#"
                 # Placeholders carry no step context: pure registry only.
@@ -6172,6 +6172,35 @@ mod tests {
         assert_eq!(list, "items");
         assert!(matches!(item, Arg::String(s, _) if s == "hi"));
         assert_eq!(steps[0].kind.to_string(), "LIST_APPEND $items \"hi\"");
+    }
+
+    #[test]
+    fn list_append_accepts_call_shaped_item() {
+        // A bare full-region call in arg position stays typed
+        // (evaluated at runtime) instead of appending the source
+        // text: same owner as assignment values and RUN-exec items.
+        let steps = parse_script(
+            "FUNC MAKE(): STRING { RETURN \"made\" }\nLIST_APPEND $items MAKE()\n",
+            lower_command,
+        )
+        .expect("parses");
+        let StepKind::ListAppend { list, item } = &steps[1].kind else {
+            panic!("expected ListAppend, got {:?}", steps[1].kind);
+        };
+        assert_eq!(list, "items");
+        assert!(
+            matches!(item, Arg::Expr(Expr::Call { name, .. }) if name == "SCRIPT::MAKE"),
+            "{item:?}"
+        );
+    }
+
+    #[test]
+    fn list_append_rejects_unknown_call_shaped_item() {
+        // Unknown callees fail loud (unknown-function, with span),
+        // never silently append. Well-formed-statement errors win:
+        // see `func_def_malformed_params_name_the_shape`.
+        let err = parse_err("LIST_APPEND $items NOPE()\n");
+        assert!(err.contains("unknown function `NOPE`"), "{err}");
     }
 
     #[test]

@@ -951,7 +951,8 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         functions: super::native::FunctionRegistry::with_builtins(),
         entry_file: None,
         import_stack: Vec::new(),
-        import_alias_frame: None,
+        executed_alias_targets: std::collections::HashMap::new(),
+        call_alias_frames: Vec::new(),
         modules: std::collections::HashMap::new(),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
@@ -6691,6 +6692,153 @@ fn parse_entry(src: &str) -> Vec<Step> {
 }
 
 #[test]
+fn forward_reference_caller_before_callee_runs() {
+    // Item 4: callees resolve regardless of definition order.
+    // Parse-time pre-declaration hoists top-level names; the LET
+    // below runs after both definitions so runtime order holds.
+    // Note: `{{ CALLER() }}` stays an unknown placeholder by
+    // design (script funcs never resolve in templates); bind
+    // through LET instead.
+    let fs = MockFs::new();
+    let steps = parse_entry(indoc! {r#"
+        FUNC CALLER(): STRING {
+         RETURN CALLEE()
+        }
+        FUNC CALLEE(): STRING {
+         RETURN "forward-ok"
+        }
+        LET $x: STRING = CALLER()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("forward ref runs");
+    assert_eq!(
+        bindings.get("x").and_then(|v| v.as_str()),
+        Some("forward-ok")
+    );
+}
+
+#[test]
+fn file_scope_top_level_let_visible_in_func_and_template() {
+    // Issue A: top-level `LET $NAME: TYPE = ...` is the supported
+    // file-scope constant idiom. The entry binding below reads inside
+    // a `FUNC` body and inside `{{ }}` with no per-FUNC rebinding.
+    let fs = MockFs::new();
+    let steps = parse_entry(indoc! {r#"
+        LET $OUT: STRING = "shared"
+        FUNC GET(): STRING {
+         RETURN $OUT
+        }
+        LET $v: STRING = GET()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("top-level LET reads in FUNC");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("shared"));
+}
+
+#[test]
+fn file_import_module_top_level_let_visible_through_func() {
+    // Issue A (module side): a lib top-level `LET` seeds the module
+    // environment its exported FUNCs resolve against, so shared
+    // config lives once in the lib instead of as zero-arg FUNCs.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                LET $SEG: STRING = ".oxdock-codebook"
+                FUNC SEG(): STRING {
+                 RETURN $SEG
+                }
+                EXPORT SEG
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS CB]
+        LET $v: STRING = CB::SEG()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("module LET reads through FUNC view");
+    assert_eq!(
+        bindings.get("v").and_then(|v| v.as_str()),
+        Some(".oxdock-codebook")
+    );
+}
+
+#[test]
+fn template_bare_harvest_direct_call_fails_bind_via_let() {
+    // Issue B: `{{ WHERE() }}` on a bare-harvested script FUNC fails
+    // by design (placeholders resolve only the pure-host table;
+    // script bodies never execute in template position). The LET
+    // binding is the supported path: it resolves through the
+    // harvest and interpolates via `{{ $w }}`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC WHERE(): STRING {
+                 RETURN "common-ok"
+                }
+                EXPORT WHERE
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD, [FUNC WHERE FROM "lib.oxdock"]]
+        LET $w: STRING = WHERE()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("harvest resolves in LET position");
+    assert_eq!(
+        bindings.get("w").and_then(|v| v.as_str()),
+        Some("common-ok")
+    );
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC WHERE(): STRING {
+                 RETURN "common-ok"
+                }
+                EXPORT WHERE
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD, [FUNC WHERE FROM "lib.oxdock"]]
+        ECHO "direct: {{ WHERE() }}"
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("placeholder function 'SCRIPT::WHERE' is a script function"),
+        "bare-harvest placeholder must name the qualified culprit, got: {err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains("bind the result first with LET"),
+        "placeholder error must point at the LET binding path, got: {err:#}"
+    );
+}
+
+#[test]
 fn file_import_registers_alias_and_calls() {
     let fs = MockFs::new();
     seed_lib(
@@ -6716,6 +6864,145 @@ fn file_import_registers_alias_and_calls() {
     .expect("import runs");
     assert_eq!(bindings.get("d").and_then(|v| v.as_str()), Some("hi"));
     assert!(!bindings.contains_key("inner"), "{bindings:?}");
+}
+
+#[test]
+fn file_import_qualified_call_ignores_shadowing_local() {
+    // #305: a qualified `ALIAS::FUNC` call resolves against the
+    // imported module's exports, never a same-named local FUNC. The
+    // local takes two args, the import takes one; the one-arg
+    // qualified call must validate against the import.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC DENIED($base: STRING): BOOL {
+                 RETURN false
+                }
+                EXPORT DENIED
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS CB]
+        FUNC DENIED($path: STRING, $deny: LIST<STRING>): BOOL {
+         RETURN false
+        }
+        FUNC T($base: STRING): BOOL {
+         LET $hit: BOOL = CB::DENIED($base)
+         RETURN $hit
+        }
+        LET $r: BOOL = T("x")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("qualified call resolves to the import, not the local shadow");
+    assert_eq!(bindings.get("r").and_then(|v| v.as_bool()), Some(false));
+}
+
+#[test]
+fn file_import_unknown_qualified_function_fails_statically() {
+    // #305: the closure pass knows every export under a file alias,
+    // so `ALIAS::TYPO` fails at validation instead of passing
+    // dry-run and failing only at runtime.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC DENIED($base: STRING): BOOL {
+                 RETURN false
+                }
+                EXPORT DENIED
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS CB]
+        FUNC T($base: STRING): BOOL {
+         LET $hit: BOOL = CB::NO_SUCH_FUNC($base)
+         RETURN $hit
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function `CB::NO_SUCH_FUNC`"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn list_append_evaluates_call_shaped_item() {
+    // A bare call in command-arg position evaluates (same as
+    // assignment values, RUN-exec items, and statement calls):
+    // the list gains the return value, never the source text.
+    fn strings(v: Option<&Value>) -> Vec<String> {
+        v.and_then(|v| v.as_list())
+            .map(|l| {
+                l.iter()
+                    .map(|i| i.as_str().unwrap_or("?").to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    let steps = parse_entry(indoc! {r#"
+        FUNC MAKE(): STRING { RETURN "made" }
+        LET $a: LIST<STRING> = []
+        LIST_APPEND $a MAKE()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("call-shaped item evaluates");
+    assert_eq!(strings(bindings.get("a")), vec!["made".to_string()]);
+}
+
+#[test]
+fn list_append_unknown_call_shaped_item_fails_loud() {
+    // Unknown callees in arg position fail (unknown-function),
+    // never silently append the source text and poison the list.
+    let err = crate::parse_script(indoc! {r#"
+        LET $a: LIST<STRING> = []
+        LIST_APPEND $a NOPE()
+    "#})
+    .expect_err("unknown call-shaped item must fail");
+    assert!(
+        format!("{err:#}").contains("unknown function `NOPE`"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn file_import_unknown_call_in_zero_function_module_fails() {
+    // The alias set (not a func-key prefix scan) proves the namespace
+    // known: a module exporting only a TYPE still rejects `T::TYPO`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "types.oxdock",
+        indoc! {r#"
+                TYPE ID = STRING
+                EXPORT TYPE ID
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["types.oxdock" AS T]
+        FUNC U($x: STRING): STRING {
+         LET $y: STRING = T::NO_SUCH_FUNC($x)
+         RETURN $y
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function `T::NO_SUCH_FUNC`"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -6861,6 +7148,74 @@ fn file_import_function_read_of_caller_var_fails() {
     assert!(
         format!("{err:?}").contains("undefined variable $carrier"),
         "fails naming the unobservable variable: {err:?}"
+    );
+}
+
+/// Entry capture: an entry `FUNC` observes the entry's top-level
+/// `LET`s in `RUN [...]` args, exactly like straight-line code.
+/// Regression for #303, where script-scope `LET $container_image`
+/// resolved in `ECHO` templates but failed the pre-pass in `RUN`
+/// args with `undefined variable`.
+#[test]
+fn entry_function_run_argv_sees_entry_let() {
+    let fs = MockFs::new();
+    let mock = MockProcessManager::default();
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD]
+        WORKSPACE LOCAL
+        LET $container_image: STRING = "mock-container-image"
+        FUNC BUILD(): VOID {
+            RUN ["docker", "build", "-t", $container_image, "."]
+        }
+        FUNC PROBE(): VOID {
+            ECHO "probing {{ $container_image }}"
+        }
+        BUILD()
+        PROBE()
+    "#});
+    run_steps_with_manager(Box::new(fs), &steps, mock.clone(), ExecIo::new())
+        .expect("entry lets resolve in RUN argv and templates inside FUNC");
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1, "one RUN argv dispatch: {runs:?}");
+    assert_eq!(
+        runs[0].argv,
+        vec!["docker", "build", "-t", "mock-container-image", "."],
+        "the script-scope LET flows into RUN args inside FUNC"
+    );
+}
+
+/// Entry capture, failure leg: an undeclared name fails the same way
+/// in `RUN [...]` args and in `{{ }}` templates, never later at
+/// runtime for one and at the gate for the other.
+#[test]
+fn entry_function_arg_and_template_share_one_gate() {
+    let fs = MockFs::new();
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD]
+        WORKSPACE LOCAL
+        FUNC FOO(): VOID {
+            RUN ["echo", "hi", $nope]
+        }
+        FOO()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:?}").contains("undefined variable $nope"),
+        "RUN args reject undeclared names: {err:?}"
+    );
+    let fs = MockFs::new();
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [STD]
+        WORKSPACE LOCAL
+        FUNC FOO(): VOID {
+            ECHO "hi {{ $nope }}"
+        }
+        FOO()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:?}").contains("undefined variable $nope"),
+        "templates reject undeclared names through the same gate: {err:?}"
     );
 }
 
@@ -7748,7 +8103,6 @@ fn file_import_from_leaves_no_stack_or_frame_behind() {
     )
     .expect("harvest then full import runs");
     assert!(state.import_stack.is_empty());
-    assert_eq!(state.import_alias_frame, None);
     assert_eq!(
         state
             .var_scopes
@@ -8079,6 +8433,938 @@ fn file_import_outside_entry_resolves_against_workspace_root() {
 }
 
 #[test]
+fn file_import_outside_entry_prefers_sibling_lib() {
+    // Entry-first resolution: an outside-workspace entry finds the
+    // sibling lib in its own dir even when a same-named workspace lib
+    // shadows it. Static harvest merge, alias targets, and runtime all
+    // share `resolve_top_level`, so `LIB::F` calls the sibling.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN "workspace"
+                }
+                EXPORT F
+            "#},
+    );
+    let outside = GuardedPath::tempdir().expect("outside tempdir");
+    let sibling = outside
+        .as_guarded_path()
+        .join("lib.oxdock")
+        .expect("sibling lib path");
+    fs.write_file(
+        &sibling,
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN "sibling"
+                }
+                EXPORT F
+            "#}
+        .as_bytes(),
+    )
+    .expect("seed sibling lib");
+    let entry = outside
+        .as_guarded_path()
+        .join("main.oxdock")
+        .expect("entry path");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $v: STRING = LIB::F("x")
+    "#});
+    let (_, _, bindings) = run_steps_with_manager_with_modules_and_entry(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+        Vec::new(),
+        Vec::new(),
+        Some(entry),
+    )
+    .expect("outside entry prefers sibling lib");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("sibling"));
+}
+
+#[test]
+fn file_import_outside_entry_type_harvest_prefers_sibling() {
+    // Same entry-first rule for `[[TYPE T FROM ...]]` harvests: the
+    // static harvest merge resolves through the closure keys recorded
+    // by entry-first expansion, not the workspace fallback.
+    let fs = MockFs::new();
+    let outside = GuardedPath::tempdir().expect("outside tempdir");
+    let sibling = outside
+        .as_guarded_path()
+        .join("lib.oxdock")
+        .expect("sibling lib path");
+    fs.write_file(
+        &sibling,
+        indoc! {r#"
+                TYPE PERSON = MAP<name: STRING>
+                EXPORT TYPE PERSON
+            "#}
+        .as_bytes(),
+    )
+    .expect("seed sibling lib");
+    let entry = outside
+        .as_guarded_path()
+        .join("main.oxdock")
+        .expect("entry path");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[TYPE PERSON FROM "lib.oxdock"]]
+        LET $p: PERSON = {name: "bob"}
+    "#});
+    let (_, _, bindings) = run_steps_with_manager_with_modules_and_entry(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+        Vec::new(),
+        Vec::new(),
+        Some(entry),
+    )
+    .expect("outside entry type harvest prefers sibling");
+    assert!(bindings.contains_key("p"));
+}
+
+#[test]
+fn dry_run_in_workspace_subdir_does_not_fall_back_to_root() {
+    // `dry_run_resolve` falls back to the workspace root only for
+    // outside-workspace dirs. An in-workspace subdirectory script
+    // importing a root-only sibling must fail the preview exactly
+    // like validation and execution, not silently inherit it.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F(): STRING {
+                 RETURN "root"
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $v: STRING = LIB::F()
+    "#});
+    let sub = fs.root().join("sub").expect("subdir");
+    let table = oxdock_parser::ModuleTable::default();
+    let result = crate::exec::dry_run_closure(&steps, "sub/main.oxdock", &sub, &fs, &table);
+    assert!(
+        result.is_err(),
+        "in-workspace subdir must not inherit root lib, got: {result:?}"
+    );
+}
+
+#[test]
+fn platform_conditional_imports_under_one_alias_are_not_ambiguous() {
+    // Disjoint platform guards under one alias are not ambiguous:
+    // `os:macos` and `not(os:macos)` can never fire together, so the
+    // static gate passes leniently instead of failing loud. Exactly
+    // one branch runs on every host; the script-function wording below
+    // proves the miss reached the script diagnostic, never the
+    // ambiguity error (script functions cannot run in `{{ }}`).
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "mac"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "lin.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "lin"
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+         [os:macos] IMPORT ["mac.oxdock" AS LIB]
+        }
+        IF $go {
+         [not(os:macos)] IMPORT ["lin.oxdock" AS LIB]
+        }
+        ECHO "{{ LIB::FOO() }}"
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("is a script function"),
+        "disjoint aliases must reach the script diagnostic, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("ambiguous"),
+        "disjoint aliases must not fail ambiguity, got: {rendered}"
+    );
+}
+
+#[test]
+fn block_scoped_import_resolves_inside_block() {
+    // Inline blocks run in the enclosing dynamic scope, so their
+    // imports belong to the enclosing unit: a top-level block's
+    // import resolves inside the block instead of reading unknown.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "h.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $v: STRING = {
+         IMPORT ["h.oxdock" AS LIB]
+         RETURN LIB::F("ok")
+        }
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("block import resolves in its enclosing scope");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("ok"));
+}
+
+#[test]
+fn disjoint_alias_missing_export_in_one_branch_fails_unknown() {
+    // Every disjoint target must export the name: the Linux file
+    // lacks FOO, so the call fails unknown even though the macOS
+    // file exports it.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "mac"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "lin.oxdock",
+        indoc! {r#"
+                FUNC BAR(): STRING {
+                 RETURN "lin"
+                }
+                EXPORT BAR
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+         [os:macos] IMPORT ["mac.oxdock" AS LIB]
+         LET $v: STRING = LIB::FOO()
+        }
+        IF $go {
+         [not(os:macos)] IMPORT ["lin.oxdock" AS LIB]
+         LET $w: STRING = LIB::FOO()
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function `LIB::FOO`"),
+        "a missing disjoint branch must fail unknown, got: {err:#}"
+    );
+}
+
+#[test]
+fn disjoint_alias_unified_signature_checks_arity() {
+    // Identical signatures across disjoint targets check precisely:
+    // calling with the wrong arity fails statically instead of
+    // passing through `ANY`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "lin.oxdock",
+        indoc! {r#"
+                FUNC FOO($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+         [os:macos] IMPORT ["mac.oxdock" AS LIB]
+         LET $v: STRING = LIB::FOO("a", "b")
+        }
+        IF $go {
+         [not(os:macos)] IMPORT ["lin.oxdock" AS LIB]
+         LET $w: STRING = LIB::FOO("a", "b")
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("expects 1 argument"),
+        "unified disjoint signatures must check arity, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("ambiguous"),
+        "disjoint aliases must not fail ambiguous, got: {rendered}"
+    );
+}
+
+#[test]
+fn disjoint_param_names_unify_positionally() {
+    // Calls are positional: differing parameter variable names across
+    // disjoint targets (`$mac_path` vs `$lin_path`) still unify when
+    // types and optionality match, so arity checks stay precise
+    // instead of degrading to `ANY`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO($mac_path: STRING): STRING {
+                    RETURN $mac_path
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "lin.oxdock",
+        indoc! {r#"
+                FUNC FOO($lin_path: STRING): STRING {
+                    RETURN $lin_path
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+            [os:macos] IMPORT ["mac.oxdock" AS LIB]
+            LET $v: STRING = LIB::FOO("a", "b")
+        }
+        IF $go {
+            [not(os:macos)] IMPORT ["lin.oxdock" AS LIB]
+            LET $w: STRING = LIB::FOO("a", "b")
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("expects 1 argument"),
+        "positional unification must keep arity checks, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("ambiguous"),
+        "disjoint aliases must not fail ambiguous, got: {rendered}"
+    );
+}
+
+#[test]
+fn disjoint_differing_inferred_returns_fall_back_to_any() {
+    // Both branches declare `: ANY` but infer different returns
+    // (`STRING` vs `INT`). The unified callee must be `ANY` rather
+    // than one arbitrary branch's inferred type: returning it where
+    // `STRING` is declared fails with an `ANY` (not `INT`/`STRING`)
+    // mismatch, deterministically on every run.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO(): ANY {
+                    RETURN "mac"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "lin.oxdock",
+        indoc! {r#"
+                FUNC FOO(): ANY {
+                    RETURN 42
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        FUNC WRAP_STR(): STRING {
+         LET $inner: BOOL = true
+         IF $inner {
+            [os:macos] IMPORT ["mac.oxdock" AS LIB]
+            RETURN LIB::FOO()
+         }
+         IF $inner {
+            [not(os:macos)] IMPORT ["lin.oxdock" AS LIB]
+            RETURN LIB::FOO()
+         }
+         RETURN "fallback"
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("yields ANY"),
+        "differing inferred returns must unify to ANY, got: {rendered}"
+    );
+}
+
+#[test]
+fn disjoint_host_harvest_branch_fails_unknown() {
+    // A host-harvest branch holds no file functions: pairing a file
+    // import with a disjoint host harvest under one alias must fail
+    // unknown (the host platform has no `FOO`), never collapse to
+    // `Canonical` on the file branch.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                    RETURN "mac"
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+            [os:macos] IMPORT ["mac.oxdock" AS LIB]
+            LET $v: STRING = LIB::FOO()
+        }
+        IF $go {
+         [not(os:macos)] IMPORT [TYPE PIPE FROM STD AS LIB]
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function `LIB::FOO`"),
+        "host-harvest branch must fail unknown, got: {err:#}"
+    );
+}
+
+#[test]
+fn same_named_block_local_functions_keep_own_overlays() {
+    // Same-named `FUNC`s in distinct blocks key overlays by definition
+    // site: the first `HELPER` resolves against `a.oxdock`, even
+    // though a later block redefines `HELPER` against `b.oxdock`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC F(): STRING {
+                    RETURN "a"
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                FUNC G(): STRING {
+                    RETURN "b"
+                }
+                EXPORT G
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $c: BOOL = true
+        IF $c {
+         FUNC HELPER(): STRING {
+            IMPORT ["a.oxdock" AS LIB]
+            RETURN LIB::F()
+         }
+        }
+        IF $c {
+         FUNC HELPER(): STRING {
+            IMPORT ["b.oxdock" AS LIB]
+            RETURN LIB::G()
+         }
+        }
+    "#});
+    run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("same-named block-local functions must keep their own overlays");
+}
+
+#[test]
+fn callee_does_not_inherit_caller_function_local_imports() {
+    // Function-local imports scope to the invocation: `F` importing
+    // `a.oxdock AS LIB` and calling `G` (same unit) must not make
+    // `G`'s own `LIB` import ambiguous, and `G` must not resolve
+    // `F`'s locals. `G` sees only the unit top-level plus its own
+    // imports, mirroring the static per-function overlays.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC AF(): STRING {
+                 RETURN "a"
+                }
+                EXPORT AF
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                FUNC BF(): STRING {
+                 RETURN "b"
+                }
+                EXPORT BF
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        FUNC G(): STRING {
+         IMPORT ["b.oxdock" AS LIB]
+         RETURN LIB::BF()
+        }
+        FUNC F(): STRING {
+         IMPORT ["a.oxdock" AS LIB]
+         RETURN G()
+        }
+        LET $v: STRING = F()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("callee resolves its own locals without ambiguity");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("b"));
+}
+
+#[test]
+fn entry_func_call_before_let_fails_static() {
+    // Flow-sensitive entry lets: calling `GET` before `$late` is
+    // declared fails the static gate instead of crashing at runtime
+    // with undefined variable.
+    let steps = parse_entry(indoc! {r#"
+        FUNC GET(): STRING { RETURN $late }
+        LET $v: STRING = GET()
+        LET $late: STRING = "late"
+    "#});
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("call-before-let must fail statically");
+    assert!(
+        format!("{err:#}").contains("undefined variable"),
+        "call-before-let must report undefined variable, got: {err:#}"
+    );
+}
+
+#[test]
+fn entry_func_call_after_let_passes() {
+    // The same program with the declaration first validates and runs:
+    // earliest-call seeding includes `$late` for the call at step 3.
+    let steps = parse_entry(indoc! {r#"
+        LET $late: STRING = "late"
+        FUNC GET(): STRING { RETURN $late }
+        LET $v: STRING = GET()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("call-after-let must pass");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("late"));
+}
+
+#[test]
+fn transitive_call_before_let_fails_static() {
+    // Earliest-call propagates through callers: `F` calls `G`, `G`
+    // reads `$late`, and the top-level call to `F` precedes the
+    // declaration, so `G` must not observe it either.
+    let steps = parse_entry(indoc! {r#"
+        FUNC G(): STRING { RETURN $late }
+        FUNC F(): STRING { RETURN G() }
+        LET $v: STRING = F()
+        LET $late: STRING = "late"
+    "#});
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("transitive call-before-let must fail statically");
+    assert!(
+        format!("{err:#}").contains("undefined variable"),
+        "transitive call-before-let must report undefined variable, got: {err:#}"
+    );
+}
+
+#[test]
+fn block_nested_call_before_let_fails_static() {
+    // Calls inside top-level `If` / `For` / `While` bodies count at
+    // the enclosing step index: the `GET()` call inside the `IF`
+    // block precedes `LET $late`, so `GET` must not observe it.
+    // (The old walker only inspected the `If` head's own strings
+    // and missed block-nested calls, seeding the full union and
+    // crashing at runtime with undefined variable.)
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        FUNC GET(): STRING { RETURN $late }
+        IF $go {
+         LET $v: STRING = GET()
+        }
+        LET $late: STRING = "late"
+    "#});
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("block-nested call-before-let must fail statically");
+    assert!(
+        format!("{err:#}").contains("undefined variable"),
+        "block-nested call-before-let must report undefined variable, got: {err:#}"
+    );
+}
+
+#[test]
+fn uncalled_nested_funcdef_calls_do_not_advance_earliest() {
+    // Calls inside an uncalled nested `FuncDef` never run, so they
+    // must not pull the enclosing function's earliest call site
+    // earlier: with `enter_funcdefs == false` the nested body is
+    // skipped at every level (the old walker descended into it via
+    // expression recursion and leaked the callee).
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        FUNC GET(): STRING { RETURN "early" }
+        IF $go {
+         FUNC INNER(): STRING { RETURN GET() }
+         LET $late: STRING = "late"
+        }
+        LET $v: STRING = GET()
+        ECHO "{{ $v }}"
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("uncalled nested calls must not disturb seeding");
+    assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("early"));
+}
+
+#[test]
+fn nested_funcdef_does_not_inherit_enclosing_alias() {
+    // Function-local imports scope to the invocation, including for
+    // lexically nested definitions: `INNER` runs under its own fresh
+    // frame, never `OUTER`'s, so the static overlay isolates nested
+    // bodies to the unit top-level exactly like the runtime.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "a"
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        FUNC OUTER(): STRING {
+         IMPORT ["a.oxdock" AS LIB]
+         FUNC INNER(): STRING { RETURN LIB::FOO() }
+         RETURN INNER()
+        }
+        LET $v: STRING = OUTER()
+    "#});
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("nested body must not see enclosing alias");
+    assert!(
+        format!("{err:#}").contains("unknown function `LIB::FOO`"),
+        "nested alias use must fail closed, got: {err:#}"
+    );
+}
+
+#[test]
+fn same_step_let_not_visible_inside_called_func() {
+    // `LET $v = F()` binds `$v` after `F` returns, so `F` reading `$v`
+    // fails statically even though the declaration shares the call's
+    // step index.
+    let steps = parse_entry(indoc! {r#"
+        FUNC F(): STRING { RETURN $v }
+        LET $v: STRING = F()
+    "#});
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("same-step let must not be visible inside the callee");
+    assert!(
+        format!("{err:#}").contains("undefined variable"),
+        "same-step let must report undefined variable, got: {err:#}"
+    );
+}
+
+#[test]
+fn empty_env_names_bail_everywhere() {
+    // Empty `env:` / `script_env:` names never interpolate empty: the
+    // static gate rejects them with the undeclared-env wording, and
+    // the script-engine expansion bails like the streaming layer.
+    for body in ["{{ env: }}", "{{ script_env: }}"] {
+        let steps = parse_entry(&format!("ECHO \"{body}\"\n"));
+        let err = run_expect_err(
+            Box::new(MockFs::new()),
+            &steps,
+            MockProcessManager::default(),
+        );
+        assert!(
+            format!("{err:#}").contains("undeclared environment variable"),
+            "{body} must fail statically, got: {err:#}"
+        );
+    }
+    let state = create_exec_state(MockFs::new());
+    let env = HashMap::new();
+    for text in ["{{ env: }}", "{{ script_env: }}"] {
+        let err = super::args::expand_string(text, &env, &state)
+            .expect_err(&format!("{text} must fail expansion"));
+        assert!(
+            err.to_string().contains("undefined environment variable"),
+            "{text} must report undefined variable, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn dead_alias_call_fails_in_static_gate() {
+    // The strict tail fires in the static gate, not just at runtime:
+    // a dead-guarded import is parse-visible but statically absent, so
+    // the expression call fails `validate_closure_for_run` instead of
+    // passing through `ANY` to a runtime failure.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "h.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                    RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        [os:macos, os:windows] IMPORT ["h.oxdock" AS ALIAS]
+        LET $v: STRING = ALIAS::F("v")
+    "#});
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("static gate must fail closed on dead aliases");
+    assert!(
+        format!("{err:#}").contains("unknown function `ALIAS::F`"),
+        "dead alias must fail static unknown, got: {err:#}"
+    );
+}
+
+#[test]
+fn template_disjoint_host_branch_does_not_suggest_let() {
+    // `check_template_call` agrees with `resolve_call` on disjoint
+    // aliases: with a host-harvest branch competing, `{{ LIB::FOO() }}`
+    // must read as a miss (no function under the alias), never as the
+    // script-function `LET` hint for a call the expression checker
+    // rejects as unknown.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "mac.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                    RETURN "mac"
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+            [os:macos] IMPORT ["mac.oxdock" AS LIB]
+        }
+        IF $go {
+            [not(os:macos)] IMPORT [TYPE PIPE FROM STD AS LIB]
+        }
+        ECHO "{{ LIB::FOO() }}"
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("no function 'FOO' under file alias 'LIB'"),
+        "template must report the miss, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("bind the result first"),
+        "template must not suggest LET for a call resolve_call rejects, got: {rendered}"
+    );
+}
+
+#[test]
+fn host_harvest_alias_does_not_inherit_sibling_file_target() {
+    // Item-2 gate: an entry holding a host type-harvest alias never
+    // imports the sibling file another unit loads under the same
+    // alias. The alias resolves with an empty target set, so the
+    // sibling's function stays unknown instead of leaking across
+    // units (previously the missing-targets lookup bypassed the
+    // sibling gate and the call succeeded).
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "h.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "m.oxdock",
+        indoc! {r#"
+                IMPORT ["h.oxdock" AS ALIAS]
+                FUNC USE(): STRING {
+                 RETURN ALIAS::F("ok")
+                }
+                EXPORT USE
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [TYPE PIPE FROM STD AS ALIAS]
+        IMPORT ["m.oxdock" AS M]
+        LET $v: STRING = ALIAS::F("v")
+        LET $w: STRING = M::USE()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function `ALIAS::F`"),
+        "host-harvest alias must not resolve the sibling file, got: {err:#}"
+    );
+}
+
+#[test]
+fn dead_guarded_import_leaves_alias_unknown() {
+    // Dead (unsatisfiable-guard) imports never execute, so the alias
+    // stays unknown everywhere: expression calls fail unknown, and
+    // templates report an unknown placeholder instead of claiming a
+    // known alias with no function under it.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "h.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        [os:macos, os:windows] IMPORT ["h.oxdock" AS ALIAS]
+        LET $v: STRING = ALIAS::F("v")
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("unknown function"),
+        "dead import must leave the alias unknown, got: {err:#}"
+    );
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "h.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        [os:macos, os:windows] IMPORT ["h.oxdock" AS ALIAS]
+        ECHO "{{ ALIAS::F() }}"
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown placeholder function 'ALIAS::F'"),
+        "dead import must leave the placeholder unknown, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("no function"),
+        "dead import must not claim a known alias, got: {rendered}"
+    );
+}
+
+#[test]
+fn malformed_dollar_placeholder_fails_static_gate() {
+    // Empty `$` segments (`{{ $ }}`, `{{ $a. }}`) fail in the static
+    // template gate like they do in template call arguments, instead
+    // of passing silently when the extractor yields no variables.
+    let steps = parse_entry(indoc! {r#"
+        ECHO "{{ $ }}"
+    "#});
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:#}").contains("invalid placeholder variable: empty variable reference"),
+        "malformed `$` must fail statically, got: {err:#}"
+    );
+    let steps = parse_entry(indoc! {r#"
+        ECHO "{{ $a. }}"
+    "#});
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:#}").contains("invalid placeholder variable: empty variable reference"),
+        "trailing-dot `$` must fail statically, got: {err:#}"
+    );
+}
+
+#[test]
 fn file_import_body_env_does_not_leak() {
     // Isolation boundary (`state.rs::push_scope` snapshots envs): ENV
     // set in an imported body reverts on return, so run-state
@@ -8135,9 +9421,11 @@ fn file_import_module_env_without_inherit_fails_statically() {
         "{msg}"
     );
     // Attribution names the offending file position: the read sits on
-    // line 2 of the helper, inside the qualified function.
+    // line 2 of the helper, inside the qualified function. The label
+    // is the canonical defining-file key (entries are keyed by
+    // defining file, never importer alias), not the call-site alias.
     assert!(msg.contains("line 2"), "{msg}");
-    assert!(msg.contains("H::WHERE"), "{msg}");
+    assert!(msg.contains("helper.oxdock::WHERE"), "{msg}");
 }
 
 #[test]
@@ -9263,7 +10551,8 @@ fn workflow_inline_scripts_pass_static_gate() {
                 functions: super::native::FunctionRegistry::with_builtins(),
                 entry_file: None,
                 import_stack: Vec::new(),
-                import_alias_frame: None,
+                executed_alias_targets: std::collections::HashMap::new(),
+                call_alias_frames: Vec::new(),
                 modules: std::collections::HashMap::new(),
                 validated_modules: std::collections::HashSet::new(),
                 module_stack: Vec::new(),
@@ -9287,4 +10576,751 @@ fn workflow_inline_scripts_pass_static_gate() {
                 .unwrap_or_else(|err| panic!("{label} static gate: {err:#}"));
         }
     }
+}
+
+#[test]
+fn entry_guarded_top_level_let_requires_guarded_read() {
+    // Directive 1: a single-platform top-level `LET` carries its guard
+    // into entry `FUNC` bodies, so an unguarded read fails coverage
+    // instead of passing statically and aborting at runtime.
+    let steps = parse_entry(indoc! {r#"
+        [os:macos] LET $target: STRING = "mac"
+        FUNC READ_IT(): STRING {
+            RETURN $target
+        }
+    "#});
+    let err = run_expect_err(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+    );
+    assert!(
+        format!("{err:#}").contains("not guaranteed to be defined"),
+        "guarded entry let must enforce coverage, got: {err:#}"
+    );
+}
+
+#[test]
+fn entry_disjoint_guarded_lets_accumulate_per_platform() {
+    // Directive 1: disjoint guarded bindings for one name accumulate
+    // instead of overwriting, so a macos-guarded read sees the macos
+    // binding instead of `undefined variable` from the overwrite.
+    let steps = parse_entry(indoc! {r#"
+        [os:macos] LET $x: INT = 1
+        [os:linux] LET $x: STRING = "lin"
+        FUNC READ_MAC(): INT {
+            [os:macos] RETURN $x
+            RETURN 0
+        }
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(MockFs::new()),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("disjoint guarded entry lets resolve per platform");
+    let _ = bindings;
+}
+
+#[test]
+fn template_bare_call_fails_statically() {
+    // Directive 2: `{{ BARE_FUNC() }}` resolves the callee, not just
+    // nested args. Parse-time qualification already rejects unknown
+    // bare heads, so this pins the parse gate; the static gate mirrors
+    // it for any shape that reaches validation.
+    let err = crate::parse_script(indoc! {r#"
+        LET $x: STRING = "v"
+        FUNC T(): STRING {
+            RETURN "{{ BARE_FUNC() }}"
+        }
+    "#})
+    .expect_err("bare template call must fail");
+    assert!(
+        format!("{err:#}").contains("BARE_FUNC"),
+        "bare template call must name culprit, got: {err:#}"
+    );
+}
+
+#[test]
+fn template_qualified_typo_fails_statically() {
+    // Directive 2: `{{ ALIAS::TYPO($x) }}` validates the callee through
+    // `resolve_call`, so the closure pass names the culprit before
+    // runtime expansion.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS CB]
+        LET $x: STRING = "v"
+        FUNC T(): STRING {
+            RETURN "{{ CB::TYPO($x) }}"
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}")
+            .contains("placeholder function 'CB::TYPO': no function 'TYPO' under file alias 'CB'"),
+        "template typo must fail, got: {err:#}"
+    );
+}
+
+#[test]
+fn sibling_alias_does_not_leak_across_files() {
+    // Directive 4: per-unit alias scopes keep sibling modules from
+    // cross-resolving. Entry imports `a` as LIBA; `b` imports `c` as
+    // LIBB. Entry calling `LIBB::BAR` must fail even though the
+    // function exists globally. Parse-time scoping already rejects the
+    // unknown module here; the static per-unit gate mirrors it for any
+    // shape that reaches validation.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "foo"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC BAR(): STRING {
+                 RETURN "bar"
+                }
+                EXPORT BAR
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                IMPORT ["c.oxdock" AS LIBB]
+                FUNC USE_IT(): STRING {
+                 RETURN LIBB::BAR()
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    let err = crate::parse_script(indoc! {r#"
+        IMPORT ["a.oxdock" AS LIBA]
+        IMPORT ["b.oxdock" AS B]
+        FUNC T(): STRING {
+         RETURN LIBB::BAR()
+        }
+    "#})
+    .expect_err("sibling alias must not leak");
+    assert!(
+        format!("{err:#}").contains("LIBB"),
+        "sibling alias must name culprit, got: {err:#}"
+    );
+}
+
+#[test]
+fn template_rejects_script_and_stateful_callees_with_pure_arity() {
+    // Pure-table gate: genuinely unknown `SCRIPT::FOO` and `STD::TYPO`
+    // keep the unknown-function diagnostic, while the known script
+    // `CB::F` names itself as a script function; `STD::LEN()` fails
+    // arity and `STD::LEN(123)` fails type.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    for (body, needle) in [
+        (
+            "{{ SCRIPT::FOO() }}",
+            "unknown placeholder function 'SCRIPT::FOO'",
+        ),
+        (
+            "{{ CB::F($x) }}",
+            "placeholder function 'CB::F' is a script function",
+        ),
+        (
+            "{{ STD::TYPO() }}",
+            "unknown placeholder function 'STD::TYPO'",
+        ),
+        ("{{ STD::LEN() }}", "expects 1 argument"),
+    ] {
+        let steps = parse_entry(&format!(
+            "IMPORT [\"lib.oxdock\" AS CB]\nLET $x: STRING = \"v\"\nFUNC T(): STRING {{\n RETURN \"{body}\"\n}}\n"
+        ));
+        let err = run_expect_err(Box::new(fs.clone()), &steps, MockProcessManager::default());
+        assert!(
+            format!("{err:#}").contains(needle),
+            "template `{body}` must fail with `{needle}`, got: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn template_sibling_alias_does_not_leak_script_hint() {
+    // Sibling-leakage gate for templates: entry imports `a` AS LIBA
+    // while `b` imports `c` AS LIBB. Parse leaves qualified heads
+    // opaque, so `{{ LIBB::BAR() }}` reaches the static gate, which
+    // must fail it as unknown (the entry never imports LIBB) instead
+    // of naming a sibling module's function with a LET hint.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "foo"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC BAR(): STRING {
+                 RETURN "bar"
+                }
+                EXPORT BAR
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                IMPORT ["c.oxdock" AS LIBB]
+                FUNC USE_IT(): STRING {
+                 RETURN LIBB::BAR()
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["a.oxdock" AS LIBA]
+        IMPORT ["b.oxdock" AS B]
+        FUNC T(): STRING {
+         RETURN "{{ LIBB::BAR() }}"
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown placeholder function 'LIBB::BAR'"),
+        "sibling alias must fail unknown, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("bind the result first with LET"),
+        "unimported sibling must never suggest LET, got: {rendered}"
+    );
+}
+
+#[test]
+fn template_in_module_body_uses_module_aliases_not_importer() {
+    // Module-body scope at runtime: entry imports `lib` AS CB, but
+    // `m` never imports CB. The template below lives in a data file,
+    // not a string literal, so the static gate cannot see it; the
+    // `EXPAND` inside M's body must still resolve against M's own
+    // imports. `{{ CB::F }}` fails unknown with the pure-table
+    // listing instead of naming the importer's function.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "m.oxdock",
+        indoc! {r#"
+                FUNC USE_IT(): STRING {
+                 LET $o: STRING = EXPAND "t.txt"
+                 RETURN $o
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    fs.write_file(
+        &fs.root().join("t.txt").expect("template path"),
+        b"{{ CB::F(\"v\") }}",
+    )
+    .expect("seed template file");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["m.oxdock" AS M, "lib.oxdock" AS CB]
+        LET $r: STRING = M::USE_IT()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown placeholder function 'CB::F'"),
+        "module body must not see the importer's alias, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("known functions:"),
+        "runtime miss must list the pure table, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("is a script function"),
+        "module body must never suggest LET for an unimported alias, got: {rendered}"
+    );
+}
+
+#[test]
+fn template_in_module_body_sees_module_own_alias() {
+    // Positive half: when `m` itself imports `lib` AS CB, the same
+    // file-backed `EXPAND` inside M's body resolves through M's own
+    // import and names the script function with its LET hint.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "m.oxdock",
+        indoc! {r#"
+                IMPORT ["lib.oxdock" AS CB]
+                FUNC USE_IT(): STRING {
+                 LET $o: STRING = EXPAND "t.txt"
+                 RETURN $o
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    fs.write_file(
+        &fs.root().join("t.txt").expect("template path"),
+        b"{{ CB::F(\"v\") }}",
+    )
+    .expect("seed template file");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["m.oxdock" AS M]
+        LET $r: STRING = M::USE_IT()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("placeholder function 'CB::F' is a script function"),
+        "module's own alias must resolve, got: {rendered}"
+    );
+}
+
+#[test]
+fn template_module_init_inside_entry_func_resolves_against_module() {
+    // Entry-boundary shape: entry FUNC T conditionally imports M,
+    // so M's init runs with the entry frame (`None`) on the module
+    // stack and M on the import stack. M's init EXPANDs a data file
+    // holding `{{ CB::F }}` (CB known to the entry, never to M).
+    // The EXPAND step is M's text, so both the static per-unit gate
+    // and the runtime unit attribution resolve against M: unknown,
+    // with no entry-alias leak and no LET hint.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "m.oxdock",
+        indoc! {r#"
+                LET $o: STRING = EXPAND "t.txt"
+                FUNC GET(): STRING {
+                 RETURN $o
+                }
+                EXPORT GET
+            "#},
+    );
+    fs.write_file(
+        &fs.root().join("t.txt").expect("template path"),
+        b"{{ CB::F(\"v\") }}",
+    )
+    .expect("seed template file");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["lib.oxdock" AS CB]
+        FUNC T(): STRING {
+         IMPORT ["m.oxdock" AS M]
+         LET $r: STRING = M::GET()
+         RETURN $r
+        }
+        LET $t: STRING = T()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown placeholder function 'CB::F'"),
+        "module init must not inherit the entry frame's aliases, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("is a script function"),
+        "module init must never suggest LET for an unimported alias, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("no function 'F' under file alias"),
+        "module init must not claim an alias it never imported, got: {rendered}"
+    );
+}
+
+#[test]
+fn template_module_init_call_into_other_uses_callee_aliases() {
+    // Cross-module calls during init: `m` imports `lib` AS CB and
+    // calls `OTHER::USE_IT()` at top level; `other` imports nothing.
+    // `USE_IT` EXPANDs a data file holding `{{ CB::F }}` (CB known
+    // only to `m`). The EXPAND executes inside `OTHER`, so both the
+    // static per-file gate and the runtime unit attribution resolve
+    // against `other`, never the initializing caller `m`: unknown
+    // with the pure-table listing, never `m`'s script function.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC F($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT F
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "other.oxdock",
+        indoc! {r#"
+                FUNC USE_IT(): STRING {
+                 LET $o: STRING = EXPAND "t.txt"
+                 RETURN $o
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "m.oxdock",
+        indoc! {r#"
+                IMPORT ["lib.oxdock" AS CB]
+                IMPORT ["other.oxdock" AS OTHER]
+                LET $r: STRING = OTHER::USE_IT()
+                FUNC GET(): STRING {
+                 RETURN $r
+                }
+                EXPORT GET
+            "#},
+    );
+    fs.write_file(
+        &fs.root().join("t.txt").expect("template path"),
+        b"{{ CB::F(\"v\") }}",
+    )
+    .expect("seed template file");
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["m.oxdock" AS M]
+        LET $v: STRING = M::GET()
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown placeholder function 'CB::F'"),
+        "callee must resolve against its own imports, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("known functions:"),
+        "runtime miss must list the pure table, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("is a script function"),
+        "callee must never inherit the initializer's alias, got: {rendered}"
+    );
+}
+
+#[test]
+fn template_colliding_alias_reports_alias_not_script() {
+    // Same-alias collision in templates: entry imports `a` AS LIB
+    // (FOO) while `b` imports `c` AS LIB (BAR). `{{ LIB::BAR() }}`
+    // in the entry resolves through the entry's alias to the wrong
+    // defining file, so it must report no function under the alias,
+    // never a script-function LET hint for a call that cannot run.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "foo"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC BAR(): STRING {
+                 RETURN "bar"
+                }
+                EXPORT BAR
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                IMPORT ["c.oxdock" AS LIB]
+                FUNC USE_IT(): STRING {
+                 RETURN LIB::BAR()
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["a.oxdock" AS LIB]
+        IMPORT ["b.oxdock" AS B]
+        FUNC T(): STRING {
+         RETURN "{{ LIB::BAR() }}"
+        }
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered
+            .contains("placeholder function 'LIB::BAR': no function 'BAR' under file alias 'LIB'"),
+        "collision must report the alias, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("is a script function"),
+        "collision must not suggest LET for an unresolvable call, got: {rendered}"
+    );
+}
+
+#[test]
+fn same_alias_same_func_name_resolves_per_unit() {
+    // Per-unit alias isolation: `a` and `b` each import a different
+    // file under the same local alias `LIB`, both exporting `FOO`.
+    // Each unit resolves its own file: no cross-unit collision, no
+    // overwrite. Previously this failed loud on the global `LIB::FOO`
+    // key; entries are keyed by defining file now.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "a"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "c"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "b.oxdock",
+        indoc! {r#"
+                IMPORT ["c.oxdock" AS LIB]
+                FUNC USE_IT(): STRING {
+                 RETURN LIB::FOO()
+                }
+                EXPORT USE_IT
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT ["a.oxdock" AS LIB]
+        IMPORT ["b.oxdock" AS B]
+        LET $x: STRING = LIB::FOO()
+        LET $y: STRING = B::USE_IT()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("per-unit aliases resolve independently");
+    assert_eq!(bindings.get("x").and_then(|v| v.as_str()), Some("a"));
+    assert_eq!(bindings.get("y").and_then(|v| v.as_str()), Some("c"));
+}
+
+#[test]
+fn independent_functions_reuse_local_alias() {
+    // Two functions in one unit import different files under the same
+    // local alias: each resolves its own file. Static per-function
+    // overlays and runtime frame scoping keep them independent instead
+    // of colliding or leaking across calls.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "a"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "c"
+                }
+                EXPORT FOO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        FUNC USE_A(): STRING {
+         IMPORT ["a.oxdock" AS LIB]
+         RETURN LIB::FOO()
+        }
+        FUNC USE_C(): STRING {
+         IMPORT ["c.oxdock" AS LIB]
+         RETURN LIB::FOO()
+        }
+        LET $x: STRING = USE_A()
+        LET $y: STRING = USE_C()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("independent functions resolve their own alias target");
+    assert_eq!(bindings.get("x").and_then(|v| v.as_str()), Some("a"));
+    assert_eq!(bindings.get("y").and_then(|v| v.as_str()), Some("c"));
+}
+
+#[test]
+fn function_scoped_import_survives_scope_exit_for_later_reimports() {
+    // File entries live in the global registry frame, never the
+    // importing scope: a function-scoped whole-file import whose
+    // module has a nested dependency keeps working after the
+    // function returns, and a later top-level re-import under a
+    // different alias reaches the nested dependency without
+    // re-executing the cached init. Previously the nested entries
+    // died with the function scope while the cache skipped
+    // re-registration, failing with `unknown function N::NF`.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "nested.oxdock",
+        indoc! {r#"
+                FUNC NF(): STRING {
+                 RETURN "n"
+                }
+                EXPORT NF
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                IMPORT ["nested.oxdock" AS N]
+                FUNC GO(): STRING {
+                 RETURN N::NF()
+                }
+                EXPORT GO
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        FUNC F(): STRING {
+         IMPORT ["a.oxdock" AS LIB]
+         RETURN LIB::GO()
+        }
+        LET $x: STRING = F()
+        IMPORT ["a.oxdock" AS LIB2]
+        LET $y: STRING = LIB2::GO()
+    "#});
+    let (_, _, bindings) = run_steps_with_manager(
+        Box::new(fs),
+        &steps,
+        MockProcessManager::default(),
+        ExecIo::new(),
+    )
+    .expect("nested entries persist past function scope");
+    assert_eq!(bindings.get("x").and_then(|v| v.as_str()), Some("n"));
+    assert_eq!(bindings.get("y").and_then(|v| v.as_str()), Some("n"));
+}
+
+#[test]
+fn expand_template_with_sequential_conditional_imports_fails_ambiguous() {
+    // Two sequential conditional imports under one alias in the same
+    // scope both execute at runtime: the file-backed `EXPAND` (which
+    // skips static validation) sees both targets and fails ambiguous
+    // exactly like the static gate, instead of suggesting a `LET`
+    // binding for a call that can never resolve.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "a.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "a"
+                }
+                EXPORT FOO
+            "#},
+    );
+    seed_lib(
+        &fs,
+        "c.oxdock",
+        indoc! {r#"
+                FUNC FOO(): STRING {
+                 RETURN "c"
+                }
+                EXPORT FOO
+            "#},
+    );
+    fs.write_file(
+        &fs.root().join("t.txt").expect("template path"),
+        b"{{ LIB::FOO() }}",
+    )
+    .expect("seed template file");
+    let steps = parse_entry(indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+         IMPORT ["a.oxdock" AS LIB]
+        }
+        IF $go {
+         IMPORT ["c.oxdock" AS LIB]
+        }
+        LET $o: STRING = EXPAND "t.txt"
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("is ambiguous: alias `LIB` is imported from multiple files"),
+        "EXPAND ambiguity must match the static gate, got: {err:#}"
+    );
 }

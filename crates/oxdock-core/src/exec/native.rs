@@ -5,8 +5,8 @@ use anyhow::Result;
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
-    Field, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step, TypeTag,
-    Value, base_name, qualify, render_structural, split_qualified,
+    Field, GuardExpr, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step,
+    TypeTag, Value, base_name, guards_overlap, qualify, render_structural, split_qualified,
 };
 use oxdock_pipe::PipeHandle;
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
@@ -26,6 +26,232 @@ pub enum FuncKind {
     Script,
     HostCtx,
     HostPure,
+}
+
+/// Canonical registry key for a file-imported script function:
+/// defining file plus base name, through the shared [`qualify`]
+/// owner. Importer aliases never appear here.
+pub(super) fn file_func_key(defining_file: &str, name: &str) -> String {
+    qualify(defining_file, name)
+}
+
+/// Loud ambiguity error for one unit importing the same alias from
+/// several files. `files` sorts for deterministic rendering.
+pub(super) fn ambiguous_alias_message(alias: &str, name: &str, files: &HashSet<String>) -> String {
+    let mut files: Vec<&str> = files.iter().map(|file| file.as_str()).collect();
+    files.sort();
+    format!(
+        "function `{alias}::{name}` is ambiguous: alias `{alias}` is imported from multiple files ({})",
+        files.join(", ")
+    )
+}
+
+/// One `ALIAS::FUNC` spelling's fate under a unit's alias targets.
+/// Single owner for alias-target matching: every resolution path
+/// (static calls, template gates, runtime dispatch, placeholder
+/// misses, snapshots, re-exports) classifies here and acts on the
+/// result, never restating the singleton/ambiguity branches.
+pub(super) enum AliasResolution {
+    /// Resolve as spelled (bare, `SCRIPT::`, hosts, unknown-to-unit).
+    Global,
+    /// Canonical defining-file key.
+    Canonical(String),
+    /// Known alias with no usable target: the caller reports unknown.
+    Unknown,
+    /// One alias, several files with the name in overlapping guards:
+    /// fail loud, naming the colliding spelling.
+    Ambiguous {
+        alias: String,
+        base: String,
+        files: HashSet<String>,
+    },
+    /// Several files hold the name under disjoint guards: the caller
+    /// validates every target instead of failing outright
+    /// (platform-conditional imports). `has_host` marks a disjoint
+    /// host-harvest branch (a `(None, guard)` target) alongside the
+    /// files: that branch holds no file functions, so any file-backed
+    /// call misses there.
+    Any {
+        base: String,
+        files: HashSet<String>,
+        has_host: bool,
+    },
+}
+
+/// One unit's alias targets: defining file plus the import's guard.
+/// Single owner for the target-set shape; static and runtime tables
+/// share it. Guards decide ambiguity (overlapping guards importing
+/// different files under one alias are ambiguous); unguarded imports
+/// overlap everything. Runtime records `None` (its imports execute
+/// once taken).
+pub(super) type AliasTargets = HashMap<String, Vec<(Option<String>, Option<GuardExpr>)>>;
+
+/// Classify one call spelling under a unit's alias targets. Single
+/// entry point for alias-target matching: splits the spelling,
+/// resolves `SCRIPT::` and bare names globally, and maps file aliases
+/// through the unit's recorded targets. `exists` probes the caller's
+/// function map for a canonical key.
+pub(super) fn classify_alias_call(
+    unit_targets: &AliasTargets,
+    name: &str,
+    exists: &dyn Fn(&str) -> bool,
+) -> AliasResolution {
+    let Some((alias, base)) = name.split_once("::") else {
+        return AliasResolution::Global;
+    };
+    if alias == SCRIPT_MODULE_NAME {
+        return AliasResolution::Global;
+    }
+    let Some(entries) = unit_targets.get(alias) else {
+        return AliasResolution::Global;
+    };
+    if entries.is_empty() {
+        return AliasResolution::Unknown;
+    }
+    // Distinct defining files in first-seen order; `(None, guard)`
+    // entries are host-harvest branches holding no file functions.
+    let mut files: Vec<(&str, Vec<Option<&GuardExpr>>)> = Vec::new();
+    let mut host_guards: Vec<Option<&GuardExpr>> = Vec::new();
+    for (file, guard) in entries {
+        match file {
+            Some(path) => match files.iter_mut().find(|(known, _)| *known == path) {
+                Some((_, guards)) => guards.push(guard.as_ref()),
+                None => files.push((path, vec![guard.as_ref()])),
+            },
+            None => host_guards.push(guard.as_ref()),
+        }
+    }
+    if files.is_empty() {
+        return AliasResolution::Unknown;
+    }
+    let overlaps = |left: &[Option<&GuardExpr>], right: &[Option<&GuardExpr>]| {
+        left.iter()
+            .any(|a| right.iter().any(|b| guards_overlap(*a, *b)))
+    };
+    if files.len() == 1 {
+        // A lone file target stays canonical unless a host-harvest
+        // branch is disjoint from it: on that platform the alias
+        // holds no file function, so the call misses there.
+        let disjoint_host = host_guards
+            .iter()
+            .any(|host| !overlaps(&files[0].1, &[*host]));
+        if !disjoint_host {
+            return AliasResolution::Canonical(file_func_key(files[0].0, base));
+        }
+        let mut all = HashSet::new();
+        all.insert(files[0].0.to_string());
+        return AliasResolution::Any {
+            base: base.to_string(),
+            files: all,
+            has_host: true,
+        };
+    }
+    let mut ambiguous = HashSet::new();
+    for (i, (file, guards)) in files.iter().enumerate() {
+        for (other, other_guards) in files.iter().skip(i + 1) {
+            if overlaps(guards, other_guards)
+                && (exists(&file_func_key(file, base)) || exists(&file_func_key(other, base)))
+            {
+                ambiguous.insert((*file).to_string());
+                ambiguous.insert((*other).to_string());
+            }
+        }
+    }
+    if !ambiguous.is_empty() {
+        return AliasResolution::Ambiguous {
+            alias: alias.to_string(),
+            base: base.to_string(),
+            files: ambiguous,
+        };
+    }
+    let all: HashSet<String> = files.iter().map(|(file, _)| (*file).to_string()).collect();
+    if all.iter().any(|file| exists(&file_func_key(file, base))) {
+        return AliasResolution::Any {
+            base: base.to_string(),
+            files: all,
+            has_host: !host_guards.is_empty(),
+        };
+    }
+    AliasResolution::Unknown
+}
+
+/// Whether a disjoint-alias template call names a script function,
+/// owned here so every placeholder path agrees with `resolve_call`:
+/// visible only when no host-harvest branch competes (`!has_host`)
+/// and **every** candidate file defines `base` (universal, not
+/// existential: a missing branch fails the `LET` path, so the
+/// template must not suggest it). `exists` probes canonical
+/// file-function keys for script definitions.
+pub(super) fn disjoint_template_script_visible(
+    base: &str,
+    files: &HashSet<String>,
+    has_host: bool,
+    exists: &dyn Fn(&str) -> bool,
+) -> bool {
+    !has_host && !files.is_empty() && files.iter().all(|file| exists(&file_func_key(file, base)))
+}
+
+/// Miss wording for a disjoint-alias placeholder call, shared by the
+/// static gate, the lazy runtime path, and (via the script set) the
+/// EXPAND snapshot. Script-visible branches read as script misses
+/// (the `LET` path); otherwise the alias is known but holds no
+/// callable function here. Always renders: `Any` only arises for a
+/// known alias, so the generic unknown wording never applies.
+pub(super) fn disjoint_alias_placeholder_miss(
+    module: &str,
+    name: &str,
+    base: &str,
+    files: &HashSet<String>,
+    has_host: bool,
+    is_script: &dyn Fn(&str) -> bool,
+) -> String {
+    let script = disjoint_template_script_visible(base, files, has_host, is_script);
+    describe_placeholder_miss(module, name, script, false, !script)
+        .expect("disjoint miss always renders")
+}
+
+/// Every local spelling of one defining file's function in a unit.
+/// Inverted direction of [`classify_alias_call`]; shares its matcher.
+/// `is_script` probes the caller's registry for script bodies, so
+/// disjoint platform aliases covering every branch with a script
+/// definition read as direct spellings (matching the static gate and
+/// the lazy path through [`disjoint_alias_placeholder_miss`]).
+pub(super) fn spellings_for_defining_file(
+    unit_targets: &AliasTargets,
+    defining: &str,
+    base: &str,
+    is_script: &dyn Fn(&str) -> bool,
+) -> (Vec<String>, Vec<(String, HashSet<String>)>) {
+    let mut direct = Vec::new();
+    let mut ambiguous = Vec::new();
+    for (alias, files) in unit_targets {
+        if !files
+            .iter()
+            .any(|(file, _)| file.as_deref() == Some(defining))
+        {
+            continue;
+        }
+        let spelling = qualify(alias, base);
+        match classify_alias_call(unit_targets, &spelling, &|key| {
+            key == file_func_key(defining, base)
+        }) {
+            AliasResolution::Canonical(_) => direct.push(spelling),
+            AliasResolution::Ambiguous { files, .. } => {
+                ambiguous.push((spelling, files));
+            }
+            AliasResolution::Any {
+                base,
+                files,
+                has_host,
+            } => {
+                if disjoint_template_script_visible(&base, &files, has_host, is_script) {
+                    direct.push(spelling);
+                }
+            }
+            AliasResolution::Global | AliasResolution::Unknown => {}
+        }
+    }
+    (direct, ambiguous)
 }
 
 impl FuncKind {
@@ -403,6 +629,69 @@ pub fn placeholder_resolver(table: Arc<PureTable>) -> oxdock_process::Placeholde
     })
 }
 
+/// Descriptive `{{ MODULE::FUNC }}` miss wording, shared by the static
+/// gate and the runtime fallbacks: known callees are never called
+/// "unknown". Returns `None` when the callee is genuinely unknown
+/// everywhere (callers keep the unknown-function diagnostic with its
+/// known-functions listing). `{{ }}` runs without step context, so
+/// the fix always routes through a prior `LET` binding.
+pub(super) fn describe_placeholder_miss(
+    module: &str,
+    name: &str,
+    is_script: bool,
+    is_stateful: bool,
+    alias_known: bool,
+) -> Option<String> {
+    let qualified = qualify(module, name);
+    if is_script {
+        let call = if module == SCRIPT_MODULE_NAME {
+            format!("{name}(...)")
+        } else {
+            format!("{qualified}(...)")
+        };
+        return Some(format!(
+            "placeholder function '{qualified}' is a script function and cannot run in {{{{ }}}}; bind the result first with LET $v = {call} then interpolate {{{{ $v }}}}"
+        ));
+    }
+    if is_stateful {
+        return Some(format!(
+            "placeholder function '{qualified}' is stateful and cannot run in {{{{ }}}}; capture it first with LET then interpolate {{{{ $v }}}}"
+        ));
+    }
+    if alias_known {
+        return Some(format!(
+            "placeholder function '{qualified}': no function '{name}' under file alias '{module}'; check the file's EXPORT list and the IMPORT harvest, or bind a known function first with LET then interpolate {{{{ $v }}}}"
+        ));
+    }
+    None
+}
+
+/// Owned placeholder classes for `'static` closures (notably
+/// `EXPAND` streaming), which cannot borrow the registry.
+pub(super) struct PlaceholderClasses {
+    pub script: HashSet<String>,
+    pub stateful: HashSet<String>,
+    pub aliases: HashSet<String>,
+    /// Ambiguous spellings: alias resolves to several files.
+    pub ambiguous: HashMap<String, HashSet<String>>,
+}
+
+impl PlaceholderClasses {
+    pub(super) fn describe(&self, module: &str, name: &str) -> Option<String> {
+        let qualified = qualify(module, name);
+        if let Some(files) = self.ambiguous.get(&qualified) {
+            return Some(ambiguous_alias_message(module, name, files));
+        }
+        describe_placeholder_miss(
+            module,
+            name,
+            self.script.contains(&qualified),
+            self.stateful.contains(&qualified),
+            self.aliases.contains(module),
+        )
+    }
+}
+
 pub struct FunctionRegistry<P: ProcessManager> {
     entries: HashMap<String, FuncEntry<P>>,
     scopes: Vec<ScopeFrame<P>>,
@@ -537,6 +826,133 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// Single lookup for every callable: script, pure, or stateful.
     pub(super) fn get(&self, name: &str) -> Option<FuncEntry<P>> {
         self.entries.get(name).cloned()
+    }
+
+    /// Single lazy miss classifier for runtime placeholder paths with
+    /// registry access: one borrow, no `FuncEntry` clones, invoked only
+    /// on resolver failure. Classification runs first (matching
+    /// `exported_metas`); the shared body helper below owns the
+    /// `Script`/`Ctx` wording, so the match appears once.
+    pub(super) fn describe_unit_placeholder_miss(
+        &self,
+        unit_targets: &AliasTargets,
+        module: &str,
+        name: &str,
+    ) -> Option<String> {
+        let qualified = qualify(module, name);
+        // File-aliased spellings classify through the shared matcher.
+        // A canonical miss means the alias is known but holds no such
+        // function; disjoint aliases share the static owner's verdict
+        // (script-visible branches read as script misses).
+        match classify_alias_call(unit_targets, &qualified, &|key| {
+            self.entries.contains_key(key)
+        }) {
+            AliasResolution::Canonical(canonical) => {
+                if let Some(entry) = self.entries.get(&canonical) {
+                    if let Some(miss) = Self::placeholder_miss_for_body(module, name, &entry.body) {
+                        return Some(miss);
+                    }
+                    None
+                } else {
+                    describe_placeholder_miss(module, name, false, false, true)
+                }
+            }
+            AliasResolution::Global => {
+                if let Some(entry) = self.entries.get(&qualified) {
+                    // `SCRIPT` and host spellings resolve globally;
+                    // canonical file keys never match a call-site
+                    // spelling.
+                    if let Some(miss) = Self::placeholder_miss_for_body(module, name, &entry.body) {
+                        return Some(miss);
+                    }
+                }
+                None
+            }
+            AliasResolution::Ambiguous { files, .. } => {
+                Some(ambiguous_alias_message(module, name, &files))
+            }
+            AliasResolution::Unknown => describe_placeholder_miss(module, name, false, false, true),
+            // Disjoint aliases share the static owner's verdict through
+            // the single miss helper, so lazy inline expansion agrees
+            // with the static gate word for word (script-visible
+            // branches read as script misses, the rest as known-alias
+            // misses, never the generic unknown wording).
+            AliasResolution::Any {
+                base,
+                files,
+                has_host,
+            } => Some(disjoint_alias_placeholder_miss(
+                module,
+                name,
+                &base,
+                &files,
+                has_host,
+                &|key| matches!(self.entries.get(key), Some(entry) if matches!(entry.body, FuncBody::Script(_))),
+            )),
+        }
+    }
+
+    /// Single owner for the `FuncBody` miss wording: script and
+    /// stateful bodies report their kind, template-capable bodies
+    /// (`Pure`/`Both`) report no miss.
+    fn placeholder_miss_for_body(module: &str, name: &str, body: &FuncBody<P>) -> Option<String> {
+        match body {
+            FuncBody::Script(_) => describe_placeholder_miss(module, name, true, false, false),
+            FuncBody::Ctx(_) => describe_placeholder_miss(module, name, false, true, false),
+            FuncBody::Pure(_) | FuncBody::Both { .. } => None,
+        }
+    }
+
+    /// Owned snapshot for `'static` placeholder closures (notably
+    /// `EXPAND` streaming): the resolver closure cannot borrow the
+    /// registry, so these name sets are the minimal owned form.
+    pub(super) fn placeholder_snapshot(&self, unit_targets: &AliasTargets) -> PlaceholderClasses {
+        let mut script = HashSet::new();
+        let mut stateful = HashSet::new();
+        let mut ambiguous: HashMap<String, HashSet<String>> = HashMap::new();
+        for (key, entry) in self.entries.iter() {
+            let Some((module, base)) = split_qualified(key) else {
+                continue;
+            };
+            match &entry.body {
+                FuncBody::Script(def) => {
+                    if module == SCRIPT_MODULE_NAME {
+                        // `SCRIPT` and bare-harvest spellings stay global.
+                        script.insert(key.clone());
+                        continue;
+                    }
+                    // Canonical file key: every local spelling in this
+                    // unit, singletons (plus disjoint platform branches
+                    // covered everywhere by script definitions) into
+                    // the script set and several files into the
+                    // ambiguity map, through the shared matcher so
+                    // `describe` matches call sites exactly like the
+                    // static gate and lazy path.
+                    let defining = def.module.as_deref().unwrap_or(module);
+                    let (direct, ambiguous_here) = spellings_for_defining_file(
+                        unit_targets,
+                        defining,
+                        base,
+                        &|key| matches!(self.entries.get(key), Some(entry) if matches!(entry.body, FuncBody::Script(_))),
+                    );
+                    script.extend(direct);
+                    for (spelling, files) in ambiguous_here {
+                        ambiguous.entry(spelling).or_default().extend(files);
+                    }
+                }
+                FuncBody::Ctx(_) => {
+                    stateful.insert(key.clone());
+                }
+                FuncBody::Pure(_) | FuncBody::Both { .. } => {}
+            }
+        }
+        let aliases = unit_targets.keys().cloned().collect();
+        PlaceholderClasses {
+            script,
+            stateful,
+            aliases,
+            ambiguous,
+        }
     }
 
     fn insert_native(&mut self, name: String, meta: FuncMeta, body: FuncBody<P>) {
@@ -719,27 +1135,26 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         Ok(())
     }
 
-    /// Define a file-imported DSL `FUNC` under its import alias (#115)
-    /// into an explicit scope frame: nested imports register their
-    /// aliases in the outermost import's caller frame, so the importer's
-    /// `ALIAS::` bodies keep resolving them after the nested frame pops.
-    /// Out-of-range depths fall back to the top frame; a missing frame
-    /// (never in practice: the registry always holds the global frame)
-    /// defines untracked, like top-level definitions.
+    /// Define a file-imported DSL `FUNC` under its canonical key
+    /// ([`file_func_key`]: defining file plus base name, never the
+    /// importer alias) in the global registry frame (index 0, never
+    /// popped): eviction on scope exit would strand the module cache
+    /// and alias targets that still reference it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn define_aliased_in(
+    pub(super) fn define_file_func(
         &mut self,
-        depth: usize,
-        alias: &str,
         name: &str,
         params: &[(String, TypeTag, bool)],
         return_type: TypeTag,
         return_spelling: &str,
         is_async: bool,
         body: &[Step],
-        module: Option<&str>,
+        defining: &str,
     ) -> Result<()> {
-        let qualified = qualify(alias, name);
+        // The importer alias selects the defining file at dispatch;
+        // the key itself names the defining file so units never share
+        // entries.
+        let qualified = file_func_key(defining, name);
         let shadowable = matches!(
             self.entries.get(&qualified).map(|entry| &entry.body),
             Some(FuncBody::Script(_))
@@ -754,15 +1169,10 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         if reserved && !shadowable {
             anyhow::bail!("cannot shadow reserved function `{name}`");
         }
-        // Duplicate scope is the target frame: nested imports share the
-        // outermost import's caller frame, so a repeated alias there is
-        // explicit, never silent.
-        let depth_in_range = depth < self.scopes.len();
-        let frame_idx = if depth_in_range {
-            depth
-        } else {
-            self.scopes.len().saturating_sub(1)
-        };
+        // File entries live in the global frame (index 0, never
+        // popped): eviction on scope exit would strand the module
+        // cache and alias targets that still reference them.
+        let frame_idx = 0;
         if self
             .scopes
             .get(frame_idx)
@@ -776,7 +1186,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             FuncEntry {
                 meta: FuncMeta {
                     name: qualified.clone(),
-                    module: alias.to_string(),
+                    module: defining.to_string(),
                     kind: FuncKind::Script,
                     params: Some(
                         params
@@ -805,7 +1215,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     return_spelling: return_spelling.to_string(),
                     is_async,
                     body: body.to_vec(),
-                    module: module.map(|m| m.to_string()),
+                    module: Some(defining.to_string()),
                 }),
             },
         );
@@ -816,12 +1226,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             }
         }
         Ok(())
-    }
-
-    /// Registry scope depth: the alias frame for an outermost import is
-    /// the frame below the top (#115).
-    pub(super) fn scope_depth(&self) -> usize {
-        self.scopes.len()
     }
 
     /// Open a lexical scope frame for script definitions. Native entries
@@ -849,12 +1253,32 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     /// True when `name` is an interpreted script definition (needing call
     /// scoping and depth budgeting through `call_func_value` rather than
-    /// inline evaluation).
+    /// inline evaluation). Callers resolve file-aliased spellings to
+    /// the canonical key first (see `resolve_file_call_key`).
     pub(super) fn contains_script(&self, name: &str) -> bool {
         matches!(
             self.entries.get(name).map(|entry| &entry.body),
             Some(FuncBody::Script(_))
         )
+    }
+
+    /// Registry lookup key for a runtime call-site spelling, through
+    /// the shared alias-target matcher.
+    pub(super) fn resolve_file_call_key(
+        &self,
+        unit_targets: &AliasTargets,
+        name: &str,
+    ) -> Result<Option<String>> {
+        match classify_alias_call(unit_targets, name, &|key| self.entries.contains_key(key)) {
+            AliasResolution::Global | AliasResolution::Unknown | AliasResolution::Any { .. } => {
+                Ok(None)
+            }
+            AliasResolution::Canonical(key) => Ok(Some(key)),
+            AliasResolution::Ambiguous { alias, base, files } => Err(anyhow::anyhow!(
+                "{}",
+                ambiguous_alias_message(&alias, &base, &files)
+            )),
+        }
     }
 
     /// Clone the pure fn for `name` (ending the registry borrow) so callers
@@ -908,6 +1332,21 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         out
     }
 
+    /// Metadata for template-capable entries only: `Pure` plus `Both`
+    /// (dual entries contribute their template arm to `{{ }}`).
+    /// `Ctx` and `Script` never resolve in placeholder expansion, so
+    /// the static template gate reads this instead of `all_metas`.
+    pub(super) fn pure_metas(&self) -> Vec<FuncMeta> {
+        let mut out: Vec<FuncMeta> = Vec::new();
+        for entry in self.entries.values() {
+            if matches!(entry.body, FuncBody::Pure(_) | FuncBody::Both { .. }) {
+                out.push(entry.meta.clone());
+            }
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
     /// Every entry's metadata, scripts included, sorted by name. Backs
     /// runtime `FUNCTIONS()` listings.
     fn entries_metas(&self) -> Vec<FuncMeta> {
@@ -936,22 +1375,36 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     /// Metadata for single-file `EXPORT` names in source order. Errors
     /// name the first missing export; callers fail fast before serving.
-    pub fn exported_metas(&self, func_exports: &[String]) -> anyhow::Result<Vec<FuncMeta>> {
+    /// Qualified names resolve through `resolve_file_call_key`, so
+    /// re-exported file functions serve under the export spelling.
+    pub fn exported_metas(
+        &self,
+        func_exports: &[String],
+        unit_targets: &AliasTargets,
+    ) -> anyhow::Result<Vec<FuncMeta>> {
         let mut out = Vec::with_capacity(func_exports.len());
         for name in func_exports {
-            // Bare names are script FUNCs; qualified names address the
-            // registry directly, so host functions export with their
-            // own metadata and docs.
-            let qualified = match name.split_once("::") {
+            // Bare names are script FUNCs; qualified names resolve
+            // through the unit's alias targets first, falling back to
+            // the global spelling for hosts and entry-owned scripts.
+            let qualified = match split_qualified(name) {
                 None => qualify(SCRIPT_MODULE_NAME, name),
                 Some(_) => name.clone(),
             };
-            match self.entries.get(&qualified) {
-                Some(entry) => out.push(entry.meta.clone()),
-                None => anyhow::bail!(
-                    "EXPORT `{name}` matches no defined script function or known host function"
-                ),
+            let lookup = self
+                .resolve_file_call_key(unit_targets, &qualified)?
+                .unwrap_or_else(|| qualified.clone());
+            if let Some(entry) = self.entries.get(&lookup) {
+                let mut meta = entry.meta.clone();
+                if lookup != qualified {
+                    meta.name = name.clone();
+                }
+                out.push(meta);
+                continue;
             }
+            anyhow::bail!(
+                "EXPORT `{name}` matches no defined script function or known host function"
+            );
         }
         Ok(out)
     }

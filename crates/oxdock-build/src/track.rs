@@ -16,20 +16,23 @@ use std::collections::{BTreeSet, HashSet};
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::{Arg, ArgPart, AssertTarget, Expr, GuardExpr, MathOp, Step, StepKind};
 
-/// Extract `{{ env:KEY }}` placeholder names from a template string.
+/// Extract `{{ env:KEY }}` placeholder names from a template string, routed
+/// through the shared [`TemplateSegments`](oxdock_parser::template::TemplateSegments)
+/// splitter and [`classify_placeholder_key`](oxdock_parser::template::classify_placeholder_key)
+/// dispatch, so fingerprinting agrees with expansion on what counts as
+/// a placeholder. Only `env:` reads are watched: `$var` and bare keys
+/// resolve from script state, never the host environment.
 fn env_placeholders(template: &str) -> Vec<String> {
+    use oxdock_parser::template::{
+        PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
+    };
     let mut keys = Vec::new();
-    let mut rest = template;
-    while let Some(start) = rest.find("{{") {
-        let after = &rest[start + 2..];
-        if let Some(end) = after.find("}}") {
-            let inner = after[..end].trim();
-            if let Some(key) = inner.strip_prefix("env:") {
-                keys.push(key.trim().to_string());
-            }
-            rest = &after[end + 2..];
-        } else {
-            break;
+    for segment in TemplateSegments::new(template) {
+        let TemplateSegment::Placeholder { key, .. } = segment else {
+            continue;
+        };
+        if let PlaceholderKey::Env(name) = classify_placeholder_key(key) {
+            keys.push(name.trim().to_string());
         }
     }
     keys

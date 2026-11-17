@@ -179,11 +179,6 @@ pub struct ExecState<P: ProcessManager> {
     /// Active file-import chain (#115), innermost last: cycle detection
     /// names the full chain, and the importer dir is the top's parent.
     pub(super) import_stack: Vec<GuardedPath>,
-    /// Registry frame where file-import aliases register (#115): the
-    /// outermost import's caller frame. Nested imports share it so the
-    /// importer's `ALIAS::` bodies keep resolving nested aliases after
-    /// the nested frame pops. `None` outside an import.
-    pub(super) import_alias_frame: Option<usize>,
     /// One file module per resolved import path (#115): parse once,
     /// validate once, initialize once. Every alias is a view onto the
     /// same record and the same shared state.
@@ -201,6 +196,26 @@ pub struct ExecState<P: ProcessManager> {
     /// params-only and never see module state). Reads and mutations
     /// consult the topmost `Some` store after lexical frames miss.
     pub(super) module_stack: Vec<Option<String>>,
+    /// Executed file-import alias targets per unit (#115): alias to
+    /// defining file keys for imports that actually ran, keyed by the
+    /// importing unit (`"entry"` for entry steps, the file key for
+    /// module bodies). Unit-top layer only: top-level (non-`FUNC`-body)
+    /// imports land here; function-local imports land on the innermost
+    /// [`ExecState::call_alias_frames`] entry instead, so a caller
+    /// function's locals never leak into a callee. Mirrors the static
+    /// per-unit `outbound_alias_targets` for the runtime placeholder
+    /// gate, so file-backed `EXPAND` templates (invisible to static
+    /// checking) classify known aliases identically: host harvests
+    /// record an explicit host branch, and module bodies resolve
+    /// against their own file's imports, never the importer's.
+    pub(super) executed_alias_targets: HashMap<String, super::native::AliasTargets>,
+    /// Active function-call import frames: one entry per live
+    /// [`call_func_value`](super::handlers::call_func_value) invocation,
+    /// holding that invocation's own local imports. The innermost frame
+    /// for the active unit shadows the unit-top map exactly like the
+    /// static per-function overlays shadow the unit imports; popping on
+    /// return (via an RAII guard) restores the caller's view.
+    pub(super) call_alias_frames: Vec<(String, super::native::AliasTargets)>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -726,10 +741,11 @@ impl<P: ProcessManager> ExecState<P> {
             functions: self.functions.clone(),
             entry_file: self.entry_file.clone(),
             import_stack: self.import_stack.clone(),
-            import_alias_frame: self.import_alias_frame,
             modules: self.modules.clone(),
             validated_modules: self.validated_modules.clone(),
             module_stack: self.module_stack.clone(),
+            executed_alias_targets: self.executed_alias_targets.clone(),
+            call_alias_frames: self.call_alias_frames.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),

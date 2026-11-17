@@ -54,6 +54,9 @@ impl<P: ProcessManager> McpSession<P> {
     /// Build the session: create state with capture sinks, register
     /// modules, install script docs, run static validation, execute the
     /// linear steps once, then validate `EXPORT`. Never discards steps.
+    /// `entry_file` anchors top-level relative `IMPORT` paths to the
+    /// script's directory, exactly like script mode; `None` resolves
+    /// against the workspace root.
     #[allow(clippy::too_many_arguments)]
     pub fn init(
         fs: Box<dyn WorkspaceFs>,
@@ -61,6 +64,7 @@ impl<P: ProcessManager> McpSession<P> {
         modules: Vec<HostModule<P>>,
         types: Vec<&'static TypeDescriptor>,
         parsed: &ParsedScript,
+        entry_file: Option<oxdock_fs::GuardedPath>,
     ) -> Result<Self> {
         let stdout_buf: Arc<Mutex<TailRing>> = Arc::new(Mutex::new(TailRing {
             buf: Vec::new(),
@@ -77,6 +81,7 @@ impl<P: ProcessManager> McpSession<P> {
         io.set_stderr(Some(stderr_sink));
 
         let mut state = super::new_state(fs, io)?;
+        state.entry_file = entry_file;
         for module in &modules {
             module.check_pre_run(&parsed.steps)?;
         }
@@ -156,7 +161,10 @@ impl<P: ProcessManager> McpSession<P> {
             }
         }
 
-        state.functions.exported_metas(&parsed.func_exports)?;
+        state.functions.exported_metas(
+            &parsed.func_exports,
+            &super::import::active_unit_alias_targets(&state),
+        )?;
         drain_buf(&stdout_buf);
         drain_buf(&stderr_buf);
 
@@ -185,7 +193,10 @@ impl<P: ProcessManager> McpSession<P> {
     /// Tool metadata for the export list, in source order. Fails fast
     /// naming the first missing export.
     pub fn tool_metas(&self) -> Result<Vec<FuncMeta>> {
-        self.state.functions.exported_metas(&self.func_exports)
+        self.state.functions.exported_metas(
+            &self.func_exports,
+            &super::import::active_unit_alias_targets(&self.state),
+        )
     }
 
     /// Script `#` docs for a qualified name, if collected at parse.

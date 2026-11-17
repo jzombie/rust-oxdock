@@ -56,13 +56,15 @@ Scripts declare logical topology, the runner owns physical infrastructure. This 
 - **Testing**: Prefer `cargo test --workspace --tests` to cover all crates; fixtures for the macros live under `crates/oxdock-logic-tests/fixtures/integration/buildtime_macros`.
 - **Workspace layout**: Internal crates live under `crates`; the CLI & build-time macros sit at the workspace root.
 
-## Parser Single-Ownership
+## Architectural Single-Ownership
 
-This is mandatory, no exceptions. Every grammar shape parses in exactly one function. One owner per shape: string literals, placeholder args, map and list literals, separators, delimiters.
+This is mandatory, no exceptions. Every rule lives in exactly one function: grammar shapes, resolution logic, AST walkers, diagnostic constructors, path containment.
 
-- **Reuse, never restate**: a new call site calls the owning function. It never restates the branches inline (`starts_with` quote checks, delimiter matching, split loops). A second copy of a parse branch is piecemealing the parser.
-- **Extend the owner**: a new spelling (another quote style, another delimiter) lands inside the owning function so all spellings stay one implementation. Callers gain it without changing.
-- **Enforcement**: duplicated parse logic is duplicate work. Review rejects it, and it is not accepted as delivered work: it is removed or consolidated before the change lands.
+- **One owner per rule**: string literals, placeholder args, map and list literals, separators, delimiters, alias-target matching (singleton, empty, ambiguous, unknown), per-unit import walks, canonical key construction, miss wording, containment checks.
+- **Reuse, never restate**: a new call site calls the owning function. It never restates the branches inline (`starts_with` quote checks, delimiter matching, split loops, `len() == 1` target checks, match arms on the same enum). A second copy of a rule branch is piecemealing, whether the copy parses text or matches state.
+- **Extend the owner**: a new spelling or a new case (another quote style, another delimiter, another target shape) lands inside the owning function so all spellings stay one implementation. Callers gain it without changing.
+- **Helpers replace siblings**: introducing a helper (such as a resolver or classifier) must replace all sibling lookups in the same commit. A helper alongside surviving duplicates is drift, not ownership.
+- **Enforcement**: duplicated logic is duplicate work. Review rejects it, and it is not accepted as delivered work: it is removed or consolidated before the change lands.
 
 ## Code Style
 

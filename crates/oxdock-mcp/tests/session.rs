@@ -33,6 +33,7 @@ fn init_session(script: &str) -> McpSession<oxdock_process::DefaultProcessManage
         Vec::new(),
         Vec::new(),
         &parsed,
+        None,
     )
     .expect("session init")
 }
@@ -308,6 +309,7 @@ fn qualified_opaque_export_still_registers() {
         Vec::new(),
         Vec::new(),
         &parsed,
+        None,
     )
     .expect("session init must accept the export");
     assert!(
@@ -353,6 +355,7 @@ fn mcp_table_build_hard_fails_on_opaque_host_signature() {
         Vec::new(),
         Vec::new(),
         &parsed,
+        None,
     )
     .expect("session init");
     let metas = session.tool_metas().expect("metas");
@@ -713,6 +716,7 @@ fn reexported_import_serves_as_tool() {
         Vec::new(),
         Vec::new(),
         &parsed,
+        None,
     )
     .expect("session init");
     let metas = session.tool_metas().expect("metas");
@@ -725,4 +729,85 @@ fn reexported_import_serves_as_tool() {
     assert_eq!(one.value.as_i64(), Some(1));
     let two = session.call("COUNT", vec![]).expect("call");
     assert_eq!(two.value.as_i64(), Some(2));
+}
+
+#[test]
+fn reload_without_watch_keeps_script_dir_import_resolution() {
+    // script_path rides the handler, not the watch config: reload
+    // with watching disabled keeps resolving relative IMPORTs
+    // against the script's directory, not the workspace root. The
+    // lib lives only beside the script, so root-relative resolution
+    // would fail loudly here.
+    let (_fs, root) = test_fs();
+    let mut seeder = PathResolver::new_lazy(root.clone()).expect("seeder");
+    seeder.set_workspace_root(root.clone());
+    let sub = root.join("sub").expect("sub dir");
+    seeder.create_dir_all(&sub).expect("create sub");
+    seeder
+        .write_file(
+            &sub.join("lib.oxdock").expect("lib path"),
+            b"FUNC F($x: STRING): STRING {\n RETURN \"hi\"\n}\nEXPORT F\n",
+        )
+        .expect("seed lib");
+    let script = indoc! {r#"
+        IMPORT ["lib.oxdock" AS LIB]
+        EXPORT LIB::F
+    "#};
+    let config = McpServerConfig {
+        workspace_root: root.clone(),
+        script_path: sub.join("main.oxdock").expect("script path"),
+        script: script.to_string(),
+        modules: Vec::new(),
+        types: Vec::new(),
+        watch: false,
+    };
+    let handler = init_handler(config).expect("init");
+    assert!(handler.tool_names().iter().any(|n| n == "F"));
+    handler
+        .reload(script, Vec::new(), Vec::new(), &root)
+        .expect("reload keeps script-dir resolution");
+    assert!(handler.tool_names().iter().any(|n| n == "F"));
+}
+
+#[test]
+fn session_imports_resolve_against_entry_file_dir() {
+    // #305: MCP session imports resolve against the script's
+    // directory, exactly like script mode, not the workspace root.
+    // The same name in both places must load the entry-dir copy.
+    let fs = MockFs::new();
+    let root_lib = fs.root().join("lib.oxdock").expect("root lib path");
+    fs.write_file(
+        &root_lib,
+        b"FUNC F($x: STRING): STRING {\n RETURN \"root\"\n}\nEXPORT F\n",
+    )
+    .expect("seed root lib");
+    let sub_lib = fs.root().join("sub/lib.oxdock").expect("sub lib path");
+    fs.write_file(
+        &sub_lib,
+        b"FUNC F($x: STRING): STRING {\n RETURN \"entry-dir\"\n}\nEXPORT F\n",
+    )
+    .expect("seed sub lib");
+    let entry = fs.root().join("sub/main.oxdock").expect("entry path");
+    let engine = Engine::new();
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["lib.oxdock" AS LIB]
+            EXPORT LIB::F
+        "#},
+        engine.module_table(),
+    )
+    .expect("parse");
+    let mut session = McpSession::init(
+        Box::new(fs),
+        default_process_manager(),
+        Vec::new(),
+        Vec::new(),
+        &parsed,
+        Some(entry),
+    )
+    .expect("session init");
+    let out = session
+        .call("F", vec![Value::string("x".to_string())])
+        .expect("call");
+    assert_eq!(out.value.as_str(), Some("entry-dir"));
 }

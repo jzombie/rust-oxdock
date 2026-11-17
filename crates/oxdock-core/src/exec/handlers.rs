@@ -1566,12 +1566,25 @@ pub(super) fn replace<P: ProcessManager>(
 ) -> Result<()> {
     let ctx = cx.state.command_ctx()?;
     let vars = cx.state.all_vars();
-    // Dispatch `{{ MODULE::FUNC(args) }}` through the shared pure table:
-    // one `Arc` clone per EXPAND. Stateful, script, and pipe backed
-    // entries never appear here: placeholders evaluate without a step
-    // context and must stay side effect free. Lookup and the
-    // unknown-name error live in [`super::native::placeholder_resolver`].
-    let calls = super::native::placeholder_resolver(cx.state.pure_function_table());
+    // Dispatch `{{ MODULE::FUNC(args) }}` through the shared pure table.
+    // Known callees reuse the static-gate wording through an owned
+    // snapshot: the `'static` closure cannot borrow the registry.
+    let table = cx.state.pure_function_table();
+    let snapshot = cx
+        .state
+        .functions
+        .placeholder_snapshot(&super::import::active_unit_alias_targets(cx.state));
+    let inner = super::native::placeholder_resolver(table);
+    let calls: oxdock_process::PlaceholderCall =
+        std::sync::Arc::new(move |module, func, args| match inner(module, func, args) {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if let Some(text) = snapshot.describe(module, func) {
+                    return Err(anyhow::anyhow!("{text}"));
+                }
+                Err(err)
+            }
+        });
 
     let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs())
         .with_vars(&vars)
@@ -2530,8 +2543,13 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     name: &str,
     args: &[Expr],
 ) -> Result<Value> {
-    // 1. Registry lookup: the single source for every callable.
-    let Some(entry) = cx.state.functions.get(name) else {
+    // 1. Registry lookup through the shared alias-target matcher.
+    let canonical = cx
+        .state
+        .functions
+        .resolve_file_call_key(&super::import::active_unit_alias_targets(cx.state), name)?;
+    let lookup_name: &str = canonical.as_deref().unwrap_or(name);
+    let Some(entry) = cx.state.functions.get(lookup_name) else {
         bail!("unknown function `{name}`");
     };
     // 2. Global recursion check.
@@ -2661,21 +2679,42 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                 })?);
             }
             let outcome: Result<Value> = (|| {
-                for ((pname, ptype, _), pval) in def.params.iter().zip(arg_vals) {
-                    cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
-                }
-                let flow = super::steps::execute_steps(
-                    cx.state,
-                    cx.process,
-                    &def.body,
-                    cx.stdin.clone(),
-                    false,
-                    cx.out.clone(),
-                    cx.err.clone(),
-                    cx.out_pipe.clone(),
-                    cx.stdin_pipe.clone(),
-                    false,
-                )?;
+                // Function-local imports scope to this invocation: push
+                // a fresh frame for this unit so the body's imports
+                // land here (never the shared unit-top map) and the
+                // callee never sees the caller's locals. The pop below
+                // runs on every path (the closure captures the outcome
+                // as a value first), matching the `push_scope` /
+                // `pop_scope` pattern with no unsafe.
+                let unit_key = def
+                    .module
+                    .clone()
+                    .unwrap_or_else(|| super::import::ENTRY_UNIT.to_string());
+                cx.state.call_alias_frames.push((unit_key, HashMap::new()));
+                let flow = (|| {
+                    for ((pname, ptype, _), pval) in def.params.iter().zip(arg_vals) {
+                        cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
+                    }
+                    super::steps::execute_steps(
+                        cx.state,
+                        cx.process,
+                        &def.body,
+                        cx.stdin.clone(),
+                        false,
+                        cx.out.clone(),
+                        cx.err.clone(),
+                        cx.out_pipe.clone(),
+                        cx.stdin_pipe.clone(),
+                        false,
+                    )
+                })();
+                // Unconditional pop before `?` propagates: errors and
+                // early boundary exits never leak the frame, matching
+                // `pop_scope` below. (Panics propagate without popping,
+                // exactly like the scope stack: no `catch_unwind`
+                // anywhere unwraps them.)
+                let _ = cx.state.call_alias_frames.pop();
+                let flow = flow?;
                 match flow {
                     Flow::Done => Ok(Value::string(String::new())),
                     Flow::Return { value, .. } => Ok(value),

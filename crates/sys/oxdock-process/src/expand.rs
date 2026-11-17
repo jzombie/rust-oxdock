@@ -360,6 +360,7 @@ fn lookup(
     vars: &HashMap<String, oxdock_parser::Value>,
     calls: Option<&PlaceholderCall>,
 ) -> Result<String> {
+    use oxdock_parser::template::{PlaceholderKey, classify_placeholder_key, split_var_path};
     let key = raw_key.trim();
 
     // 1. Explicit overrides (command-level CLI flags: KEY=val)
@@ -367,69 +368,109 @@ fn lookup(
         return Ok(val.clone());
     }
 
-    // 2. Environment variables: must be prefixed with "env:"
-    if let Some(env_key) = key.strip_prefix("env:") {
-        if let Some(val) = overrides.get(env_key).or_else(|| env.get(env_key)) {
-            return Ok(val.clone());
+    // Shapes below come from the single template owner: this keeps
+    // its own order (overrides first), sources, and errors.
+    match classify_placeholder_key(key) {
+        // 2. Environment variables: must be prefixed with "env:"
+        PlaceholderKey::Env(env_key) => {
+            // Trim once up front like the static gate and the
+            // script-engine expansion, so `{{ env: FOO }}` looks up
+            // `FOO` (never the padded spelling) on every layer.
+            let env_key = env_key.trim();
+            // Empty names bail explicitly (same message as the miss
+            // below) instead of relying on the lookup miss alone.
+            if env_key.is_empty() {
+                bail!("undefined environment variable: ''");
+            }
+            if let Some(val) = overrides.get(env_key).or_else(|| env.get(env_key)) {
+                return Ok(val.clone());
+            }
+            let hint = if vars.contains_key(env_key) {
+                format!("; did you mean '${env_key}' (script variable)?")
+            } else {
+                String::new()
+            };
+            bail!("undefined environment variable: '{env_key}'{hint}");
         }
-        let hint = if vars.contains_key(env_key) {
-            format!("; did you mean '${env_key}' (script variable)?")
-        } else {
-            String::new()
-        };
-        bail!("undefined environment variable: '{env_key}'{hint}");
-    }
 
-    // 3. Script variables: must be prefixed with "$"
-    if let Some(var_key) = key.strip_prefix('$') {
-        if var_key.contains('.') {
-            let parts: Vec<&str> = var_key.split('.').collect();
+        // 3. Script variables: must be prefixed with "$". Path split
+        // through the single template owner; dotted paths traverse
+        // strictly, plain names read directly.
+        PlaceholderKey::Dollar(rest) => {
+            let parts = split_var_path(rest);
+            if parts.len() == 1 {
+                if let Some(val) = vars.get(&parts[0]) {
+                    return format_value_for_string(val);
+                }
+                let hint = if env.contains_key(rest) {
+                    format!("; did you mean 'env:{rest}' (environment variable)?")
+                } else if overrides.contains_key(rest) {
+                    format!("; did you mean '{rest}' (step override)?")
+                } else {
+                    String::new()
+                };
+                bail!("undefined script variable: '${rest}'{hint}");
+            }
             return resolve_key_path_strict(&parts, vars);
         }
-        if let Some(val) = vars.get(var_key) {
-            return format_value_for_string(val);
-        }
-        let hint = if env.contains_key(var_key) {
-            format!("; did you mean 'env:{var_key}' (environment variable)?")
-        } else if overrides.contains_key(var_key) {
-            format!("; did you mean '{var_key}' (step override)?")
-        } else {
-            String::new()
-        };
-        bail!("undefined script variable: '${var_key}'{hint}");
-    }
 
-    // 4. Placeholder calls: `MODULE::FUNC(args)` dispatches through the
-    // registered resolver. Without one, the shape falls through to the
-    // invalid placeholder error below.
-    if let Some((module, func, args_src)) = parse_placeholder_call(key) {
-        let Some(resolver) = calls else {
-            bail!(
-                "placeholder call '{module}::{func}' has no function registry; register one with with_call_resolver"
-            );
-        };
-        let mut args = Vec::with_capacity(args_src.len());
-        for src in args_src {
-            args.push(resolve_call_arg(&src, vars)?);
+        // 4. Placeholder calls: `MODULE::FUNC(args)` dispatches through
+        // the registered resolver. Without one, the shape falls through
+        // to the invalid placeholder error below. Bare heads are not
+        // resolvable here: they fail as invalid placeholders, never as
+        // missing keys.
+        PlaceholderKey::Call(call) => {
+            let Some(module) = call.module else {
+                // Bare `FUNC(...)` has no registry entry in override
+                // expansion: explicit invalid-format error, never silent
+                // fallthrough.
+                bail!(
+                    "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
+                );
+            };
+            let (name, args_raw) = (call.name, call.args_raw);
+            let Some(resolver) = calls else {
+                bail!(
+                    "placeholder call '{module}::{name}' has no function registry; register one with with_call_resolver"
+                );
+            };
+            let args_src = oxdock_parser::template::split_placeholder_args(args_raw);
+            let mut args = Vec::with_capacity(args_src.len());
+            for src in args_src {
+                args.push(resolve_call_arg(&src, vars)?);
+            }
+            let result = resolver(module, name, args)?;
+            return format_value_for_string(&result);
         }
-        let result = resolver(&module, &func, args)?;
-        return format_value_for_string(&result);
-    }
 
-    // 5. Unprefixed key: could be a missing step override or invalid syntax
-    if !key.is_empty()
-        && key
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-    {
-        let hint = if vars.contains_key(key) {
-            format!("; did you mean '${key}' (script variable)?")
-        } else if env.contains_key(key) {
-            format!("; did you mean 'env:{key}' (environment variable)?")
-        } else {
-            String::new()
-        };
-        bail!("missing required step override argument: '{key}'{hint}");
+        // 5. Unprefixed key: could be a missing step override or invalid
+        // syntax. `script_env:` has no meaning in this context: it reads
+        // as invalid exactly like any other non-shape.
+        PlaceholderKey::Bare(name) => {
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                let hint = if vars.contains_key(name) {
+                    format!("; did you mean '${name}' (script variable)?")
+                } else if env.contains_key(name) {
+                    format!("; did you mean 'env:{name}' (environment variable)?")
+                } else {
+                    String::new()
+                };
+                bail!("missing required step override argument: '{name}'{hint}");
+            }
+        }
+        PlaceholderKey::ScriptEnv(name) => {
+            // Empty names bail explicitly; non-empty `script_env:`
+            // has no meaning here and falls through to the invalid
+            // placeholder error below, as before.
+            if name.trim().is_empty() {
+                bail!("undefined environment variable: ''");
+            }
+        }
+        PlaceholderKey::Empty => {}
     }
     bail!(
         "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
@@ -439,26 +480,23 @@ fn lookup(
 /// Split a `MODULE::FUNC(args)` placeholder body for call resolution
 /// outside the streaming expander. Returns `None` when the body is not
 /// call shaped, so plain keys keep their own handling. Single grammar
-/// behind every phase: parses through the shared
-/// `oxdock_parser::template::parse_placeholder_call`, so runtime
+/// behind every phase: classifies through the shared
+/// `oxdock_parser::template::classify_placeholder_key`, so runtime
 /// dispatch and parse-time qualification can never disagree on what
 /// counts as one call.
 pub fn parse_placeholder_call(key: &str) -> Option<(String, String, Vec<String>)> {
-    let call = oxdock_parser::template::parse_placeholder_call(key.trim())?;
+    use oxdock_parser::template::{PlaceholderKey, classify_placeholder_key};
+    let PlaceholderKey::Call(call) = classify_placeholder_key(key.trim()) else {
+        return None;
+    };
     let module = call.module?.to_string();
     let args = oxdock_parser::template::split_placeholder_args(call.args_raw);
     Some((module, call.name.to_string(), args))
 }
 
-/// Maximum nesting for map and list literals in placeholder call args.
-const MAX_LITERAL_DEPTH: usize = 16;
-
-/// Split on a top-level separator inside placeholder call args.
-/// One shared implementation lives in the parser; this stays as
-/// the local name so map/list lowering reads unchanged.
-fn split_top_level(src: &str, sep: char) -> Vec<String> {
-    oxdock_parser::template::split_top_level(src, sep)
-}
+/// Maximum nesting for map and list literals in placeholder call
+/// args: the parser's shared argument depth budget.
+const MAX_LITERAL_DEPTH: usize = oxdock_parser::template::MAX_TEMPLATE_ARG_DEPTH;
 
 /// Resolve one placeholder call argument against script variables for
 /// call resolution outside the streaming expander. Same grammar there:
@@ -486,77 +524,71 @@ fn resolve_call_value(
     vars: &HashMap<String, oxdock_parser::Value>,
     depth: usize,
 ) -> Result<oxdock_parser::Value> {
+    use oxdock_parser::template::{
+        ScalarLit, TemplateArg, classify_template_arg, parse_scalar_literal, parse_string_literal,
+        parse_var_path,
+    };
     if depth > MAX_LITERAL_DEPTH {
         bail!("placeholder call argument nests too deep (limit {MAX_LITERAL_DEPTH})");
     }
-    if let Some(path) = src.strip_prefix('$') {
-        let parts: Vec<&str> = path.split('.').collect();
-        return resolve_value_path(&parts, vars);
-    }
-    if let Some(literal) = oxdock_parser::template::parse_string_literal(src) {
-        return literal.map(oxdock_parser::Value::string);
-    }
-    if let Some(inner) = oxdock_parser::template::strip_wrapped_delimiters(src, '{', '}') {
-        return resolve_call_map(inner, vars, depth);
-    }
-    if let Some(inner) = oxdock_parser::template::strip_wrapped_delimiters(src, '[', ']') {
-        return resolve_call_list(inner, vars, depth);
-    }
-    match src {
-        "true" => return Ok(oxdock_parser::Value::bool(true)),
-        "false" => return Ok(oxdock_parser::Value::bool(false)),
-        _ => {}
-    }
-    if let Ok(i) = src.parse::<i64>() {
-        return Ok(oxdock_parser::Value::int(i));
-    }
-    if let Ok(f) = src.parse::<f64>() {
-        return Ok(oxdock_parser::Value::float(f));
+    match classify_template_arg(src) {
+        TemplateArg::Dollar(rest) => {
+            let Some(parts) = parse_var_path(rest) else {
+                // `$` refs split through the single template owner; the
+                // empty check below keeps the historical
+                // malformed-argument error.
+                bail!("invalid placeholder call argument: empty variable reference");
+            };
+            return resolve_value_path(&parts, vars);
+        }
+        TemplateArg::Str(literal_src) => {
+            if let Some(literal) = parse_string_literal(literal_src) {
+                return literal.map(oxdock_parser::Value::string);
+            }
+        }
+        TemplateArg::Map(inner) => {
+            return resolve_call_map(inner, vars, depth);
+        }
+        TemplateArg::List(inner) => {
+            return resolve_call_list(inner, vars, depth);
+        }
+        TemplateArg::Scalar(scalar_src) => match parse_scalar_literal(scalar_src) {
+            Some(ScalarLit::Bool(value)) => return Ok(oxdock_parser::Value::bool(value)),
+            Some(ScalarLit::Int(value)) => return Ok(oxdock_parser::Value::int(value)),
+            Some(ScalarLit::Float(value)) => return Ok(oxdock_parser::Value::float(value)),
+            None => {}
+        },
+        TemplateArg::Invalid(_) => {}
     }
     bail!(
         "invalid placeholder call argument '{src}': use $var.path, a string, int, float, or bool literal, or a {{key: value}} or [item] literal"
     )
 }
 
-/// Resolve a `{key: value}` map literal. Keys are bare ASCII
-/// identifiers or string literals; values recurse through
-/// [`resolve_call_value`].
+/// Resolve a `{key: value}` map literal. Keys validate through the
+/// shared key parser; values recurse through [`resolve_call_value`].
 fn resolve_call_map(
     inner: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
     depth: usize,
 ) -> Result<oxdock_parser::Value> {
+    use oxdock_parser::template::{parse_map_key, split_map_entry, split_top_level};
     let mut entries = std::collections::BTreeMap::new();
     if inner.trim().is_empty() {
         return Ok(oxdock_parser::Value::map(entries));
     }
     for entry in split_top_level(inner, ',') {
-        let parts = split_top_level(&entry, ':');
-        if parts.len() != 2 {
+        let Some((key_src, value_src)) = split_map_entry(&entry) else {
             bail!("invalid map literal entry '{entry}': use key: value");
-        }
-        let key = resolve_call_key(&parts[0])?;
+        };
+        let key = parse_map_key(&key_src)?;
         if entries.contains_key(&key) {
             bail!("duplicate key '{key}' in map literal");
         }
-        let value = resolve_call_value(&parts[1], vars, depth + 1)?;
+        let value = resolve_call_value(&value_src, vars, depth + 1)?;
         entries.insert(key, value);
     }
     Ok(oxdock_parser::Value::map(entries))
-}
-
-/// Resolve one map literal key: a bare ASCII identifier or a string
-/// literal in any spelling. String shapes route through the single
-/// `oxdock_parser::template::parse_string_literal` owner, never a
-/// local quote check.
-fn resolve_call_key(src: &str) -> Result<String> {
-    if let Some(literal) = oxdock_parser::template::parse_string_literal(src) {
-        return literal;
-    }
-    if !src.is_empty() && src.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Ok(src.to_string());
-    }
-    bail!("invalid map literal key '{src}': use a bare name or any string spelling")
 }
 
 /// Resolve a `[item]` list literal, elements recursing through
@@ -570,7 +602,7 @@ fn resolve_call_list(
     if inner.trim().is_empty() {
         return Ok(oxdock_parser::Value::list(items));
     }
-    for item in split_top_level(inner, ',') {
+    for item in oxdock_parser::template::split_top_level(inner, ',') {
         items.push(resolve_call_value(&item, vars, depth + 1)?);
     }
     Ok(oxdock_parser::Value::list(items))
@@ -580,18 +612,18 @@ fn resolve_call_list(
 /// Mirrors `resolve_key_path_strict` but returns the value instead of
 /// its string form so calls receive typed arguments.
 fn resolve_value_path(
-    parts: &[&str],
+    parts: &[String],
     vars: &HashMap<String, oxdock_parser::Value>,
 ) -> Result<oxdock_parser::Value> {
     if parts.is_empty() || parts[0].is_empty() {
         bail!("invalid placeholder call argument: empty variable reference");
     }
-    let root_key = parts[0];
+    let root_key = parts[0].as_str();
     let mut current = vars
         .get(root_key)
         .ok_or_else(|| anyhow!("undefined script variable: '${root_key}'"))?
         .clone();
-    for &segment in &parts[1..] {
+    for segment in &parts[1..] {
         if segment.contains('(') || segment.contains(')') {
             bail!("nested calls are not supported in placeholder arguments");
         }
@@ -625,15 +657,15 @@ fn resolve_value_path(
 /// Fails explicitly on missing object keys, out-of-bounds array indices,
 /// or type mismatches (e.g. trying to access a property on a primitive).
 fn resolve_key_path_strict(
-    parts: &[&str],
+    parts: &[String],
     vars: &HashMap<String, oxdock_parser::Value>,
 ) -> Result<String> {
-    let root_key = parts[0];
+    let root_key = parts[0].as_str();
     let mut current = vars
         .get(root_key)
         .ok_or_else(|| anyhow!("undefined script variable: '${root_key}'"))?;
 
-    for &segment in &parts[1..] {
+    for segment in &parts[1..] {
         if let Some(map) = current.as_map() {
             current = map
                 .get(segment)
@@ -837,6 +869,30 @@ mod tests {
                 .contains("undefined environment variable"),
             "error should mention undefined environment variable"
         );
+    }
+
+    #[test]
+    fn spaced_env_name_resolves_trimmed() {
+        // `{{ env: FOO }}` looks up `FOO` on every layer: the lookup
+        // trims up front like the static gate and the script engine,
+        // instead of missing on the padded spelling.
+        let mut env = HashMap::new();
+        env.insert("FOO".into(), "bar".into());
+        let expander = StreamingExpand::new(&[], &env);
+        assert_eq!(expander.expand_string("{{ env: FOO }}").unwrap(), "bar");
+    }
+
+    #[test]
+    fn empty_env_names_bail() {
+        // Empty `env:` / `script_env:` names never interpolate empty:
+        // every layer rejects them, matching the static gate and the
+        // script-engine expansion.
+        let env = HashMap::new();
+        for text in ["{{ env: }}", "{{ script_env: }}", "{{ script_env:   }}"] {
+            let expander = StreamingExpand::new(&[], &env);
+            let result = expander.expand_string(text);
+            assert!(result.is_err(), "{text:?} must fail");
+        }
     }
 
     #[test]
@@ -1358,6 +1414,18 @@ mod tests {
     fn malformed_symbol_placeholder_errors() {
         let expander = StreamingExpand::new(&[], &HashMap::new());
         let result = expander.expand_string("{{ @invalid! }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid placeholder format"), "got: {msg}");
+    }
+
+    #[test]
+    fn bare_call_head_fails_as_invalid_placeholder() {
+        // Directive 3: bare `FUNC(...)` has no registry entry in
+        // override expansion. The `Call` arm handles `module == None`
+        // explicitly instead of silently falling through.
+        let expander = StreamingExpand::new(&[], &HashMap::new());
+        let result = expander.expand_string("{{ FOO() }}");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("invalid placeholder format"), "got: {msg}");

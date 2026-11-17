@@ -996,10 +996,10 @@ fn fetch_cleartext_to_real_host_refuses_without_dialing() {
 }
 
 #[test]
-fn fetch_in_placeholder_stays_unknown() {
-    // Stateful entries never reach the pure table behind `{{ }}`: the
-    // placeholder fails listing the known pure names, and `NET_FETCH`
-    // is not among them. No sockets open, so this runs under Miri.
+fn fetch_in_placeholder_rejects_stateful() {
+    // Stateful entries never run behind `{{ }}`: the static gate names
+    // the stateful boundary instead of leaving the end user wondering.
+    // No sockets open, so this runs under Miri.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
@@ -1010,18 +1010,8 @@ fn fetch_in_placeholder_stays_unknown() {
     "#};
     let err = run_script(&root, script).expect_err("placeholder fetch must fail");
     assert!(
-        format!("{err:#}").contains("unknown placeholder function"),
+        format!("{err:#}").contains("placeholder function 'NET::NET_FETCH' is stateful"),
         "{err:#}"
-    );
-    let known = err
-        .to_string()
-        .split("known functions:")
-        .nth(1)
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        !known.contains("NET_FETCH"),
-        "pure listing must not offer NET_FETCH: {err:#}"
     );
 }
 
