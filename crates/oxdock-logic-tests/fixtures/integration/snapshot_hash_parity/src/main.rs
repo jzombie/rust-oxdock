@@ -110,6 +110,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         remote_serve: false,
         mcp: false,
         remotes: Vec::new(),
+        script_args: Vec::new(),
     };
 
     let result = execute_with_result(opts, workspace_root.clone())?;

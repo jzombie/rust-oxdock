@@ -59,7 +59,7 @@ oxdock_embed! {
             ECHO """
             oxdock {{ env:CARGO_PKG_VERSION }} — {{ env:CARGO_PKG_DESCRIPTION }}
 
-            Usage: oxdock [OPTIONS] [SCRIPT]
+            Usage: oxdock [OPTIONS] [--] [SCRIPT] [-- script-args...]
               SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
               --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
               --shell            run the script, then drop into an interactive shell (requires a TTY)
@@ -70,6 +70,7 @@ oxdock_embed! {
               --version, -V, -v   print the version and exit
 
             With no script given, reads the script from stdin (must be piped unless `--shell`).
+            Everything after SCRIPT is a verbatim script arg (read via `STD::ARGV()`); one leading `--` there is a separator and dropped, so `--dry-run` after the script stays data.
             {{ $tail }}
             """
         }
@@ -290,8 +291,12 @@ pub fn run() -> Result<()> {
     // no shell. Binary stdio contract enforced inside.
     #[cfg(feature = "net")]
     if opts.remote_serve {
-        if opts.shell || !opts.remotes.is_empty() || !matches!(opts.script, ScriptSource::Stdin) {
-            bail!("--remote-serve runs alone (no --script, --shell, or --remote)");
+        if opts.shell
+            || !opts.remotes.is_empty()
+            || !matches!(opts.script, ScriptSource::Stdin)
+            || !opts.script_args.is_empty()
+        {
+            bail!("--remote-serve runs alone (no --script, --shell, --remote, or script args)");
         }
         return serve::serve();
     }
@@ -312,6 +317,9 @@ pub fn run() -> Result<()> {
             }
             if opts.dry_run {
                 bail!("--mcp runs alone (no --dry-run)");
+            }
+            if !opts.script_args.is_empty() {
+                bail!("--mcp runs alone (no script args)");
             }
             return mcp::serve_mcp(opts, workspace_root);
         }
@@ -363,6 +371,11 @@ pub struct Options {
     /// Raw `--remote <target>="<command>"` pairs, in flag order. Validated
     /// and tokenized at inventory build; empty in lean builds (flag bails).
     pub remotes: Vec<(String, String)>,
+    /// Verbatim tail after the script position (#226): everything after
+    /// the script (or after `--script <file>`), with one leading `--`
+    /// stripped when present. Never option-parsed, so `--dry-run` after
+    /// the script stays data. Surfaced script-side via `STD::ARGV()`.
+    pub script_args: Vec<String>,
 }
 
 impl Options {
@@ -381,13 +394,30 @@ impl Options {
         // Pushed only under `net`; without it the binding never mutates.
         #[cfg_attr(not(feature = "net"), allow(unused_mut))]
         let mut remotes: Vec<(String, String)> = Vec::new();
-        let mut set_script = |source: ScriptSource, origin: &str| -> Result<()> {
-            if script.is_some() {
-                bail!("script given multiple times ({origin})");
-            }
-            script = Some(source);
-            Ok(())
-        };
+        let mut script_args: Vec<String> = Vec::new();
+        // Verbatim tail after the script is fixed (#226): drain lexopt's
+        // remaining raw args without option parsing. When the script was
+        // just fixed and the tail sits entirely in the raw stream, strip
+        // one leading `--` separator. When `text` itself already holds
+        // the tail head (`--` stdin marker or dash-leading first arg),
+        // that separator (or first arg) is already accounted for, so the
+        // remainder stays verbatim. Bare empties stay intact here: only
+        // pre-script positionals skip them.
+        let drain_tail =
+            |parser: &mut lexopt::Parser, strip_leading: bool| -> Result<Vec<String>> {
+                let mut raw = parser.raw_args().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let Some(first_os) = raw.next() else {
+                    return Ok(Vec::new());
+                };
+                let first = value_string(first_os)?;
+                if strip_leading && first == "--" {
+                    raw.map(value_string).collect()
+                } else {
+                    std::iter::once(Ok(first))
+                        .chain(raw.map(value_string))
+                        .collect()
+                }
+            };
         // Pass the stream unfiltered: an explicit empty value (for
         // example `--script ""`) is a real token boundary, so stripping
         // empties up front would shift every following value. Bare empty
@@ -405,18 +435,19 @@ impl Options {
                         bail!("--script requires a path");
                     }
                     if path == "-" {
-                        set_script(ScriptSource::Stdin, "--script -")?;
+                        script = Some(ScriptSource::Stdin);
                     } else {
                         reject_url_script(&path)?;
-                        set_script(
-                            ScriptSource::Path(
-                                workspace_root
-                                    .join_script(&path)
-                                    .with_context(|| format!("guard script path {path}"))?,
-                            ),
-                            "--script",
-                        )?;
+                        script = Some(ScriptSource::Path(
+                            workspace_root
+                                .join_script(&path)
+                                .with_context(|| format!("guard script path {path}"))?,
+                        ));
                     }
+                    // After the script, stop option parsing entirely:
+                    // everything else is verbatim script args.
+                    script_args = drain_tail(&mut parser, true)?;
+                    break;
                 }
                 Long("shell") => {
                     shell = true;
@@ -498,19 +529,40 @@ impl Options {
                     if text.is_empty() {
                         continue;
                     }
-                    if text == "-" {
-                        set_script(ScriptSource::Stdin, "positional `-`")?;
-                    } else {
-                        reject_url_script(&text)?;
-                        set_script(
-                            ScriptSource::Path(
-                                workspace_root
-                                    .join_script(&text)
-                                    .with_context(|| format!("guard script path {text}"))?,
-                            ),
-                            "positional argument",
-                        )?;
+                    if text == "--" {
+                        // Second `--` with no script yet: stdin script with
+                        // the remainder as args (`oxdock -- -- foo`). The
+                        // text itself is the one stripped separator.
+                        script = Some(ScriptSource::Stdin);
+                        script_args = drain_tail(&mut parser, false)?;
+                        break;
                     }
+                    if text == "-" {
+                        script = Some(ScriptSource::Stdin);
+                        script_args = drain_tail(&mut parser, true)?;
+                        break;
+                    }
+                    if text.starts_with('-') {
+                        // Dash-leading Value only surfaces after lexopt's
+                        // `--` separator, so this is `oxdock -- --foo`:
+                        // stdin script with dash-leading args, not a file
+                        // named `--foo` (pass those via `--script`). The
+                        // text is already the tail head, so the remainder
+                        // stays verbatim to preserve inner `--` entries.
+                        script = Some(ScriptSource::Stdin);
+                        let mut tail = drain_tail(&mut parser, false)?;
+                        tail.insert(0, text);
+                        script_args = tail;
+                        break;
+                    }
+                    reject_url_script(&text)?;
+                    script = Some(ScriptSource::Path(
+                        workspace_root
+                            .join_script(&text)
+                            .with_context(|| format!("guard script path {text}"))?,
+                    ));
+                    script_args = drain_tail(&mut parser, true)?;
+                    break;
                 }
                 Long(other) => bail!("unexpected flag: --{other}"),
                 Short(other) => bail!("unexpected flag: -{other}"),
@@ -527,6 +579,7 @@ impl Options {
             remote_serve,
             mcp,
             remotes,
+            script_args,
         })
     }
 }
@@ -644,11 +697,16 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
         #[cfg(feature = "net")]
         let io_cfg = {
             let mut io_cfg = ExecIo::new();
+            io_cfg.set_script_args(opts.script_args.clone());
             register_remote_runners(&mut io_cfg, &inventory);
             io_cfg
         };
         #[cfg(not(feature = "net"))]
-        let io_cfg = ExecIo::new();
+        let io_cfg = {
+            let mut io_cfg = ExecIo::new();
+            io_cfg.set_script_args(opts.script_args.clone());
+            io_cfg
+        };
         #[cfg(feature = "net")]
         let output = run_cli_steps(&workspace_root, &steps, io_cfg, Some(&registry), entry_file)?;
         #[cfg(not(feature = "net"))]
@@ -893,6 +951,7 @@ where
 
         let mut io_cfg = ExecIo::new();
         io_cfg.set_stdin(stdin_handle);
+        io_cfg.set_script_args(opts.script_args.clone());
         #[cfg(feature = "net")]
         register_remote_runners(&mut io_cfg, &inventory);
         let entry_file = entry_file_of(&opts.script);
@@ -1085,6 +1144,7 @@ mod tests {
             remote_serve: false,
             mcp: false,
             remotes: Vec::new(),
+            script_args: Vec::new(),
         };
 
         let observed = Cell::new(false);
@@ -1148,10 +1208,12 @@ mod tests {
         resolver
             .write_file(&script_path, b"WRITE out.txt hi")
             .expect("write script");
+        // #226: interpreter flags come before the script; anything
+        // after is verbatim script args.
         let mut args = vec![
+            "--shell".to_string(),
             "--script".to_string(),
             "script.txt".to_string(),
-            "--shell".to_string(),
         ]
         .into_iter();
         let opts = Options::parse(&mut args, &workspace_root).expect("parse");
@@ -1160,6 +1222,20 @@ mod tests {
             ScriptSource::Path(path) => assert_eq!(path, script_path),
             ScriptSource::Stdin => panic!("expected path script"),
         }
+        assert!(opts.script_args.is_empty());
+
+        let mut args = vec![
+            "--script".to_string(),
+            "script.txt".to_string(),
+            "--shell".to_string(),
+        ]
+        .into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert!(
+            !opts.shell,
+            "--shell after the script is data, not the interpreter flag"
+        );
+        assert_eq!(opts.script_args, vec!["--shell"]);
     }
 
     #[cfg_attr(
@@ -1232,7 +1308,10 @@ mod tests {
         ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
     )]
     #[test]
-    fn options_parse_rejects_duplicate_script_sources() {
+    fn options_parse_second_positional_is_script_arg() {
+        // #226: after the script, option parsing stops entirely, so a
+        // second positional (or `--script` there) is verbatim script
+        // args, never a duplicate-script error.
         let workspace = GuardedPath::tempdir().expect("tempdir");
         let workspace_root = workspace.as_guarded_path().clone();
         let mut args = vec![
@@ -1241,14 +1320,20 @@ mod tests {
             "b.ox".to_string(),
         ]
         .into_iter();
-        let err = Options::parse(&mut args, &workspace_root)
-            .expect_err("expected duplicate script error");
-        assert!(err.to_string().contains("multiple times"), "{err:?}");
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        match &opts.script {
+            ScriptSource::Path(path) => assert_eq!(
+                path,
+                &workspace_root.join("a.ox").expect("script path"),
+                "first positional fixes the script"
+            ),
+            ScriptSource::Stdin => panic!("expected path script"),
+        }
+        assert_eq!(opts.script_args, vec!["--script", "b.ox"]);
 
         let mut args = vec!["a.ox".to_string(), "b.ox".to_string()].into_iter();
-        let err = Options::parse(&mut args, &workspace_root)
-            .expect_err("expected duplicate script error");
-        assert!(err.to_string().contains("multiple times"), "{err:?}");
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert_eq!(opts.script_args, vec!["b.ox"]);
     }
 
     #[cfg_attr(
@@ -1441,6 +1526,131 @@ mod tests {
             }
             ScriptSource::Stdin => panic!("expected path script after --"),
         }
+        assert!(opts.script_args.is_empty());
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_routes_verbatim_tail_to_script_args() {
+        // #226: after the script, option parsing stops. Dash-leading
+        // tails survive without `--`, and one leading `--` strips.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let mut args = vec![
+            "my.ox".to_string(),
+            "--dry-run".to_string(),
+            "--listen".to_string(),
+            "0.0.0.0:2251".to_string(),
+        ]
+        .into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert_eq!(
+            opts.script_args,
+            vec!["--dry-run", "--listen", "0.0.0.0:2251"]
+        );
+
+        let mut args = vec![
+            "my.ox".to_string(),
+            "--".to_string(),
+            "--dry-run".to_string(),
+        ]
+        .into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert_eq!(opts.script_args, vec!["--dry-run"]);
+
+        let mut args = vec![
+            "--script".to_string(),
+            "my.ox".to_string(),
+            "--".to_string(),
+            "a".to_string(),
+            "--".to_string(),
+            "b".to_string(),
+        ]
+        .into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert_eq!(opts.script_args, vec!["a", "--", "b"]);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_help_after_script_is_data() {
+        // `--help`/`--version` stay interpreter-only before the script.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let mut args = vec!["my.ox".to_string(), "--help".to_string()].into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert_eq!(opts.script_args, vec!["--help"]);
+        let mut args = vec!["my.ox".to_string(), "--version".to_string()].into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert_eq!(opts.script_args, vec!["--version"]);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_dash_leading_after_separator_is_stdin_args() {
+        // `oxdock -- --foo` is stdin plus args, not a file named `--foo`
+        // (pass those via `--script`). Plain names after `--` stay files.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let mut args = vec!["--".to_string(), "--foo".to_string()].into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert!(matches!(opts.script, ScriptSource::Stdin));
+        assert_eq!(opts.script_args, vec!["--foo"]);
+
+        let mut args = vec!["--".to_string(), "script.ox".to_string()].into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        match opts.script {
+            ScriptSource::Path(path) => {
+                assert_eq!(path, workspace_root.join("script.ox").expect("script path"))
+            }
+            ScriptSource::Stdin => panic!("expected path script"),
+        }
+        assert!(opts.script_args.is_empty());
+
+        let mut args = vec!["--".to_string(), "--".to_string(), "a".to_string()].into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert!(matches!(opts.script, ScriptSource::Stdin));
+        assert_eq!(opts.script_args, vec!["a"]);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_preserves_inner_separators_in_tail() {
+        // Only one leading `--` is stripped. Inner separators stay data.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let mut args = vec![
+            "--".to_string(),
+            "--foo".to_string(),
+            "--".to_string(),
+            "--bar".to_string(),
+        ]
+        .into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert!(matches!(opts.script, ScriptSource::Stdin));
+        assert_eq!(opts.script_args, vec!["--foo", "--", "--bar"]);
+
+        let mut args = vec![
+            "my.ox".to_string(),
+            "a".to_string(),
+            "--".to_string(),
+            "b".to_string(),
+        ]
+        .into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert_eq!(opts.script_args, vec!["a", "--", "b"]);
     }
 
     #[cfg_attr(
@@ -1525,6 +1735,7 @@ mod tests {
             remote_serve: false,
             mcp: false,
             remotes: Vec::new(),
+            script_args: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root).expect("execute");
         let snapshot = result
@@ -1535,6 +1746,54 @@ mod tests {
         let out = snapshot.join("out.txt").expect("out path");
         let contents = temp_resolver.read_to_string(&out).expect("read out");
         assert_eq!(contents.trim(), "hi");
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn execute_with_result_routes_script_args_to_argv() {
+        // #226: verbatim tail lands in `STD::ARGV()`, never merged
+        // with interpreter opts.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("script.txt").expect("script path");
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())
+            .expect("resolver");
+        let script = indoc! {r#"
+            IMPORT [STD]
+            LET $args: LIST<STRING> = ARGV()
+            LET $n: INT = LEN($args)
+            ASSERT_EQ $n 2
+            ASSERT_EQ $args.0 "--dry-run"
+            ASSERT_EQ $args.1 "serve"
+            WRITE out.txt "ok"
+        "#};
+        resolver
+            .write_file(&script_path, script.as_bytes())
+            .expect("write script");
+        // Parse through the real CLI boundary so the routing (strip
+        // one `--`, keep `--dry-run` as data) is covered too.
+        let mut args = vec![
+            "script.txt".to_string(),
+            "--".to_string(),
+            "--dry-run".to_string(),
+            "serve".to_string(),
+        ]
+        .into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert_eq!(opts.script_args, vec!["--dry-run", "serve"]);
+        let result = execute_with_result(opts, workspace_root).expect("execute");
+        let snapshot = result
+            .snapshot_path()
+            .expect("WRITE materializes the snapshot");
+        let temp_resolver = PathResolver::new(snapshot.root(), snapshot.root()).expect("resolver");
+        let out = snapshot.join("out.txt").expect("out path");
+        assert_eq!(
+            temp_resolver.read_to_string(&out).expect("read").trim(),
+            "ok"
+        );
     }
 
     #[cfg_attr(
@@ -1559,6 +1818,7 @@ mod tests {
             remote_serve: false,
             mcp: false,
             remotes: Vec::new(),
+            script_args: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root.clone()).expect("execute");
         assert!(
@@ -1596,6 +1856,7 @@ mod tests {
             remote_serve: false,
             mcp: false,
             remotes: Vec::new(),
+            script_args: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root.clone()).expect("execute");
         assert!(
@@ -1624,6 +1885,7 @@ mod tests {
             remote_serve: false,
             mcp: false,
             remotes: Vec::new(),
+            script_args: Vec::new(),
         };
         let called = RefCell::new(None::<(String, String)>);
         execute_for_test(opts, workspace_root.clone(), |cwd, workspace| {
@@ -1676,6 +1938,7 @@ mod tests {
             remote_serve: false,
             mcp: false,
             remotes: Vec::new(),
+            script_args: Vec::new(),
         };
         execute_with_result(opts, workspace_root)?;
         Ok(())
@@ -1717,6 +1980,7 @@ mod tests {
             remote_serve: false,
             mcp: false,
             remotes: Vec::new(),
+            script_args: Vec::new(),
         };
         execute_with_result(opts, workspace_root)?;
         Ok(())
@@ -1758,6 +2022,7 @@ mod tests {
             remote_serve: false,
             mcp: false,
             remotes: Vec::new(),
+            script_args: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root)?;
         let snapshot = result
@@ -1807,6 +2072,7 @@ mod tests {
             remote_serve: false,
             mcp: false,
             remotes: Vec::new(),
+            script_args: Vec::new(),
         };
         let err = match execute_with_result(opts, workspace_root) {
             Ok(_) => panic!("SSH names must be unknown without the feature"),
@@ -1873,6 +2139,7 @@ mod tests {
             remote_serve: false,
             mcp: false,
             remotes: Vec::new(),
+            script_args: Vec::new(),
         };
         let err = match execute_with_result(opts, workspace_root) {
             Ok(_) => panic!("NET names must be unknown without the feature"),

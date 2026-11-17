@@ -787,6 +787,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TaskPoll::registration(),
             Version::registration(),
             Interpreter::registration(),
+            Argv::registration(),
             TextTrim::registration(),
             TextTrimPrefix::registration(),
             TextTrimSuffix::registration(),
@@ -2240,6 +2241,35 @@ fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     names.sort();
     names.dedup();
     Ok(Value::list(names.into_iter().map(Value::string).collect()))
+}
+
+/// Report the verbatim CLI tail after the script position.
+///
+/// Staged per run from `Options.script_args` (#226): everything after
+/// the script file (or `--script <file>`), with one leading `--`
+/// stripped. Never merged with interpreter flags, so `--dry-run`
+/// after the script arrives here instead of enabling dry-run.
+#[oxdock_func(returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "empty",
+    code = r###"
+    # With no staged args the list is empty.
+    IMPORT [STD]
+    LET $args: LIST<STRING> = ARGV()
+    LET $n: INT = LEN($args)
+    ASSERT_EQ $n 0
+    "###
+)]
+fn argv<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
+    Ok(Value::list(
+        cx.state
+            .io
+            .script_args()
+            .iter()
+            .cloned()
+            .map(Value::string)
+            .collect(),
+    ))
 }
 
 /// Describe one function by qualified name.

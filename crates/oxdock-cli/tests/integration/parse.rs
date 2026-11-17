@@ -219,6 +219,7 @@ fn dry_run_rejects_static_return_mismatch() {
         remote_serve: false,
         mcp: false,
         remotes: Vec::new(),
+        script_args: Vec::new(),
     };
     assert!(
         execute_with_result(opts, root.clone()).is_ok(),
@@ -232,6 +233,7 @@ fn dry_run_rejects_static_return_mismatch() {
         remote_serve: false,
         mcp: false,
         remotes: Vec::new(),
+        script_args: Vec::new(),
     };
     match execute_with_result(opts, root) {
         Ok(_) => panic!("dry-run must fail static check"),

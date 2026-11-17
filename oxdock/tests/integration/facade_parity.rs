@@ -32,6 +32,7 @@ fn facade_execute_with_result_runs_script() {
         remote_serve: false,
         mcp: false,
         remotes: Vec::new(),
+        script_args: Vec::new(),
     };
     let result = execute_with_result(opts, workspace_root).expect("execute");
     let snapshot = result

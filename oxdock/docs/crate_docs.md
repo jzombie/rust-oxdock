@@ -4389,6 +4389,33 @@ releases once); equality is handle identity.
 
 The STD standard library: built-in functions available to every script. Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Plugin modules ([`NET`, `SSH`, `MARKDOWN`](https://github.com/jzombie/rust-oxdock#plugin-references)) add more functions the same way, and hosts can extend the language with their own modules ([Extending OxDock from Rust](https://github.com/jzombie/rust-oxdock#extending-oxdock-from-rust)). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
 
+### STD::ARGV
+
+Report the verbatim CLI tail after the script position.
+
+Staged per run from `Options.script_args` (#226): everything after
+the script file (or `--script <file>`), with one leading `--`
+stripped. Never merged with interpreter flags, so `--dry-run`
+after the script arrives here instead of enabling dry-run.
+
+**Signature:** `STD::ARGV(): LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: empty**
+
+```oxdock
+# With no staged args the list is empty.
+IMPORT [STD]
+LET $args: LIST<STRING> = ARGV()
+LET $n: INT = LEN($args)
+ASSERT_EQ $n 0
+```
+
 ### STD::BASE64_DECODE
 
 Decode standard base64 to a STRING.
