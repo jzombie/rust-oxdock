@@ -461,7 +461,6 @@ pub(crate) fn new_state<P: ProcessManager>(
         functions: self::native::FunctionRegistry::with_builtins(),
         entry_file: None,
         import_stack: Vec::new(),
-        import_alias_frame: None,
         executed_alias_targets: std::collections::HashMap::new(),
         call_alias_frames: Vec::new(),
         modules: std::collections::HashMap::new(),

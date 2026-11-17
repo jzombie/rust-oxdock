@@ -179,11 +179,6 @@ pub struct ExecState<P: ProcessManager> {
     /// Active file-import chain (#115), innermost last: cycle detection
     /// names the full chain, and the importer dir is the top's parent.
     pub(super) import_stack: Vec<GuardedPath>,
-    /// Registry frame where file-import aliases register (#115): the
-    /// outermost import's caller frame. Nested imports share it so the
-    /// importer's `ALIAS::` bodies keep resolving nested aliases after
-    /// the nested frame pops. `None` outside an import.
-    pub(super) import_alias_frame: Option<usize>,
     /// One file module per resolved import path (#115): parse once,
     /// validate once, initialize once. Every alias is a view onto the
     /// same record and the same shared state.
@@ -746,7 +741,6 @@ impl<P: ProcessManager> ExecState<P> {
             functions: self.functions.clone(),
             entry_file: self.entry_file.clone(),
             import_stack: self.import_stack.clone(),
-            import_alias_frame: self.import_alias_frame,
             modules: self.modules.clone(),
             validated_modules: self.validated_modules.clone(),
             module_stack: self.module_stack.clone(),

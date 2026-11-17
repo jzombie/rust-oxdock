@@ -376,11 +376,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 })?;
             }
             if let Some(alias) = alias {
-                // Harvest aliases register like file imports so later
-                // top-level imports re-latch cleanly; no funcs to define.
-                // Recorded with no defining file so the runtime
-                // placeholder gate still treats the alias as known.
-                let _ = enter_alias_frame(cx.state);
+                // Harvest aliases register like file imports; no funcs
+                // to define. Recorded with no defining file so the
+                // runtime placeholder gate still treats the alias
+                // as known.
                 record_executed_alias(cx.state, alias, None);
             }
             return Ok(());
@@ -399,7 +398,6 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         // registry keys, so only this record keeps the alias known.
         record_executed_alias(cx.state, alias, Some(key.clone()));
     }
-    let alias_frame = enter_alias_frame(cx.state);
     // Join the import stack like a full import: nested loads need this
     // file on the chain for cycle/depth detection and for
     // importer-relative resolution.
@@ -458,19 +456,17 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             // names, so shared views stay idempotent. The guard reads
             // the canonical file key, never the importer alias.
             match alias {
-                Some(alias) => {
+                Some(_) => {
                     let canonical = super::native::file_func_key(&key, name);
                     if cx.state.functions.get(&canonical).is_none() {
-                        cx.state.functions.define_aliased_in(
-                            alias_frame,
-                            alias,
+                        cx.state.functions.define_file_func(
                             name,
                             &resolved_params,
                             return_tag.clone(),
                             &def.1,
                             def.2,
                             &def.3,
-                            Some(&key),
+                            &key,
                         )?;
                     }
                 }
@@ -541,12 +537,8 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         Ok(())
     })();
     // import_funcs pushes no scope (nothing executes), so only the
-    // import stack unwinds here; the alias frame clears exactly like a
-    // full import so later top-level imports re-latch cleanly.
+    // import stack unwinds here.
     let _ = cx.state.import_stack.pop();
-    if cx.state.import_stack.is_empty() {
-        cx.state.import_alias_frame = None;
-    }
     // Harvest persists only the explicitly requested types (plus nested
     // imports' contributions, which already persisted through their own
     // calls): restore the pre-import map, then re-insert what this site
@@ -612,19 +604,6 @@ pub(crate) fn insert_imported_type<P: ProcessManager>(
     }
     Ok(())
 }
-/// Outermost-import alias frame (#115): the caller frame, shared by
-/// every nested import so `ALIAS::` bodies keep resolving nested
-/// aliases after nested frames pop.
-fn enter_alias_frame<P: ProcessManager>(state: &mut ExecState<P>) -> usize {
-    if state.import_stack.is_empty() {
-        let depth = state.functions.scope_depth().saturating_sub(1);
-        state.import_alias_frame = Some(depth);
-    }
-    state
-        .import_alias_frame
-        .unwrap_or_else(|| state.functions.scope_depth().saturating_sub(1))
-}
-
 /// Execute `IMPORT ["<path>" AS <ALIAS>]`: initialize the module on
 /// first import (executing its body once and draining its top-level
 /// `LET`s into the shared store), then register its `EXPORT`ed
@@ -727,7 +706,6 @@ pub(crate) fn import_file<P: ProcessManager>(
     // zero-function imports leave no registry keys, so only this record
     // keeps the alias known (mirrors static `imported_aliases`).
     record_executed_alias(cx.state, alias, Some(key.clone()));
-    let alias_frame = enter_alias_frame(cx.state);
     // Merge the imported file's type aliases for its own validation and
     // execution; restored after the import returns so aliases never leak
     // across the import boundary except through `EXPORT TYPE`.
@@ -776,16 +754,14 @@ pub(crate) fn import_file<P: ProcessManager>(
                     let return_tag = cx.state.resolve_tag(return_type)?;
                     cx.state
                         .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
-                    cx.state.functions.define_aliased_in(
-                        alias_frame,
-                        alias,
+                    cx.state.functions.define_file_func(
                         name,
                         &resolved_params,
                         return_tag,
                         return_type,
                         *is_async,
                         body,
-                        Some(&key),
+                        &key,
                     )?;
                 }
             }
@@ -956,9 +932,6 @@ pub(crate) fn import_file<P: ProcessManager>(
     let pop_res = cx.state.pop_scope();
     cx.state.var_scopes = saved_vars;
     let _ = cx.state.import_stack.pop();
-    if cx.state.import_stack.is_empty() {
-        cx.state.import_alias_frame = None;
-    }
     cx.state.type_aliases = saved_aliases;
     // Re-apply the file's own harvests after the init restore: the
     // restore drops everything but exports, while harvested funcs

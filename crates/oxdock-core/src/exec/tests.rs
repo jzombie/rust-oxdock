@@ -951,7 +951,6 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         functions: super::native::FunctionRegistry::with_builtins(),
         entry_file: None,
         import_stack: Vec::new(),
-        import_alias_frame: None,
         executed_alias_targets: std::collections::HashMap::new(),
         call_alias_frames: Vec::new(),
         modules: std::collections::HashMap::new(),
@@ -8104,7 +8103,6 @@ fn file_import_from_leaves_no_stack_or_frame_behind() {
     )
     .expect("harvest then full import runs");
     assert!(state.import_stack.is_empty());
-    assert_eq!(state.import_alias_frame, None);
     assert_eq!(
         state
             .var_scopes
@@ -10553,7 +10551,6 @@ fn workflow_inline_scripts_pass_static_gate() {
                 functions: super::native::FunctionRegistry::with_builtins(),
                 entry_file: None,
                 import_stack: Vec::new(),
-                import_alias_frame: None,
                 executed_alias_targets: std::collections::HashMap::new(),
                 call_alias_frames: Vec::new(),
                 modules: std::collections::HashMap::new(),

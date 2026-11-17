@@ -1136,31 +1136,25 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     }
 
     /// Define a file-imported DSL `FUNC` under its canonical key
-    /// ([`file_func_key`]) in the global registry frame (index 0, never
+    /// ([`file_func_key`]: defining file plus base name, never the
+    /// importer alias) in the global registry frame (index 0, never
     /// popped): eviction on scope exit would strand the module cache
-    /// and alias targets that still reference it. The `depth` frame
-    /// only scopes the legacy fallback keys (`module: None`).
+    /// and alias targets that still reference it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn define_aliased_in(
+    pub(super) fn define_file_func(
         &mut self,
-        depth: usize,
-        alias: &str,
         name: &str,
         params: &[(String, TypeTag, bool)],
         return_type: TypeTag,
         return_spelling: &str,
         is_async: bool,
         body: &[Step],
-        module: Option<&str>,
+        defining: &str,
     ) -> Result<()> {
         // The importer alias selects the defining file at dispatch;
         // the key itself names the defining file so units never share
-        // entries. `None` keeps the legacy alias key (defensive: every
-        // import site passes its file key).
-        let qualified = match module {
-            Some(defining) => file_func_key(defining, name),
-            None => qualify(alias, name),
-        };
+        // entries.
+        let qualified = file_func_key(defining, name);
         let shadowable = matches!(
             self.entries.get(&qualified).map(|entry| &entry.body),
             Some(FuncBody::Script(_))
@@ -1177,18 +1171,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         }
         // File entries live in the global frame (index 0, never
         // popped): eviction on scope exit would strand the module
-        // cache and alias targets that still reference them. The
-        // alias frame only scopes the legacy fallback keys.
-        let frame_idx = if module.is_some() {
-            0
-        } else {
-            let depth_in_range = depth < self.scopes.len();
-            if depth_in_range {
-                depth
-            } else {
-                self.scopes.len().saturating_sub(1)
-            }
-        };
+        // cache and alias targets that still reference them.
+        let frame_idx = 0;
         if self
             .scopes
             .get(frame_idx)
@@ -1202,7 +1186,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             FuncEntry {
                 meta: FuncMeta {
                     name: qualified.clone(),
-                    module: module.unwrap_or(alias).to_string(),
+                    module: defining.to_string(),
                     kind: FuncKind::Script,
                     params: Some(
                         params
@@ -1231,7 +1215,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     return_spelling: return_spelling.to_string(),
                     is_async,
                     body: body.to_vec(),
-                    module: module.map(|m| m.to_string()),
+                    module: Some(defining.to_string()),
                 }),
             },
         );
@@ -1242,12 +1226,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             }
         }
         Ok(())
-    }
-
-    /// Registry scope depth: the alias frame for an outermost import is
-    /// the frame below the top (#115).
-    pub(super) fn scope_depth(&self) -> usize {
-        self.scopes.len()
     }
 
     /// Open a lexical scope frame for script definitions. Native entries
