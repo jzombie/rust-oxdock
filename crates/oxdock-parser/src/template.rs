@@ -585,54 +585,144 @@ pub fn placeholder_vars(key: &str) -> Vec<TemplateVar> {
     }
 }
 
-/// One `$a.b` path from its post-`$` rest: split through the single
-/// [`split_var_path`] owner, rejecting empty parts (`$`, `$a.`,
-/// `$.a`). `None` means malformed: runtime owns that error. Single
-/// owner for `$` path syntax, shared by placeholder keys and nested
-/// call args.
-fn parse_dollar_path(rest: &str) -> Option<TemplateVar> {
+/// One `$a.b` path from its post-`$` rest. `None` means malformed:
+/// the caller owns that error. Single owner for `$` path syntax.
+pub fn parse_var_path(rest: &str) -> Option<Vec<String>> {
     let parts = split_var_path(rest);
     if parts.iter().any(|part| part.is_empty()) {
         return None;
     }
-    Some(TemplateVar::Path(parts))
+    Some(parts)
 }
 
-/// Nested `$` refs inside one call arg. Strings, numbers, bools, and
-/// empty literals hold none; maps and lists recurse; anything else is
-/// runtime-owned invalid syntax and contributes nothing here.
-fn collect_call_arg_vars(src: &str, out: &mut Vec<TemplateVar>) {
+/// Maximum nesting for map and list literals in placeholder call
+/// args. Single depth budget shared by static inference and runtime
+/// resolution.
+pub const MAX_TEMPLATE_ARG_DEPTH: usize = 16;
+
+/// One placeholder call argument's shape. Single owner for the
+/// argument grammar: every path classifies here, then acts on the
+/// result with its own types and errors.
+pub enum TemplateArg<'a> {
+    /// `$` variable path: raw rest after `$` (validate with
+    /// [`parse_var_path`]).
+    Dollar(&'a str),
+    /// String literal source in any spelling (parse with
+    /// [`parse_string_literal`]).
+    Str(&'a str),
+    /// `{...}` map inner source.
+    Map(&'a str),
+    /// `[...]` list inner source.
+    List(&'a str),
+    /// Bare scalar source (`true`, `false`, numbers; see
+    /// [`parse_scalar_literal`]).
+    Scalar(&'a str),
+    /// Anything else: the caller owns the invalid-syntax error.
+    Invalid(&'a str),
+}
+
+/// Classify one call argument by shape. Inputs arrive trimmed from
+/// [`split_placeholder_args`].
+pub fn classify_template_arg(src: &str) -> TemplateArg<'_> {
     let src = src.trim();
-    if src.is_empty() {
-        return;
-    }
-    if let PlaceholderKey::Dollar(rest) = classify_placeholder_key(src) {
-        out.extend(parse_dollar_path(rest));
-        return;
+    if let Some(rest) = src.strip_prefix('$') {
+        return TemplateArg::Dollar(rest);
     }
     if parse_string_literal(src).is_some() {
-        return;
+        return TemplateArg::Str(src);
     }
     if let Some(inner) = strip_wrapped_delimiters(src, '{', '}') {
-        if inner.trim().is_empty() {
-            return;
-        }
-        for entry in split_top_level(inner, ',') {
-            let parts = split_top_level(&entry, ':');
-            if parts.len() != 2 {
-                continue;
-            }
-            collect_call_arg_vars(&parts[1], out);
-        }
-        return;
+        return TemplateArg::Map(inner);
     }
     if let Some(inner) = strip_wrapped_delimiters(src, '[', ']') {
-        if inner.trim().is_empty() {
-            return;
+        return TemplateArg::List(inner);
+    }
+    if parse_scalar_literal(src).is_some() {
+        return TemplateArg::Scalar(src);
+    }
+    TemplateArg::Invalid(src)
+}
+
+/// One bare scalar literal's value shape. Shared by static inference
+/// (tags) and runtime resolution (values), which map the same shapes
+/// instead of restating the cascade.
+pub enum ScalarLit {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+}
+
+/// Parse one bare scalar literal: `true`/`false`, then int, then
+/// float. `None` means not scalar-shaped at all.
+pub fn parse_scalar_literal(src: &str) -> Option<ScalarLit> {
+    match src {
+        "true" => Some(ScalarLit::Bool(true)),
+        "false" => Some(ScalarLit::Bool(false)),
+        _ => src
+            .parse::<i64>()
+            .map(ScalarLit::Int)
+            .ok()
+            .or_else(|| src.parse::<f64>().map(ScalarLit::Float).ok()),
+    }
+}
+
+/// One `{key: value}` entry's key and value sources, split once on a
+/// top-level `:`. `None` when the entry is not exactly one pair.
+pub fn split_map_entry(entry: &str) -> Option<(String, String)> {
+    let mut parts = split_top_level(entry, ':');
+    if parts.len() != 2 {
+        return None;
+    }
+    let value = parts.pop().expect("split_map_entry checked len");
+    let key = parts.pop().expect("split_map_entry checked len");
+    Some((key, value))
+}
+
+/// One map literal key: a string literal in any spelling or a bare
+/// ASCII identifier. Shared by static inference and runtime
+/// resolution, which report identical diagnostics.
+pub fn parse_map_key(src: &str) -> anyhow::Result<String> {
+    if let Some(literal) = parse_string_literal(src) {
+        return literal.map_err(|err| anyhow::anyhow!("{err:#}"));
+    }
+    if !src.is_empty() && src.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Ok(src.to_string());
+    }
+    anyhow::bail!("invalid map literal key '{src}': use a bare name or any string spelling")
+}
+
+fn parse_dollar_path(rest: &str) -> Option<TemplateVar> {
+    parse_var_path(rest).map(TemplateVar::Path)
+}
+
+/// Nested `$` refs inside one call arg, through the shared argument
+/// classifier: strings, scalars, and invalid shapes hold none; maps
+/// and lists recurse into their entries; malformed entries are
+/// runtime-owned invalid syntax and contribute nothing here.
+fn collect_call_arg_vars(src: &str, out: &mut Vec<TemplateVar>) {
+    match classify_template_arg(src) {
+        TemplateArg::Dollar(rest) => {
+            out.extend(parse_dollar_path(rest));
         }
-        for item in split_top_level(inner, ',') {
-            collect_call_arg_vars(&item, out);
+        TemplateArg::Map(inner) => {
+            if inner.trim().is_empty() {
+                return;
+            }
+            for entry in split_top_level(inner, ',') {
+                if let Some((_, value)) = split_map_entry(&entry) {
+                    collect_call_arg_vars(&value, out);
+                }
+            }
         }
+        TemplateArg::List(inner) => {
+            if inner.trim().is_empty() {
+                return;
+            }
+            for item in split_top_level(inner, ',') {
+                collect_call_arg_vars(&item, out);
+            }
+        }
+        TemplateArg::Str(_) | TemplateArg::Scalar(_) | TemplateArg::Invalid(_) => {}
     }
 }
 /// Allocation-free segment iterator over template text. See the module

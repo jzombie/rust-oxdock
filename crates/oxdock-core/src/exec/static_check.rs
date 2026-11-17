@@ -75,8 +75,8 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{
-    CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, SCRIPT_MODULE_NAME, Step, StepKind,
-    TypeTag, Value, qualify, render_structural,
+    CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag, Value,
+    qualify, render_structural,
 };
 use oxdock_process::ProcessManager;
 
@@ -119,6 +119,10 @@ struct FuncInfo {
     is_async: bool,
     body: Vec<Step>,
     module: Option<String>,
+    /// Base name for per-function import overlays (see
+    /// `body_alias_scopes`): the call-site spellings vary, the
+    /// (owner, name) pair does not.
+    name: String,
 }
 
 /// One top-level binding with its declaration guard. Guards ride along
@@ -276,11 +280,17 @@ struct Checker<'a, P: ProcessManager> {
     /// the closure pass: single-file validation leaves it empty and
     /// keeps the `ANY` leniency for unknown qualified names.
     imported_aliases: HashSet<String>,
-    /// Outbound alias targets for the checked unit: `ALIAS` to defining
-    /// file keys this unit imports under that alias. `resolve_call`
-    /// requires the defining file to be among the targets, so same-alias
-    /// different-file imports cannot cross-resolve.
-    alias_targets: HashMap<String, HashSet<String>>,
+    /// Outbound alias targets for the checked unit: `ALIAS` to
+    /// (defining file, import guard) pairs. `resolve_call` requires a
+    /// unique resolvable target, so same-alias different-file imports
+    /// cannot cross-resolve.
+    alias_targets: super::native::AliasTargets,
+    /// Per-function import overlays: file-top imports plus the
+    /// function's own subtree imports, keyed by (owner module key,
+    /// `"entry"` for entry functions, function name). Swapped in while
+    /// checking that body so function-local imports resolve without
+    /// leaking into sibling functions or the top level.
+    body_scopes: BodyScopes,
     /// Nesting depth inside `ISOLATED` bodies: the isolated allowlist node
     /// is legal only below an `ISOLATED` head, at any depth including
     /// through nested blocks and nested `ISOLATED` itself.
@@ -609,33 +619,53 @@ pub fn validate_script_closure<P: ProcessManager>(
         // namespace known. Scoped per unit so sibling modules cannot
         // cross-resolve each other's `AS` aliases.
         let mut entry_aliases = HashSet::new();
-        import_aliases(entry, &mut entry_aliases);
-        let mut file_aliases: HashMap<String, HashSet<String>> = HashMap::new();
-        for file in files {
-            let mut set = HashSet::new();
-            import_aliases(&file.steps, &mut set);
-            file_aliases.insert(file.key.clone(), set);
-        }
-        // Outbound targets per unit, resolved through the closure keys.
-        // Entry resolves against the import base; files resolve against
-        // their own directories. Same alias in different units maps to
-        // different defining files; `resolve_call` requires the defining
-        // file to be among the current unit's targets.
         let entry_base = super::import::import_base(exec);
         let entry_parent = exec.entry_file.as_ref().and_then(|entry| entry.parent());
-        let mut entry_targets: HashMap<String, HashSet<String>> = HashMap::new();
-        outbound_alias_targets(
+        let mut entry_targets: super::native::AliasTargets = HashMap::new();
+        unit_imports(
             entry,
             &entry_base,
             files,
-            &mut entry_targets,
             entry_parent.as_ref(),
+            &mut entry_aliases,
+            &mut entry_targets,
         );
-        let mut file_targets: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
+        let mut file_aliases: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut file_targets: HashMap<String, super::native::AliasTargets> = HashMap::new();
         for file in files {
+            let mut set = HashSet::new();
             let mut targets = HashMap::new();
-            outbound_alias_targets(&file.steps, &file.dir, files, &mut targets, None);
+            unit_imports(&file.steps, &file.dir, files, None, &mut set, &mut targets);
+            file_aliases.insert(file.key.clone(), set);
             file_targets.insert(file.key.clone(), targets);
+        }
+        // Per-function overlays: file-top imports plus each body
+        // subtree, so function-local imports resolve inside their
+        // function without leaking into sibling functions or the
+        // top level (mirroring the runtime dynamic scope).
+        let mut body_scopes: BodyScopes = HashMap::new();
+        collect_body_scopes(
+            entry,
+            super::import::ENTRY_UNIT,
+            &entry_base,
+            files,
+            entry_parent.as_ref(),
+            &(entry_aliases.clone(), entry_targets.clone()),
+            &mut body_scopes,
+        );
+        for file in files {
+            collect_body_scopes(
+                &file.steps,
+                &file.key,
+                &file.dir,
+                files,
+                None,
+                &(
+                    file_aliases.get(&file.key).cloned().unwrap_or_default(),
+                    file_targets.get(&file.key).cloned().unwrap_or_default(),
+                ),
+                &mut body_scopes,
+            );
         }
         let entry_defs: Vec<(String, String)> = super::typing::collect_type_aliases(entry, exec)?
             .into_iter()
@@ -692,7 +722,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 None => entry_aliases.clone(),
                 Some(module) => file_aliases.get(module).cloned().unwrap_or_default(),
             };
-            let owner_targets: HashMap<String, HashSet<String>> = match &owner {
+            let owner_targets: super::native::AliasTargets = match &owner {
                 None => entry_targets.clone(),
                 Some(module) => file_targets.get(module).cloned().unwrap_or_default(),
             };
@@ -707,6 +737,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     files,
                     &owner_aliases,
                     &owner_targets,
+                    &body_scopes,
                 );
                 let ty = checker.func_return(&key, 0)?;
                 inferred.insert(key.clone(), ty);
@@ -731,7 +762,8 @@ pub fn validate_script_closure<P: ProcessManager>(
             entry: &[Step],
             files: &[ClosureFile],
             imported_aliases: &HashSet<String>,
-            alias_targets: &HashMap<String, HashSet<String>>,
+            alias_targets: &super::native::AliasTargets,
+            body_scopes: &BodyScopes,
         ) -> Checker<'a, P> {
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
@@ -740,6 +772,7 @@ pub fn validate_script_closure<P: ProcessManager>(
             checker.inferred = inferred.clone();
             checker.imported_aliases = imported_aliases.clone();
             checker.alias_targets = alias_targets.clone();
+            checker.body_scopes = body_scopes.clone();
             checker.build_env_unions(entry, files);
             checker
         }
@@ -754,6 +787,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 files,
                 &entry_aliases,
                 &entry_targets,
+                &body_scopes,
             )
             .check_top_level(entry)
         })?;
@@ -775,6 +809,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     files,
                     &aliases,
                     &targets,
+                    &body_scopes,
                 )
                 .check_import_body(&file.key, &file.steps, Some(&file.key))
             })?;
@@ -1103,55 +1138,29 @@ fn file_env_union(steps: &[Step]) -> HashSet<String> {
     union
 }
 
-/// Every file-import alias visible to one step tree: each `AS ALIAS`
-/// on whole-file imports (always aliased) and aliased harvests,
-/// descending into nested bodies. Conservative like expansion:
-/// conditional imports count, since validation checks every path.
-/// Single owner for the closure's alias set; `resolve_call` reads it,
-/// so a zero-function module still proves its alias known.
-fn import_aliases(steps: &[Step], out: &mut HashSet<String>) {
-    for step in steps {
-        // Dead steps never execute, so their imports never register at
-        // runtime either; skip them like `module_lets` and collection
-        // do instead of marking unreachable aliases known.
-        if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
-            continue;
-        }
-        match &step.kind {
-            StepKind::ImportFile { alias, .. } => {
-                out.insert(alias.clone());
-            }
-            StepKind::ImportFuncs {
-                alias: Some(alias), ..
-            } => {
-                out.insert(alias.clone());
-            }
-            _ => {}
-        }
-        for body in super::import::child_bodies(&step.kind) {
-            import_aliases(body, out);
-        }
-    }
-}
-
-/// Outbound alias targets for one unit: `ALIAS` to the set of defining
-/// file keys it imports under that alias, resolved through the closure
-/// without filesystem reads. Nested bodies count, mirroring
-/// `import_aliases`. Bare harvests (`alias None`) stay global by design
-/// and record nothing here. `entry_parent` enables entry-first key
-/// matching for the entry unit (outside-workspace siblings); file
-/// units pass `None` and resolve purely against their own directory.
-fn outbound_alias_targets(
+/// Outbound imports of one step tree in a single walk: every visible
+/// `AS` alias plus each alias's defining file keys. `entry_parent`
+/// enables entry-first key matching for the entry unit; file units
+/// pass `None`. Single owner for the closure's per-unit import view;
+/// dead steps register nowhere, `FUNC` bodies never leak into the
+/// enclosing scope (they own per-function overlays), bare harvests
+/// stay global.
+fn unit_imports(
     steps: &[Step],
     dir: &GuardedPath,
     files: &[ClosureFile],
-    out: &mut HashMap<String, HashSet<String>>,
     entry_parent: Option<&GuardedPath>,
+    aliases: &mut HashSet<String>,
+    targets: &mut super::native::AliasTargets,
 ) {
     for step in steps {
-        // Dead imports never execute: the runtime records nothing for
-        // them, so the static targets must not either.
         if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+            continue;
+        }
+        // Function-local imports belong to the enclosing function's
+        // overlay, never the unit: skipping `FUNC` bodies here keeps
+        // sibling functions from cross-resolving each other's aliases.
+        if matches!(step.kind, StepKind::FuncDef { .. }) {
             continue;
         }
         let (path, alias) = match &step.kind {
@@ -1164,20 +1173,57 @@ fn outbound_alias_targets(
             _ => (String::new(), None),
         };
         if let Some(alias) = alias {
-            // Always record the alias, even when the target is not a
-            // closure file (host-module harvests): the runtime records
-            // the same empty set, so the gate below reads `Some` and
-            // rejects instead of bypassing on a missing entry.
-            let targets = out.entry(alias).or_default();
+            aliases.insert(alias.clone());
+            let unit = targets.entry(alias).or_default();
             let is_entry = entry_parent.is_some();
             if let Some(key) =
                 super::import::resolve_static_top_level(entry_parent, dir, files, &path, is_entry)
             {
-                targets.insert(key);
+                unit.push((key, step.guard.clone()));
             }
         }
         for body in super::import::child_bodies(&step.kind) {
-            outbound_alias_targets(body, dir, files, out, entry_parent);
+            unit_imports(body, dir, files, entry_parent, aliases, targets);
+        }
+    }
+}
+
+/// Per-function import overlay: the union of the enclosing unit's
+/// top-level imports with the function's own direct imports (nested
+/// function bodies get their own overlays). Keyed by (owner module
+/// key, `"entry"` for entry functions, function name). Single owner
+/// for function-local alias visibility; `check_function_body_probed`
+/// swaps it in while checking that body.
+type BodyScopes = HashMap<(String, String), (HashSet<String>, super::native::AliasTargets)>;
+
+/// Collect one overlay per `FUNC` definition under `steps`: each
+/// overlay is the parent scope plus that body's own direct imports.
+/// Nested definitions inherit the enclosing overlay. `module_key`
+/// names the owning unit (`ENTRY_UNIT` for entry functions). Dead
+/// steps contribute nothing, like the unit walk.
+#[allow(clippy::too_many_arguments)]
+fn collect_body_scopes(
+    steps: &[Step],
+    module_key: &str,
+    dir: &GuardedPath,
+    files: &[ClosureFile],
+    entry_parent: Option<&GuardedPath>,
+    parent: &(HashSet<String>, super::native::AliasTargets),
+    out: &mut BodyScopes,
+) {
+    for step in steps {
+        if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+            continue;
+        }
+        if let StepKind::FuncDef { name, body, .. } = &step.kind {
+            let mut scope = parent.clone();
+            unit_imports(body, dir, files, entry_parent, &mut scope.0, &mut scope.1);
+            out.insert((module_key.to_string(), name.clone()), scope.clone());
+            collect_body_scopes(body, module_key, dir, files, entry_parent, &scope, out);
+        } else {
+            for nested in super::import::child_bodies(&step.kind) {
+                collect_body_scopes(nested, module_key, dir, files, entry_parent, parent, out);
+            }
         }
     }
 }
@@ -1449,6 +1495,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             visits: 0,
             imported_aliases: HashSet::new(),
             alias_targets: HashMap::new(),
+            body_scopes: HashMap::new(),
             isolated_depth: 0,
         }
     }
@@ -1570,10 +1617,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // resolve like expression calls (unknown `ALIAS::TYPO`
                 // fails here, never at runtime).
                 PlaceholderKey::Dollar(rest) => {
-                    if oxdock_parser::template::split_var_path(rest)
-                        .iter()
-                        .any(|part| part.is_empty())
-                    {
+                    if oxdock_parser::template::parse_var_path(rest).is_none() {
                         bail!("invalid placeholder variable: empty variable reference");
                     }
                     for var in placeholder_vars(key) {
@@ -1649,41 +1693,40 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     ) -> Result<()> {
         let qualified = qualify(module, name);
         let Some(meta) = self.pure_hosts.get(&qualified).cloned() else {
-            // Sibling-leakage gate, mirroring `resolve_call`: a known
-            // file-aliased function is only a script function to units
-            // whose alias targets resolve to its defining file (registry
-            // entries are keyed by defining file, never importer alias).
-            // `SCRIPT::` and bare names resolve globally by spelling;
-            // unimported aliases fall through to unknown instead of
-            // naming a sibling's function and instructing a call that
-            // can never resolve. One unit importing one alias from
-            // several files is ambiguous and fails loud.
-            let mut is_script_visible = self.funcs.get(&qualified).is_some_and(|info| {
-                super::native::script_visible_to_unit(
-                    info.module.as_deref(),
-                    module,
-                    self.imported_aliases.contains(module),
-                    self.alias_targets.get(module),
-                )
-            });
-            if let Some(targets) = self.alias_targets.get(module) {
-                if targets.len() == 1 {
-                    let defining = targets.iter().next().expect("singleton checked");
-                    let canonical = super::native::file_func_key(defining, name);
-                    is_script_visible = self.funcs.get(&canonical).is_some_and(|info| {
-                        super::native::script_visible_to_unit(
-                            info.module.as_deref(),
-                            module,
-                            self.imported_aliases.contains(module),
-                            self.alias_targets.get(module),
-                        )
-                    });
-                } else if targets.len() > 1 {
+            // Sibling-leakage gate through the shared alias-target
+            // matcher, mirroring `resolve_call`. Anything reaching the
+            // miss wording below is a script, stateful, or known-alias
+            // callee that can never run in `{{ }}`.
+            let mut is_script_visible = false;
+            match super::native::classify_alias_call(&self.alias_targets, &qualified, &|key| {
+                self.funcs.contains_key(key)
+            }) {
+                // Global spellings resolve as written; only `SCRIPT::`
+                // names can hit a script entry this way.
+                super::native::AliasResolution::Global => {
+                    is_script_visible = self.funcs.contains_key(&qualified);
+                }
+                super::native::AliasResolution::Canonical(canonical) => {
+                    is_script_visible = self.funcs.contains_key(&canonical);
+                }
+                super::native::AliasResolution::Ambiguous { files, .. } => {
                     bail!(
                         "{}",
-                        super::native::ambiguous_alias_message(module, name, targets)
+                        super::native::ambiguous_alias_message(module, name, &files)
                     );
                 }
+                // Platform-conditional aliases: the active branch is
+                // unknowable statically. Any candidate holding the
+                // name is a script function, so the template call
+                // needs the `LET` path; with no candidate holding
+                // it the miss wording below applies instead.
+                super::native::AliasResolution::Any { base, files } => {
+                    is_script_visible = files.iter().any(|file| {
+                        self.funcs
+                            .contains_key(&super::native::file_func_key(file, &base))
+                    });
+                }
+                super::native::AliasResolution::Unknown => {}
             }
             if let Some(text) = super::native::describe_placeholder_miss(
                 module,
@@ -1758,11 +1801,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         Ok(())
     }
 
-    /// Infer one template call argument type through the single-owner
-    /// template helpers, mirroring runtime `resolve_call_value` shapes
-    /// without needing values. Depth caps at the runtime literal limit.
-    /// `$` paths reject empty segments, containers validate structure
-    /// and infer homogeneous element types, scalars map to their tags.
+    /// Infer one template call argument type through the shared
+    /// argument grammar, mirroring runtime `resolve_call_value` shapes
+    /// without needing values. Depth caps at the shared literal limit.
     fn infer_template_arg(
         &mut self,
         src: &str,
@@ -1772,53 +1813,58 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         literal_depth: usize,
     ) -> Result<StaticTy> {
         use oxdock_parser::template::{
-            parse_string_literal, split_var_path, strip_wrapped_delimiters,
+            MAX_TEMPLATE_ARG_DEPTH, ScalarLit, TemplateArg, classify_template_arg,
+            parse_string_literal, parse_var_path,
         };
-        const MAX_TEMPLATE_LITERAL_DEPTH: usize = 16;
-        if literal_depth > MAX_TEMPLATE_LITERAL_DEPTH {
-            bail!("placeholder call argument nests too deep (limit {MAX_TEMPLATE_LITERAL_DEPTH})");
+        if literal_depth > MAX_TEMPLATE_ARG_DEPTH {
+            bail!("placeholder call argument nests too deep (limit {MAX_TEMPLATE_ARG_DEPTH})");
         }
-        if let Some(rest) = src.strip_prefix('$') {
-            let parts = split_var_path(rest);
-            if parts.iter().any(|part| part.is_empty()) {
-                bail!("invalid placeholder call argument: empty variable reference");
+        match classify_template_arg(src) {
+            TemplateArg::Dollar(rest) => {
+                let Some(parts) = parse_var_path(rest) else {
+                    bail!("invalid placeholder call argument: empty variable reference");
+                };
+                let (base, segs) = parts.split_first().expect("split always yields one");
+                let expr = if segs.is_empty() {
+                    Expr::Var(base.clone())
+                } else {
+                    Expr::KeyPath {
+                        base: base.clone(),
+                        keys: segs.to_vec(),
+                    }
+                };
+                self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
             }
-            let (base, segs) = parts.split_first().expect("split always yields one");
-            let expr = if segs.is_empty() {
-                Expr::Var(base.clone())
-            } else {
-                Expr::KeyPath {
-                    base: base.clone(),
-                    keys: segs.to_vec(),
-                }
-            };
-            return self.infer_expr(&expr, env, scope, scope.idx, depth + 1);
+            TemplateArg::Str(literal_src) => {
+                let literal = parse_string_literal(literal_src)
+                    .expect("classify_template_arg only yields Str for string shapes");
+                let _ = literal.map_err(|err| anyhow::anyhow!("{err:#}"))?;
+                Ok(StaticTy::Ty(TypeTag::String))
+            }
+            TemplateArg::Map(inner) => {
+                self.infer_template_map(inner, env, scope, depth, literal_depth)
+            }
+            TemplateArg::List(inner) => {
+                self.infer_template_list(inner, env, scope, depth, literal_depth)
+            }
+            TemplateArg::Scalar(scalar_src) => {
+                let Some(lit) = oxdock_parser::template::parse_scalar_literal(scalar_src) else {
+                    bail!("invalid placeholder call argument '{scalar_src}'")
+                };
+                Ok(StaticTy::Ty(match lit {
+                    ScalarLit::Bool(_) => TypeTag::Bool,
+                    ScalarLit::Int(_) => TypeTag::Int,
+                    ScalarLit::Float(_) => TypeTag::Float,
+                }))
+            }
+            TemplateArg::Invalid(invalid) => {
+                bail!("invalid placeholder call argument '{invalid}'")
+            }
         }
-        if let Some(literal) = parse_string_literal(src) {
-            let _ = literal.map_err(|err| anyhow::anyhow!("{err:#}"))?;
-            return Ok(StaticTy::Ty(TypeTag::String));
-        }
-        if let Some(inner) = strip_wrapped_delimiters(src, '{', '}') {
-            return self.infer_template_map(inner, env, scope, depth, literal_depth);
-        }
-        if let Some(inner) = strip_wrapped_delimiters(src, '[', ']') {
-            return self.infer_template_list(inner, env, scope, depth, literal_depth);
-        }
-        match src {
-            "true" | "false" => return Ok(StaticTy::Ty(TypeTag::Bool)),
-            _ => {}
-        }
-        if src.parse::<i64>().is_ok() {
-            return Ok(StaticTy::Ty(TypeTag::Int));
-        }
-        if src.parse::<f64>().is_ok() {
-            return Ok(StaticTy::Ty(TypeTag::Float));
-        }
-        bail!("invalid placeholder call argument '{src}'")
     }
 
-    /// Infer one `{key: value}` literal: keys validate as bare identifiers
-    /// or string literals with duplicate rejection, values recurse.
+    /// Infer one `{key: value}` literal: keys validate through the
+    /// shared key parser with duplicate rejection, values recurse.
     /// Homogeneous value types yield `MapOf`, heterogeneous or empty
     /// yield bare `Map` so `check_exact` enforces shaped parameters.
     fn infer_template_map(
@@ -1829,36 +1875,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         depth: usize,
         literal_depth: usize,
     ) -> Result<StaticTy> {
-        use oxdock_parser::template::{parse_string_literal, split_top_level};
+        use oxdock_parser::template::{parse_map_key, split_map_entry, split_top_level};
         if inner.trim().is_empty() {
             return Ok(StaticTy::Ty(TypeTag::Map));
         }
         let mut seen = std::collections::HashSet::new();
         let mut value_tags: Vec<TypeTag> = Vec::new();
         for entry in split_top_level(inner, ',') {
-            let parts = split_top_level(&entry, ':');
-            if parts.len() != 2 {
+            let Some((key_src, value_src)) = split_map_entry(&entry) else {
                 bail!("invalid map literal entry '{entry}': use key: value");
-            }
-            let key_src = parts[0].trim();
-            let key = if let Some(literal) = parse_string_literal(key_src) {
-                literal.map_err(|err| anyhow::anyhow!("{err:#}"))?
-            } else if !key_src.is_empty()
-                && key_src
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            {
-                key_src.to_string()
-            } else {
-                bail!(
-                    "invalid map literal key '{key_src}': use a bare name or any string spelling"
-                );
             };
+            let key = parse_map_key(&key_src)?;
             if !seen.insert(key.clone()) {
                 bail!("duplicate key '{key}' in map literal");
             }
             let value_ty =
-                self.infer_template_arg(parts[1].trim(), env, scope, depth, literal_depth + 1)?;
+                self.infer_template_arg(value_src.trim(), env, scope, depth, literal_depth + 1)?;
             let StaticTy::Ty(tag) = value_ty else {
                 bail!("VOID has no value to pass");
             };
@@ -1965,6 +1997,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     is_async,
                     body: body.to_vec(),
                     module: module.map(|m| m.to_string()),
+                    name: name.to_string(),
                 },
             );
         }
@@ -2326,7 +2359,26 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             col: 0,
             idx: 0,
         };
-        let out = self.walk_body(&info.body, &mut env, &scope, depth + 1)?;
+        // Function-local imports scope to this body (mirroring the
+        // runtime dynamic extent): swap in the body's overlay,
+        // restoring the unit sets afterward on every path.
+        let unit = info.module.as_deref().unwrap_or(super::import::ENTRY_UNIT);
+        let overlay = self
+            .body_scopes
+            .get(&(unit.to_string(), info.name.clone()))
+            .cloned();
+        let saved = overlay.map(|(aliases, targets)| {
+            (
+                std::mem::replace(&mut self.imported_aliases, aliases),
+                std::mem::replace(&mut self.alias_targets, targets),
+            )
+        });
+        let out = self.walk_body(&info.body, &mut env, &scope, depth + 1);
+        if let Some((aliases, targets)) = saved {
+            self.imported_aliases = aliases;
+            self.alias_targets = targets;
+        }
+        let out = out?;
         if !enforce_types {
             // Touch probe: reads are recorded in the module scope
             // above; return-type enforcement lives in the dedicated
@@ -2652,6 +2704,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     is_async: *is_async,
                     body: body.clone(),
                     module: env.module.as_ref().map(|scope| scope.key.clone()),
+                    name: name.clone(),
                 };
                 self.check_function_body(name, &info, depth + 1)?;
                 Ok(live)
@@ -3467,48 +3520,79 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
     }
 
-    /// Resolve a callee: script functions (bare or `SCRIPT::`-qualified)
-    /// win over host metas, matching runtime shadowing. Unknown names
-    /// yield `ANY`: the parse-time unknown-function gate owns that
-    /// error, not this pass. File-aliased spellings resolve through
-    /// the active unit's own outbound targets to the defining file's
-    /// canonical key (registry entries are keyed by defining file,
-    /// never importer alias). Three exceptions, all scoped to the
-    /// unit's imports: an alias the unit imports with no recorded
-    /// target (host-module harvests) or whose full canonical name is
-    /// absent (`ALIAS::TYPO`) is unknown; one alias imported from
-    /// several files is ambiguous and fails loud; a known
-    /// `ALIAS::FUNC` the unit never imported (sibling leakage) is
-    /// unknown. Passes without that knowledge (single-file
-    /// validation, touch probes) keep the `ANY` leniency: an absent
-    /// alias means "unknown here", not "known absent". `SCRIPT::`
-    /// always resolves (entry-owned); host names bypass the alias
-    /// gate entirely.
+    /// Resolve a callee through the shared alias-target matcher;
+    /// script functions (bare or `SCRIPT::`) win over host metas.
+    /// Unknown names yield `ANY`: the parse-time unknown-function gate
+    /// owns that error, not this pass.
     fn resolve_call(&mut self, name: &str, depth: usize) -> Result<Callee> {
-        // Canonical lookup key: file-aliased spellings map through the
-        // unit's targets, everything else resolves as spelled.
+        // Canonical lookup key through the single alias-target
+        // matcher: file-aliased spellings map to the defining file,
+        // everything else resolves as spelled.
         let mut lookup = name.to_string();
-        if let Some((alias, base)) = name.split_once("::")
-            && alias != SCRIPT_MODULE_NAME
         {
-            match self.alias_targets.get(alias) {
-                Some(targets) if targets.len() == 1 => {
-                    let defining = targets.iter().next().expect("singleton checked");
-                    lookup = super::native::file_func_key(defining, base);
-                }
-                Some(targets) if targets.is_empty() => {
+            match super::native::classify_alias_call(&self.alias_targets, name, &|key| {
+                self.funcs.contains_key(key)
+            }) {
+                super::native::AliasResolution::Global => {}
+                super::native::AliasResolution::Canonical(key) => lookup = key,
+                super::native::AliasResolution::Unknown => {
                     bail!("unknown function `{name}`");
                 }
-                Some(targets) => {
+                super::native::AliasResolution::Ambiguous { alias, base, files } => {
                     bail!(
                         "{}",
-                        super::native::ambiguous_alias_message(alias, base, targets)
+                        super::native::ambiguous_alias_message(&alias, &base, &files)
                     );
                 }
-                None => {
-                    if self.imported_aliases.contains(alias) {
-                        bail!("unknown function `{name}`");
+                // Disjoint platform-conditional targets: the active
+                // branch is unknowable statically. Every file must
+                // export the name (a missing branch fails the call on
+                // its platform); identical signatures check precisely,
+                // differing ones fall back to `ANY`.
+                super::native::AliasResolution::Any { base, files } => {
+                    // Every disjoint target must export the name: a
+                    // missing branch fails the call on its platform.
+                    let mut canonicals = Vec::new();
+                    for file in &files {
+                        let canonical = super::native::file_func_key(file, &base);
+                        let Some(info) = self.funcs.get(&canonical) else {
+                            bail!("unknown function `{name}`");
+                        };
+                        canonicals.push((canonical, info.clone()));
                     }
+                    // Identical signatures check precisely against the
+                    // shared shape; differing ones fall back to `ANY`
+                    // since the active branch is unknowable.
+                    let (_, first) = canonicals.first().expect("Any is never empty");
+                    let unified = canonicals.iter().all(|(_, info)| {
+                        info.params.len() == first.params.len()
+                            && info.params.iter().zip(first.params.iter()).all(
+                                |(
+                                    (param_name, param_tag, optional),
+                                    (first_name, first_tag, first_optional),
+                                )| {
+                                    param_name == first_name
+                                        && optional == first_optional
+                                        && tags_equal(param_tag, first_tag)
+                                },
+                            )
+                            && tags_equal(&info.declared, &first.declared)
+                    });
+                    if !unified {
+                        return Ok(Callee {
+                            params: None,
+                            ret: StaticTy::Ty(TypeTag::Any),
+                            host_params: None,
+                        });
+                    }
+                    let (first_key, first_info) =
+                        canonicals.into_iter().next().expect("Any is never empty");
+                    let ret = self.func_return_owned(&first_info, &first_key, depth)?;
+                    return Ok(Callee {
+                        params: Some(first_info.params.clone()),
+                        ret,
+                        host_params: None,
+                    });
                 }
             }
         }

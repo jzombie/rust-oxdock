@@ -170,59 +170,70 @@ fn dry_run_load(
     Ok((key, parsed, nested_dir))
 }
 
-/// Preview-phase twin of [`resolve_top_level`]: no entry handle here,
-/// so the workspace root is the fallback directly. Tries `dir` first;
-/// at top level (`is_top`) a miss falls back to the workspace root
-/// (then build context) only when `dir` sits outside it, matching
-/// `import_base` for staged outside-workspace scripts. In-workspace
-/// subdirectory scripts never inherit root-level siblings. Nested
-/// imports stay importer-relative.
+/// Workspace root with build-context fallback: the shared default
+/// directory behind [`import_base`] and dry-run previews. Single
+/// owner for the fallback rule; every other spelling is a call here.
+fn workspace_fallback(fs: &dyn WorkspaceFs) -> GuardedPath {
+    fs.workspace_root()
+        .cloned()
+        .unwrap_or_else(|| fs.build_context().clone())
+}
+
+/// Single top-level import resolver shared by runtime expansion,
+/// validation, and dry-run previews. `entry_parent` probes the entry
+/// directory first when set; `fallback` applies only when `dir` sits
+/// outside it. Nested imports (`top == false`) stay
+/// importer-relative. Probes through the passed filesystem so
+/// memory-backed tests answer from their own state.
+fn resolve_top_level_with(
+    fs: &dyn WorkspaceFs,
+    dir: &GuardedPath,
+    top: bool,
+    entry_parent: Option<&GuardedPath>,
+    fallback: Option<&GuardedPath>,
+    path: &str,
+) -> Result<GuardedPath> {
+    if top
+        && let Some(eparent) = entry_parent
+        && eparent != dir
+        && let Ok(candidate) = eparent.join(path)
+        && fs.entry_kind(&candidate).is_ok()
+    {
+        return Ok(candidate);
+    }
+    if let Ok(candidate) = dir.join(path)
+        && fs.entry_kind(&candidate).is_ok()
+    {
+        return Ok(candidate);
+    }
+    if top
+        && let Some(root) = fallback
+        // Both sides arrive canonicalized by construction
+        // (`guard_path` canonicalizes through the nearest existing
+        // ancestor), so a raw prefix check already compares canonical
+        // spellings.
+        && root != dir
+        && !dir.as_path().starts_with(root.as_path())
+        && let Ok(candidate) = root.join(path)
+        && fs.entry_kind(&candidate).is_ok()
+    {
+        return Ok(candidate);
+    }
+    dir.join(path)
+        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))
+}
+
+/// Preview-phase entry point: no entry handle here, so the workspace
+/// root is the fallback directly. Nested imports stay
+/// importer-relative.
 fn dry_run_resolve(
     fs: &dyn WorkspaceFs,
     dir: &GuardedPath,
     path: &str,
     is_top: bool,
 ) -> Result<GuardedPath> {
-    if let Ok(candidate) = dir.join(path)
-        && fs.entry_kind(&candidate).is_ok()
-    {
-        return Ok(candidate);
-    }
-    if is_top {
-        let fallback = fs.workspace_root().cloned().unwrap_or_else(|| {
-            // WorkspaceFs is object-safe; build_context is available on
-            // every backend via the same trait object.
-            fs.build_context().clone()
-        });
-        // Canonicalize before comparing: `dir` may arrive through a
-        // symlinked path (e.g. `/var` vs `/private/var` on macOS)
-        // while the workspace root is canonical, and a raw
-        // `starts_with` would then misread an in-workspace
-        // subdirectory as outside and wrongly fall back to the root.
-        // Canonicalization failures keep the raw paths (today's
-        // behavior), never newly fail the preview.
-        // Canonicalize before comparing: `dir` may arrive through
-        // a symlinked spelling (e.g. `/var` vs `/private/var` on
-        // macOS, verbatim `\\?\` prefixes on Windows) while the
-        // workspace root is canonical, and a raw `starts_with` would
-        // then misread an in-workspace subdirectory as outside and
-        // wrongly fall back to the root. Canonicalization failures
-        // keep the raw paths (today's behavior), never newly fail the
-        // preview.
-        let dir_canon = fs.canonicalize(dir).unwrap_or_else(|_| dir.clone());
-        let fallback_canon = fs
-            .canonicalize(&fallback)
-            .unwrap_or_else(|_| fallback.clone());
-        if fallback != *dir
-            && !dir_canon.as_path().starts_with(fallback_canon.as_path())
-            && let Ok(candidate) = fallback.join(path)
-            && fs.entry_kind(&candidate).is_ok()
-        {
-            return Ok(candidate);
-        }
-    }
-    dir.join(path)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))
+    let fallback = workspace_fallback(fs);
+    resolve_top_level_with(fs, dir, is_top, None, is_top.then_some(&fallback), path)
 }
 
 /// Preview a harvest target: only its top-level nested imports load,
@@ -494,12 +505,9 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 insert_imported_type(cx.state, name, target, alias, path)?;
             }
         }
-        // Nested imports are the harvested functions' dependencies: run
-        // them per their own form. Anything else stays unrunned. They
-        // belong textually to the harvested file, so they execute with
-        // its module on the context stack (mirroring import_file phase
-        // 2): unit attribution and any nested lookups resolve against
-        // it, never the importer.
+        // Nested imports run per their own form with the harvested
+        // file on the context stack, so unit attribution matches the
+        // static pass.
         cx.state.module_stack.push(Some(key.clone()));
         let mut nested_cause: Option<anyhow::Error> = None;
         for step in &steps {
@@ -1176,8 +1184,15 @@ fn expand_walk_kind<P: ProcessManager>(
 /// Immediate child bodies of a step, shared by expansion and dry-run.
 /// Boxed sub-kinds unwrap one level; block bodies recurse per step by
 /// the callers.
+/// Immediate child step bodies of one step: block bodies plus inline
+/// block expressions, which run in the enclosing dynamic scope (a
+/// `FUNC` body does not: it owns an execution frame). Single owner
+/// for nested-step traversal: closure expansion, dry-run previews,
+/// harvest merging, and per-unit import walks all route through
+/// here. Only direct child expressions are inspected; blocks nested
+/// deeper inside collection literals never contain imports.
 pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
-    match kind {
+    let mut out: Vec<&[Step]> = match kind {
         StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => child_bodies(cmd),
         StepKind::For { body, .. }
         | StepKind::While { body, .. }
@@ -1203,7 +1218,33 @@ pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
             out
         }
         _ => Vec::new(),
+    };
+    // Inline blocks run in the enclosing dynamic scope, so their
+    // contents belong to the enclosing walk, exactly like child
+    // bodies above. Only direct child expressions are inspected;
+    // blocks nested deeper inside collection literals never contain
+    // imports. (`Return` boxes its expression; the rest do not.)
+    match kind {
+        StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => {
+            if let oxdock_parser::Expr::Block(body) = expr {
+                out.push(body);
+            }
+        }
+        StepKind::Return { expr, .. } => {
+            if let oxdock_parser::Expr::Block(body) = expr.as_ref() {
+                out.push(body);
+            }
+        }
+        StepKind::Call { args, .. } => {
+            for arg in args {
+                if let oxdock_parser::Expr::Block(body) = arg {
+                    out.push(body);
+                }
+            }
+        }
+        _ => {}
     }
+    out
 }
 
 /// Record an import site, deduping identical sites (diamonds share one
@@ -1404,49 +1445,40 @@ pub(crate) fn import_base<P: ProcessManager>(state: &ExecState<P>) -> GuardedPat
             return parent;
         }
     } else if let Some(parent) = state.entry_file.as_ref().and_then(|entry| entry.parent()) {
-        let base = state
-            .fs
-            .workspace_root()
-            .cloned()
-            .unwrap_or_else(|| state.fs.build_context().clone());
+        let base = workspace_fallback(state.fs.as_ref());
         if !parent.as_path().starts_with(base.as_path()) {
             return base;
         }
         return parent;
     }
-    if let Some(root) = state.fs.workspace_root() {
-        return root.clone();
-    }
-    state.fs.build_context().clone()
+    workspace_fallback(state.fs.as_ref())
 }
 
-/// Resolve a top-level import against the entry dir first when the
-/// entry sits outside the workspace, falling back to `dir`
-/// (the workspace root). Entries staged outside the workspace (CI
-/// temp dirs) keep resolving workspace libs like stdin runs, while
-/// real outside entries (entry plus sibling lib) resolve
-/// entry-relative. Nested imports (`stack` non-empty) always stay
-/// importer-relative with no fallback. Probes through the run
-/// filesystem so memory-backed tests answer from their own state.
-/// Shared by expansion (`expand_load`, `load_file`), runtime host-type
-/// probes, and the static closure pass, so every top-level import
-/// resolves identically.
+/// Runtime entry point for top-level import resolution: entry-dir
+/// probe, no workspace fallback. Thin wrapper over the shared
+/// [`resolve_top_level_with`]; nested imports (`stack` non-empty)
+/// always stay importer-relative. Shared by expansion
+/// (`expand_load`, `load_file`), runtime host-type probes, and the
+/// static closure pass, so every top-level import resolves
+/// identically.
 pub(crate) fn resolve_top_level<P: ProcessManager>(
     state: &ExecState<P>,
     dir: &GuardedPath,
     stack: &[GuardedPath],
     path: &str,
 ) -> Result<GuardedPath> {
-    if stack.is_empty()
-        && let Some(eparent) = state.entry_file.as_ref().and_then(|entry| entry.parent())
-        && eparent != *dir
-        && let Ok(candidate) = eparent.join(path)
-        && state.fs.entry_kind(&candidate).is_ok()
-    {
-        return Ok(candidate);
-    }
-    dir.join(path)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))
+    resolve_top_level_with(
+        state.fs.as_ref(),
+        dir,
+        stack.is_empty(),
+        state
+            .entry_file
+            .as_ref()
+            .and_then(|entry| entry.parent())
+            .as_ref(),
+        None,
+        path,
+    )
 }
 
 /// Unit key for entry steps in
@@ -1455,15 +1487,7 @@ pub(crate) fn resolve_top_level<P: ProcessManager>(
 pub(crate) const ENTRY_UNIT: &str = "entry";
 
 /// Active unit for runtime alias attribution: the innermost module
-/// on the context stack, else the entry. This mirrors
-/// [`ExecState::current_module`]: a callee's steps belong to the
-/// callee's file even when a different module's import is still on
-/// the import chain (e.g. `OTHER::FOO()` called from `M`'s init must
-/// resolve against `OTHER`, not `M`). The import stack stays out of
-/// it: it tracks the loading chain for cycle detection and relative
-/// resolution, not the executing unit. Entry functions push `None`,
-/// so entry execution (including entry code reached anywhere in the
-/// chain) always attributes to the entry.
+/// on the context stack, else the entry.
 pub(crate) fn active_unit_key<P: ProcessManager>(state: &ExecState<P>) -> String {
     if let Some(key) = state.current_module() {
         return key;
@@ -1476,7 +1500,7 @@ pub(crate) fn active_unit_key<P: ProcessManager>(state: &ExecState<P>) -> String
 /// imports that never execute stay absent and fall back to unknown.
 pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
     state: &ExecState<P>,
-) -> HashMap<String, std::collections::HashSet<String>> {
+) -> super::native::AliasTargets {
     state
         .executed_alias_targets
         .get(&active_unit_key(state))
@@ -1487,7 +1511,8 @@ pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
 /// Record one executed file import under the importing unit: alias to
 /// its defining file key (`None` for host-only harvests, which keep
 /// the alias known with an empty target set, mirroring the static
-/// host fallback).
+/// host fallback). Runtime imports execute unconditionally once
+/// taken, so they record no guard.
 pub(crate) fn record_executed_alias<P: ProcessManager>(
     state: &mut ExecState<P>,
     alias: &str,
@@ -1501,7 +1526,7 @@ pub(crate) fn record_executed_alias<P: ProcessManager>(
         .entry(alias.to_string())
         .or_default();
     if let Some(key) = defining {
-        targets.insert(key);
+        targets.push((key, None));
     }
 }
 

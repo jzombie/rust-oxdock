@@ -411,13 +411,9 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         // function body (see `handlers::block_value`).
         Expr::Block(body) => super::handlers::block_value(cx, body),
         Expr::Call { name, args } => {
-            // DSL-defined functions run through the call path so arity,
-            // depth budget, and scoping apply uniformly. File-aliased
-            // spellings resolve to the canonical defining-file key
-            // first (entries are keyed by defining file, never
-            // importer alias); ambiguity fails loud here, like the
-            // call path does.
-            let canonical = super::native::resolve_file_call_key(
+            // File-aliased spellings resolve to the canonical key
+            // first, through the shared matcher.
+            let canonical = cx.state.functions.resolve_file_call_key(
                 &super::import::active_unit_alias_targets(cx.state),
                 name.as_str(),
             )?;
@@ -1822,9 +1818,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     let result = match resolve(module, call.name, args) {
                         Ok(value) => value,
                         Err(err) => {
-                            // Single lazy classifier, invoked only on
-                            // resolver failure so the hot path stays
-                            // allocation-free.
+                            // Lazy miss classification on resolver failure.
                             if let Some(text) = state.functions.describe_unit_placeholder_miss(
                                 &super::import::active_unit_alias_targets(state),
                                 module,

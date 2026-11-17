@@ -1566,16 +1566,9 @@ pub(super) fn replace<P: ProcessManager>(
 ) -> Result<()> {
     let ctx = cx.state.command_ctx()?;
     let vars = cx.state.all_vars();
-    // Dispatch `{{ MODULE::FUNC(args) }}` through the shared pure table:
-    // one `Arc` clone per EXPAND. Stateful, script, and pipe backed
-    // entries never appear here: placeholders evaluate without a step
-    // context and must stay side effect free. Lookup and the
-    // unknown-name error live in [`super::native::placeholder_resolver`].
+    // Dispatch `{{ MODULE::FUNC(args) }}` through the shared pure table.
     // Known callees reuse the static-gate wording through an owned
-    // snapshot: the `'static` streaming closure cannot borrow the
-    // registry, so the name sets are computed once per EXPAND (name
-    // strings only; bodies and step ASTs never move). Inline
-    // expansion instead classifies lazily on resolver failure.
+    // snapshot: the `'static` closure cannot borrow the registry.
     let table = cx.state.pure_function_table();
     let snapshot = cx
         .state
@@ -2550,19 +2543,11 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     name: &str,
     args: &[Expr],
 ) -> Result<Value> {
-    // 1. Registry lookup: the single source for every callable.
-    // File-aliased spellings resolve through the calling unit's
-    // recorded targets to the defining file's canonical key (entries
-    // are keyed by defining file, never importer alias, so units
-    // reuse aliases freely). Ambiguous aliases (one unit, several
-    // files) fail here, never by silent first-wins. Anything the
-    // unit never imported falls through to the global spelling:
-    // hosts resolve, everything else keeps the unknown-function
-    // error below.
-    let canonical = super::native::resolve_file_call_key(
-        &super::import::active_unit_alias_targets(cx.state),
-        name,
-    )?;
+    // 1. Registry lookup through the shared alias-target matcher.
+    let canonical = cx
+        .state
+        .functions
+        .resolve_file_call_key(&super::import::active_unit_alias_targets(cx.state), name)?;
     let lookup_name: &str = canonical.as_deref().unwrap_or(name);
     let Some(entry) = cx.state.functions.get(lookup_name) else {
         bail!("unknown function `{name}`");
@@ -2694,21 +2679,43 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                 })?);
             }
             let outcome: Result<Value> = (|| {
-                for ((pname, ptype, _), pval) in def.params.iter().zip(arg_vals) {
-                    cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
+                // Function-local imports scope to the dynamic extent:
+                // snapshot this function's own unit map so nested
+                // imports attribute while running, then restore on
+                // return. Other units (including module inits that ran
+                // in this extent) are untouched. Static per-function
+                // overlays mirror this exactly.
+                let unit_key = def
+                    .module
+                    .clone()
+                    .unwrap_or_else(|| super::import::ENTRY_UNIT.to_string());
+                let saved_unit_aliases = cx.state.executed_alias_targets.get(&unit_key).cloned();
+                let flow = (|| {
+                    for ((pname, ptype, _), pval) in def.params.iter().zip(arg_vals) {
+                        cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
+                    }
+                    super::steps::execute_steps(
+                        cx.state,
+                        cx.process,
+                        &def.body,
+                        cx.stdin.clone(),
+                        false,
+                        cx.out.clone(),
+                        cx.err.clone(),
+                        cx.out_pipe.clone(),
+                        cx.stdin_pipe.clone(),
+                        false,
+                    )
+                })();
+                match saved_unit_aliases {
+                    Some(saved) => {
+                        cx.state.executed_alias_targets.insert(unit_key, saved);
+                    }
+                    None => {
+                        cx.state.executed_alias_targets.remove(&unit_key);
+                    }
                 }
-                let flow = super::steps::execute_steps(
-                    cx.state,
-                    cx.process,
-                    &def.body,
-                    cx.stdin.clone(),
-                    false,
-                    cx.out.clone(),
-                    cx.err.clone(),
-                    cx.out_pipe.clone(),
-                    cx.stdin_pipe.clone(),
-                    false,
-                )?;
+                let flow = flow?;
                 match flow {
                     Flow::Done => Ok(Value::string(String::new())),
                     Flow::Return { value, .. } => Ok(value),

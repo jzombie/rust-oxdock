@@ -191,8 +191,7 @@ impl<P: ProcessManager> McpSession<P> {
     }
 
     /// Tool metadata for the export list, in source order. Fails fast
-    /// naming the first missing export. Re-exported file functions
-    /// resolve through the entry unit's recorded alias targets.
+    /// naming the first missing export.
     pub fn tool_metas(&self) -> Result<Vec<FuncMeta>> {
         self.state.functions.exported_metas(
             &self.func_exports,

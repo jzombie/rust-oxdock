@@ -211,8 +211,7 @@ pub struct ExecState<P: ProcessManager> {
     /// types-only imports record their alias with an empty target set,
     /// and module bodies resolve against their own file's imports,
     /// never the importer's.
-    pub(super) executed_alias_targets:
-        HashMap<String, HashMap<String, std::collections::HashSet<String>>>,
+    pub(super) executed_alias_targets: HashMap<String, super::native::AliasTargets>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,

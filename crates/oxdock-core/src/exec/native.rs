@@ -5,8 +5,8 @@ use anyhow::Result;
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
-    Field, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step, TypeTag,
-    Value, base_name, qualify, render_structural, split_qualified,
+    Field, GuardExpr, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step,
+    TypeTag, Value, base_name, guards_overlap, qualify, render_structural, split_qualified,
 };
 use oxdock_pipe::PipeHandle;
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
@@ -28,23 +28,15 @@ pub enum FuncKind {
     HostPure,
 }
 
-/// Canonical registry key for a file-imported script function: the
-/// defining file's key plus the base name, through the shared
-/// [`qualify`] owner. Importer aliases never appear here: the same
-/// file serves every unit that imports it under any local alias, and
-/// independent units reuse short aliases without colliding. Call
-/// sites keep their `ALIAS::FUNC` spelling; each layer resolves it
-/// through its own unit's alias targets to this key. Bare,
-/// `SCRIPT::`, and host keys are untouched: those namespaces stay
-/// global by design.
+/// Canonical registry key for a file-imported script function:
+/// defining file plus base name, through the shared [`qualify`]
+/// owner. Importer aliases never appear here.
 pub(super) fn file_func_key(defining_file: &str, name: &str) -> String {
     qualify(defining_file, name)
 }
 
 /// Loud ambiguity error for one unit importing the same alias from
-/// several files: the call cannot pick a defining file. Shared by
-/// static resolution and runtime dispatch so both layers fail
-/// identically on use. `files` sorts for deterministic rendering.
+/// several files. `files` sorts for deterministic rendering.
 pub(super) fn ambiguous_alias_message(alias: &str, name: &str, files: &HashSet<String>) -> String {
     let mut files: Vec<&str> = files.iter().map(|file| file.as_str()).collect();
     files.sort();
@@ -54,35 +46,132 @@ pub(super) fn ambiguous_alias_message(alias: &str, name: &str, files: &HashSet<S
     )
 }
 
-/// Registry lookup key for a runtime call-site spelling: file-aliased
-/// `ALIAS::FUNC` resolves through the calling unit's recorded targets
-/// to the defining file's canonical key (entries are keyed by defining
-/// file, never importer alias). Returns `None` to resolve `name` as
-/// spelled (bare, `SCRIPT::`, hosts, and names the unit never
-/// imported). One unit importing one alias from several files is
-/// ambiguous and fails loud. Single owner for the runtime side;
-/// static resolution mirrors it through its own per-unit targets.
-pub(super) fn resolve_file_call_key(
-    unit_targets: &HashMap<String, HashSet<String>>,
+/// One `ALIAS::FUNC` spelling's fate under a unit's alias targets.
+/// Single owner for alias-target matching: every resolution path
+/// (static calls, template gates, runtime dispatch, placeholder
+/// misses, snapshots, re-exports) classifies here and acts on the
+/// result, never restating the singleton/ambiguity branches.
+pub(super) enum AliasResolution {
+    /// Resolve as spelled (bare, `SCRIPT::`, hosts, unknown-to-unit).
+    Global,
+    /// Canonical defining-file key.
+    Canonical(String),
+    /// Known alias with no usable target: the caller reports unknown.
+    Unknown,
+    /// One alias, several files with the name in overlapping guards:
+    /// fail loud, naming the colliding spelling.
+    Ambiguous {
+        alias: String,
+        base: String,
+        files: HashSet<String>,
+    },
+    /// Several files hold the name under disjoint guards: the caller
+    /// validates every target instead of failing outright
+    /// (platform-conditional imports).
+    Any {
+        base: String,
+        files: HashSet<String>,
+    },
+}
+
+/// One unit's alias targets: defining file plus the import's guard.
+/// Single owner for the target-set shape; static and runtime tables
+/// share it. Guards decide ambiguity (overlapping guards importing
+/// different files under one alias are ambiguous); unguarded imports
+/// overlap everything. Runtime records `None` (its imports execute
+/// once taken).
+pub(super) type AliasTargets = HashMap<String, Vec<(String, Option<GuardExpr>)>>;
+
+/// Classify one call spelling under a unit's alias targets. Single
+/// entry point for alias-target matching: splits the spelling,
+/// resolves `SCRIPT::` and bare names globally, and maps file aliases
+/// through the unit's recorded targets. `exists` probes the caller's
+/// function map for a canonical key.
+pub(super) fn classify_alias_call(
+    unit_targets: &AliasTargets,
     name: &str,
-) -> Result<Option<String>> {
+    exists: &dyn Fn(&str) -> bool,
+) -> AliasResolution {
     let Some((alias, base)) = name.split_once("::") else {
-        return Ok(None);
+        return AliasResolution::Global;
     };
     if alias == SCRIPT_MODULE_NAME {
-        return Ok(None);
+        return AliasResolution::Global;
     }
-    match unit_targets.get(alias) {
-        Some(files) if files.len() == 1 => Ok(Some(file_func_key(
-            files.iter().next().expect("singleton checked"),
-            base,
-        ))),
-        Some(files) if files.len() > 1 => Err(anyhow::anyhow!(
-            "{}",
-            ambiguous_alias_message(alias, base, files)
-        )),
-        _ => Ok(None),
+    let Some(entries) = unit_targets.get(alias) else {
+        return AliasResolution::Global;
+    };
+    if entries.is_empty() {
+        return AliasResolution::Unknown;
     }
+    // Distinct defining files in first-seen order.
+    let mut files: Vec<(&str, Vec<Option<&GuardExpr>>)> = Vec::new();
+    for (file, guard) in entries {
+        match files.iter_mut().find(|(known, _)| *known == file) {
+            Some((_, guards)) => guards.push(guard.as_ref()),
+            None => files.push((file, vec![guard.as_ref()])),
+        }
+    }
+    if files.len() == 1 {
+        return AliasResolution::Canonical(file_func_key(files[0].0, base));
+    }
+    let overlaps = |left: &[Option<&GuardExpr>], right: &[Option<&GuardExpr>]| {
+        left.iter()
+            .any(|a| right.iter().any(|b| guards_overlap(*a, *b)))
+    };
+    let mut ambiguous = HashSet::new();
+    for (i, (file, guards)) in files.iter().enumerate() {
+        for (other, other_guards) in files.iter().skip(i + 1) {
+            if overlaps(guards, other_guards)
+                && (exists(&file_func_key(file, base)) || exists(&file_func_key(other, base)))
+            {
+                ambiguous.insert((*file).to_string());
+                ambiguous.insert((*other).to_string());
+            }
+        }
+    }
+    if !ambiguous.is_empty() {
+        return AliasResolution::Ambiguous {
+            alias: alias.to_string(),
+            base: base.to_string(),
+            files: ambiguous,
+        };
+    }
+    let all: HashSet<String> = files.iter().map(|(file, _)| (*file).to_string()).collect();
+    if all.iter().any(|file| exists(&file_func_key(file, base))) {
+        return AliasResolution::Any {
+            base: base.to_string(),
+            files: all,
+        };
+    }
+    AliasResolution::Unknown
+}
+
+/// Every local spelling of one defining file's function in a unit.
+/// Inverted direction of [`classify_alias_call`]; shares its matcher.
+pub(super) fn spellings_for_defining_file(
+    unit_targets: &AliasTargets,
+    defining: &str,
+    base: &str,
+) -> (Vec<String>, Vec<(String, HashSet<String>)>) {
+    let mut direct = Vec::new();
+    let mut ambiguous = Vec::new();
+    for (alias, files) in unit_targets {
+        if !files.iter().any(|(file, _)| file == defining) {
+            continue;
+        }
+        let spelling = qualify(alias, base);
+        match classify_alias_call(unit_targets, &spelling, &|key| {
+            key == file_func_key(defining, base)
+        }) {
+            AliasResolution::Canonical(_) => direct.push(spelling),
+            AliasResolution::Ambiguous { files, .. } => {
+                ambiguous.push((spelling, files));
+            }
+            AliasResolution::Global | AliasResolution::Unknown | AliasResolution::Any { .. } => {}
+        }
+    }
+    (direct, ambiguous)
 }
 
 impl FuncKind {
@@ -497,44 +586,22 @@ pub(super) fn describe_placeholder_miss(
     None
 }
 
-/// Whether a script function is visible to a unit for template
-/// purposes: `SCRIPT` names resolve globally, other modules need the
-/// alias imported with the defining file among the unit's recorded
-/// targets. Single owner; the static gate, the lazy runtime
-/// classifier, and the `EXPAND` snapshot all route through it,
-/// mirroring `Checker::resolve_call`'s sibling-leakage gate.
-pub(super) fn script_visible_to_unit(
-    defining: Option<&str>,
-    module: &str,
-    is_imported: bool,
-    targets: Option<&HashSet<String>>,
-) -> bool {
-    if module == SCRIPT_MODULE_NAME {
-        return true;
-    }
-    if !is_imported {
-        return false;
-    }
-    match defining {
-        Some(defining) => targets.is_some_and(|targets| targets.contains(defining)),
-        None => true,
-    }
-}
-
-/// Owned placeholder classes for `'static` closures (notably `EXPAND`
-/// streaming): the resolver closure cannot borrow the registry, so
-/// these name sets are the minimal owned snapshot (name strings only;
-/// bodies and step ASTs never move). The hot inline path classifies
-/// lazily through `describe_unit_placeholder_miss` instead.
+/// Owned placeholder classes for `'static` closures (notably
+/// `EXPAND` streaming), which cannot borrow the registry.
 pub(super) struct PlaceholderClasses {
     pub script: HashSet<String>,
     pub stateful: HashSet<String>,
     pub aliases: HashSet<String>,
+    /// Ambiguous spellings: alias resolves to several files.
+    pub ambiguous: HashMap<String, HashSet<String>>,
 }
 
 impl PlaceholderClasses {
     pub(super) fn describe(&self, module: &str, name: &str) -> Option<String> {
         let qualified = qualify(module, name);
+        if let Some(files) = self.ambiguous.get(&qualified) {
+            return Some(ambiguous_alias_message(module, name, files));
+        }
         describe_placeholder_miss(
             module,
             name,
@@ -681,45 +748,22 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         self.entries.get(name).cloned()
     }
 
-    /// Single lazy miss classifier for every runtime placeholder path
-    /// with registry access (inline `{{ }}` expansion): one borrow, no
-    /// `FuncEntry` clones, invoked only on resolver failure. Pure and
-    /// dual bodies return `None` (the resolver hit them, so the error
-    /// is execution failure and the original diagnostic stands).
-    /// `SCRIPT` stays globally visible; file aliases resolve through
-    /// the unit's recorded targets to the defining file's canonical
-    /// key (entries are keyed by defining file, never importer alias),
-    /// exactly like the static gate; anything else falls back to
-    /// unknown.
+    /// Single lazy miss classifier for runtime placeholder paths with
+    /// registry access: one borrow, no `FuncEntry` clones, invoked only
+    /// on resolver failure.
     pub(super) fn describe_unit_placeholder_miss(
         &self,
-        unit_targets: &HashMap<String, HashSet<String>>,
+        unit_targets: &AliasTargets,
         module: &str,
         name: &str,
     ) -> Option<String> {
         let qualified = qualify(module, name);
-        // Canonical file entry for this unit's alias: the spelling
-        // lookup above only hits `SCRIPT` and host keys now.
-        let canonical = unit_targets.get(module).and_then(|files| {
-            (files.len() == 1)
-                .then(|| files.iter().next().map(|file| file_func_key(file, name)))
-                .flatten()
-        });
-        let entry_opt = self
-            .entries
-            .get(&qualified)
-            .or_else(|| canonical.as_deref().and_then(|key| self.entries.get(key)));
-        if let Some(entry) = entry_opt {
+        if let Some(entry) = self.entries.get(&qualified) {
+            // `SCRIPT` and host spellings resolve globally; canonical
+            // file keys never match a call-site spelling.
             match &entry.body {
-                FuncBody::Script(def) => {
-                    if script_visible_to_unit(
-                        def.module.as_deref(),
-                        module,
-                        unit_targets.contains_key(module),
-                        unit_targets.get(module),
-                    ) {
-                        return describe_placeholder_miss(module, name, true, false, false);
-                    }
+                FuncBody::Script(_) => {
+                    return describe_placeholder_miss(module, name, true, false, false);
                 }
                 FuncBody::Ctx(_) => {
                     return describe_placeholder_miss(module, name, false, true, false);
@@ -727,24 +771,44 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 FuncBody::Pure(_) | FuncBody::Both { .. } => return None,
             }
         }
-        if unit_targets.contains_key(module) {
-            return describe_placeholder_miss(module, name, false, false, true);
+        // File-aliased spellings classify through the shared matcher.
+        // A canonical miss means the alias is known but holds no such
+        // function; Global/Any carry no miss of their own.
+        match classify_alias_call(unit_targets, &qualified, &|key| {
+            self.entries.contains_key(key)
+        }) {
+            AliasResolution::Canonical(canonical) => {
+                if let Some(entry) = self.entries.get(&canonical) {
+                    match &entry.body {
+                        FuncBody::Script(_) => {
+                            return describe_placeholder_miss(module, name, true, false, false);
+                        }
+                        FuncBody::Ctx(_) => {
+                            return describe_placeholder_miss(module, name, false, true, false);
+                        }
+                        FuncBody::Pure(_) | FuncBody::Both { .. } => return None,
+                    }
+                }
+                return describe_placeholder_miss(module, name, false, false, true);
+            }
+            AliasResolution::Ambiguous { files, .. } => {
+                return Some(ambiguous_alias_message(module, name, &files));
+            }
+            AliasResolution::Unknown => {
+                return describe_placeholder_miss(module, name, false, false, true);
+            }
+            AliasResolution::Any { .. } | AliasResolution::Global => {}
         }
         None
     }
 
     /// Owned snapshot for `'static` placeholder closures (notably
     /// `EXPAND` streaming): the resolver closure cannot borrow the
-    /// registry, so these name sets are the minimal owned snapshot
-    /// (name strings only; bodies and step ASTs never move). Computed
-    /// once per `EXPAND`, an IO-bound step; inline expansion classifies
-    /// lazily through `describe_unit_placeholder_miss` instead.
-    pub(super) fn placeholder_snapshot(
-        &self,
-        unit_targets: &HashMap<String, HashSet<String>>,
-    ) -> PlaceholderClasses {
+    /// registry, so these name sets are the minimal owned form.
+    pub(super) fn placeholder_snapshot(&self, unit_targets: &AliasTargets) -> PlaceholderClasses {
         let mut script = HashSet::new();
         let mut stateful = HashSet::new();
+        let mut ambiguous: HashMap<String, HashSet<String>> = HashMap::new();
         for (key, entry) in self.entries.iter() {
             let Some((module, base)) = split_qualified(key) else {
                 continue;
@@ -753,27 +817,20 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 FuncBody::Script(def) => {
                     if module == SCRIPT_MODULE_NAME {
                         // `SCRIPT` and bare-harvest spellings stay global.
-                        if script_visible_to_unit(
-                            def.module.as_deref(),
-                            module,
-                            unit_targets.contains_key(module),
-                            unit_targets.get(module),
-                        ) {
-                            script.insert(key.clone());
-                        }
+                        script.insert(key.clone());
                         continue;
                     }
-                    // Canonical file key: translate back to every local
-                    // spelling this unit resolves to the defining file,
-                    // so `describe` keeps matching call-site spellings.
-                    // Singleton targets only, mirroring the lazy
-                    // classifier: ambiguous aliases fall through to the
-                    // known-alias message on both paths.
+                    // Canonical file key: every local spelling in this
+                    // unit, singletons into the script set and several
+                    // files into the ambiguity map, through the shared
+                    // matcher so `describe` matches call sites exactly
+                    // like the static gate and lazy path.
                     let defining = def.module.as_deref().unwrap_or(module);
-                    for (alias, files) in unit_targets {
-                        if files.len() == 1 && files.contains(defining) {
-                            script.insert(qualify(alias, base));
-                        }
+                    let (direct, ambiguous_here) =
+                        spellings_for_defining_file(unit_targets, defining, base);
+                    script.extend(direct);
+                    for (spelling, files) in ambiguous_here {
+                        ambiguous.entry(spelling).or_default().extend(files);
                     }
                 }
                 FuncBody::Ctx(_) => {
@@ -787,6 +844,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             script,
             stateful,
             aliases,
+            ambiguous,
         }
     }
 
@@ -971,18 +1029,10 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     }
 
     /// Define a file-imported DSL `FUNC` under its canonical key
-    /// ([`file_func_key`]: defining file plus base name, never the
-    /// importer alias) into an explicit scope frame: nested imports
-    /// register their aliases in the outermost import's caller frame,
-    /// so the importer's `ALIAS::` bodies keep resolving them after
-    /// the nested frame pops. Independent units reuse local aliases
-    /// freely: their entries land under different defining files.
-    /// Same-file re-imports skip before calling (see the `get` guards
-    /// at the import sites), so a repeated define here is a true
-    /// same-scope duplicate. Out-of-range depths fall back to the top
-    /// frame; a missing frame (never in practice: the registry always
-    /// holds the global frame) defines untracked, like top-level
-    /// definitions.
+    /// ([`file_func_key`]) in the global registry frame (index 0, never
+    /// popped): eviction on scope exit would strand the module cache
+    /// and alias targets that still reference it. The `depth` frame
+    /// only scopes the legacy fallback keys (`module: None`).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn define_aliased_in(
         &mut self,
@@ -1018,14 +1068,19 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         if reserved && !shadowable {
             anyhow::bail!("cannot shadow reserved function `{name}`");
         }
-        // Duplicate scope is the target frame: nested imports share the
-        // outermost import's caller frame, so a repeated alias there is
-        // explicit, never silent.
-        let depth_in_range = depth < self.scopes.len();
-        let frame_idx = if depth_in_range {
-            depth
+        // File entries live in the global frame (index 0, never
+        // popped): eviction on scope exit would strand the module
+        // cache and alias targets that still reference them. The
+        // alias frame only scopes the legacy fallback keys.
+        let frame_idx = if module.is_some() {
+            0
         } else {
-            self.scopes.len().saturating_sub(1)
+            let depth_in_range = depth < self.scopes.len();
+            if depth_in_range {
+                depth
+            } else {
+                self.scopes.len().saturating_sub(1)
+            }
         };
         if self
             .scopes
@@ -1122,6 +1177,25 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         )
     }
 
+    /// Registry lookup key for a runtime call-site spelling, through
+    /// the shared alias-target matcher.
+    pub(super) fn resolve_file_call_key(
+        &self,
+        unit_targets: &AliasTargets,
+        name: &str,
+    ) -> Result<Option<String>> {
+        match classify_alias_call(unit_targets, name, &|key| self.entries.contains_key(key)) {
+            AliasResolution::Global | AliasResolution::Unknown | AliasResolution::Any { .. } => {
+                Ok(None)
+            }
+            AliasResolution::Canonical(key) => Ok(Some(key)),
+            AliasResolution::Ambiguous { alias, base, files } => Err(anyhow::anyhow!(
+                "{}",
+                ambiguous_alias_message(&alias, &base, &files)
+            )),
+        }
+    }
+
     /// Clone the pure fn for `name` (ending the registry borrow) so callers
     /// can invoke it without holding `&self` across a `&mut StepCtx` use.
     /// Dual entries answer with their template arm.
@@ -1216,47 +1290,32 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     /// Metadata for single-file `EXPORT` names in source order. Errors
     /// name the first missing export; callers fail fast before serving.
-    /// Bare names address `SCRIPT::NAME`; qualified names address the
-    /// registry directly for hosts, and resolve through the exporting
-    /// unit's recorded alias targets for re-exported file functions
-    /// (`EXPORT LIB::F` serves the defining file's entry under the
-    /// export spelling, so independent units reuse local aliases).
-    /// Ambiguous aliases (one unit, several files) fail loud.
+    /// Qualified names resolve through [`resolve_file_call_key`], so
+    /// re-exported file functions serve under the export spelling.
     pub fn exported_metas(
         &self,
         func_exports: &[String],
-        unit_targets: &HashMap<String, HashSet<String>>,
+        unit_targets: &AliasTargets,
     ) -> anyhow::Result<Vec<FuncMeta>> {
         let mut out = Vec::with_capacity(func_exports.len());
         for name in func_exports {
-            // Bare names are script FUNCs; qualified names address the
-            // registry directly, so host functions export with their
-            // own metadata and docs.
+            // Bare names are script FUNCs; qualified names resolve
+            // through the unit's alias targets first, falling back to
+            // the global spelling for hosts and entry-owned scripts.
             let qualified = match name.split_once("::") {
                 None => qualify(SCRIPT_MODULE_NAME, name),
                 Some(_) => name.clone(),
             };
-            if let Some(entry) = self.entries.get(&qualified) {
-                out.push(entry.meta.clone());
-                continue;
-            }
-            if let Some((alias, base)) = name.split_once("::") {
-                match unit_targets.get(alias) {
-                    Some(files) if files.len() == 1 => {
-                        let canonical =
-                            file_func_key(files.iter().next().expect("singleton checked"), base);
-                        if let Some(entry) = self.entries.get(&canonical) {
-                            let mut meta = entry.meta.clone();
-                            meta.name = name.clone();
-                            out.push(meta);
-                            continue;
-                        }
-                    }
-                    Some(files) if files.len() > 1 => {
-                        anyhow::bail!("{}", ambiguous_alias_message(alias, base, files));
-                    }
-                    _ => {}
+            let lookup = self
+                .resolve_file_call_key(unit_targets, &qualified)?
+                .unwrap_or_else(|| qualified.clone());
+            if let Some(entry) = self.entries.get(&lookup) {
+                let mut meta = entry.meta.clone();
+                if lookup != qualified {
+                    meta.name = name.clone();
                 }
+                out.push(meta);
+                continue;
             }
             anyhow::bail!(
                 "EXPORT `{name}` matches no defined script function or known host function"

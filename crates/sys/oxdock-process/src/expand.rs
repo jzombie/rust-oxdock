@@ -477,15 +477,9 @@ pub fn parse_placeholder_call(key: &str) -> Option<(String, String, Vec<String>)
     Some((module, call.name.to_string(), args))
 }
 
-/// Maximum nesting for map and list literals in placeholder call args.
-const MAX_LITERAL_DEPTH: usize = 16;
-
-/// Split on a top-level separator inside placeholder call args.
-/// One shared implementation lives in the parser; this stays as
-/// the local name so map/list lowering reads unchanged.
-fn split_top_level(src: &str, sep: char) -> Vec<String> {
-    oxdock_parser::template::split_top_level(src, sep)
-}
+/// Maximum nesting for map and list literals in placeholder call
+/// args: the parser's shared argument depth budget.
+const MAX_LITERAL_DEPTH: usize = oxdock_parser::template::MAX_TEMPLATE_ARG_DEPTH;
 
 /// Resolve one placeholder call argument against script variables for
 /// call resolution outside the streaming expander. Same grammar there:
@@ -513,78 +507,71 @@ fn resolve_call_value(
     vars: &HashMap<String, oxdock_parser::Value>,
     depth: usize,
 ) -> Result<oxdock_parser::Value> {
+    use oxdock_parser::template::{
+        ScalarLit, TemplateArg, classify_template_arg, parse_scalar_literal, parse_string_literal,
+        parse_var_path,
+    };
     if depth > MAX_LITERAL_DEPTH {
         bail!("placeholder call argument nests too deep (limit {MAX_LITERAL_DEPTH})");
     }
-    if let Some(rest) = src.strip_prefix('$') {
-        // `$` refs split through the single template owner; the empty
-        // check below keeps the historical malformed-argument error.
-        return resolve_value_path(&oxdock_parser::template::split_var_path(rest), vars);
-    }
-    if let Some(literal) = oxdock_parser::template::parse_string_literal(src) {
-        return literal.map(oxdock_parser::Value::string);
-    }
-    if let Some(inner) = oxdock_parser::template::strip_wrapped_delimiters(src, '{', '}') {
-        return resolve_call_map(inner, vars, depth);
-    }
-    if let Some(inner) = oxdock_parser::template::strip_wrapped_delimiters(src, '[', ']') {
-        return resolve_call_list(inner, vars, depth);
-    }
-    match src {
-        "true" => return Ok(oxdock_parser::Value::bool(true)),
-        "false" => return Ok(oxdock_parser::Value::bool(false)),
-        _ => {}
-    }
-    if let Ok(i) = src.parse::<i64>() {
-        return Ok(oxdock_parser::Value::int(i));
-    }
-    if let Ok(f) = src.parse::<f64>() {
-        return Ok(oxdock_parser::Value::float(f));
+    match classify_template_arg(src) {
+        TemplateArg::Dollar(rest) => {
+            let Some(parts) = parse_var_path(rest) else {
+                // `$` refs split through the single template owner; the
+                // empty check below keeps the historical
+                // malformed-argument error.
+                bail!("invalid placeholder call argument: empty variable reference");
+            };
+            return resolve_value_path(&parts, vars);
+        }
+        TemplateArg::Str(literal_src) => {
+            if let Some(literal) = parse_string_literal(literal_src) {
+                return literal.map(oxdock_parser::Value::string);
+            }
+        }
+        TemplateArg::Map(inner) => {
+            return resolve_call_map(inner, vars, depth);
+        }
+        TemplateArg::List(inner) => {
+            return resolve_call_list(inner, vars, depth);
+        }
+        TemplateArg::Scalar(scalar_src) => match parse_scalar_literal(scalar_src) {
+            Some(ScalarLit::Bool(value)) => return Ok(oxdock_parser::Value::bool(value)),
+            Some(ScalarLit::Int(value)) => return Ok(oxdock_parser::Value::int(value)),
+            Some(ScalarLit::Float(value)) => return Ok(oxdock_parser::Value::float(value)),
+            None => {}
+        },
+        TemplateArg::Invalid(_) => {}
     }
     bail!(
         "invalid placeholder call argument '{src}': use $var.path, a string, int, float, or bool literal, or a {{key: value}} or [item] literal"
     )
 }
 
-/// Resolve a `{key: value}` map literal. Keys are bare ASCII
-/// identifiers or string literals; values recurse through
-/// [`resolve_call_value`].
+/// Resolve a `{key: value}` map literal. Keys validate through the
+/// shared key parser; values recurse through [`resolve_call_value`].
 fn resolve_call_map(
     inner: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
     depth: usize,
 ) -> Result<oxdock_parser::Value> {
+    use oxdock_parser::template::{parse_map_key, split_map_entry, split_top_level};
     let mut entries = std::collections::BTreeMap::new();
     if inner.trim().is_empty() {
         return Ok(oxdock_parser::Value::map(entries));
     }
     for entry in split_top_level(inner, ',') {
-        let parts = split_top_level(&entry, ':');
-        if parts.len() != 2 {
+        let Some((key_src, value_src)) = split_map_entry(&entry) else {
             bail!("invalid map literal entry '{entry}': use key: value");
-        }
-        let key = resolve_call_key(&parts[0])?;
+        };
+        let key = parse_map_key(&key_src)?;
         if entries.contains_key(&key) {
             bail!("duplicate key '{key}' in map literal");
         }
-        let value = resolve_call_value(&parts[1], vars, depth + 1)?;
+        let value = resolve_call_value(&value_src, vars, depth + 1)?;
         entries.insert(key, value);
     }
     Ok(oxdock_parser::Value::map(entries))
-}
-
-/// Resolve one map literal key: a bare ASCII identifier or a string
-/// literal in any spelling. String shapes route through the single
-/// `oxdock_parser::template::parse_string_literal` owner, never a
-/// local quote check.
-fn resolve_call_key(src: &str) -> Result<String> {
-    if let Some(literal) = oxdock_parser::template::parse_string_literal(src) {
-        return literal;
-    }
-    if !src.is_empty() && src.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Ok(src.to_string());
-    }
-    bail!("invalid map literal key '{src}': use a bare name or any string spelling")
 }
 
 /// Resolve a `[item]` list literal, elements recursing through
@@ -598,7 +585,7 @@ fn resolve_call_list(
     if inner.trim().is_empty() {
         return Ok(oxdock_parser::Value::list(items));
     }
-    for item in split_top_level(inner, ',') {
+    for item in oxdock_parser::template::split_top_level(inner, ',') {
         items.push(resolve_call_value(&item, vars, depth + 1)?);
     }
     Ok(oxdock_parser::Value::list(items))
