@@ -240,6 +240,10 @@ pub struct ExecIo {
     /// conformance) whose in-process binary is not a CLI; `None` keeps
     /// the `current_exe` default.
     interpreter_override: Option<String>,
+    /// Verbatim CLI tail after the script position (#226): surfaced
+    /// script-side via `STD::ARGV()`. Staged by the CLI from
+    /// `Options.script_args`; embedding hosts stage their own argv.
+    script_args: Vec<String>,
 }
 
 /// Shared append-only manifest of executed `--to-host` declarations.
@@ -679,6 +683,23 @@ impl ExecIo {
     /// `current_exe` default.
     pub fn interpreter_override(&self) -> Option<String> {
         self.interpreter_override.clone()
+    }
+
+    /// Stage this run's script args for `STD::ARGV()`. Chainable.
+    /// Callers pass the post-separator tail: the CLI strips one leading
+    /// `--` before staging, so embedded hosts stage already-stripped args.
+    pub fn set_script_args<I, S>(&mut self, args: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.script_args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The staged script args for this run.
+    pub fn script_args(&self) -> &[String] {
+        &self.script_args
     }
 
     /// Stage the transport behind one `REMOTE` target. Chainable; the NET

@@ -83,10 +83,10 @@ fn cli_exit_code_relays_guest_exit_over_loopback() {
     // guest's code, proving the relay crossed the real wire protocol.
     let bin = env!("CARGO_BIN_EXE_oxdock");
     let mut cmd = CommandBuilder::new(bin);
-    cmd.arg("--script")
-        .arg("script.ox")
-        .arg("--remote")
-        .arg(format!("loop=\"{bin}\""));
+    cmd.arg("--remote")
+        .arg(format!("loop=\"{bin}\""))
+        .arg("--script")
+        .arg("script.ox");
     cmd.env(oxdock_fs::env::oxdock::WORKSPACE_ROOT, root.display());
     let status = cmd.status().expect("run cli");
     assert_eq!(status.code(), Some(3), "guest EXIT must reach the OS");

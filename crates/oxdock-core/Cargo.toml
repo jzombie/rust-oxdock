@@ -24,6 +24,7 @@ anyhow.workspace = true
 base64.workspace = true
 flate2.workspace = true
 indoc.workspace = true
+lexopt.workspace = true
 line-ending.workspace = true
 oxdock-fs.workspace = true
 oxdock-func-macro.workspace = true

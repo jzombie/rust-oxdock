@@ -30,7 +30,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.40.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.41.0-alpha/oxdock/)
 
 Jump to the [Command Reference](#command-reference) below for the full
 command list with runnable examples, or view the standard library
@@ -63,11 +63,11 @@ Installs to `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH. Set `$env:I
 For a reproducible install, pin an explicit release:
 
 ```sh
-(export VERSION=v0.40.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
+(export VERSION=v0.41.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
 ```
 
 ```powershell
-$env:VERSION = 'v0.40.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
+$env:VERSION = 'v0.41.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 ```
 
 </details>
@@ -82,7 +82,7 @@ release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 From the registry:
 
 ```sh
-cargo install oxdock@0.40.0-alpha
+cargo install oxdock@0.41.0-alpha
 ```
 
 From a local checkout:
@@ -96,7 +96,7 @@ cargo install --path oxdock
 ### Add to Rust project
 
 ```sh
-cargo add oxdock@0.40.0-alpha
+cargo add oxdock@0.41.0-alpha
 ```
 
 ### Run a script with the CLI
@@ -3769,6 +3769,33 @@ releases once); equality is handle identity.
 
 The STD standard library: built-in functions available to every script. Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Plugin modules ([`NET`, `SSH`, `MARKDOWN`](https://github.com/jzombie/rust-oxdock#plugin-references)) add more functions the same way, and hosts can extend the language with their own modules ([Extending OxDock from Rust](https://github.com/jzombie/rust-oxdock#extending-oxdock-from-rust)). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
 
+### STD::ARGV
+
+Report the verbatim CLI tail after the script position.
+
+Staged per run from `Options.script_args` (#226): everything after
+the script file (or `--script <file>`), with one leading `--`
+stripped. Never merged with interpreter flags, so `--dry-run`
+after the script arrives here instead of enabling dry-run.
+
+**Signature:** `STD::ARGV(): LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: empty**
+
+```oxdock
+# With no staged args the list is empty.
+IMPORT [STD]
+LET $args: LIST<STRING> = ARGV()
+LET $n: INT = LEN($args)
+ASSERT_EQ $n 0
+```
+
 ### STD::BASE64_DECODE
 
 Decode standard base64 to a STRING.
@@ -4629,6 +4656,68 @@ IMPORT [STD]
 LET $m: MAP<ANY> = MERGE_MAPS([{a: 1}, {b: 2}], "overwrite")
 ASSERT_EQ $m.a 1
 ASSERT_EQ $m.b 2
+```
+
+### STD::PARSE_ARGS
+
+Parse an argv tail into flags and positionals.
+
+Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt`
+tokenizer. Long `--key=value` binds the string value. Bare long
+`--key` binds `true`. Short `-a` binds `true` and clusters `-abc`
+bind each letter. Attached short values bind only through `=`
+(`-k=value`). One `--` entry ends option parsing, so the rest
+(including a second `--`) lands in `positionals`. Duplicate keys
+overwrite in order, so the last occurrence wins. Values stay
+strings: cast explicitly in script.
+
+**Signature:** `STD::PARSE_ARGS($args: LIST<STRING>): MAP<flags: MAP<BOOL|STRING>, positionals: LIST<STRING>>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$args` (`LIST<STRING>`): Argv tail to parse, usually from `STD::ARGV()`.
+
+**Returns:** `MAP<flags: MAP<BOOL|STRING>, positionals: LIST<STRING>>`
+
+  - `flags` (`MAP<BOOL|STRING>`): Parsed flags: bare entries bind true, equals entries bind strings.
+  - `positionals` (`LIST<STRING>`): Trailing values and entries after the first double dash.
+
+**Examples:**
+
+**Example: longs**
+
+```oxdock
+# Long equals entries bind strings, bare longs bind true.
+IMPORT [STD]
+LET $parsed: MAP<ANY> = PARSE_ARGS(["--host=example.com", "--verbose", "serve"])
+ASSERT_EQ $parsed.flags.host "example.com"
+ASSERT_EQ $parsed.flags.verbose true
+ASSERT_EQ $parsed.positionals.0 "serve"
+```
+
+**Example: shorts and separator**
+
+```oxdock
+# Short clusters expand, short equals binds, and one double dash ends flags.
+IMPORT [STD]
+LET $parsed: MAP<ANY> = PARSE_ARGS(["-ab", "-k=value", "--flag", "--", "--not-a-flag"])
+ASSERT_EQ $parsed.flags.a true
+ASSERT_EQ $parsed.flags.b true
+ASSERT_EQ $parsed.flags.k "value"
+ASSERT_EQ $parsed.flags.flag true
+ASSERT_EQ $parsed.positionals.0 "--not-a-flag"
+```
+
+**Example: duplicates and separator**
+
+```oxdock
+# Duplicate keys overwrite in order, and a bare second double dash is positional.
+IMPORT [STD]
+LET $parsed: MAP<ANY> = PARSE_ARGS(["--x=1", "--x=2", "--", "--"])
+ASSERT_EQ $parsed.flags.x "2"
+ASSERT_EQ $parsed.positionals.0 "--"
 ```
 
 ### STD::PARSE_BYTE_COUNT
@@ -6787,8 +6876,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.40.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.40.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.41.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.41.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -6800,7 +6889,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.40.0-alpha"
+    "alpha OxDock 0.41.0-alpha"
 );
 ```
 
@@ -7469,13 +7558,13 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 
 ## Citation
 
-If you use OxDock in published work, cite version `0.40.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+If you use OxDock in published work, cite version `0.41.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
 
 ```bibtex
 @software{oxdock,
   author = "Jeremy Harris",
   title = "OxDock",
-  version = "0.40.0-alpha",
+  version = "0.41.0-alpha",
   url = "https://github.com/jzombie/rust-oxdock",
   license = "Apache-2.0"
 }

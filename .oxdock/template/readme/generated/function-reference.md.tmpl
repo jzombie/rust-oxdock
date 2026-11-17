@@ -3,6 +3,33 @@
 
 The STD standard library: built-in functions available to every script. Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Plugin modules ([`NET`, `SSH`, `MARKDOWN`]({{ $global.workspace_url }}#plugin-references)) add more functions the same way, and hosts can extend the language with their own modules ([Extending OxDock from Rust]({{ $global.workspace_url }}#extending-oxdock-from-rust)). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
 
+### STD::ARGV
+
+Report the verbatim CLI tail after the script position.
+
+Staged per run from `Options.script_args` (#226): everything after
+the script file (or `--script <file>`), with one leading `--`
+stripped. Never merged with interpreter flags, so `--dry-run`
+after the script arrives here instead of enabling dry-run.
+
+**Signature:** `STD::ARGV(): LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: empty**
+
+```oxdock
+# With no staged args the list is empty.
+IMPORT [STD]
+LET $args: LIST<STRING> = ARGV()
+LET $n: INT = LEN($args)
+ASSERT_EQ $n 0
+```
+
 ### STD::BASE64_DECODE
 
 Decode standard base64 to a STRING.
@@ -863,6 +890,68 @@ IMPORT [STD]
 LET $m: MAP<ANY> = MERGE_MAPS([{a: 1}, {b: 2}], "overwrite")
 ASSERT_EQ $m.a 1
 ASSERT_EQ $m.b 2
+```
+
+### STD::PARSE_ARGS
+
+Parse an argv tail into flags and positionals.
+
+Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt`
+tokenizer. Long `--key=value` binds the string value. Bare long
+`--key` binds `true`. Short `-a` binds `true` and clusters `-abc`
+bind each letter. Attached short values bind only through `=`
+(`-k=value`). One `--` entry ends option parsing, so the rest
+(including a second `--`) lands in `positionals`. Duplicate keys
+overwrite in order, so the last occurrence wins. Values stay
+strings: cast explicitly in script.
+
+**Signature:** `STD::PARSE_ARGS($args: LIST<STRING>): MAP<flags: MAP<BOOL|STRING>, positionals: LIST<STRING>>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$args` (`LIST<STRING>`): Argv tail to parse, usually from `STD::ARGV()`.
+
+**Returns:** `MAP<flags: MAP<BOOL|STRING>, positionals: LIST<STRING>>`
+
+  - `flags` (`MAP<BOOL|STRING>`): Parsed flags: bare entries bind true, equals entries bind strings.
+  - `positionals` (`LIST<STRING>`): Trailing values and entries after the first double dash.
+
+**Examples:**
+
+**Example: longs**
+
+```oxdock
+# Long equals entries bind strings, bare longs bind true.
+IMPORT [STD]
+LET $parsed: MAP<ANY> = PARSE_ARGS(["--host=example.com", "--verbose", "serve"])
+ASSERT_EQ $parsed.flags.host "example.com"
+ASSERT_EQ $parsed.flags.verbose true
+ASSERT_EQ $parsed.positionals.0 "serve"
+```
+
+**Example: shorts and separator**
+
+```oxdock
+# Short clusters expand, short equals binds, and one double dash ends flags.
+IMPORT [STD]
+LET $parsed: MAP<ANY> = PARSE_ARGS(["-ab", "-k=value", "--flag", "--", "--not-a-flag"])
+ASSERT_EQ $parsed.flags.a true
+ASSERT_EQ $parsed.flags.b true
+ASSERT_EQ $parsed.flags.k "value"
+ASSERT_EQ $parsed.flags.flag true
+ASSERT_EQ $parsed.positionals.0 "--not-a-flag"
+```
+
+**Example: duplicates and separator**
+
+```oxdock
+# Duplicate keys overwrite in order, and a bare second double dash is positional.
+IMPORT [STD]
+LET $parsed: MAP<ANY> = PARSE_ARGS(["--x=1", "--x=2", "--", "--"])
+ASSERT_EQ $parsed.flags.x "2"
+ASSERT_EQ $parsed.positionals.0 "--"
 ```
 
 ### STD::PARSE_BYTE_COUNT

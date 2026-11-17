@@ -787,6 +787,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TaskPoll::registration(),
             Version::registration(),
             Interpreter::registration(),
+            Argv::registration(),
+            ParseArgs::registration(),
             TextTrim::registration(),
             TextTrimPrefix::registration(),
             TextTrimSuffix::registration(),
@@ -2240,6 +2242,142 @@ fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     names.sort();
     names.dedup();
     Ok(Value::list(names.into_iter().map(Value::string).collect()))
+}
+
+/// Report the verbatim CLI tail after the script position.
+///
+/// Staged per run from `Options.script_args` (#226): everything after
+/// the script file (or `--script <file>`), with one leading `--`
+/// stripped. Never merged with interpreter flags, so `--dry-run`
+/// after the script arrives here instead of enabling dry-run.
+#[oxdock_func(returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "empty",
+    code = r###"
+    # With no staged args the list is empty.
+    IMPORT [STD]
+    LET $args: LIST<STRING> = ARGV()
+    LET $n: INT = LEN($args)
+    ASSERT_EQ $n 0
+    "###
+)]
+fn argv<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
+    Ok(Value::list(
+        cx.state
+            .io
+            .script_args()
+            .iter()
+            .cloned()
+            .map(Value::string)
+            .collect(),
+    ))
+}
+
+/// Parse an argv tail into flags and positionals.
+///
+/// Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt`
+/// tokenizer. Long `--key=value` binds the string value. Bare long
+/// `--key` binds `true`. Short `-a` binds `true` and clusters `-abc`
+/// bind each letter. Attached short values bind only through `=`
+/// (`-k=value`). One `--` entry ends option parsing, so the rest
+/// (including a second `--`) lands in `positionals`. Duplicate keys
+/// overwrite in order, so the last occurrence wins. Values stay
+/// strings: cast explicitly in script.
+#[oxdock_func(
+    pure,
+    returns = TypeTag::Record(std::sync::Arc::from([Field {
+        name: "flags".to_string(),
+        ty: TypeTag::MapOf(std::sync::Arc::new(TypeTag::union(vec![
+            TypeTag::Bool,
+            TypeTag::String,
+        ]))),
+        docs: "Parsed flags: bare entries bind true, equals entries bind strings.",
+        optional: false,
+    }, Field {
+        name: "positionals".to_string(),
+        ty: TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)),
+        docs: "Trailing values and entries after the first double dash.",
+        optional: false,
+    }]))
+)]
+#[example(
+    name = "longs",
+    code = r###"
+    # Long equals entries bind strings, bare longs bind true.
+    IMPORT [STD]
+    LET $parsed: MAP<ANY> = PARSE_ARGS(["--host=example.com", "--verbose", "serve"])
+    ASSERT_EQ $parsed.flags.host "example.com"
+    ASSERT_EQ $parsed.flags.verbose true
+    ASSERT_EQ $parsed.positionals.0 "serve"
+    "###
+)]
+#[example(
+    name = "shorts and separator",
+    code = r###"
+    # Short clusters expand, short equals binds, and one double dash ends flags.
+    IMPORT [STD]
+    LET $parsed: MAP<ANY> = PARSE_ARGS(["-ab", "-k=value", "--flag", "--", "--not-a-flag"])
+    ASSERT_EQ $parsed.flags.a true
+    ASSERT_EQ $parsed.flags.b true
+    ASSERT_EQ $parsed.flags.k "value"
+    ASSERT_EQ $parsed.flags.flag true
+    ASSERT_EQ $parsed.positionals.0 "--not-a-flag"
+    "###
+)]
+#[example(
+    name = "duplicates and separator",
+    code = r###"
+    # Duplicate keys overwrite in order, and a bare second double dash is positional.
+    IMPORT [STD]
+    LET $parsed: MAP<ANY> = PARSE_ARGS(["--x=1", "--x=2", "--", "--"])
+    ASSERT_EQ $parsed.flags.x "2"
+    ASSERT_EQ $parsed.positionals.0 "--"
+    "###
+)]
+fn parse_args(
+    /// Argv tail to parse, usually from `STD::ARGV()`.
+    args: Vec<String>,
+) -> Result<Value> {
+    use lexopt::Arg::{Long, Short, Value as ArgValue};
+    let mut parser = lexopt::Parser::from_args(args);
+    let mut flags: BTreeMap<String, Value> = BTreeMap::new();
+    let mut positionals: Vec<Value> = Vec::new();
+    let utf8 = |value: std::ffi::OsString| -> Result<String> {
+        value
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("PARSE_ARGS: argument must be UTF-8"))
+    };
+    loop {
+        match parser.next() {
+            Ok(None) => break,
+            Ok(Some(Long(name))) => {
+                let key = name.to_owned();
+                if let Some(raw) = parser.optional_value() {
+                    flags.insert(key, Value::string(utf8(raw)?));
+                } else {
+                    flags.insert(key, Value::bool(true));
+                }
+            }
+            Ok(Some(Short(ch))) => {
+                flags.insert(ch.to_string(), Value::bool(true));
+            }
+            Ok(Some(ArgValue(raw))) => {
+                positionals.push(Value::string(utf8(raw)?));
+            }
+            Err(lexopt::Error::UnexpectedValue { option, value }) => {
+                let key = option
+                    .strip_prefix("--")
+                    .or_else(|| option.strip_prefix('-'))
+                    .unwrap_or(option.as_str());
+                flags.insert(key.to_string(), Value::string(utf8(value)?));
+            }
+            Err(err) => anyhow::bail!("PARSE_ARGS: {err}"),
+        }
+    }
+    let mut out = BTreeMap::new();
+    out.insert("flags".to_string(), Value::map(flags));
+    out.insert("positionals".to_string(), Value::list(positionals));
+    Ok(Value::map(out))
 }
 
 /// Describe one function by qualified name.
