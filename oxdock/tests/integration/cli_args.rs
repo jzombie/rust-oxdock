@@ -50,3 +50,38 @@ fn positional_script_path_runs_like_script_flag() {
         "script output missing from: {stdout}"
     );
 }
+
+#[cfg(all(feature = "net", feature = "mcp"))]
+#[cfg_attr(
+    miri,
+    ignore = "spawns the CLI binary; Miri does not support process execution"
+)]
+#[test]
+fn exclusive_modes_reject_staged_script_args() {
+    // #226: `--remote-serve` and `--mcp` run alone; anything staged
+    // after the script position fails instead of serving.
+    let tempdir = GuardedPath::tempdir().expect("tempdir");
+    let root = tempdir.as_guarded_path().clone();
+    for args in [
+        vec!["--remote-serve", "script.ox", "extra"],
+        vec!["--mcp", "script.ox", "--", "extra"],
+    ] {
+        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_oxdock"));
+        for arg in args {
+            cmd.arg(arg);
+        }
+        cmd.env(oxdock_fs::env::oxdock::WORKSPACE_ROOT, root.display());
+        let output = cmd
+            .output()
+            .expect("run cli in exclusive mode with script args");
+        assert!(
+            !output.success(),
+            "exclusive mode must fail with staged script args"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("runs alone"),
+            "exclusivity error missing runs-alone wording: {stderr}"
+        );
+    }
+}

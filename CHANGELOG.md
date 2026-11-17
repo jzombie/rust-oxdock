@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.41.0-alpha] - 2026-11-17
+
+### Added
+
+- Verbatim script arguments with `STD::ARGV()` (#226): everything after `SCRIPT` is a script arg, never an interpreter flag, so `oxdock [OPTIONS] [--] [SCRIPT] [-- script-args...]` stages the tail per run and `LET $args: LIST<STRING> = ARGV()` reads it script-side. One leading `--` after the script is a separator and dropped, so `--dry-run` after the script stays data instead of enabling dry-run. Dash-leading positionals (`oxdock -- --foo`) read as a stdin script with args (pass dash-named files via `--script`), and `--remote-serve` / `--mcp` keep running alone, failing on any staged script args.
+- `STD::PARSE_ARGS($args)` function (pure): tokenizes an argv tail (usually `STD::ARGV()`) with the workspace `lexopt` tokenizer into a fixed `{flags, positionals}` record, so scripts stop hand-rolling prefix, split, and map loops. Long `--key=value` binds the string value and bare long `--key` binds `true`; short `-a` binds `true`, clusters `-abc` bind each letter, and attached short values bind only through `=` (`-k=value`). One `--` entry ends flag parsing and the rest (including a second `--`) lands in `positionals`. Duplicate keys overwrite in order, so the last occurrence wins, and values stay strings for explicit script-side casts.
+
 ## [0.40.0-alpha] - 2026-11-17
 
 ### Added

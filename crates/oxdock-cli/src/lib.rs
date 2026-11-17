@@ -1199,6 +1199,28 @@ mod tests {
         ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
     )]
     #[test]
+    fn options_parse_script_flag_takes_dash_leading_path() {
+        // #226: dash-named files ride `--script` (bare dash-leading
+        // positionals are stdin args, never files).
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let mut args = vec!["--script".to_string(), "--weird.ox".to_string()].into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        match opts.script {
+            ScriptSource::Path(path) => assert_eq!(
+                path,
+                workspace_root.join("--weird.ox").expect("script path")
+            ),
+            ScriptSource::Stdin => panic!("expected path script"),
+        }
+        assert!(opts.script_args.is_empty());
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
     fn options_parse_script_path_and_shell() {
         let workspace = GuardedPath::tempdir().expect("tempdir");
         let workspace_root = workspace.as_guarded_path().clone();

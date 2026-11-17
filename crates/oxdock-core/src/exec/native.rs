@@ -2324,6 +2324,16 @@ fn argv<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     ASSERT_EQ $parsed.positionals.0 "--not-a-flag"
     "###
 )]
+#[example(
+    name = "duplicates and separator",
+    code = r###"
+    # Duplicate keys overwrite in order, and a bare second double dash is positional.
+    IMPORT [STD]
+    LET $parsed: MAP<ANY> = PARSE_ARGS(["--x=1", "--x=2", "--", "--"])
+    ASSERT_EQ $parsed.flags.x "2"
+    ASSERT_EQ $parsed.positionals.0 "--"
+    "###
+)]
 fn parse_args(
     /// Argv tail to parse, usually from `STD::ARGV()`.
     args: Vec<String>,
