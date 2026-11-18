@@ -2696,8 +2696,7 @@ impl<P: ProcessManager> OxDockFn<P> for ParseFlags {
             let specs = resolve_flags_specs(cx)?;
             let (raw, positionals) = tokenize_raw_args(args)?;
             if !positionals.is_empty() {
-                let shown: Vec<String> =
-                    positionals.iter().map(|pos| pos.to_string()).collect();
+                let shown: Vec<String> = positionals.iter().map(|pos| pos.to_string()).collect();
                 anyhow::bail!(
                     "PARSE_FLAGS() does not accept positional arguments; found {}",
                     shown.join(", ")

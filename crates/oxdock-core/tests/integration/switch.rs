@@ -300,7 +300,6 @@ fn switch_bare_call_conditions_and_no_match_noop() {
 
 #[test]
 fn switch_bare_head_tolerates_comment_gap() {
-
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
