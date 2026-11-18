@@ -19,6 +19,8 @@ mod incremental;
 mod key_path;
 #[path = "integration/let_capture.rs"]
 mod let_capture;
+#[path = "integration/parse_args.rs"]
+mod parse_args;
 #[path = "integration/phase_boundary.rs"]
 mod phase_boundary;
 #[path = "integration/reference_examples.rs"]

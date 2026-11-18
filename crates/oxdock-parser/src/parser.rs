@@ -9420,6 +9420,42 @@ mod tests {
     }
 
     #[test]
+    fn type_field_defaults_parse_to_canonical_targets() {
+        // Token-level regression: `= literal` tails belong to the
+        // field (floats lex as three tokens), and the statement
+        // target canonicalizes exactly like the spelling parser.
+        for (text, want) in [
+            ("TYPE F = MAP<retries: INT = 2>", "MAP<retries: INT = 2>"),
+            ("TYPE F = MAP<retries: INT=-2>", "MAP<retries: INT = -2>"),
+            (
+                "TYPE F = MAP<ratio: FLOAT = 2.5>",
+                "MAP<ratio: FLOAT = 2.5>",
+            ),
+            ("TYPE F = MAP<on: BOOL = true>", "MAP<on: BOOL = true>"),
+            (
+                "TYPE F = MAP<model: STRING = \"gpt-4\">",
+                "MAP<model: STRING = \"gpt-4\">",
+            ),
+            (
+                "TYPE F = MAP<k: STRING = \"d\", n: INT = 3>",
+                "MAP<k: STRING = \"d\", n: INT = 3>",
+            ),
+        ] {
+            assert_parity(text);
+            let steps = crate::parse_script(text, lower)
+                .unwrap_or_else(|e| panic!("default spelling must parse {text:?}: {e}"));
+            let target = steps
+                .iter()
+                .find_map(|s| match &s.kind {
+                    StepKind::TypeAlias { target, .. } => Some(target.clone()),
+                    _ => None,
+                })
+                .expect("TYPE alias step");
+            assert_eq!(target, want, "canonical target for {text:?}");
+        }
+    }
+
+    #[test]
     fn multi_line_run_exec_matches_single_line_shape() {
         // `RUN [...]` rides the shared bracket core, so a wrapped exec
         // list parses exactly like its single-line spelling (and agrees

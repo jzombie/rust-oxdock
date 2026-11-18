@@ -299,6 +299,28 @@ fn switch_bare_call_conditions_and_no_match_noop() {
 }
 
 #[test]
+fn switch_bare_head_tolerates_comment_gap() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        # A comment between the bare head and the body brace parses:
+        # gaps skip before the brace check, like the discriminant path.
+        LET $n: INT = 2
+        SWITCH /* pick */ {
+            CASE $n > 5 {
+                WRITE band.txt high
+            }
+            CASE $n > 1 {
+                WRITE band.txt mid
+            }
+        }
+        LET $band: STRING = READ band.txt
+        ASSERT_EQ $band "mid"
+    "#};
+    run_script(&root, script).expect("comment gap before body parses");
+}
+
+#[test]
 fn switch_break_exits_arm_and_continue_reaches_loop() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
