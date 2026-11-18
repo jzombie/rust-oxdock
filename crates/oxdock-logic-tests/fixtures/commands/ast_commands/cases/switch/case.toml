@@ -1,0 +1,5 @@
+name = "switch"
+
+[expect]
+files = { "hit.txt" = "second", "fallthrough.txt" = "fallback" }
+missing = ["wrong.txt"]

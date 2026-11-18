@@ -1,0 +1,21 @@
+LET $cmd: STRING = "b"
+SWITCH $cmd {
+    CASE "a" {
+        WRITE wrong.txt "nope"
+    }
+    CASE "b", "beta" {
+        WRITE hit.txt "second"
+    }
+    DEFAULT {
+        WRITE wrong.txt "nope"
+    }
+}
+LET $other: STRING = "zzz"
+SWITCH $other {
+    CASE "a" {
+        WRITE wrong.txt "nope"
+    }
+    DEFAULT {
+        WRITE fallthrough.txt "fallback"
+    }
+}
