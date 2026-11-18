@@ -987,7 +987,7 @@ fn apply_neg(val: Value) -> Result<Value> {
 }
 
 /// Strict value equality for `SWITCH` matching: the `==` branch of
-/// [`apply_compare`](self::apply_compare) without the `Value` wrapper.
+/// [`apply_compare`] without the `Value` wrapper.
 /// Numerics compare across `INT` and `FLOAT`; every other cross-type
 /// pair is unequal.
 pub(crate) fn values_equal(left: &Value, right: &Value) -> bool {
