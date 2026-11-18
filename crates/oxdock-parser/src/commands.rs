@@ -2882,7 +2882,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 so `7 / 2` is `3`); any `Float` operand promotes to `FLOAT`.
                 Division by zero, overflow, and non-finite results are errors.
                 Both numeric sides compare numerically (`1 == 1.0` is true);
-                otherwise `==`/`!=` compare rendered strings and ordering on
+                otherwise `==`/`!=` are strict (cross-type words are unequal,
+                so `"true" == true` is false) and ordering on
                 non-numerics is a Type Error. Constant subtrees fold at parse
                 time and dynamic arithmetic compiles to flat RPN with
                 identical semantics.

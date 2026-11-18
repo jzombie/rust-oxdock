@@ -913,8 +913,9 @@ fn apply_neg(val: Value) -> Result<Value> {
 /// decimals whose reduced denominator is a power of 2 (0.5, 0.25, 0.75)
 /// compare cleanly, while denominators containing factor 5 (0.1, 0.2, 0.3)
 /// are repeating fractions in binary, so `0.1 + 0.2 == 0.3` is false.
-/// The LET reference documents this with examples; otherwise `==`/`!=`
-/// keep the stringified behavior and ordering on non-numerics bails.
+/// The LET reference documents this with examples. `==`/`!=` are otherwise
+/// strict: cross-type words compare unequal (`"true" == true` is false),
+/// matching `ASSERT_EQ` value equality; ordering on non-numerics bails.
 fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
     if let (Some(a), Some(b)) = (as_f64_value(left), as_f64_value(right)) {
         // Both numeric (finite floats; ints always qualify).
@@ -942,11 +943,10 @@ fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
     }
     match op {
         CompareOp::Eq | CompareOp::Ne => {
-            let ls = format_value_for_string(left)?;
-            let rs = format_value_for_string(right)?;
+            let equal = left == right;
             let result = match op {
-                CompareOp::Eq => ls == rs,
-                CompareOp::Ne => ls != rs,
+                CompareOp::Eq => equal,
+                CompareOp::Ne => !equal,
                 _ => bail!("internal error: equality shape"),
             };
             Ok(Value::bool(result))

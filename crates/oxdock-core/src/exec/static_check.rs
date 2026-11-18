@@ -4451,7 +4451,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let left_ty = self.infer_expr(left, env, scope, idx, depth + 1)?;
                 let right_ty = self.infer_expr(right, env, scope, idx, depth + 1)?;
                 match op {
-                    // Equality stringifies anything: always BOOL.
+                    // Equality is strict but always BOOL.
                     CompareOp::Eq | CompareOp::Ne => {}
                     // Ordering needs numerics (mirror apply_compare).
                     CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {

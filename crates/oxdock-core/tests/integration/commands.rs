@@ -1833,12 +1833,14 @@ fn rpn_math_position_runs_pure_calls() {
 fn rpn_math_position_runs_rpn_capable_stateful_calls() {
     // `GLOB(...)` inside a comparison lowers to RPN `Call`: this passes
     // only if the math path dispatches flagged stateful functions.
+    // Strict equality: the LIST result counts through `LEN` instead of
+    // stringifying against a STRING.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD]
         WRITE witness.txt "hi"
-        IF GLOB("*.txt") == "witness.txt" {
+        IF LEN(GLOB("*.txt")) == 1 {
             WRITE hit.txt "yes"
         }
         LET $h: STRING = READ hit.txt

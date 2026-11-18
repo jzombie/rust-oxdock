@@ -343,7 +343,8 @@ Numbers are numeric literals: `42` binds `INT`, `3.14` binds
 so `7 / 2` is `3`); any `Float` operand promotes to `FLOAT`.
 Division by zero, overflow, and non-finite results are errors.
 Both numeric sides compare numerically (`1 == 1.0` is true);
-otherwise `==`/`!=` compare rendered strings and ordering on
+otherwise `==`/`!=` are strict (cross-type words are unequal,
+so `"true" == true` is false) and ordering on
 non-numerics is a Type Error. Constant subtrees fold at parse
 time and dynamic arithmetic compiles to flat RPN with
 identical semantics.
@@ -3653,6 +3654,39 @@ LET $names: LIST<STRING> = FUNCTIONS()
 ASSERT_CONTAINS $names "STD::INT"
 ```
 
+### STD::GET
+
+Read one map entry with a default for missing keys.
+
+Pure MAP getter so optional flags cost one line instead of a
+`HAS_KEY` + index + rebind triple: present keys return their value
+verbatim (no coercion), absent keys return `default`.
+
+**Signature:** `STD::GET($map: MAP<ANY>, $key: STRING, $default: ANY): ANY`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$map` (`MAP<ANY>`): Map to read.
+- `$key` (`STRING`): Key to look up.
+- `$default` (`ANY`): Default for absent keys.
+
+**Returns:** `ANY`
+
+**Examples:**
+
+**Example: present and absent**
+
+```oxdock
+IMPORT [STD]
+LET $m: MAP<ANY> = PARSE_JSON("{\"a\": 1}")
+LET $hit: INT = GET($m, "a", 0)
+ASSERT_EQ $hit 1
+LET $miss: INT = GET($m, "b", 0)
+ASSERT_EQ $miss 0
+```
+
 ### STD::GLOB
 
 List workspace paths matching a glob pattern.
@@ -4152,26 +4186,20 @@ ASSERT_EQ $m.b 2
 
 Parse an argv tail into flags and positionals.
 
-Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt`
-tokenizer. Long `--key=value` binds the string value. Bare long
-`--key` binds `true`. Short `-a` binds `true` and clusters `-abc`
-bind each letter. Attached short values bind only through `=`
-(`-k=value`). One `--` entry ends option parsing, so the rest
-(including a second `--`) lands in `positionals`. Duplicate keys
-overwrite in order, so the last occurrence wins. Values stay
-strings: cast explicitly in script.
+Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt` tokenizer. See the function reference for the optional schema forms.
 
-**Signature:** `STD::PARSE_ARGS($args: LIST<STRING>): MAP<flags: MAP<BOOL|STRING>, positionals: LIST<STRING>>`
+**Signature:** `STD::PARSE_ARGS($args: LIST<STRING>, $schema?: MAP): MAP<flags: MAP<ANY>, positionals: LIST<STRING>>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 
 - `$args` (`LIST<STRING>`): Argv tail to parse, usually from `STD::ARGV()`.
+- `$schema?` (`MAP`): Optional flag schema: type names, defaults, or `{type, default?, required?}` descriptors. Omitted or `{}` parses untyped.
 
-**Returns:** `MAP<flags: MAP<BOOL|STRING>, positionals: LIST<STRING>>`
+**Returns:** `MAP<flags: MAP<ANY>, positionals: LIST<STRING>>`
 
-  - `flags` (`MAP<BOOL|STRING>`): Parsed flags: bare entries bind true, equals entries bind strings.
+  - `flags` (`MAP<ANY>`): Parsed flags: untyped `BOOL|STRING` without a schema, coerced targets with one.
   - `positionals` (`LIST<STRING>`): Trailing values and entries after the first double dash.
 
 **Examples:**
@@ -4179,7 +4207,6 @@ strings: cast explicitly in script.
 **Example: longs**
 
 ```oxdock
-# Long equals entries bind strings, bare longs bind true.
 IMPORT [STD]
 LET $parsed: MAP<ANY> = PARSE_ARGS(["--host=example.com", "--verbose", "serve"])
 ASSERT_EQ $parsed.flags.host "example.com"
@@ -4190,7 +4217,6 @@ ASSERT_EQ $parsed.positionals.0 "serve"
 **Example: shorts and separator**
 
 ```oxdock
-# Short clusters expand, short equals binds, and one double dash ends flags.
 IMPORT [STD]
 LET $parsed: MAP<ANY> = PARSE_ARGS(["-ab", "-k=value", "--flag", "--", "--not-a-flag"])
 ASSERT_EQ $parsed.flags.a true
@@ -4203,12 +4229,42 @@ ASSERT_EQ $parsed.positionals.0 "--not-a-flag"
 **Example: duplicates and separator**
 
 ```oxdock
-# Duplicate keys overwrite in order, and a bare second double dash is positional.
 IMPORT [STD]
 LET $parsed: MAP<ANY> = PARSE_ARGS(["--x=1", "--x=2", "--", "--"])
 ASSERT_EQ $parsed.flags.x "2"
 ASSERT_EQ $parsed.positionals.0 "--"
 ```
+
+**Example: typed schema**
+
+```oxdock
+IMPORT [STD]
+LET $parsed: MAP<ANY> = PARSE_ARGS(["--model=gpt-4", "--propose"], {model: "STRING", propose: false})
+ASSERT_EQ $parsed.flags.model "gpt-4"
+ASSERT_EQ $parsed.flags.propose true
+LET $flags: MAP<ANY> = $parsed.flags
+LET $raw: BOOL|STRING = GET($flags, "propose", false)
+LET $on: BOOL = BOOL($raw)
+ASSERT_EQ $on true
+```
+
+**Example: schema defaults and missing required**
+
+```oxdock expect_error:"missing required flag"
+IMPORT [STD]
+LET $parsed: MAP<ANY> = PARSE_ARGS([], {model: "STRING", propose: false})
+```
+
+**Expected error:** `missing required flag`
+
+**Example: schema unknown flag**
+
+```oxdock expect_error:"unknown flag"
+IMPORT [STD]
+LET $parsed: MAP<ANY> = PARSE_ARGS(["--model=x", "--nope=1"], {model: "STRING"})
+```
+
+**Expected error:** `unknown flag`
 
 ### STD::PARSE_BYTE_COUNT
 

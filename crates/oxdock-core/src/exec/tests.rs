@@ -6730,10 +6730,10 @@ fn file_scope_top_level_let_visible_in_func_and_template() {
     let fs = MockFs::new();
     let steps = parse_entry(indoc! {r#"
         LET $OUT: STRING = "shared"
-        FUNC GET(): STRING {
+        FUNC FETCH(): STRING {
          RETURN $OUT
         }
-        LET $v: STRING = GET()
+        LET $v: STRING = FETCH()
     "#});
     let (_, _, bindings) = run_steps_with_manager(
         Box::new(fs),
@@ -8968,12 +8968,12 @@ fn callee_does_not_inherit_caller_function_local_imports() {
 
 #[test]
 fn entry_func_call_before_let_fails_static() {
-    // Flow-sensitive entry lets: calling `GET` before `$late` is
+    // Flow-sensitive entry lets: calling `FETCH` before `$late` is
     // declared fails the static gate instead of crashing at runtime
     // with undefined variable.
     let steps = parse_entry(indoc! {r#"
-        FUNC GET(): STRING { RETURN $late }
-        LET $v: STRING = GET()
+        FUNC FETCH(): STRING { RETURN $late }
+        LET $v: STRING = FETCH()
         LET $late: STRING = "late"
     "#});
     let fs = MockFs::new();
@@ -8993,8 +8993,8 @@ fn entry_func_call_after_let_passes() {
     // earliest-call seeding includes `$late` for the call at step 3.
     let steps = parse_entry(indoc! {r#"
         LET $late: STRING = "late"
-        FUNC GET(): STRING { RETURN $late }
-        LET $v: STRING = GET()
+        FUNC FETCH(): STRING { RETURN $late }
+        LET $v: STRING = FETCH()
     "#});
     let (_, _, bindings) = run_steps_with_manager(
         Box::new(MockFs::new()),
@@ -9031,16 +9031,16 @@ fn transitive_call_before_let_fails_static() {
 #[test]
 fn block_nested_call_before_let_fails_static() {
     // Calls inside top-level `If` / `For` / `While` bodies count at
-    // the enclosing step index: the `GET()` call inside the `IF`
-    // block precedes `LET $late`, so `GET` must not observe it.
+    // the enclosing step index: the `FETCH()` call inside the `IF`
+    // block precedes `LET $late`, so `FETCH` must not observe it.
     // (The old walker only inspected the `If` head's own strings
     // and missed block-nested calls, seeding the full union and
     // crashing at runtime with undefined variable.)
     let steps = parse_entry(indoc! {r#"
         LET $go: BOOL = true
-        FUNC GET(): STRING { RETURN $late }
+        FUNC FETCH(): STRING { RETURN $late }
         IF $go {
-         LET $v: STRING = GET()
+         LET $v: STRING = FETCH()
         }
         LET $late: STRING = "late"
     "#});
@@ -9064,12 +9064,12 @@ fn uncalled_nested_funcdef_calls_do_not_advance_earliest() {
     // expression recursion and leaked the callee).
     let steps = parse_entry(indoc! {r#"
         LET $go: BOOL = true
-        FUNC GET(): STRING { RETURN "early" }
+        FUNC FETCH(): STRING { RETURN "early" }
         IF $go {
-         FUNC INNER(): STRING { RETURN GET() }
+         FUNC INNER(): STRING { RETURN FETCH() }
          LET $late: STRING = "late"
         }
-        LET $v: STRING = GET()
+        LET $v: STRING = FETCH()
         ECHO "{{ $v }}"
     "#});
     let (_, _, bindings) = run_steps_with_manager(
@@ -9511,15 +9511,15 @@ fn file_import_module_capture_let_resolves() {
         "cap.oxdock",
         indoc! {r#"
             LET $out: STRING = RUN "echo hi"
-            FUNC GET(): STRING {
+            FUNC FETCH(): STRING {
                 RETURN $out
             }
-            EXPORT GET
+            EXPORT FETCH
         "#},
     );
     let steps = parse_entry(indoc! {r#"
         IMPORT ["cap.oxdock" AS CAP]
-        LET $v: STRING = CAP::GET()
+        LET $v: STRING = CAP::FETCH()
     "#});
     let (_, _, bindings) = run_steps_with_manager(
         Box::new(fs),
@@ -10174,7 +10174,7 @@ fn file_import_module_paths_follow_caller_workdir() {
         "lib.oxdock",
         indoc! {r#"
             LET $n: INT = 0
-            FUNC GET(): STRING {
+            FUNC FETCH(): STRING {
              $n = $n + 1
              LET $out: STRING = READ "probe.txt"
              RETURN $out
@@ -10182,7 +10182,7 @@ fn file_import_module_paths_follow_caller_workdir() {
             FUNC COUNT(): INT {
              RETURN $n
             }
-            EXPORT [GET, COUNT]
+            EXPORT [FETCH, COUNT]
         "#},
     );
     let steps = parse_entry(indoc! {r#"
@@ -10191,9 +10191,9 @@ fn file_import_module_paths_follow_caller_workdir() {
         WRITE probe.txt "root"
         MKDIR sub
         WRITE sub/probe.txt "nested"
-        LET $r1: STRING = A::GET()
+        LET $r1: STRING = A::FETCH()
         WORKDIR sub
-        LET $r2: STRING = B::GET()
+        LET $r2: STRING = B::FETCH()
         LET $total: INT = A::COUNT()
     "#});
     let (_, _, bindings) = run_steps_with_manager(
@@ -10953,10 +10953,10 @@ fn template_module_init_inside_entry_func_resolves_against_module() {
         "m.oxdock",
         indoc! {r#"
                 LET $o: STRING = EXPAND "t.txt"
-                FUNC GET(): STRING {
+                FUNC FETCH(): STRING {
                  RETURN $o
                 }
-                EXPORT GET
+                EXPORT FETCH
             "#},
     );
     fs.write_file(
@@ -10968,7 +10968,7 @@ fn template_module_init_inside_entry_func_resolves_against_module() {
         IMPORT ["lib.oxdock" AS CB]
         FUNC T(): STRING {
          IMPORT ["m.oxdock" AS M]
-         LET $r: STRING = M::GET()
+         LET $r: STRING = M::FETCH()
          RETURN $r
         }
         LET $t: STRING = T()
@@ -11027,10 +11027,10 @@ fn template_module_init_call_into_other_uses_callee_aliases() {
                 IMPORT ["lib.oxdock" AS CB]
                 IMPORT ["other.oxdock" AS OTHER]
                 LET $r: STRING = OTHER::USE_IT()
-                FUNC GET(): STRING {
+                FUNC FETCH(): STRING {
                  RETURN $r
                 }
-                EXPORT GET
+                EXPORT FETCH
             "#},
     );
     fs.write_file(
@@ -11040,7 +11040,7 @@ fn template_module_init_call_into_other_uses_callee_aliases() {
     .expect("seed template file");
     let steps = parse_entry(indoc! {r#"
         IMPORT ["m.oxdock" AS M]
-        LET $v: STRING = M::GET()
+        LET $v: STRING = M::FETCH()
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
