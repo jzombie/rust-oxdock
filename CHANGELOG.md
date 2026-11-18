@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- `STD::GET($map, $key, $default)` function (pure) (#307): reads one map entry with a default for missing keys, so optional flags cost one line instead of a `HAS_KEY` plus index plus rebind triple. Present keys return their value verbatim with no coercion; absent keys return `default`.
+- Typed `STD::PARSE_ARGS($args, $schema?)` schemas (#307): a second optional MAP argument moves coercion, defaults, and usage errors into the engine. Omitted or `{}` keeps the existing untyped `BOOL|STRING` behavior. Each schema entry is a type-name `STRING` (`"STRING"`, `"BOOL"`, `"INT"`, `"FLOAT"`) for a required flag, a scalar default (`BOOL`/`INT`/`FLOAT`, or any other `STRING`) for an optional flag with inferred type, or a MAP descriptor (`{type, default?, required?}`). Present flags coerce to their target (`BOOL` accepts `true`/`false` spellings, `INT`/`FLOAT` parse their strings); a bare `--key` for a non-`BOOL` target fails naming the flag. Missing flags fill their default, missing required flags fail, unknown flags fail, and absent optional flags without a default stay absent (probe with `HAS_KEY`/`GET`).
+
+### Changed
+
+- [breaking] Scripts are affected: `==`/`!=` are strict (#307): cross-type words compare unequal (`"true" == true` is false) instead of comparing rendered strings, matching `ASSERT_EQ` value equality. Numerics still compare cross-type (`1 == 1.0` is true); ordering on non-numerics still fails.
+
 ## [0.41.0-alpha] - 2026-11-17
 
 ### Added
