@@ -94,16 +94,20 @@ pub(crate) fn shadowed_dist_paths(resolver: &PathResolver, root: &GuardedPath) -
             Err(_) => continue,
         };
         // Existence and length first: only read the file when a
-        // byte-for-byte comparison is actually needed. A metadata hit
-        // with an unreadable file (directory shadowing a file path,
+        // byte-for-byte comparison is actually needed. `file_len`
+        // answers from stat where the backend can stat and reports
+        // unsupported where it cannot (synthetic and mock
+        // filesystems), so the native size fast-path stays while
+        // those backends read bytes instead. A length hit with an
+        // unreadable file (directory shadowing a file path,
         // permission error) counts as drift: the disk entry cannot be
         // the embedded bytes. A broken symlink has no target for
-        // `metadata` (which follows links) but still shadows the path:
+        // stat (which follows links) but still shadows the path:
         // `entry_kind_no_follow` sees the link itself, so that case
         // counts as drift instead of silently passing as missing.
-        let differs = match resolver.metadata(&path) {
+        let differs = match resolver.file_len(&path) {
             Err(_) => resolver.entry_kind_no_follow(&path).is_ok(),
-            Ok(meta) if meta.len() as usize != bytes.len() => true,
+            Ok(Some(len)) if len as usize != bytes.len() => true,
             Ok(_) => match resolver.read_file(&path) {
                 Ok(disk) => disk.as_slice() != *bytes,
                 Err(_) => true,
@@ -522,6 +526,10 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg_attr(
+        miri,
+        ignore = "requires symlink support; Miri synthetic fs cannot create symlinks"
+    )]
     #[test]
     fn broken_symlink_at_dist_path_counts_as_drift() {
         // A broken symlink has no target for `metadata` (which follows

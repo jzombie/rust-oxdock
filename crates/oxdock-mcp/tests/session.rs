@@ -739,7 +739,13 @@ fn reload_without_watch_keeps_script_dir_import_resolution() {
     // lib lives only beside the script, so root-relative resolution
     // would fail loudly here.
     let (_fs, root) = test_fs();
-    let mut seeder = PathResolver::new_lazy(root.clone()).expect("seeder");
+    // Eager roots, not a lazy holder: under Miri a lazy resolver
+    // guards writes against its own synthetic root, so seeding the
+    // build-context tree through one fails containment. An eager
+    // resolver publishes `root` as the concrete snapshot root, so
+    // writes land in the shared synthetic state the handler's own
+    // resolver reads back through its build-context fallback.
+    let mut seeder = PathResolver::new_guarded(root.clone(), root.clone()).expect("seeder");
     seeder.set_workspace_root(root.clone());
     let sub = root.join("sub").expect("sub dir");
     seeder.create_dir_all(&sub).expect("create sub");

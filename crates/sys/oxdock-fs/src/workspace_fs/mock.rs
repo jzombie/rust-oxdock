@@ -176,6 +176,23 @@ impl WorkspaceFs for MockFs {
         bail!("metadata not supported in mock fs");
     }
 
+    /// Lengths straight from in-memory state: files report their byte
+    /// length for size fast-paths, directories answer `None` (no stat
+    /// lengths to report; the caller reads and treats the failure as
+    /// drift, exactly like a native stat length mismatch), and missing
+    /// paths error like a failed read.
+    fn file_len(&self, path: &GuardedPath) -> Result<Option<u64>> {
+        let rel = self.relative_path(path);
+        let state = self.state.lock().expect("mock state poisoned");
+        if let Some(bytes) = state.files.get(&rel) {
+            Ok(Some(bytes.len() as u64))
+        } else if rel.is_empty() || state.dirs.contains(&rel) {
+            Ok(None)
+        } else {
+            Err(anyhow::anyhow!("missing file {}", path.display()))
+        }
+    }
+
     fn root(&self) -> &GuardedPath {
         &self.root
     }
