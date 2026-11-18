@@ -47,8 +47,15 @@ pub struct Field {
     pub docs: &'static str,
     /// Optional fields (`MAP<permit?: PERMIT>`) may be absent: missing
     /// optional keys pass, missing required keys fail, extra keys
-    /// always fail.
+    /// always fail. A default (`MAP<retries: INT = 2>`) fills when
+    /// absent: defaults satisfy every binding check, and readers
+    /// never observe the hole.
     pub optional: bool,
+    /// Fill value for absent fields (`None` when the shape carries
+    /// none). Materialized where the alias resolves and checked
+    /// against the field type there, so ill-typed defaults fail
+    /// naming the declaration.
+    pub default: Option<Value>,
 }
 
 /// A declarative type for function params, returns, and bindings.
@@ -296,10 +303,15 @@ pub fn render_structural(tag: &TypeTag) -> String {
                 .iter()
                 .map(|field| {
                     format!(
-                        "{}{}: {}",
+                        "{}{}: {}{}",
                         field.name,
                         if field.optional { "?" } else { "" },
-                        render_structural(&field.ty)
+                        render_structural(&field.ty),
+                        field
+                            .default
+                            .as_ref()
+                            .map(|d| format!(" = {}", render_default_value(d)))
+                            .unwrap_or_default(),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -328,12 +340,76 @@ pub enum Spelled {
 }
 
 /// One generic argument: a bare type or a named (possibly optional)
-/// record field carrying its nested spelling.
+/// record field carrying its nested spelling and optional `= literal`
+/// default. Defaults are plain data here and become Values where the
+/// alias resolves, so spellings stay total and comparable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpelledField {
     pub name: Option<String>,
     pub optional: bool,
     pub ty: Spelled,
+    pub default: Option<SpelledDefault>,
+}
+
+/// One field default literal (`= 2`, `= "hi"`): integers, floats
+/// (stored as bits, since floats are not `Eq`), booleans, and
+/// double-quoted strings with no escapes. Plain data by design:
+/// resolution materializes the Value and checks it against the
+/// field type, so an ill-typed default fails naming the alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpelledDefault {
+    Str(String),
+    Int(i64),
+    Float(u64),
+    Bool(bool),
+}
+
+impl SpelledDefault {
+    /// Materialize the literal as a runtime word. Infallible by
+    /// construction: parsing validates, resolution converts.
+    pub fn to_value(&self) -> Value {
+        match self {
+            SpelledDefault::Str(s) => Value::string(s.clone()),
+            SpelledDefault::Int(n) => Value::int(*n),
+            SpelledDefault::Float(bits) => Value::float(f64::from_bits(*bits)),
+            SpelledDefault::Bool(b) => Value::bool(*b),
+        }
+    }
+
+    /// Canonical literal text: integers and booleans verbatim,
+    /// floats through `Debug` (shortest round-trip, always a
+    /// decimal point), strings double-quoted.
+    pub fn render(&self) -> String {
+        match self {
+            SpelledDefault::Str(s) => format!("\"{s}\""),
+            SpelledDefault::Int(n) => format!("{n}"),
+            SpelledDefault::Float(bits) => format!("{:?}", f64::from_bits(*bits)),
+            SpelledDefault::Bool(b) => format!("{b}"),
+        }
+    }
+}
+
+/// Canonical default literal text from a materialized word:
+/// integers and booleans verbatim, floats through `Debug`
+/// (shortest round-trip, always a decimal point), strings
+/// double-quoted. Must agree with [`SpelledDefault::render`]
+/// on every spelling-produced value; the round-trip test pins
+/// the agreement. Non-literals cannot arise from spellings;
+/// they render Debug rather than failing totality.
+pub fn render_default_value(value: &Value) -> String {
+    if let Some(n) = value.as_i64() {
+        return format!("{n}");
+    }
+    if let Some(f) = value.as_f64() {
+        return format!("{f:?}");
+    }
+    if let Some(b) = value.as_bool() {
+        return format!("{b}");
+    }
+    if let Some(s) = value.as_str() {
+        return format!("\"{s}\"");
+    }
+    format!("{value:?}")
 }
 
 /// Canonical spelling: exactly the structural representation
@@ -344,8 +420,7 @@ pub struct SpelledField {
 /// Malformed input passes through trimmed for the resolver to
 /// reject by name.
 pub fn canonicalize_spelling(s: &str) -> String {
-    let stripped: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    match parse_spelling(&stripped) {
+    match parse_spelling(s) {
         Ok(spelled) => render_spelled(&spelled),
         Err(_) => s.trim().to_string(),
     }
@@ -367,10 +442,15 @@ pub fn render_spelled(spelled: &Spelled) -> String {
                 .iter()
                 .map(|field| match &field.name {
                     Some(field_name) => format!(
-                        "{}{}: {}",
+                        "{}{}: {}{}",
                         field_name,
                         if field.optional { "?" } else { "" },
-                        render_spelled(&field.ty)
+                        render_spelled(&field.ty),
+                        field
+                            .default
+                            .as_ref()
+                            .map(|d| format!(" = {}", d.render()))
+                            .unwrap_or_default(),
                     ),
                     None => render_spelled(&field.ty),
                 })
@@ -382,10 +462,11 @@ pub fn render_spelled(spelled: &Spelled) -> String {
 
 /// Parse a spelling into its shape. Hand-rolled descent: the
 /// grammar guarantees shape for parser strings, this keeps the
-/// public resolution API safe for direct callers. All whitespace
-/// is stripped before parsing, so any spaced form parses.
+/// public resolution API safe for direct callers. Whitespace strips
+/// quote-aware (double-quoted default strings keep their spaces);
+/// any other spaced form parses.
 pub fn parse_spelling(s: &str) -> Result<Spelled, String> {
-    let text: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    let text: String = strip_spelling_whitespace(s);
     let (spelled, rest) = parse_spelled_one(&text, 0)?;
     if !rest.is_empty() {
         return Err(format!(
@@ -393,6 +474,25 @@ pub fn parse_spelling(s: &str) -> Result<Spelled, String> {
         ));
     }
     Ok(spelled)
+}
+
+/// Strip whitespace outside double-quoted default strings: quoted
+/// regions keep their bytes verbatim, everything else drops gaps.
+/// No escapes: a quote always toggles, so a default string cannot
+/// contain one (parse fails loudly instead of misreading).
+fn strip_spelling_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut quoted = false;
+    for ch in s.chars() {
+        if ch == '"' {
+            quoted = !quoted;
+        }
+        if !quoted && ch.is_whitespace() {
+            continue;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn parse_spelled_one(text: &str, depth: usize) -> Result<(Spelled, &str), String> {
@@ -444,12 +544,14 @@ fn parse_spelled_shape(text: &str, depth: usize) -> Result<(Spelled, &str), Stri
     loop {
         let (field_name, optional, after_name) = parse_spelled_field_name(rest);
         let (arg, after_arg) = parse_spelled_one(after_name, depth + 1)?;
+        let (default, after_default) = parse_spelled_default(after_arg)?;
         args.push(SpelledField {
             name: field_name,
             optional,
             ty: arg,
+            default,
         });
-        rest = after_arg;
+        rest = after_default;
         if let Some(tail) = rest.strip_prefix(',') {
             rest = tail;
             continue;
@@ -496,6 +598,81 @@ fn parse_spelled_field_name(text: &str) -> (Option<String>, bool, &str) {
     }
 }
 
+/// Optional `= literal` default after a field type: integers
+/// (optional `-`), decimals, `true`/`false`, or a double-quoted
+/// string with no escapes. No `=` means no default. Anything else
+/// fails naming the position, so malformed defaults never parse as
+/// a longer type.
+fn parse_spelled_default(text: &str) -> Result<(Option<SpelledDefault>, &str), String> {
+    let Some(after_eq) = text.strip_prefix('=') else {
+        return Ok((None, text));
+    };
+    let (lit, rest) = parse_spelled_literal(after_eq)?;
+    Ok((Some(lit), rest))
+}
+
+/// One default literal: the single owner for default spellings, so
+/// resolution and rendering agree on what parses. Trailing boundary
+/// checks belong to the caller: anything but `,` or `>` after the
+/// literal fails there naming the remainder.
+fn parse_spelled_literal(text: &str) -> Result<(SpelledDefault, &str), String> {
+    if let Some(after) = text.strip_prefix('"') {
+        match after.find('"') {
+            Some(end) => {
+                let (body, rest) = after.split_at(end);
+                return Ok((SpelledDefault::Str(body.to_string()), &rest[1..]));
+            }
+            None => {
+                return Err(format!(
+                    "unterminated string default in type spelling: {text:?}"
+                ));
+            }
+        }
+    }
+    if let Some(rest) = text.strip_prefix("true") {
+        return Ok((SpelledDefault::Bool(true), rest));
+    }
+    if let Some(rest) = text.strip_prefix("false") {
+        return Ok((SpelledDefault::Bool(false), rest));
+    }
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    if bytes.first() == Some(&b'-') {
+        i += 1;
+    }
+    let int_start = i;
+    while bytes.get(i).is_some_and(|b| b.is_ascii_digit()) {
+        i += 1;
+    }
+    if i == int_start {
+        return Err(format!(
+            "expected default literal (INT, FLOAT, BOOL, or quoted STRING) in type spelling, found {text:?}"
+        ));
+    }
+    let mut is_float = false;
+    if bytes.get(i) == Some(&b'.')
+        && bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit())
+    {
+        is_float = true;
+        i += 1;
+        while bytes.get(i).is_some_and(|b| b.is_ascii_digit()) {
+            i += 1;
+        }
+    }
+    let (num, rest) = text.split_at(i);
+    if is_float {
+        match num.parse::<f64>() {
+            Ok(f) if f.is_finite() => Ok((SpelledDefault::Float(f.to_bits()), rest)),
+            _ => Err(format!("bad float default in type spelling: {num:?}")),
+        }
+    } else {
+        match num.parse::<i64>() {
+            Ok(n) => Ok((SpelledDefault::Int(n), rest)),
+            Err(_) => Err(format!("bad integer default in type spelling: {num:?}")),
+        }
+    }
+}
+
 /// Process-global intern table for rendered tags: one shared
 /// `&'static TypeTag` per distinct canonical spelling. The lock is
 /// held only for lookup/insert; leaf resolution happens outside it
@@ -535,7 +712,9 @@ pub fn intern_rendered(canonical: String, tag: TypeTag) -> TypeTag {
 
 /// Check a value against a tag, failing naming the expected shape and
 /// the offending path. Records reject missing AND extra fields: a
-/// schema is a lock, not a hint.
+/// schema is a lock, not a hint. Fields with defaults count as
+/// satisfied when absent (every binding site fills them before
+/// verifying), so the lock holds without restating it per call site.
 pub fn check_value(tag: &TypeTag, value: &Value) -> Result<()> {
     check_value_at(tag, value, "$")
 }
@@ -597,7 +776,11 @@ pub fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
                         Some(item) => {
                             check_value_at(&field.ty, item, &format!("{path}.{}", field.name))?;
                         }
-                        None if field.optional => {}
+                        // Optional or defaulted fields may be absent:
+                        // every binding site fills defaults before
+                        // verifying, so absence here only fails for
+                        // required fields with no default.
+                        None if field.optional || field.default.is_some() => {}
                         None => bail!(
                             "{path}: missing field '{}'; expected fields: {}",
                             field.name,
@@ -725,12 +908,14 @@ mod tests {
                 ty: TypeTag::String,
                 docs: "",
                 optional: false,
+                default: None,
             },
             Field {
                 name: "b".to_string(),
                 ty: TypeTag::Int,
                 docs: "",
                 optional: false,
+                default: None,
             },
         ]);
         let tag = TypeTag::Record(fields);
@@ -763,12 +948,14 @@ mod tests {
                 ty: TypeTag::Int,
                 docs: "",
                 optional: false,
+                default: None,
             },
             Field {
                 name: "permit".to_string(),
                 ty: TypeTag::String,
                 docs: "",
                 optional: true,
+                default: None,
             },
         ]);
         let tag = TypeTag::Record(fields);
@@ -828,6 +1015,7 @@ mod tests {
                     name: None,
                     optional: false,
                     ty: Spelled::Named("MAP".to_string()),
+                default: None,
                 }],
             }
         );
@@ -839,6 +1027,7 @@ mod tests {
                     name: Some("name".to_string()),
                     optional: false,
                     ty: Spelled::Named("STRING".to_string()),
+                default: None,
                 }],
             }
         );
@@ -860,6 +1049,7 @@ mod tests {
                     name: Some("permit".to_string()),
                     optional: true,
                     ty: Spelled::Named("PERMIT".to_string()),
+                default: None,
                 }],
             }
         );
@@ -867,6 +1057,90 @@ mod tests {
             canonicalize_spelling("MAP<permit ? : PERMIT>"),
             "MAP<permit?: PERMIT>"
         );
+    }
+
+    #[test]
+    fn default_spellings_parse_render_and_materialize() {
+        // `= literal` rides one field: ints, negative ints, floats,
+        // bools, and quoted strings (spaces kept). Each parses into
+        // the literal, canonicalizes back, and materializes the word.
+        for (spelling, canonical, value) in [
+            (
+                "MAP<retries: INT = 2>",
+                "MAP<retries: INT = 2>",
+                Value::int(2),
+            ),
+            (
+                "MAP<retries: INT=-2>",
+                "MAP<retries: INT = -2>",
+                Value::int(-2),
+            ),
+            (
+                "MAP<ratio: FLOAT = 2.5>",
+                "MAP<ratio: FLOAT = 2.5>",
+                Value::float(2.5),
+            ),
+            (
+                "MAP<on: BOOL = true>",
+                "MAP<on: BOOL = true>",
+                Value::bool(true),
+            ),
+            (
+                "MAP<model: STRING = \"gpt-4\">",
+                "MAP<model: STRING = \"gpt-4\">",
+                Value::string("gpt-4".to_string()),
+            ),
+            (
+                "MAP<msg: STRING = \"hello world\">",
+                "MAP<msg: STRING = \"hello world\">",
+                Value::string("hello world".to_string()),
+            ),
+        ] {
+            let spelled = parse_spelling(spelling).expect("parses");
+            assert_eq!(render_spelled(&spelled), canonical, "canonical: {spelling}");
+            assert_eq!(canonicalize_spelling(spelling), canonical);
+            match spelled {
+                Spelled::Generic { args, .. } => {
+                    let found = args.iter().find(|f| f.default.is_some()).expect("default");
+                    let lit = found.default.as_ref().expect("lit");
+                    assert_eq!(lit.to_value(), value);
+                    assert!(
+                        canonical.contains(&format!("= {}", lit.render())),
+                        "canonical carries the default: {canonical}"
+                    );
+                }
+                other => panic!("expected generic, got {other:?}"),
+            }
+        }
+        // Rendered tags agree with rendered spellings on defaults.
+        let tag = TypeTag::Record(Arc::from([Field {
+            name: "retries".to_string(),
+            ty: TypeTag::Int,
+            docs: "",
+            optional: false,
+            default: Some(Value::int(2)),
+        }]));
+        assert_eq!(
+            render_structural(&tag),
+            "MAP<retries: INT = 2>",
+            "tag renders defaults canonically"
+        );
+        assert_eq!(
+            render_default_value(&Value::float(2.5)),
+            "2.5",
+            "float keeps its point"
+        );
+        // Malformed defaults fail loudly: empty, non-literal,
+        // unterminated strings, and bad numbers.
+        for bad in [
+            "MAP<a: INT = >",
+            "MAP<a: INT = x>",
+            "MAP<a: INT = 1.2.3>",
+            "MAP<a: INT = \"x>",
+            "MAP<a: INT = 9999999999999999999999>",
+        ] {
+            assert!(parse_spelling(bad).is_err(), "must fail: {bad}");
+        }
     }
 
     #[test]
@@ -881,6 +1155,7 @@ mod tests {
                     name: None,
                     optional: false,
                     ty: Spelled::Named("ANY".to_string()),
+                default: None,
                 }],
             }
         );
@@ -954,6 +1229,7 @@ mod tests {
             ty: TypeTag::String,
             docs: "",
             optional: false,
+            default: None,
         }]);
         let record = TypeTag::Record(fields);
         let list = TypeTag::ListOf(Arc::new(record));

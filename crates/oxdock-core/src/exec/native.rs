@@ -5,8 +5,8 @@ use anyhow::Result;
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
-    BOOL_TYPE_NAME, FLOAT_TYPE_NAME, Field, GuardExpr, INT_TYPE_NAME, KEYWORD_INSPECT,
-    SCRIPT_MODULE_NAME, STD_MODULE_NAME, STRING_TYPE_NAME, SemaphoreState, Step, TypeTag, Value,
+    Field, GuardExpr, KEYWORD_INSPECT,
+    SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step, TypeTag, Value,
     base_name, guards_overlap, qualify, render_structural, split_qualified,
 };
 use oxdock_pipe::PipeHandle;
@@ -469,9 +469,10 @@ pub(super) struct FuncDefData {
 /// Zero value for an omitted trailing optional script param, by
 /// resolved tag. Scalars take falsy empties and collections empty
 /// shapes (mirroring the host optional-`MAP` fill); records qualify
-/// only when every field is optional. Handles, pipes, custom types,
-/// unions, and the remaining words have no zero: omitting those
-/// fails at definition, so the caller passes explicitly.
+/// when every field is optional or defaulted (binding fills the
+/// defaults). Handles, pipes, custom types, unions, and the
+/// remaining words have no zero: omitting those fails at definition,
+/// so the caller passes explicitly.
 pub fn optional_zero_value(tag: &TypeTag) -> Result<Value> {
     match tag {
         TypeTag::Bool => Ok(Value::bool(false)),
@@ -480,7 +481,11 @@ pub fn optional_zero_value(tag: &TypeTag) -> Result<Value> {
         TypeTag::Float => Ok(Value::float(0.0)),
         TypeTag::List | TypeTag::ListOf(_) => Ok(Value::list(Vec::new())),
         TypeTag::Map | TypeTag::MapOf(_) => Ok(Value::map(BTreeMap::new())),
-        TypeTag::Record(fields) if fields.iter().all(|field| field.optional) => {
+        TypeTag::Record(fields)
+            if fields
+                .iter()
+                .all(|field| field.optional || field.default.is_some()) =>
+        {
             Ok(Value::map(BTreeMap::new()))
         }
         other => anyhow::bail!(
@@ -791,6 +796,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Interpreter::registration(),
             Argv::registration(),
             ParseArgs::registration(),
+            ParseFlags::registration(),
+            ParsePositionals::registration(),
             TextTrim::registration(),
             TextTrimPrefix::registration(),
             TextTrimSuffix::registration(),
@@ -2303,78 +2310,47 @@ fn argv<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     ))
 }
 
-/// Parse an argv tail into flags and positionals, optionally against a schema.
+/// Parse an argv tail against `TYPE FLAGS`, returning flags and positionals.
 ///
 /// Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt`
 /// tokenizer. Long `--key=value` binds the string value. Bare long
-/// `--key` binds `true`. Short `-a` binds `true` and clusters `-abc`
-/// bind each letter. Attached short values bind only through `=`
-/// (`-k=value`). One `--` entry ends option parsing, so the rest
-/// (including a second `--`) lands in `positionals`. Duplicate keys
+/// `--key` binds `true`. Short `-a` binds `true`. One `--` entry ends
+/// option parsing, so the rest lands in `positionals`. Duplicate keys
 /// overwrite in order, so the last occurrence wins.
 ///
-/// Without a schema, values stay `BOOL|STRING`: cast explicitly in
-/// script. With a schema MAP as the second argument, the engine owns
-/// coercion, defaults, and usage errors: each schema entry names the
-/// target type and, optionally, a default. Present flags coerce to
-/// their target (`BOOL` accepts `true`/`false` spellings,
-/// `INT`/`FLOAT` parse their strings); bare `--key` for a non-`BOOL`
-/// target fails naming the flag instead of smuggling `true` into a
-/// `STRING` slot. Missing flags fill their default, missing required
-/// flags fail, and unknown flags fail. Absent optional flags without
-/// a default stay absent (probe with `HAS_KEY`/`GET`).
-///
-/// Schema entry forms, keyed by flag name verbatim as parsed:
-/// a type-name `STRING` (`"STRING"`, `"BOOL"`, `"INT"`, `"FLOAT"`)
-/// means a required flag of that type; a `BOOL`/`INT`/`FLOAT` value,
-/// or any other `STRING`, means an optional flag whose type is
-/// inferred from the value and whose value is the default; a MAP
-/// descriptor `{type: "STRING", default?: ANY, required?: BOOL}`
-/// spells the full control (a `STRING` default equal to a type name
-/// must use this form). `type` is required; `default` fills absent
-/// flags; `required` defaults to true when no default is given.
-/// Unknown descriptor keys fail.
+/// The schema is always `TYPE FLAGS`: a `MAP` shape with scalar
+/// fields. Present flags coerce to their target (`BOOL` accepts
+/// `true`/`false` spellings, `INT`/`FLOAT` parse their strings); bare
+/// `--key` for a non-`BOOL` target fails naming the flag. Missing
+/// flags fill their `= default`, missing required flags fail, and
+/// unknown flags fail. Absent optional flags without a default stay
+/// absent (read them with a typed `GET` default). `positionals` is
+/// omitted when empty, so a flags only `MAP<flags: FLAGS>` binds clean.
 pub struct ParseArgs;
 
 impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
     fn registration() -> HostRegistration<P> {
-        let func: PureFn = Arc::new(|values: Vec<Value>| {
-            if values.is_empty() || values.len() > 2 {
+        let func: NativeFn<P> = Arc::new(|cx: &mut StepCtx<P>, values: Vec<Value>| {
+            if values.len() != 1 {
                 anyhow::bail!(
-                    "PARSE_ARGS() expects 1 to 2 argument(s), got {}",
+                    "PARSE_ARGS() expects 1 argument, got {}",
                     values.len()
                 );
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
-            crate::check_value_at(
-                &TypeTag::ListOf(Arc::new(TypeTag::String)),
-                &args_val,
-                "PARSE_ARGS() argument `$args`",
-            )?;
-            let args: Vec<String> = args_val
-                .as_list()
-                .expect("check_value_at enforces LIST")
-                .iter()
-                .map(|v| {
-                    v.as_str()
-                        .expect("check_value_at enforces STRING")
-                        .to_string()
-                })
-                .collect();
-            let schema_val = iter.next().unwrap_or_else(|| Value::map(BTreeMap::new()));
-            crate::check_value_at(
-                &TypeTag::Map,
-                &schema_val,
-                "PARSE_ARGS() argument `$schema`",
-            )?;
-            let schema = schema_val
-                .as_map()
-                .expect("check_value_at enforces MAP")
-                .clone();
-            parse_args_impl(args, schema)
+            let args = string_list_arg(&args_val, "PARSE_ARGS() argument `$args`")?;
+            let specs = resolve_flags_specs(cx)?;
+            let (raw, positionals) = tokenize_raw_args(args)?;
+            let coerced = coerce_flags(&specs, &raw)?;
+            let mut out = BTreeMap::new();
+            out.insert("flags".to_string(), Value::map(coerced));
+            if !positionals.is_empty() {
+                out.insert("positionals".to_string(), Value::list(positionals));
+            }
+            Ok(Value::map(out))
         });
-        HostRegistration::Pure {
+        HostRegistration::Stateful {
             name: "PARSE_ARGS".to_string(),
             meta: FuncMeta {
                 name: "PARSE_ARGS".to_string(),
@@ -2389,101 +2365,91 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
                         options: None,
                         optional: false,
                     },
-                    FuncParam {
-                        name: "schema".to_string(),
-                        param_type: Some(TypeTag::Map),
-                        allowed: None,
-                        docs: "Optional flag schema: type names, defaults, or `{type, default?, required?}` descriptors. Omitted or `{}` parses untyped.",
-                        options: None,
-                        optional: true,
-                    },
                 ]),
                 returns: Some(TypeTag::Record(Arc::from([
                     Field {
                         name: "flags".to_string(),
-                        ty: TypeTag::MapOf(Arc::new(TypeTag::Any)),
-                        docs: "Parsed flags: untyped `BOOL|STRING` without a schema, coerced targets with one.",
+                        ty: TypeTag::Map,
+                        docs: "Flags coerced to `TYPE FLAGS`.",
                         optional: false,
+                        default: None,
                     },
                     Field {
                         name: "positionals".to_string(),
                         ty: TypeTag::ListOf(Arc::new(TypeTag::String)),
-                        docs: "Trailing values and entries after the first double dash.",
-                        optional: false,
+                        docs: "Trailing values and entries after the first double dash. Omitted when empty.",
+                        optional: true,
+                        default: None,
                     },
                 ]))),
                 rpn: true,
-                summary: "Parse an argv tail into flags and positionals.",
-                docs: "Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt` tokenizer. See the function reference for the optional schema forms.",
+                summary: "Parse an argv tail against TYPE FLAGS.",
+                docs: "Consumes a `LIST<STRING>` with the `lexopt` tokenizer and coerces flags through `TYPE FLAGS`. See the function reference for the coercion and omission rules.",
                 examples: &[
                     crate::Example {
-                        name: "longs",
+                        name: "flags and positionals",
                         fence_meta: None,
                         code: indoc::indoc! {r#"
                             IMPORT [STD]
-                            # Long equals entries bind strings, bare longs bind true.
-                            LET $parsed: MAP<ANY> = PARSE_ARGS(["--host=example.com", "--verbose", "serve"])
-                            ASSERT_EQ $parsed.flags.host "example.com"
-                            ASSERT_EQ $parsed.flags.verbose true
+                            # One schema TYPE drives coercion; the pair binds both slots.
+                            TYPE FLAGS = MAP<model: STRING, verbose?: BOOL>
+                            TYPE POSITIONS = LIST<STRING>
+                            TYPE PARSED = MAP<flags: FLAGS, positionals?: POSITIONS>
+                            LET $parsed: PARSED = PARSE_ARGS(["--model=gpt-4", "--verbose", "serve"])
+                            LET $flags: FLAGS = $parsed.flags
+                            ASSERT_EQ $flags.model "gpt-4"
+                            ASSERT_EQ $flags.verbose true
                             ASSERT_EQ $parsed.positionals.0 "serve"
                         "#},
                     },
                     crate::Example {
-                        name: "shorts and separator",
+                        name: "optional stays absent",
                         fence_meta: None,
                         code: indoc::indoc! {r#"
                             IMPORT [STD]
-                            # Short clusters expand, short equals binds, and one double dash ends flags.
-                            LET $parsed: MAP<ANY> = PARSE_ARGS(["-ab", "-k=value", "--flag", "--", "--not-a-flag"])
-                            ASSERT_EQ $parsed.flags.a true
-                            ASSERT_EQ $parsed.flags.b true
-                            ASSERT_EQ $parsed.flags.k "value"
-                            ASSERT_EQ $parsed.flags.flag true
-                            ASSERT_EQ $parsed.positionals.0 "--not-a-flag"
+                            # Absent optionals stay absent; read them with a typed GET default.
+                            TYPE FLAGS = MAP<model: STRING, propose?: BOOL>
+                            TYPE POSITIONS = LIST<STRING>
+                            TYPE PARSED = MAP<flags: FLAGS, positionals?: POSITIONS>
+                            LET $parsed: PARSED = PARSE_ARGS(["--model=x"])
+                            LET $flags: FLAGS = $parsed.flags
+                            LET $propose: BOOL = GET($flags, "propose", false)
+                            ASSERT_EQ $propose false
                         "#},
                     },
                     crate::Example {
-                        name: "duplicates and separator",
+                        name: "flags only omits positionals",
                         fence_meta: None,
                         code: indoc::indoc! {r#"
                             IMPORT [STD]
-                            # Duplicate keys overwrite in order, and a bare second double dash is positional.
-                            LET $parsed: MAP<ANY> = PARSE_ARGS(["--x=1", "--x=2", "--", "--"])
-                            ASSERT_EQ $parsed.flags.x "2"
-                            ASSERT_EQ $parsed.positionals.0 "--"
+                            # Empty positionals are omitted, so a flags only shape binds clean.
+                            TYPE FLAGS = MAP<model: STRING>
+                            TYPE PARSED = MAP<flags: FLAGS>
+                            LET $parsed: PARSED = PARSE_ARGS(["--model=x"])
+                            LET $flags: FLAGS = $parsed.flags
+                            ASSERT_EQ $flags.model "x"
                         "#},
                     },
                     crate::Example {
-                        name: "typed schema",
-                        fence_meta: None,
-                        code: indoc::indoc! {r#"
-                            IMPORT [STD]
-                            # Schema types coerce flags and fill defaults.
-                            LET $parsed: MAP<ANY> = PARSE_ARGS(["--model=gpt-4", "--propose"], {model: "STRING", propose: false})
-                            ASSERT_EQ $parsed.flags.model "gpt-4"
-                            ASSERT_EQ $parsed.flags.propose true
-                            LET $flags: MAP<ANY> = $parsed.flags
-                            LET $raw: BOOL|STRING = GET($flags, "propose", false)
-                            LET $on: BOOL = BOOL($raw)
-                            ASSERT_EQ $on true
-                        "#},
-                    },
-                    crate::Example {
-                        name: "schema defaults and missing required",
+                        name: "missing required",
                         fence_meta: Some("expect_error:\"missing required flag\""),
                         code: indoc::indoc! {r#"
                             IMPORT [STD]
                             # Absent required flags fail naming the flag.
-                            LET $parsed: MAP<ANY> = PARSE_ARGS([], {model: "STRING", propose: false})
+                            TYPE FLAGS = MAP<model: STRING>
+                            TYPE PARSED = MAP<flags: FLAGS>
+                            LET $parsed: PARSED = PARSE_ARGS([])
                         "#},
                     },
                     crate::Example {
-                        name: "schema unknown flag",
+                        name: "unknown flag",
                         fence_meta: Some("expect_error:\"unknown flag\""),
                         code: indoc::indoc! {r#"
                             IMPORT [STD]
                             # Undeclared flags fail instead of passing through.
-                            LET $parsed: MAP<ANY> = PARSE_ARGS(["--model=x", "--nope=1"], {model: "STRING"})
+                            TYPE FLAGS = MAP<model: STRING>
+                            TYPE PARSED = MAP<flags: FLAGS>
+                            LET $parsed: PARSED = PARSE_ARGS(["--model=x", "--nope=1"])
                         "#},
                     },
                 ],
@@ -2495,23 +2461,13 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
 
 /// CLI target types for `PARSE_ARGS` schemas: the four scalar words
 /// raw flags can coerce into. No new types without extending the
-/// coercion below and the schema docs above together.
+/// coercion below together with the schema resolution below it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CliType {
     String,
     Bool,
     Int,
     Float,
-}
-
-fn parse_cli_type(name: &str) -> Option<CliType> {
-    match name {
-        STRING_TYPE_NAME => Some(CliType::String),
-        BOOL_TYPE_NAME => Some(CliType::Bool),
-        INT_TYPE_NAME => Some(CliType::Int),
-        FLOAT_TYPE_NAME => Some(CliType::Float),
-        _ => None,
-    }
 }
 
 /// Coerce one raw flag value to its schema target. Raw values are only
@@ -2560,10 +2516,35 @@ fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> Result<Value> {
     }
 }
 
-/// Shared argv tokenizer plus optional schema coercion. Raw parsing
-/// stays identical with and without a schema; the schema pass only
-/// coerces, defaults, and rejects unknown flags.
-fn parse_args_impl(args: Vec<String>, schema: BTreeMap<String, Value>) -> Result<Value> {
+/// One CLI flag spec: target type, required bit, and filled default.
+/// Single alias so the tokenizer, coercion, and both entry points
+/// share one signature.
+type CliSpecs = BTreeMap<String, (CliType, bool, Option<Value>)>;
+
+/// Checked `LIST<STRING>` extraction for the CLI trio. Single owner
+/// so all three functions admit exactly the same argv shape.
+fn string_list_arg(val: &Value, what: &str) -> Result<Vec<String>> {
+    crate::check_value_at(
+        &TypeTag::ListOf(Arc::new(TypeTag::String)),
+        val,
+        what,
+    )?;
+    Ok(val
+        .as_list()
+        .expect("check_value_at enforces LIST")
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .expect("check_value_at enforces STRING")
+                .to_string()
+        })
+        .collect())
+}
+
+/// Shared argv tokenizer. Single owner so flags versus positionals
+/// split identically for all three entry points. Raw values are only
+/// `BOOL true` (bare) or `STRING` (equals form).
+fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<Value>)> {
     use lexopt::Arg::{Long, Short, Value as ArgValue};
     let mut parser = lexopt::Parser::from_args(args);
     let mut flags: BTreeMap<String, Value> = BTreeMap::new();
@@ -2600,97 +2581,187 @@ fn parse_args_impl(args: Vec<String>, schema: BTreeMap<String, Value>) -> Result
             Err(err) => anyhow::bail!("PARSE_ARGS: {err}"),
         }
     }
-    if schema.is_empty() {
-        let mut out = BTreeMap::new();
-        out.insert("flags".to_string(), Value::map(flags));
-        out.insert("positionals".to_string(), Value::list(positionals));
-        return Ok(Value::map(out));
-    }
+    Ok((flags, positionals))
+}
+
+/// Shared flag coercion. Single owner so `PARSE_ARGS` and
+/// `PARSE_FLAGS` fill, require, and reject identically: present flags
+/// coerce, missing defaulted flags fill, missing required flags fail,
+/// missing optionals stay absent, unknown flags fail.
+fn coerce_flags(specs: &CliSpecs, raw: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Value>> {
     let mut coerced: BTreeMap<String, Value> = BTreeMap::new();
-    for (flag, spec) in schema.iter() {
+    for (flag, (target, required, default)) in specs.iter() {
         if flag.is_empty() {
             anyhow::bail!("PARSE_ARGS schema flag names must be non-empty");
         }
-        let (target, required, default) = parse_schema_entry(flag, spec)?;
-        if let Some(raw) = flags.get(flag) {
-            coerced.insert(flag.clone(), coerce_cli_flag(target, flag, raw.clone())?);
+        if let Some(raw) = raw.get(flag) {
+            coerced.insert(flag.clone(), coerce_cli_flag(*target, flag, raw.clone())?);
         } else if let Some(d) = default {
-            coerced.insert(flag.clone(), d);
-        } else if required {
+            coerced.insert(flag.clone(), d.clone());
+        } else if *required {
             anyhow::bail!("PARSE_ARGS missing required flag --{flag}");
         }
     }
-    for flag in flags.keys() {
-        if !schema.contains_key(flag) {
+    for flag in raw.keys() {
+        if !specs.contains_key(flag) {
             anyhow::bail!("PARSE_ARGS unknown flag --{flag}");
         }
     }
-    let mut out = BTreeMap::new();
-    out.insert("flags".to_string(), Value::map(coerced));
-    out.insert("positionals".to_string(), Value::list(positionals));
-    Ok(Value::map(out))
+    Ok(coerced)
 }
 
-/// Decode one schema entry into its target type, required bit, and
-/// coerced default. Shorthands stay small; the MAP descriptor carries
-/// the full control. Failures name the flag, so schema bugs read as
-/// schema bugs instead of distant coercion errors.
-fn parse_schema_entry(flag: &str, spec: &Value) -> Result<(CliType, bool, Option<Value>)> {
-    if let Some(s) = spec.as_str() {
-        if let Some(target) = parse_cli_type(s) {
-            return Ok((target, true, None));
-        }
-        return Ok((CliType::String, false, Some(Value::string(s.to_string()))));
-    }
-    if let Some(b) = spec.as_bool() {
-        return Ok((CliType::Bool, false, Some(Value::bool(b))));
-    }
-    if let Some(n) = spec.as_i64() {
-        return Ok((CliType::Int, false, Some(Value::int(n))));
-    }
-    if let Some(f) = spec.as_f64() {
-        return Ok((CliType::Float, false, Some(Value::float(f))));
-    }
-    if let Some(map) = spec.as_map() {
-        let type_val = map.get("type").ok_or_else(|| {
-            anyhow::anyhow!("PARSE_ARGS schema for --{flag} needs a \"type\" key")
-        })?;
-        let type_name = type_val.as_str().ok_or_else(|| {
-            anyhow::anyhow!(
-                "PARSE_ARGS schema for --{flag}: \"type\" must be a STRING (STRING, BOOL, INT, or FLOAT)"
-            )
-        })?;
-        let Some(target) = parse_cli_type(type_name) else {
-            anyhow::bail!(
-                "PARSE_ARGS schema for --{flag}: unknown type {type_name:?}; expected STRING, BOOL, INT, or FLOAT"
-            );
+/// Resolve the fixed `TYPE FLAGS` schema into coercion specs: one entry
+/// per record field, targets from scalar field types, required unless
+/// optional or defaulted, defaults filled from the shape. Single owner
+/// so both pair and flags only entry points admit exactly the same
+/// set. Non-record types and non-scalar fields fail naming the flag.
+fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpecs> {
+    let name = "FLAGS";
+    let tag = cx
+        .state
+        .resolve_tag(name)
+        .map_err(|err| anyhow::anyhow!("PARSE_ARGS schema type {name:?}: {err:#}"))?;
+    let TypeTag::Record(fields) = tag else {
+        anyhow::bail!("PARSE_ARGS schema type {name:?} must be a MAP shape with scalar fields");
+    };
+    let mut specs = BTreeMap::new();
+    for field in fields.iter() {
+        let target = match field.ty {
+            TypeTag::String => CliType::String,
+            TypeTag::Bool => CliType::Bool,
+            TypeTag::Int => CliType::Int,
+            TypeTag::Float => CliType::Float,
+            _ => anyhow::bail!(
+                "PARSE_ARGS schema for --{}: type must be one of STRING, BOOL, INT, or FLOAT, got {}",
+                field.name,
+                field.ty.name(),
+            ),
         };
-        for key in map.keys() {
-            if key != "type" && key != "default" && key != "required" {
+        specs.insert(
+            field.name.clone(),
+            (
+                target,
+                !field.optional && field.default.is_none(),
+                field.default.clone(),
+            ),
+        );
+    }
+    Ok(specs)
+}
+
+/// Parse flags only against `TYPE FLAGS`.
+///
+/// Returns the flags `MAP` directly: no pair wrapper, no positionals.
+/// Same tokenizer, coercion, defaults, and errors as `PARSE_ARGS`.
+pub struct ParseFlags;
+
+impl<P: ProcessManager> OxDockFn<P> for ParseFlags {
+    fn registration() -> HostRegistration<P> {
+        let func: NativeFn<P> = Arc::new(|cx: &mut StepCtx<P>, values: Vec<Value>| {
+            if values.len() != 1 {
                 anyhow::bail!(
-                    "PARSE_ARGS schema for --{flag}: unknown key {key:?}; expected type, default, or required"
+                    "PARSE_FLAGS() expects 1 argument, got {}",
+                    values.len()
                 );
             }
+            let mut iter = values.into_iter();
+            let args_val = iter.next().expect("arity checked above");
+            let args = string_list_arg(&args_val, "PARSE_FLAGS() argument `$args`")?;
+            let specs = resolve_flags_specs(cx)?;
+            let (raw, _positionals) = tokenize_raw_args(args)?;
+            Ok(Value::map(coerce_flags(&specs, &raw)?))
+        });
+        HostRegistration::Stateful {
+            name: "PARSE_FLAGS".to_string(),
+            meta: FuncMeta {
+                name: "PARSE_FLAGS".to_string(),
+                module: String::new(),
+                kind: FuncKind::HostPure,
+                params: Some(vec![FuncParam {
+                    name: "args".to_string(),
+                    param_type: Some(TypeTag::ListOf(Arc::new(TypeTag::String))),
+                    allowed: None,
+                    docs: "Argv tail to parse, usually from `STD::ARGV()`.",
+                    options: None,
+                    optional: false,
+                }]),
+                returns: Some(TypeTag::Map),
+                rpn: true,
+                summary: "Parse flags against TYPE FLAGS.",
+                docs: "Consumes a `LIST<STRING>` and coerces flags through `TYPE FLAGS`. Returns the flags `MAP` directly.",
+                examples: &[crate::Example {
+                    name: "flags only",
+                    fence_meta: None,
+                    code: indoc::indoc! {r#"
+                        IMPORT [STD]
+                        # Flags only returns the flags MAP directly.
+                        TYPE FLAGS = MAP<model: STRING, retries: INT = 2>
+                        LET $flags: FLAGS = PARSE_FLAGS(["--model=x"])
+                        ASSERT_EQ $flags.model "x"
+                        ASSERT_EQ $flags.retries 2
+                    "#},
+                }],
+            },
+            func,
         }
-        let required = match map.get("required") {
-            Some(v) => v.as_bool().ok_or_else(|| {
-                anyhow::anyhow!("PARSE_ARGS schema for --{flag}: \"required\" must be a BOOL")
-            })?,
-            None => !map.contains_key("default"),
-        };
-        let default = match map.get("default") {
-            Some(d) => Some(coerce_cli_flag(target, flag, d.clone()).map_err(|_| {
-                anyhow::anyhow!(
-                    "PARSE_ARGS schema for --{flag}: default does not match type {type_name}"
-                )
-            })?),
-            None => None,
-        };
-        return Ok((target, required, default));
     }
-    anyhow::bail!(
-        "PARSE_ARGS schema for --{flag} must be a type name STRING, a BOOL/INT/FLOAT/STRING default, or a MAP descriptor"
-    );
+}
+
+/// Parse positionals only: no schema, no `TYPE FLAGS` needed.
+///
+/// Returns trailing values and entries after the first double dash in
+/// argv order. Tokenizer matches `PARSE_ARGS` exactly.
+pub struct ParsePositionals;
+
+impl<P: ProcessManager> OxDockFn<P> for ParsePositionals {
+    fn registration() -> HostRegistration<P> {
+        let func: NativeFn<P> = Arc::new(|_: &mut StepCtx<P>, values: Vec<Value>| {
+            if values.len() != 1 {
+                anyhow::bail!(
+                    "PARSE_POSITIONALS() expects 1 argument, got {}",
+                    values.len()
+                );
+            }
+            let mut iter = values.into_iter();
+            let args_val = iter.next().expect("arity checked above");
+            let args = string_list_arg(&args_val, "PARSE_POSITIONALS() argument `$args`")?;
+            let (_raw, positionals) = tokenize_raw_args(args)?;
+            Ok(Value::list(positionals))
+        });
+        HostRegistration::Stateful {
+            name: "PARSE_POSITIONALS".to_string(),
+            meta: FuncMeta {
+                name: "PARSE_POSITIONALS".to_string(),
+                module: String::new(),
+                kind: FuncKind::HostPure,
+                params: Some(vec![FuncParam {
+                    name: "args".to_string(),
+                    param_type: Some(TypeTag::ListOf(Arc::new(TypeTag::String))),
+                    allowed: None,
+                    docs: "Argv tail to parse, usually from `STD::ARGV()`.",
+                    options: None,
+                    optional: false,
+                }]),
+                returns: Some(TypeTag::ListOf(Arc::new(TypeTag::String))),
+                rpn: true,
+                summary: "Parse positionals in argv order.",
+                docs: "Consumes a `LIST<STRING>` and returns positionals in argv order with no schema.",
+                examples: &[crate::Example {
+                    name: "positionals only",
+                    fence_meta: None,
+                    code: indoc::indoc! {r#"
+                        IMPORT [STD]
+                        # No schema needed: positionals are always strings in order.
+                        TYPE POSITIONS = LIST<STRING>
+                        LET $pos: POSITIONS = PARSE_POSITIONALS(["serve", "--", "--not-a-flag"])
+                        ASSERT_EQ $pos.0 "serve"
+                        ASSERT_EQ $pos.1 "--not-a-flag"
+                    "#},
+                }],
+            },
+            func,
+        }
+    }
 }
 
 /// Describe one function by qualified name.
@@ -2713,16 +2784,19 @@ fn parse_schema_entry(flag: &str, spec: &Value) -> Result<(CliType, bool, Option
         ty: TypeTag::String,
         docs: "Qualified function name.",
         optional: false,
+        default: None,
     }, Field {
         name: "module".to_string(),
         ty: TypeTag::String,
         docs: "Owning module.",
         optional: false,
+        default: None,
     }, Field {
         name: "kind".to_string(),
         ty: TypeTag::String,
         docs: "Origin label (`host` or `script`).",
         optional: false,
+        default: None,
     }, Field {
         name: "params".to_string(),
         ty: TypeTag::ListOf(std::sync::Arc::new(TypeTag::MapOf(std::sync::Arc::new(
@@ -2730,21 +2804,25 @@ fn parse_schema_entry(flag: &str, spec: &Value) -> Result<(CliType, bool, Option
         )))),
         docs: "Parameter entries (empty for parameterless functions).",
         optional: false,
+        default: None,
     }, Field {
         name: "returns".to_string(),
         ty: TypeTag::String,
         docs: "Structural return shape (empty when untagged).",
         optional: false,
+        default: None,
     }, Field {
         name: "rpn".to_string(),
         ty: TypeTag::Bool,
         docs: "True when callable in RPN position.",
         optional: false,
+        default: None,
     }, Field {
         name: "summary".to_string(),
         ty: TypeTag::String,
         docs: "One-line description.",
         optional: false,
+        default: None,
     }]))
     summary = "Describe one function by qualified name."
 )]
@@ -2806,16 +2884,19 @@ fn types<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     ty: TypeTag::String,
     docs: "Queried type name.",
     optional: false,
+    default: None,
 }, Field {
     name: "summary".to_string(),
     ty: TypeTag::String,
     docs: "One-line description.",
     optional: false,
+    default: None,
 }, Field {
     name: "docs".to_string(),
     ty: TypeTag::String,
     docs: "Full documentation text.",
     optional: false,
+    default: None,
 }])))]
 #[example(
     name = "describe",
@@ -3137,11 +3218,13 @@ fn semaphore_new<P: ProcessManager>(
     ty: TypeTag::Bool,
     docs: "`true` with the permit under `permit`, `false` with no `permit` key.",
     optional: false,
+    default: None,
 }, Field {
     name: "permit".to_string(),
     ty: TypeTag::Permit,
     docs: "Permit handle; read only when `held`.",
     optional: true,
+    default: None,
 }])))]
 #[example(
     name = "acquire",
@@ -4427,48 +4510,56 @@ fn task_poll_result_fields() -> Arc<[Field]> {
             ty: TypeTag::String,
             docs: "Task phase: `running` or `finished`.",
             optional: false,
+            default: None,
         },
         Field {
             name: "ok".to_string(),
             ty: TypeTag::Bool,
             docs: "True unless the task failed.",
             optional: false,
+            default: None,
         },
         Field {
             name: "stdout_tail".to_string(),
             ty: TypeTag::String,
             docs: "Bounded stdout tail, live while running.",
             optional: false,
+            default: None,
         },
         Field {
             name: "stderr_tail".to_string(),
             ty: TypeTag::String,
             docs: "Bounded stderr tail, live while running.",
             optional: false,
+            default: None,
         },
         Field {
             name: "truncated_bytes".to_string(),
             ty: TypeTag::Int,
             docs: "Dropped head bytes past the per-stream cap.",
             optional: false,
+            default: None,
         },
         Field {
             name: "exit_code".to_string(),
             ty: TypeTag::Int,
             docs: "Process exit code, present once finished.",
             optional: true,
+            default: None,
         },
         Field {
             name: "result".to_string(),
             ty: TypeTag::Any,
             docs: "Task `RETURN` value, present on clean finish.",
             optional: true,
+            default: None,
         },
         Field {
             name: "error".to_string(),
             ty: TypeTag::String,
             docs: "Failure text, present on failed finish.",
             optional: true,
+            default: None,
         },
     ])
 }

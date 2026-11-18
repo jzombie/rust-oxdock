@@ -18,8 +18,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use oxdock_parser::{
-    ANY_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, Step, StepKind, canonicalize_spelling,
-    intern_rendered, lookup_rendered, parse_spelling,
+    ANY_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, Step, StepKind,
+    canonicalize_spelling, intern_rendered, lookup_rendered, parse_spelling,
 };
 use oxdock_process::ProcessManager;
 
@@ -327,11 +327,25 @@ impl<P: ProcessManager> ExecState<P> {
                 );
             };
             let ty = self.build_rendered(&arg.ty, resolving, depth + 1)?;
+            let default = match &arg.default {
+                None => None,
+                Some(lit) => {
+                    let value = lit.to_value();
+                    check_value(&ty, &value).map_err(|_| {
+                        anyhow::anyhow!(
+                            "default for field '{field_name}' does not match {}",
+                            oxdock_parser::render_structural(&ty)
+                        )
+                    })?;
+                    Some(value)
+                }
+            };
             fields.push(Field {
                 name: field_name.clone(),
                 ty,
                 docs: "",
                 optional: arg.optional,
+                default,
             });
         }
         Ok(TypeTag::Record(std::sync::Arc::from(fields)))
@@ -541,7 +555,16 @@ impl<P: ProcessManager> ExecState<P> {
                                 meta.name,
                             );
                         }
-                        if !matches!(param.param_type, Some(TypeTag::Map)) {
+                        // Omission fills an empty MAP, so the param type
+                        // must admit one: checked semantically (empty MAP
+                        // against the type) instead of naming admissible
+                        // constructors, so defaulted shapes and unions
+                        // qualify exactly when the fill verifies.
+                        let fills = param.param_type.as_ref().is_some_and(|expected| {
+                            check_value(expected, &Value::map(std::collections::BTreeMap::new()))
+                                .is_ok()
+                        });
+                        if !fills {
                             anyhow::bail!(
                                 "param '{}' of '{}' is optional without a MAP type",
                                 param.name,

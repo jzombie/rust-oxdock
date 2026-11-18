@@ -3813,7 +3813,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 for field in e_fields.iter() {
                     match a_fields.iter().find(|found| found.name == field.name) {
                         Some(found) => Self::check_exact(&field.ty, &found.ty, ctx)?,
-                        None if field.optional => {}
+                        // Optional or defaulted fields may be absent:
+                        // binding fills defaults before verifying, so
+                        // absence here only fails required fields.
+                        None if field.optional || field.default.is_some() => {}
                         None => bail!("{ctx}: missing field '{}'", field.name),
                     }
                 }
@@ -4844,6 +4847,7 @@ mod tests {
                     ty: TypeTag::String,
                     docs: "",
                     optional: false,
+                    default: None,
                 }]
                 .into(),
             ),
@@ -4888,12 +4892,14 @@ mod tests {
                         ty: TypeTag::ListOf(Arc::new(TypeTag::String)),
                         docs: "",
                         optional: false,
+                        default: None,
                     },
                     oxdock_parser::Field {
                         name: "opt".to_string(),
                         ty: TypeTag::Int,
                         docs: "",
                         optional: true,
+                        default: None,
                     },
                 ]
                 .into(),

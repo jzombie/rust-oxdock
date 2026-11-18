@@ -766,6 +766,7 @@ mod tests {
             ty: string_path.clone(),
             docs: "",
             optional: false,
+            default: None,
         }]));
         for tag in [&string_path, &list_union, &map_union, &record_union] {
             assert_eq!(

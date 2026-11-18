@@ -5443,90 +5443,86 @@ ASSERT_EQ $m.b 2
 
 ### STD::PARSE_ARGS
 
-Parse an argv tail into flags and positionals.
+Parse an argv tail against TYPE FLAGS.
 
-Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt` tokenizer. See the function reference for the optional schema forms.
+Consumes a `LIST<STRING>` with the `lexopt` tokenizer and coerces flags through `TYPE FLAGS`. See the function reference for the coercion and omission rules.
 
-**Signature:** `STD::PARSE_ARGS($args: LIST<STRING>, $schema?: MAP): MAP<flags: MAP<ANY>, positionals: LIST<STRING>>`
+**Signature:** `STD::PARSE_ARGS($args: LIST<STRING>): MAP<flags: MAP, positionals?: LIST<STRING>>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 
 - `$args` (`LIST<STRING>`): Argv tail to parse, usually from `STD::ARGV()`.
-- `$schema?` (`MAP`): Optional flag schema: type names, defaults, or `{type, default?, required?}` descriptors. Omitted or `{}` parses untyped.
 
-**Returns:** `MAP<flags: MAP<ANY>, positionals: LIST<STRING>>`
+**Returns:** `MAP<flags: MAP, positionals?: LIST<STRING>>`
 
-  - `flags` (`MAP<ANY>`): Parsed flags: untyped `BOOL|STRING` without a schema, coerced targets with one.
-  - `positionals` (`LIST<STRING>`): Trailing values and entries after the first double dash.
+  - `flags` (`MAP`): Flags coerced to `TYPE FLAGS`.
+  - `positionals` (`LIST<STRING>`, optional): Trailing values and entries after the first double dash. Omitted when empty.
 
 **Examples:**
 
-**Example: longs**
+**Example: flags and positionals**
 
 ```oxdock
 IMPORT [STD]
-# Long equals entries bind strings, bare longs bind true.
-LET $parsed: MAP<ANY> = PARSE_ARGS(["--host=example.com", "--verbose", "serve"])
-ASSERT_EQ $parsed.flags.host "example.com"
-ASSERT_EQ $parsed.flags.verbose true
+# One schema TYPE drives coercion; the pair binds both slots.
+TYPE FLAGS = MAP<model: STRING, verbose?: BOOL>
+TYPE POSITIONS = LIST<STRING>
+TYPE PARSED = MAP<flags: FLAGS, positionals?: POSITIONS>
+LET $parsed: PARSED = PARSE_ARGS(["--model=gpt-4", "--verbose", "serve"])
+LET $flags: FLAGS = $parsed.flags
+ASSERT_EQ $flags.model "gpt-4"
+ASSERT_EQ $flags.verbose true
 ASSERT_EQ $parsed.positionals.0 "serve"
 ```
 
-**Example: shorts and separator**
+**Example: optional stays absent**
 
 ```oxdock
 IMPORT [STD]
-# Short clusters expand, short equals binds, and one double dash ends flags.
-LET $parsed: MAP<ANY> = PARSE_ARGS(["-ab", "-k=value", "--flag", "--", "--not-a-flag"])
-ASSERT_EQ $parsed.flags.a true
-ASSERT_EQ $parsed.flags.b true
-ASSERT_EQ $parsed.flags.k "value"
-ASSERT_EQ $parsed.flags.flag true
-ASSERT_EQ $parsed.positionals.0 "--not-a-flag"
+# Absent optionals stay absent; read them with a typed GET default.
+TYPE FLAGS = MAP<model: STRING, propose?: BOOL>
+TYPE POSITIONS = LIST<STRING>
+TYPE PARSED = MAP<flags: FLAGS, positionals?: POSITIONS>
+LET $parsed: PARSED = PARSE_ARGS(["--model=x"])
+LET $flags: FLAGS = $parsed.flags
+LET $propose: BOOL = GET($flags, "propose", false)
+ASSERT_EQ $propose false
 ```
 
-**Example: duplicates and separator**
+**Example: flags only omits positionals**
 
 ```oxdock
 IMPORT [STD]
-# Duplicate keys overwrite in order, and a bare second double dash is positional.
-LET $parsed: MAP<ANY> = PARSE_ARGS(["--x=1", "--x=2", "--", "--"])
-ASSERT_EQ $parsed.flags.x "2"
-ASSERT_EQ $parsed.positionals.0 "--"
+# Empty positionals are omitted, so a flags only shape binds clean.
+TYPE FLAGS = MAP<model: STRING>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $parsed: PARSED = PARSE_ARGS(["--model=x"])
+LET $flags: FLAGS = $parsed.flags
+ASSERT_EQ $flags.model "x"
 ```
 
-**Example: typed schema**
-
-```oxdock
-IMPORT [STD]
-# Schema types coerce flags and fill defaults.
-LET $parsed: MAP<ANY> = PARSE_ARGS(["--model=gpt-4", "--propose"], {model: "STRING", propose: false})
-ASSERT_EQ $parsed.flags.model "gpt-4"
-ASSERT_EQ $parsed.flags.propose true
-LET $flags: MAP<ANY> = $parsed.flags
-LET $raw: BOOL|STRING = GET($flags, "propose", false)
-LET $on: BOOL = BOOL($raw)
-ASSERT_EQ $on true
-```
-
-**Example: schema defaults and missing required**
+**Example: missing required**
 
 ```oxdock expect_error:"missing required flag"
 IMPORT [STD]
 # Absent required flags fail naming the flag.
-LET $parsed: MAP<ANY> = PARSE_ARGS([], {model: "STRING", propose: false})
+TYPE FLAGS = MAP<model: STRING>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $parsed: PARSED = PARSE_ARGS([])
 ```
 
 **Expected error:** `missing required flag`
 
-**Example: schema unknown flag**
+**Example: unknown flag**
 
 ```oxdock expect_error:"unknown flag"
 IMPORT [STD]
 # Undeclared flags fail instead of passing through.
-LET $parsed: MAP<ANY> = PARSE_ARGS(["--model=x", "--nope=1"], {model: "STRING"})
+TYPE FLAGS = MAP<model: STRING>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $parsed: PARSED = PARSE_ARGS(["--model=x", "--nope=1"])
 ```
 
 **Expected error:** `unknown flag`
@@ -5627,6 +5623,35 @@ LET $spaced: INT = PARSE_DURATION("1 h")
 ASSERT_EQ $spaced 3_600_000
 ```
 
+### STD::PARSE_FLAGS
+
+Parse flags against TYPE FLAGS.
+
+Consumes a `LIST<STRING>` and coerces flags through `TYPE FLAGS`. Returns the flags `MAP` directly.
+
+**Signature:** `STD::PARSE_FLAGS($args: LIST<STRING>): MAP`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$args` (`LIST<STRING>`): Argv tail to parse, usually from `STD::ARGV()`.
+
+**Returns:** `MAP`
+
+**Examples:**
+
+**Example: flags only**
+
+```oxdock
+IMPORT [STD]
+# Flags only returns the flags MAP directly.
+TYPE FLAGS = MAP<model: STRING, retries: INT = 2>
+LET $flags: FLAGS = PARSE_FLAGS(["--model=x"])
+ASSERT_EQ $flags.model "x"
+ASSERT_EQ $flags.retries 2
+```
+
 ### STD::PARSE_JSON
 
 Parse JSON text already held in memory.
@@ -5663,6 +5688,35 @@ ASSERT_EQ $doc.a 1
 LET $items: LIST<ANY> = PARSE_JSON("[1, 2]")
 ASSERT_EQ $items.0 1
 ASSERT_EQ $items.1 2
+```
+
+### STD::PARSE_POSITIONALS
+
+Parse positionals in argv order.
+
+Consumes a `LIST<STRING>` and returns positionals in argv order with no schema.
+
+**Signature:** `STD::PARSE_POSITIONALS($args: LIST<STRING>): LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$args` (`LIST<STRING>`): Argv tail to parse, usually from `STD::ARGV()`.
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: positionals only**
+
+```oxdock
+IMPORT [STD]
+# No schema needed: positionals are always strings in order.
+TYPE POSITIONS = LIST<STRING>
+LET $pos: POSITIONS = PARSE_POSITIONALS(["serve", "--", "--not-a-flag"])
+ASSERT_EQ $pos.0 "serve"
+ASSERT_EQ $pos.1 "--not-a-flag"
 ```
 
 ### STD::PARSE_TOML

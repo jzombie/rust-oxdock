@@ -5399,6 +5399,7 @@ fn resolve_tag_combines_schema_and_alias_leaves() {
         ty: TypeTag::String,
         docs: "",
         optional: false,
+        default: None,
     }]);
     state.register_record_schema("EMP", schema_fields);
     state
@@ -5745,6 +5746,17 @@ fn run_start_rejects_misplaced_optional_params() {
     state
         .validate_function_type_tags()
         .expect("trailing optional MAP must pass");
+    // Trailing optional UNION containing MAP: accepted (omission
+    // still fills an empty MAP).
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(optional_module(vec![(
+        "schema",
+        TypeTag::union(vec![TypeTag::String, TypeTag::Map]),
+        true,
+    )]));
+    state
+        .validate_function_type_tags()
+        .expect("trailing optional UNION with MAP must pass");
 }
 
 #[cfg(not(miri))]

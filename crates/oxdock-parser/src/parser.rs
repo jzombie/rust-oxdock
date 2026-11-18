@@ -4120,7 +4120,8 @@ fn skip_type_nl(toks: &[Tok], mut p: usize) -> usize {
 }
 
 /// Maximal `type_tag` match over toks (non-atomic: gaps free
-/// everywhere): atoms with `<>` args, `|` unions, `name?:` fields.
+/// everywhere): atoms with `<>` args, `|` unions, `name?:` fields,
+/// and one `= literal` default tail per field.
 /// Returns the exclusive end index, or `None` on shape miss.
 fn parse_type_shape(toks: &[Tok], pos: usize) -> Option<usize> {
     let mut p = parse_type_atom(toks, skip_type_nl(toks, pos))?;
@@ -4177,7 +4178,35 @@ fn parse_type_field(toks: &[Tok], pos: usize) -> Option<usize> {
             p = skip_type_nl(toks, q + 1);
         }
     }
-    parse_type_shape(toks, p)
+    let mut p = parse_type_shape(toks, p)?;
+    // Optional `= literal` default: one `-` plus one token, any
+    // spacing. Generous here on purpose: the spelling parser owns
+    // literal validation, so malformed defaults fail there naming
+    // the alias instead of missing here as unknown-command noise.
+    let q = skip_type_nl(toks, p);
+    if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Punct('=')))
+        && !matches!(toks.get(q + 1).map(|t| &t.kind), Some(TokKind::Punct('=')))
+    {
+        let mut r = skip_type_nl(toks, q + 1);
+        if matches!(toks.get(r).map(|t| &t.kind), Some(TokKind::Punct('-'))) {
+            r = skip_type_nl(toks, r + 1);
+        }
+        if toks.get(r).is_some() {
+            r += 1;
+            // Decimal tail: the lexer splits `2.5` into three tokens,
+            // so each `.` plus word rides the same default literal.
+            // Loops so `2.5.6` still reaches the spelling parser,
+            // which owns literal validation and fails naming the
+            // alias.
+            while matches!(toks.get(r).map(|t| &t.kind), Some(TokKind::Punct('.')))
+                && matches!(toks.get(r + 1).map(|t| &t.kind), Some(TokKind::Word(_)))
+            {
+                r += 2;
+            }
+        }
+        p = r;
+    }
+    Some(p)
 }
 
 /// Single (non-block) `IF`: condition plus then-block with an
@@ -4356,6 +4385,10 @@ fn parse_case_values(
     Ok((values, p))
 }
 
+/// Parsed `SWITCH` arms: one value list plus body per `CASE`, with
+/// an optional trailing `DEFAULT` body.
+type SwitchArms = (Vec<(Vec<Expr>, Vec<Step>)>, Option<Vec<Step>>);
+
 /// Parse the arms inside a `SWITCH` body brace: `CASE <values> { ... }`
 /// arms plus an optional trailing `DEFAULT { ... }`. Hard errors once
 /// committed (the `SWITCH` head is unambiguous): unknown words, empty
@@ -4364,7 +4397,7 @@ fn parse_switch_body(
     inner: &[Tok],
     stmt: usize,
     ctx: &ParseCtx,
-) -> Result<(Vec<(Vec<Expr>, Vec<Step>)>, Option<Vec<Step>>), TokenError> {
+) -> Result<SwitchArms, TokenError> {
     let err = |msg: String| TokenError {
         stmt,
         line: 0,
@@ -4473,25 +4506,29 @@ fn parse_switch_at(
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
-    // Bare head: the token after `SWITCH` opens the body brace, so no
-    // discriminant is parsed (every `CASE` carries its own condition).
+    // Bare head: gaps skipped like the discriminant entry below; the
+    // token then opens the body brace, so no discriminant is parsed
+    // (every `CASE` carries its own condition).
+    let mut gap = Cursor::expr(&toks[pos + 1..], stmt);
+    gap.skip_gap();
+    let brace_pos = pos + 1 + gap.pos;
     let bare_head = matches!(
-        toks.get(pos + 1).map(|t| &t.kind),
+        toks.get(brace_pos).map(|t| &t.kind),
         Some(TokKind::Group {
             delim: GroupDelim::Brace,
             ..
         })
     ) && toks
-        .get(pos + 1)
+        .get(brace_pos)
         .is_some_and(|t| !is_template_brace(t));
-    let mut p = pos + 1;
+    let p: usize;
     let discriminant = if bare_head {
+        p = brace_pos;
         None
     } else {
-        // Discriminant entry skips leading gap comments (`IF` uses `gap`).
-        let mut lead = Cursor::expr(&toks[pos + 1..], stmt);
-        lead.skip_gap();
-        let mut cur = Cursor::expr(&toks[pos + 1 + lead.pos..], stmt);
+        // Discriminant entry reuses the skipped gaps above (`IF` uses
+        // the same gap rule).
+        let mut cur = Cursor::expr(&toks[brace_pos..], stmt);
         let disc = match parse_expr_checked(&mut cur, ctx) {
             Ok(expr) => expr,
             Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
@@ -4501,7 +4538,7 @@ fn parse_switch_at(
             Err(e) if e.kind.is_some() => return Err(e),
             Err(_) => return Ok(None),
         };
-        p = pos + 1 + lead.pos + cur.pos;
+        p = brace_pos + cur.pos;
         Some(Box::new(disc))
     };
     let body_ok = matches!(
@@ -5947,8 +5984,8 @@ fn parse_type_stmt_at(
     let Some(end) = parse_type_shape(toks, pos + 3) else {
         return Ok(None);
     };
-    // Post-match the span holds words/puncts only, so the shared
-    // renderer cannot fail; stay failed regardless.
+    // Post-match the span holds words, puncts, and default literals
+    // only, so the shared renderer cannot fail; stay failed regardless.
     let target = render_type_region(&toks[pos + 3..end], stmt).unwrap_or_default();
     Ok(Some((StepKind::TypeAlias { name, target }, end - pos)))
 }
@@ -6841,25 +6878,32 @@ pub(crate) fn parse_single_expr(
     Ok(expr)
 }
 
-/// Assignment `=`: the first `=` neither glued to a following `=`
-/// (`==`) nor glued after `!`/`<`/`>`/`=` (`!=`, `<=`, `>=`, second of
-/// `==`). Glued-ness reads off the `=`'s own `joint` (gap before it)
-/// and the follower's (gap after it). Anything else leaves the
-/// statement bare (`LET $p: PIPE`), exactly where the grammar's `"="`
-/// match fails.
+/// Assignment `=`: the first depth-zero `=` neither glued to a
+/// following `=` (`==`) nor glued after `!`/`<`/`>`/`=` (`!=`, `<=`,
+/// `>=`, second of `==`). `<>` shape brackets own any `=` inside
+/// them (field defaults), so LET annotations with defaults find the
+/// real assignment. Glued-ness reads off the `=`'s own `joint` (gap
+/// before it) and the follower's (gap after it). Anything else leaves
+/// the statement bare (`LET $p: PIPE`), exactly where the grammar's
+/// `"="` match fails.
 fn find_assign_eq(body: &[Tok]) -> Option<usize> {
+    let mut depth = 0usize;
     for (i, tok) in body.iter().enumerate() {
-        if !matches!(&tok.kind, TokKind::Punct('=')) {
-            continue;
-        }
-        let next_eq = body
-            .get(i + 1)
-            .is_some_and(|t| t.joint && matches!(&t.kind, TokKind::Punct('=')));
-        let prev_op = tok.joint
-            && i > 0
-            && matches!(&body[i - 1].kind, TokKind::Punct('!' | '<' | '>' | '='));
-        if !next_eq && !prev_op {
-            return Some(i);
+        match &tok.kind {
+            TokKind::Punct('<') => depth += 1,
+            TokKind::Punct('>') if depth > 0 => depth -= 1,
+            TokKind::Punct('=') if depth == 0 => {
+                let next_eq = body
+                    .get(i + 1)
+                    .is_some_and(|t| t.joint && matches!(&t.kind, TokKind::Punct('=')));
+                let prev_op = tok.joint
+                    && i > 0
+                    && matches!(&body[i - 1].kind, TokKind::Punct('!' | '<' | '>' | '='));
+                if !next_eq && !prev_op {
+                    return Some(i);
+                }
+            }
+            _ => {}
         }
     }
     None
@@ -6881,6 +6925,12 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
         match &tok.kind {
             TokKind::Word(w) => out.push_str(w),
             TokKind::Punct(c) => out.push(*c),
+            TokKind::Str { text, quote } => {
+                out.push(*quote);
+                out.push_str(text);
+                out.push(*quote);
+            }
+            TokKind::BlockStr(full) => out.push_str(full),
             _ => {
                 return Err(TokenError {
                     stmt,
@@ -6960,7 +7010,8 @@ fn parse_let_body(
             }),
         });
     }
-    // Type region runs to the assignment `=`; it cannot contain one.
+    // Type region runs to the depth-zero assignment `=`; `<>`
+    // shapes own any `=` inside them (field defaults).
     let type_start = cur.pos;
     let assign = find_assign_eq(&body[type_start..]).map(|i| i + type_start);
     let Some(eq) = assign else {

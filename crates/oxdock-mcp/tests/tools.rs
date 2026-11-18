@@ -80,12 +80,14 @@ fn schema_nesting_projects() {
                 ty: TypeTag::String,
                 docs: "",
                 optional: false,
+                default: None,
             },
             oxdock_parser::Field {
                 name: "nick".to_string(),
                 ty: TypeTag::String,
                 docs: "",
                 optional: true,
+                default: None,
             },
         ]
         .into(),

@@ -97,6 +97,7 @@ fn emp_fields() -> std::sync::Arc<[Field]> {
         ty: TypeTag::String,
         docs: "",
         optional: false,
+        default: None,
     }])
 }
 
