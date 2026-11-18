@@ -4527,7 +4527,7 @@ ASSERT_EQ $spaced 3_600_000
 
 Parse flags against TYPE FLAGS.
 
-Consumes a `LIST<STRING>` and coerces flags through `TYPE FLAGS`. Returns the flags `MAP` directly.
+Consumes a `LIST<STRING>` and coerces flags through `TYPE FLAGS`. Returns the flags `MAP` directly; positional arguments fail.
 
 **Signature:** `STD::PARSE_FLAGS($args: LIST<STRING>): MAP`
 
