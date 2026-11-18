@@ -381,6 +381,7 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         record_schemas: HashMap::new(),
         module_states: HashMap::new(),
         type_aliases: HashMap::new(),
+        type_env_digest: 0,
         call_depth: 0,
         task_id: 0,
         push_manifest: Vec::new(),

@@ -4883,6 +4883,36 @@ LET $flags: FLAGS = $parsed.flags
 ASSERT_EQ $flags.model "x"
 ```
 
+**Example: literal defaults**
+
+```oxdock
+IMPORT [STD]
+# Defaults are literals only: INT, FLOAT, BOOL,
+# and double-quoted STRING fill absent flags.
+TYPE FLAGS = MAP<retries: INT = 2, ratio: FLOAT = 2.5, verbose: BOOL = true, model: STRING = "gpt-4">
+TYPE PARSED = MAP<flags: FLAGS>
+LET $parsed: PARSED = PARSE_ARGS([])
+LET $flags: FLAGS = $parsed.flags
+ASSERT_EQ $flags.retries 2
+ASSERT_EQ $flags.verbose true
+ASSERT_EQ $flags.model "gpt-4"
+LET $ratio_ok: BOOL = $flags.ratio == 2.5
+ASSERT_EQ $ratio_ok true
+```
+
+**Example: variable default fails**
+
+```oxdock expect_error:"expected default literal"
+IMPORT [STD]
+# Defaults are literals: a variable in place
+# of a literal fails instead of evaluating.
+TYPE FLAGS = MAP<n: INT = $x>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $p: PARSED = PARSE_ARGS([])
+```
+
+**Expected error:** `expected default literal`
+
 **Example: missing required**
 
 ```oxdock expect_error:"missing required flag"

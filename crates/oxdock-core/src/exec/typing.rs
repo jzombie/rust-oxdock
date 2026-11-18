@@ -18,8 +18,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use oxdock_parser::{
-    ANY_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, Step, StepKind,
-    canonicalize_spelling, intern_rendered, lookup_rendered, parse_spelling,
+    ANY_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, Step, StepKind, canonicalize_spelling,
+    intern_rendered, lookup_rendered, parse_spelling, render_structural,
 };
 use oxdock_process::ProcessManager;
 
@@ -59,6 +59,20 @@ pub fn check_options(
     Ok(())
 }
 
+/// Pure entry hash for the environment digest: the namespace byte
+/// names the collection (`b'a'` aliases, `b's'` schemas, `b't'`
+/// custom types), never the action. Set and removal of the same
+/// entry hash identically, so removal backs the insertion out
+/// exactly and the digest always mirrors current content.
+fn hash_env_entry(namespace: u8, name: &str, value: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hasher};
+    let mut hasher = DefaultHasher::new();
+    hasher.write_u8(namespace);
+    hasher.write(name.as_bytes());
+    hasher.write(value.as_bytes());
+    hasher.finish()
+}
+
 /// Fresh name directory seeded with the startup descriptors.
 pub(super) fn startup_type_map() -> HashMap<String, &'static TypeDescriptor> {
     startup_descriptors()
@@ -85,6 +99,7 @@ impl<P: ProcessManager> ExecState<P> {
             return;
         }
         self.types.insert(descriptor.name.to_string(), descriptor);
+        self.type_env_digest ^= hash_env_entry(b't', descriptor.name, descriptor.name);
     }
 
     /// True when `name` names a registered type (startup or host).
@@ -109,7 +124,9 @@ impl<P: ProcessManager> ExecState<P> {
             }
             return;
         }
+        let rendered = render_structural(&TypeTag::Record(fields.clone()));
         self.record_schemas.insert(name.to_string(), fields);
+        self.type_env_digest ^= hash_env_entry(b's', name, &rendered);
     }
 
     /// Every registered schema name, sorted. Backs discovery listings.
@@ -211,19 +228,60 @@ impl<P: ProcessManager> ExecState<P> {
 
     /// Resolve one canonical spelling that may carry `<...>` args:
     /// interned hit returns shared, else parse, build, and intern.
+    /// The intern key carries the environment digest: one run's
+    /// `MAP<flags: FLAGS>` must never share a payload with another
+    /// run that spells it under different aliases.
     fn resolve_spelling_text(
         &self,
         canonical: &str,
         resolving: &mut Vec<String>,
         depth: usize,
     ) -> Result<TypeTag> {
-        if let Some(hit) = lookup_rendered(canonical) {
+        let key = format!("{}\x1f{:016x}", canonical, self.type_env_digest);
+        if let Some(hit) = lookup_rendered(&key) {
             return Ok(hit);
         }
         let spelled = parse_spelling(canonical)
             .map_err(|err| anyhow::anyhow!("invalid type spelling: {err}"))?;
         let tag = self.build_rendered(&spelled, resolving, depth)?;
-        Ok(intern_rendered(canonical.to_string(), tag))
+        Ok(intern_rendered(key, tag))
+    }
+
+    /// Record one alias binding, folding it into the digest. An
+    /// overwrite backs the old target out before mixing the new one
+    /// in, so the digest always mirrors current content; identical
+    /// re-registration folds nothing, so re-importing the same file
+    /// shares cache entries instead of forking them.
+    pub(super) fn register_alias(&mut self, name: String, target: String) {
+        if let Some(old) = self.type_aliases.insert(name.clone(), target.clone()) {
+            if old == target {
+                return;
+            }
+            self.type_env_digest ^= hash_env_entry(b'a', &name, &old);
+        }
+        self.type_env_digest ^= hash_env_entry(b'a', &name, &target);
+    }
+
+    /// Drop one alias binding, backing its hash out of the digest.
+    /// Absent names change nothing and fold nothing.
+    pub(super) fn remove_alias(&mut self, name: &str) {
+        if let Some(old) = self.type_aliases.remove(name) {
+            self.type_env_digest ^= hash_env_entry(b'a', name, &old);
+        }
+    }
+
+    /// Replace the whole alias directory (save/restore paths). Backs
+    /// the entire current directory out and mixes the entire next
+    /// one in: swaps are bounded and infrequent next to lookups, and
+    /// the digest stays an exact mirror of content either way.
+    pub(super) fn restore_aliases(&mut self, next: HashMap<String, String>) {
+        for (name, target) in &self.type_aliases {
+            self.type_env_digest ^= hash_env_entry(b'a', name, target);
+        }
+        for (name, target) in &next {
+            self.type_env_digest ^= hash_env_entry(b'a', name, target);
+        }
+        self.type_aliases = next;
     }
 
     /// Build a parsed spelling into its structural tag. `LIST`

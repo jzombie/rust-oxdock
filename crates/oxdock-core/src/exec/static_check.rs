@@ -464,16 +464,16 @@ fn with_scope_aliases<P: ProcessManager, R>(
         .map(|(name, _)| (name.clone(), exec.type_aliases.get(name).cloned()))
         .collect();
     for (name, target) in aliases {
-        exec.type_aliases.insert(name.clone(), target.clone());
+        exec.register_alias(name.clone(), target.clone());
     }
     let outcome = f(&mut *exec);
     for (name, prev) in saved {
         match prev {
             Some(target) => {
-                exec.type_aliases.insert(name, target);
+                exec.register_alias(name, target);
             }
             None => {
-                exec.type_aliases.remove(&name);
+                exec.remove_alias(&name);
             }
         }
     }
@@ -843,7 +843,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         }
         Ok(())
     })();
-    exec.type_aliases = saved_global;
+    exec.restore_aliases(saved_global);
     if outcome.is_ok() {
         // Proven once, trusted thereafter: every file in the closure
         // passed with full nested-import knowledge, and the registry

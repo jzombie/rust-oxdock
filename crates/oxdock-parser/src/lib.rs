@@ -64,9 +64,8 @@ pub use tag::{
     HANDLE_TYPE_NAME, INT_TYPE_NAME, LIST_TAG, LIST_TYPE_NAME, MAP_TAG, MAP_TYPE_NAME,
     MAX_GENERIC_DEPTH, PATH_TYPE_NAME, PERMIT_TYPE_NAME, PIPE_TYPE_NAME, SEMAPHORE_TYPE_NAME,
     STRING_TYPE_NAME, Spelled, SpelledDefault, SpelledField, TypeTag, VOID_TYPE_NAME,
-    canonicalize_spelling,
-    check_value, check_value_at, intern_rendered, lookup_rendered, parse_spelling,
-    render_structural,
+    canonicalize_spelling, check_value, check_value_at, intern_rendered, lookup_rendered,
+    parse_spelling, render_structural,
 };
 #[cfg(feature = "proc-macro-api")]
 pub use tok::lex_tokens;

@@ -961,6 +961,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         record_schemas: std::collections::HashMap::new(),
         module_states: std::collections::HashMap::new(),
         type_aliases: std::collections::HashMap::new(),
+        type_env_digest: 0,
         call_depth: 0,
         task_id: 0,
         push_manifest: Vec::new(),
@@ -5429,7 +5430,7 @@ fn resolve_tag_rejects_deep_alias_chains() {
     let fs = MockFs::new();
     let mut state = create_exec_state(fs);
     for n in 0..12 {
-        state.type_aliases.insert(
+        state.register_alias(
             format!("A{n}"),
             if n == 11 {
                 "MAP".to_string()
@@ -5442,6 +5443,127 @@ fn resolve_tag_rejects_deep_alias_chains() {
     assert!(
         format!("{err:#}").contains("maximum generic depth"),
         "{err:#}"
+    );
+}
+
+#[test]
+fn resolve_spelling_never_shares_across_alias_scopes() {
+    // The rendered-tag cache keys on spelling text, but a spelling
+    // naming an alias resolves through per-run directories: resolving
+    // one run's `MAP<flags: FLAGS>` must not poison a later run that
+    // spells it under different aliases.
+    let fs = MockFs::new();
+    let mut first = create_exec_state(fs);
+    first.register_alias("FLAGS".to_string(), "MAP<model: STRING>".to_string());
+    let one = first
+        .resolve_tag("MAP<flags: FLAGS>")
+        .expect("first scope resolves");
+    let fs = MockFs::new();
+    let mut second = create_exec_state(fs);
+    second.register_alias(
+        "FLAGS".to_string(),
+        "MAP<retries: INT = 2, ratio: FLOAT = 2.5>".to_string(),
+    );
+    let two = second
+        .resolve_tag("MAP<flags: FLAGS>")
+        .expect("second scope resolves");
+    fn flag_fields(tag: &TypeTag) -> Vec<String> {
+        let TypeTag::Record(fields) = tag else {
+            panic!("expected outer record, got {tag:?}");
+        };
+        let flags = fields
+            .iter()
+            .find(|field| field.name == "flags")
+            .expect("flags field");
+        let TypeTag::Record(inner) = &flags.ty else {
+            panic!("FLAGS must resolve to a record, got {:?}", flags.ty);
+        };
+        let mut names: Vec<String> = inner.iter().map(|field| field.name.clone()).collect();
+        names.sort();
+        names
+    }
+    assert_eq!(flag_fields(&one), vec!["model".to_string()]);
+    assert_eq!(
+        flag_fields(&two),
+        vec!["ratio".to_string(), "retries".to_string()]
+    );
+}
+
+#[test]
+fn env_digest_overwrite_remove_restore_mirror_content() {
+    // Zobrist discipline: overwrites back the old hash out, removals
+    // back their insertion out, restores swap whole directories. A
+    // digest must equal a fresh state holding the same content, so
+    // identical environments always share cache entries.
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    let empty = state.type_env_digest;
+    state.register_alias("A".to_string(), "MAP<n: INT>".to_string());
+    let one = state.type_env_digest;
+    assert_ne!(one, empty, "insertion changes the digest");
+    state.register_alias("A".to_string(), "MAP<n: STRING>".to_string());
+    assert_ne!(state.type_env_digest, one, "overwrite changes the digest");
+    state.register_alias("A".to_string(), "MAP<n: INT>".to_string());
+    assert_eq!(
+        state.type_env_digest, one,
+        "overwrite-back restores the digest exactly"
+    );
+    state.remove_alias("A");
+    assert_eq!(
+        state.type_env_digest, empty,
+        "removal restores the empty digest exactly"
+    );
+    state.remove_alias("A");
+    assert_eq!(
+        state.type_env_digest, empty,
+        "removing an absent name folds nothing"
+    );
+}
+
+#[test]
+fn env_digest_revert_never_serves_stale_tags() {
+    // The revert collision: A=1, then A=2, then back to A=1 must
+    // resolve to INT content even though a STRING-only state shares
+    // the same digest. Under ghost digests the revert lands on the
+    // STRING-only digest and serves its tag.
+    fn inner_scalar(tag: &TypeTag) -> TypeTag {
+        let TypeTag::ListOf(element) = tag else {
+            panic!("expected LIST, got {tag:?}");
+        };
+        let TypeTag::Record(fields) = element.as_ref() else {
+            panic!("expected record element, got {element:?}");
+        };
+        let field = fields
+            .iter()
+            .find(|field| field.name == "n")
+            .expect("n field");
+        field.ty.clone()
+    }
+    let fs = MockFs::new();
+    let mut reverting = create_exec_state(fs);
+    reverting.register_alias("A".to_string(), "MAP<n: INT>".to_string());
+    reverting.register_alias("A".to_string(), "MAP<n: STRING>".to_string());
+    reverting.register_alias("A".to_string(), "MAP<n: INT>".to_string());
+    let fs = MockFs::new();
+    let mut string_only = create_exec_state(fs);
+    string_only.register_alias("A".to_string(), "MAP<n: STRING>".to_string());
+    assert_ne!(
+        reverting.type_env_digest, string_only.type_env_digest,
+        "reverted content must not share the STRING-only digest"
+    );
+    let tag = reverting
+        .resolve_tag("LIST<A>")
+        .expect("reverted scope resolves");
+    assert!(
+        matches!(inner_scalar(&tag), TypeTag::Int),
+        "reverted scope resolves its own INT content, got {tag:?}"
+    );
+    let tag = string_only
+        .resolve_tag("LIST<A>")
+        .expect("string scope resolves");
+    assert!(
+        matches!(inner_scalar(&tag), TypeTag::String),
+        "string scope resolves its own STRING content, got {tag:?}"
     );
 }
 
@@ -10573,14 +10695,16 @@ fn workflow_inline_scripts_pass_static_gate() {
                 record_schemas: std::collections::HashMap::new(),
                 module_states: std::collections::HashMap::new(),
                 type_aliases: std::collections::HashMap::new(),
+                type_env_digest: 0,
                 call_depth: 0,
                 task_id: 0,
                 push_manifest: Vec::new(),
                 _marker: std::marker::PhantomData,
             };
             state.push_var_scope();
-            state.type_aliases =
-                super::typing::collect_type_aliases(&steps, &state).expect("aliases");
+            state.restore_aliases(
+                super::typing::collect_type_aliases(&steps, &state).expect("aliases"),
+            );
             state.validate_function_type_tags().expect("tags");
             let closure =
                 super::import::expand_import_closure(&mut state, &steps).expect("closure");

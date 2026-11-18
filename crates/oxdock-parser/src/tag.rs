@@ -650,9 +650,7 @@ fn parse_spelled_literal(text: &str) -> Result<(SpelledDefault, &str), String> {
         ));
     }
     let mut is_float = false;
-    if bytes.get(i) == Some(&b'.')
-        && bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit())
-    {
+    if bytes.get(i) == Some(&b'.') && bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit()) {
         is_float = true;
         i += 1;
         while bytes.get(i).is_some_and(|b| b.is_ascii_digit()) {
@@ -1015,7 +1013,7 @@ mod tests {
                     name: None,
                     optional: false,
                     ty: Spelled::Named("MAP".to_string()),
-                default: None,
+                    default: None,
                 }],
             }
         );
@@ -1027,7 +1025,7 @@ mod tests {
                     name: Some("name".to_string()),
                     optional: false,
                     ty: Spelled::Named("STRING".to_string()),
-                default: None,
+                    default: None,
                 }],
             }
         );
@@ -1049,7 +1047,7 @@ mod tests {
                     name: Some("permit".to_string()),
                     optional: true,
                     ty: Spelled::Named("PERMIT".to_string()),
-                default: None,
+                    default: None,
                 }],
             }
         );
@@ -1155,7 +1153,7 @@ mod tests {
                     name: None,
                     optional: false,
                     ty: Spelled::Named("ANY".to_string()),
-                default: None,
+                    default: None,
                 }],
             }
         );

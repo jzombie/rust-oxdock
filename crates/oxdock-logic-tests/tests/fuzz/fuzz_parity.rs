@@ -821,7 +821,9 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             }
         }),
         (arb_body(), arb_body()).prop_map(|(case_body, default_body)| StepKind::Switch {
-            discriminant: Some(Box::new(Expr::Literal(Value::string("coverage".to_string())))),
+            discriminant: Some(Box::new(Expr::Literal(Value::string(
+                "coverage".to_string()
+            )))),
             cases: vec![(
                 vec![Expr::Literal(Value::string("coverage".to_string()))],
                 case_body,
@@ -2285,7 +2287,9 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             }],
         },
         StepKind::Switch {
-            discriminant: Some(Box::new(Expr::Literal(Value::string("coverage".to_string())))),
+            discriminant: Some(Box::new(Expr::Literal(Value::string(
+                "coverage".to_string(),
+            )))),
             cases: vec![(
                 vec![Expr::Literal(Value::string("coverage".to_string()))],
                 vec![Step {

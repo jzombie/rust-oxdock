@@ -443,10 +443,7 @@ fn switch_parse_errors_name_the_shape() {
             "SWITCH {\nDEFAULT {\nECHO a\n}\nDEFAULT {\nECHO b\n}\n}",
             "SWITCH allows only one DEFAULT arm",
         ),
-        (
-            "SWITCH $x",
-            "SWITCH needs a value or bare condition list",
-        ),
+        ("SWITCH $x", "SWITCH needs a value or bare condition list"),
         (
             "CASE \"a\" {\nECHO hi\n}",
             "CASE only appears inside a SWITCH body",
@@ -474,9 +471,6 @@ fn switch_display_round_trips_through_reparse() {
             .collect::<Vec<_>>()
             .join("\n");
         let again = oxdock_core::parse_script(&rendered).expect("reparse switch");
-        assert_eq!(
-            steps, again,
-            "Display round-trips: {rendered}"
-        );
+        assert_eq!(steps, again, "Display round-trips: {rendered}");
     }
 }

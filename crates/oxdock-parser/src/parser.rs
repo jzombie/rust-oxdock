@@ -96,9 +96,9 @@ use crate::constants::{
     INJECT_PREFIX, INJECT_SUFFIX, KEYWORD_AS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
     KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_DEFAULT, KEYWORD_ELSE, KEYWORD_ENV,
     KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IF,
-    KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED, KEYWORD_LET,
-    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH, KEYWORD_TIMEOUT, KEYWORD_TYPE,
-    KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
+    KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED,
+    KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH, KEYWORD_TIMEOUT,
+    KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
 };
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 
@@ -4179,29 +4179,36 @@ fn parse_type_field(toks: &[Tok], pos: usize) -> Option<usize> {
         }
     }
     let mut p = parse_type_shape(toks, p)?;
-    // Optional `= literal` default: one `-` plus one token, any
-    // spacing. Generous here on purpose: the spelling parser owns
-    // literal validation, so malformed defaults fail there naming
+    // Optional `= ...` default tail: consume to the next field
+    // delimiter (`,`, `>`, `|` at angle depth zero), tracking `<>`
+    // so nested shapes ride along. Any spacing, any tokens:
+    // literals, `$vars`, `env:` reads, calls. The spelling parser
+    // owns literal validation, so non-literals fail there naming
     // the alias instead of missing here as unknown-command noise.
     let q = skip_type_nl(toks, p);
     if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Punct('=')))
         && !matches!(toks.get(q + 1).map(|t| &t.kind), Some(TokKind::Punct('=')))
     {
         let mut r = skip_type_nl(toks, q + 1);
-        if matches!(toks.get(r).map(|t| &t.kind), Some(TokKind::Punct('-'))) {
-            r = skip_type_nl(toks, r + 1);
-        }
-        if toks.get(r).is_some() {
-            r += 1;
-            // Decimal tail: the lexer splits `2.5` into three tokens,
-            // so each `.` plus word rides the same default literal.
-            // Loops so `2.5.6` still reaches the spelling parser,
-            // which owns literal validation and fails naming the
-            // alias.
-            while matches!(toks.get(r).map(|t| &t.kind), Some(TokKind::Punct('.')))
-                && matches!(toks.get(r + 1).map(|t| &t.kind), Some(TokKind::Word(_)))
-            {
-                r += 2;
+        let mut depth = 0usize;
+        loop {
+            match toks.get(r).map(|t| &t.kind) {
+                Some(TokKind::Punct('<')) => {
+                    depth += 1;
+                    r = skip_type_nl(toks, r + 1);
+                }
+                Some(TokKind::Punct('>')) => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                    r = skip_type_nl(toks, r + 1);
+                }
+                Some(TokKind::Punct(',' | '|')) if depth == 0 => break,
+                Some(_) => {
+                    r += 1;
+                }
+                None => break,
             }
         }
         p = r;
@@ -4373,10 +4380,7 @@ fn parse_case_values(
         let mut gcur = Cursor::expr(&toks[p..], stmt);
         gcur.skip_gap_nl();
         p += gcur.pos;
-        if matches!(
-            toks.get(p).map(|t| &t.kind),
-            Some(TokKind::Punct(','))
-        ) {
+        if matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct(','))) {
             p += 1;
             continue;
         }
@@ -4393,11 +4397,7 @@ type SwitchArms = (Vec<(Vec<Expr>, Vec<Step>)>, Option<Vec<Step>>);
 /// arms plus an optional trailing `DEFAULT { ... }`. Hard errors once
 /// committed (the `SWITCH` head is unambiguous): unknown words, empty
 /// bodies, missing blocks, duplicate or non-trailing `DEFAULT`.
-fn parse_switch_body(
-    inner: &[Tok],
-    stmt: usize,
-    ctx: &ParseCtx,
-) -> Result<SwitchArms, TokenError> {
+fn parse_switch_body(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<SwitchArms, TokenError> {
     let err = |msg: String| TokenError {
         stmt,
         line: 0,
@@ -4489,7 +4489,7 @@ fn parse_switch_body(
     }
     if cases.is_empty() && default_body.is_none() {
         return Err(err(
-            "SWITCH needs at least one CASE or DEFAULT arm".to_string(),
+            "SWITCH needs at least one CASE or DEFAULT arm".to_string()
         ));
     }
     Ok((cases, default_body))
@@ -4518,9 +4518,7 @@ fn parse_switch_at(
             delim: GroupDelim::Brace,
             ..
         })
-    ) && toks
-        .get(brace_pos)
-        .is_some_and(|t| !is_template_brace(t));
+    ) && toks.get(brace_pos).is_some_and(|t| !is_template_brace(t));
     let p: usize;
     let discriminant = if bare_head {
         p = brace_pos;

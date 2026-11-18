@@ -115,6 +115,11 @@ pub struct ExecState<P: ProcessManager> {
     /// from top-level `TYPE` steps before the static pass, so forward
     /// references resolve run-wide at first coercion.
     pub(super) type_aliases: HashMap<String, String>,
+    /// Digest of the type environment above (aliases, schemas, custom
+    /// types), folded per mutation: interned rendered tags key on
+    /// spelling plus this digest, so one run's alias-dependent
+    /// shapes never share entries with another run's.
+    pub(super) type_env_digest: u64,
     /// Cancellation token for background thread teardown.
     #[allow(dead_code)]
     pub(super) cancel_token: Arc<AtomicBool>,
@@ -751,6 +756,7 @@ impl<P: ProcessManager> ExecState<P> {
             record_schemas: self.record_schemas.clone(),
             module_states: self.module_states.clone(),
             type_aliases: self.type_aliases.clone(),
+            type_env_digest: self.type_env_digest,
             call_depth: self.call_depth,
             task_id: self.task_id,
             // Forks start with an empty manifest: async children record

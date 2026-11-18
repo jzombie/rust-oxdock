@@ -5,9 +5,8 @@ use anyhow::Result;
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
-    Field, GuardExpr, KEYWORD_INSPECT,
-    SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step, TypeTag, Value,
-    base_name, guards_overlap, qualify, render_structural, split_qualified,
+    Field, GuardExpr, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step,
+    TypeTag, Value, base_name, guards_overlap, qualify, render_structural, split_qualified,
 };
 use oxdock_pipe::PipeHandle;
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
@@ -2323,7 +2322,10 @@ fn argv<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 /// `true`/`false` spellings, `INT`/`FLOAT` parse their strings); bare
 /// `--key` for a non-`BOOL` target fails naming the flag. Missing
 /// flags fill their `= default`, missing required flags fail, and
-/// unknown flags fail. Absent optional flags without a default stay
+/// unknown flags fail. Defaults are literals only: `INT`, `FLOAT`,
+/// `BOOL`, and double-quoted `STRING`. A variable or expression in
+/// place of a literal fails the `TYPE` statement, so defaults stay
+/// plain data in the shape. Absent optional flags without a default stay
 /// absent (read them with a typed `GET` default). `positionals` is
 /// omitted when empty, so a flags only `MAP<flags: FLAGS>` binds clean.
 pub struct ParseArgs;
@@ -2332,10 +2334,7 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
     fn registration() -> HostRegistration<P> {
         let func: NativeFn<P> = Arc::new(|cx: &mut StepCtx<P>, values: Vec<Value>| {
             if values.len() != 1 {
-                anyhow::bail!(
-                    "PARSE_ARGS() expects 1 argument, got {}",
-                    values.len()
-                );
+                anyhow::bail!("PARSE_ARGS() expects 1 argument, got {}", values.len());
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
@@ -2356,16 +2355,14 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
                 name: "PARSE_ARGS".to_string(),
                 module: String::new(),
                 kind: FuncKind::HostPure,
-                params: Some(vec![
-                    FuncParam {
-                        name: "args".to_string(),
-                        param_type: Some(TypeTag::ListOf(Arc::new(TypeTag::String))),
-                        allowed: None,
-                        docs: "Argv tail to parse, usually from `STD::ARGV()`.",
-                        options: None,
-                        optional: false,
-                    },
-                ]),
+                params: Some(vec![FuncParam {
+                    name: "args".to_string(),
+                    param_type: Some(TypeTag::ListOf(Arc::new(TypeTag::String))),
+                    allowed: None,
+                    docs: "Argv tail to parse, usually from `STD::ARGV()`.",
+                    options: None,
+                    optional: false,
+                }]),
                 returns: Some(TypeTag::Record(Arc::from([
                     Field {
                         name: "flags".to_string(),
@@ -2428,6 +2425,36 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
                             LET $parsed: PARSED = PARSE_ARGS(["--model=x"])
                             LET $flags: FLAGS = $parsed.flags
                             ASSERT_EQ $flags.model "x"
+                        "#},
+                    },
+                    crate::Example {
+                        name: "literal defaults",
+                        fence_meta: None,
+                        code: indoc::indoc! {r#"
+                            IMPORT [STD]
+                            # Defaults are literals only: INT, FLOAT, BOOL,
+                            # and double-quoted STRING fill absent flags.
+                            TYPE FLAGS = MAP<retries: INT = 2, ratio: FLOAT = 2.5, verbose: BOOL = true, model: STRING = "gpt-4">
+                            TYPE PARSED = MAP<flags: FLAGS>
+                            LET $parsed: PARSED = PARSE_ARGS([])
+                            LET $flags: FLAGS = $parsed.flags
+                            ASSERT_EQ $flags.retries 2
+                            ASSERT_EQ $flags.verbose true
+                            ASSERT_EQ $flags.model "gpt-4"
+                            LET $ratio_ok: BOOL = $flags.ratio == 2.5
+                            ASSERT_EQ $ratio_ok true
+                        "#},
+                    },
+                    crate::Example {
+                        name: "variable default fails",
+                        fence_meta: Some("expect_error:\"expected default literal\""),
+                        code: indoc::indoc! {r#"
+                            IMPORT [STD]
+                            # Defaults are literals: a variable in place
+                            # of a literal fails instead of evaluating.
+                            TYPE FLAGS = MAP<n: INT = $x>
+                            TYPE PARSED = MAP<flags: FLAGS>
+                            LET $p: PARSED = PARSE_ARGS([])
                         "#},
                     },
                     crate::Example {
@@ -2524,11 +2551,7 @@ type CliSpecs = BTreeMap<String, (CliType, bool, Option<Value>)>;
 /// Checked `LIST<STRING>` extraction for the CLI trio. Single owner
 /// so all three functions admit exactly the same argv shape.
 fn string_list_arg(val: &Value, what: &str) -> Result<Vec<String>> {
-    crate::check_value_at(
-        &TypeTag::ListOf(Arc::new(TypeTag::String)),
-        val,
-        what,
-    )?;
+    crate::check_value_at(&TypeTag::ListOf(Arc::new(TypeTag::String)), val, what)?;
     Ok(val
         .as_list()
         .expect("check_value_at enforces LIST")
@@ -2588,7 +2611,10 @@ fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<
 /// `PARSE_FLAGS` fill, require, and reject identically: present flags
 /// coerce, missing defaulted flags fill, missing required flags fail,
 /// missing optionals stay absent, unknown flags fail.
-fn coerce_flags(specs: &CliSpecs, raw: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Value>> {
+fn coerce_flags(
+    specs: &CliSpecs,
+    raw: &BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, Value>> {
     let mut coerced: BTreeMap<String, Value> = BTreeMap::new();
     for (flag, (target, required, default)) in specs.iter() {
         if flag.is_empty() {
@@ -2659,10 +2685,7 @@ impl<P: ProcessManager> OxDockFn<P> for ParseFlags {
     fn registration() -> HostRegistration<P> {
         let func: NativeFn<P> = Arc::new(|cx: &mut StepCtx<P>, values: Vec<Value>| {
             if values.len() != 1 {
-                anyhow::bail!(
-                    "PARSE_FLAGS() expects 1 argument, got {}",
-                    values.len()
-                );
+                anyhow::bail!("PARSE_FLAGS() expects 1 argument, got {}", values.len());
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");

@@ -406,7 +406,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
     let outcome: Result<()> = (|| {
         let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
         for (name, target) in aliases {
-            cx.state.type_aliases.insert(name, target);
+            cx.state.register_alias(name, target);
         }
         // Proven once, trusted thereafter: files the static closure
         // pass validated (full nested-import knowledge, same cached
@@ -553,7 +553,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 persisted.push((name.clone(), target));
             }
         }
-        cx.state.type_aliases = saved_aliases;
+        cx.state.restore_aliases(saved_aliases);
         for (name, target) in persisted {
             // Collision-checked: re-importing the same target is
             // idempotent, differing targets fail naming both files.
@@ -564,7 +564,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                     );
                 }
             } else {
-                cx.state.type_aliases.insert(name, target);
+                cx.state.register_alias(name, target);
             }
         }
     }
@@ -600,7 +600,7 @@ pub(crate) fn insert_imported_type<P: ProcessManager>(
             );
         }
     } else {
-        state.type_aliases.insert(key, target.to_string());
+        state.register_alias(key, target.to_string());
     }
     Ok(())
 }
@@ -715,7 +715,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     let phase_one: Result<Option<Value>> = (|| {
         let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
         for (name, target) in &aliases {
-            cx.state.type_aliases.insert(name.clone(), target.clone());
+            cx.state.register_alias(name.clone(), target.clone());
         }
         // Self-sufficiency: the file's own harvests satisfy its own
         // signatures (see `resolve_own_type_harvests`).
@@ -793,7 +793,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         }
         Ok(None)
     })();
-    cx.state.type_aliases = saved_aliases.clone();
+    cx.state.restore_aliases(saved_aliases.clone());
     let cached = phase_one?;
     // Whole-file type persistence: exported types survive the restore,
     // bare plus `ALIAS::NAME`, exactly like func views. Runs on every
@@ -803,7 +803,7 @@ pub(crate) fn import_file<P: ProcessManager>(
             // Temporarily merge full aliases so nested-type targets
             // resolve, then filter to exported for persistence.
             for (name, target) in &aliases {
-                cx.state.type_aliases.insert(name.clone(), target.clone());
+                cx.state.register_alias(name.clone(), target.clone());
             }
             let type_exported: std::collections::HashSet<&str> =
                 type_exports.iter().map(|e| e.as_str()).collect();
@@ -815,12 +815,12 @@ pub(crate) fn import_file<P: ProcessManager>(
                     to_persist.push((name.clone(), target.clone()));
                 }
             }
-            cx.state.type_aliases = saved_aliases.clone();
+            cx.state.restore_aliases(saved_aliases.clone());
             for (name, target) in to_persist {
                 insert_imported_type(cx.state, &name, &target, Some(alias), path)?;
             }
         } else {
-            cx.state.type_aliases = saved_aliases.clone();
+            cx.state.restore_aliases(saved_aliases.clone());
         }
     }
     if let Some(value) = cached {
@@ -835,7 +835,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     let outcome: Result<Value> = (|| {
         let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
         for (name, target) in aliases {
-            cx.state.type_aliases.insert(name, target);
+            cx.state.register_alias(name, target);
         }
         cx.state.import_stack.push(resolved.clone());
         cx.state.push_scope();
@@ -932,7 +932,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     let pop_res = cx.state.pop_scope();
     cx.state.var_scopes = saved_vars;
     let _ = cx.state.import_stack.pop();
-    cx.state.type_aliases = saved_aliases;
+    cx.state.restore_aliases(saved_aliases);
     // Re-apply the file's own harvests after the init restore: the
     // restore drops everything but exports, while harvested funcs
     // persist through the registry. Types persist like funcs do, so

@@ -2633,7 +2633,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                 .collect();
             let saved_type_aliases = cx.state.type_aliases.clone();
             for (name, target) in &owner_aliases {
-                cx.state.type_aliases.insert(name.clone(), target.clone());
+                cx.state.register_alias(name.clone(), target.clone());
             }
             // Module-owned bodies execute with their module on the
             // context stack, so name resolution falls back to the
@@ -2738,7 +2738,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             }
             cx.state.call_depth -= 1;
             let _ = cx.state.module_stack.pop();
-            cx.state.type_aliases = saved_type_aliases;
+            cx.state.restore_aliases(saved_type_aliases);
             match (outcome, pop_res) {
                 (Ok(value), Ok(())) => {
                     let _ = (&def.return_type, &def.return_spelling, def.is_async);
@@ -4386,9 +4386,7 @@ fn step_returns_value(kind: &StepKind) -> bool {
             default_body,
             ..
         } => {
-            cases
-                .iter()
-                .any(|(_, branch)| body_returns_value(branch))
+            cases.iter().any(|(_, branch)| body_returns_value(branch))
                 || default_body
                     .as_ref()
                     .is_some_and(|body| body_returns_value(body))
