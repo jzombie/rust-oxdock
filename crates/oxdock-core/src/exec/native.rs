@@ -2677,7 +2677,10 @@ fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpec
 
 /// Parse flags only against `TYPE FLAGS`.
 ///
-/// Returns the flags `MAP` directly: no pair wrapper, no positionals.
+/// Returns the flags `MAP` directly: no pair wrapper. Positional
+/// arguments fail instead of dropping silently, so a space-separated
+/// value (`--model gpt-4`) names the mistake instead of binding
+/// `--model` to `true` and losing `gpt-4`.
 /// Same tokenizer, coercion, defaults, and errors as `PARSE_ARGS`.
 pub struct ParseFlags;
 
@@ -2691,7 +2694,15 @@ impl<P: ProcessManager> OxDockFn<P> for ParseFlags {
             let args_val = iter.next().expect("arity checked above");
             let args = string_list_arg(&args_val, "PARSE_FLAGS() argument `$args`")?;
             let specs = resolve_flags_specs(cx)?;
-            let (raw, _positionals) = tokenize_raw_args(args)?;
+            let (raw, positionals) = tokenize_raw_args(args)?;
+            if !positionals.is_empty() {
+                let shown: Vec<String> =
+                    positionals.iter().map(|pos| pos.to_string()).collect();
+                anyhow::bail!(
+                    "PARSE_FLAGS() does not accept positional arguments; found {}",
+                    shown.join(", ")
+                );
+            }
             Ok(Value::map(coerce_flags(&specs, &raw)?))
         });
         HostRegistration::Stateful {
@@ -2711,7 +2722,7 @@ impl<P: ProcessManager> OxDockFn<P> for ParseFlags {
                 returns: Some(TypeTag::Map),
                 rpn: true,
                 summary: "Parse flags against TYPE FLAGS.",
-                docs: "Consumes a `LIST<STRING>` and coerces flags through `TYPE FLAGS`. Returns the flags `MAP` directly.",
+                docs: "Consumes a `LIST<STRING>` and coerces flags through `TYPE FLAGS`. Returns the flags `MAP` directly; positional arguments fail.",
                 examples: &[crate::Example {
                     name: "flags only",
                     fence_meta: None,

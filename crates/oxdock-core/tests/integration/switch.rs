@@ -300,6 +300,7 @@ fn switch_bare_call_conditions_and_no_match_noop() {
 
 #[test]
 fn switch_bare_head_tolerates_comment_gap() {
+
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
@@ -318,6 +319,34 @@ fn switch_bare_head_tolerates_comment_gap() {
         ASSERT_EQ $band "mid"
     "#};
     run_script(&root, script).expect("comment gap before body parses");
+}
+
+#[test]
+fn switch_discriminant_tolerates_gap_before_brace() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        # Gaps between the discriminant and the body brace parse:
+        # trailing gaps skip after the expression, mirroring the
+        # bare head, so comments and newlines ride there too.
+        LET $cmd: STRING = "b"
+        SWITCH $cmd /* pick */ {
+            CASE "b" {
+                WRITE hit.txt comment-gap
+            }
+        }
+        LET $other: STRING = "c"
+        SWITCH $other /* also picks */ {
+            CASE "c" {
+                WRITE hit2.txt second-gap
+            }
+        }
+        LET $hit: STRING = READ hit.txt
+        ASSERT_EQ $hit "comment-gap"
+        LET $hit2: STRING = READ hit2.txt
+        ASSERT_EQ $hit2 "second-gap"
+    "#};
+    run_script(&root, script).expect("discriminant gaps before brace parse");
 }
 
 #[test]

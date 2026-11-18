@@ -129,3 +129,22 @@ fn parse_args_missing_required_and_unknown_flag_fail() {
     let err = run_err(&root, unknown);
     assert!(err.contains("unknown flag --nope"), "{err}");
 }
+
+#[test]
+fn parse_flags_rejects_positionals_instead_of_dropping() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // A space-separated value tokenizes as a bare flag plus a
+    // positional; flags only must fail naming the positional
+    // instead of binding `--model` to true and losing `gpt-4`.
+    let script = indoc! {r#"
+        IMPORT [STD]
+        TYPE FLAGS = MAP<model: STRING>
+        LET $flags: FLAGS = PARSE_FLAGS(["--model", "gpt-4"])
+    "#};
+    let err = run_err(&root, script);
+    assert!(
+        err.contains("does not accept positional arguments") && err.contains("gpt-4"),
+        "{err}"
+    );
+}
