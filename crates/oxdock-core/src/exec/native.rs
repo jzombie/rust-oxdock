@@ -2356,7 +2356,11 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
                 .as_list()
                 .expect("check_value_at enforces LIST")
                 .iter()
-                .map(|v| v.as_str().expect("check_value_at enforces STRING").to_string())
+                .map(|v| {
+                    v.as_str()
+                        .expect("check_value_at enforces STRING")
+                        .to_string()
+                })
                 .collect();
             let schema_val = iter.next().unwrap_or_else(|| Value::map(BTreeMap::new()));
             crate::check_value_at(
@@ -2528,7 +2532,10 @@ fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> Result<Value> {
                     ),
                 }
             }
-            anyhow::bail!("PARSE_ARGS flag --{flag} expects BOOL, got {}", raw.type_name())
+            anyhow::bail!(
+                "PARSE_ARGS flag --{flag} expects BOOL, got {}",
+                raw.type_name()
+            )
         }
         CliType::String => {
             if let Some(s) = raw.as_str() {
@@ -2540,17 +2547,15 @@ fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> Result<Value> {
             if raw.as_bool().is_some() {
                 anyhow::bail!("PARSE_ARGS flag --{flag} needs a value: use --{flag}=<value>");
             }
-            super::args::int_from_value(raw).map_err(|_| {
-                anyhow::anyhow!("PARSE_ARGS flag --{flag} expects INT")
-            })
+            super::args::int_from_value(raw)
+                .map_err(|_| anyhow::anyhow!("PARSE_ARGS flag --{flag} expects INT"))
         }
         CliType::Float => {
             if raw.as_bool().is_some() {
                 anyhow::bail!("PARSE_ARGS flag --{flag} needs a value: use --{flag}=<value>");
             }
-            super::args::float_from_value(raw).map_err(|_| {
-                anyhow::anyhow!("PARSE_ARGS flag --{flag} expects FLOAT")
-            })
+            super::args::float_from_value(raw)
+                .map_err(|_| anyhow::anyhow!("PARSE_ARGS flag --{flag} expects FLOAT"))
         }
     }
 }
@@ -2608,10 +2613,7 @@ fn parse_args_impl(args: Vec<String>, schema: BTreeMap<String, Value>) -> Result
         }
         let (target, required, default) = parse_schema_entry(flag, spec)?;
         if let Some(raw) = flags.get(flag) {
-            coerced.insert(
-                flag.clone(),
-                coerce_cli_flag(target, flag, raw.clone())?,
-            );
+            coerced.insert(flag.clone(), coerce_cli_flag(target, flag, raw.clone())?);
         } else if let Some(d) = default {
             coerced.insert(flag.clone(), d);
         } else if required {
@@ -2672,9 +2674,7 @@ fn parse_schema_entry(flag: &str, spec: &Value) -> Result<(CliType, bool, Option
         }
         let required = match map.get("required") {
             Some(v) => v.as_bool().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "PARSE_ARGS schema for --{flag}: \"required\" must be a BOOL"
-                )
+                anyhow::anyhow!("PARSE_ARGS schema for --{flag}: \"required\" must be a BOOL")
             })?,
             None => !map.contains_key("default"),
         };
