@@ -547,6 +547,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=$var], ...] <command> \| WITH_IO [bindings] { <commands> } \| WITH_IO [tty[, stdin=$p][, rows=<int>][, cols=<int>]] RUN ...` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
+| [`SWITCH`](#switch) | `SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE<T> = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
@@ -809,6 +810,134 @@ LET $an: STRING = READ and.txt
 ASSERT_EQ $an "and-false"
 LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
 ASSERT_EQ $t2 "absent"
+```
+
+
+### SWITCH
+
+Multi-way branch on a value or a condition list.
+
+**Syntax:** `SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }`
+
+Compares one discriminant against each `CASE` value list in
+order with strict `==` (same rule as `IF` conditions:
+numerics compare across `INT` and `FLOAT`, every other
+cross-type pair is unequal). The first matching arm runs
+exclusively: later arms never run and there is no
+fallthrough, so group values with commas
+(`CASE "help", "h"`) instead of stacking bodies.
+
+With no discriminant (`SWITCH { ... }`), each `CASE`
+carries its own boolean condition (a call counts: any
+expression evaluating to `BOOL`), and the first true arm
+runs. Conditions evaluate in order and stop at the first
+match, so later calls never run. A final `DEFAULT` arm
+runs when nothing matched; without one, no match is a
+no-op.
+
+`BREAK` exits the `SWITCH` early (the remainder of the arm
+is skipped and an enclosing loop is unaffected); `CONTINUE`
+continues an enclosing loop; `RETURN` and `EXIT` propagate
+as usual.
+
+
+**Examples:**
+
+**Example: switch on a value**
+
+```oxdock
+# The first arm whose value list contains the discriminant
+# runs; no later arm runs.
+LET $cmd: STRING = "help"
+SWITCH $cmd {
+  CASE "help", "h" {
+    WRITE chosen.txt help
+  }
+  CASE "summarize" {
+    WRITE chosen.txt summarize
+  }
+  DEFAULT {
+    WRITE chosen.txt fallback
+  }
+}
+
+LET $body: STRING = READ chosen.txt
+ASSERT_EQ $body "help"
+```
+
+**Example: switch on conditions**
+
+```oxdock
+# With no discriminant each CASE is its own condition;
+# calls work as conditions too.
+LET $n: INT = 2
+SWITCH {
+  CASE $n > 5 {
+    WRITE band.txt high
+  }
+  CASE $n > 1 {
+    WRITE band.txt mid
+  }
+  DEFAULT {
+    WRITE band.txt low
+  }
+}
+
+LET $band: STRING = READ band.txt
+ASSERT_EQ $band "mid"
+```
+
+**Example: break and continue inside switch**
+
+```oxdock
+# BREAK exits the SWITCH early: the trailing ECHO and
+# EXIT 1 never run, so reaching them would print a
+# marker and fail the script.
+# CONTINUE passes through to the enclosing loop.
+LET $items: LIST<STRING> = ["a", "skip", "b"]
+FOR $item: STRING IN $items {
+  SWITCH $item {
+    CASE "skip" {
+      CONTINUE
+    }
+    CASE "a" {
+      ECHO saw-a
+      BREAK
+      ECHO unreachable
+      EXIT 1
+    }
+    DEFAULT {
+      ECHO saw-other
+    }
+  }
+}
+
+ASSERT_CONTAINS stdout "saw-a"
+ASSERT_CONTAINS stdout "saw-other"
+```
+
+**Example: overlapping arms run first match only**
+
+```oxdock
+# Overlapping arms never both run: the first match wins,
+# so order arms most specific first. There is no
+# fallthrough to the next CASE; CONTINUE would continue
+# an enclosing loop, not advance to the next arm.
+LET $n: INT = 10
+SWITCH {
+  CASE $n > 1 {
+    WRITE band.txt wide
+  }
+  CASE $n > 5 {
+    WRITE band.txt narrow
+  }
+  DEFAULT {
+    WRITE band.txt low
+  }
+}
+
+LET $band: STRING = READ band.txt
+ASSERT_EQ $band "wide"
 ```
 
 
@@ -4718,6 +4847,7 @@ Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt` tokenizer. S
 
 ```oxdock
 IMPORT [STD]
+# Long equals entries bind strings, bare longs bind true.
 LET $parsed: MAP<ANY> = PARSE_ARGS(["--host=example.com", "--verbose", "serve"])
 ASSERT_EQ $parsed.flags.host "example.com"
 ASSERT_EQ $parsed.flags.verbose true
@@ -4728,6 +4858,7 @@ ASSERT_EQ $parsed.positionals.0 "serve"
 
 ```oxdock
 IMPORT [STD]
+# Short clusters expand, short equals binds, and one double dash ends flags.
 LET $parsed: MAP<ANY> = PARSE_ARGS(["-ab", "-k=value", "--flag", "--", "--not-a-flag"])
 ASSERT_EQ $parsed.flags.a true
 ASSERT_EQ $parsed.flags.b true
@@ -4740,6 +4871,7 @@ ASSERT_EQ $parsed.positionals.0 "--not-a-flag"
 
 ```oxdock
 IMPORT [STD]
+# Duplicate keys overwrite in order, and a bare second double dash is positional.
 LET $parsed: MAP<ANY> = PARSE_ARGS(["--x=1", "--x=2", "--", "--"])
 ASSERT_EQ $parsed.flags.x "2"
 ASSERT_EQ $parsed.positionals.0 "--"
@@ -4749,6 +4881,7 @@ ASSERT_EQ $parsed.positionals.0 "--"
 
 ```oxdock
 IMPORT [STD]
+# Schema types coerce flags and fill defaults.
 LET $parsed: MAP<ANY> = PARSE_ARGS(["--model=gpt-4", "--propose"], {model: "STRING", propose: false})
 ASSERT_EQ $parsed.flags.model "gpt-4"
 ASSERT_EQ $parsed.flags.propose true
@@ -4762,6 +4895,7 @@ ASSERT_EQ $on true
 
 ```oxdock expect_error:"missing required flag"
 IMPORT [STD]
+# Absent required flags fail naming the flag.
 LET $parsed: MAP<ANY> = PARSE_ARGS([], {model: "STRING", propose: false})
 ```
 
@@ -4771,6 +4905,7 @@ LET $parsed: MAP<ANY> = PARSE_ARGS([], {model: "STRING", propose: false})
 
 ```oxdock expect_error:"unknown flag"
 IMPORT [STD]
+# Undeclared flags fail instead of passing through.
 LET $parsed: MAP<ANY> = PARSE_ARGS(["--model=x", "--nope=1"], {model: "STRING"})
 ```
 

@@ -16,8 +16,9 @@
 //! later through the shared `lower_block_string`.
 
 use crate::constants::{
-    KEYWORD_ASYNC, KEYWORD_ELSE, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_ISOLATED,
-    KEYWORD_REMOTE, KEYWORD_TIMEOUT, KEYWORD_WHILE, KEYWORD_WITH_IO,
+    KEYWORD_ASYNC, KEYWORD_CASE, KEYWORD_DEFAULT, KEYWORD_ELSE, KEYWORD_FOR, KEYWORD_FUNC,
+    KEYWORD_IF, KEYWORD_ISOLATED, KEYWORD_REMOTE, KEYWORD_SWITCH, KEYWORD_TIMEOUT, KEYWORD_WHILE,
+    KEYWORD_WITH_IO,
 };
 use crate::error::ParseErrorKind;
 use std::fmt;
@@ -143,6 +144,9 @@ fn is_block_head(w: &str) -> bool {
         w,
         KEYWORD_IF
             | KEYWORD_ELSE
+            | KEYWORD_SWITCH
+            | KEYWORD_CASE
+            | KEYWORD_DEFAULT
             | KEYWORD_FOR
             | KEYWORD_WHILE
             | KEYWORD_FUNC

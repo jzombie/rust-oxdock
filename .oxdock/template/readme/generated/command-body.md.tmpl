@@ -249,6 +249,134 @@ ASSERT_EQ $t2 "absent"
 ```
 
 
+### SWITCH
+
+Multi-way branch on a value or a condition list.
+
+**Syntax:** `SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }`
+
+Compares one discriminant against each `CASE` value list in
+order with strict `==` (same rule as `IF` conditions:
+numerics compare across `INT` and `FLOAT`, every other
+cross-type pair is unequal). The first matching arm runs
+exclusively: later arms never run and there is no
+fallthrough, so group values with commas
+(`CASE "help", "h"`) instead of stacking bodies.
+
+With no discriminant (`SWITCH { ... }`), each `CASE`
+carries its own boolean condition (a call counts: any
+expression evaluating to `BOOL`), and the first true arm
+runs. Conditions evaluate in order and stop at the first
+match, so later calls never run. A final `DEFAULT` arm
+runs when nothing matched; without one, no match is a
+no-op.
+
+`BREAK` exits the `SWITCH` early (the remainder of the arm
+is skipped and an enclosing loop is unaffected); `CONTINUE`
+continues an enclosing loop; `RETURN` and `EXIT` propagate
+as usual.
+
+
+**Examples:**
+
+**Example: switch on a value**
+
+```oxdock
+# The first arm whose value list contains the discriminant
+# runs; no later arm runs.
+LET $cmd: STRING = "help"
+SWITCH $cmd {
+  CASE "help", "h" {
+    WRITE chosen.txt help
+  }
+  CASE "summarize" {
+    WRITE chosen.txt summarize
+  }
+  DEFAULT {
+    WRITE chosen.txt fallback
+  }
+}
+
+LET $body: STRING = READ chosen.txt
+ASSERT_EQ $body "help"
+```
+
+**Example: switch on conditions**
+
+```oxdock
+# With no discriminant each CASE is its own condition;
+# calls work as conditions too.
+LET $n: INT = 2
+SWITCH {
+  CASE $n > 5 {
+    WRITE band.txt high
+  }
+  CASE $n > 1 {
+    WRITE band.txt mid
+  }
+  DEFAULT {
+    WRITE band.txt low
+  }
+}
+
+LET $band: STRING = READ band.txt
+ASSERT_EQ $band "mid"
+```
+
+**Example: break and continue inside switch**
+
+```oxdock
+# BREAK exits the SWITCH early: the trailing ECHO and
+# EXIT 1 never run, so reaching them would print a
+# marker and fail the script.
+# CONTINUE passes through to the enclosing loop.
+LET $items: LIST<STRING> = ["a", "skip", "b"]
+FOR $item: STRING IN $items {
+  SWITCH $item {
+    CASE "skip" {
+      CONTINUE
+    }
+    CASE "a" {
+      ECHO saw-a
+      BREAK
+      ECHO unreachable
+      EXIT 1
+    }
+    DEFAULT {
+      ECHO saw-other
+    }
+  }
+}
+
+ASSERT_CONTAINS stdout "saw-a"
+ASSERT_CONTAINS stdout "saw-other"
+```
+
+**Example: overlapping arms run first match only**
+
+```oxdock
+# Overlapping arms never both run: the first match wins,
+# so order arms most specific first. There is no
+# fallthrough to the next CASE; CONTINUE would continue
+# an enclosing loop, not advance to the next arm.
+LET $n: INT = 10
+SWITCH {
+  CASE $n > 1 {
+    WRITE band.txt wide
+  }
+  CASE $n > 5 {
+    WRITE band.txt narrow
+  }
+  DEFAULT {
+    WRITE band.txt low
+  }
+}
+
+LET $band: STRING = READ band.txt
+ASSERT_EQ $band "wide"
+```
+
+
 ### LET
 
 Bind script-local variables.

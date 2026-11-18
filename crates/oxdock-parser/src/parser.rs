@@ -94,11 +94,11 @@ use crate::commands::{
 };
 use crate::constants::{
     INJECT_PREFIX, INJECT_SUFFIX, KEYWORD_AS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
-    KEYWORD_CANCEL, KEYWORD_CONTINUE, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT,
-    KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN,
-    KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE,
-    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO,
-    MODULE_SEPARATOR,
+    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_DEFAULT, KEYWORD_ELSE, KEYWORD_ENV,
+    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IF,
+    KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED, KEYWORD_LET,
+    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH, KEYWORD_TIMEOUT, KEYWORD_TYPE,
+    KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
 };
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 
@@ -4318,6 +4318,215 @@ fn parse_if_at(
     Ok(Some((kind, p - pos)))
 }
 
+/// Parse one `CASE` value list: comma-separated expressions up to (not
+/// including) the arm body brace. Groups are atomic tokens, so commas
+/// inside calls, lists, and maps never split. Returns the values plus
+/// the token count consumed past the `CASE` word.
+fn parse_case_values(
+    toks: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<(Vec<Expr>, usize), TokenError> {
+    let mut values = Vec::new();
+    let mut p = 0;
+    loop {
+        let mut gcur = Cursor::expr(&toks[p..], stmt);
+        gcur.skip_gap_nl();
+        let start = p + gcur.pos;
+        let mut vcur = Cursor::expr(&toks[start..], stmt);
+        let value = match parse_expr_checked(&mut vcur, ctx) {
+            Ok(expr) => expr,
+            Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+            Err(e) => return Err(e),
+        };
+        values.push(value);
+        p = start + vcur.pos;
+        let mut gcur = Cursor::expr(&toks[p..], stmt);
+        gcur.skip_gap_nl();
+        p += gcur.pos;
+        if matches!(
+            toks.get(p).map(|t| &t.kind),
+            Some(TokKind::Punct(','))
+        ) {
+            p += 1;
+            continue;
+        }
+        break;
+    }
+    Ok((values, p))
+}
+
+/// Parse the arms inside a `SWITCH` body brace: `CASE <values> { ... }`
+/// arms plus an optional trailing `DEFAULT { ... }`. Hard errors once
+/// committed (the `SWITCH` head is unambiguous): unknown words, empty
+/// bodies, missing blocks, duplicate or non-trailing `DEFAULT`.
+fn parse_switch_body(
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<(Vec<(Vec<Expr>, Vec<Step>)>, Option<Vec<Step>>), TokenError> {
+    let err = |msg: String| TokenError {
+        stmt,
+        line: 0,
+        col: 0,
+        msg,
+        kind: None,
+    };
+    let mut cases: Vec<(Vec<Expr>, Vec<Step>)> = Vec::new();
+    let mut default_body: Option<Vec<Step>> = None;
+    let mut p = 0;
+    loop {
+        let mut gcur = Cursor::expr(&inner[p..], stmt);
+        gcur.skip_gap_nl();
+        p += gcur.pos;
+        if p >= inner.len() {
+            break;
+        }
+        let word = match &inner[p].kind {
+            TokKind::Word(w) => w.clone(),
+            _ => {
+                return Err(err(
+                    "SWITCH body must hold CASE or DEFAULT arms, e.g. `SWITCH $cmd { CASE \"a\" { ECHO yes } DEFAULT { ECHO no } }`".to_string(),
+                ));
+            }
+        };
+        if word == KEYWORD_CASE {
+            if default_body.is_some() {
+                return Err(err(
+                    "SWITCH DEFAULT must be the last arm; no CASE may follow it".to_string(),
+                ));
+            }
+            let (values, used) = parse_case_values(&inner[p + 1..], stmt, ctx)?;
+            p += 1 + used;
+            let mut bcur = Cursor::expr(&inner[p..], stmt);
+            bcur.skip_gap_nl();
+            p += bcur.pos;
+            let arm_ok = matches!(
+                inner.get(p).map(|t| &t.kind),
+                Some(TokKind::Group {
+                    delim: GroupDelim::Brace,
+                    ..
+                })
+            ) && inner.get(p).is_some_and(|t| !is_template_brace(t));
+            if !arm_ok {
+                return Err(err(
+                    "SWITCH CASE needs a braced block, e.g. `CASE \"a\", \"b\" { ECHO yes }`"
+                        .to_string(),
+                ));
+            }
+            let arm_inner = match &inner[p].kind {
+                TokKind::Group { inner, .. } => inner.clone(),
+                _ => unreachable!(),
+            };
+            let body = parse_body_steps(&arm_inner, stmt, ctx, false)?;
+            cases.push((values, body));
+            p += 1;
+        } else if word == KEYWORD_DEFAULT {
+            if default_body.is_some() {
+                return Err(err("SWITCH allows only one DEFAULT arm".to_string()));
+            }
+            p += 1;
+            let mut bcur = Cursor::expr(&inner[p..], stmt);
+            bcur.skip_gap_nl();
+            p += bcur.pos;
+            let arm_ok = matches!(
+                inner.get(p).map(|t| &t.kind),
+                Some(TokKind::Group {
+                    delim: GroupDelim::Brace,
+                    ..
+                })
+            ) && inner.get(p).is_some_and(|t| !is_template_brace(t));
+            if !arm_ok {
+                return Err(err(
+                    "SWITCH DEFAULT needs a braced block, e.g. `DEFAULT { ECHO fallback }`"
+                        .to_string(),
+                ));
+            }
+            let arm_inner = match &inner[p].kind {
+                TokKind::Group { inner, .. } => inner.clone(),
+                _ => unreachable!(),
+            };
+            default_body = Some(parse_body_steps(&arm_inner, stmt, ctx, false)?);
+            p += 1;
+        } else {
+            return Err(err(
+                "SWITCH body must hold CASE or DEFAULT arms, e.g. `SWITCH $cmd { CASE \"a\" { ECHO yes } DEFAULT { ECHO no } }`".to_string(),
+            ));
+        }
+    }
+    if cases.is_empty() && default_body.is_none() {
+        return Err(err(
+            "SWITCH needs at least one CASE or DEFAULT arm".to_string(),
+        ));
+    }
+    Ok((cases, default_body))
+}
+
+/// `SWITCH [disc] { CASE v, ... { ... } ... [DEFAULT { ... }] }` or
+/// bare `SWITCH { CASE <bool> { ... } ... }`. `None` on shape miss (no
+/// outer brace: falls to generic, which fails it with the SWITCH hint);
+/// classified expression failures propagate like `IF`, and arm errors
+/// are hard (the head commits the shape).
+fn parse_switch_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    // Bare head: the token after `SWITCH` opens the body brace, so no
+    // discriminant is parsed (every `CASE` carries its own condition).
+    let bare_head = matches!(
+        toks.get(pos + 1).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        })
+    ) && toks
+        .get(pos + 1)
+        .is_some_and(|t| !is_template_brace(t));
+    let mut p = pos + 1;
+    let discriminant = if bare_head {
+        None
+    } else {
+        // Discriminant entry skips leading gap comments (`IF` uses `gap`).
+        let mut lead = Cursor::expr(&toks[pos + 1..], stmt);
+        lead.skip_gap();
+        let mut cur = Cursor::expr(&toks[pos + 1 + lead.pos..], stmt);
+        let disc = match parse_expr_checked(&mut cur, ctx) {
+            Ok(expr) => expr,
+            Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+            // Same classified-error rule as the `IF` head above: the
+            // head is unambiguous, so resolvable-but-unknown callees
+            // name the culprit instead of the generic hint.
+            Err(e) if e.kind.is_some() => return Err(e),
+            Err(_) => return Ok(None),
+        };
+        p = pos + 1 + lead.pos + cur.pos;
+        Some(Box::new(disc))
+    };
+    let body_ok = matches!(
+        toks.get(p).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        })
+    ) && toks.get(p).is_some_and(|t| !is_template_brace(t));
+    if !body_ok {
+        return Ok(None);
+    }
+    let inner = match &toks[p].kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    let (cases, default_body) = parse_switch_body(&inner, stmt, ctx)?;
+    let kind = StepKind::Switch {
+        discriminant,
+        cases,
+        default_body,
+    };
+    Ok(Some((kind, p + 1 - pos)))
+}
+
 /// Single (non-block) `FOR`: `$var[: TYPE] (, $var[: TYPE])? IN
 /// expr` plus block. Header shapes miss to generic (a third variable,
 /// a missing block, a bad name all fail in lowering like the
@@ -7830,6 +8039,11 @@ fn parse_element_at(
                 return Ok((vec![step(kind)], used));
             }
         }
+        Some(KEYWORD_SWITCH) => {
+            if let Some((kind, used)) = parse_switch_at(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
         Some(KEYWORD_FOR) => {
             if let Some((kind, used)) = parse_for_at(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
@@ -8339,6 +8553,7 @@ fn parse_inner_command(
                 KEYWORD_FUNC
                     | KEYWORD_LET
                     | KEYWORD_IF
+                    | KEYWORD_SWITCH
                     | KEYWORD_FOR
                     | KEYWORD_WHILE
                     | KEYWORD_TYPE

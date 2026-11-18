@@ -423,6 +423,29 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     }
                 }
             }
+            StepKind::Switch {
+                discriminant,
+                cases,
+                default_body,
+                ..
+            } => {
+                if let Some(disc) = discriminant {
+                    walk_expr(&mut keys, disc);
+                }
+                for (values, body) in cases {
+                    for value in values {
+                        walk_expr(&mut keys, value);
+                    }
+                    for k in collect_env_references(body) {
+                        keys.insert(k);
+                    }
+                }
+                if let Some(body) = default_body {
+                    for k in collect_env_references(body) {
+                        keys.insert(k);
+                    }
+                }
+            }
             StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => {
                 walk_expr(&mut keys, expr);
             }

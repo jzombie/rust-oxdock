@@ -3125,6 +3125,62 @@ pub(crate) fn if_then<P: ProcessManager>(
     Ok(Flow::Done)
 }
 
+/// Execute a `SWITCH`: with a discriminant, the first `CASE` value
+/// strictly equal to it wins (values evaluate in order and stop at
+/// the hit, so later calls never run); bare, the first truthy `CASE`
+/// condition wins. Only the winning arm runs: no fallthrough. `BREAK`
+/// exits the switch (consumed here, so an enclosing loop never sees
+/// it); `CONTINUE` and `RETURN` propagate to the loop or boundary.
+pub(crate) fn switch_run<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    discriminant: &Option<Box<Expr>>,
+    cases: &[(Vec<Expr>, Vec<Step>)],
+    default_body: &Option<Vec<Step>>,
+) -> Result<Flow> {
+    let mut chosen: Option<&Vec<Step>> = None;
+    if let Some(disc) = discriminant {
+        let target = super::args::evaluate_expr(disc, cx)?;
+        'arms: for (values, body) in cases {
+            for value in values {
+                let candidate = super::args::evaluate_expr(value, cx)?;
+                if super::args::values_equal(&target, &candidate) {
+                    chosen = Some(body);
+                    break 'arms;
+                }
+            }
+        }
+    } else {
+        'arms: for (conds, body) in cases {
+            for cond in conds {
+                let val = super::args::evaluate_expr(cond, cx)?;
+                if super::args::is_truthy(&val)? {
+                    chosen = Some(body);
+                    break 'arms;
+                }
+            }
+        }
+    }
+    let body = match chosen.or(default_body.as_ref()) {
+        Some(body) => body,
+        None => return Ok(Flow::Done),
+    };
+    match super::steps::execute_scoped_steps(
+        cx.state,
+        cx.process,
+        body,
+        cx.stdin.clone(),
+        false,
+        cx.out.clone(),
+        cx.err.clone(),
+        cx.out_pipe.clone(),
+        cx.stdin_pipe.clone(),
+        false,
+    )? {
+        Flow::Break { .. } => Ok(Flow::Done),
+        flow => Ok(flow),
+    }
+}
+
 // ── Dispatch functions ──────────────────────────────────────────────────────
 // These extract fields from `StepKind` variants, resolve arguments, and
 // forward to the actual handler functions. Used by `define_pipeline!`.
@@ -3208,6 +3264,22 @@ fn collect_body_bindings<P: ProcessManager>(
         | StepKind::While { body, .. } => {
             for step in body {
                 collect_body_bindings(&step.kind, state, out);
+            }
+        }
+        StepKind::Switch {
+            cases,
+            default_body,
+            ..
+        } => {
+            for (_, branch) in cases {
+                for step in branch {
+                    collect_body_bindings(&step.kind, state, out);
+                }
+            }
+            if let Some(body) = default_body {
+                for step in body {
+                    collect_body_bindings(&step.kind, state, out);
+                }
             }
         }
         StepKind::If {
@@ -4118,6 +4190,21 @@ pub(crate) fn dispatch_if_then<P: ProcessManager>(
     top_level_flow(if_then(cx, cond, then_body, else_ifs, else_body)?)
 }
 
+pub(crate) fn dispatch_switch<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Switch {
+        discriminant,
+        cases,
+        default_body,
+    } = step
+    else {
+        unreachable!()
+    };
+    top_level_flow(switch_run(cx, discriminant, cases, default_body)?)
+}
+
 pub(crate) fn dispatch_assign<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -4291,6 +4378,18 @@ fn step_returns_value(kind: &StepKind) -> bool {
                     .iter()
                     .any(|(_, branch)| body_returns_value(branch))
                 || else_body
+                    .as_ref()
+                    .is_some_and(|body| body_returns_value(body))
+        }
+        StepKind::Switch {
+            cases,
+            default_body,
+            ..
+        } => {
+            cases
+                .iter()
+                .any(|(_, branch)| body_returns_value(branch))
+                || default_body
                     .as_ref()
                     .is_some_and(|body| body_returns_value(body))
         }

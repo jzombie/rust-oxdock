@@ -2904,6 +2904,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Exit(_) => {}
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
+        StepKind::Switch { .. } => {}
         StepKind::Assign { .. } => {}
         StepKind::Set { .. } => {}
         StepKind::AssignCapture { .. } => {}

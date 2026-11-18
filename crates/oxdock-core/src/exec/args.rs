@@ -908,6 +908,17 @@ fn apply_neg(val: Value) -> Result<Value> {
     bail!("Type Error: unary '-' requires Int or Float, found {val:?}")
 }
 
+/// Strict value equality for `SWITCH` matching: the `==` branch of
+/// [`apply_compare`](self::apply_compare) without the `Value` wrapper.
+/// Numerics compare across `INT` and `FLOAT`; every other cross-type
+/// pair is unequal.
+pub(crate) fn values_equal(left: &Value, right: &Value) -> bool {
+    if let (Some(a), Some(b)) = (as_f64_value(left), as_f64_value(right)) {
+        return a == b;
+    }
+    left == right
+}
+
 /// Shared comparison: both `Int`/`Float` compare numerically (`1 == 1.0` is
 /// true, exact equality, no epsilon). Exactness follows binary fractions:
 /// decimals whose reduced denominator is a power of 2 (0.5, 0.25, 0.75)

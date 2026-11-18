@@ -951,6 +951,7 @@ Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt` tokenizer. S
 
 ```oxdock
 IMPORT [STD]
+# Long equals entries bind strings, bare longs bind true.
 LET $parsed: MAP<ANY> = PARSE_ARGS(["--host=example.com", "--verbose", "serve"])
 ASSERT_EQ $parsed.flags.host "example.com"
 ASSERT_EQ $parsed.flags.verbose true
@@ -961,6 +962,7 @@ ASSERT_EQ $parsed.positionals.0 "serve"
 
 ```oxdock
 IMPORT [STD]
+# Short clusters expand, short equals binds, and one double dash ends flags.
 LET $parsed: MAP<ANY> = PARSE_ARGS(["-ab", "-k=value", "--flag", "--", "--not-a-flag"])
 ASSERT_EQ $parsed.flags.a true
 ASSERT_EQ $parsed.flags.b true
@@ -973,6 +975,7 @@ ASSERT_EQ $parsed.positionals.0 "--not-a-flag"
 
 ```oxdock
 IMPORT [STD]
+# Duplicate keys overwrite in order, and a bare second double dash is positional.
 LET $parsed: MAP<ANY> = PARSE_ARGS(["--x=1", "--x=2", "--", "--"])
 ASSERT_EQ $parsed.flags.x "2"
 ASSERT_EQ $parsed.positionals.0 "--"
@@ -982,6 +985,7 @@ ASSERT_EQ $parsed.positionals.0 "--"
 
 ```oxdock
 IMPORT [STD]
+# Schema types coerce flags and fill defaults.
 LET $parsed: MAP<ANY> = PARSE_ARGS(["--model=gpt-4", "--propose"], {model: "STRING", propose: false})
 ASSERT_EQ $parsed.flags.model "gpt-4"
 ASSERT_EQ $parsed.flags.propose true
@@ -995,6 +999,7 @@ ASSERT_EQ $on true
 
 ```oxdock expect_error:"missing required flag"
 IMPORT [STD]
+# Absent required flags fail naming the flag.
 LET $parsed: MAP<ANY> = PARSE_ARGS([], {model: "STRING", propose: false})
 ```
 
@@ -1004,6 +1009,7 @@ LET $parsed: MAP<ANY> = PARSE_ARGS([], {model: "STRING", propose: false})
 
 ```oxdock expect_error:"unknown flag"
 IMPORT [STD]
+# Undeclared flags fail instead of passing through.
 LET $parsed: MAP<ANY> = PARSE_ARGS(["--model=x", "--nope=1"], {model: "STRING"})
 ```
 

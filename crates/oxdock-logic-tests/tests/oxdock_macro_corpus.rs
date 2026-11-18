@@ -791,6 +791,7 @@ fn kind_covered(kind: &oxdock_parser::StepKind) -> bool {
         | StepKind::Continue
         | StepKind::For { .. }
         | StepKind::If { .. }
+        | StepKind::Switch { .. }
         | StepKind::WithIo { .. }
         | StepKind::WithIoBlock { .. }
         | StepKind::TypeAlias { .. } => true,
@@ -1158,6 +1159,30 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
                     .iter()
                     .zip(ey.iter())
                     .all(|((c1, b1), (c2, b2))| c1 == c2 && steps_content_eq(b1, b2))
+                && match (bx, by) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => steps_content_eq(x, y),
+                    _ => false,
+                }
+        }
+        (
+            StepKind::Switch {
+                discriminant: dx,
+                cases: cx,
+                default_body: bx,
+            },
+            StepKind::Switch {
+                discriminant: dy,
+                cases: cy,
+                default_body: by,
+            },
+        ) => {
+            dx == dy
+                && cx.len() == cy.len()
+                && cx
+                    .iter()
+                    .zip(cy.iter())
+                    .all(|((v1, b1), (v2, b2))| v1 == v2 && steps_content_eq(b1, b2))
                 && match (bx, by) {
                     (None, None) => true,
                     (Some(x), Some(y)) => steps_content_eq(x, y),

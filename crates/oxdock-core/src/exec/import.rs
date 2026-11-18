@@ -1190,6 +1190,20 @@ pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
             }
             out
         }
+        StepKind::Switch {
+            cases,
+            default_body,
+            ..
+        } => {
+            let mut out: Vec<&[Step]> = Vec::new();
+            for (_, arm) in cases {
+                out.push(arm);
+            }
+            if let Some(arm) = default_body {
+                out.push(arm);
+            }
+            out
+        }
         _ => Vec::new(),
     };
     // Inline blocks run in the enclosing dynamic scope, so their

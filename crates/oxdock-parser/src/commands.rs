@@ -441,6 +441,15 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
         "ELSE" => Some(format!(
             "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}."
         )),
+        "SWITCH" => Some(format!(
+            "SWITCH needs a value or bare condition list plus braced CASE arms, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}."
+        )),
+        "CASE" => Some(format!(
+            "CASE only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\", \"b\" {{ ECHO yes }} }}`; got {got}."
+        )),
+        "DEFAULT" => Some(format!(
+            "DEFAULT only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}."
+        )),
         "LET" => Some(format!(
             "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE<T> = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}."
         )),
@@ -463,10 +472,10 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "WHILE needs a Bool condition and a block, e.g. `WHILE !$done {{ ... }}`; got {got}."
         )),
         "BREAK" => Some(
-            "`BREAK` exits the innermost enclosing FOR/WHILE loop; it must appear inside a loop.".to_string(),
+            "`BREAK` exits the innermost enclosing FOR/WHILE loop or SWITCH; it must appear inside a loop or SWITCH.".to_string(),
         ),
         "CONTINUE" => Some(
-            "`CONTINUE` skips to the next iteration of the innermost enclosing FOR/WHILE loop; it must appear inside a loop.".to_string(),
+            "`CONTINUE` skips to the next iteration of the innermost enclosing FOR/WHILE loop; it must appear inside a loop (a SWITCH never captures it).".to_string(),
         ),
         "INHERIT_ENV" => Some(format!(
             "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME, PATH]`; got {got}."
@@ -823,6 +832,20 @@ impl StepKind {
                     f(cond);
                 }
             }
+            StepKind::Switch {
+                discriminant,
+                cases,
+                ..
+            } => {
+                if let Some(disc) = discriminant {
+                    f(disc);
+                }
+                for (exprs, _) in cases {
+                    for expr in exprs {
+                        f(expr);
+                    }
+                }
+            }
             StepKind::While { cond, .. } => f(cond),
             StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
                 walk_arg(duration, f);
@@ -925,6 +948,7 @@ impl StepKind {
                 | StepKind::Return { .. }
                 | StepKind::For { .. }
                 | StepKind::If { .. }
+                | StepKind::Switch { .. }
                 | StepKind::While { .. } => {}
                 StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
                     walk_arg(duration, f);
@@ -1053,6 +1077,18 @@ impl StepKind {
                     walk_body(body, f);
                 }
                 if let Some(body) = else_body {
+                    walk_body(body, f);
+                }
+            }
+            StepKind::Switch {
+                cases,
+                default_body,
+                ..
+            } => {
+                for (_, body) in cases {
+                    walk_body(body, f);
+                }
+                if let Some(body) = default_body {
                     walk_body(body, f);
                 }
             }
@@ -1246,6 +1282,7 @@ declare_commands! {
         TypeAlias { name: String, target: String },
         For { key_var: Option<String>, key_type: Option<String>, var: String, var_type: String, in_expr: Expr, body: Vec<Step> },
         If { cond: Box<Expr>, then_body: Vec<Step>, else_ifs: Vec<(Box<Expr>, Vec<Step>)>, else_body: Option<Vec<Step>> },
+        Switch { discriminant: Option<Box<Expr>>, cases: Vec<(Vec<Expr>, Vec<Step>)>, default_body: Option<Vec<Step>> },
         Assign { var: String, decl_type: String, expr: Expr },
         Set { var: String, expr: Expr },
         AssignCapture { var: String, decl_type: String, cmd: Box<StepKind> },
@@ -2837,6 +2874,140 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 ASSERT_EQ $an "and-false"
                 LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
                 ASSERT_EQ $t2 "absent"
+            "#},
+                },
+            ],
+        },
+        CommandMeta {
+            in_index: true,
+            name: "SWITCH",
+            syntax: "SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }",
+            summary: "Multi-way branch on a value or a condition list.",
+            description: indoc! {r#"
+                Compares one discriminant against each `CASE` value list in
+                order with strict `==` (same rule as `IF` conditions:
+                numerics compare across `INT` and `FLOAT`, every other
+                cross-type pair is unequal). The first matching arm runs
+                exclusively: later arms never run and there is no
+                fallthrough, so group values with commas
+                (`CASE "help", "h"`) instead of stacking bodies.
+
+                With no discriminant (`SWITCH { ... }`), each `CASE`
+                carries its own boolean condition (a call counts: any
+                expression evaluating to `BOOL`), and the first true arm
+                runs. Conditions evaluate in order and stop at the first
+                match, so later calls never run. A final `DEFAULT` arm
+                runs when nothing matched; without one, no match is a
+                no-op.
+
+                `BREAK` exits the `SWITCH` early (the remainder of the arm
+                is skipped and an enclosing loop is unaffected); `CONTINUE`
+                continues an enclosing loop; `RETURN` and `EXIT` propagate
+                as usual.
+            "#},
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[
+                Example {
+                    name: "switch on a value",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # The first arm whose value list contains the discriminant
+                # runs; no later arm runs.
+                LET $cmd: STRING = "help"
+                SWITCH $cmd {
+                  CASE "help", "h" {
+                    WRITE chosen.txt help
+                  }
+                  CASE "summarize" {
+                    WRITE chosen.txt summarize
+                  }
+                  DEFAULT {
+                    WRITE chosen.txt fallback
+                  }
+                }
+
+                LET $body: STRING = READ chosen.txt
+                ASSERT_EQ $body "help"
+            "#},
+                },
+                Example {
+                    name: "switch on conditions",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # With no discriminant each CASE is its own condition;
+                # calls work as conditions too.
+                LET $n: INT = 2
+                SWITCH {
+                  CASE $n > 5 {
+                    WRITE band.txt high
+                  }
+                  CASE $n > 1 {
+                    WRITE band.txt mid
+                  }
+                  DEFAULT {
+                    WRITE band.txt low
+                  }
+                }
+
+                LET $band: STRING = READ band.txt
+                ASSERT_EQ $band "mid"
+            "#},
+                },
+                Example {
+                    name: "break and continue inside switch",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # BREAK exits the SWITCH early: the trailing ECHO and
+                # EXIT 1 never run, so reaching them would print a
+                # marker and fail the script.
+                # CONTINUE passes through to the enclosing loop.
+                LET $items: LIST<STRING> = ["a", "skip", "b"]
+                FOR $item: STRING IN $items {
+                  SWITCH $item {
+                    CASE "skip" {
+                      CONTINUE
+                    }
+                    CASE "a" {
+                      ECHO saw-a
+                      BREAK
+                      ECHO unreachable
+                      EXIT 1
+                    }
+                    DEFAULT {
+                      ECHO saw-other
+                    }
+                  }
+                }
+
+                ASSERT_CONTAINS stdout "saw-a"
+                ASSERT_CONTAINS stdout "saw-other"
+            "#},
+                },
+                Example {
+                    name: "overlapping arms run first match only",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Overlapping arms never both run: the first match wins,
+                # so order arms most specific first. There is no
+                # fallthrough to the next CASE; CONTINUE would continue
+                # an enclosing loop, not advance to the next arm.
+                LET $n: INT = 10
+                SWITCH {
+                  CASE $n > 1 {
+                    WRITE band.txt wide
+                  }
+                  CASE $n > 5 {
+                    WRITE band.txt narrow
+                  }
+                  DEFAULT {
+                    WRITE band.txt low
+                  }
+                }
+
+                LET $band: STRING = READ band.txt
+                ASSERT_EQ $band "wide"
             "#},
                 },
             ],
@@ -4656,6 +4827,38 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
+            StepKind::Switch {
+                discriminant,
+                cases,
+                default_body,
+            } => {
+                match discriminant {
+                    Some(disc) => write!(f, "SWITCH {} {{", disc)?,
+                    None => write!(f, "SWITCH {{")?,
+                }
+                for (exprs, body) in cases {
+                    write!(f, " CASE ")?;
+                    for (i, expr) in exprs.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", expr)?;
+                    }
+                    write!(f, " {{")?;
+                    for s in body {
+                        write!(f, "\n    {}", s)?;
+                    }
+                    write!(f, " }}")?;
+                }
+                if let Some(b) = default_body {
+                    write!(f, " DEFAULT {{")?;
+                    for s in b {
+                        write!(f, "\n    {}", s)?;
+                    }
+                    write!(f, " }}")?;
+                }
+                write!(f, " }}")
+            }
             StepKind::Assign {
                 var,
                 decl_type,
@@ -5111,6 +5314,18 @@ pub(crate) fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
             }
             if let Some(else_body) = else_body {
                 rewrite_isolated_inherit(else_body);
+            }
+        }
+        StepKind::Switch {
+            cases,
+            default_body,
+            ..
+        } => {
+            for (_, branch) in cases {
+                rewrite_isolated_inherit(branch);
+            }
+            if let Some(default_body) = default_body {
+                rewrite_isolated_inherit(default_body);
             }
         }
         StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
@@ -6683,6 +6898,7 @@ mod tests {
                 StepKind::WithIo { .. } | StepKind::WithIoBlock { .. } => Some("WITH_IO"),
                 StepKind::For { .. } => Some("FOR"),
                 StepKind::If { .. } => Some("IF"),
+                StepKind::Switch { .. } => Some("SWITCH"),
                 StepKind::Assign { .. } => Some("LET"),
                 StepKind::Set { .. } => Some("MUTATION"),
                 StepKind::AssignCapture { .. } => Some("LET"),
@@ -6764,6 +6980,11 @@ mod tests {
                 then_body: Vec::new(),
                 else_ifs: Vec::new(),
                 else_body: None,
+            },
+            StepKind::Switch {
+                discriminant: None,
+                cases: Vec::new(),
+                default_body: None,
             },
             StepKind::Assign {
                 var: "v".to_string(),

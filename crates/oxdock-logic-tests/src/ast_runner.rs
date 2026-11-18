@@ -1511,6 +1511,7 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Expand { .. } => "Expand",
         StepKind::For { .. } => "For",
         StepKind::If { .. } => "If",
+        StepKind::Switch { .. } => "Switch",
         StepKind::Assign { .. } => "Assign",
         StepKind::Set { .. } => "Set",
         StepKind::AssignCapture { .. } => "AssignCapture",
