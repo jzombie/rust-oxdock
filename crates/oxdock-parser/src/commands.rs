@@ -4211,10 +4211,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             args: &[],
             flags: &[],
             default_output: None,
-            examples: &[Example {
-                name: "break",
-                fence_meta: None,
-                code: indoc! {r#"
+            examples: &[
+                Example {
+                    name: "break",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 # BREAK leaves after the first pass: only "a" is written.
                 FOR $x: STRING IN ["a", "b"] {
                   WRITE picked.txt "{{ $x }}"
@@ -4224,11 +4225,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $body: STRING = READ picked.txt
                 ASSERT_EQ $body "a"
             "#},
-            },
-            Example {
-                name: "break nested",
-                fence_meta: None,
-                code: indoc! {r#"
+                },
+                Example {
+                    name: "break nested",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 # Inner BREAK exits only the inner loop: the outer runs
                 # both passes, and each inner stops before 2.
                 LET $hits: LIST<STRING> = []
@@ -4244,7 +4245,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $want: LIST<STRING> = ["x1", "y1"]
                 ASSERT_EQ $hits $want
             "#},
-            }],
+                },
+            ],
         },
         CommandMeta {
             in_index: true,
@@ -4260,10 +4262,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             args: &[],
             flags: &[],
             default_output: None,
-            examples: &[Example {
-                name: "continue",
-                fence_meta: None,
-                code: indoc! {r#"
+            examples: &[
+                Example {
+                    name: "continue",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 # CONTINUE skips the write on "a": only "b" lands.
                 FOR $x: STRING IN ["a", "b"] {
                   IF $x == "a" {
@@ -4275,11 +4278,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $body: STRING = READ picked.txt
                 ASSERT_EQ $body "b"
             "#},
-            },
-            Example {
-                name: "continue nested",
-                fence_meta: None,
-                code: indoc! {r#"
+                },
+                Example {
+                    name: "continue nested",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 # Inner CONTINUE skips only the inner 2: the outer runs
                 # both passes, and each inner still reaches 3.
                 LET $hits: LIST<STRING> = []
@@ -4295,7 +4298,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $want: LIST<STRING> = ["x1", "x3", "y1", "y3"]
                 ASSERT_EQ $hits $want
             "#},
-            }],
+                },
+            ],
         },
         CommandMeta {
             in_index: true,
