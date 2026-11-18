@@ -2986,6 +2986,52 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
+                    name: "switch arms with nested loops",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Loops nested in arms obey the innermost rule: inner
+                # BREAK ends only the inner FOR, inner CONTINUE skips
+                # only its iteration, and the arm keeps running past both.
+                LET $hits: LIST<STRING> = []
+                SWITCH "b" {
+                  CASE "b" {
+                    FOR $o: STRING IN ["x", "y"] {
+                      FOR $i: INT IN [1, 2, 3] {
+                        IF $i == 2 {
+                          BREAK
+                        }
+                        LIST_APPEND $hits "b{{ $o }}{{ $i }}"
+                      }
+                    }
+                    LIST_APPEND $hits "b-after"
+                  }
+                  DEFAULT {
+                    LIST_APPEND $hits "b-wrong"
+                  }
+                }
+
+                SWITCH "c" {
+                  CASE "c" {
+                    FOR $o: STRING IN ["x", "y"] {
+                      FOR $i: INT IN [1, 2, 3] {
+                        IF $i == 2 {
+                          CONTINUE
+                        }
+                        LIST_APPEND $hits "c{{ $o }}{{ $i }}"
+                      }
+                    }
+                    LIST_APPEND $hits "c-after"
+                  }
+                  DEFAULT {
+                    LIST_APPEND $hits "c-wrong"
+                  }
+                }
+
+                LET $want: LIST<STRING> = ["bx1", "by1", "b-after", "cx1", "cx3", "cy1", "cy3", "c-after"]
+                ASSERT_EQ $hits $want
+            "#},
+                },
+                Example {
                     name: "overlapping arms run first match only",
                     fence_meta: None,
                     code: indoc! {r#"
@@ -4178,6 +4224,26 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $body: STRING = READ picked.txt
                 ASSERT_EQ $body "a"
             "#},
+            },
+            Example {
+                name: "break nested",
+                fence_meta: None,
+                code: indoc! {r#"
+                # Inner BREAK exits only the inner loop: the outer runs
+                # both passes, and each inner stops before 2.
+                LET $hits: LIST<STRING> = []
+                FOR $o: STRING IN ["x", "y"] {
+                  FOR $i: INT IN [1, 2, 3] {
+                    IF $i == 2 {
+                      BREAK
+                    }
+                    LIST_APPEND $hits "{{ $o }}{{ $i }}"
+                  }
+                }
+
+                LET $want: LIST<STRING> = ["x1", "y1"]
+                ASSERT_EQ $hits $want
+            "#},
             }],
         },
         CommandMeta {
@@ -4208,6 +4274,26 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 LET $body: STRING = READ picked.txt
                 ASSERT_EQ $body "b"
+            "#},
+            },
+            Example {
+                name: "continue nested",
+                fence_meta: None,
+                code: indoc! {r#"
+                # Inner CONTINUE skips only the inner 2: the outer runs
+                # both passes, and each inner still reaches 3.
+                LET $hits: LIST<STRING> = []
+                FOR $o: STRING IN ["x", "y"] {
+                  FOR $i: INT IN [1, 2, 3] {
+                    IF $i == 2 {
+                      CONTINUE
+                    }
+                    LIST_APPEND $hits "{{ $o }}{{ $i }}"
+                  }
+                }
+
+                LET $want: LIST<STRING> = ["x1", "x3", "y1", "y3"]
+                ASSERT_EQ $hits $want
             "#},
             }],
         },

@@ -379,6 +379,138 @@ fn switch_break_exits_arm_and_continue_reaches_loop() {
 }
 
 #[test]
+fn switch_arm_loop_break_stays_in_loop() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        # BREAK inside a loop nested in an arm stays in the loop: the
+        # FOR stops at 2, and the arm keeps running past it.
+        LET $hits: LIST<STRING> = []
+        SWITCH "go" {
+            CASE "go" {
+                FOR $i: INT IN [1, 2, 3] {
+                    IF $i == 2 {
+                        BREAK
+                    }
+                    LIST_APPEND $hits "{{ $i }}"
+                }
+                LIST_APPEND $hits "after"
+            }
+            DEFAULT {
+                LIST_APPEND $hits "wrong-arm"
+            }
+        }
+        LET $want: LIST<STRING> = ["1", "after"]
+        ASSERT_EQ $hits $want
+    "#};
+    run_script(&root, script).expect("arm loop BREAK stays in the loop");
+}
+
+#[test]
+fn switch_arm_loop_continue_stays_in_arm_loop() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        # CONTINUE inside a loop nested in an arm stays in that loop:
+        # it skips the 1 write, the arm still reaches 2 and
+        # "after", and the outer loop still runs its "y" pass.
+        LET $hits: LIST<STRING> = []
+        FOR $o: STRING IN ["x", "y"] {
+            SWITCH $o {
+                CASE "x" {
+                    FOR $i: INT IN [1, 2] {
+                        IF $i == 1 {
+                            CONTINUE
+                        }
+                        LIST_APPEND $hits "{{ $o }}{{ $i }}"
+                    }
+                    LIST_APPEND $hits "{{ $o }}-after"
+                }
+                DEFAULT {
+                    LIST_APPEND $hits "{{ $o }}-other"
+                }
+            }
+        }
+        LET $want: LIST<STRING> = ["x2", "x-after", "y-other"]
+        ASSERT_EQ $hits $want
+    "#};
+    run_script(&root, script).expect("arm loop CONTINUE stays in the arm loop");
+}
+
+#[test]
+fn switch_in_nested_loops_continue_hits_inner_loop() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        # CONTINUE inside a SWITCH in the inner loop skips only that
+        # inner iteration: the outer still runs both passes.
+        LET $hits: LIST<STRING> = []
+        FOR $o: STRING IN ["x", "y"] {
+            FOR $i: STRING IN ["skip", "go"] {
+                SWITCH $i {
+                    CASE "skip" {
+                        CONTINUE
+                    }
+                    DEFAULT {
+                        LIST_APPEND $hits "{{ $o }}{{ $i }}"
+                    }
+                }
+            }
+        }
+        LET $want: LIST<STRING> = ["xgo", "ygo"]
+        ASSERT_EQ $hits $want
+    "#};
+    run_script(&root, script).expect("SWITCH CONTINUE hits the inner loop");
+}
+
+#[test]
+fn switch_arm_nested_loops_stay_innermost() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        # Doubly nested loops behave the same inside an arm: inner
+        # BREAK ends only the inner FOR, inner CONTINUE skips only the
+        # inner iteration, and the arm keeps running past both.
+        LET $hits: LIST<STRING> = []
+        SWITCH "b" {
+            CASE "b" {
+                FOR $o: STRING IN ["x", "y"] {
+                    FOR $i: INT IN [1, 2, 3] {
+                        IF $i == 2 {
+                            BREAK
+                        }
+                        LIST_APPEND $hits "b{{ $o }}{{ $i }}"
+                    }
+                }
+                LIST_APPEND $hits "b-after"
+            }
+            DEFAULT {
+                LIST_APPEND $hits "b-wrong"
+            }
+        }
+        SWITCH "c" {
+            CASE "c" {
+                FOR $o: STRING IN ["x", "y"] {
+                    FOR $i: INT IN [1, 2, 3] {
+                        IF $i == 2 {
+                            CONTINUE
+                        }
+                        LIST_APPEND $hits "c{{ $o }}{{ $i }}"
+                    }
+                }
+                LIST_APPEND $hits "c-after"
+            }
+            DEFAULT {
+                LIST_APPEND $hits "c-wrong"
+            }
+        }
+        LET $want: LIST<STRING> = ["bx1", "by1", "b-after", "cx1", "cx3", "cy1", "cy3", "c-after"]
+        ASSERT_EQ $hits $want
+    "#};
+    run_script(&root, script).expect("arm nested loops stay innermost");
+}
+
+#[test]
 fn switch_return_per_arm_routes_like_early_if_chain() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
