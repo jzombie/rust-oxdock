@@ -1,0 +1,8 @@
+# FAIL prints to stderr and exits 1: the block runs first with its
+# stdout rerouted, usage output never touches stdout, and steps after
+# the abort never run.
+WRITE before.txt "ok"
+FAIL "boom-msg" {
+    ECHO usage-line
+}
+WRITE after.txt "nope"

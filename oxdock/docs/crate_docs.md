@@ -1173,6 +1173,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
+| [`FAIL`](#fail) | `FAIL [<code>] [<message>] [{ <commands> }]` |
 | [`ISOLATED`](#isolated) | `ISOLATED { INHERIT_ENV [...] <commands> } \| ISOLATED <command...>` |
 | [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
 | [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]): RET { <commands> } \| ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }` |
@@ -2312,6 +2313,72 @@ LET $quick: HANDLE<VOID> = ASYNC {
 }
 TIMEOUT 30s AWAIT $quick
 ```
+
+
+### FAIL
+
+Print a failure message and exit.
+
+**Syntax:** `FAIL [<code>] [<message>] [{ <commands> }]`
+
+Prints the message to stderr (the `ECHO` plus `EXIT` idiom as
+one step, rerouted to the error stream), runs the optional
+block first, then exits through the `EXIT` path with
+`EXIT requested with code <code>`.
+
+With no code the exit code is 1; with a code it clamps to
+0..=255 like `EXIT`. The block runs inline in caller scope
+with its stdout rerouted to stderr, so usage text, cleanup,
+and callee output all land on the error stream while stdout
+stays empty: the only form a `FUNC` cannot express, since
+functions take values, never blocks. At least one of
+message or block is required.
+
+A lone bare int is a silent code (`FAIL 2` exits 2 with no
+output); quoting decides, so `FAIL "2"` prints `2` and
+exits 1.
+
+
+**Output:** Stderr
+
+**Examples:**
+
+**Example: fail**
+
+```oxdock expect_error:"EXIT requested with code 1"
+# The message prints to stderr, never stdout, so a
+# failure cannot pollute captured output. No code
+# means exit 1.
+FAIL "cargo not found in image"
+```
+
+**Expected error:** `EXIT requested with code 1`
+
+**Example: fail code**
+
+```oxdock expect_error:"EXIT requested with code 2"
+# An explicit code exits with that code (clamped to
+# 0..=255 like EXIT); the message still prints to
+# stderr.
+FAIL 2 "cargo not found in image"
+```
+
+**Expected error:** `EXIT requested with code 2`
+
+**Example: fail block**
+
+```oxdock expect_error:"EXIT requested with code 1"
+# The block runs first with its stdout rerouted to
+# stderr: usage text and cleanup land on the error
+# stream beside the message, and stdout stays empty.
+# Callee output reroutes too: a FUNC called here
+# inherits the swapped handle.
+FAIL "unknown command" {
+    ECHO usage-text
+}
+```
+
+**Expected error:** `EXIT requested with code 1`
 
 
 ### ISOLATED

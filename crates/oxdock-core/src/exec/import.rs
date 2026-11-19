@@ -1211,6 +1211,7 @@ pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
         | StepKind::While { body, .. }
         | StepKind::FuncDef { body, .. }
         | StepKind::Timeout { body, .. }
+        | StepKind::Fail { body, .. }
         | StepKind::Isolated { body, .. }
         | StepKind::AssignAsync { body, .. }
         | StepKind::AsyncBlock { body, .. }

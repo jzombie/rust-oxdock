@@ -1,0 +1,13 @@
+name = "fail"
+
+[expect]
+files = { "before.txt" = "ok" }
+missing = ["after.txt"]
+# The harness captures stdout only, and an unset stderr aliases the
+# stdout sink by ExecIo convention, so both FAIL lines land here in
+# block-then-message order. Stream separation itself (stdout stays
+# empty) is pinned by core integration tests with split buffers.
+stdout = "usage-line\nboom-msg\n"
+
+[expect.error]
+contains = "EXIT requested with code 1"

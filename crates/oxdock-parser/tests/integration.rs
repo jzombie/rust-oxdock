@@ -39,6 +39,8 @@ mod run_exec;
 mod run_shell_stack;
 #[path = "integration/timeout_block.rs"]
 mod timeout_block;
+#[path = "integration/fail.rs"]
+mod fail;
 #[path = "integration/type_syntax.rs"]
 mod type_syntax;
 #[path = "integration/unified_values.rs"]

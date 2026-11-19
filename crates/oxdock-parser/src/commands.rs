@@ -28,7 +28,7 @@ use crate::constants::{
     KEYWORD_ASSERT_EQ, KEYWORD_ASSERT_NE, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
     KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
     KEYWORD_DEFAULT, KEYWORD_ECHO, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXIT, KEYWORD_EXPAND,
-    KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV,
+    KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV,
     KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR,
     KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE,
     KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH,
@@ -472,6 +472,9 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
         name if name == KEYWORD_TIMEOUT => Some(format!(
             "TIMEOUT needs a duration and a command or block, e.g. `TIMEOUT 30s RUN ...`; got {got}."
         )),
+        name if name == KEYWORD_FAIL => Some(format!(
+            "FAIL needs a message, a code, or a block, e.g. `FAIL \"boom\"`, `FAIL 2 \"boom\"`, or `FAIL \"boom\" {{ ECHO usage }}`; got {got}."
+        )),
         name if name == KEYWORD_REMOTE => Some(format!(
             "REMOTE needs a target and a braced block, e.g. `REMOTE prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}."
         )),
@@ -863,6 +866,10 @@ impl StepKind {
             StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
                 walk_arg(duration, f);
             }
+            StepKind::Fail { code, message, .. } => {
+                walk_opt(code, f);
+                walk_opt(message, f);
+            }
             StepKind::Workdir(arg)
             | StepKind::Echo(arg)
             | StepKind::Run(arg)
@@ -965,6 +972,10 @@ impl StepKind {
                 | StepKind::While { .. } => {}
                 StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
                     walk_arg(duration, f);
+                }
+                StepKind::Fail { code, message, .. } => {
+                    walk_opt(code, f);
+                    walk_opt(message, f);
                 }
                 StepKind::Workdir(arg)
                 | StepKind::Echo(arg)
@@ -1075,6 +1086,7 @@ impl StepKind {
             | StepKind::While { body, .. }
             | StepKind::FuncDef { body, .. }
             | StepKind::Timeout { body, .. }
+            | StepKind::Fail { body, .. }
             | StepKind::Isolated { body }
             | StepKind::AssignAsync { body, .. }
             | StepKind::AsyncBlock { body }
@@ -1305,6 +1317,7 @@ declare_commands! {
         Await { var: String },
         Cancel { var: String },
         Timeout { duration: Arg, body: Vec<Step> },
+        Fail { code: Option<Arg>, message: Option<Arg>, body: Vec<Step> },
         Isolated { body: Vec<Step> },
         IsolatedInheritEnv { keys: Vec<String> },
         RemoteBlock { target: String, vars: Vec<String>, env: Vec<String>, body: Vec<Step> },
@@ -3817,6 +3830,69 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
+            name: KEYWORD_FAIL,
+            syntax: "FAIL [<code>] [<message>] [{ <commands> }]",
+            summary: "Print a failure message and exit.",
+            description: indoc! {r#"
+                Prints the message to stderr (the `ECHO` plus `EXIT` idiom as
+                one step, rerouted to the error stream), runs the optional
+                block first, then exits through the `EXIT` path with
+                `EXIT requested with code <code>`.
+
+                With no code the exit code is 1; with a code it clamps to
+                0..=255 like `EXIT`. The block runs first in a child scope
+                that reads caller locals, with its stdout rerouted to
+                stderr, so usage text, cleanup, and callee output all land
+                on the error stream while stdout stays empty: the only
+                form a `FUNC` cannot express, since functions take values,
+                never blocks. At least one of message or block is required.
+
+                A lone bare int is a silent code (`FAIL 2` exits 2 with no
+                output); quoting decides, so `FAIL "2"` prints `2` and
+                exits 1.
+            "#},
+            args: &[],
+            flags: &[],
+            default_output: Some(Stream::Stderr),
+            examples: &[
+                Example {
+                    name: "fail",
+                    fence_meta: Some("expect_error:\"EXIT requested with code 1\""),
+                    code: indoc! {r#"
+                    # The message prints to stderr, never stdout, so a
+                    # failure cannot pollute captured output. No code
+                    # means exit 1.
+                    FAIL "cargo not found in image"
+                    "#},
+                },
+                Example {
+                    name: "fail code",
+                    fence_meta: Some("expect_error:\"EXIT requested with code 2\""),
+                    code: indoc! {r#"
+                    # An explicit code exits with that code (clamped to
+                    # 0..=255 like EXIT); the message still prints to
+                    # stderr.
+                    FAIL 2 "cargo not found in image"
+                    "#},
+                },
+                Example {
+                    name: "fail block",
+                    fence_meta: Some("expect_error:\"EXIT requested with code 1\""),
+                    code: indoc! {r#"
+                    # The block runs first with its stdout rerouted to
+                    # stderr: usage text and cleanup land on the error
+                    # stream beside the message, and stdout stays empty.
+                    # Callee output reroutes too: a FUNC called here
+                    # inherits the swapped handle.
+                    FAIL "unknown command" {
+                        ECHO usage-text
+                    }
+                    "#},
+                },
+            ],
+        },
+        CommandMeta {
+            in_index: true,
             name: KEYWORD_ISOLATED,
             syntax: "ISOLATED { INHERIT_ENV [...] <commands> } | ISOLATED <command...>",
             summary: "Run steps with the seeded script environment.",
@@ -5040,6 +5116,46 @@ impl fmt::Display for StepKind {
                 }
             }
             StepKind::Exit(code) => write!(f, "{} {}", KEYWORD_EXIT, fmt_raw_arg(code)),
+            StepKind::Fail { code, message, body } => {
+                write!(f, "{}", KEYWORD_FAIL)?;
+                if let Some(c) = code {
+                    write!(f, " {}", fmt_raw_arg(c))?;
+                }
+                if let Some(m) = message {
+                    // Quoting decides (`FAIL 2` is a silent code,
+                    // `FAIL "2"` prints): a bare int-like message with
+                    // no code alongside would reparse as the code, so
+                    // pin quotes to keep the round-trip from inverting
+                    // a message into a silent code.
+                    let rendered = match m {
+                        Arg::String(s, _)
+                            if code.is_none()
+                                && crate::command::strip_digit_separators(s)
+                                    .parse::<i64>()
+                                    .is_ok() =>
+                        {
+                            quote_dsl_string(s)
+                        }
+                        _ => fmt_value(m, quote_msg),
+                    };
+                    write!(f, " {rendered}")?;
+                }
+                if body.is_empty() {
+                    // Only `FAIL {}` reaches here with neither code nor
+                    // message (bare `FAIL` is a parse error): render the
+                    // braces back so the empty block round-trips instead
+                    // of collapsing into unparseable `FAIL`.
+                    if code.is_none() && message.is_none() {
+                        return write!(f, " {{}}");
+                    }
+                    return Ok(());
+                }
+                write!(f, " {{")?;
+                for s in body {
+                    write!(f, "\n    {}", s)?;
+                }
+                write!(f, "\n}}")
+            }
             StepKind::Sleep { duration } => {
                 write!(f, "{} {}", KEYWORD_SLEEP, fmt_raw_arg(duration))
             }
@@ -5599,6 +5715,7 @@ pub(crate) fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
         StepKind::For { body, .. }
         | StepKind::While { body, .. }
         | StepKind::Timeout { body, .. }
+        | StepKind::Fail { body, .. }
         | StepKind::Isolated { body }
         | StepKind::AssignAsync { body, .. }
         | StepKind::AsyncBlock { body } => rewrite_isolated_inherit(body),
@@ -6673,6 +6790,35 @@ mod tests {
     }
 
     #[test]
+    fn syntax_strings_open_with_their_keyword() {
+        // `Command::syntax` is a `const fn` returning `&'static str`,
+        // so it cannot `format!` the keyword constants in. This lock
+        // is the divergence guard instead: renaming a keyword fails
+        // here until its syntax string follows.
+        for cmd in crate::COMMANDS {
+            let keyword = cmd.as_str();
+            let syntax = cmd.syntax();
+            assert!(
+                syntax.starts_with(keyword),
+                "syntax for {keyword} diverges from its keyword: {syntax:?}"
+            );
+        }
+        for meta in all_metadata() {
+            // Pseudo-entry: documents `$var = <expr>`, which opens
+            // with a variable, never its non-keyword name.
+            if meta.name == "MUTATION" {
+                continue;
+            }
+            assert!(
+                meta.syntax.starts_with(meta.name),
+                "syntax for {} diverges from its keyword: {:?}",
+                meta.name,
+                meta.syntax
+            );
+        }
+    }
+
+    #[test]
     fn leaf_arity_errors_carry_invalid_syntax_prefix() {
         let err = parse_err("SLEEP 1s 2s\n");
         assert!(err.contains("invalid syntax for command SLEEP"), "{err}");
@@ -7207,6 +7353,7 @@ mod tests {
                 StepKind::Await { .. } => Some("AWAIT"),
                 StepKind::Cancel { .. } => Some("CANCEL"),
                 StepKind::Timeout { .. } => Some("TIMEOUT"),
+                StepKind::Fail { .. } => Some("FAIL"),
                 StepKind::Isolated { .. } => Some("ISOLATED"),
                 StepKind::IsolatedInheritEnv { .. } => Some("ISOLATED"),
                 StepKind::RemoteBlock { .. } => Some("REMOTE"),
@@ -7322,6 +7469,11 @@ mod tests {
             },
             StepKind::Timeout {
                 duration: Arg::String("1s".to_string(), false),
+                body: Vec::new(),
+            },
+            StepKind::Fail {
+                code: None,
+                message: None,
                 body: Vec::new(),
             },
             StepKind::Isolated { body: Vec::new() },

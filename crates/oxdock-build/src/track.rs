@@ -465,6 +465,17 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     keys.insert(k);
                 }
             }
+            StepKind::Fail { code, message, body } => {
+                if let Some(c) = code {
+                    template_keys(&mut keys, c);
+                }
+                if let Some(m) = message {
+                    template_keys(&mut keys, m);
+                }
+                for k in collect_env_references(body) {
+                    keys.insert(k);
+                }
+            }
             StepKind::RemoteBlock { env, body, .. } => {
                 // Header `env:NAME` entries read host env at block entry;
                 // body references resolve guest-side but are tracked too so

@@ -2971,6 +2971,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::WithIo { .. } => {}
         StepKind::WithIoBlock { .. } => {}
         StepKind::Exit(_) => {}
+        StepKind::Fail { .. } => {}
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
         StepKind::Switch { .. } => {}
@@ -4834,6 +4835,242 @@ fn exit_accepts_full_int64_range_at_lower() {
     assert!(
         err.to_string().contains("9223372036854775808"),
         "expected int error, got: {err:#}"
+    );
+}
+
+fn run_script_captured(
+    root: &GuardedPath,
+    script: &str,
+) -> (Result<(), anyhow::Error>, String, String) {
+    let steps = oxdock_core::parse_script(script).expect("parse script");
+    let out = Arc::new(Mutex::new(Vec::new()));
+    let err = Arc::new(Mutex::new(Vec::new()));
+    let mut io_cfg = ExecIo::new();
+    io_cfg.set_stdout(Some(out.clone()));
+    io_cfg.set_stderr(Some(err.clone()));
+    let res = run_steps_with_context_result_with_io(root, root, &steps, io_cfg).map(|_| ());
+    let out_s = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+    let err_s = String::from_utf8(err.lock().unwrap().clone()).unwrap();
+    (res, out_s, err_s)
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+fn fail_message_only_exits_1_on_stderr() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let (res, out, err) = run_script_captured(&root, "FAIL \"boom\"\n");
+    let err_out = res.expect_err("FAIL must abort");
+    assert!(
+        err_out.to_string().contains("EXIT requested with code 1"),
+        "expected exit 1, got: {err_out:#}"
+    );
+    assert_eq!(out, "", "FAIL message must not touch stdout");
+    assert!(err.contains("boom"), "FAIL message must land on stderr, got: {err:?}");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+fn fail_explicit_code() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let (res, out, err) = run_script_captured(&root, "FAIL 2 \"coded\"\n");
+    let err_out = res.expect_err("FAIL must abort");
+    assert!(
+        err_out.to_string().contains("EXIT requested with code 2"),
+        "expected exit 2, got: {err_out:#}"
+    );
+    assert_eq!(out, "");
+    assert!(err.contains("coded"), "got: {err:?}");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+fn fail_lone_code_is_silent() {
+    // Quoting decides: bare `2` exits silently, `"2"` prints.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let (res, out, err) = run_script_captured(&root, "FAIL 2\n");
+    let err_out = res.expect_err("FAIL must abort");
+    assert!(
+        err_out.to_string().contains("EXIT requested with code 2"),
+        "got: {err_out:#}"
+    );
+    assert_eq!(out, "");
+    assert!(!err.contains('2'), "lone code must print nothing, got: {err:?}");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+fn fail_block_reroutes_nested_output_to_stderr() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let (res, out, err) = run_script_captured(
+        &root,
+        indoc! {r#"
+            LET $who: STRING = "caller-val"
+            FUNC SHOUT(): VOID {
+                ECHO "func-sees:{{ $who }}"
+            }
+            FAIL "fail-msg" {
+                ECHO "block-sees:{{ $who }}"
+                SHOUT()
+            }
+            WRITE never.txt written
+        "#},
+    );
+    let err_out = res.expect_err("FAIL must abort");
+    assert!(
+        err_out.to_string().contains("EXIT requested with code 1"),
+        "got: {err_out:#}"
+    );
+    assert_eq!(out, "", "block output must leave stdout empty");
+    for needle in ["block-sees:caller-val", "func-sees:caller-val", "fail-msg"] {
+        assert!(err.contains(needle), "stderr must contain {needle:?}, got: {err:?}");
+    }
+    assert!(
+        !exists(&root, "never.txt"),
+        "steps after FAIL must never run"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+fn fail_inside_func_aborts_pipeline() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let (res, out, _) = run_script_captured(
+        &root,
+        indoc! {r#"
+            FUNC DIE(): VOID {
+                FAIL 3 "from-callee"
+            }
+            DIE()
+            WRITE never.txt written
+        "#},
+    );
+    let err_out = res.expect_err("FAIL in callee must abort");
+    assert!(
+        err_out.to_string().contains("EXIT requested with code 3"),
+        "callee FAIL must propagate its code, got: {err_out:#}"
+    );
+    assert_eq!(out, "");
+    assert!(
+        !exists(&root, "never.txt"),
+        "steps after a callee FAIL must never run"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+fn fail_resolves_code_after_block_runs() {
+    // Argument evaluation follows the block: a body mutation of the
+    // code variable takes effect in the exit code.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let (res, _, _) = run_script_captured(
+        &root,
+        indoc! {r#"
+            LET $c: INT = 1
+            FAIL $c "mutated" { $c = 2 }
+        "#},
+    );
+    let err_out = res.expect_err("FAIL must abort");
+    assert!(
+        err_out.to_string().contains("EXIT requested with code 2"),
+        "code must resolve after the block, got: {err_out:#}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+fn fail_body_exit_wins_over_outer_code() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let (res, _, _) = run_script_captured(&root, "FAIL 2 \"outer\" { EXIT 3 }\n");
+    let err_out = res.expect_err("body EXIT must abort");
+    assert!(
+        err_out.to_string().contains("EXIT requested with code 3"),
+        "body EXIT must propagate unwrapped, got: {err_out:#}"
+    );
+    assert!(
+        !err_out.to_string().contains("outer"),
+        "outer message must not print when the body exits first: {err_out:#}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+fn fail_block_stays_off_outer_stdout_pipe() {
+    // An outer `WITH_IO [stdout=$p]` must not capture FAIL block
+    // output: the reroute targets the error stream, and the harness
+    // stdout buffer proves nothing leaked to the terminal stdout.
+    // (`$p` itself is unreadable post-abort, so the empty terminal
+    // stdout plus stderr contents are the observable proof.)
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let (res, out, err) = run_script_captured(
+        &root,
+        indoc! {r#"
+            LET $p: PIPE
+            WITH_IO [stdout=$p] {
+                FAIL "msg" {
+                    ECHO leaked
+                }
+            }
+        "#},
+    );
+    let err_out = res.expect_err("FAIL must abort");
+    assert!(
+        err_out.to_string().contains("EXIT requested with code 1"),
+        "got: {err_out:#}"
+    );
+    assert_eq!(out, "", "FAIL block output must not reach stdout");
+    for needle in ["leaked", "msg"] {
+        assert!(err.contains(needle), "stderr must contain {needle:?}, got: {err:?}");
+    }
+}
+
+#[test]
+fn fail_requires_message_or_block() {
+    let err = oxdock_core::parse_script("FAIL\n").expect_err("bare FAIL must fail");
+    assert!(
+        err.to_string().contains("FAIL"),
+        "expected FAIL hint, got: {err:#}"
+    );
+}
+
+#[test]
+fn fail_rejects_three_args() {
+    let err =
+        oxdock_core::parse_script("FAIL 1 \"a\" \"b\"\n").expect_err("three args must fail");
+    assert!(
+        err.to_string().contains("FAIL"),
+        "expected FAIL hint, got: {err:#}"
     );
 }
 
