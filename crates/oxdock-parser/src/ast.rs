@@ -6,7 +6,7 @@ pub use crate::commands::{AssertTarget, StepKind};
 use crate::constants::{
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS,
     KEYWORD_ASSERT_EQ, KEYWORD_ASSERT_NE, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
-    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
+    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
     KEYWORD_DEFAULT, KEYWORD_ECHO, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXIT, KEYWORD_EXPAND,
     KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT,
     KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET,
@@ -285,6 +285,7 @@ impl Command {
 /// hardcoding keyword lists elsewhere.
 pub const STRUCTURAL_KEYWORDS: &[&str] = &[
     KEYWORD_LET,
+    KEYWORD_CONST,
     KEYWORD_FOR,
     KEYWORD_IF,
     KEYWORD_ELSE,
@@ -627,6 +628,7 @@ pub enum ArithOp {
 pub enum MathOp {
     PushConst(Value),
     LoadVar(String),
+    LoadConstRef { alias: String, name: String },
     LoadEnv(String),
     LoadKeyPath { base: String, keys: Vec<String> },
     Call { name: String, arity: usize },
@@ -654,6 +656,15 @@ pub enum LogicalOp {
 pub enum Expr {
     Literal(Value),
     Var(String),
+    /// Qualified immutable read (`$ALIAS::NAME`): a `CONST` exported by
+    /// the module imported under `ALIAS`. Parsed only for the `$`-led
+    /// qualified shape; evaluation resolves through the active unit's
+    /// alias targets and fails closed on unknown aliases, non-exported
+    /// names, and `LET` bindings (never exportable).
+    ConstRef {
+        alias: String,
+        name: String,
+    },
     /// Environment read (`env:KEY`): resolves against the script
     /// environment at evaluation time.
     Env(String),
@@ -750,6 +761,7 @@ impl Expr {
         match self {
             Expr::Literal(_)
             | Expr::Var(_)
+            | Expr::ConstRef { .. }
             | Expr::Env(_)
             | Expr::KeyPath { .. }
             | Expr::Inspect(_)
@@ -797,6 +809,7 @@ impl Expr {
         match self {
             Expr::Literal(_)
             | Expr::Var(_)
+            | Expr::ConstRef { .. }
             | Expr::Env(_)
             | Expr::KeyPath { .. }
             | Expr::Inspect(_)
@@ -1263,6 +1276,9 @@ impl fmt::Display for Expr {
         match self {
             Expr::Literal(v) => write!(f, "{}", v),
             Expr::Var(name) => write!(f, "${}", name),
+            Expr::ConstRef { alias, name } => {
+                write!(f, "${}::{name}", alias)
+            }
             Expr::Env(key) => write!(f, "env:{}", key),
             Expr::KeyPath { base, keys } => {
                 write!(f, "${}", base)?;
@@ -1380,6 +1396,7 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
         match op {
             MathOp::PushConst(v) => stack.push(format!("{}", v)),
             MathOp::LoadVar(name) => stack.push(format!("${}", name)),
+            MathOp::LoadConstRef { alias, name } => stack.push(format!("${alias}::{name}")),
             MathOp::LoadEnv(key) => stack.push(format!("env:{}", key)),
             MathOp::LoadKeyPath { base, keys } => {
                 let mut s = format!("${}", base);
@@ -1550,6 +1567,7 @@ mod tests {
         // the dispatch when adding a head.
         for head in [
             "LET",
+            "CONST",
             "RETURN",
             "BREAK",
             "CONTINUE",

@@ -5,6 +5,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs, WorkspaceSelection};
+use oxdock_parser::constants::KEYWORD_CONST;
 use oxdock_parser::{Field, Step, TypeDescriptor, TypeTag, Value};
 use oxdock_process::{BackgroundHandle, CancelHub, CommandContext, ProcessManager};
 
@@ -53,6 +54,18 @@ impl Drop for TaskSlotGuard {
 /// foreground capture scale: the same never-grows guarantee.
 const TASK_TAIL_CAP: usize = 64 * 1024;
 
+/// Single message shape for every refused `CONST` write: `SET`,
+/// `LIST_APPEND`, `MAP_SET`/`MERGE_MAPS`, and frozen-buffer writes all
+/// render this prefix, so tests and diagnostics match one string.
+/// Free function (not a method) so host-function extractors and
+/// macro-generated wrappers share it without a state handle.
+pub fn const_mutation_error(what: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "cannot mutate {kw} {what}: {kw} bindings are deeply immutable",
+        kw = KEYWORD_CONST,
+    )
+}
+
 /// Execution state for one script run. Public so hosts can register
 /// functions and introspect listings; all fields stay crate-private so the
 /// scope, recursion-budget, and task invariants cannot be broken from outside.
@@ -95,6 +108,11 @@ pub struct ExecState<P: ProcessManager> {
     /// Innermost scope is last. Variables are looked up from innermost to outermost.
     /// Each entry carries its declared type name alongside the value.
     pub(super) var_scopes: Vec<HashMap<String, (TypeTag, Value)>>,
+    /// `CONST` names per variable scope frame, pushed and popped in
+    /// lockstep with `var_scopes`. A name present here refuses `SET`,
+    /// `LIST_APPEND`, and rebinding; the value-level frozen flag
+    /// additionally refuses writes through `LET`-bound aliases.
+    pub(super) const_scopes: Vec<HashSet<String>>,
     /// Name directory for type resolution: startup descriptors plus the
     /// run's host descriptors. Words carry their own vtables, so this map
     /// serves only name queries (declarations, `TYPES()`, `TYPE_DESCRIBE`).
@@ -259,6 +277,9 @@ pub(super) struct ModuleRecord {
     /// `EXPORT TYPE` names in source order. Separate from func exports
     /// so the MCP server never confuses a type for a tool.
     pub(super) type_exports: Vec<String>,
+    /// `EXPORT CONST` names in source order. Only these (never `LET`
+    /// bindings) are readable through `$ALIAS::NAME`.
+    pub(super) const_exports: Vec<String>,
     pub(super) init: Option<ModuleInit>,
 }
 
@@ -272,6 +293,10 @@ pub(super) struct ModuleRecord {
 #[derive(Clone)]
 pub(super) struct ModuleInit {
     pub(super) vars: HashMap<String, (TypeTag, Value)>,
+    /// Top-level `CONST` names drained with `vars`: rebinding,
+    /// `SET`, and `LIST_APPEND` against these fail; functional
+    /// rebuilds fail on the value-level frozen flag.
+    pub(super) const_vars: HashSet<String>,
     pub(super) return_value: Value,
     /// Script env the module's functions execute with (#115): the
     /// session seed plus the init body's own `ENV` contributions
@@ -707,7 +732,7 @@ impl<P: ProcessManager> ExecState<P> {
 
     /// Fork the execution state for a child thread. The child gets:
     /// - A cloned filesystem handle (shared snapshot backing, independent root selection)
-    /// - Cloned envs, cwd, cargo scratch name, var_scopes
+    /// - Cloned envs, cwd, cargo scratch name, var_scopes, const_scopes
     /// - Fresh bg_children, scope_stack (empty -- child manages its own)
     /// - Shared assert_windows, assert_windows_stderr, exact_stdout (Arc clones)
     /// - Cloned io configuration
@@ -729,6 +754,7 @@ impl<P: ProcessManager> ExecState<P> {
             assert_windows_stderr: Arc::clone(&self.assert_windows_stderr),
             exact_stdout: Arc::clone(&self.exact_stdout),
             var_scopes: self.var_scopes.clone(),
+            const_scopes: self.const_scopes.clone(),
             cancel_token: Arc::new(AtomicBool::new(false)),
             // Fresh cancellation, inherited telemetry: the fork's
             // workers still attribute to the originating run.
@@ -805,10 +831,12 @@ impl<P: ProcessManager> ExecState<P> {
 
     pub(super) fn push_var_scope(&mut self) {
         self.var_scopes.push(HashMap::new());
+        self.const_scopes.push(HashSet::new());
     }
 
     pub(super) fn pop_var_scope(&mut self) {
         self.var_scopes.pop();
+        self.const_scopes.pop();
     }
 
     /// Reset module-owned env (#115): env to the module init's
@@ -869,7 +897,83 @@ impl<P: ProcessManager> ExecState<P> {
         Ok(())
     }
 
+    /// Declare a `CONST` binding: same namespace as [`declare_var`]
+    /// (a `LET` and a `CONST` cannot share a name in one frame), then
+    /// mark the frame const and deep-freeze the value, so nested
+    /// containers freeze with the binding instead of aliasing a
+    /// mutable buffer.
+    pub(super) fn declare_const(&mut self, key: String, kind: TypeTag, value: Value) -> Result<()> {
+        if self
+            .var_scopes
+            .last()
+            .map(|s| s.contains_key(&key))
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "redeclaration error: ${key} already declared in this scope; {kw} bindings are immutable and cannot redeclare it",
+                kw = KEYWORD_CONST,
+            );
+        }
+        let coerced = super::args::coerce_value(value, &kind)?;
+        let frozen = Value::deep_freeze(&coerced);
+        let scope = self
+            .var_scopes
+            .last_mut()
+            .ok_or_else(|| anyhow::anyhow!("no variable scope for declaration"))?;
+        scope.insert(key.clone(), (kind, frozen));
+        if let Some(frame) = self.const_scopes.last_mut() {
+            frame.insert(key);
+        }
+        Ok(())
+    }
+
+    /// Whether `key` names a `CONST` binding visible here: the
+    /// innermost lexical frame holding the name decides (a local
+    /// `LET` shadowing a module-level `CONST` stays mutable), exactly
+    /// mirroring [`mutate_var`](Self::mutate_var)'s resolution; only
+    /// when no lexical frame declares the name does the owning
+    /// module's shared store answer. Single owner for the const check
+    /// behind `SET`, `LIST_APPEND`, and redeclaration diagnostics.
+    pub(super) fn is_const_var(&self, key: &str) -> bool {
+        for idx in (0..self.var_scopes.len()).rev() {
+            if self.var_scopes[idx].contains_key(key) {
+                return self
+                    .const_scopes
+                    .get(idx)
+                    .is_some_and(|frame| frame.contains(key));
+            }
+        }
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get(&module)
+            && let Some(init) = record.init.as_ref()
+            && init.vars.contains_key(key)
+        {
+            return init.const_vars.contains(key);
+        }
+        false
+    }
+
+    /// Shared declaration switch behind `LET` and `CONST` capture,
+    /// async, and await paths: one call site per declare, so a new
+    /// binding form cannot forget the const branch.
+    pub(super) fn declare_binding(
+        &mut self,
+        key: String,
+        kind: TypeTag,
+        value: Value,
+        is_const: bool,
+    ) -> Result<()> {
+        if is_const {
+            self.declare_const(key, kind, value)
+        } else {
+            self.declare_var(key, kind, value)
+        }
+    }
+
     pub(super) fn mutate_var(&mut self, key: &str, value: Value) -> Result<()> {
+        if self.is_const_var(key) {
+            return Err(const_mutation_error(&format!("${key}")));
+        }
         let kind = self
             .var_scopes
             .iter()
@@ -904,6 +1008,9 @@ impl<P: ProcessManager> ExecState<P> {
     /// the item against the element tag, so a push can never silently
     /// corrupt the shape the declaration promises.
     pub(super) fn push_into_list(&mut self, key: &str, item: Value) -> Result<()> {
+        if self.is_const_var(key) {
+            return Err(const_mutation_error(&format!("${key}")));
+        }
         let kind = self
             .var_scopes
             .iter()
@@ -924,6 +1031,9 @@ impl<P: ProcessManager> ExecState<P> {
         };
         for scope in self.var_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key) {
+                if slot.1.is_frozen() {
+                    return Err(const_mutation_error(&format!("${key}")));
+                }
                 let list = slot.1.as_list_mut().ok_or_else(|| {
                     anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
                 })?;
@@ -942,6 +1052,9 @@ impl<P: ProcessManager> ExecState<P> {
         // store in place, so module-global lists stay appendable from
         // module-owned functions with no importer visibility.
         if let Some((_, value)) = self.module_var_mut(key) {
+            if value.is_frozen() {
+                return Err(const_mutation_error(&format!("${key}")));
+            }
             let list = value.as_list_mut().ok_or_else(|| {
                 anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
             })?;

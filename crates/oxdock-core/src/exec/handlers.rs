@@ -13,6 +13,7 @@ use oxdock_fs::PolicyPath;
 use oxdock_fs::command_path;
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::constants::KEYWORD_RUN;
+use oxdock_parser::constants::{KEYWORD_CONST, KEYWORD_LET};
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value,
     WorkspaceTarget, render_structural,
@@ -2618,6 +2619,13 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             } else {
                 None
             };
+            // `CONST` marks ride the same swap: module-owned code
+            // declares into a fresh const frame and restores after.
+            let saved_consts = if module_env.as_ref().is_some() {
+                Some(std::mem::take(&mut cx.state.const_scopes))
+            } else {
+                None
+            };
             cx.state.push_scope();
             // Module-owned bodies resolve their own file's TYPE aliases
             // first, shadowing globals for the call: a file's bodies
@@ -2736,6 +2744,9 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             let pop_res = cx.state.pop_scope();
             if let Some(saved) = saved_vars {
                 cx.state.var_scopes = saved;
+            }
+            if let Some(saved) = saved_consts {
+                cx.state.const_scopes = saved;
             }
             cx.state.call_depth -= 1;
             let _ = cx.state.module_stack.pop();
@@ -2887,6 +2898,19 @@ pub(crate) fn assign<P: ProcessManager>(
     Ok(())
 }
 
+pub(crate) fn assign_const<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    var: &str,
+    decl_type: String,
+    expr: &Expr,
+) -> Result<()> {
+    let value = super::args::evaluate_expr(expr, cx)?;
+    let clean_var = var.trim_start_matches('$').to_string();
+    let tag = cx.state.resolve_tag(&decl_type)?;
+    cx.state.declare_const(clean_var, tag, value)?;
+    Ok(())
+}
+
 pub(crate) fn set_var_value<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     var: &str,
@@ -2898,7 +2922,8 @@ pub(crate) fn set_var_value<P: ProcessManager>(
     Ok(())
 }
 
-/// Dispatch `LET $var: STRING = <sync command>` : run the command to completion with
+/// Dispatch `LET $var: STRING = <sync command>` (or `CONST`, via
+/// `is_const`) : run the command to completion with
 /// a spillable capture sink as its stdout, then bind the exact bytes as a
 /// string. Only stdout is captured (stderr keeps the parent wiring; stdin
 /// passes through so `WITH_IO [stdin=$p]` still works). Captured bytes
@@ -2918,9 +2943,11 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     var: &str,
     decl_type: String,
     cmd: &StepKind,
+    is_const: bool,
 ) -> Result<Flow> {
     use std::sync::Arc;
 
+    let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
     match peel_capture_command(cx, cmd)? {
         PeeledCapture::Import {
             bindings,
@@ -2937,7 +2964,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
                 bail!(
-                    "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+                    "{kw} capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
                 );
             }
             let guard = arm_deadline(cx, deadline);
@@ -2968,7 +2995,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             let value = disarm_deadline(cx, guard, deadline, result)?;
             let clean_var = var.trim_start_matches('$').to_string();
             let tag = cx.state.resolve_tag(&decl_type)?;
-            cx.state.declare_var(clean_var, tag, value)?;
+            cx.state.declare_binding(clean_var, tag, value, is_const)?;
             return Ok(Flow::Done);
         }
         PeeledCapture::Call {
@@ -2986,7 +3013,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
                 bail!(
-                    "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+                    "{kw} capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
                 );
             }
             let guard = arm_deadline(cx, deadline);
@@ -3018,7 +3045,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             let value = disarm_deadline(cx, guard, deadline, result)?;
             let clean_var = var.trim_start_matches('$').to_string();
             let tag = cx.state.resolve_tag(&decl_type)?;
-            cx.state.declare_var(clean_var, tag, value)?;
+            cx.state.declare_binding(clean_var, tag, value, is_const)?;
             return Ok(Flow::Done);
         }
         PeeledCapture::Sink => {}
@@ -3063,10 +3090,11 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     }
     let text = sink
         .drain_string_strict()
-        .map_err(|e| anyhow!("LET ${var} capture is not valid UTF-8: {e}"))?;
+        .map_err(|e| anyhow!("{kw} ${var} capture is not valid UTF-8: {e}"))?;
     let clean_var = var.trim_start_matches('$').to_string();
     let tag = cx.state.resolve_tag(&decl_type)?;
-    cx.state.declare_var(clean_var, tag, Value::string(text))?;
+    cx.state
+        .declare_binding(clean_var, tag, Value::string(text), is_const)?;
     Ok(Flow::Done)
 }
 
@@ -4308,6 +4336,21 @@ pub(crate) fn dispatch_assign<P: ProcessManager>(
     assign(cx, var, decl_type.clone(), expr)
 }
 
+pub(crate) fn dispatch_const<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Const {
+        var,
+        decl_type,
+        expr,
+    } = step
+    else {
+        unreachable!()
+    };
+    assign_const(cx, var, decl_type.clone(), expr)
+}
+
 pub(crate) fn dispatch_set<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -4493,6 +4536,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     decl_type: String,
     body: &[Step],
     cx: &mut StepCtx<'_, P>,
+    is_const: bool,
 ) -> Result<()> {
     // Generate a unique task ID. Allocation refuses past the live-task
     // cap, so a spawn storm fails the step loudly instead of wedging
@@ -4629,7 +4673,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     // Store the task handle in the variable scope
     let tag = cx.state.resolve_tag(&decl_type)?;
     cx.state
-        .declare_var(var.to_string(), tag, Value::handle(task_id))?;
+        .declare_binding(var.to_string(), tag, Value::handle(task_id), is_const)?;
     Ok(())
 }
 
@@ -4842,7 +4886,8 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
     Ok(())
 }
 
-/// Dispatch `LET $out: TYPE = AWAIT $task` : join like bare `AWAIT` (identical
+/// Dispatch `LET $out: TYPE = AWAIT $task` (or `CONST`, via
+/// `is_const`) : join like bare `AWAIT` (identical
 /// cancellation/timeout/double-await semantics via [`await_task_entry`]),
 /// then bind the task's explicit `RETURN` value (coerced to the declared
 /// type). A task whose body cannot return yields `INT` 0 on success, like
@@ -4855,7 +4900,9 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     out_type: String,
     task_var: &str,
     cx: &mut StepCtx<'_, P>,
+    is_const: bool,
 ) -> Result<()> {
+    let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
     let entry = resolve_task_entry(task_var, cx)?;
     await_task_entry(&entry, &cx.state.cancel_token, task_var)?;
     let (return_value, returns_value) = {
@@ -4864,20 +4911,25 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     };
     if let Some(value) = return_value {
         let tag = cx.state.resolve_tag(&out_type)?;
-        cx.state
-            .declare_var(out_var.trim_start_matches('$').to_string(), tag, value)?;
+        cx.state.declare_binding(
+            out_var.trim_start_matches('$').to_string(),
+            tag,
+            value,
+            is_const,
+        )?;
         return Ok(());
     }
     if returns_value {
         anyhow::bail!(
-            "LET ${out_var} = AWAIT ${task_var} fell off the end without RETURN: the task body can return a value on some path but this run produced none"
+            "{kw} ${out_var} = AWAIT ${task_var} fell off the end without RETURN: the task body can return a value on some path but this run produced none"
         );
     }
     let tag = cx.state.resolve_tag(&out_type)?;
-    cx.state.declare_var(
+    cx.state.declare_binding(
         out_var.trim_start_matches('$').to_string(),
         tag,
         Value::int(0),
+        is_const,
     )?;
     Ok(())
 }
@@ -4951,7 +5003,23 @@ pub(crate) fn dispatch_assign_async_step<P: ProcessManager>(
     else {
         unreachable!()
     };
-    dispatch_assign_async(var, decl_type.clone(), body, cx)
+    dispatch_assign_async(var, decl_type.clone(), body, cx, false)
+}
+
+/// Pipeline dispatch wrapper for `ConstAsync`
+pub(crate) fn dispatch_const_async_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::ConstAsync {
+        var,
+        decl_type,
+        body,
+    } = step
+    else {
+        unreachable!()
+    };
+    dispatch_assign_async(var, decl_type.clone(), body, cx, true)
 }
 
 /// Pipeline dispatch wrapper for `Await`
@@ -4985,6 +5053,31 @@ pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
         var,
         decl_type.clone(),
         cmd,
+        false,
+    )?)
+}
+
+/// Pipeline dispatch wrapper for `ConstCapture`
+pub(crate) fn dispatch_const_capture_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::ConstCapture {
+        var,
+        decl_type,
+        cmd,
+    } = step
+    else {
+        unreachable!()
+    };
+    top_level_flow(assign_capture(
+        cx,
+        super::steps::allocate_assert_generation(),
+        0,
+        var,
+        decl_type.clone(),
+        cmd,
+        true,
     )?)
 }
 
@@ -5001,7 +5094,23 @@ pub(crate) fn dispatch_await_capture_step<P: ProcessManager>(
     else {
         unreachable!()
     };
-    dispatch_await_capture(out_var, out_type.clone(), task_var, cx)
+    dispatch_await_capture(out_var, out_type.clone(), task_var, cx, false)
+}
+
+/// Pipeline dispatch wrapper for `ConstAwaitCapture`
+pub(crate) fn dispatch_const_await_capture_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::ConstAwaitCapture {
+        out_var,
+        out_type,
+        task_var,
+    } = step
+    else {
+        unreachable!()
+    };
+    dispatch_await_capture(out_var, out_type.clone(), task_var, cx, true)
 }
 
 /// Pipeline dispatch wrapper for `Cancel`

@@ -20,6 +20,7 @@ pub const SCRIPT_MODULE_NAME: &str = "SCRIPT";
 /// lowering. Each is referenced by [`crate::STRUCTURAL_KEYWORDS`]; spelling
 /// lives here exactly once.
 pub const KEYWORD_LET: &str = "LET";
+pub const KEYWORD_CONST: &str = "CONST";
 pub const KEYWORD_FOR: &str = "FOR";
 pub const KEYWORD_IF: &str = "IF";
 pub const KEYWORD_ELSE: &str = "ELSE";

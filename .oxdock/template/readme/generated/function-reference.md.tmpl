@@ -1030,10 +1030,14 @@ ASSERT_EQ $cfg.title "demo"
 
 ### STD::MAP_SET
 
-Insert one key into a map.
+Insert one key into a map, returning the extended map.
 
 Fails on duplicates so two entries sharing a key fail the run
 instead of silently shadowing each other.
+
+A frozen (`CONST`-derived) map fails instead of deriving: `CONST`
+bindings never produce a mutable map, so snapshot explicitly
+through a `LET` copy of unfrozen data if derivation is intended.
 
 
 **Signature:** `STD::MAP_SET($map: MAP<ANY>, $key: STRING, $value: ANY): MAP<ANY>`
@@ -1066,6 +1070,10 @@ Merge a LIST of MAPs in order under one duplicate policy.
 claiming one placeholder fail the run instead of shadowing each
 other. `overwrite` lets later files win, for environment overlays.
 Non MAP elements fail naming their position.
+
+A frozen (`CONST`-derived) list or element fails instead of
+deriving, mirroring `MAP_SET`: `CONST` bindings never produce a
+mutable map.
 
 
 **Signature:** `STD::MERGE_MAPS($maps: LIST<MAP<ANY>>, $policy: STRING = "fail_on_duplicate" | "overwrite"): MAP<ANY>`

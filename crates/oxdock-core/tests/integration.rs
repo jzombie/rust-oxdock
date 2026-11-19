@@ -7,6 +7,8 @@
 mod arithmetic;
 #[path = "integration/commands.rs"]
 mod commands;
+#[path = "integration/const.rs"]
+mod const_;
 #[path = "integration/custom_types.rs"]
 mod custom_types;
 #[path = "integration/glob_sandbox.rs"]

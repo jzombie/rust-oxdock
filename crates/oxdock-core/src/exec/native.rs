@@ -2135,10 +2135,14 @@ fn get(
     Ok(map.get(&key).cloned().unwrap_or(default))
 }
 
-/// Insert one key into a map.
+/// Insert one key into a map, returning the extended map.
 ///
 /// Fails on duplicates so two entries sharing a key fail the run
 /// instead of silently shadowing each other.
+///
+/// A frozen (`CONST`-derived) map fails instead of deriving: `CONST`
+/// bindings never produce a mutable map, so snapshot explicitly
+/// through a `LET` copy of unfrozen data if derivation is intended.
 ///
 #[oxdock_func(pure, returns = TypeTag::MapOf(std::sync::Arc::new(TypeTag::Any)))]
 #[example(
@@ -2151,6 +2155,7 @@ fn get(
 )]
 fn map_set(
     /// Map to insert into.
+    #[reject_frozen]
     map: BTreeMap<String, Value>,
     /// Key to insert; duplicates fail.
     key: String,
@@ -2308,6 +2313,10 @@ fn type_of(
 /// other. `overwrite` lets later files win, for environment overlays.
 /// Non MAP elements fail naming their position.
 ///
+/// A frozen (`CONST`-derived) list or element fails instead of
+/// deriving, mirroring `MAP_SET`: `CONST` bindings never produce a
+/// mutable map.
+///
 #[oxdock_func(pure, returns = TypeTag::MapOf(std::sync::Arc::new(TypeTag::Any)))]
 #[example(
     name = "merge",
@@ -2320,6 +2329,7 @@ fn type_of(
 )]
 fn merge_maps(
     /// LIST of MAPs to merge in order.
+    #[reject_frozen]
     maps: Vec<BTreeMap<String, Value>>,
     /// Duplicate policy.
     #[values("fail_on_duplicate", "overwrite")]

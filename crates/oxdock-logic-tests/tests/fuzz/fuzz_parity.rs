@@ -447,6 +447,8 @@ fn arb_leaf_expr() -> impl Strategy<Value = Expr> {
     prop_oneof![
         arb_scalar_literal(),
         "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Var),
+        ("[A-Z][A-Z0-9_]*", "[A-Z][A-Z0-9_]*")
+            .prop_map(|(alias, name)| Expr::ConstRef { alias, name }),
         "[A-Z][A-Z0-9_]*".prop_map(Expr::Env),
         "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Inspect),
         (
@@ -725,6 +727,13 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                     expr: Expr::Literal(Value::string(s)),
                 }
             }),
+            ("[a-z][a-zA-Z0-9_]*", safe_string()).prop_map(|(var, s)| {
+                StepKind::Const {
+                    var,
+                    decl_type: "STRING".to_string(),
+                    expr: Expr::Literal(Value::string(s)),
+                }
+            }),
             ("[a-z][a-zA-Z0-9_]*", 0u32..999_999).prop_map(|(var, i)| {
                 StepKind::Assign {
                     var,
@@ -858,6 +867,11 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             decl_type: "HANDLE".to_string(),
             body,
         }),
+        ("[a-z][a-zA-Z0-9_]*", arb_body()).prop_map(|(var, body)| StepKind::ConstAsync {
+            var,
+            decl_type: "HANDLE".to_string(),
+            body,
+        }),
         arb_body().prop_map(|body| StepKind::RemoteBlock {
             target: "coveragetarget".to_string(),
             vars: vec![],
@@ -869,7 +883,17 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             decl_type: "STRING".to_string(),
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         }),
+        ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::ConstCapture {
+            var,
+            decl_type: "STRING".to_string(),
+            cmd: Box::new(StepKind::Echo("coverage echo".into())),
+        }),
         ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::AwaitCapture {
+            out_var: var.clone(),
+            out_type: "STRING".to_string(),
+            task_var: var,
+        }),
+        ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::ConstAwaitCapture {
             out_var: var.clone(),
             out_type: "STRING".to_string(),
             task_var: var,
@@ -959,6 +983,7 @@ fn zero_kind_markers(kind: &mut StepKind) {
         | StepKind::Isolated { body, .. }
         | StepKind::AsyncBlock { body, .. }
         | StepKind::AssignAsync { body, .. }
+        | StepKind::ConstAsync { body, .. }
         | StepKind::RemoteBlock { body, .. } => zero_markers(body),
         StepKind::Switch {
             cases,
@@ -972,9 +997,9 @@ fn zero_kind_markers(kind: &mut StepKind) {
                 zero_markers(body);
             }
         }
-        StepKind::AssignCapture { cmd, .. } | StepKind::WithIo { cmd, .. } => {
-            zero_kind_markers(cmd)
-        }
+        StepKind::AssignCapture { cmd, .. }
+        | StepKind::ConstCapture { cmd, .. }
+        | StepKind::WithIo { cmd, .. } => zero_kind_markers(cmd),
         _ => {}
     }
 }
@@ -1687,6 +1712,22 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_bodies_eq(lb, rb, msg);
         }
         (
+            StepKind::ConstAsync {
+                var: lv,
+                decl_type: lt,
+                body: lb,
+            },
+            StepKind::ConstAsync {
+                var: rv,
+                decl_type: rt,
+                body: rb,
+            },
+        ) => {
+            assert_eq!(lv, rv, "ConstAsync var mismatch: {}", msg);
+            assert_eq!(lt, rt, "ConstAsync type mismatch: {}", msg);
+            assert_bodies_eq(lb, rb, msg);
+        }
+        (
             StepKind::RemoteBlock {
                 target: lt,
                 vars: lv,
@@ -1722,6 +1763,22 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_bodies_eq(&[shell_of_kind(lc)], &[shell_of_kind(rc)], msg);
         }
         (
+            StepKind::ConstCapture {
+                var: lv,
+                decl_type: lt,
+                cmd: lc,
+            },
+            StepKind::ConstCapture {
+                var: rv,
+                decl_type: rt,
+                cmd: rc,
+            },
+        ) => {
+            assert_eq!(lv, rv, "ConstCapture var mismatch: {}", msg);
+            assert_eq!(lt, rt, "ConstCapture type mismatch: {}", msg);
+            assert_bodies_eq(&[shell_of_kind(lc)], &[shell_of_kind(rc)], msg);
+        }
+        (
             StepKind::AwaitCapture {
                 out_var: lo,
                 out_type: lt,
@@ -1736,6 +1793,22 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_eq!(lo, ro, "AwaitCapture out mismatch: {}", msg);
             assert_eq!(lt, rt, "AwaitCapture type mismatch: {}", msg);
             assert_eq!(lv, rv, "AwaitCapture task mismatch: {}", msg);
+        }
+        (
+            StepKind::ConstAwaitCapture {
+                out_var: lo,
+                out_type: lt,
+                task_var: lv,
+            },
+            StepKind::ConstAwaitCapture {
+                out_var: ro,
+                out_type: rt,
+                task_var: rv,
+            },
+        ) => {
+            assert_eq!(lo, ro, "ConstAwaitCapture out mismatch: {}", msg);
+            assert_eq!(lt, rt, "ConstAwaitCapture type mismatch: {}", msg);
+            assert_eq!(lv, rv, "ConstAwaitCapture task mismatch: {}", msg);
         }
         (
             StepKind::WithIo {
@@ -2189,6 +2262,11 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             decl_type: "STRING".to_string(),
             expr: Expr::Literal(Value::string("covered".to_string())),
         },
+        StepKind::Const {
+            var: "coverage".to_string(),
+            decl_type: "STRING".to_string(),
+            expr: Expr::Literal(Value::string("covered".to_string())),
+        },
         StepKind::Set {
             var: "coverage".to_string(),
             expr: Expr::Literal(Value::int(7)),
@@ -2405,6 +2483,18 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 col: 0,
             }],
         },
+        StepKind::ConstAsync {
+            var: "coverage".to_string(),
+            decl_type: "HANDLE".to_string(),
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+                line: 0,
+                col: 0,
+            }],
+        },
         StepKind::RemoteBlock {
             target: "coveragetarget".to_string(),
             vars: vec![],
@@ -2423,7 +2513,17 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             decl_type: "STRING".to_string(),
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         },
+        StepKind::ConstCapture {
+            var: "coverage".to_string(),
+            decl_type: "STRING".to_string(),
+            cmd: Box::new(StepKind::Echo("coverage echo".into())),
+        },
         StepKind::AwaitCapture {
+            out_var: "coverage".to_string(),
+            out_type: "STRING".to_string(),
+            task_var: "coverage".to_string(),
+        },
+        StepKind::ConstAwaitCapture {
             out_var: "coverage".to_string(),
             out_type: "STRING".to_string(),
             task_var: "coverage".to_string(),
@@ -2505,11 +2605,15 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         // Expression bodies need Expr strategies (literals, math,
         // calls, keypaths) before generation is sound.
         StepKind::Assign { .. } => true,
+        StepKind::Const { .. } => true,
         StepKind::Set { .. } => true,
         StepKind::AssignCapture { .. } => true,
+        StepKind::ConstCapture { .. } => true,
         StepKind::AwaitCapture { .. } => true,
+        StepKind::ConstAwaitCapture { .. } => true,
         StepKind::AsyncBlock { .. } => true,
         StepKind::AssignAsync { .. } => true,
+        StepKind::ConstAsync { .. } => true,
         StepKind::Await { .. } => true,
         StepKind::Cancel { .. } => true,
         StepKind::Timeout { .. } => true,
@@ -2617,6 +2721,7 @@ fn expr_covers_kind(expr: &Expr) -> bool {
     match expr {
         Expr::Literal(..)
         | Expr::Var(..)
+        | Expr::ConstRef { .. }
         | Expr::Env(..)
         | Expr::KeyPath { .. }
         | Expr::List(..)
@@ -2649,6 +2754,10 @@ fn sample_covered_exprs() -> Vec<Expr> {
         Expr::Literal(Value::int(7)),
         Expr::Literal(Value::bool(true)),
         Expr::Var("coverage".to_string()),
+        Expr::ConstRef {
+            alias: "COVERAGE".to_string(),
+            name: "COVERAGE".to_string(),
+        },
         Expr::Env("COVERAGE".to_string()),
         Expr::KeyPath {
             base: "coverage".to_string(),
@@ -2709,6 +2818,7 @@ fn assert_expr_tree_claimed(expr: &Expr) {
     match expr {
         Expr::Literal(..)
         | Expr::Var(..)
+        | Expr::ConstRef { .. }
         | Expr::Env(..)
         | Expr::KeyPath { .. }
         | Expr::Inspect(..)

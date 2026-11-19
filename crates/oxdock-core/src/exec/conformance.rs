@@ -358,6 +358,7 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         assert_windows_stderr: Arc::new(std::sync::Mutex::new(HashMap::new())),
         exact_stdout: Arc::new(std::sync::Mutex::new(HashMap::new())),
         var_scopes: Vec::new(),
+        const_scopes: Vec::new(),
         cancel_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cancel_hub: Arc::new(oxdock_process::CancelHub::new()),
         active_process: Arc::new(std::sync::Mutex::new(None)),

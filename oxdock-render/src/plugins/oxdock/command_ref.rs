@@ -54,6 +54,7 @@ fn render_math_op(op: &MathOp) -> String {
     match op {
         MathOp::PushConst(value) => format!("PushConst({value})"),
         MathOp::LoadVar(name) => format!("LoadVar(${name})"),
+        MathOp::LoadConstRef { alias, name } => format!("LoadConstRef(${alias}::{name})"),
         MathOp::LoadEnv(key) => format!("LoadEnv(env:{key})"),
         MathOp::LoadKeyPath { base, keys } => {
             let mut rendered = format!("${base}");

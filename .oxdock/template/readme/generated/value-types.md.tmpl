@@ -20,10 +20,16 @@ Boolean `true` or `false`.
 ### Value type: LIST
 
 Ordered list of values. Shared heap: cloning bumps a refcount.
+The `frozen` flag marks `CONST`-owned buffers: every in-place
+mutation choke point (`as_list_mut`) refuses a frozen buffer, so
+freezing is deep and permanent. Only [`Value::deep_freeze`]
+sets it, on a freshly detached tree.
 
 ### Value type: MAP
 
 String-keyed map of values. Shared heap: cloning bumps a refcount.
+Freezing mirrors [`ListValue`]: `as_map_mut` refuses frozen
+buffers and only [`Value::deep_freeze`] sets the flag.
 
 ### Value type: PATH
 

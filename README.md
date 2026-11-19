@@ -549,6 +549,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`SWITCH`](#switch) | `SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
+| [`CONST`](#const) | `CONST $var: TYPE = <expr> \| CONST $p: PIPE \| CONST $var: TYPE = ASYNC { <commands> } \| CONST $var: TYPE = <command> \| CONST $var: TYPE = AWAIT $task \| CONST $var: TYPE = { <commands> }` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE<T> = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
@@ -1418,6 +1419,69 @@ ASSERT_EQ $info.type "PIPE"
 LET $t: STRING = PATH_TYPE("unexpected.txt")
 ASSERT_EQ $t "absent"
 ```
+
+
+### CONST
+
+Bind deeply immutable script-local values.
+
+**Syntax:** `CONST $var: TYPE = <expr> | CONST $p: PIPE | CONST $var: TYPE = ASYNC { <commands> } | CONST $var: TYPE = <command> | CONST $var: TYPE = AWAIT $task | CONST $var: TYPE = { <commands> }`
+
+Declares a script-local constant with an explicit type. The
+right-hand side accepts every `LET` form (expression,
+capture, `ASYNC`, `AWAIT`, inline block, bare `PIPE`).
+
+Immutability is deep and total: `SET` (`$var = ...`),
+`LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS` on a `CONST`
+value all fail. Nested containers freeze with the binding,
+so reaching a list or map through a `CONST` never exposes
+a mutable handle. Reads behave exactly like `LET`.
+
+`CONST` and `LET` share one namespace: declaring either
+twice in the same scope frame is a redeclaration error.
+Shadowing an outer binding in an inner block stays legal
+and the inner declaration reverts on block exit.
+
+`CONST` is the only variable binding an `EXPORT` can name
+(`EXPORT CONST_NAME`, `EXPORT [CONST A, B]`): `LET`
+bindings never cross the module boundary. Importers read
+the value as `$ALIAS::NAME` (see IMPORT).
+
+
+**Examples:**
+
+**Example: const**
+
+```oxdock
+# CONST reads exactly like LET.
+CONST $name: STRING = "world"
+ECHO "hello, {{ $name }}"
+ASSERT_CONTAINS stdout "hello, world"
+
+# Containers freeze with the binding.
+CONST $items: LIST<STRING> = ["a", "b"]
+ASSERT_CONTAINS $items "a"
+```
+
+**Example: const rejects mutation**
+
+```oxdock expect_error:"cannot mutate CONST"
+# SET on a CONST fails instead of rebinding.
+CONST $n: INT = 1
+$n = 2
+```
+
+**Expected error:** `cannot mutate CONST`
+
+**Example: const rejects append**
+
+```oxdock expect_error:"cannot mutate CONST"
+# LIST_APPEND on a CONST fails instead of pushing.
+CONST $items: LIST<STRING> = ["a"]
+LIST_APPEND $items "b"
+```
+
+**Expected error:** `cannot mutate CONST`
 
 
 ### MUTATION
@@ -4133,10 +4197,16 @@ Boolean `true` or `false`.
 ### Value type: LIST
 
 Ordered list of values. Shared heap: cloning bumps a refcount.
+The `frozen` flag marks `CONST`-owned buffers: every in-place
+mutation choke point (`as_list_mut`) refuses a frozen buffer, so
+freezing is deep and permanent. Only [`Value::deep_freeze`]
+sets it, on a freshly detached tree.
 
 ### Value type: MAP
 
 String-keyed map of values. Shared heap: cloning bumps a refcount.
+Freezing mirrors [`ListValue`]: `as_map_mut` refuses frozen
+buffers and only [`Value::deep_freeze`] sets the flag.
 
 ### Value type: PATH
 
@@ -5210,10 +5280,14 @@ ASSERT_EQ $cfg.title "demo"
 
 ### STD::MAP_SET
 
-Insert one key into a map.
+Insert one key into a map, returning the extended map.
 
 Fails on duplicates so two entries sharing a key fail the run
 instead of silently shadowing each other.
+
+A frozen (`CONST`-derived) map fails instead of deriving: `CONST`
+bindings never produce a mutable map, so snapshot explicitly
+through a `LET` copy of unfrozen data if derivation is intended.
 
 
 **Signature:** `STD::MAP_SET($map: MAP<ANY>, $key: STRING, $value: ANY): MAP<ANY>`
@@ -5246,6 +5320,10 @@ Merge a LIST of MAPs in order under one duplicate policy.
 claiming one placeholder fail the run instead of shadowing each
 other. `overwrite` lets later files win, for environment overlays.
 Non MAP elements fail naming their position.
+
+A frozen (`CONST`-derived) list or element fails instead of
+deriving, mirroring `MAP_SET`: `CONST` bindings never produce a
+mutable map.
 
 
 **Signature:** `STD::MERGE_MAPS($maps: LIST<MAP<ANY>>, $policy: STRING = "fail_on_duplicate" | "overwrite"): MAP<ANY>`

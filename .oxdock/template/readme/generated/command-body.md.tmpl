@@ -855,6 +855,69 @@ ASSERT_EQ $t "absent"
 ```
 
 
+### CONST
+
+Bind deeply immutable script-local values.
+
+**Syntax:** `CONST $var: TYPE = <expr> | CONST $p: PIPE | CONST $var: TYPE = ASYNC { <commands> } | CONST $var: TYPE = <command> | CONST $var: TYPE = AWAIT $task | CONST $var: TYPE = { <commands> }`
+
+Declares a script-local constant with an explicit type. The
+right-hand side accepts every `LET` form (expression,
+capture, `ASYNC`, `AWAIT`, inline block, bare `PIPE`).
+
+Immutability is deep and total: `SET` (`$var = ...`),
+`LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS` on a `CONST`
+value all fail. Nested containers freeze with the binding,
+so reaching a list or map through a `CONST` never exposes
+a mutable handle. Reads behave exactly like `LET`.
+
+`CONST` and `LET` share one namespace: declaring either
+twice in the same scope frame is a redeclaration error.
+Shadowing an outer binding in an inner block stays legal
+and the inner declaration reverts on block exit.
+
+`CONST` is the only variable binding an `EXPORT` can name
+(`EXPORT CONST_NAME`, `EXPORT [CONST A, B]`): `LET`
+bindings never cross the module boundary. Importers read
+the value as `$ALIAS::NAME` (see IMPORT).
+
+
+**Examples:**
+
+**Example: const**
+
+```oxdock
+# CONST reads exactly like LET.
+CONST $name: STRING = "world"
+ECHO "hello, \{{ $name }}"
+ASSERT_CONTAINS stdout "hello, world"
+
+# Containers freeze with the binding.
+CONST $items: LIST<STRING> = ["a", "b"]
+ASSERT_CONTAINS $items "a"
+```
+
+**Example: const rejects mutation**
+
+```oxdock expect_error:"cannot mutate CONST"
+# SET on a CONST fails instead of rebinding.
+CONST $n: INT = 1
+$n = 2
+```
+
+**Expected error:** `cannot mutate CONST`
+
+**Example: const rejects append**
+
+```oxdock expect_error:"cannot mutate CONST"
+# LIST_APPEND on a CONST fails instead of pushing.
+CONST $items: LIST<STRING> = ["a"]
+LIST_APPEND $items "b"
+```
+
+**Expected error:** `cannot mutate CONST`
+
+
 ### MUTATION
 
 Mutate a declared variable.

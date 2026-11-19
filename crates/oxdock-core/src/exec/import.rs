@@ -430,6 +430,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         steps,
         func_exports,
         type_exports,
+        const_exports: _,
     } = load_import(cx.state, path)?;
     let key = resolved.display();
     if let Some(alias) = alias {
@@ -740,6 +741,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         steps,
         func_exports,
         type_exports,
+        const_exports: _,
     } = load_import(cx.state, path)?;
     let key = resolved.display();
     // Record under the importing unit for the runtime placeholder gate:
@@ -871,6 +873,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     // whole variable stack swaps for a fresh one, exactly like a
     // module-owned call, and restores after the scope pops.
     let saved_vars = std::mem::take(&mut cx.state.var_scopes);
+    let saved_consts = std::mem::take(&mut cx.state.const_scopes);
     let saved_aliases = cx.state.type_aliases.clone();
     let outcome: Result<Value> = (|| {
         let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
@@ -915,6 +918,12 @@ pub(crate) fn import_file<P: ProcessManager>(
                 .var_scopes
                 .last_mut()
                 .expect("import pushed exactly one var scope"),
+        );
+        let drained_consts = std::mem::take(
+            cx.state
+                .const_scopes
+                .last_mut()
+                .expect("import pushed exactly one const scope"),
         );
         let value = match flow {
             Flow::Done => Value::string(String::new()),
@@ -963,6 +972,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         }
         record.init = Some(super::state::ModuleInit {
             vars: drained,
+            const_vars: drained_consts,
             return_value: value.clone(),
             envs: module_env,
             inherit_names,
@@ -971,6 +981,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     })();
     let pop_res = cx.state.pop_scope();
     cx.state.var_scopes = saved_vars;
+    cx.state.const_scopes = saved_consts;
     let _ = cx.state.import_stack.pop();
     cx.state.restore_aliases(saved_aliases);
     // Re-apply the file's own harvests after the init restore: the
@@ -1013,6 +1024,7 @@ pub(super) struct ClosureFile {
     pub steps: Vec<Step>,
     pub func_exports: Vec<String>,
     pub type_exports: Vec<String>,
+    pub const_exports: Vec<String>,
     pub sites: Vec<ClosureSite>,
 }
 
@@ -1302,6 +1314,7 @@ fn record_site(
             steps: target.body.clone(),
             func_exports: target.func_exports.clone(),
             type_exports: target.type_exports.clone(),
+            const_exports: target.const_exports.clone(),
             sites: vec![site],
         }),
     }
@@ -1314,6 +1327,7 @@ struct ExpandedImport {
     body: Vec<Step>,
     func_exports: Vec<String>,
     type_exports: Vec<String>,
+    const_exports: Vec<String>,
     nested: GuardedPath,
 }
 
@@ -1356,6 +1370,7 @@ fn expand_load<P: ProcessManager>(
         steps: body,
         func_exports,
         type_exports,
+        const_exports,
     } = load_file(state, dir, stack, path)?;
     let nested = resolved.parent().unwrap_or_else(|| dir.clone());
     Ok(ExpandedImport {
@@ -1363,6 +1378,7 @@ fn expand_load<P: ProcessManager>(
         body,
         func_exports,
         type_exports,
+        const_exports,
         nested,
     })
 }
@@ -1384,6 +1400,7 @@ struct LoadedFile {
     steps: Vec<Step>,
     func_exports: Vec<String>,
     type_exports: Vec<String>,
+    const_exports: Vec<String>,
 }
 
 /// Shared loader core: `stack` is the active chain for cycle/depth
@@ -1425,6 +1442,7 @@ fn load_file<P: ProcessManager>(
             steps: record.steps.clone(),
             func_exports: record.func_exports.clone(),
             type_exports: record.type_exports.clone(),
+            const_exports: record.const_exports.clone(),
         });
     }
     let bytes = read_import_bytes(state.fs.as_ref(), &resolved)
@@ -1447,6 +1465,7 @@ fn load_file<P: ProcessManager>(
             steps: parsed.steps.clone(),
             func_exports: parsed.func_exports.clone(),
             type_exports: parsed.type_exports.clone(),
+            const_exports: parsed.const_exports.clone(),
             init: None,
         },
     );
@@ -1455,6 +1474,7 @@ fn load_file<P: ProcessManager>(
         steps: parsed.steps,
         func_exports: parsed.func_exports,
         type_exports: parsed.type_exports,
+        const_exports: parsed.const_exports,
     })
 }
 
@@ -1553,6 +1573,112 @@ pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
         }
     }
     out
+}
+
+/// Resolve one `$ALIAS::NAME` read against the active unit's alias
+/// targets: the single runtime owner for qualified `CONST` reads
+/// (expression, math, and template positions all route here, so the
+/// three can never disagree). Only `EXPORT`ed `CONST` bindings
+/// resolve: `LET` bindings never cross the boundary, and an alias
+/// with several live files exporting the name fails loud instead of
+/// picking one.
+pub(crate) fn resolve_const_ref<P: ProcessManager>(
+    state: &ExecState<P>,
+    alias: &str,
+    name: &str,
+) -> Result<Value> {
+    use super::native::{AliasResolution, ambiguous_alias_message, classify_alias_call};
+    let qualified = oxdock_parser::qualify(alias, name);
+    let targets = active_unit_alias_targets(state);
+    // Suffix probe for the matcher's canonical keys
+    // (`file::base`): the base is ours, so stripping it recovers the
+    // file exactly, and only an exporting file counts as a holder.
+    let suffix = format!("::{name}");
+    let exports = |canonical: &str| {
+        canonical
+            .strip_suffix(suffix.as_str())
+            .and_then(|file| state.modules.get(file))
+            .is_some_and(|record| record.const_exports.iter().any(|n| n == name))
+    };
+    let files = match classify_alias_call(&targets, &qualified, &exports) {
+        AliasResolution::Global | AliasResolution::Unknown => {
+            bail!("unknown CONST `${qualified}`: no import alias `{alias}` exports that name");
+        }
+        AliasResolution::Canonical(canonical) => {
+            let Some(file) = canonical.strip_suffix(suffix.as_str()) else {
+                bail!("unknown CONST `${qualified}`");
+            };
+            vec![file.to_string()]
+        }
+        AliasResolution::Ambiguous { alias, base, files } => {
+            bail!(
+                "{}",
+                ambiguous_alias_message(&alias, &base, &files).replacen("function", "CONST", 1)
+            );
+        }
+        AliasResolution::Any { mut files, .. } => {
+            let mut files: Vec<String> = files.drain().collect();
+            files.sort();
+            files
+        }
+    };
+    // Exporting files only (the matcher already gated on exports, but
+    // `Any` carries every disjoint file): exactly one live holder
+    // reads; several fail loud instead of picking.
+    let mut holders = Vec::new();
+    for file in files {
+        let Some(record) = state.modules.get(&file) else {
+            continue;
+        };
+        if !record.const_exports.iter().any(|n| n == name) {
+            continue;
+        }
+        holders.push(file);
+    }
+    if holders.len() > 1 {
+        holders.sort();
+        let files: std::collections::HashSet<String> = holders.into_iter().collect();
+        bail!(
+            "{}",
+            ambiguous_alias_message(alias, name, &files).replacen("function", "CONST", 1)
+        );
+    }
+    let Some(file) = holders.into_iter().next() else {
+        let hint = state.modules.values().flat_map(|record| {
+            record.init.as_ref().and_then(|init| {
+                init.vars.get(name).map(|_| {
+                    if init.const_vars.contains(name) {
+                        format!("module holds `{name}` as CONST but does not export it: add `EXPORT CONST {name}`")
+                    } else {
+                        format!("`{name}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary")
+                    }
+                })
+            })
+        }).next();
+        match hint {
+            Some(hint) => bail!("unknown CONST `${qualified}`: {hint}"),
+            None => {
+                bail!("unknown CONST `${qualified}`: no import alias `{alias}` exports that name")
+            }
+        }
+    };
+    let Some(record) = state.modules.get(&file) else {
+        bail!("unknown CONST `${qualified}`");
+    };
+    let Some(init) = record.init.as_ref() else {
+        bail!(
+            "`${qualified}` cannot be read: the module was harvested but never initialized; import the file"
+        );
+    };
+    if !init.const_vars.contains(name) {
+        bail!(
+            "`${qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+        );
+    }
+    init.vars
+        .get(name)
+        .map(|(_, value)| value.clone())
+        .ok_or_else(|| anyhow::anyhow!("unknown CONST `${qualified}`"))
 }
 
 /// Record one executed import under the importing unit: alias to its

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- `CONST $name: TYPE = <expr>` bindings (#318): deeply immutable values in every shape `LET` accepts. `SET`, `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS` on a `CONST` fail; nested containers freeze with the binding. `CONST` and `LET` share one namespace. Only `CONST` is `EXPORT`able from modules, read as `$ALIAS::NAME`.
+
 ## [0.43.0-alpha] - 2026-11-19
 
 ### Added

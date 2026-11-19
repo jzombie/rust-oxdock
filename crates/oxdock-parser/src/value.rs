@@ -124,14 +124,35 @@ struct StringValue(pub String);
 struct BoolValue(pub bool);
 
 /// Ordered list of values. Shared heap: cloning bumps a refcount.
+/// The `frozen` flag marks `CONST`-owned buffers: every in-place
+/// mutation choke point (`as_list_mut`) refuses a frozen buffer, so
+/// freezing is deep and permanent. Only [`Value::deep_freeze`]
+/// sets it, on a freshly detached tree.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "LIST", shared)]
-#[derive(Debug, Clone, PartialEq)]
-struct ListValue(pub Vec<Value>);
+#[derive(Debug, Clone)]
+struct ListValue(pub Vec<Value>, pub bool);
+
+impl PartialEq for ListValue {
+    /// Payload equality only: a frozen buffer still equals its
+    /// unfrozen twin, so `ASSERT_EQ` never observes `CONST`-ness.
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
 
 /// String-keyed map of values. Shared heap: cloning bumps a refcount.
+/// Freezing mirrors [`ListValue`]: `as_map_mut` refuses frozen
+/// buffers and only [`Value::deep_freeze`] sets the flag.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "MAP", shared)]
-#[derive(Debug, Clone, PartialEq)]
-struct MapValue(pub BTreeMap<String, Value>);
+#[derive(Debug, Clone)]
+struct MapValue(pub BTreeMap<String, Value>, pub bool);
+
+impl PartialEq for MapValue {
+    /// Payload equality only: see [`ListValue::eq`].
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
 
 /// Workspace path, resolved against cwd and guarded against escape.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "PATH")]
@@ -576,12 +597,12 @@ impl Value {
 
     /// Construct a list word (shared heap: clones share the buffer).
     pub fn list(items: Vec<Value>) -> Self {
-        Self::mint_heap_shared(ListValue::descriptor(), ListValue(items))
+        Self::mint_heap_shared(ListValue::descriptor(), ListValue(items, false))
     }
 
     /// Construct a map word (shared heap: clones share the buffer).
     pub fn map(entries: BTreeMap<String, Value>) -> Self {
-        Self::mint_heap_shared(MapValue::descriptor(), MapValue(entries))
+        Self::mint_heap_shared(MapValue::descriptor(), MapValue(entries, false))
     }
 
     /// Construct a path word.
@@ -689,7 +710,12 @@ impl Value {
     /// Borrow a list payload mutably, detaching the shared buffer first when
     /// clones exist. Returns `None` for non-`LIST` words. This is the choke
     /// point every future in-place container mutation must go through.
+    /// Frozen (`CONST`-owned) buffers refuse: `None` without detaching,
+    /// so an attempted write can never observe or disturb the buffer.
     pub fn as_list_mut(&mut self) -> Option<&mut Vec<Value>> {
+        if self.is_frozen() {
+            return None;
+        }
         self.read_heap_mut::<ListValue>(ListValue::descriptor())
             .map(|v| &mut v.0)
     }
@@ -703,9 +729,56 @@ impl Value {
     /// Borrow a map payload mutably, detaching the shared buffer first when
     /// clones exist. Returns `None` for non-`MAP` words. This is the choke
     /// point every future in-place container mutation must go through.
+    /// Frozen (`CONST`-owned) buffers refuse like lists above.
     pub fn as_map_mut(&mut self) -> Option<&mut BTreeMap<String, Value>> {
+        if self.is_frozen() {
+            return None;
+        }
         self.read_heap_mut::<MapValue>(MapValue::descriptor())
             .map(|v| &mut v.0)
+    }
+
+    /// Whether this word names a frozen (`CONST`-owned) container
+    /// buffer. Non-containers never freeze: rebinding a `LET` that
+    /// happens to hold a frozen value stays legal, only writes into
+    /// the buffer fail.
+    pub fn is_frozen(&self) -> bool {
+        if let Some(list) = self.read_heap::<ListValue>(ListValue::descriptor()) {
+            return list.1;
+        }
+        if let Some(map) = self.read_heap::<MapValue>(MapValue::descriptor()) {
+            return map.1;
+        }
+        false
+    }
+
+    /// Deep-freeze one value for `CONST` ownership: rebuild every
+    /// reachable `LIST`/`MAP` on fresh buffers with the frozen flag
+    /// set, so the tree shares nothing with the bindings it was built
+    /// from. Scalars (including strings, which have no in-place
+    /// mutator) clone as-is. The result reads exactly like the input
+    /// and refuses every in-place write.
+    pub fn deep_freeze(value: &Value) -> Value {
+        if let Some(list) = value.as_list() {
+            let items: Vec<Value> = list.iter().map(Self::deep_freeze).collect();
+            let mut out = Self::list(items);
+            if let Some(slot) = out.read_heap_mut::<ListValue>(ListValue::descriptor()) {
+                slot.1 = true;
+            }
+            return out;
+        }
+        if let Some(map) = value.as_map() {
+            let entries: BTreeMap<String, Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), Self::deep_freeze(v)))
+                .collect();
+            let mut out = Self::map(entries);
+            if let Some(slot) = out.read_heap_mut::<MapValue>(MapValue::descriptor()) {
+                slot.1 = true;
+            }
+            return out;
+        }
+        value.clone()
     }
 
     /// Clone the pipe handle out of a `PIPE` word. Returns `None` for

@@ -74,7 +74,9 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
-use oxdock_parser::constants::{KEYWORD_BREAK, KEYWORD_CONTINUE, KEYWORD_IMPORT};
+use oxdock_parser::constants::{
+    KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_IMPORT, KEYWORD_LET,
+};
 use oxdock_parser::template::{
     PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
 };
@@ -133,10 +135,18 @@ struct FuncInfo {
     col: usize,
 }
 
-/// One top-level binding with its declaration guard. Guards ride along
-/// so platform-specific `LET`s enforce coverage instead of reading as
-/// unconditional.
-type GuardedLet = (String, TypeTag, Option<GuardExpr>);
+/// One top-level binding with its guard and constness. Guards ride along
+/// so platform-specific `LET`s/`CONST`s enforce coverage instead of
+/// reading as unconditional. `is_const` distinguishes the binding
+/// family: `SET`, `LIST_APPEND`, and redeclaration diagnostics consult
+/// it, and only `is_const` bindings satisfy `EXPORT CONST`.
+#[derive(Clone, Debug)]
+struct GuardedLet {
+    name: String,
+    tag: TypeTag,
+    guard: Option<GuardExpr>,
+    is_const: bool,
+}
 /// Module-owned bindings by module key.
 type ModuleLets = HashMap<String, Vec<GuardedLet>>;
 
@@ -148,14 +158,15 @@ type ModuleLets = HashMap<String, Vec<GuardedLet>>;
 /// shadowing an outer frame is legal exactly where the runtime
 /// pushes a scope. `SET` and reads walk outward; types never change
 /// on mutation (runtime coerces).
-/// One live declaration: its tag plus the guard it was declared
-/// under. Same-scope duplicates with disjoint guards coexist (only
-/// one path ever binds); reads unify across entries since the path
-/// is unknowable statically.
+/// One live declaration: its tag, the guard it was declared under,
+/// and whether it is a `CONST`. Same-scope duplicates with disjoint
+/// guards coexist (only one path ever binds); reads unify across
+/// entries since the path is unknowable statically.
 #[derive(Clone, Debug)]
 struct Binding {
     tag: TypeTag,
     guard: Option<GuardExpr>,
+    is_const: bool,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -305,6 +316,11 @@ struct Checker<'a, P: ProcessManager> {
     /// unique resolvable target, so same-alias different-file imports
     /// cannot cross-resolve.
     alias_targets: super::native::AliasTargets,
+    /// `EXPORT CONST` names per module key, populated alongside
+    /// `module_lets` for the closure pass. Qualified `$ALIAS::NAME`
+    /// reads gate against these: only listed names resolve, and only
+    /// to `CONST` bindings.
+    module_const_exports: HashMap<String, Vec<String>>,
     /// Per-function import overlays: file-top imports plus the
     /// function's own subtree imports, keyed by (owner module key,
     /// `"entry"` for entry functions, function name). Swapped in while
@@ -431,7 +447,7 @@ fn module_lets_indexed<P: ProcessManager>(
         }
         // Every top-level binding form counts, so a file using
         // capture/async/readline initializers resolves exactly like
-        // one using plain `LET`.
+        // one using plain `LET`/`CONST`.
         match &step.kind {
             StepKind::Assign { var, decl_type, .. }
             | StepKind::AssignCapture { var, decl_type, .. }
@@ -439,10 +455,58 @@ fn module_lets_indexed<P: ProcessManager>(
                 let tag = exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("variable `${var}`: {err:#}"))?;
-                out.push(((clean_var(var), tag, step.guard.clone()), idx));
+                out.push((
+                    GuardedLet {
+                        name: clean_var(var),
+                        tag,
+                        guard: step.guard.clone(),
+                        is_const: false,
+                    },
+                    idx,
+                ));
+            }
+            StepKind::Const { var, decl_type, .. }
+            | StepKind::ConstCapture { var, decl_type, .. }
+            | StepKind::ConstAsync { var, decl_type, .. } => {
+                let tag = exec
+                    .resolve_tag(decl_type)
+                    .map_err(|err| anyhow::anyhow!("variable `${var}`: {err:#}"))?;
+                out.push((
+                    GuardedLet {
+                        name: clean_var(var),
+                        tag,
+                        guard: step.guard.clone(),
+                        is_const: true,
+                    },
+                    idx,
+                ));
+            }
+            StepKind::ConstAwaitCapture {
+                out_var, out_type, ..
+            } => {
+                let tag = exec
+                    .resolve_tag(out_type)
+                    .map_err(|err| anyhow::anyhow!("variable `${out_var}`: {err:#}"))?;
+                out.push((
+                    GuardedLet {
+                        name: clean_var(out_var),
+                        tag,
+                        guard: step.guard.clone(),
+                        is_const: true,
+                    },
+                    idx,
+                ));
             }
             StepKind::ReadLine { var } | StepKind::Prompt { var, .. } => {
-                out.push(((clean_var(var), TypeTag::String, step.guard.clone()), idx));
+                out.push((
+                    GuardedLet {
+                        name: clean_var(var),
+                        tag: TypeTag::String,
+                        guard: step.guard.clone(),
+                        is_const: false,
+                    },
+                    idx,
+                ));
             }
             _ => {}
         }
@@ -648,6 +712,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         // (bare harvests stay bare); bodies check below.
         let mut all_funcs = HashMap::new();
         let mut all_lets: ModuleLets = HashMap::new();
+        let mut all_const_exports: HashMap<String, Vec<String>> = HashMap::new();
         // Per-unit file-import aliases: the entry's own outbound imports
         // plus each file's own outbound imports (nested included).
         // Zero-function modules contribute no `ALIAS::` func keys, so
@@ -718,6 +783,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 }
                 extend_funcs_checked(&mut all_funcs, checker.funcs, &file.path)?;
                 all_lets.insert(file.key.clone(), module_lets(&file.steps, exec)?);
+                all_const_exports.insert(file.key.clone(), file.const_exports.clone());
                 Ok(())
             })?;
         }
@@ -759,6 +825,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     exec,
                     &all_funcs,
                     &all_lets,
+                    &all_const_exports,
                     &entry_lets,
                     &inferred,
                     entry,
@@ -785,6 +852,7 @@ pub fn validate_script_closure<P: ProcessManager>(
             exec: &'a mut ExecState<P>,
             funcs: &HashMap<String, FuncInfo>,
             lets: &ModuleLets,
+            const_exports: &HashMap<String, Vec<String>>,
             entry_lets: &[GuardedLet],
             inferred: &HashMap<String, StaticTy>,
             entry: &[Step],
@@ -796,6 +864,7 @@ pub fn validate_script_closure<P: ProcessManager>(
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
             checker.module_lets = lets.clone();
+            checker.module_const_exports = const_exports.clone();
             checker.entry_lets = entry_lets.to_vec();
             checker.entry_let_scopes = entry_let_scopes.clone();
             checker.inferred = inferred.clone();
@@ -810,6 +879,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 exec,
                 &all_funcs,
                 &all_lets,
+                &all_const_exports,
                 &entry_lets,
                 &inferred,
                 entry,
@@ -831,6 +901,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     exec,
                     &all_funcs,
                     &all_lets,
+                    &all_const_exports,
                     &entry_lets,
                     &inferred,
                     entry,
@@ -1296,6 +1367,7 @@ fn expr_call_names(expr: &Expr, enter_funcdefs: bool, out: &mut Vec<String>) {
         }
         Expr::Not(inner) => expr_call_names(inner, enter_funcdefs, out),
         Expr::Var(_)
+        | Expr::ConstRef { .. }
         | Expr::Env(_)
         | Expr::KeyPath { .. }
         | Expr::Inspect(_)
@@ -1508,7 +1580,14 @@ impl Env {
     fn one_frame(bindings: Vec<(String, TypeTag, bool)>) -> Self {
         let mut top = HashMap::new();
         for (name, tag, _) in bindings {
-            top.insert(name, vec![Binding { tag, guard: None }]);
+            top.insert(
+                name,
+                vec![Binding {
+                    tag,
+                    guard: None,
+                    is_const: false,
+                }],
+            );
         }
         Self {
             frames: vec![top],
@@ -1673,10 +1752,40 @@ impl Env {
                 .is_some_and(|scope| scope.lets.contains_key(key))
     }
 
+    /// Whether `key` names a `CONST` binding visible here: the innermost
+    /// frame holding the name decides (shadowing an outer `CONST`
+    /// with an inner `LET` stays mutable); module-shared bindings
+    /// consult their entries the same way. Only entries whose guard
+    /// overlaps the active step's site count, mirroring
+    /// [`declare_inner`](Self::declare_inner): a platform-conditional
+    /// `LET` never reads as `CONST` through a disjoint `CONST` entry.
+    /// Single owner for the static const gate behind `SET` and
+    /// `LIST_APPEND` rejection.
+    fn is_const(&self, key: &str, site: Option<&GuardExpr>) -> bool {
+        for frame in self.frames.iter().rev() {
+            if let Some(entries) = frame.get(key) {
+                return entries.iter().any(|entry| {
+                    entry.is_const && oxdock_parser::guards_overlap(entry.guard.as_ref(), site)
+                });
+            }
+        }
+        if let Some(scope) = &self.module
+            && let Some(entries) = scope.lets.get(key)
+        {
+            return entries.iter().any(|entry| {
+                entry.is_const && oxdock_parser::guards_overlap(entry.guard.as_ref(), site)
+            });
+        }
+        false
+    }
+
     /// Declare in the top frame. A duplicate whose guard overlaps any
     /// live entry mirrors the runtime redeclaration error; a disjoint
     /// one (e.g. `[os:windows]` after `[os:macos]`) shadows across exclusive
-    /// paths and is allowed.
+    /// paths and is allowed. `LET` and `CONST` share one namespace, so
+    /// redeclaring across families fails here exactly like the runtime
+    /// same-scope check; the message names the blocking family instead
+    /// of suggesting a mutation that would fail.
     fn declare(
         &mut self,
         key: String,
@@ -1684,11 +1793,40 @@ impl Env {
         guard: Option<&GuardExpr>,
         idx: usize,
     ) -> Result<()> {
+        self.declare_inner(key, tag, guard, idx, false)
+    }
+
+    /// `CONST` twin of [`declare`](Self::declare): same overlap rule,
+    /// marks the new entry immutable.
+    fn declare_const(
+        &mut self,
+        key: String,
+        tag: TypeTag,
+        guard: Option<&GuardExpr>,
+        idx: usize,
+    ) -> Result<()> {
+        self.declare_inner(key, tag, guard, idx, true)
+    }
+
+    fn declare_inner(
+        &mut self,
+        key: String,
+        tag: TypeTag,
+        guard: Option<&GuardExpr>,
+        idx: usize,
+        is_const: bool,
+    ) -> Result<()> {
         if let Some(frame) = self.frames.last()
             && let Some(entries) = frame.get(&key)
         {
             for entry in entries {
                 if oxdock_parser::guards_overlap(entry.guard.as_ref(), guard) {
+                    if entry.is_const || is_const {
+                        bail!(
+                            "step {}: redeclaration error: ${key} is a CONST binding and cannot be redeclared; CONST and LET share one namespace",
+                            idx + 1
+                        );
+                    }
                     bail!(
                         "step {}: redeclaration error: ${key} already declared in this scope; \
                          use ${key} = ... to mutate",
@@ -1701,6 +1839,7 @@ impl Env {
             frame.entry(key).or_default().push(Binding {
                 tag,
                 guard: guard.cloned(),
+                is_const,
             });
         }
         Ok(())
@@ -1713,6 +1852,7 @@ impl Env {
                 vec![Binding {
                     tag,
                     guard: guard.cloned(),
+                    is_const: false,
                 }],
             );
         }
@@ -1748,6 +1888,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             strict_qualified: false,
             entry_let_scopes: HashMap::new(),
             alias_targets: HashMap::new(),
+            module_const_exports: HashMap::new(),
             body_scopes: HashMap::new(),
             isolated_depth: 0,
         }
@@ -1898,7 +2039,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// One template variable read through expression inference, so
     /// templates and code agree on every error. `$a.b` traverses like
-    /// `KeyPath`; bare keys read like `Var`.
+    /// `KeyPath`; bare keys read like `Var`; `$ALIAS::NAME` reads like
+    /// `ConstRef`. Key paths never ride qualified names: copy to a
+    /// local binding first, mirroring the expression parser.
     fn check_template_var(
         &mut self,
         var: &oxdock_parser::template::TemplateVar,
@@ -1913,7 +2056,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .split_first()
                     .expect("placeholder_vars never emits empty paths");
                 if rest.is_empty() {
-                    Expr::Var(base.clone())
+                    if let Some((alias, name)) = base.split_once("::") {
+                        Expr::ConstRef {
+                            alias: alias.to_string(),
+                            name: name.to_string(),
+                        }
+                    } else {
+                        Expr::Var(base.clone())
+                    }
+                } else if base.contains("::") {
+                    bail!(
+                        "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+                    );
                 } else {
                     Expr::KeyPath {
                         base: base.clone(),
@@ -2090,7 +2244,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 };
                 let (base, segs) = parts.split_first().expect("split always yields one");
                 let expr = if segs.is_empty() {
-                    Expr::Var(base.clone())
+                    if let Some((alias, name)) = base.split_once("::") {
+                        Expr::ConstRef {
+                            alias: alias.to_string(),
+                            name: name.to_string(),
+                        }
+                    } else {
+                        Expr::Var(base.clone())
+                    }
+                } else if base.contains("::") {
+                    bail!(
+                        "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+                    );
                 } else {
                     Expr::KeyPath {
                         base: base.clone(),
@@ -2488,8 +2653,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let mut env = Env::one_frame(Vec::new());
         if let Some(module) = module {
             let mut lets: HashMap<String, Vec<Binding>> = HashMap::new();
-            for (name, tag, guard) in self.module_lets.get(module).cloned().unwrap_or_default() {
-                lets.entry(name).or_default().push(Binding { tag, guard });
+            for entry in self.module_lets.get(module).cloned().unwrap_or_default() {
+                lets.entry(entry.name).or_default().push(Binding {
+                    tag: entry.tag,
+                    guard: entry.guard,
+                    is_const: entry.is_const,
+                });
             }
             env.module = Some(ModuleScope {
                 key: module.to_string(),
@@ -2594,11 +2763,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             let lets = self.module_lets.get(module).cloned().unwrap_or_default();
             let touched = probe.unwrap_or_default();
             let mut module_lets: HashMap<String, Vec<Binding>> = HashMap::new();
-            for (name, tag, guard) in lets {
-                module_lets
-                    .entry(name)
-                    .or_default()
-                    .push(Binding { tag, guard });
+            for entry in lets {
+                module_lets.entry(entry.name).or_default().push(Binding {
+                    tag: entry.tag,
+                    guard: entry.guard,
+                    is_const: entry.is_const,
+                });
             }
             env.module = Some(ModuleScope {
                 key: module.to_string(),
@@ -2632,10 +2802,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 .unwrap_or_else(|| self.entry_lets.clone());
             if !scoped.is_empty() {
                 let mut bottom: HashMap<String, Vec<Binding>> = HashMap::new();
-                for (name, tag, guard) in &scoped {
-                    bottom.entry(name.clone()).or_default().push(Binding {
-                        tag: tag.clone(),
-                        guard: guard.clone(),
+                for entry in &scoped {
+                    bottom.entry(entry.name.clone()).or_default().push(Binding {
+                        tag: entry.tag.clone(),
+                        guard: entry.guard.clone(),
+                        is_const: entry.is_const,
                     });
                 }
                 env.frames.insert(0, bottom);
@@ -2835,6 +3006,282 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// Walk a single live step. The returned `falls_through` is
     /// relative to the step alone; the caller applies guard semantics.
+    /// Shared `LET`/`CONST $var: TYPE = <expr>` check: infer, reject
+    /// `VOID`, resolve and validate the tag, then declare (`CONST`
+    /// via `declare_const`). Everything but the declaration is
+    /// family-independent, so the two arms cannot drift.
+    #[allow(clippy::too_many_arguments)]
+    fn check_plain_binding(
+        &mut self,
+        var: &str,
+        decl_type: &str,
+        expr: &Expr,
+        env: &mut Env,
+        scope: &Scope,
+        step: &Step,
+        idx: usize,
+        depth: usize,
+        is_const: bool,
+        live: WalkOut,
+    ) -> Result<WalkOut> {
+        let rhs = self.infer_expr(expr, env, scope, idx, depth + 1)?;
+        if matches!(rhs, StaticTy::Void) {
+            bail!(
+                "step {}: VOID block has no value to bind to `${var}`",
+                idx + 1
+            );
+        }
+        let tag = self
+            .exec
+            .resolve_tag(decl_type)
+            .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+        self.exec
+            .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
+        let key = clean_var(var);
+        if is_const {
+            env.declare_const(key, tag, step.guard.as_ref(), idx)?;
+        } else {
+            env.declare(key, tag, step.guard.as_ref(), idx)?;
+        }
+        Ok(live)
+    }
+
+    /// Shared capture check (`LET`/`CONST $var: TYPE = <command>`):
+    /// the captured command checks first, the yield must coerce to
+    /// the declared tag, then declare. `is_const` selects the
+    /// declaration and the diagnostic word.
+    #[allow(clippy::too_many_arguments)]
+    fn check_capture_binding(
+        &mut self,
+        var: &str,
+        decl_type: &str,
+        cmd: &StepKind,
+        env: &mut Env,
+        scope: &Scope,
+        step: &Step,
+        idx: usize,
+        depth: usize,
+        is_const: bool,
+        live: WalkOut,
+    ) -> Result<WalkOut> {
+        // The captured command runs first at runtime, so its
+        // expressions check before the declaration lands.
+        self.walk_wrapped(step, cmd, env, scope, idx, depth + 1)?;
+        let tag = self
+            .exec
+            .resolve_tag(decl_type)
+            .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+        self.exec
+            .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
+        // Yield check mirroring runtime assign_capture (see
+        // capture_yield): without it a TIMEOUT-wrapped (or any
+        // non-call) command sails through with an incompatible
+        // declaration and fails only at runtime coercion.
+        if let Some(yield_tag) = self.capture_yield(cmd, depth)?
+            && self
+                .check_arg(
+                    &tag,
+                    StaticTy::Ty(yield_tag.clone()),
+                    &format!("step {}", idx + 1),
+                )
+                .is_err()
+        {
+            let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
+            bail!(
+                "step {}: {kw} ${} captures {} but declares {}",
+                idx + 1,
+                clean_var(var),
+                render_structural(&yield_tag),
+                render_structural(&tag)
+            );
+        }
+        let key = clean_var(var);
+        if is_const {
+            env.declare_const(key, tag, step.guard.as_ref(), idx)?;
+        } else {
+            env.declare(key, tag, step.guard.as_ref(), idx)?;
+        }
+        Ok(live)
+    }
+
+    /// Shared `AWAIT` capture check: the handle resolves before the
+    /// output declares, the payload must fit the declared tag, then
+    /// declare (`CONST` via `declare_const`).
+    #[allow(clippy::too_many_arguments)]
+    fn check_await_binding(
+        &mut self,
+        out_var: &str,
+        out_type: &str,
+        task_var: &str,
+        env: &mut Env,
+        scope: &Scope,
+        step: &Step,
+        idx: usize,
+        is_const: bool,
+        live: WalkOut,
+    ) -> Result<WalkOut> {
+        // The handle resolves before the output declares.
+        let handle_tag = Self::check_name_read(env, task_var, scope, idx)?;
+        let tag = self
+            .exec
+            .resolve_tag(out_type)
+            .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+        self.exec
+            .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
+        let payload = match handle_tag {
+            TypeTag::Handle => TypeTag::Any,
+            TypeTag::HandleOf(inner) => (*inner).clone(),
+            other => bail!(
+                "step {}: AWAIT ${} is {}, not HANDLE",
+                idx + 1,
+                clean_var(task_var),
+                render_structural(&other)
+            ),
+        };
+        if matches!(payload, TypeTag::Void) {
+            bail!(
+                "step {}: AWAIT ${} is HANDLE<VOID>: no value to bind to `${}`; use bare AWAIT for join",
+                idx + 1,
+                clean_var(task_var),
+                clean_var(out_var)
+            );
+        }
+        if !is_compatible(&payload, &tag) && !is_compatible(&tag, &payload) {
+            // Top-down: capture type must accept the task payload.
+            // Allow coercible pairs via check_arg shape.
+            if self
+                .check_arg(
+                    &tag,
+                    StaticTy::Ty(payload.clone()),
+                    &format!("step {}", idx + 1),
+                )
+                .is_err()
+            {
+                bail!(
+                    "step {}: AWAIT ${} yields {} but `${}` declares {}",
+                    idx + 1,
+                    clean_var(task_var),
+                    render_structural(&payload),
+                    clean_var(out_var),
+                    render_structural(&tag)
+                );
+            }
+        }
+        let key = clean_var(out_var);
+        if is_const {
+            env.declare_const(key, tag, step.guard.as_ref(), idx)?;
+        } else {
+            env.declare(key, tag, step.guard.as_ref(), idx)?;
+        }
+        Ok(live)
+    }
+
+    /// Shared `ASYNC` binding check: the body walks in a forked task
+    /// scope, the declared tag must be `HANDLE`-headed and fit the
+    /// task's returns, then declare. `is_const` selects the
+    /// declaration; both families overlap-check, mirroring the
+    /// runtime redeclare error.
+    #[allow(clippy::too_many_arguments)]
+    fn check_async_binding(
+        &mut self,
+        var: &str,
+        decl_type: &str,
+        body: &[Step],
+        env: &mut Env,
+        scope: &Scope,
+        step: &Step,
+        idx: usize,
+        depth: usize,
+        is_const: bool,
+        live: WalkOut,
+    ) -> Result<WalkOut> {
+        // Bodies publish through `AWAIT`; returns belong to the task,
+        // never the enclosing function. Every ASYNC position is HANDLE-headed.
+        let mut fork = env.fork();
+        let task = Scope {
+            label: scope.label,
+            ret: RetCtx::AsyncValue,
+            loops: 0,
+            switches: 0,
+            site: scope.site.clone(),
+            line: scope.line,
+            col: scope.col,
+            idx: scope.idx,
+        };
+        let inner = self.walk_body(body, &mut fork, &task, depth + 1)?;
+        let tag = self
+            .exec
+            .resolve_tag(decl_type)
+            .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+        // HANDLE-headed first (the async rule owns that
+        // message), then the shared position rule for nested
+        // VOID (HANDLE<LIST<VOID>> and friends).
+        let payload = match &tag {
+            TypeTag::Handle => TypeTag::Any,
+            TypeTag::HandleOf(inner_tag) => (**inner_tag).clone(),
+            _ => bail!(
+                "step {}: ASYNC `${}` declares {}, not HANDLE; every ASYNC position is HANDLE-headed",
+                idx + 1,
+                clean_var(var),
+                render_structural(&tag)
+            ),
+        };
+        self.exec
+            .check_declaration_tag(&format!("step {}", idx + 1), &tag)
+            .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+        if inner.bare_return && !matches!(payload, TypeTag::Void) {
+            bail!(
+                "step {}: ASYNC `${}` declares {} but task has a bare RETURN; bare RETURN is only a void exit",
+                idx + 1,
+                clean_var(var),
+                render_structural(&tag)
+            );
+        }
+        if matches!(payload, TypeTag::Void) {
+            if let Some((ty, line, _col)) = inner.types.first() {
+                bail!(
+                    "step {}: HANDLE<VOID> task RETURN at line {line} yields {}",
+                    idx + 1,
+                    render_structural(ty)
+                );
+            }
+        } else if inner.types.is_empty() {
+            if !matches!(payload, TypeTag::Any) {
+                bail!(
+                    "step {}: ASYNC `${}` declares {} but task has no value RETURN",
+                    idx + 1,
+                    clean_var(var),
+                    render_structural(&tag)
+                );
+            }
+        } else {
+            for (ty, line, _col) in &inner.types {
+                if !is_compatible(ty, &payload) {
+                    bail!(
+                        "step {}: ASYNC `${}` declares {} but task RETURN at line {line} yields {}",
+                        idx + 1,
+                        clean_var(var),
+                        render_structural(&tag),
+                        render_structural(ty)
+                    );
+                }
+            }
+        }
+        let key = clean_var(var);
+        if is_const {
+            env.declare_const(key, tag, step.guard.as_ref(), idx)?;
+        } else {
+            // Overlap-checked like every other declaration: the
+            // runtime `declare_var` fails the same duplicate, so the
+            // static pass must not silently overwrite it (a `LET`
+            // following a same-scope `CONST` would otherwise erase
+            // the const entry and admit mutations that crash at
+            // runtime).
+            env.declare(key, tag, step.guard.as_ref(), idx)?;
+        }
+        Ok(live)
+    }
+
     fn walk_step(
         &mut self,
         step: &Step,
@@ -3050,68 +3497,41 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 var,
                 decl_type,
                 expr,
-            } => {
-                let rhs = self.infer_expr(expr, env, scope, idx, depth + 1)?;
-                if matches!(rhs, StaticTy::Void) {
-                    bail!(
-                        "step {}: VOID block has no value to bind to `${var}`",
-                        idx + 1
-                    );
-                }
-                let tag = self
-                    .exec
-                    .resolve_tag(decl_type)
-                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                self.exec
-                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
-                let key = clean_var(var);
-                env.declare(key, tag, step.guard.as_ref(), idx)?;
-                Ok(live)
-            }
+            } => self.check_plain_binding(
+                var, decl_type, expr, env, scope, step, idx, depth, false, live,
+            ),
+            StepKind::Const {
+                var,
+                decl_type,
+                expr,
+            } => self.check_plain_binding(
+                var, decl_type, expr, env, scope, step, idx, depth, true, live,
+            ),
             StepKind::AssignCapture {
                 var,
                 decl_type,
                 cmd,
-            } => {
-                // The captured command runs first at runtime, so its
-                // expressions check before the declaration lands.
-                self.walk_wrapped(step, cmd, env, scope, idx, depth + 1)?;
-                let tag = self
-                    .exec
-                    .resolve_tag(decl_type)
-                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                self.exec
-                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
-                // Yield check mirroring runtime assign_capture (see
-                // capture_yield): without it a TIMEOUT-wrapped (or any
-                // non-call) command sails through with an incompatible
-                // declaration and fails only at runtime coercion.
-                if let Some(yield_tag) = self.capture_yield(cmd, depth)?
-                    && self
-                        .check_arg(
-                            &tag,
-                            StaticTy::Ty(yield_tag.clone()),
-                            &format!("step {}", idx + 1),
-                        )
-                        .is_err()
-                {
-                    bail!(
-                        "step {}: LET ${} captures {} but declares {}",
-                        idx + 1,
-                        clean_var(var),
-                        render_structural(&yield_tag),
-                        render_structural(&tag)
-                    );
-                }
-                let key = clean_var(var);
-                env.declare(key, tag, step.guard.as_ref(), idx)?;
-                Ok(live)
-            }
+            } => self.check_capture_binding(
+                var, decl_type, cmd, env, scope, step, idx, depth, false, live,
+            ),
+            StepKind::ConstCapture {
+                var,
+                decl_type,
+                cmd,
+            } => self.check_capture_binding(
+                var, decl_type, cmd, env, scope, step, idx, depth, true, live,
+            ),
             StepKind::Set { var, expr } => {
                 let key = clean_var(var);
                 if !env.is_declared(&key) {
                     bail!(
                         "step {}: undeclared variable ${key}: declare it first with LET ${key}: TYPE = ...",
+                        idx + 1
+                    );
+                }
+                if env.is_const(&key, scope.site.as_ref()) {
+                    bail!(
+                        "step {}: cannot mutate CONST ${key}: CONST bindings are deeply immutable",
                         idx + 1
                     );
                 }
@@ -3127,58 +3547,16 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 out_var,
                 out_type,
                 task_var,
-            } => {
-                // The handle resolves before the output declares.
-                let handle_tag = Self::check_name_read(env, task_var, scope, idx)?;
-                let tag = self
-                    .exec
-                    .resolve_tag(out_type)
-                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                self.exec
-                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
-                let payload = match handle_tag {
-                    TypeTag::Handle => TypeTag::Any,
-                    TypeTag::HandleOf(inner) => (*inner).clone(),
-                    other => bail!(
-                        "step {}: AWAIT ${} is {}, not HANDLE",
-                        idx + 1,
-                        clean_var(task_var),
-                        render_structural(&other)
-                    ),
-                };
-                if matches!(payload, TypeTag::Void) {
-                    bail!(
-                        "step {}: AWAIT ${} is HANDLE<VOID>: no value to bind to `${}`; use bare AWAIT for join",
-                        idx + 1,
-                        clean_var(task_var),
-                        clean_var(out_var)
-                    );
-                }
-                if !is_compatible(&payload, &tag) && !is_compatible(&tag, &payload) {
-                    // Top-down: capture type must accept the task payload.
-                    // Allow coercible pairs via check_arg shape.
-                    if self
-                        .check_arg(
-                            &tag,
-                            StaticTy::Ty(payload.clone()),
-                            &format!("step {}", idx + 1),
-                        )
-                        .is_err()
-                    {
-                        bail!(
-                            "step {}: AWAIT ${} yields {} but `${}` declares {}",
-                            idx + 1,
-                            clean_var(task_var),
-                            render_structural(&payload),
-                            clean_var(out_var),
-                            render_structural(&tag)
-                        );
-                    }
-                }
-                let key = clean_var(out_var);
-                env.declare(key, tag, step.guard.as_ref(), idx)?;
-                Ok(live)
-            }
+            } => self.check_await_binding(
+                out_var, out_type, task_var, env, scope, step, idx, false, live,
+            ),
+            StepKind::ConstAwaitCapture {
+                out_var,
+                out_type,
+                task_var,
+            } => self.check_await_binding(
+                out_var, out_type, task_var, env, scope, step, idx, true, live,
+            ),
             StepKind::AsyncBlock { body } => {
                 // Bare tasks never publish a value: control never
                 // crosses the thread boundary at runtime.
@@ -3200,84 +3578,16 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 var,
                 decl_type,
                 body,
-            } => {
-                // `LET $t: HANDLE<VOID> = ASYNC ...` bodies publish through `AWAIT`;
-                // returns belong to the task, never the enclosing
-                // function. Every ASYNC position is HANDLE-headed.
-                let mut fork = env.fork();
-                let task = Scope {
-                    label: scope.label,
-                    ret: RetCtx::AsyncValue,
-                    loops: 0,
-                    switches: 0,
-                    site: scope.site.clone(),
-                    line: scope.line,
-                    col: scope.col,
-                    idx: scope.idx,
-                };
-                let inner = self.walk_body(body, &mut fork, &task, depth + 1)?;
-                let tag = self
-                    .exec
-                    .resolve_tag(decl_type)
-                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                // HANDLE-headed first (the async rule owns that
-                // message), then the shared position rule for nested
-                // VOID (HANDLE<LIST<VOID>> and friends).
-                let payload = match &tag {
-                    TypeTag::Handle => TypeTag::Any,
-                    TypeTag::HandleOf(inner_tag) => (**inner_tag).clone(),
-                    _ => bail!(
-                        "step {}: ASYNC `${}` declares {}, not HANDLE; every ASYNC position is HANDLE-headed",
-                        idx + 1,
-                        clean_var(var),
-                        render_structural(&tag)
-                    ),
-                };
-                self.exec
-                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)
-                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                if inner.bare_return && !matches!(payload, TypeTag::Void) {
-                    bail!(
-                        "step {}: ASYNC `${}` declares {} but task has a bare RETURN; bare RETURN is only a void exit",
-                        idx + 1,
-                        clean_var(var),
-                        render_structural(&tag)
-                    );
-                }
-                if matches!(payload, TypeTag::Void) {
-                    if let Some((ty, line, _col)) = inner.types.first() {
-                        bail!(
-                            "step {}: HANDLE<VOID> task RETURN at line {line} yields {}",
-                            idx + 1,
-                            render_structural(ty)
-                        );
-                    }
-                } else if inner.types.is_empty() {
-                    if !matches!(payload, TypeTag::Any) {
-                        bail!(
-                            "step {}: ASYNC `${}` declares {} but task has no value RETURN",
-                            idx + 1,
-                            clean_var(var),
-                            render_structural(&tag)
-                        );
-                    }
-                } else {
-                    for (ty, line, _col) in &inner.types {
-                        if !is_compatible(ty, &payload) {
-                            bail!(
-                                "step {}: ASYNC `${}` declares {} but task RETURN at line {line} yields {}",
-                                idx + 1,
-                                clean_var(var),
-                                render_structural(&tag),
-                                render_structural(ty)
-                            );
-                        }
-                    }
-                }
-                let key = clean_var(var);
-                env.insert_top(key, tag, step.guard.as_ref());
-                Ok(live)
-            }
+            } => self.check_async_binding(
+                var, decl_type, body, env, scope, step, idx, depth, false, live,
+            ),
+            StepKind::ConstAsync {
+                var,
+                decl_type,
+                body,
+            } => self.check_async_binding(
+                var, decl_type, body, env, scope, step, idx, depth, true, live,
+            ),
             StepKind::Timeout { body, .. } => {
                 // A dynamic duration evaluates before the body runs.
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
@@ -3461,6 +3771,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         Self::check_pipe_bindings(env, bindings, scope, idx)?;
                     }
                     StepKind::ListAppend { list, item } => {
+                        let key = clean_var(list);
+                        if env.is_const(&key, scope.site.as_ref()) {
+                            bail!(
+                                "step {}: cannot mutate CONST ${key}: CONST bindings are deeply immutable",
+                                idx + 1
+                            );
+                        }
                         let tag = Self::check_name_read(env, list, scope, idx)?;
                         let element = match tag {
                             TypeTag::List => None,
@@ -4052,6 +4369,110 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         })
     }
 
+    /// Resolve one `$ALIAS::NAME` read to its `CONST` tag: the static
+    /// twin of [`import::resolve_const_ref`](super::import::resolve_const_ref).
+    /// Alias matching runs through the shared classifier; only
+    /// `EXPORT`ed `CONST` bindings resolve. Unknown aliases stay
+    /// lenient without the closure (single-file probes) and fail
+    /// closed on it; a `LET` spelling with the same name names the
+    /// real error (never exportable) instead of an unknown-name miss.
+    fn resolve_const_ref(&self, alias: &str, name: &str, scope: &Scope) -> Result<TypeTag> {
+        use super::native::{AliasResolution, ambiguous_alias_message, classify_alias_call};
+        let at = || step_pos(scope.line, scope.col, scope.idx);
+        let qualified = oxdock_parser::qualify(alias, name);
+        let suffix = format!("::{name}");
+        let exports = |canonical: &str| {
+            canonical
+                .strip_suffix(suffix.as_str())
+                .and_then(|file| self.module_const_exports.get(file))
+                .is_some_and(|names| names.iter().any(|n| n == name))
+        };
+        let files = match classify_alias_call(&self.alias_targets, &qualified, &exports) {
+            AliasResolution::Global | AliasResolution::Unknown => {
+                if self.strict_qualified {
+                    bail!(
+                        "{}: unknown CONST `${qualified}`: no import alias `{alias}` exports that name",
+                        at()
+                    );
+                }
+                return Ok(TypeTag::Any);
+            }
+            AliasResolution::Canonical(canonical) => {
+                let Some(file) = canonical.strip_suffix(suffix.as_str()) else {
+                    bail!("{}: unknown CONST `${qualified}`", at());
+                };
+                vec![file.to_string()]
+            }
+            AliasResolution::Ambiguous { alias, base, files } => {
+                bail!(
+                    "{}: {}",
+                    at(),
+                    ambiguous_alias_message(&alias, &base, &files).replacen("function", "CONST", 1)
+                );
+            }
+            AliasResolution::Any { mut files, .. } => {
+                let mut files: Vec<String> = files.drain().collect();
+                files.sort();
+                files
+            }
+        };
+        // Tag lookup over exporting files only: exactly one holder
+        // tags the read; several live holders fail loud (runtime
+        // would too), and differing disjoint tags fall back to `ANY`
+        // since only the live branch initializes.
+        let mut tags: Vec<TypeTag> = Vec::new();
+        for file in &files {
+            if !exports(&oxdock_parser::qualify(file, name)) {
+                continue;
+            }
+            let Some(binding) = self
+                .module_lets
+                .get(file)
+                .and_then(|lets| lets.iter().find(|entry| entry.name == name))
+            else {
+                continue;
+            };
+            if !binding.is_const {
+                bail!(
+                    "{}: `${qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary",
+                    at()
+                );
+            }
+            tags.push(binding.tag.clone());
+        }
+        if tags.len() > 1 {
+            let first = tags[0].clone();
+            if !tags.iter().all(|tag| tags_equal(&first, tag)) {
+                return Ok(TypeTag::Any);
+            }
+        }
+        match tags.into_iter().next() {
+            Some(tag) => Ok(tag),
+            None => {
+                let hint = self.module_lets.values().flat_map(|lets| {
+                    lets.iter().find(|entry| entry.name == name).map(|entry| {
+                        if entry.is_const {
+                            format!(
+                                "module holds `{name}` as CONST but does not export it: add `EXPORT CONST {name}`"
+                            )
+                        } else {
+                            format!(
+                                "`{name}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+                            )
+                        }
+                    })
+                }).next();
+                match hint {
+                    Some(hint) => bail!("{}: unknown CONST `${qualified}`: {hint}", at()),
+                    None => bail!(
+                        "{}: unknown CONST `${qualified}`: no import alias `{alias}` exports that name",
+                        at()
+                    ),
+                }
+            }
+        }
+    }
+
     /// Whether checking this function observes module-shared state
     /// (#115): runs the body check with an armed probe and reports the
     /// flag. Used by the harvest gate, statically and at load time.
@@ -4401,6 +4822,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?))
             }
+            Expr::ConstRef { alias, name } => {
+                let tag = self.resolve_const_ref(alias, name, scope)?;
+                Ok(StaticTy::Ty(tag))
+            }
             Expr::Env(name) => {
                 self.check_env_name(env, name, "env:", scope)?;
                 Ok(StaticTy::Ty(TypeTag::String))
@@ -4613,6 +5038,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         bail!("undefined variable ${key}");
                     }
                     stack.push(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?));
+                }
+                MathOp::LoadConstRef { alias, name } => {
+                    let tag = self.resolve_const_ref(alias, name, scope)?;
+                    stack.push(StaticTy::Ty(tag));
                 }
                 MathOp::LoadEnv(name) => {
                     self.check_env_name(env, name, "env:", scope)?;

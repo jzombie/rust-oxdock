@@ -2976,11 +2976,15 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::If { .. } => {}
         StepKind::Switch { .. } => {}
         StepKind::Assign { .. } => {}
+        StepKind::Const { .. } => {}
         StepKind::Set { .. } => {}
         StepKind::AssignCapture { .. } => {}
+        StepKind::ConstCapture { .. } => {}
         StepKind::AssignAsync { .. } => {}
+        StepKind::ConstAsync { .. } => {}
         StepKind::Await { .. } => {}
         StepKind::AwaitCapture { .. } => {}
+        StepKind::ConstAwaitCapture { .. } => {}
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
         StepKind::Isolated { .. } => {}

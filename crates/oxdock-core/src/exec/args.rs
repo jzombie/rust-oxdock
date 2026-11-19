@@ -461,6 +461,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             .state
             .get_var(name)
             .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}")),
+        Expr::ConstRef { alias, name } => super::import::resolve_const_ref(cx.state, alias, name),
         Expr::Env(key) => match cx.state.get_env(key) {
             Some(v) => Ok(Value::string(v.to_string())),
             // Declared-but-absent reads empty, exactly like a host
@@ -1316,9 +1317,46 @@ fn resolve_key_path_value<P: ProcessManager>(
     base: &str,
     keys: &[String],
 ) -> Result<Value> {
-    let mut current = state
+    let current = state
         .get_var(base)
         .ok_or_else(|| anyhow::anyhow!("undefined variable ${base}"))?;
+    descend_value(current, keys)
+}
+
+/// One `$ALIAS::NAME` placeholder call argument: resolve a
+/// module-exported `CONST` to its value, or `None` when the argument
+/// is any other shape (the flat var map owns those). Key paths never
+/// ride qualified names, mirroring expression and template reads, so
+/// both sides fail with one message.
+fn resolve_const_call_arg<P: ProcessManager>(
+    state: &ExecState<P>,
+    src: &str,
+) -> Result<Option<Value>> {
+    use oxdock_parser::template::{TemplateArg, classify_template_arg, parse_var_path};
+    let TemplateArg::Dollar(rest) = classify_template_arg(src.trim()) else {
+        return Ok(None);
+    };
+    let Some(parts) = parse_var_path(rest) else {
+        return Ok(None);
+    };
+    let (base, segs) = parts.split_first().expect("split always yields one");
+    let Some((alias, name)) = base.split_once("::") else {
+        return Ok(None);
+    };
+    if !segs.is_empty() {
+        anyhow::bail!(
+            "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+        );
+    }
+    super::import::resolve_const_ref(state, alias, name).map(Some)
+}
+
+/// Descend one value through map keys / list indices: the shared
+/// traversal behind [`resolve_key_path_value`] and qualified
+/// `$ALIAS::NAME` template reads, so both report the same hard
+/// errors on missing keys instead of rendering empty.
+fn descend_value(current: Value, keys: &[String]) -> Result<Value> {
+    let mut current = current;
     for key in keys {
         if let Some(map) = current.as_map() {
             current = map
@@ -1363,6 +1401,9 @@ fn evaluate_compiled_math<P: ProcessManager>(
                     .get_var(name)
                     .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))?;
                 stack.push(val);
+            }
+            MathOp::LoadConstRef { alias, name } => {
+                stack.push(super::import::resolve_const_ref(cx.state, alias, name)?);
             }
             MathOp::LoadEnv(key) => match cx.state.get_env(key) {
                 Some(v) => stack.push(Value::string(v.to_string())),
@@ -1859,10 +1900,23 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     // $var never reads the environment; use {{ env:KEY }}.
                     // Split through the single template owner; the base
                     // lookup below mirrors `resolve_key_path_value`.
+                    // `$ALIAS::NAME` reads a module-exported CONST
+                    // through the same resolver expressions use; key
+                    // paths never ride qualified names.
                     let parts = split_var_path(rest);
                     let (base, segs) = parts.split_first().expect("split always yields one");
-                    let value = resolve_key_path_value(state, base, segs)?;
-                    output.push_str(&format_value_for_string(&value)?);
+                    if let Some((alias, name)) = base.split_once("::") {
+                        if !segs.is_empty() {
+                            bail!(
+                                "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+                            );
+                        }
+                        let value = super::import::resolve_const_ref(state, alias, name)?;
+                        output.push_str(&format_value_for_string(&value)?);
+                    } else {
+                        let value = resolve_key_path_value(state, base, segs)?;
+                        output.push_str(&format_value_for_string(&value)?);
+                    }
                 }
                 // `{{ env:KEY }}` reads the script env: absent names
                 // read empty. Undeclared names never reach here: the
@@ -1936,7 +1990,11 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     let args_src = oxdock_parser::template::split_placeholder_args(call.args_raw);
                     let mut args = Vec::with_capacity(args_src.len());
                     for src in args_src {
-                        args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
+                        if let Some(value) = resolve_const_call_arg(state, &src)? {
+                            args.push(value);
+                        } else {
+                            args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
+                        }
                     }
                     let result = match resolve(module, call.name, args) {
                         Ok(value) => value,
