@@ -74,6 +74,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
+use oxdock_parser::constants::{KEYWORD_BREAK, KEYWORD_CONTINUE};
 use oxdock_parser::template::{
     PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
 };
@@ -2880,8 +2881,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(out)
             }
-            StepKind::Break => self.walk_break("BREAK", scope, idx),
-            StepKind::Continue => self.walk_break("CONTINUE", scope, idx),
+            StepKind::Break => self.walk_break(KEYWORD_BREAK, scope, idx),
+            StepKind::Continue => self.walk_break(KEYWORD_CONTINUE, scope, idx),
             StepKind::Exit(_) => {
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
                 Ok(WalkOut {
@@ -3594,7 +3595,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// switch consumes it). Anywhere else the boundary error mirrors
     /// execution one for one.
     fn walk_break(&mut self, word: &str, scope: &Scope, idx: usize) -> Result<WalkOut> {
-        let legal = if word == "BREAK" {
+        let legal = if word == KEYWORD_BREAK {
             scope.loops > 0 || scope.switches > 0
         } else {
             scope.loops > 0
@@ -3609,7 +3610,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
         match &scope.ret {
             RetCtx::Top => {
-                if word == "BREAK" {
+                if word == KEYWORD_BREAK {
                     bail!("step {}: BREAK outside loop or SWITCH", idx + 1)
                 } else {
                     bail!("step {}: {word} outside loop", idx + 1)

@@ -985,6 +985,123 @@ LET $band: STRING = READ band.txt
 ASSERT_EQ $band "wide"
 ```
 
+**Example: no fallthrough without break**
+
+```oxdock
+# C falls through without break: this SWITCH does not.
+# Both arms match and neither uses BREAK, yet only the
+# first arm runs.
+LET $hits: LIST<STRING> = []
+SWITCH 1 {
+  CASE 1 {
+    LIST_APPEND $hits "first"
+  }
+  CASE 1 {
+    LIST_APPEND $hits "second"
+  }
+  DEFAULT {
+    LIST_APPEND $hits "default"
+  }
+}
+
+# CONTINUE does not fall through either: in the "x" pass
+# it skips the rest of the arm and the SWITCH, and the
+# loop advances. The second arm never runs for "x".
+FOR $o: STRING IN ["x", "y"] {
+  SWITCH $o {
+    CASE "x" {
+      LIST_APPEND $hits "x-arm"
+      CONTINUE
+      LIST_APPEND $hits "x-unreached"
+    }
+    CASE "x", "y" {
+      LIST_APPEND $hits "other-arm"
+    }
+  }
+  LIST_APPEND $hits "after"
+}
+
+LET $want: LIST<STRING> = ["first", "x-arm", "other-arm", "after"]
+ASSERT_EQ $hits $want
+```
+
+**Example: strict equality, not C coercion**
+
+```oxdock
+# No C-style coercion: STRING "1" never equals INT 1.
+# Numerics still compare across INT and FLOAT.
+LET $hits: LIST<STRING> = []
+SWITCH "1" {
+  CASE 1 {
+    LIST_APPEND $hits "coerced"
+  }
+  DEFAULT {
+    LIST_APPEND $hits "no-coercion"
+  }
+}
+
+SWITCH 2 {
+  CASE 2.0 {
+    LIST_APPEND $hits "numeric-match"
+  }
+  DEFAULT {
+    LIST_APPEND $hits "numeric-miss"
+  }
+}
+
+LET $want: LIST<STRING> = ["no-coercion", "numeric-match"]
+ASSERT_EQ $hits $want
+```
+
+**Example: later conditions never evaluate**
+
+```oxdock
+# Each CASE without a discriminant is a call, and calls
+# stop at the first true arm. PROBE writes a marker, so
+# its absence proves it never ran.
+IMPORT [STD]
+FUNC PROBE($v: BOOL): BOOL {
+  WRITE probed.txt hit
+  RETURN $v
+}
+LET $n: INT = 2
+SWITCH {
+  CASE $n > 1 {
+    WRITE band.txt mid
+  }
+  CASE PROBE(true) {
+    WRITE band.txt probed
+  }
+  DEFAULT {
+    WRITE band.txt low
+  }
+}
+
+LET $band: STRING = READ band.txt
+ASSERT_EQ $band "mid"
+LET $t: STRING = PATH_TYPE("probed.txt")
+ASSERT_EQ $t "absent"
+```
+
+**Example: no match without default is a no-op**
+
+```oxdock
+# No arm matches and no DEFAULT: nothing runs and nothing
+# fails, so the write never happens.
+IMPORT [STD]
+SWITCH "zzz" {
+  CASE "a" {
+    WRITE picked.txt a
+  }
+  CASE "b" {
+    WRITE picked.txt b
+  }
+}
+
+LET $t: STRING = PATH_TYPE("picked.txt")
+ASSERT_EQ $t "absent"
+```
+
 
 ### LET
 
