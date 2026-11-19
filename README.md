@@ -989,8 +989,8 @@ ASSERT_EQ $band "wide"
 
 ```oxdock
 # C falls through without break: this SWITCH does not.
-# Both arms match and neither uses BREAK, yet only the
-# first arm runs.
+# One value matches two arms and neither uses BREAK,
+# yet only the first arm runs.
 LET $hits: LIST<STRING> = []
 SWITCH 1 {
   CASE 1 {
@@ -1004,25 +1004,42 @@ SWITCH 1 {
   }
 }
 
-# CONTINUE does not fall through either: in the "x" pass
-# it skips the rest of the arm and the SWITCH, and the
-# loop advances. The second arm never runs for "x".
-FOR $o: STRING IN ["x", "y"] {
-  SWITCH $o {
-    CASE "x" {
-      LIST_APPEND $hits "x-arm"
+LET $want: LIST<STRING> = ["first"]
+ASSERT_EQ $hits $want
+```
+
+**Example: continue never advances to the next arm**
+
+```oxdock
+# 3 satisfies both CASE conditions, but only the first matching
+# arm runs. CONTINUE then jumps straight to the next loop
+# iteration: skipping both "small-unreached" in the arm and
+# "after" in the loop body (whereas BREAK would only exit the
+# SWITCH and still run "after").
+IMPORT [STD]
+LET $hits: LIST<STRING> = []
+FOR $n: INT IN [3] {
+  SWITCH {
+    CASE $n < 5 {
+      LIST_APPEND $hits "small"
       CONTINUE
-      LIST_APPEND $hits "x-unreached"
+      LIST_APPEND $hits "small-unreached"
     }
-    CASE "x", "y" {
-      LIST_APPEND $hits "other-arm"
+    CASE $n < 10 {
+      LIST_APPEND $hits "mid"
     }
   }
   LIST_APPEND $hits "after"
 }
 
-LET $want: LIST<STRING> = ["first", "x-arm", "other-arm", "after"]
+LET $want: LIST<STRING> = ["small"]
 ASSERT_EQ $hits $want
+
+# Exactly one append ran: neither the rest of the arm
+# ("small-unreached"), the also-matching second arm
+# ("mid"), nor the trailing step ("after") executed.
+LET $count: INT = LEN($hits)
+ASSERT_EQ $count 1
 ```
 
 **Example: strict equality, not C coercion**
