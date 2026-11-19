@@ -344,6 +344,154 @@ fn const_keypath_on_alias_fails_with_copy_hint() {
 }
 
 #[test]
+fn const_nested_freeze_refuses_inner_mutation() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // Freezing is deep: inner maps and lists freeze with the outer
+    // binding, so deriving through a copied inner handle fails.
+    for script in [
+        indoc! {r#"
+            IMPORT [STD]
+            CONST $m: MAP<ANY> = {nested: {x: 1}}
+            LET $inner: MAP<ANY> = $m.nested
+            LET $z: MAP<ANY> = MAP_SET($inner, "y", 2)
+        "#},
+        indoc! {r#"
+            IMPORT [STD]
+            CONST $m: MAP<ANY> = {items: ["a"]}
+            LET $items: LIST<STRING> = $m.items
+            LIST_APPEND $items "b"
+        "#},
+        indoc! {r#"
+            IMPORT [STD]
+            CONST $c: LIST<ANY> = [{x: 1}]
+            LET $first: MAP<ANY> = $c.0
+            LET $z: MAP<ANY> = MERGE_MAPS([$first], "overwrite")
+        "#},
+    ] {
+        let err = Engine::new()
+            .run_script(&root, script)
+            .expect_err("nested CONST contents must refuse mutation");
+        assert!(
+            format!("{err:#}").contains("cannot mutate CONST"),
+            "{err:#}"
+        );
+    }
+}
+
+#[test]
+fn const_imported_value_stays_immutable() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxdock",
+        indoc! {r#"
+            CONST $VERSION: STRING = "1.2.3"
+            CONST $LIMITS: MAP<ANY> = {max: 10}
+            CONST $ITEMS: LIST<STRING> = ["a"]
+            EXPORT CONST VERSION
+            EXPORT [CONST LIMITS, CONST ITEMS]
+        "#},
+    );
+    // Scalar copies rebind like any LET; frozen-ness only guards
+    // container buffers, never rebinding.
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["lib.oxdock" AS LIB]
+                LET $v: STRING = $LIB::VERSION
+                $v = "other"
+                ASSERT_EQ $v "other"
+            "#},
+        )
+        .expect("scalar copy of an imported CONST rebinds");
+    // Container copies keep the frozen flag across the import, so
+    // every write shape fails with the one message.
+    for script in [
+        indoc! {r#"
+            IMPORT ["lib.oxdock" AS LIB]
+            IMPORT [STD]
+            LET $lim: MAP<ANY> = $LIB::LIMITS
+            LET $z: MAP<ANY> = MAP_SET($lim, "x", 1)
+        "#},
+        indoc! {r#"
+            IMPORT ["lib.oxdock" AS LIB]
+            LET $items: LIST<STRING> = $LIB::ITEMS
+            LIST_APPEND $items "b"
+        "#},
+    ] {
+        let err = Engine::new()
+            .run_script(&root, script)
+            .expect_err("imported CONST contents must refuse mutation");
+        assert!(
+            format!("{err:#}").contains("cannot mutate CONST"),
+            "{err:#}"
+        );
+    }
+}
+
+#[test]
+fn const_export_names_share_one_registry() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // FUNC, TYPE, and CONST exports share one registry: the same
+    // name cannot ride two export kinds.
+    for lib in [
+        indoc! {r#"
+            FUNC FOO(): INT {
+                RETURN 1
+            }
+            CONST $FOO: INT = 2
+            EXPORT FOO
+            EXPORT CONST FOO
+        "#},
+        indoc! {r#"
+            TYPE FOO = MAP<x: INT>
+            CONST $FOO: INT = 2
+            EXPORT TYPE FOO
+            EXPORT CONST FOO
+        "#},
+    ] {
+        write_lib(&root, "lib.oxdock", lib);
+        let err = Engine::new()
+            .run_script(
+                &root,
+                indoc! {r#"
+                    IMPORT ["lib.oxdock" AS LIB]
+                    ECHO hi
+                "#},
+            )
+            .expect_err("duplicate EXPORT across kinds must fail");
+        assert!(err.to_string().contains("duplicate EXPORT `FOO`"), "{err}");
+    }
+    // Same-name FUNC and CONST coexist when only one is exported;
+    // each reads through its own namespace.
+    write_lib(
+        &root,
+        "lib.oxdock",
+        indoc! {r#"
+            FUNC FOO(): INT {
+                RETURN 1
+            }
+            CONST $FOO: INT = 2
+            EXPORT CONST FOO
+        "#},
+    );
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["lib.oxdock" AS LIB]
+                LET $x: INT = $LIB::FOO
+                ASSERT_EQ $x 2
+            "#},
+        )
+        .expect("CONST reads when the same-name FUNC stays private");
+}
+
+#[test]
 fn const_module_local_shadow_stays_mutable() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
