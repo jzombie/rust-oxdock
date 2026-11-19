@@ -677,6 +677,9 @@ fn parse_spelled_alias(text: &str) -> Result<(Option<String>, &str), String> {
         return Err(format!("{ALIAS_KEYWORD} needs a lowercase alias name"));
     };
     if !first.is_ascii_lowercase() {
+        if !first.is_ascii_alphabetic() {
+            return Err(format!("{ALIAS_KEYWORD} needs a lowercase alias name"));
+        }
         return Err(format!(
             "{ALIAS_KEYWORD} name must start lowercase, found {first:?} in {after_keyword:?}"
         ));
