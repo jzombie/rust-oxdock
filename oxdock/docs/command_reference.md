@@ -1197,12 +1197,12 @@ block first, then exits through the `EXIT` path with
 `EXIT requested with code <code>`.
 
 With no code the exit code is 1; with a code it clamps to
-0..=255 like `EXIT`. The block runs inline in caller scope
-with its stdout rerouted to stderr, so usage text, cleanup,
-and callee output all land on the error stream while stdout
-stays empty: the only form a `FUNC` cannot express, since
-functions take values, never blocks. At least one of
-message or block is required.
+0..=255 like `EXIT`. The block runs first in a child scope
+that reads caller locals, with its stdout rerouted to
+stderr, so usage text, cleanup, and callee output all land
+on the error stream while stdout stays empty: the only
+form a `FUNC` cannot express, since functions take values,
+never blocks. At least one of message or block is required.
 
 A lone bare int is a silent code (`FAIL 2` exits 2 with no
 output); quoting decides, so `FAIL "2"` prints `2` and

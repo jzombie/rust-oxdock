@@ -8,7 +8,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.42.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.43.0-alpha/oxdock/)
 
 ## Dynamically embed assets at compile time
 
@@ -101,8 +101,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.42.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.42.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.43.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.43.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -114,7 +114,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.42.0-alpha"
+    "alpha OxDock 0.43.0-alpha"
 );
 ```
 
@@ -2327,12 +2327,12 @@ block first, then exits through the `EXIT` path with
 `EXIT requested with code <code>`.
 
 With no code the exit code is 1; with a code it clamps to
-0..=255 like `EXIT`. The block runs inline in caller scope
-with its stdout rerouted to stderr, so usage text, cleanup,
-and callee output all land on the error stream while stdout
-stays empty: the only form a `FUNC` cannot express, since
-functions take values, never blocks. At least one of
-message or block is required.
+0..=255 like `EXIT`. The block runs first in a child scope
+that reads caller locals, with its stdout rerouted to
+stderr, so usage text, cleanup, and callee output all land
+on the error stream while stdout stays empty: the only
+form a `FUNC` cannot express, since functions take values,
+never blocks. At least one of message or block is required.
 
 A lone bare int is a silent code (`FAIL 2` exits 2 with no
 output); quoting decides, so `FAIL "2"` prints `2` and
