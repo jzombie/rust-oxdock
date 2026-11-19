@@ -3056,7 +3056,7 @@ fn logical_port_connect_roundtrip() {
             $empty = $info.buffer_bytes == 0
             $tries = $tries + 1
             IF $tries > 100 {
-                EXIT 1
+                FAIL "timeout waiting for server-greeting"
             }
         }
         ASSERT_CONTAINS $cout "server-greeting"
@@ -3112,7 +3112,7 @@ fn mapped_name_connect_roundtrip() {
             $empty = $info.buffer_bytes == 0
             $tries = $tries + 1
             IF $tries > 100 {
-                EXIT 1
+                FAIL "timeout waiting for server-greeting"
             }
         }
         ASSERT_CONTAINS $cout "server-greeting"

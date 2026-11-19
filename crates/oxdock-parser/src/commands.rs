@@ -2985,9 +2985,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "break and continue inside switch",
                     fence_meta: None,
                     code: indoc! {r#"
-                # BREAK exits the SWITCH early: the trailing ECHO and
-                # EXIT 1 never run, so reaching them would print a
-                # marker and fail the script.
+                # BREAK exits the SWITCH early: the trailing FAIL
+                # never runs, so reaching it fails the script.
                 # CONTINUE passes through to the enclosing loop.
                 LET $items: LIST<STRING> = ["a", "skip", "b"]
                 FOR $item: STRING IN $items {
@@ -2998,8 +2997,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     CASE "a" {
                       ECHO saw-a
                       BREAK
-                      ECHO unreachable
-                      EXIT 1
+                      FAIL "trap: BREAK must skip trailing steps"
                     }
                     DEFAULT {
                       ECHO saw-other

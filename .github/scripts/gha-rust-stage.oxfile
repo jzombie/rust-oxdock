@@ -34,8 +34,7 @@ FOR $p: MAP<ANY> IN $packages {
     }
 }
 IF $found == 0 {
-    ECHO "no binaries for product {{ $bin }}: check workspace.metadata.oxdock release_bins and the package's [[bin]] targets"
-    EXIT 1
+    FAIL "no binaries for product {{ $bin }}: check workspace.metadata.oxdock release_bins and the package's [[bin]] targets"
 }
 MKDIR target/pkg-stage
 FOR $b: STRING IN $names {

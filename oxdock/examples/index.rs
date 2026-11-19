@@ -37,8 +37,7 @@ fn main() -> anyhow::Result<()> {
             ECHO "{{ $count }}: {{ $s }}"
         }
         IF $count == 0 {
-            ECHO "No runnable scripts found beside index.rs."
-            EXIT 1
+            FAIL "No runnable scripts found beside index.rs."
         }
         LET $raw: STRING = ""
         LET $choice: STRING = ""

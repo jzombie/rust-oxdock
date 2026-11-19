@@ -2186,10 +2186,10 @@ fn map_set(
     LET $draw: FLOAT = RAND()
     LET $delay: FLOAT = 1.0 + $draw * 10.0
     IF $delay < 1.0 {
-        EXIT 1
+        FAIL "trap: RAND draw below range"
     }
     IF $delay >= 11.0 {
-        EXIT 1
+        FAIL "trap: RAND draw above range"
     }
     ECHO "retrying in {{ $delay }}s"
     "###

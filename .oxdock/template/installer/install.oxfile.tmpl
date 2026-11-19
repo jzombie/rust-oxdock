@@ -29,13 +29,11 @@ FUNC INSTALL_SELECTED($dir: STRING, $destname: STRING): VOID {
         # is the whole product. Selection needs an inventory to
         # validate against, so it fails closed here instead.
         IF $want_raw != "" {
-            ECHO "OXDOCK_BINS needs a tarball install: local builds bridge no member inventory"
-            EXIT 1
+            FAIL "OXDOCK_BINS needs a tarball install: local builds bridge no member inventory"
         }
         LET $local: BOOL = BOOL_OR("\{{ env:OXDOCK_SKIP_DOWNLOAD }}", false)
         IF !$local {
-            ECHO "release tarball held no binaries"
-            EXIT 1
+            FAIL "release tarball held no binaries"
         }
         LET $bin: STRING = "\{{ env:OXDOCK_BIN }}"
         LET $primary_dest: STRING = PATH_JOIN($dir, $destname)
@@ -61,8 +59,7 @@ FUNC INSTALL_SELECTED($dir: STRING, $destname: STRING): VOID {
     LET $want: LIST<STRING> = TEXT_FIELDS($want_raw)
     LET $picked: STRING = TEXT_JOIN($want, " ")
     IF $picked == "" {
-        ECHO "OXDOCK_BINS names no binaries: name tarball members or unset it to place the whole product"
-        EXIT 1
+        FAIL "OXDOCK_BINS names no binaries: name tarball members or unset it to place the whole product"
     }
     LET $known: STRING = TEXT_JOIN($members, ", ")
     FOR $w: STRING IN $want {
@@ -82,8 +79,7 @@ FUNC INSTALL_SELECTED($dir: STRING, $destname: STRING): VOID {
             }
         }
         IF !$matched {
-            ECHO "unknown binary \{{ $w }}: tarball holds \{{ $known }}"
-            EXIT 1
+            FAIL "unknown binary \{{ $w }}: tarball holds \{{ $known }}"
         }
     }
     RETURN
@@ -141,14 +137,12 @@ IF $has_piped {
         [family:windows] LET $home: STRING = "\{{ env:USERPROFILE }}"
 
         IF $home == "" {
-            [family:unix] ECHO "no install directory: HOME is unset, so set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $global.unix_default_suffix }}\")"
-            [family:windows] ECHO "no install directory: USERPROFILE is unset, so set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $global.windows_default_prefix }}{{ $global.windows_default_suffix }}\")"
-            EXIT 1
+            [family:unix] FAIL "no install directory: HOME is unset, so set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $global.unix_default_suffix }}\")"
+            [family:windows] FAIL "no install directory: USERPROFILE is unset, so set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $global.windows_default_prefix }}{{ $global.windows_default_suffix }}\")"
         }
 
-        [family:unix] ECHO "no install directory: set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $global.unix_default_suffix }}\")"
-        [family:windows] ECHO "no install directory: set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $global.windows_default_prefix }}{{ $global.windows_default_suffix }}\")"
-        EXIT 1
+        [family:unix] FAIL "no install directory: set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $global.unix_default_suffix }}\")"
+        [family:windows] FAIL "no install directory: set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $global.windows_default_prefix }}{{ $global.windows_default_suffix }}\")"
     }
 
     # Destination derives after the prompt: PROMPT mutates $dir in
@@ -192,8 +186,7 @@ IF $has_piped {
             # below when a new product arrives.
             LET $product: STRING = "\{{ env:OXDOCK_PRODUCT }}"
             IF $product == "" {
-                ECHO "OXDOCK_PRODUCT is unset: bridge the product name (example: oxdock)"
-                EXIT 1
+                FAIL "OXDOCK_PRODUCT is unset: bridge the product name (example: oxdock)"
             }
             LET $checks_version: BOOL = PRODUCT_CHECKS_VERSION($product)
             IF $checks_version {
