@@ -25,6 +25,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Entry guard rooting for absolute in-workspace script paths: `oxdock /work/mcp/tools.oxfile` now keeps `/work` as the guard root exactly like the relative spelling, so parent-relative `IMPORT`s (`../shared.oxfile`) resolve instead of failing closed as root escapes. Genuinely outside-workspace paths still re-root at their own parent.
 - `SWITCH CASE` with a missing value fails at parse time naming the miss (`SWITCH CASE requires a value or condition before '{'`) instead of consuming the arm body as a block expression and failing later at runtime.
 
+### Dependencies
+
+- Bump `russh` 0.65.1 → 0.65.2 (#314).
+- Bump `rand` 0.10.3 → 0.10.4 (#315).
+- Bump `rmcp` / `rmcp-macros` 3.9.0 → 3.11.0 (#316).
+
 ## [0.42.0-alpha] - 2026-11-18
 
 ### Added
