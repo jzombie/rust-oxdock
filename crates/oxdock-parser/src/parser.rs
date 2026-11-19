@@ -95,8 +95,8 @@ use crate::commands::{
 use crate::constants::{
     INJECT_PREFIX, INJECT_SUFFIX, KEYWORD_AS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
     KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_DEFAULT, KEYWORD_ELSE, KEYWORD_ENV,
-    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IF,
-    KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED,
+    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC,
+    KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED,
     KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH, KEYWORD_TIMEOUT,
     KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
 };
@@ -3987,7 +3987,8 @@ fn parse_fail_single(
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
-    let head_ok = matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_FAIL);
+    let head_ok =
+        matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_FAIL);
     if !head_ok {
         return Ok(None);
     }
@@ -4089,7 +4090,11 @@ fn parse_fail_single(
         }
     };
     crate::commands::rewrite_isolated_inherit(&mut body);
-    let kind = StepKind::Fail { code, message, body };
+    let kind = StepKind::Fail {
+        code,
+        message,
+        body,
+    };
     let span = lowering_ctx(stmt);
     crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
         stmt,

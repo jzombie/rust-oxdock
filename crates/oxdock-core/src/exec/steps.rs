@@ -1878,7 +1878,11 @@ fn dispatch_flow_step<P: ProcessManager>(
             let duration = super::args::resolve_arg_as_duration(duration, cx)?;
             handlers::timeout(cx, &duration, body)
         }
-        StepKind::Fail { code, message, body } => handlers::fail(cx, code, message, body),
+        StepKind::Fail {
+            code,
+            message,
+            body,
+        } => handlers::fail(cx, code, message, body),
         StepKind::Isolated { body } => handlers::isolated(cx, body),
         StepKind::WithIo { bindings, cmd } => handlers::with_io(cx, generation, idx, bindings, cmd),
         StepKind::AssignCapture {

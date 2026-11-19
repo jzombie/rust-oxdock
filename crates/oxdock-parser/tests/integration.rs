@@ -15,6 +15,8 @@ mod common;
 mod env_display;
 #[path = "integration/error_kinds.rs"]
 mod error_kinds;
+#[path = "integration/fail.rs"]
+mod fail;
 #[path = "integration/guard_tests.rs"]
 mod guard_tests;
 #[path = "integration/import.rs"]
@@ -39,8 +41,6 @@ mod run_exec;
 mod run_shell_stack;
 #[path = "integration/timeout_block.rs"]
 mod timeout_block;
-#[path = "integration/fail.rs"]
-mod fail;
 #[path = "integration/type_syntax.rs"]
 mod type_syntax;
 #[path = "integration/unified_values.rs"]

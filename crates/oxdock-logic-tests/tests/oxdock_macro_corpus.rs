@@ -1054,9 +1054,7 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
                 message: my,
                 body: by,
             },
-        ) => {
-            opt_arg_eq(cx, cy) && opt_arg_eq(mx, my) && steps_content_eq(bx, by)
-        }
+        ) => opt_arg_eq(cx, cy) && opt_arg_eq(mx, my) && steps_content_eq(bx, by),
         (StepKind::Isolated { body: x }, StepKind::Isolated { body: y }) => steps_content_eq(x, y),
         (
             StepKind::RemoteBlock {

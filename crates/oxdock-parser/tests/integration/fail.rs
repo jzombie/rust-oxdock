@@ -7,9 +7,11 @@ fn fail_case(script: &str) -> (Option<Arg>, Option<Arg>, Vec<oxdock_parser::ast:
     let steps = parse_script(script, mock_lower).expect("parse FAIL");
     assert_eq!(steps.len(), 1, "expected a single FAIL step");
     match &steps[0].kind {
-        StepKind::Fail { code, message, body } => {
-            (code.clone(), message.clone(), body.clone())
-        }
+        StepKind::Fail {
+            code,
+            message,
+            body,
+        } => (code.clone(), message.clone(), body.clone()),
         other => panic!("expected Fail, got {other:?}"),
     }
 }

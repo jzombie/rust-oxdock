@@ -4165,9 +4165,9 @@ pub(crate) fn fail<P: ProcessManager>(
         // unless an inner `WITH_IO` overrides it for that step.
         let body_out = match cx.err.clone() {
             Some(handle) => Some(handle),
-            None => Some(StreamHandle::Stream(Arc::new(Mutex::new(
-                std::io::stderr(),
-            )))),
+            None => Some(StreamHandle::Stream(Arc::new(
+                Mutex::new(std::io::stderr()),
+            ))),
         };
         let flow = super::steps::execute_scoped_steps(
             cx.state,
@@ -4203,7 +4203,12 @@ pub(crate) fn dispatch_fail<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::Fail { code, message, body } = step else {
+    let StepKind::Fail {
+        code,
+        message,
+        body,
+    } = step
+    else {
         unreachable!()
     };
     top_level_flow(fail(cx, code, message, body)?)

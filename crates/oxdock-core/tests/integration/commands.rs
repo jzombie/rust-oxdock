@@ -4869,7 +4869,10 @@ fn fail_message_only_exits_1_on_stderr() {
         "expected exit 1, got: {err_out:#}"
     );
     assert_eq!(out, "", "FAIL message must not touch stdout");
-    assert!(err.contains("boom"), "FAIL message must land on stderr, got: {err:?}");
+    assert!(
+        err.contains("boom"),
+        "FAIL message must land on stderr, got: {err:?}"
+    );
 }
 
 #[test]
@@ -4906,7 +4909,10 @@ fn fail_lone_code_is_silent() {
         "got: {err_out:#}"
     );
     assert_eq!(out, "");
-    assert!(!err.contains('2'), "lone code must print nothing, got: {err:?}");
+    assert!(
+        !err.contains('2'),
+        "lone code must print nothing, got: {err:?}"
+    );
 }
 
 #[test]
@@ -4938,7 +4944,10 @@ fn fail_block_reroutes_nested_output_to_stderr() {
     );
     assert_eq!(out, "", "block output must leave stdout empty");
     for needle in ["block-sees:caller-val", "func-sees:caller-val", "fail-msg"] {
-        assert!(err.contains(needle), "stderr must contain {needle:?}, got: {err:?}");
+        assert!(
+            err.contains(needle),
+            "stderr must contain {needle:?}, got: {err:?}"
+        );
     }
     assert!(
         !exists(&root, "never.txt"),
@@ -5051,7 +5060,10 @@ fn fail_block_stays_off_outer_stdout_pipe() {
     );
     assert_eq!(out, "", "FAIL block output must not reach stdout");
     for needle in ["leaked", "msg"] {
-        assert!(err.contains(needle), "stderr must contain {needle:?}, got: {err:?}");
+        assert!(
+            err.contains(needle),
+            "stderr must contain {needle:?}, got: {err:?}"
+        );
     }
 }
 
@@ -5066,8 +5078,7 @@ fn fail_requires_message_or_block() {
 
 #[test]
 fn fail_rejects_three_args() {
-    let err =
-        oxdock_core::parse_script("FAIL 1 \"a\" \"b\"\n").expect_err("three args must fail");
+    let err = oxdock_core::parse_script("FAIL 1 \"a\" \"b\"\n").expect_err("three args must fail");
     assert!(
         err.to_string().contains("FAIL"),
         "expected FAIL hint, got: {err:#}"

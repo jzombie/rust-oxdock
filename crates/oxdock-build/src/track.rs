@@ -465,7 +465,11 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     keys.insert(k);
                 }
             }
-            StepKind::Fail { code, message, body } => {
+            StepKind::Fail {
+                code,
+                message,
+                body,
+            } => {
                 if let Some(c) = code {
                     template_keys(&mut keys, c);
                 }
