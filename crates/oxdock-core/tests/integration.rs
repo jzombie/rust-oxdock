@@ -19,12 +19,16 @@ mod incremental;
 mod key_path;
 #[path = "integration/let_capture.rs"]
 mod let_capture;
+#[path = "integration/parse_args.rs"]
+mod parse_args;
 #[path = "integration/phase_boundary.rs"]
 mod phase_boundary;
 #[path = "integration/reference_examples.rs"]
 mod reference_examples;
 #[path = "integration/remote.rs"]
 mod remote;
+#[path = "integration/switch.rs"]
+mod switch;
 #[path = "integration/text_pumps.rs"]
 mod text_pumps;
 #[path = "integration/unified_values.rs"]

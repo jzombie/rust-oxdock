@@ -332,6 +332,7 @@ fn record_tag(fields: &[RecordField]) -> TokenStream2 {
                     ty: #ty,
                     docs: "",
                     optional: #optional,
+                    default: None,
                 }
             }
         })

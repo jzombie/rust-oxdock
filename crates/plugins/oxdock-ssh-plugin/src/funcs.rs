@@ -364,11 +364,13 @@ fn ssh_serve<P: ProcessManager>(
     ty: TypeTag::Bool,
     docs: "True when the session closed cleanly.",
     optional: false,
+    default: None,
 }, Field {
     name: FIELD_COMMAND.to_string(),
     ty: TypeTag::String,
     docs: "Executed command, empty for shells.",
     optional: false,
+    default: None,
 }])), summary = "Accept one SSH session into pipes.")]
 #[example(
     name = "accept and close",
@@ -439,6 +441,7 @@ fn ssh_accept<P: ProcessManager>(
         ty: TypeTag::Bool,
         docs: "True when the session closed cleanly.",
         optional: false,
+        default: None,
     }])),
     summary = "Pump a dequeued SSH session through pipes."
 )]
@@ -573,11 +576,13 @@ fn ssh_close<P: ProcessManager>(
     ty: TypeTag::Bool,
     docs: "True when the session closed cleanly.",
     optional: false,
+    default: None,
 }, Field {
     name: FIELD_EXIT_STATUS.to_string(),
     ty: TypeTag::Int,
     docs: "Remote exit status, or -1 when none arrived.",
     optional: false,
+    default: None,
 }])), summary = "Open an SSH client session into pipes.")]
 #[example(
     name = "connect and close",
@@ -1126,30 +1131,35 @@ fn serve_result_fields() -> Arc<[Field]> {
             ty: TypeTag::Custom(SshServerTag::descriptor()),
             docs: "Server handle for `SSH_ACCEPT`, `SSH_DEQUEUE`, and `SSH_CLOSE`.",
             optional: false,
+            default: None,
         },
         Field {
             name: FIELD_ADDR.to_string(),
             ty: TypeTag::String,
             docs: "Bound socket address (`ip:port`) of the server.",
             optional: false,
+            default: None,
         },
         Field {
             name: FIELD_USERNAME.to_string(),
             ty: TypeTag::String,
             docs: "Configured username.",
             optional: false,
+            default: None,
         },
         Field {
             name: FIELD_PASSWORD.to_string(),
             ty: TypeTag::String,
             docs: "Configured password.",
             optional: false,
+            default: None,
         },
         Field {
             name: FIELD_VIRTUAL.to_string(),
             ty: TypeTag::String,
             docs: "Virtual endpoint echo of the claimed slot.",
             optional: false,
+            default: None,
         },
     ])
 }
@@ -1162,24 +1172,28 @@ fn dequeue_result_fields() -> Arc<[Field]> {
             ty: TypeTag::Custom(SshSessionTag::descriptor()),
             docs: "Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).",
             optional: false,
+            default: None,
         },
         Field {
             name: FIELD_COMMAND.to_string(),
             ty: TypeTag::String,
             docs: "Executed command, empty for shells.",
             optional: false,
+            default: None,
         },
         Field {
             name: FIELD_USERNAME.to_string(),
             ty: TypeTag::String,
             docs: "Authenticated username, empty when unset.",
             optional: false,
+            default: None,
         },
         Field {
             name: FIELD_ADDR.to_string(),
             ty: TypeTag::String,
             docs: "Peer address, empty when unset.",
             optional: false,
+            default: None,
         },
     ])
 }

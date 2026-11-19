@@ -1709,6 +1709,75 @@ fn break_cannot_cross_function_boundary() {
 }
 
 #[test]
+fn nested_break_exits_inner_loop_only() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        # Inner BREAK exits only the inner FOR: the outer runs both
+        # passes, and each inner stops at 2 without appending it.
+        LET $hits: LIST<STRING> = []
+        FOR $o: STRING IN ["x", "y"] {
+            FOR $i: INT IN [1, 2, 3] {
+                IF $i == 2 {
+                    BREAK
+                }
+                LIST_APPEND $hits "{{ $o }}{{ $i }}"
+            }
+        }
+        LET $want: LIST<STRING> = ["x1", "y1"]
+        ASSERT_EQ $hits $want
+    "#};
+    run_script(&root, script).expect("inner BREAK stays inner");
+}
+
+#[test]
+fn nested_continue_skips_inner_iteration_only() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        # Inner CONTINUE skips only the 2 write: the outer still runs
+        # both passes and the inner still reaches 3.
+        LET $hits: LIST<STRING> = []
+        FOR $o: STRING IN ["x", "y"] {
+            FOR $i: INT IN [1, 2, 3] {
+                IF $i == 2 {
+                    CONTINUE
+                }
+                LIST_APPEND $hits "{{ $o }}{{ $i }}"
+            }
+        }
+        LET $want: LIST<STRING> = ["x1", "x3", "y1", "y3"]
+        ASSERT_EQ $hits $want
+    "#};
+    run_script(&root, script).expect("inner CONTINUE stays inner");
+}
+
+#[test]
+fn while_outer_for_inner_break_stays_inner() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        # WHILE uses the same innermost rule: the inner FOR BREAK ends
+        # the FOR, and the WHILE still runs its second pass.
+        LET $hits: LIST<STRING> = []
+        LET $n: INT = 0
+        WHILE $n < 2 {
+            FOR $i: INT IN [1, 2, 3] {
+                IF $i == 2 {
+                    BREAK
+                }
+                LIST_APPEND $hits "{{ $i }}"
+            }
+            $n = $n + 1
+        }
+        LET $want: LIST<STRING> = ["1", "1"]
+        ASSERT_EQ $hits $want
+        ASSERT_EQ $n 2
+    "#};
+    run_script(&root, script).expect("WHILE outer survives inner BREAK");
+}
+
+#[test]
 fn native_arity_failure_precedes_argument_evaluation() {
     // Gates before effects: `$nope` would fail lookup if evaluated, so the
     // arity error proves the arguments never ran.
@@ -1833,12 +1902,14 @@ fn rpn_math_position_runs_pure_calls() {
 fn rpn_math_position_runs_rpn_capable_stateful_calls() {
     // `GLOB(...)` inside a comparison lowers to RPN `Call`: this passes
     // only if the math path dispatches flagged stateful functions.
+    // Strict equality: the LIST result counts through `LEN` instead of
+    // stringifying against a STRING.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD]
         WRITE witness.txt "hi"
-        IF GLOB("*.txt") == "witness.txt" {
+        IF LEN(GLOB("*.txt")) == 1 {
             WRITE hit.txt "yes"
         }
         LET $h: STRING = READ hit.txt
@@ -2902,6 +2973,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Exit(_) => {}
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
+        StepKind::Switch { .. } => {}
         StepKind::Assign { .. } => {}
         StepKind::Set { .. } => {}
         StepKind::AssignCapture { .. } => {}

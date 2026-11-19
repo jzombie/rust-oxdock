@@ -30,7 +30,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.41.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.42.0-alpha/oxdock/)
 
 Jump to the [Command Reference](#command-reference) below for the full
 command list with runnable examples, or view the standard library
@@ -63,11 +63,11 @@ Installs to `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH. Set `$env:I
 For a reproducible install, pin an explicit release:
 
 ```sh
-(export VERSION=v0.41.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
+(export VERSION=v0.42.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
 ```
 
 ```powershell
-$env:VERSION = 'v0.41.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
+$env:VERSION = 'v0.42.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 ```
 
 </details>
@@ -82,7 +82,7 @@ release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 From the registry:
 
 ```sh
-cargo install oxdock@0.41.0-alpha
+cargo install oxdock@0.42.0-alpha
 ```
 
 From a local checkout:
@@ -96,7 +96,7 @@ cargo install --path oxdock
 ### Add to Rust project
 
 ```sh
-cargo add oxdock@0.41.0-alpha
+cargo add oxdock@0.42.0-alpha
 ```
 
 ### Run a script with the CLI
@@ -547,6 +547,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=$var], ...] <command> \| WITH_IO [bindings] { <commands> } \| WITH_IO [tty[, stdin=$p][, rows=<int>][, cols=<int>]] RUN ...` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
+| [`SWITCH`](#switch) | `SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE<T> = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
@@ -812,6 +813,313 @@ ASSERT_EQ $t2 "absent"
 ```
 
 
+### SWITCH
+
+Multi-way branch on a value or a condition list.
+
+**Syntax:** `SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }`
+
+Compares one discriminant against each `CASE` value list in
+order with strict `==` (same rule as `IF` conditions:
+numerics compare across `INT` and `FLOAT`, every other
+cross-type pair is unequal). The first matching arm runs
+exclusively: later arms never run and there is no
+fallthrough, so group values with commas
+(`CASE "help", "h"`) instead of stacking bodies.
+
+With no discriminant (`SWITCH { ... }`), each `CASE`
+carries its own boolean condition (a call counts: any
+expression evaluating to `BOOL`), and the first true arm
+runs. Conditions evaluate in order and stop at the first
+match, so later calls never run. A final `DEFAULT` arm
+runs when nothing matched; without one, no match is a
+no-op.
+
+`BREAK` exits the `SWITCH` early (the remainder of the arm
+is skipped and an enclosing loop is unaffected); `CONTINUE`
+continues an enclosing loop; `RETURN` and `EXIT` propagate
+as usual.
+
+
+**Examples:**
+
+**Example: switch on a value**
+
+```oxdock
+# The first arm whose value list contains the discriminant
+# runs; no later arm runs.
+LET $cmd: STRING = "help"
+SWITCH $cmd {
+  CASE "help", "h" {
+    WRITE chosen.txt help
+  }
+  CASE "summarize" {
+    WRITE chosen.txt summarize
+  }
+  DEFAULT {
+    WRITE chosen.txt fallback
+  }
+}
+
+LET $body: STRING = READ chosen.txt
+ASSERT_EQ $body "help"
+```
+
+**Example: switch on conditions**
+
+```oxdock
+# With no discriminant each CASE is its own condition;
+# calls work as conditions too.
+LET $n: INT = 2
+SWITCH {
+  CASE $n > 5 {
+    WRITE band.txt high
+  }
+  CASE $n > 1 {
+    WRITE band.txt mid
+  }
+  DEFAULT {
+    WRITE band.txt low
+  }
+}
+
+LET $band: STRING = READ band.txt
+ASSERT_EQ $band "mid"
+```
+
+**Example: break and continue inside switch**
+
+```oxdock
+# BREAK exits the SWITCH early: the trailing ECHO and
+# EXIT 1 never run, so reaching them would print a
+# marker and fail the script.
+# CONTINUE passes through to the enclosing loop.
+LET $items: LIST<STRING> = ["a", "skip", "b"]
+FOR $item: STRING IN $items {
+  SWITCH $item {
+    CASE "skip" {
+      CONTINUE
+    }
+    CASE "a" {
+      ECHO saw-a
+      BREAK
+      ECHO unreachable
+      EXIT 1
+    }
+    DEFAULT {
+      ECHO saw-other
+    }
+  }
+}
+
+ASSERT_CONTAINS stdout "saw-a"
+ASSERT_CONTAINS stdout "saw-other"
+```
+
+**Example: switch arms with nested loops**
+
+```oxdock
+# Loops nested in arms obey the innermost rule: inner
+# BREAK ends only the inner FOR, inner CONTINUE skips
+# only its iteration, and the arm keeps running past both.
+LET $hits: LIST<STRING> = []
+SWITCH "b" {
+  CASE "b" {
+    FOR $o: STRING IN ["x", "y"] {
+      FOR $i: INT IN [1, 2, 3] {
+        IF $i == 2 {
+          BREAK
+        }
+        LIST_APPEND $hits "b{{ $o }}{{ $i }}"
+      }
+    }
+    LIST_APPEND $hits "b-after"
+  }
+  DEFAULT {
+    LIST_APPEND $hits "b-wrong"
+  }
+}
+
+SWITCH "c" {
+  CASE "c" {
+    FOR $o: STRING IN ["x", "y"] {
+      FOR $i: INT IN [1, 2, 3] {
+        IF $i == 2 {
+          CONTINUE
+        }
+        LIST_APPEND $hits "c{{ $o }}{{ $i }}"
+      }
+    }
+    LIST_APPEND $hits "c-after"
+  }
+  DEFAULT {
+    LIST_APPEND $hits "c-wrong"
+  }
+}
+
+LET $want: LIST<STRING> = ["bx1", "by1", "b-after", "cx1", "cx3", "cy1", "cy3", "c-after"]
+ASSERT_EQ $hits $want
+```
+
+**Example: overlapping arms run first match only**
+
+```oxdock
+# Overlapping arms never both run: the first match wins,
+# so order arms most specific first. There is no
+# fallthrough to the next CASE; CONTINUE would continue
+# an enclosing loop, not advance to the next arm.
+LET $n: INT = 10
+SWITCH {
+  CASE $n > 1 {
+    WRITE band.txt wide
+  }
+  CASE $n > 5 {
+    WRITE band.txt narrow
+  }
+  DEFAULT {
+    WRITE band.txt low
+  }
+}
+
+LET $band: STRING = READ band.txt
+ASSERT_EQ $band "wide"
+```
+
+**Example: no fallthrough without break**
+
+```oxdock
+# C falls through without break: this SWITCH does not.
+# One value matches two arms and neither uses BREAK,
+# yet only the first arm runs.
+LET $hits: LIST<STRING> = []
+SWITCH 1 {
+  CASE 1 {
+    LIST_APPEND $hits "first"
+  }
+  CASE 1 {
+    LIST_APPEND $hits "second"
+  }
+  DEFAULT {
+    LIST_APPEND $hits "default"
+  }
+}
+
+LET $want: LIST<STRING> = ["first"]
+ASSERT_EQ $hits $want
+```
+
+**Example: continue never advances to the next arm**
+
+```oxdock
+# 3 satisfies both CASE conditions, but only the first matching
+# arm runs. CONTINUE then jumps straight to the next loop
+# iteration: skipping both "small-unreached" in the arm and
+# "after" in the loop body (whereas BREAK would only exit the
+# SWITCH and still run "after").
+IMPORT [STD]
+LET $hits: LIST<STRING> = []
+FOR $n: INT IN [3] {
+  SWITCH {
+    CASE $n < 5 {
+      LIST_APPEND $hits "small"
+      CONTINUE
+      LIST_APPEND $hits "small-unreached"
+    }
+    CASE $n < 10 {
+      LIST_APPEND $hits "mid"
+    }
+  }
+  LIST_APPEND $hits "after"
+}
+
+LET $want: LIST<STRING> = ["small"]
+ASSERT_EQ $hits $want
+
+# Exactly one append ran: neither the rest of the arm
+# ("small-unreached"), the also-matching second arm
+# ("mid"), nor the trailing step ("after") executed.
+LET $count: INT = LEN($hits)
+ASSERT_EQ $count 1
+```
+
+**Example: strict equality, not C coercion**
+
+```oxdock
+# No C-style coercion: STRING "1" never equals INT 1.
+# Numerics still compare across INT and FLOAT.
+LET $hits: LIST<STRING> = []
+SWITCH "1" {
+  CASE 1 {
+    LIST_APPEND $hits "coerced"
+  }
+  DEFAULT {
+    LIST_APPEND $hits "no-coercion"
+  }
+}
+
+SWITCH 2 {
+  CASE 2.0 {
+    LIST_APPEND $hits "numeric-match"
+  }
+  DEFAULT {
+    LIST_APPEND $hits "numeric-miss"
+  }
+}
+
+LET $want: LIST<STRING> = ["no-coercion", "numeric-match"]
+ASSERT_EQ $hits $want
+```
+
+**Example: later conditions never evaluate**
+
+```oxdock
+# Each CASE without a discriminant is a call, and calls
+# stop at the first true arm. PROBE writes a marker, so
+# its absence proves it never ran.
+IMPORT [STD]
+FUNC PROBE($v: BOOL): BOOL {
+  WRITE probed.txt hit
+  RETURN $v
+}
+LET $n: INT = 2
+SWITCH {
+  CASE $n > 1 {
+    WRITE band.txt mid
+  }
+  CASE PROBE(true) {
+    WRITE band.txt probed
+  }
+  DEFAULT {
+    WRITE band.txt low
+  }
+}
+
+LET $band: STRING = READ band.txt
+ASSERT_EQ $band "mid"
+LET $t: STRING = PATH_TYPE("probed.txt")
+ASSERT_EQ $t "absent"
+```
+
+**Example: no match without default is a no-op**
+
+```oxdock
+# No arm matches and no DEFAULT: nothing runs and nothing
+# fails, so the write never happens.
+IMPORT [STD]
+SWITCH "zzz" {
+  CASE "a" {
+    WRITE picked.txt a
+  }
+  CASE "b" {
+    WRITE picked.txt b
+  }
+}
+
+LET $t: STRING = PATH_TYPE("picked.txt")
+ASSERT_EQ $t "absent"
+```
+
+
 ### LET
 
 Bind script-local variables.
@@ -853,7 +1161,8 @@ Numbers are numeric literals: `42` binds `INT`, `3.14` binds
 so `7 / 2` is `3`); any `Float` operand promotes to `FLOAT`.
 Division by zero, overflow, and non-finite results are errors.
 Both numeric sides compare numerically (`1 == 1.0` is true);
-otherwise `==`/`!=` compare rendered strings and ordering on
+otherwise `==`/`!=` are strict (cross-type words are unequal,
+so `"true" == true` is false) and ordering on
 non-numerics is a Type Error. Constant subtrees fold at parse
 time and dynamic arithmetic compiles to flat RPN with
 identical semantics.
@@ -1926,6 +2235,25 @@ LET $body: STRING = READ picked.txt
 ASSERT_EQ $body "a"
 ```
 
+**Example: break nested**
+
+```oxdock
+# Inner BREAK exits only the inner loop: the outer runs
+# both passes, and each inner stops before 2.
+LET $hits: LIST<STRING> = []
+FOR $o: STRING IN ["x", "y"] {
+  FOR $i: INT IN [1, 2, 3] {
+    IF $i == 2 {
+      BREAK
+    }
+    LIST_APPEND $hits "{{ $o }}{{ $i }}"
+  }
+}
+
+LET $want: LIST<STRING> = ["x1", "y1"]
+ASSERT_EQ $hits $want
+```
+
 
 ### CONTINUE
 
@@ -1954,6 +2282,25 @@ FOR $x: STRING IN ["a", "b"] {
 
 LET $body: STRING = READ picked.txt
 ASSERT_EQ $body "b"
+```
+
+**Example: continue nested**
+
+```oxdock
+# Inner CONTINUE skips only the inner 2: the outer runs
+# both passes, and each inner still reaches 3.
+LET $hits: LIST<STRING> = []
+FOR $o: STRING IN ["x", "y"] {
+  FOR $i: INT IN [1, 2, 3] {
+    IF $i == 2 {
+      CONTINUE
+    }
+    LIST_APPEND $hits "{{ $o }}{{ $i }}"
+  }
+}
+
+LET $want: LIST<STRING> = ["x1", "x3", "y1", "y3"]
+ASSERT_EQ $hits $want
 ```
 
 
@@ -4163,6 +4510,39 @@ LET $names: LIST<STRING> = FUNCTIONS()
 ASSERT_CONTAINS $names "STD::INT"
 ```
 
+### STD::GET
+
+Read one map entry with a default for missing keys.
+
+Pure MAP getter so optional flags cost one line instead of a
+`HAS_KEY` + index + rebind triple: present keys return their value
+verbatim (no coercion), absent keys return `default`.
+
+**Signature:** `STD::GET($map: MAP<ANY>, $key: STRING, $default: ANY): ANY`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$map` (`MAP<ANY>`): Map to read.
+- `$key` (`STRING`): Key to look up.
+- `$default` (`ANY`): Default for absent keys.
+
+**Returns:** `ANY`
+
+**Examples:**
+
+**Example: present and absent**
+
+```oxdock
+IMPORT [STD]
+LET $m: MAP<ANY> = PARSE_JSON("{\"a\": 1}")
+LET $hit: INT = GET($m, "a", 0)
+ASSERT_EQ $hit 1
+LET $miss: INT = GET($m, "b", 0)
+ASSERT_EQ $miss 0
+```
+
 ### STD::GLOB
 
 List workspace paths matching a glob pattern.
@@ -4660,18 +5040,11 @@ ASSERT_EQ $m.b 2
 
 ### STD::PARSE_ARGS
 
-Parse an argv tail into flags and positionals.
+Parse an argv tail against TYPE FLAGS.
 
-Consumes a `LIST<STRING>` (usually `STD::ARGV()`) with the `lexopt`
-tokenizer. Long `--key=value` binds the string value. Bare long
-`--key` binds `true`. Short `-a` binds `true` and clusters `-abc`
-bind each letter. Attached short values bind only through `=`
-(`-k=value`). One `--` entry ends option parsing, so the rest
-(including a second `--`) lands in `positionals`. Duplicate keys
-overwrite in order, so the last occurrence wins. Values stay
-strings: cast explicitly in script.
+Consumes a `LIST<STRING>` with the `lexopt` tokenizer and coerces flags through `TYPE FLAGS`. See the function reference for the coercion and omission rules.
 
-**Signature:** `STD::PARSE_ARGS($args: LIST<STRING>): MAP<flags: MAP<BOOL|STRING>, positionals: LIST<STRING>>`
+**Signature:** `STD::PARSE_ARGS($args: LIST<STRING>): MAP<flags: MAP, positionals?: LIST<STRING>>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
@@ -4679,46 +5052,107 @@ strings: cast explicitly in script.
 
 - `$args` (`LIST<STRING>`): Argv tail to parse, usually from `STD::ARGV()`.
 
-**Returns:** `MAP<flags: MAP<BOOL|STRING>, positionals: LIST<STRING>>`
+**Returns:** `MAP<flags: MAP, positionals?: LIST<STRING>>`
 
-  - `flags` (`MAP<BOOL|STRING>`): Parsed flags: bare entries bind true, equals entries bind strings.
-  - `positionals` (`LIST<STRING>`): Trailing values and entries after the first double dash.
+  - `flags` (`MAP`): Flags coerced to `TYPE FLAGS`.
+  - `positionals` (`LIST<STRING>`, optional): Trailing values and entries after the first double dash. Omitted when empty.
 
 **Examples:**
 
-**Example: longs**
+**Example: flags and positionals**
 
 ```oxdock
-# Long equals entries bind strings, bare longs bind true.
 IMPORT [STD]
-LET $parsed: MAP<ANY> = PARSE_ARGS(["--host=example.com", "--verbose", "serve"])
-ASSERT_EQ $parsed.flags.host "example.com"
-ASSERT_EQ $parsed.flags.verbose true
+# One schema TYPE drives coercion; the pair binds both slots.
+TYPE FLAGS = MAP<model: STRING, verbose?: BOOL>
+TYPE POSITIONS = LIST<STRING>
+TYPE PARSED = MAP<flags: FLAGS, positionals?: POSITIONS>
+LET $parsed: PARSED = PARSE_ARGS(["--model=gpt-4", "--verbose", "serve"])
+LET $flags: FLAGS = $parsed.flags
+ASSERT_EQ $flags.model "gpt-4"
+ASSERT_EQ $flags.verbose true
 ASSERT_EQ $parsed.positionals.0 "serve"
 ```
 
-**Example: shorts and separator**
+**Example: optional stays absent**
 
 ```oxdock
-# Short clusters expand, short equals binds, and one double dash ends flags.
 IMPORT [STD]
-LET $parsed: MAP<ANY> = PARSE_ARGS(["-ab", "-k=value", "--flag", "--", "--not-a-flag"])
-ASSERT_EQ $parsed.flags.a true
-ASSERT_EQ $parsed.flags.b true
-ASSERT_EQ $parsed.flags.k "value"
-ASSERT_EQ $parsed.flags.flag true
-ASSERT_EQ $parsed.positionals.0 "--not-a-flag"
+# Absent optionals stay absent; read them with a typed GET default.
+TYPE FLAGS = MAP<model: STRING, propose?: BOOL>
+TYPE POSITIONS = LIST<STRING>
+TYPE PARSED = MAP<flags: FLAGS, positionals?: POSITIONS>
+LET $parsed: PARSED = PARSE_ARGS(["--model=x"])
+LET $flags: FLAGS = $parsed.flags
+LET $propose: BOOL = GET($flags, "propose", false)
+ASSERT_EQ $propose false
 ```
 
-**Example: duplicates and separator**
+**Example: flags only omits positionals**
 
 ```oxdock
-# Duplicate keys overwrite in order, and a bare second double dash is positional.
 IMPORT [STD]
-LET $parsed: MAP<ANY> = PARSE_ARGS(["--x=1", "--x=2", "--", "--"])
-ASSERT_EQ $parsed.flags.x "2"
-ASSERT_EQ $parsed.positionals.0 "--"
+# Empty positionals are omitted, so a flags only shape binds clean.
+TYPE FLAGS = MAP<model: STRING>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $parsed: PARSED = PARSE_ARGS(["--model=x"])
+LET $flags: FLAGS = $parsed.flags
+ASSERT_EQ $flags.model "x"
 ```
+
+**Example: literal defaults**
+
+```oxdock
+IMPORT [STD]
+# Defaults are literals only: INT, FLOAT, BOOL,
+# and double-quoted STRING fill absent flags.
+TYPE FLAGS = MAP<retries: INT = 2, ratio: FLOAT = 2.5, verbose: BOOL = true, model: STRING = "gpt-4">
+TYPE PARSED = MAP<flags: FLAGS>
+LET $parsed: PARSED = PARSE_ARGS([])
+LET $flags: FLAGS = $parsed.flags
+ASSERT_EQ $flags.retries 2
+ASSERT_EQ $flags.verbose true
+ASSERT_EQ $flags.model "gpt-4"
+LET $ratio_ok: BOOL = $flags.ratio == 2.5
+ASSERT_EQ $ratio_ok true
+```
+
+**Example: variable default fails**
+
+```oxdock expect_error:"expected default literal"
+IMPORT [STD]
+# Defaults are literals: a variable in place
+# of a literal fails instead of evaluating.
+TYPE FLAGS = MAP<n: INT = $x>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $p: PARSED = PARSE_ARGS([])
+```
+
+**Expected error:** `expected default literal`
+
+**Example: missing required**
+
+```oxdock expect_error:"missing required flag"
+IMPORT [STD]
+# Absent required flags fail naming the flag.
+TYPE FLAGS = MAP<model: STRING>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $parsed: PARSED = PARSE_ARGS([])
+```
+
+**Expected error:** `missing required flag`
+
+**Example: unknown flag**
+
+```oxdock expect_error:"unknown flag"
+IMPORT [STD]
+# Undeclared flags fail instead of passing through.
+TYPE FLAGS = MAP<model: STRING>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $parsed: PARSED = PARSE_ARGS(["--model=x", "--nope=1"])
+```
+
+**Expected error:** `unknown flag`
 
 ### STD::PARSE_BYTE_COUNT
 
@@ -4816,6 +5250,35 @@ LET $spaced: INT = PARSE_DURATION("1 h")
 ASSERT_EQ $spaced 3_600_000
 ```
 
+### STD::PARSE_FLAGS
+
+Parse flags against TYPE FLAGS.
+
+Consumes a `LIST<STRING>` and coerces flags through `TYPE FLAGS`. Returns the flags `MAP` directly; positional arguments fail.
+
+**Signature:** `STD::PARSE_FLAGS($args: LIST<STRING>): MAP`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$args` (`LIST<STRING>`): Argv tail to parse, usually from `STD::ARGV()`.
+
+**Returns:** `MAP`
+
+**Examples:**
+
+**Example: flags only**
+
+```oxdock
+IMPORT [STD]
+# Flags only returns the flags MAP directly.
+TYPE FLAGS = MAP<model: STRING, retries: INT = 2>
+LET $flags: FLAGS = PARSE_FLAGS(["--model=x"])
+ASSERT_EQ $flags.model "x"
+ASSERT_EQ $flags.retries 2
+```
+
 ### STD::PARSE_JSON
 
 Parse JSON text already held in memory.
@@ -4852,6 +5315,35 @@ ASSERT_EQ $doc.a 1
 LET $items: LIST<ANY> = PARSE_JSON("[1, 2]")
 ASSERT_EQ $items.0 1
 ASSERT_EQ $items.1 2
+```
+
+### STD::PARSE_POSITIONALS
+
+Parse positionals in argv order.
+
+Consumes a `LIST<STRING>` and returns positionals in argv order with no schema.
+
+**Signature:** `STD::PARSE_POSITIONALS($args: LIST<STRING>): LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$args` (`LIST<STRING>`): Argv tail to parse, usually from `STD::ARGV()`.
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: positionals only**
+
+```oxdock
+IMPORT [STD]
+# No schema needed: positionals are always strings in order.
+TYPE POSITIONS = LIST<STRING>
+LET $pos: POSITIONS = PARSE_POSITIONALS(["serve", "--", "--not-a-flag"])
+ASSERT_EQ $pos.0 "serve"
+ASSERT_EQ $pos.1 "--not-a-flag"
 ```
 
 ### STD::PARSE_TOML
@@ -6876,8 +7368,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.41.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.41.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.42.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.42.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -6889,7 +7381,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.41.0-alpha"
+    "alpha OxDock 0.42.0-alpha"
 );
 ```
 
@@ -7558,13 +8050,13 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 
 ## Citation
 
-If you use OxDock in published work, cite version `0.41.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+If you use OxDock in published work, cite version `0.42.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
 
 ```bibtex
 @software{oxdock,
   author = "Jeremy Harris",
   title = "OxDock",
-  version = "0.41.0-alpha",
+  version = "0.42.0-alpha",
   url = "https://github.com/jzombie/rust-oxdock",
   license = "Apache-2.0"
 }

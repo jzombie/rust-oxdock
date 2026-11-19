@@ -10,7 +10,8 @@
 //! keeping both pathways unified.
 
 use super::constants::{
-    KEYWORD_ASYNC, KEYWORD_IN, KEYWORD_ISOLATED, KEYWORD_TIMEOUT, KEYWORD_WITH_IO, MODULE_SEPARATOR,
+    KEYWORD_ASYNC, KEYWORD_ELSE, KEYWORD_IF, KEYWORD_IN, KEYWORD_ISOLATED, KEYWORD_TIMEOUT,
+    KEYWORD_WITH_IO, MODULE_SEPARATOR,
 };
 use super::{Command, Step};
 use anyhow::Result;
@@ -798,7 +799,9 @@ fn walk(
                 let mut should_finalize = false;
                 // ELSE always appends to current line : grammar handles } \n ELSE via blank*
                 // IF after ELSE stays on same line (ELSE IF clause)
-                if ident_text == "ELSE" || (ident_text == "IF" && trimmed.ends_with("ELSE")) {
+                if ident_text == KEYWORD_ELSE
+                    || (ident_text == KEYWORD_IF && trimmed.ends_with(KEYWORD_ELSE))
+                {
                     should_finalize = false;
                 // Guard idents are values, never statements: even a
                 // command-named value (`LS`) or a guard call (`not(`)

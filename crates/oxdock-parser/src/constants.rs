@@ -23,6 +23,9 @@ pub const KEYWORD_LET: &str = "LET";
 pub const KEYWORD_FOR: &str = "FOR";
 pub const KEYWORD_IF: &str = "IF";
 pub const KEYWORD_ELSE: &str = "ELSE";
+pub const KEYWORD_SWITCH: &str = "SWITCH";
+pub const KEYWORD_CASE: &str = "CASE";
+pub const KEYWORD_DEFAULT: &str = "DEFAULT";
 pub const KEYWORD_ASYNC: &str = "ASYNC";
 pub const KEYWORD_AWAIT: &str = "AWAIT";
 pub const KEYWORD_CANCEL: &str = "CANCEL";
@@ -43,6 +46,35 @@ pub const KEYWORD_EXPAND: &str = "EXPAND";
 pub const KEYWORD_IN: &str = "IN";
 pub const KEYWORD_AS: &str = "AS";
 pub const KEYWORD_FROM: &str = "FROM";
+
+/// Plain command spellings. `Command::as_str` and `Command::parse` own
+/// no literals: every arm references one of these, so a rename touches
+/// exactly one definition here.
+pub const KEYWORD_WORKDIR: &str = "WORKDIR";
+pub const KEYWORD_WORKSPACE: &str = "WORKSPACE";
+pub const KEYWORD_ECHO: &str = "ECHO";
+pub const KEYWORD_COPY: &str = "COPY";
+pub const KEYWORD_COPY_GIT: &str = "COPY_GIT";
+pub const KEYWORD_SYMLINK: &str = "SYMLINK";
+pub const KEYWORD_MKDIR: &str = "MKDIR";
+pub const KEYWORD_INSTALL: &str = "INSTALL";
+pub const KEYWORD_SET_EXECUTABLE: &str = "SET_EXECUTABLE";
+pub const KEYWORD_ARCHIVE: &str = "ARCHIVE";
+pub const KEYWORD_UNARCHIVE: &str = "UNARCHIVE";
+pub const KEYWORD_LS: &str = "LS";
+pub const KEYWORD_READ: &str = "READ";
+pub const KEYWORD_READ_LINE: &str = "READ_LINE";
+pub const KEYWORD_PROMPT: &str = "PROMPT";
+pub const KEYWORD_WRITE: &str = "WRITE";
+pub const KEYWORD_APPEND: &str = "APPEND";
+pub const KEYWORD_APPEND_LINE: &str = "APPEND_LINE";
+pub const KEYWORD_REMOVE: &str = "REMOVE";
+pub const KEYWORD_ASSERT_EQ: &str = "ASSERT_EQ";
+pub const KEYWORD_ASSERT_NE: &str = "ASSERT_NE";
+pub const KEYWORD_ASSERT_CONTAINS: &str = "ASSERT_CONTAINS";
+pub const KEYWORD_EXIT: &str = "EXIT";
+pub const KEYWORD_SLEEP: &str = "SLEEP";
+pub const KEYWORD_LIST_APPEND: &str = "LIST_APPEND";
 
 /// Variable inspection: a dedicated AST node, never a registry entry, so it
 /// needs no import and accepts no qualifier.

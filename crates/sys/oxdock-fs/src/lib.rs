@@ -115,6 +115,17 @@ pub trait WorkspaceFs: Send + Sync {
         Ok((len, mode))
     }
 
+    /// Byte length of a file for size fast-paths (drift checks):
+    /// `Some(len)` where the backend can stat, `None` where it cannot
+    /// (synthetic and mock filesystems have no stat lengths), so the
+    /// caller reads bytes instead. Missing files error exactly like
+    /// `metadata`, so miss handling stays shared; `None` never means
+    /// missing. The default implementation stats the path, preserving
+    /// exact native behavior.
+    fn file_len(&self, path: &GuardedPath) -> Result<Option<u64>> {
+        Ok(Some(self.metadata(path)?.len()))
+    }
+
     fn root(&self) -> &GuardedPath;
     fn build_context(&self) -> &GuardedPath;
     /// Selection last applied through `switch_to_*`: the four-way
@@ -296,6 +307,19 @@ impl WorkspaceFs for PathResolver {
 
     fn archive_member_stat(&self, path: &GuardedPath) -> Result<(u64, Option<u32>)> {
         PathResolver::archive_member_stat(self, path)
+    }
+
+    /// Miri has no host stat, and fabricated metadata cannot report
+    /// true lengths: presence alone decides. Present entries answer
+    /// `None` so the caller reads bytes; missing entries error like
+    /// a failed read, so miss handling stays shared.
+    #[cfg(miri)]
+    fn file_len(&self, path: &GuardedPath) -> Result<Option<u64>> {
+        if PathResolver::exists(self, path) {
+            Ok(None)
+        } else {
+            Err(anyhow::anyhow!("missing file {}", path.display()))
+        }
     }
 
     #[allow(clippy::disallowed_types)]

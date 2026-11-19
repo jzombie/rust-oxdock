@@ -5,6 +5,7 @@ use oxdock_fs::to_forward_slashes;
 use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, TypeTag, Value};
 use oxdock_pipe::{SharedInput, SharedOutput, SpillBuffer};
 use oxdock_process::{ProcessManager, format_value_for_string};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::state::ExecState;
@@ -52,8 +53,9 @@ pub(crate) fn parse_bool_str(s: &str) -> Option<bool> {
 }
 
 /// Strict return-slot check for host functions: the value a host body
-/// hands back must satisfy its declared `returns` tag exactly. No
-/// coercion applies on this path: a mismatch is an implementation
+/// hands back must satisfy its declared `returns` tag exactly. Shape
+/// defaults fill first (same rule as every binding site), then the
+/// check runs with no other coercion: a mismatch is an implementation
 /// bug, so it fails loudly naming the function instead of reshaping
 /// the value. Script bodies carry no declared slot (their type is
 /// inferred by unification), so they never reach here. Shared by the
@@ -67,7 +69,8 @@ pub(crate) fn check_host_return_value(
     let Some(slot) = returns else {
         return Ok(());
     };
-    oxdock_parser::check_value_at(slot, value, ctx)
+    let filled = fill_record_defaults(slot, value);
+    oxdock_parser::check_value_at(slot, &filled, ctx)
 }
 
 /// Narrow a `STRING|PATH` word to display text: strings verbatim,
@@ -88,6 +91,76 @@ pub(crate) fn string_or_path_text(value: &Value) -> Result<String> {
     ))
 }
 
+/// Fill absent defaulted record fields before verification: the
+/// single owner for shape defaults, so LET, mutation, script params,
+/// host returns, and PARSE_ARGS all observe the same filled shape
+/// instead of restating the rule. Pure fill, never a verdict:
+/// missing required fields stay missing for the check below to
+/// name, and already-complete values pass through untouched.
+/// Recursion descends into present nested maps and lists; unions
+/// try members in order with the first filled-and-verifying member
+/// winning, mirroring coercion's member-wise rule.
+fn fill_record_defaults(expected: &TypeTag, value: &Value) -> Value {
+    fill_record(expected, value).unwrap_or_else(|| value.clone())
+}
+
+fn fill_record(expected: &TypeTag, value: &Value) -> Option<Value> {
+    match expected {
+        TypeTag::Record(fields) => {
+            let map = value.as_map()?;
+            let mut out: Option<BTreeMap<String, Value>> = None;
+            for field in fields.iter() {
+                match map.get(field.name.as_str()) {
+                    Some(item) => {
+                        if let Some(filled) = fill_record(&field.ty, item) {
+                            out.get_or_insert_with(|| map.clone())
+                                .insert(field.name.clone(), filled);
+                        }
+                    }
+                    None => {
+                        if let Some(default) = field.default.as_ref() {
+                            out.get_or_insert_with(|| map.clone())
+                                .insert(field.name.clone(), default.clone());
+                        }
+                    }
+                }
+            }
+            out.map(Value::map)
+        }
+        TypeTag::ListOf(inner) => {
+            let items = value.as_list()?;
+            let mut out: Option<Vec<Value>> = None;
+            for (idx, item) in items.iter().enumerate() {
+                if let Some(filled) = fill_record(inner, item) {
+                    out.get_or_insert_with(|| items.clone())[idx] = filled;
+                }
+            }
+            out.map(Value::list)
+        }
+        TypeTag::MapOf(inner) => {
+            let map = value.as_map()?;
+            let mut out: Option<BTreeMap<String, Value>> = None;
+            for (key, item) in map.iter() {
+                if let Some(filled) = fill_record(inner, item) {
+                    out.get_or_insert_with(|| map.clone())
+                        .insert(key.clone(), filled);
+                }
+            }
+            out.map(Value::map)
+        }
+        TypeTag::Union(_, members) => {
+            for member in members.iter() {
+                let filled = fill_record(member, value).unwrap_or_else(|| value.clone());
+                if oxdock_parser::check_value(member, &filled).is_ok() {
+                    return (filled != *value).then_some(filled);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Coerce a runtime [`Value`] word into a declared type name. Single
 /// coercion point. Type references are plain names resolved against the
 /// run's name directory here (not at parse time, where host descriptors
@@ -99,6 +172,11 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
     if matches!(expected, TypeTag::Any) {
         return Ok(value);
     }
+    // Shape defaults fill before anything verifies: a missing field
+    // with a default is satisfied, never a hole. Values already
+    // complete pass through untouched, so this changes no passing
+    // bind; only previously-failing defaulted binds now fill.
+    let value = fill_record_defaults(expected, &value);
     // Exact conformance first: passthrough when the value already
     // satisfies the tag, including shaped records and typed lists.
     // A shaped violation returns here with its indexed path: no
@@ -908,13 +986,25 @@ fn apply_neg(val: Value) -> Result<Value> {
     bail!("Type Error: unary '-' requires Int or Float, found {val:?}")
 }
 
+/// Strict value equality for `SWITCH` matching: the `==` branch of
+/// [`apply_compare`] without the `Value` wrapper.
+/// Numerics compare across `INT` and `FLOAT`; every other cross-type
+/// pair is unequal.
+pub(crate) fn values_equal(left: &Value, right: &Value) -> bool {
+    if let (Some(a), Some(b)) = (as_f64_value(left), as_f64_value(right)) {
+        return a == b;
+    }
+    left == right
+}
+
 /// Shared comparison: both `Int`/`Float` compare numerically (`1 == 1.0` is
 /// true, exact equality, no epsilon). Exactness follows binary fractions:
 /// decimals whose reduced denominator is a power of 2 (0.5, 0.25, 0.75)
 /// compare cleanly, while denominators containing factor 5 (0.1, 0.2, 0.3)
 /// are repeating fractions in binary, so `0.1 + 0.2 == 0.3` is false.
-/// The LET reference documents this with examples; otherwise `==`/`!=`
-/// keep the stringified behavior and ordering on non-numerics bails.
+/// The LET reference documents this with examples. `==`/`!=` are otherwise
+/// strict: cross-type words compare unequal (`"true" == true` is false),
+/// matching `ASSERT_EQ` value equality; ordering on non-numerics bails.
 fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
     if let (Some(a), Some(b)) = (as_f64_value(left), as_f64_value(right)) {
         // Both numeric (finite floats; ints always qualify).
@@ -942,11 +1032,10 @@ fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
     }
     match op {
         CompareOp::Eq | CompareOp::Ne => {
-            let ls = format_value_for_string(left)?;
-            let rs = format_value_for_string(right)?;
+            let equal = left == right;
             let result = match op {
-                CompareOp::Eq => ls == rs,
-                CompareOp::Ne => ls != rs,
+                CompareOp::Eq => equal,
+                CompareOp::Ne => !equal,
                 _ => bail!("internal error: equality shape"),
             };
             Ok(Value::bool(result))

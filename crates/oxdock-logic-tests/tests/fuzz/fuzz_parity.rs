@@ -820,6 +820,16 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                 else_body: Some(else_body),
             }
         }),
+        (arb_body(), arb_body()).prop_map(|(case_body, default_body)| StepKind::Switch {
+            discriminant: Some(Box::new(Expr::Literal(Value::string(
+                "coverage".to_string()
+            )))),
+            cases: vec![(
+                vec![Expr::Literal(Value::string("coverage".to_string()))],
+                case_body,
+            )],
+            default_body: Some(default_body),
+        }),
         (arb_bool_expr(), arb_body()).prop_map(|(cond, body)| StepKind::While {
             cond: Box::new(cond),
             body,
@@ -944,6 +954,18 @@ fn zero_kind_markers(kind: &mut StepKind) {
         | StepKind::AsyncBlock { body, .. }
         | StepKind::AssignAsync { body, .. }
         | StepKind::RemoteBlock { body, .. } => zero_markers(body),
+        StepKind::Switch {
+            cases,
+            default_body,
+            ..
+        } => {
+            for (_, body) in cases.iter_mut() {
+                zero_markers(body);
+            }
+            if let Some(body) = default_body {
+                zero_markers(body);
+            }
+        }
         StepKind::AssignCapture { cmd, .. } | StepKind::WithIo { cmd, .. } => {
             zero_kind_markers(cmd)
         }
@@ -1535,6 +1557,37 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 (None, None) => {}
                 (Some(x), Some(y)) => assert_bodies_eq(x, y, msg),
                 _ => panic!("If else-body mismatch: {}", msg),
+            }
+        }
+        (
+            StepKind::Switch {
+                discriminant: ld,
+                cases: lc,
+                default_body: lb,
+            },
+            StepKind::Switch {
+                discriminant: rd,
+                cases: rc,
+                default_body: rb,
+            },
+        ) => {
+            match (ld, rd) {
+                (None, None) => {}
+                (Some(x), Some(y)) => assert!(expr_image_eq(x, y), "Switch disc mismatch: {}", msg),
+                _ => panic!("Switch discriminant mismatch: {}", msg),
+            }
+            assert_eq!(lc.len(), rc.len(), "Switch case count mismatch: {}", msg);
+            for ((v1, b1), (v2, b2)) in lc.iter().zip(rc.iter()) {
+                assert_eq!(v1.len(), v2.len(), "Switch value count mismatch: {}", msg);
+                for (x, y) in v1.iter().zip(v2.iter()) {
+                    assert!(expr_image_eq(x, y), "Switch value mismatch: {}", msg);
+                }
+                assert_bodies_eq(b1, b2, msg);
+            }
+            match (lb, rb) {
+                (None, None) => {}
+                (Some(x), Some(y)) => assert_bodies_eq(x, y, msg),
+                _ => panic!("Switch default-body mismatch: {}", msg),
             }
         }
         (StepKind::While { cond: lc, body: lb }, StepKind::While { cond: rc, body: rb }) => {
@@ -2233,6 +2286,23 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 col: 0,
             }],
         },
+        StepKind::Switch {
+            discriminant: Some(Box::new(Expr::Literal(Value::string(
+                "coverage".to_string(),
+            )))),
+            cases: vec![(
+                vec![Expr::Literal(Value::string("coverage".to_string()))],
+                vec![Step {
+                    guard: None,
+                    kind: StepKind::Echo("coverage echo".into()),
+                    scope_enter: 0,
+                    scope_exit: 0,
+                    line: 0,
+                    col: 0,
+                }],
+            )],
+            default_body: None,
+        },
         StepKind::FuncDef {
             name: "COVERAGEFUNC".to_string(),
             params: vec![("coverage".to_string(), "STRING".to_string(), false)],
@@ -2426,6 +2496,7 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         StepKind::WithIoBlock { .. } => false,
         StepKind::For { .. } => true,
         StepKind::If { .. } => true,
+        StepKind::Switch { .. } => true,
         // Durations and list items need value-shaped strategies.
         StepKind::Sleep { .. } => true,
         StepKind::ListAppend { .. } => true,

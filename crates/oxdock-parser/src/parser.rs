@@ -94,11 +94,11 @@ use crate::commands::{
 };
 use crate::constants::{
     INJECT_PREFIX, INJECT_SUFFIX, KEYWORD_AS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
-    KEYWORD_CANCEL, KEYWORD_CONTINUE, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT,
-    KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN,
-    KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE,
-    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO,
-    MODULE_SEPARATOR,
+    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_DEFAULT, KEYWORD_ELSE, KEYWORD_ENV,
+    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IF,
+    KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED,
+    KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH, KEYWORD_TIMEOUT,
+    KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
 };
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 
@@ -4120,7 +4120,8 @@ fn skip_type_nl(toks: &[Tok], mut p: usize) -> usize {
 }
 
 /// Maximal `type_tag` match over toks (non-atomic: gaps free
-/// everywhere): atoms with `<>` args, `|` unions, `name?:` fields.
+/// everywhere): atoms with `<>` args, `|` unions, `name?:` fields,
+/// and one `= literal` default tail per field.
 /// Returns the exclusive end index, or `None` on shape miss.
 fn parse_type_shape(toks: &[Tok], pos: usize) -> Option<usize> {
     let mut p = parse_type_atom(toks, skip_type_nl(toks, pos))?;
@@ -4177,7 +4178,42 @@ fn parse_type_field(toks: &[Tok], pos: usize) -> Option<usize> {
             p = skip_type_nl(toks, q + 1);
         }
     }
-    parse_type_shape(toks, p)
+    let mut p = parse_type_shape(toks, p)?;
+    // Optional `= ...` default tail: consume to the next field
+    // delimiter (`,`, `>`, `|` at angle depth zero), tracking `<>`
+    // so nested shapes ride along. Any spacing, any tokens:
+    // literals, `$vars`, `env:` reads, calls. The spelling parser
+    // owns literal validation, so non-literals fail there naming
+    // the alias instead of missing here as unknown-command noise.
+    let q = skip_type_nl(toks, p);
+    if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Punct('=')))
+        && !matches!(toks.get(q + 1).map(|t| &t.kind), Some(TokKind::Punct('=')))
+    {
+        let mut r = skip_type_nl(toks, q + 1);
+        let mut depth = 0usize;
+        loop {
+            match toks.get(r).map(|t| &t.kind) {
+                Some(TokKind::Punct('<')) => {
+                    depth += 1;
+                    r = skip_type_nl(toks, r + 1);
+                }
+                Some(TokKind::Punct('>')) => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                    r = skip_type_nl(toks, r + 1);
+                }
+                Some(TokKind::Punct(',' | '|')) if depth == 0 => break,
+                Some(_) => {
+                    r += 1;
+                }
+                None => break,
+            }
+        }
+        p = r;
+    }
+    Some(p)
 }
 
 /// Single (non-block) `IF`: condition plus then-block with an
@@ -4316,6 +4352,214 @@ fn parse_if_at(
         else_body,
     };
     Ok(Some((kind, p - pos)))
+}
+
+/// Parse one `CASE` value list: comma-separated expressions up to (not
+/// including) the arm body brace. Groups are atomic tokens, so commas
+/// inside calls, lists, and maps never split. Returns the values plus
+/// the token count consumed past the `CASE` word.
+fn parse_case_values(
+    toks: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<(Vec<Expr>, usize), TokenError> {
+    let mut values = Vec::new();
+    let mut p = 0;
+    loop {
+        let mut gcur = Cursor::expr(&toks[p..], stmt);
+        gcur.skip_gap_nl();
+        let start = p + gcur.pos;
+        let mut vcur = Cursor::expr(&toks[start..], stmt);
+        let value = match parse_expr_checked(&mut vcur, ctx) {
+            Ok(expr) => expr,
+            Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+            Err(e) => return Err(e),
+        };
+        values.push(value);
+        p = start + vcur.pos;
+        let mut gcur = Cursor::expr(&toks[p..], stmt);
+        gcur.skip_gap_nl();
+        p += gcur.pos;
+        if matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Punct(','))) {
+            p += 1;
+            continue;
+        }
+        break;
+    }
+    Ok((values, p))
+}
+
+/// Parsed `SWITCH` arms: one value list plus body per `CASE`, with
+/// an optional trailing `DEFAULT` body.
+type SwitchArms = (Vec<(Vec<Expr>, Vec<Step>)>, Option<Vec<Step>>);
+
+/// Parse the arms inside a `SWITCH` body brace: `CASE <values> { ... }`
+/// arms plus an optional trailing `DEFAULT { ... }`. Hard errors once
+/// committed (the `SWITCH` head is unambiguous): unknown words, empty
+/// bodies, missing blocks, duplicate or non-trailing `DEFAULT`.
+fn parse_switch_body(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<SwitchArms, TokenError> {
+    let err = |msg: String| TokenError {
+        stmt,
+        line: 0,
+        col: 0,
+        msg,
+        kind: None,
+    };
+    let mut cases: Vec<(Vec<Expr>, Vec<Step>)> = Vec::new();
+    let mut default_body: Option<Vec<Step>> = None;
+    let mut p = 0;
+    loop {
+        let mut gcur = Cursor::expr(&inner[p..], stmt);
+        gcur.skip_gap_nl();
+        p += gcur.pos;
+        if p >= inner.len() {
+            break;
+        }
+        let word = match &inner[p].kind {
+            TokKind::Word(w) => w.clone(),
+            _ => {
+                return Err(err(
+                    "SWITCH body must hold CASE or DEFAULT arms, e.g. `SWITCH $cmd { CASE \"a\" { ECHO yes } DEFAULT { ECHO no } }`".to_string(),
+                ));
+            }
+        };
+        if word == KEYWORD_CASE {
+            if default_body.is_some() {
+                return Err(err(
+                    "SWITCH DEFAULT must be the last arm; no CASE may follow it".to_string(),
+                ));
+            }
+            let (values, used) = parse_case_values(&inner[p + 1..], stmt, ctx)?;
+            p += 1 + used;
+            let mut bcur = Cursor::expr(&inner[p..], stmt);
+            bcur.skip_gap_nl();
+            p += bcur.pos;
+            let arm_ok = matches!(
+                inner.get(p).map(|t| &t.kind),
+                Some(TokKind::Group {
+                    delim: GroupDelim::Brace,
+                    ..
+                })
+            ) && inner.get(p).is_some_and(|t| !is_template_brace(t));
+            if !arm_ok {
+                return Err(err(
+                    "SWITCH CASE needs a braced block, e.g. `CASE \"a\", \"b\" { ECHO yes }`"
+                        .to_string(),
+                ));
+            }
+            let arm_inner = match &inner[p].kind {
+                TokKind::Group { inner, .. } => inner.clone(),
+                _ => unreachable!(),
+            };
+            let body = parse_body_steps(&arm_inner, stmt, ctx, false)?;
+            cases.push((values, body));
+            p += 1;
+        } else if word == KEYWORD_DEFAULT {
+            if default_body.is_some() {
+                return Err(err("SWITCH allows only one DEFAULT arm".to_string()));
+            }
+            p += 1;
+            let mut bcur = Cursor::expr(&inner[p..], stmt);
+            bcur.skip_gap_nl();
+            p += bcur.pos;
+            let arm_ok = matches!(
+                inner.get(p).map(|t| &t.kind),
+                Some(TokKind::Group {
+                    delim: GroupDelim::Brace,
+                    ..
+                })
+            ) && inner.get(p).is_some_and(|t| !is_template_brace(t));
+            if !arm_ok {
+                return Err(err(
+                    "SWITCH DEFAULT needs a braced block, e.g. `DEFAULT { ECHO fallback }`"
+                        .to_string(),
+                ));
+            }
+            let arm_inner = match &inner[p].kind {
+                TokKind::Group { inner, .. } => inner.clone(),
+                _ => unreachable!(),
+            };
+            default_body = Some(parse_body_steps(&arm_inner, stmt, ctx, false)?);
+            p += 1;
+        } else {
+            return Err(err(
+                "SWITCH body must hold CASE or DEFAULT arms, e.g. `SWITCH $cmd { CASE \"a\" { ECHO yes } DEFAULT { ECHO no } }`".to_string(),
+            ));
+        }
+    }
+    if cases.is_empty() && default_body.is_none() {
+        return Err(err(
+            "SWITCH needs at least one CASE or DEFAULT arm".to_string()
+        ));
+    }
+    Ok((cases, default_body))
+}
+
+/// `SWITCH [disc] { CASE v, ... { ... } ... [DEFAULT { ... }] }` or
+/// bare `SWITCH { CASE <bool> { ... } ... }`. `None` on shape miss (no
+/// outer brace: falls to generic, which fails it with the SWITCH hint);
+/// classified expression failures propagate like `IF`, and arm errors
+/// are hard (the head commits the shape).
+fn parse_switch_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    // Bare head: gaps skipped like the discriminant entry below; the
+    // token then opens the body brace, so no discriminant is parsed
+    // (every `CASE` carries its own condition).
+    let mut gap = Cursor::expr(&toks[pos + 1..], stmt);
+    gap.skip_gap();
+    let brace_pos = pos + 1 + gap.pos;
+    let bare_head = matches!(
+        toks.get(brace_pos).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        })
+    ) && toks.get(brace_pos).is_some_and(|t| !is_template_brace(t));
+    let p: usize;
+    let discriminant = if bare_head {
+        p = brace_pos;
+        None
+    } else {
+        // Discriminant entry reuses the skipped gaps above (`IF` uses
+        // the same gap rule).
+        let mut cur = Cursor::expr(&toks[brace_pos..], stmt);
+        let disc = match parse_expr_checked(&mut cur, ctx) {
+            Ok(expr) => expr,
+            Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
+            // Same classified-error rule as the `IF` head above: the
+            // head is unambiguous, so resolvable-but-unknown callees
+            // name the culprit instead of the generic hint.
+            Err(e) if e.kind.is_some() => return Err(e),
+            Err(_) => return Ok(None),
+        };
+        p = brace_pos + cur.pos;
+        Some(Box::new(disc))
+    };
+    let body_ok = matches!(
+        toks.get(p).map(|t| &t.kind),
+        Some(TokKind::Group {
+            delim: GroupDelim::Brace,
+            ..
+        })
+    ) && toks.get(p).is_some_and(|t| !is_template_brace(t));
+    if !body_ok {
+        return Ok(None);
+    }
+    let inner = match &toks[p].kind {
+        TokKind::Group { inner, .. } => inner.clone(),
+        _ => unreachable!(),
+    };
+    let (cases, default_body) = parse_switch_body(&inner, stmt, ctx)?;
+    let kind = StepKind::Switch {
+        discriminant,
+        cases,
+        default_body,
+    };
+    Ok(Some((kind, p + 1 - pos)))
 }
 
 /// Single (non-block) `FOR`: `$var[: TYPE] (, $var[: TYPE])? IN
@@ -5738,8 +5982,8 @@ fn parse_type_stmt_at(
     let Some(end) = parse_type_shape(toks, pos + 3) else {
         return Ok(None);
     };
-    // Post-match the span holds words/puncts only, so the shared
-    // renderer cannot fail; stay failed regardless.
+    // Post-match the span holds words, puncts, and default literals
+    // only, so the shared renderer cannot fail; stay failed regardless.
     let target = render_type_region(&toks[pos + 3..end], stmt).unwrap_or_default();
     Ok(Some((StepKind::TypeAlias { name, target }, end - pos)))
 }
@@ -6632,25 +6876,32 @@ pub(crate) fn parse_single_expr(
     Ok(expr)
 }
 
-/// Assignment `=`: the first `=` neither glued to a following `=`
-/// (`==`) nor glued after `!`/`<`/`>`/`=` (`!=`, `<=`, `>=`, second of
-/// `==`). Glued-ness reads off the `=`'s own `joint` (gap before it)
-/// and the follower's (gap after it). Anything else leaves the
-/// statement bare (`LET $p: PIPE`), exactly where the grammar's `"="`
-/// match fails.
+/// Assignment `=`: the first depth-zero `=` neither glued to a
+/// following `=` (`==`) nor glued after `!`/`<`/`>`/`=` (`!=`, `<=`,
+/// `>=`, second of `==`). `<>` shape brackets own any `=` inside
+/// them (field defaults), so LET annotations with defaults find the
+/// real assignment. Glued-ness reads off the `=`'s own `joint` (gap
+/// before it) and the follower's (gap after it). Anything else leaves
+/// the statement bare (`LET $p: PIPE`), exactly where the grammar's
+/// `"="` match fails.
 fn find_assign_eq(body: &[Tok]) -> Option<usize> {
+    let mut depth = 0usize;
     for (i, tok) in body.iter().enumerate() {
-        if !matches!(&tok.kind, TokKind::Punct('=')) {
-            continue;
-        }
-        let next_eq = body
-            .get(i + 1)
-            .is_some_and(|t| t.joint && matches!(&t.kind, TokKind::Punct('=')));
-        let prev_op = tok.joint
-            && i > 0
-            && matches!(&body[i - 1].kind, TokKind::Punct('!' | '<' | '>' | '='));
-        if !next_eq && !prev_op {
-            return Some(i);
+        match &tok.kind {
+            TokKind::Punct('<') => depth += 1,
+            TokKind::Punct('>') if depth > 0 => depth -= 1,
+            TokKind::Punct('=') if depth == 0 => {
+                let next_eq = body
+                    .get(i + 1)
+                    .is_some_and(|t| t.joint && matches!(&t.kind, TokKind::Punct('=')));
+                let prev_op = tok.joint
+                    && i > 0
+                    && matches!(&body[i - 1].kind, TokKind::Punct('!' | '<' | '>' | '='));
+                if !next_eq && !prev_op {
+                    return Some(i);
+                }
+            }
+            _ => {}
         }
     }
     None
@@ -6672,6 +6923,12 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
         match &tok.kind {
             TokKind::Word(w) => out.push_str(w),
             TokKind::Punct(c) => out.push(*c),
+            TokKind::Str { text, quote } => {
+                out.push(*quote);
+                out.push_str(text);
+                out.push(*quote);
+            }
+            TokKind::BlockStr(full) => out.push_str(full),
             _ => {
                 return Err(TokenError {
                     stmt,
@@ -6747,11 +7004,12 @@ fn parse_let_body(
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::InvalidSyntax {
-                command: "LET".to_string(),
+                command: KEYWORD_LET.to_string(),
             }),
         });
     }
-    // Type region runs to the assignment `=`; it cannot contain one.
+    // Type region runs to the depth-zero assignment `=`; `<>`
+    // shapes own any `=` inside them (field defaults).
     let type_start = cur.pos;
     let assign = find_assign_eq(&body[type_start..]).map(|i| i + type_start);
     let Some(eq) = assign else {
@@ -7830,6 +8088,11 @@ fn parse_element_at(
                 return Ok((vec![step(kind)], used));
             }
         }
+        Some(KEYWORD_SWITCH) => {
+            if let Some((kind, used)) = parse_switch_at(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
         Some(KEYWORD_FOR) => {
             if let Some((kind, used)) = parse_for_at(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
@@ -8339,6 +8602,7 @@ fn parse_inner_command(
                 KEYWORD_FUNC
                     | KEYWORD_LET
                     | KEYWORD_IF
+                    | KEYWORD_SWITCH
                     | KEYWORD_FOR
                     | KEYWORD_WHILE
                     | KEYWORD_TYPE
@@ -9150,6 +9414,42 @@ mod tests {
                 got, want,
                 "multi-line must canonicalize like one line: {multi:?}"
             );
+        }
+    }
+
+    #[test]
+    fn type_field_defaults_parse_to_canonical_targets() {
+        // Token-level regression: `= literal` tails belong to the
+        // field (floats lex as three tokens), and the statement
+        // target canonicalizes exactly like the spelling parser.
+        for (text, want) in [
+            ("TYPE F = MAP<retries: INT = 2>", "MAP<retries: INT = 2>"),
+            ("TYPE F = MAP<retries: INT=-2>", "MAP<retries: INT = -2>"),
+            (
+                "TYPE F = MAP<ratio: FLOAT = 2.5>",
+                "MAP<ratio: FLOAT = 2.5>",
+            ),
+            ("TYPE F = MAP<on: BOOL = true>", "MAP<on: BOOL = true>"),
+            (
+                "TYPE F = MAP<model: STRING = \"gpt-4\">",
+                "MAP<model: STRING = \"gpt-4\">",
+            ),
+            (
+                "TYPE F = MAP<k: STRING = \"d\", n: INT = 3>",
+                "MAP<k: STRING = \"d\", n: INT = 3>",
+            ),
+        ] {
+            assert_parity(text);
+            let steps = crate::parse_script(text, lower)
+                .unwrap_or_else(|e| panic!("default spelling must parse {text:?}: {e}"));
+            let target = steps
+                .iter()
+                .find_map(|s| match &s.kind {
+                    StepKind::TypeAlias { target, .. } => Some(target.clone()),
+                    _ => None,
+                })
+                .expect("TYPE alias step");
+            assert_eq!(target, want, "canonical target for {text:?}");
         }
     }
 

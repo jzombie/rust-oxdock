@@ -785,6 +785,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         | StepKind::Continue
         | StepKind::For { .. }
         | StepKind::If { .. }
+        | StepKind::Switch { .. }
         | StepKind::Timeout { .. }
         | StepKind::Isolated { .. }
         | StepKind::WithIo { .. }
@@ -1053,6 +1054,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         | StepKind::Continue
         | StepKind::For { .. }
         | StepKind::If { .. }
+        | StepKind::Switch { .. }
         | StepKind::Timeout { .. }
         | StepKind::Isolated { .. }
         | StepKind::WithIo { .. }
@@ -1157,6 +1159,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                     | StepKind::Continue
                     | StepKind::For { .. }
                     | StepKind::If { .. }
+                    | StepKind::Switch { .. }
                     | StepKind::Timeout { .. }
                     | StepKind::Isolated { .. }
                     | StepKind::WithIo { .. }
@@ -1452,6 +1455,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                             | StepKind::Continue
                             | StepKind::For { .. }
                             | StepKind::If { .. }
+                            | StepKind::Switch { .. }
                             | StepKind::Timeout { .. }
                             | StepKind::Isolated { .. }
                             | StepKind::WithIo { .. }
@@ -1861,6 +1865,11 @@ fn dispatch_flow_step<P: ProcessManager>(
             else_ifs,
             else_body,
         } => handlers::if_then(cx, cond, then_body, else_ifs, else_body),
+        StepKind::Switch {
+            discriminant,
+            cases,
+            default_body,
+        } => handlers::switch_run(cx, discriminant, cases, default_body),
         StepKind::Timeout { duration, body } => {
             let duration = super::args::resolve_arg_as_duration(duration, cx)?;
             handlers::timeout(cx, &duration, body)

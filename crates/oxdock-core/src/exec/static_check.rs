@@ -74,6 +74,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
+use oxdock_parser::constants::{KEYWORD_BREAK, KEYWORD_CONTINUE, KEYWORD_IMPORT};
 use oxdock_parser::template::{
     PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
 };
@@ -204,14 +205,17 @@ enum RetCtx {
 
 /// Walk context: message label, return boundary, loop depth,
 /// plus the current step's guard for site-aware reads.
-/// `BREAK`/`CONTINUE` are legal only with `loops > 0`; blocks,
-/// functions, and tasks reset it (control never crosses those
+/// `BREAK` is legal with `loops > 0` or `switches > 0` (a `SWITCH`
+/// consumes it, so an enclosing loop never sees it); `CONTINUE`
+/// needs `loops > 0` (a `SWITCH` never captures it). Blocks,
+/// functions, and tasks reset both (control never crosses those
 /// boundaries at runtime).
 #[derive(Clone)]
 struct Scope<'x> {
     label: &'x str,
     ret: RetCtx,
     loops: usize,
+    switches: usize,
     site: Option<GuardExpr>,
     /// Position of the current step for error attribution: source
     /// line/column plus the walk index. Set per step by the body
@@ -461,16 +465,16 @@ fn with_scope_aliases<P: ProcessManager, R>(
         .map(|(name, _)| (name.clone(), exec.type_aliases.get(name).cloned()))
         .collect();
     for (name, target) in aliases {
-        exec.type_aliases.insert(name.clone(), target.clone());
+        exec.register_alias(name.clone(), target.clone());
     }
     let outcome = f(&mut *exec);
     for (name, prev) in saved {
         match prev {
             Some(target) => {
-                exec.type_aliases.insert(name, target);
+                exec.register_alias(name, target);
             }
             None => {
-                exec.type_aliases.remove(&name);
+                exec.remove_alias(&name);
             }
         }
     }
@@ -840,7 +844,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         }
         Ok(())
     })();
-    exec.type_aliases = saved_global;
+    exec.restore_aliases(saved_global);
     if outcome.is_ok() {
         // Proven once, trusted thereafter: every file in the closure
         // passed with full nested-import knowledge, and the registry
@@ -2306,6 +2310,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     self.collect_owned(arm, module)?;
                 }
             }
+            StepKind::Switch {
+                cases,
+                default_body,
+                ..
+            } => {
+                for (_, arm) in cases {
+                    self.collect_owned(arm, module)?;
+                }
+                if let Some(arm) = default_body {
+                    self.collect_owned(arm, module)?;
+                }
+            }
             StepKind::For { body, .. } | StepKind::While { body, .. } => {
                 self.collect_owned(body, module)?;
             }
@@ -2483,8 +2499,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
         let scope = Scope {
             label,
-            ret: RetCtx::Func("IMPORT".to_string()),
+            ret: RetCtx::Func(KEYWORD_IMPORT.to_string()),
             loops: 0,
+            switches: 0,
             site: None,
             line: 0,
             col: 0,
@@ -2504,6 +2521,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             label: "top level",
             ret: RetCtx::Top,
             loops: 0,
+            switches: 0,
             site: None,
             line: 0,
             col: 0,
@@ -2632,6 +2650,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             label: key,
             ret: RetCtx::Func(key.to_string()),
             loops: 0,
+            switches: 0,
             site: None,
             line: 0,
             col: 0,
@@ -2754,6 +2773,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 label: scope.label,
                 ret: scope.ret.clone(),
                 loops: scope.loops,
+                switches: scope.switches,
                 site,
                 line: step.line,
                 col: step.col,
@@ -2861,8 +2881,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(out)
             }
-            StepKind::Break => self.walk_break("BREAK", scope, idx),
-            StepKind::Continue => self.walk_break("CONTINUE", scope, idx),
+            StepKind::Break => self.walk_break(KEYWORD_BREAK, scope, idx),
+            StepKind::Continue => self.walk_break(KEYWORD_CONTINUE, scope, idx),
             StepKind::Exit(_) => {
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
                 Ok(WalkOut {
@@ -2898,6 +2918,45 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     Some(arm) => {
                         let mut fork = env.fork();
                         let arm_out = self.walk_body(arm, &mut fork, scope, depth + 1)?;
+                        out.has_return |= arm_out.has_return;
+                        out.bare_return |= arm_out.bare_return;
+                        out.types.extend(arm_out.types);
+                        arms_terminal &= !arm_out.falls_through;
+                    }
+                    None => arms_terminal = false,
+                }
+                out.falls_through = !arms_terminal;
+                Ok(out)
+            }
+            StepKind::Switch {
+                discriminant,
+                cases,
+                default_body,
+            } => {
+                if let Some(disc) = discriminant {
+                    self.infer_expr(disc, env, scope, idx, depth + 1)?;
+                }
+                let mut arms_terminal = true;
+                let mut out = live;
+                for (values, arm) in cases {
+                    for value in values {
+                        self.infer_expr(value, env, scope, idx, depth + 1)?;
+                    }
+                    let mut fork = env.fork();
+                    let mut inner_scope = scope.clone();
+                    inner_scope.switches += 1;
+                    let arm_out = self.walk_body(arm, &mut fork, &inner_scope, depth + 1)?;
+                    out.has_return |= arm_out.has_return;
+                    out.bare_return |= arm_out.bare_return;
+                    out.types.extend(arm_out.types);
+                    arms_terminal &= !arm_out.falls_through;
+                }
+                match default_body {
+                    Some(arm) => {
+                        let mut fork = env.fork();
+                        let mut inner_scope = scope.clone();
+                        inner_scope.switches += 1;
+                        let arm_out = self.walk_body(arm, &mut fork, &inner_scope, depth + 1)?;
                         out.has_return |= arm_out.has_return;
                         out.bare_return |= arm_out.bare_return;
                         out.types.extend(arm_out.types);
@@ -3128,6 +3187,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     label: scope.label,
                     ret: RetCtx::AsyncStmt,
                     loops: 0,
+                    switches: 0,
                     site: scope.site.clone(),
                     line: scope.line,
                     col: scope.col,
@@ -3149,6 +3209,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     label: scope.label,
                     ret: RetCtx::AsyncValue,
                     loops: 0,
+                    switches: 0,
                     site: scope.site.clone(),
                     line: scope.line,
                     col: scope.col,
@@ -3332,6 +3393,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     label: scope.label,
                     ret: RetCtx::Top,
                     loops: 0,
+                    switches: 0,
                     site: None,
                     line: scope.line,
                     col: scope.col,
@@ -3528,10 +3590,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         Ok(())
     }
 
-    /// `BREAK`/`CONTINUE`: legal only inside a loop body. Anywhere
-    /// else the boundary error mirrors execution one for one.
+    /// `BREAK`/`CONTINUE`: legal only inside a loop body, except
+    /// `BREAK` which is also legal directly in a `SWITCH` arm (the
+    /// switch consumes it). Anywhere else the boundary error mirrors
+    /// execution one for one.
     fn walk_break(&mut self, word: &str, scope: &Scope, idx: usize) -> Result<WalkOut> {
-        if scope.loops > 0 {
+        let legal = if word == KEYWORD_BREAK {
+            scope.loops > 0 || scope.switches > 0
+        } else {
+            scope.loops > 0
+        };
+        if legal {
             return Ok(WalkOut {
                 falls_through: true,
                 has_return: false,
@@ -3540,7 +3609,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             });
         }
         match &scope.ret {
-            RetCtx::Top => bail!("step {}: {word} outside loop", idx + 1),
+            RetCtx::Top => {
+                if word == KEYWORD_BREAK {
+                    bail!("step {}: BREAK outside loop or SWITCH", idx + 1)
+                } else {
+                    bail!("step {}: {word} outside loop", idx + 1)
+                }
+            }
             RetCtx::Func(name) => {
                 bail!(
                     "step {}: {word} cannot cross function boundary (in {name}())",
@@ -3739,7 +3814,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 for field in e_fields.iter() {
                     match a_fields.iter().find(|found| found.name == field.name) {
                         Some(found) => Self::check_exact(&field.ty, &found.ty, ctx)?,
-                        None if field.optional => {}
+                        // Optional or defaulted fields may be absent:
+                        // binding fills defaults before verifying, so
+                        // absence here only fails required fields.
+                        None if field.optional || field.default.is_some() => {}
                         None => bail!("{ctx}: missing field '{}'", field.name),
                     }
                 }
@@ -4410,6 +4488,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         label: scope.label,
                         ret: RetCtx::Block,
                         loops: 0,
+                        switches: 0,
                         site: scope.site.clone(),
                         line: scope.line,
                         col: scope.col,
@@ -4451,7 +4530,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let left_ty = self.infer_expr(left, env, scope, idx, depth + 1)?;
                 let right_ty = self.infer_expr(right, env, scope, idx, depth + 1)?;
                 match op {
-                    // Equality stringifies anything: always BOOL.
+                    // Equality is strict but always BOOL.
                     CompareOp::Eq | CompareOp::Ne => {}
                     // Ordering needs numerics (mirror apply_compare).
                     CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
@@ -4769,6 +4848,7 @@ mod tests {
                     ty: TypeTag::String,
                     docs: "",
                     optional: false,
+                    default: None,
                 }]
                 .into(),
             ),
@@ -4813,12 +4893,14 @@ mod tests {
                         ty: TypeTag::ListOf(Arc::new(TypeTag::String)),
                         docs: "",
                         optional: false,
+                        default: None,
                     },
                     oxdock_parser::Field {
                         name: "opt".to_string(),
                         ty: TypeTag::Int,
                         docs: "",
                         optional: true,
+                        default: None,
                     },
                 ]
                 .into(),

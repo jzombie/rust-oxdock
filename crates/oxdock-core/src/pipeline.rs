@@ -20,6 +20,7 @@ macro_rules! define_pipeline {
                 $crate::StepKind::InheritEnv { .. } => $crate::exec::dispatch_inherit_env(step, cx),
                 $crate::StepKind::For { .. } => $crate::exec::dispatch_for_loop(step, cx),
                 $crate::StepKind::If { .. } => $crate::exec::dispatch_if_then(step, cx),
+                $crate::StepKind::Switch { .. } => $crate::exec::dispatch_switch(step, cx),
                 $crate::StepKind::Assign { .. } => $crate::exec::dispatch_assign(step, cx),
                 // Static declaration: collected before the run and
                 // resolved at first coercion. Nothing to execute.

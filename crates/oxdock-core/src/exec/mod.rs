@@ -41,8 +41,9 @@ pub(crate) use self::handlers::{
     dispatch_isolated_step, dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step,
     dispatch_read, dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return,
     dispatch_run, dispatch_run_exec, dispatch_set, dispatch_set_executable, dispatch_sleep_step,
-    dispatch_symlink, dispatch_timeout_step, dispatch_unarchive, dispatch_while_loop,
-    dispatch_with_io, dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
+    dispatch_switch, dispatch_symlink, dispatch_timeout_step, dispatch_unarchive,
+    dispatch_while_loop, dispatch_with_io, dispatch_with_io_block, dispatch_workdir,
+    dispatch_workspace, dispatch_write,
 };
 pub use self::import::{DryRunStep, dry_run_closure};
 pub use self::io::ExecIo;
@@ -471,6 +472,7 @@ pub(crate) fn new_state<P: ProcessManager>(
         record_schemas: std::collections::HashMap::new(),
         module_states: std::collections::HashMap::new(),
         type_aliases: std::collections::HashMap::new(),
+        type_env_digest: 0,
         call_depth: 0,
         // Root flow is task 0; worker ids start at 1 (see next_task_id).
         task_id: 0,
@@ -546,12 +548,12 @@ pub fn validate_closure_for_run<P: ProcessManager>(
     state: &mut ExecState<P>,
     steps: &[Step],
 ) -> Result<Vec<String>> {
-    state.type_aliases = self::typing::collect_type_aliases(steps, state)?;
+    state.restore_aliases(self::typing::collect_type_aliases(steps, state)?);
     state.validate_function_type_tags()?;
     let saved_aliases = state.type_aliases.clone();
     let closure = self::import::expand_import_closure(state, steps)?;
     static_check::validate_script_closure(steps, &closure, state)?;
-    state.type_aliases = saved_aliases;
+    state.restore_aliases(saved_aliases);
     let mut exported = Vec::new();
     for file in &closure {
         exported.extend(file.type_exports.iter().cloned());

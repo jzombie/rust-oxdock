@@ -1395,6 +1395,41 @@ fn emit_stepkind(
                 }
             }
         }
+        StepKind::Switch {
+            discriminant,
+            cases,
+            default_body,
+        } => {
+            let disc_tokens = match discriminant {
+                Some(disc) => {
+                    let d = emit_expr(disc, interp);
+                    quote! { Some(Box::new(#d)) }
+                }
+                None => quote! { None },
+            };
+            let case_tokens: Vec<_> = cases
+                .iter()
+                .map(|(values, body)| {
+                    let vs: Vec<_> = values.iter().map(|v| emit_expr(v, interp)).collect();
+                    let bs: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+                    quote! { (vec![#(#vs),*], vec![#(#bs),*]) }
+                })
+                .collect();
+            let default_tokens = match default_body {
+                Some(body) => {
+                    let bs: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+                    quote! { Some(vec![#(#bs),*]) }
+                }
+                None => quote! { None },
+            };
+            quote! {
+                oxdock_parser::ast::StepKind::Switch {
+                    discriminant: #disc_tokens,
+                    cases: vec![#(#case_tokens),*],
+                    default_body: #default_tokens,
+                }
+            }
+        }
         StepKind::Assign {
             var,
             decl_type,

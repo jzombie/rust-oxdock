@@ -961,6 +961,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         record_schemas: std::collections::HashMap::new(),
         module_states: std::collections::HashMap::new(),
         type_aliases: std::collections::HashMap::new(),
+        type_env_digest: 0,
         call_depth: 0,
         task_id: 0,
         push_manifest: Vec::new(),
@@ -5399,6 +5400,7 @@ fn resolve_tag_combines_schema_and_alias_leaves() {
         ty: TypeTag::String,
         docs: "",
         optional: false,
+        default: None,
     }]);
     state.register_record_schema("EMP", schema_fields);
     state
@@ -5428,7 +5430,7 @@ fn resolve_tag_rejects_deep_alias_chains() {
     let fs = MockFs::new();
     let mut state = create_exec_state(fs);
     for n in 0..12 {
-        state.type_aliases.insert(
+        state.register_alias(
             format!("A{n}"),
             if n == 11 {
                 "MAP".to_string()
@@ -5441,6 +5443,127 @@ fn resolve_tag_rejects_deep_alias_chains() {
     assert!(
         format!("{err:#}").contains("maximum generic depth"),
         "{err:#}"
+    );
+}
+
+#[test]
+fn resolve_spelling_never_shares_across_alias_scopes() {
+    // The rendered-tag cache keys on spelling text, but a spelling
+    // naming an alias resolves through per-run directories: resolving
+    // one run's `MAP<flags: FLAGS>` must not poison a later run that
+    // spells it under different aliases.
+    let fs = MockFs::new();
+    let mut first = create_exec_state(fs);
+    first.register_alias("FLAGS".to_string(), "MAP<model: STRING>".to_string());
+    let one = first
+        .resolve_tag("MAP<flags: FLAGS>")
+        .expect("first scope resolves");
+    let fs = MockFs::new();
+    let mut second = create_exec_state(fs);
+    second.register_alias(
+        "FLAGS".to_string(),
+        "MAP<retries: INT = 2, ratio: FLOAT = 2.5>".to_string(),
+    );
+    let two = second
+        .resolve_tag("MAP<flags: FLAGS>")
+        .expect("second scope resolves");
+    fn flag_fields(tag: &TypeTag) -> Vec<String> {
+        let TypeTag::Record(fields) = tag else {
+            panic!("expected outer record, got {tag:?}");
+        };
+        let flags = fields
+            .iter()
+            .find(|field| field.name == "flags")
+            .expect("flags field");
+        let TypeTag::Record(inner) = &flags.ty else {
+            panic!("FLAGS must resolve to a record, got {:?}", flags.ty);
+        };
+        let mut names: Vec<String> = inner.iter().map(|field| field.name.clone()).collect();
+        names.sort();
+        names
+    }
+    assert_eq!(flag_fields(&one), vec!["model".to_string()]);
+    assert_eq!(
+        flag_fields(&two),
+        vec!["ratio".to_string(), "retries".to_string()]
+    );
+}
+
+#[test]
+fn env_digest_overwrite_remove_restore_mirror_content() {
+    // Zobrist discipline: overwrites back the old hash out, removals
+    // back their insertion out, restores swap whole directories. A
+    // digest must equal a fresh state holding the same content, so
+    // identical environments always share cache entries.
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    let empty = state.type_env_digest;
+    state.register_alias("A".to_string(), "MAP<n: INT>".to_string());
+    let one = state.type_env_digest;
+    assert_ne!(one, empty, "insertion changes the digest");
+    state.register_alias("A".to_string(), "MAP<n: STRING>".to_string());
+    assert_ne!(state.type_env_digest, one, "overwrite changes the digest");
+    state.register_alias("A".to_string(), "MAP<n: INT>".to_string());
+    assert_eq!(
+        state.type_env_digest, one,
+        "overwrite-back restores the digest exactly"
+    );
+    state.remove_alias("A");
+    assert_eq!(
+        state.type_env_digest, empty,
+        "removal restores the empty digest exactly"
+    );
+    state.remove_alias("A");
+    assert_eq!(
+        state.type_env_digest, empty,
+        "removing an absent name folds nothing"
+    );
+}
+
+#[test]
+fn env_digest_revert_never_serves_stale_tags() {
+    // The revert collision: A=1, then A=2, then back to A=1 must
+    // resolve to INT content even though a STRING-only state shares
+    // the same digest. Under ghost digests the revert lands on the
+    // STRING-only digest and serves its tag.
+    fn inner_scalar(tag: &TypeTag) -> TypeTag {
+        let TypeTag::ListOf(element) = tag else {
+            panic!("expected LIST, got {tag:?}");
+        };
+        let TypeTag::Record(fields) = element.as_ref() else {
+            panic!("expected record element, got {element:?}");
+        };
+        let field = fields
+            .iter()
+            .find(|field| field.name == "n")
+            .expect("n field");
+        field.ty.clone()
+    }
+    let fs = MockFs::new();
+    let mut reverting = create_exec_state(fs);
+    reverting.register_alias("A".to_string(), "MAP<n: INT>".to_string());
+    reverting.register_alias("A".to_string(), "MAP<n: STRING>".to_string());
+    reverting.register_alias("A".to_string(), "MAP<n: INT>".to_string());
+    let fs = MockFs::new();
+    let mut string_only = create_exec_state(fs);
+    string_only.register_alias("A".to_string(), "MAP<n: STRING>".to_string());
+    assert_ne!(
+        reverting.type_env_digest, string_only.type_env_digest,
+        "reverted content must not share the STRING-only digest"
+    );
+    let tag = reverting
+        .resolve_tag("LIST<A>")
+        .expect("reverted scope resolves");
+    assert!(
+        matches!(inner_scalar(&tag), TypeTag::Int),
+        "reverted scope resolves its own INT content, got {tag:?}"
+    );
+    let tag = string_only
+        .resolve_tag("LIST<A>")
+        .expect("string scope resolves");
+    assert!(
+        matches!(inner_scalar(&tag), TypeTag::String),
+        "string scope resolves its own STRING content, got {tag:?}"
     );
 }
 
@@ -5745,6 +5868,17 @@ fn run_start_rejects_misplaced_optional_params() {
     state
         .validate_function_type_tags()
         .expect("trailing optional MAP must pass");
+    // Trailing optional UNION containing MAP: accepted (omission
+    // still fills an empty MAP).
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(optional_module(vec![(
+        "schema",
+        TypeTag::union(vec![TypeTag::String, TypeTag::Map]),
+        true,
+    )]));
+    state
+        .validate_function_type_tags()
+        .expect("trailing optional UNION with MAP must pass");
 }
 
 #[cfg(not(miri))]
@@ -6730,10 +6864,10 @@ fn file_scope_top_level_let_visible_in_func_and_template() {
     let fs = MockFs::new();
     let steps = parse_entry(indoc! {r#"
         LET $OUT: STRING = "shared"
-        FUNC GET(): STRING {
+        FUNC FETCH(): STRING {
          RETURN $OUT
         }
-        LET $v: STRING = GET()
+        LET $v: STRING = FETCH()
     "#});
     let (_, _, bindings) = run_steps_with_manager(
         Box::new(fs),
@@ -8968,12 +9102,12 @@ fn callee_does_not_inherit_caller_function_local_imports() {
 
 #[test]
 fn entry_func_call_before_let_fails_static() {
-    // Flow-sensitive entry lets: calling `GET` before `$late` is
+    // Flow-sensitive entry lets: calling `FETCH` before `$late` is
     // declared fails the static gate instead of crashing at runtime
     // with undefined variable.
     let steps = parse_entry(indoc! {r#"
-        FUNC GET(): STRING { RETURN $late }
-        LET $v: STRING = GET()
+        FUNC FETCH(): STRING { RETURN $late }
+        LET $v: STRING = FETCH()
         LET $late: STRING = "late"
     "#});
     let fs = MockFs::new();
@@ -8993,8 +9127,8 @@ fn entry_func_call_after_let_passes() {
     // earliest-call seeding includes `$late` for the call at step 3.
     let steps = parse_entry(indoc! {r#"
         LET $late: STRING = "late"
-        FUNC GET(): STRING { RETURN $late }
-        LET $v: STRING = GET()
+        FUNC FETCH(): STRING { RETURN $late }
+        LET $v: STRING = FETCH()
     "#});
     let (_, _, bindings) = run_steps_with_manager(
         Box::new(MockFs::new()),
@@ -9031,16 +9165,16 @@ fn transitive_call_before_let_fails_static() {
 #[test]
 fn block_nested_call_before_let_fails_static() {
     // Calls inside top-level `If` / `For` / `While` bodies count at
-    // the enclosing step index: the `GET()` call inside the `IF`
-    // block precedes `LET $late`, so `GET` must not observe it.
+    // the enclosing step index: the `FETCH()` call inside the `IF`
+    // block precedes `LET $late`, so `FETCH` must not observe it.
     // (The old walker only inspected the `If` head's own strings
     // and missed block-nested calls, seeding the full union and
     // crashing at runtime with undefined variable.)
     let steps = parse_entry(indoc! {r#"
         LET $go: BOOL = true
-        FUNC GET(): STRING { RETURN $late }
+        FUNC FETCH(): STRING { RETURN $late }
         IF $go {
-         LET $v: STRING = GET()
+         LET $v: STRING = FETCH()
         }
         LET $late: STRING = "late"
     "#});
@@ -9064,12 +9198,12 @@ fn uncalled_nested_funcdef_calls_do_not_advance_earliest() {
     // expression recursion and leaked the callee).
     let steps = parse_entry(indoc! {r#"
         LET $go: BOOL = true
-        FUNC GET(): STRING { RETURN "early" }
+        FUNC FETCH(): STRING { RETURN "early" }
         IF $go {
-         FUNC INNER(): STRING { RETURN GET() }
+         FUNC INNER(): STRING { RETURN FETCH() }
          LET $late: STRING = "late"
         }
-        LET $v: STRING = GET()
+        LET $v: STRING = FETCH()
         ECHO "{{ $v }}"
     "#});
     let (_, _, bindings) = run_steps_with_manager(
@@ -9511,15 +9645,15 @@ fn file_import_module_capture_let_resolves() {
         "cap.oxdock",
         indoc! {r#"
             LET $out: STRING = RUN "echo hi"
-            FUNC GET(): STRING {
+            FUNC FETCH(): STRING {
                 RETURN $out
             }
-            EXPORT GET
+            EXPORT FETCH
         "#},
     );
     let steps = parse_entry(indoc! {r#"
         IMPORT ["cap.oxdock" AS CAP]
-        LET $v: STRING = CAP::GET()
+        LET $v: STRING = CAP::FETCH()
     "#});
     let (_, _, bindings) = run_steps_with_manager(
         Box::new(fs),
@@ -10174,7 +10308,7 @@ fn file_import_module_paths_follow_caller_workdir() {
         "lib.oxdock",
         indoc! {r#"
             LET $n: INT = 0
-            FUNC GET(): STRING {
+            FUNC FETCH(): STRING {
              $n = $n + 1
              LET $out: STRING = READ "probe.txt"
              RETURN $out
@@ -10182,7 +10316,7 @@ fn file_import_module_paths_follow_caller_workdir() {
             FUNC COUNT(): INT {
              RETURN $n
             }
-            EXPORT [GET, COUNT]
+            EXPORT [FETCH, COUNT]
         "#},
     );
     let steps = parse_entry(indoc! {r#"
@@ -10191,9 +10325,9 @@ fn file_import_module_paths_follow_caller_workdir() {
         WRITE probe.txt "root"
         MKDIR sub
         WRITE sub/probe.txt "nested"
-        LET $r1: STRING = A::GET()
+        LET $r1: STRING = A::FETCH()
         WORKDIR sub
-        LET $r2: STRING = B::GET()
+        LET $r2: STRING = B::FETCH()
         LET $total: INT = A::COUNT()
     "#});
     let (_, _, bindings) = run_steps_with_manager(
@@ -10561,14 +10695,16 @@ fn workflow_inline_scripts_pass_static_gate() {
                 record_schemas: std::collections::HashMap::new(),
                 module_states: std::collections::HashMap::new(),
                 type_aliases: std::collections::HashMap::new(),
+                type_env_digest: 0,
                 call_depth: 0,
                 task_id: 0,
                 push_manifest: Vec::new(),
                 _marker: std::marker::PhantomData,
             };
             state.push_var_scope();
-            state.type_aliases =
-                super::typing::collect_type_aliases(&steps, &state).expect("aliases");
+            state.restore_aliases(
+                super::typing::collect_type_aliases(&steps, &state).expect("aliases"),
+            );
             state.validate_function_type_tags().expect("tags");
             let closure =
                 super::import::expand_import_closure(&mut state, &steps).expect("closure");
@@ -10953,10 +11089,10 @@ fn template_module_init_inside_entry_func_resolves_against_module() {
         "m.oxdock",
         indoc! {r#"
                 LET $o: STRING = EXPAND "t.txt"
-                FUNC GET(): STRING {
+                FUNC FETCH(): STRING {
                  RETURN $o
                 }
-                EXPORT GET
+                EXPORT FETCH
             "#},
     );
     fs.write_file(
@@ -10968,7 +11104,7 @@ fn template_module_init_inside_entry_func_resolves_against_module() {
         IMPORT ["lib.oxdock" AS CB]
         FUNC T(): STRING {
          IMPORT ["m.oxdock" AS M]
-         LET $r: STRING = M::GET()
+         LET $r: STRING = M::FETCH()
          RETURN $r
         }
         LET $t: STRING = T()
@@ -11027,10 +11163,10 @@ fn template_module_init_call_into_other_uses_callee_aliases() {
                 IMPORT ["lib.oxdock" AS CB]
                 IMPORT ["other.oxdock" AS OTHER]
                 LET $r: STRING = OTHER::USE_IT()
-                FUNC GET(): STRING {
+                FUNC FETCH(): STRING {
                  RETURN $r
                 }
-                EXPORT GET
+                EXPORT FETCH
             "#},
     );
     fs.write_file(
@@ -11040,7 +11176,7 @@ fn template_module_init_call_into_other_uses_callee_aliases() {
     .expect("seed template file");
     let steps = parse_entry(indoc! {r#"
         IMPORT ["m.oxdock" AS M]
-        LET $v: STRING = M::GET()
+        LET $v: STRING = M::FETCH()
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
