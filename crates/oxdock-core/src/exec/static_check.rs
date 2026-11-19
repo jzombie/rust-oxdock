@@ -3731,8 +3731,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             StepKind::ReadLine { var } => {
                 // Declares `STRING` when absent, mutates (type kept)
-                // when present — mirroring `read_line` exactly.
+                // when present — mirroring `read_line` exactly, which
+                // rejects `CONST` through `mutate_var`.
                 let key = clean_var(var);
+                if env.is_const(&key, scope.site.as_ref()) {
+                    bail!(
+                        "step {}: cannot mutate CONST ${key}: CONST bindings are deeply immutable",
+                        idx + 1
+                    );
+                }
                 if !env.is_declared(&key) {
                     env.insert_top(key, TypeTag::String, step.guard.as_ref());
                 }
@@ -3742,6 +3749,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // Same declare-or-mutate contract as `read_line`:
                 // the answer binds as `STRING`, mutating when present.
                 let key = clean_var(var);
+                if env.is_const(&key, scope.site.as_ref()) {
+                    bail!(
+                        "step {}: cannot mutate CONST ${key}: CONST bindings are deeply immutable",
+                        idx + 1
+                    );
+                }
                 if !env.is_declared(&key) {
                     env.insert_top(key, TypeTag::String, step.guard.as_ref());
                 }
