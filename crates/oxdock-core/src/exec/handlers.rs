@@ -12,6 +12,7 @@ use oxdock_fs::PathResolver;
 use oxdock_fs::PolicyPath;
 use oxdock_fs::command_path;
 use oxdock_fs::to_forward_slashes;
+use oxdock_parser::constants::KEYWORD_RUN;
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value,
     WorkspaceTarget, render_structural,
@@ -492,7 +493,7 @@ fn run_pty<P: ProcessManager>(
         should_cancel: Box::new(move || hub.is_cancelled() || token.load(Ordering::SeqCst)),
         on_exit: None,
         on_output_drained: None,
-        func: "RUN",
+        func: KEYWORD_RUN,
     })
     .with_context(|| format!("RUN {what}"))?;
     // Pipe EOF rides the writer drops like any `RUN`: the supervisor

@@ -7004,7 +7004,7 @@ fn parse_let_body(
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::InvalidSyntax {
-                command: "LET".to_string(),
+                command: KEYWORD_LET.to_string(),
             }),
         });
     }

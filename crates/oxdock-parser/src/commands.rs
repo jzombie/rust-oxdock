@@ -23,7 +23,18 @@ use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
     split_assignment,
 };
-use crate::constants::{KEYWORD_EXPORT, KEYWORD_IMPORT};
+use crate::constants::{
+    KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS,
+    KEYWORD_ASSERT_EQ, KEYWORD_ASSERT_NE, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
+    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
+    KEYWORD_DEFAULT, KEYWORD_ECHO, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXIT, KEYWORD_EXPAND,
+    KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_INHERIT_ENV,
+    KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_LS, KEYWORD_MKDIR,
+    KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE,
+    KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH,
+    KEYWORD_SYMLINK, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WHILE,
+    KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE,
+};
 use crate::error::{ParseError, ParseResult, SpanContext};
 use indoc::indoc;
 
@@ -36,7 +47,8 @@ use indoc::indoc;
 /// Reserved words that can never name a `REMOTE` target: the workspace
 /// roots plus the block keyword itself. Shared with CLI inventory
 /// validation so charset rules cannot drift between parser and host.
-pub const REMOTE_RESERVED_WORDS: &[&str] = &["SNAPSHOT", "LOCAL", "CACHE", "SYSTEM", "REMOTE"];
+pub const REMOTE_RESERVED_WORDS: &[&str] =
+    &["SNAPSHOT", "LOCAL", "CACHE", "SYSTEM", KEYWORD_REMOTE];
 
 /// Validate a `REMOTE` target name: start alnum, then alnum, `_`, or
 /// `-`, max 64 chars. Safe in CLI flags, log lines, tarball names, and
@@ -100,16 +112,17 @@ fn join_value(args: Vec<Arg>, cmd_name: &str) -> ParseResult<Arg> {
 pub fn lower_env_assignment(args: Vec<Arg>) -> ParseResult<StepKind> {
     let arg = args.into_iter().next().ok_or_else(|| {
         ParseError::validation(
-            "ENV",
+            KEYWORD_ENV,
             "ENV requires KEY=value".to_string(),
             &SpanContext::line_only(0),
         )
     })?;
-    let Some((key, value)) = split_assignment(arg.as_str())
-        .map_err(|e| ParseError::validation("ENV", e.to_string(), &SpanContext::line_only(0)))?
+    let Some((key, value)) = split_assignment(arg.as_str()).map_err(|e| {
+        ParseError::validation(KEYWORD_ENV, e.to_string(), &SpanContext::line_only(0))
+    })?
     else {
         return Err(ParseError::validation(
-            "ENV",
+            KEYWORD_ENV,
             "ENV requires KEY=value format".to_string(),
             &SpanContext::line_only(0),
         ));
@@ -335,7 +348,7 @@ fn fmt_io(b: &IoBinding) -> String {
 // such, lowering falls through here : report a committed syntax error instead
 // of an unknown command.
 pub(crate) fn is_known_command(name: &str) -> bool {
-    if name == "ELSE" {
+    if name == KEYWORD_ELSE {
         return true;
     }
     all_metadata().iter().any(|meta| meta.name == name)
@@ -422,62 +435,62 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
         format!("`{received}`")
     };
     match name {
-        "WITH_IO" => Some(with_io_hint(&got, received)),
-        "AWAIT" => Some(format!(
+        name if name == KEYWORD_WITH_IO => Some(with_io_hint(&got, received)),
+        name if name == KEYWORD_AWAIT => Some(format!(
             "AWAIT waits for a background task variable, e.g. `LET $t: HANDLE<VOID> = ASYNC ECHO hi` then `AWAIT $t`; got {got}."
         )),
-        "CANCEL" => Some(format!(
+        name if name == KEYWORD_CANCEL => Some(format!(
             "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t: HANDLE<VOID> = ASYNC ...`); got {got}."
         )),
-        "ASYNC" => Some(format!(
+        name if name == KEYWORD_ASYNC => Some(format!(
             "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t: HANDLE<T> = ASYNC ...`; got {got}."
         )),
-        "FOR" => Some(format!(
+        name if name == KEYWORD_FOR => Some(format!(
             "FOR loops need `FOR $item: TYPE IN <expr> {{ ... }}` (or `FOR $key: STRING, $value: TYPE IN <expr> {{ ... }}`); got {got}."
         )),
-        "IF" => Some(format!(
+        name if name == KEYWORD_IF => Some(format!(
             "IF needs a condition and a block, e.g. `IF true {{ ECHO yes }}`; got {got}."
         )),
-        "ELSE" => Some(format!(
+        name if name == KEYWORD_ELSE => Some(format!(
             "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}."
         )),
-        "SWITCH" => Some(format!(
+        name if name == KEYWORD_SWITCH => Some(format!(
             "SWITCH needs a value or bare condition list plus braced CASE arms, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}."
         )),
-        "CASE" => Some(format!(
+        name if name == KEYWORD_CASE => Some(format!(
             "CASE only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\", \"b\" {{ ECHO yes }} }}`; got {got}."
         )),
-        "DEFAULT" => Some(format!(
+        name if name == KEYWORD_DEFAULT => Some(format!(
             "DEFAULT only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}."
         )),
-        "LET" => Some(format!(
+        name if name == KEYWORD_LET => Some(format!(
             "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE<T> = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}."
         )),
         "SET" => Some(
             "`SET` is not a keyword; mutate a declared variable with `$var = <expr>`, e.g. `$count = 2`.".to_string(),
         ),
-        "TIMEOUT" => Some(format!(
+        name if name == KEYWORD_TIMEOUT => Some(format!(
             "TIMEOUT needs a duration and a command or block, e.g. `TIMEOUT 30s RUN ...`; got {got}."
         )),
-        "REMOTE" => Some(format!(
+        name if name == KEYWORD_REMOTE => Some(format!(
             "REMOTE needs a target and a braced block, e.g. `REMOTE prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}."
         )),
-        "FUNC" => Some(format!(
+        name if name == KEYWORD_FUNC => Some(format!(
             "FUNC defines a function, e.g. `FUNC GREET($name: STRING): STRING {{ RETURN $name }}`; got {got}."
         )),
-        "RETURN" => Some(format!(
+        name if name == KEYWORD_RETURN => Some(format!(
             "RETURN ends the nearest function, ASYNC task, or inline LET block with a value, e.g. `RETURN $x`; got {got}."
         )),
-        "WHILE" => Some(format!(
+        name if name == KEYWORD_WHILE => Some(format!(
             "WHILE needs a Bool condition and a block, e.g. `WHILE !$done {{ ... }}`; got {got}."
         )),
-        "BREAK" => Some(
+        name if name == KEYWORD_BREAK => Some(
             "`BREAK` exits the innermost enclosing FOR/WHILE loop or SWITCH; it must appear inside a loop or SWITCH.".to_string(),
         ),
-        "CONTINUE" => Some(
+        name if name == KEYWORD_CONTINUE => Some(
             "`CONTINUE` skips to the next iteration of the innermost enclosing FOR/WHILE loop; it must appear inside a loop (a SWITCH never captures it).".to_string(),
         ),
-        "INHERIT_ENV" => Some(format!(
+        name if name == KEYWORD_INHERIT_ENV => Some(format!(
             "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME, PATH]`; got {got}."
         )),
         name if name == KEYWORD_IMPORT => Some(format!(
@@ -1312,7 +1325,7 @@ declare_commands! {
     ]
 
     Workdir => [
-        name: "WORKDIR",
+        name: KEYWORD_WORKDIR,
         variant: Workdir(Arg),
         syntax: "WORKDIR <path>",
         summary: "Change the working directory.",
@@ -1348,13 +1361,13 @@ declare_commands! {
             ASSERT_EQ $body "inner"
         "#} } ],
         lower: |_flags, args| {
-            let path = args.into_iter().next().ok_or_else(|| ParseError::validation("WORKDIR", "WORKDIR requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_WORKDIR, "WORKDIR requires a path".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Workdir(path))
         },
     ],
 
     Workspace => [
-        name: "WORKSPACE",
+        name: KEYWORD_WORKSPACE,
         variant: Workspace(WorkspaceTarget),
         syntax: "WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM) [--local]",
         summary: "Switch workspace roots.",
@@ -1395,20 +1408,20 @@ declare_commands! {
         "#} } ],
         lower: |flags, args| {
             let local = flags.iter().any(|(k, _)| k == "local");
-            let target = args.into_iter().next().ok_or_else(|| ParseError::validation("WORKSPACE", "WORKSPACE requires a target".to_string(), &SpanContext::line_only(0)))?;
+            let target = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_WORKSPACE, "WORKSPACE requires a target".to_string(), &SpanContext::line_only(0)))?;
             match target.as_str() {
-                "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => Err(ParseError::validation("WORKSPACE", "WORKSPACE --local requires CACHE".to_string(), &SpanContext::line_only(0))),
+                "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => Err(ParseError::validation(KEYWORD_WORKSPACE, "WORKSPACE --local requires CACHE".to_string(), &SpanContext::line_only(0))),
                 "SNAPSHOT" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
                 "LOCAL" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
                 "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache { local })),
                 "SYSTEM" => Ok(StepKind::Workspace(WorkspaceTarget::System)),
-                other => Err(ParseError::validation("WORKSPACE", format!("unknown workspace target: {other}"), &SpanContext::line_only(0))),
+                other => Err(ParseError::validation(KEYWORD_WORKSPACE, format!("unknown workspace target: {other}"), &SpanContext::line_only(0))),
             }
         },
     ],
 
     Env => [
-        name: "ENV",
+        name: KEYWORD_ENV,
         variant: Env { key: String, value: Arg },
         syntax: "ENV KEY=value",
         summary: "Set an environment variable.",
@@ -1497,7 +1510,7 @@ declare_commands! {
     ],
 
     InheritEnv => [
-        name: "INHERIT_ENV",
+        name: KEYWORD_INHERIT_ENV,
         variant: InheritEnv { keys: Vec<String> },
         syntax: "INHERIT_ENV [<key>, ...]",
         summary: "Inherit env vars from host.",
@@ -1534,7 +1547,7 @@ declare_commands! {
     ],
 
     Echo => [
-        name: "ECHO",
+        name: KEYWORD_ECHO,
         variant: Echo(Arg),
         syntax: "ECHO <message>",
         summary: "Print to stdout.",
@@ -1574,11 +1587,11 @@ declare_commands! {
                 ECHO "Hello {{ env:OXDOCK_DOC_NO_SUCH_KEY }}!"
             "#} },
         ],
-        lower: |_flags, args| Ok(StepKind::Echo(join_value(args, "ECHO")?)),
+        lower: |_flags, args| Ok(StepKind::Echo(join_value(args, KEYWORD_ECHO)?)),
     ],
 
     Run => [
-        name: "RUN",
+        name: KEYWORD_RUN,
         variant: Run(Arg),
         syntax: "RUN <command...> | RUN [\"exe\", \"arg\", ...]",
         summary: "Execute shell command or direct executable.",
@@ -1623,17 +1636,17 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| match args.as_slice() {
             [Arg::Expr(Expr::List(elems))] if elems.is_empty() => {
-                Err(ParseError::validation("RUN", "RUN requires at least one argument".to_string(), &SpanContext::line_only(0)))
+                Err(ParseError::validation(KEYWORD_RUN, "RUN requires at least one argument".to_string(), &SpanContext::line_only(0)))
             }
             [Arg::Expr(Expr::List(elems))] => Ok(StepKind::RunExec {
                 argv: elems.iter().cloned().map(Arg::Expr).collect(),
             }),
-            _ => Ok(StepKind::Run(join_value(args, "RUN")?)),
+            _ => Ok(StepKind::Run(join_value(args, KEYWORD_RUN)?)),
         },
     ],
 
     Copy => [
-        name: "COPY",
+        name: KEYWORD_COPY,
         variant: Copy { from_workspace: Option<WorkspaceTarget>, from_host: bool, to_host: bool, from: Arg, to: Arg },
         syntax: "COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] [--from-host | --to-host] <from> <to>",
         summary: "Copy file into workspace.",
@@ -1672,23 +1685,23 @@ declare_commands! {
                     "LOCAL" => Ok(WorkspaceTarget::Local),
                     "CACHE" => Ok(WorkspaceTarget::Cache { local: false }),
                     "SYSTEM" => Ok(WorkspaceTarget::System),
-                    other => Err(ParseError::validation("COPY", format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
+                    other => Err(ParseError::validation(KEYWORD_COPY, format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
                 })
                 .transpose()?;
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| ParseError::validation("COPY", "COPY requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation("COPY", "COPY requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY, "COPY requires a source".to_string(), &SpanContext::line_only(0)))?;
+            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY, "COPY requires a destination".to_string(), &SpanContext::line_only(0)))?;
             let from_host = flags.iter().any(|(k, _)| k == "from_host");
             let to_host = flags.iter().any(|(k, _)| k == "to_host");
             if from_host && to_host {
-                return Err(ParseError::validation("COPY", "COPY --from-host and --to-host are mutually exclusive".to_string(), &SpanContext::line_only(0)));
+                return Err(ParseError::validation(KEYWORD_COPY, "COPY --from-host and --to-host are mutually exclusive".to_string(), &SpanContext::line_only(0)));
             }
             Ok(StepKind::Copy { from_workspace, from_host, to_host, from, to })
         },
     ],
 
     CopyGit => [
-        name: "COPY_GIT",
+        name: KEYWORD_COPY_GIT,
         variant: CopyGit { rev: Arg, from: Arg, to: Arg, include_dirty: bool },
         syntax: "COPY_GIT [--include-dirty] <rev> <src> <dst>",
         summary: "Copy from git revision.",
@@ -1704,15 +1717,15 @@ declare_commands! {
         lower: |flags, args| {
             let include_dirty = flags.iter().any(|(k, _)| k == "dirty");
             let mut it = args.into_iter();
-            let rev = it.next().ok_or_else(|| ParseError::validation("COPY_GIT", "COPY_GIT requires a revision".to_string(), &SpanContext::line_only(0)))?;
-            let from = it.next().ok_or_else(|| ParseError::validation("COPY_GIT", "COPY_GIT requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation("COPY_GIT", "COPY_GIT requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let rev = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY_GIT, "COPY_GIT requires a revision".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY_GIT, "COPY_GIT requires a source".to_string(), &SpanContext::line_only(0)))?;
+            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY_GIT, "COPY_GIT requires a destination".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::CopyGit { rev, from, to, include_dirty })
         },
     ],
 
     Symlink => [
-        name: "SYMLINK",
+        name: KEYWORD_SYMLINK,
         variant: Symlink { from_workspace: Option<WorkspaceTarget>, from: Arg, to: Arg },
         syntax: "SYMLINK [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>",
         summary: "Create symlink.",
@@ -1751,18 +1764,18 @@ declare_commands! {
                     "LOCAL" => Ok(WorkspaceTarget::Local),
                     "CACHE" => Ok(WorkspaceTarget::Cache { local: false }),
                     "SYSTEM" => Ok(WorkspaceTarget::System),
-                    other => Err(ParseError::validation("SYMLINK", format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
+                    other => Err(ParseError::validation(KEYWORD_SYMLINK, format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
                 })
                 .transpose()?;
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| ParseError::validation("SYMLINK", "SYMLINK requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation("SYMLINK", "SYMLINK requires a target".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_SYMLINK, "SYMLINK requires a source".to_string(), &SpanContext::line_only(0)))?;
+            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_SYMLINK, "SYMLINK requires a target".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Symlink { from_workspace, from, to })
         },
     ],
 
     Mkdir => [
-        name: "MKDIR",
+        name: KEYWORD_MKDIR,
         variant: Mkdir(Arg),
         syntax: "MKDIR <path>",
         summary: "Create directory.",
@@ -1777,11 +1790,11 @@ declare_commands! {
             LET $t: STRING = PATH_TYPE("deeply/nested/tree")
             ASSERT_EQ $t "dir"
         "#} } ],
-        lower: |_flags, args| Ok(StepKind::Mkdir(args.into_iter().next().ok_or_else(|| ParseError::validation("MKDIR", "MKDIR requires a path".to_string(), &SpanContext::line_only(0)))?)),
+        lower: |_flags, args| Ok(StepKind::Mkdir(args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_MKDIR, "MKDIR requires a path".to_string(), &SpanContext::line_only(0)))?)),
     ],
 
     Install => [
-        name: "INSTALL",
+        name: KEYWORD_INSTALL,
         variant: Install { from: Arg, to: Arg },
         syntax: "INSTALL <source> <dest>",
         summary: "Atomically install a verified binary as executable.",
@@ -1803,14 +1816,14 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| ParseError::validation("INSTALL", "INSTALL requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation("INSTALL", "INSTALL requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_INSTALL, "INSTALL requires a source".to_string(), &SpanContext::line_only(0)))?;
+            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_INSTALL, "INSTALL requires a destination".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Install { from, to })
         },
     ],
 
     SetExecutable => [
-        name: "SET_EXECUTABLE",
+        name: KEYWORD_SET_EXECUTABLE,
         variant: SetExecutable { path: Arg },
         syntax: "SET_EXECUTABLE <path>",
         summary: "Mark a file executable.",
@@ -1827,11 +1840,11 @@ declare_commands! {
             LET $t: STRING = PATH_TYPE("tool.sh")
             ASSERT_EQ $t "file"
         "#} } ],
-        lower: |_flags, args| Ok(StepKind::SetExecutable { path: args.into_iter().next().ok_or_else(|| ParseError::validation("SET_EXECUTABLE", "SET_EXECUTABLE requires a path".to_string(), &SpanContext::line_only(0)))? }),
+        lower: |_flags, args| Ok(StepKind::SetExecutable { path: args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_SET_EXECUTABLE, "SET_EXECUTABLE requires a path".to_string(), &SpanContext::line_only(0)))? }),
     ],
 
     Archive => [
-        name: "ARCHIVE",
+        name: KEYWORD_ARCHIVE,
         variant: Archive { src: Arg, dst: Arg, raw: bool },
         syntax: "ARCHIVE [--raw] <src> <dst>",
         summary: "Pack a file or directory into a tarball.",
@@ -1885,14 +1898,14 @@ declare_commands! {
         lower: |flags, args| {
             let raw = flags.iter().any(|(k, _)| k == "raw");
             let mut it = args.into_iter();
-            let src = it.next().ok_or_else(|| ParseError::validation("ARCHIVE", "ARCHIVE requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let dst = it.next().ok_or_else(|| ParseError::validation("ARCHIVE", "ARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let src = it.next().ok_or_else(|| ParseError::validation(KEYWORD_ARCHIVE, "ARCHIVE requires a source".to_string(), &SpanContext::line_only(0)))?;
+            let dst = it.next().ok_or_else(|| ParseError::validation(KEYWORD_ARCHIVE, "ARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Archive { src, dst, raw })
         },
     ],
 
     Unarchive => [
-        name: "UNARCHIVE",
+        name: KEYWORD_UNARCHIVE,
         variant: Unarchive { src: Arg, dst: Arg, max_bytes: Option<Arg> },
         syntax: "UNARCHIVE <src> <dst> [--max-bytes <bytes>]",
         summary: "Unpack a tarball into a directory.",
@@ -1939,8 +1952,8 @@ declare_commands! {
         "#} } ],
         lower: |flags, args| {
             let mut it = args.into_iter();
-            let src = it.next().ok_or_else(|| ParseError::validation("UNARCHIVE", "UNARCHIVE requires an archive".to_string(), &SpanContext::line_only(0)))?;
-            let dst = it.next().ok_or_else(|| ParseError::validation("UNARCHIVE", "UNARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let src = it.next().ok_or_else(|| ParseError::validation(KEYWORD_UNARCHIVE, "UNARCHIVE requires an archive".to_string(), &SpanContext::line_only(0)))?;
+            let dst = it.next().ok_or_else(|| ParseError::validation(KEYWORD_UNARCHIVE, "UNARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
             let max_bytes = flags
                 .into_iter()
                 .find_map(|(k, v)| (k == "max_bytes").then_some(v));
@@ -1962,7 +1975,7 @@ declare_commands! {
     ],
 
     Ls => [
-        name: "LS",
+        name: KEYWORD_LS,
         variant: Ls(Option<Arg>),
         syntax: "LS [<path>]",
         summary: "List directory.",
@@ -1980,7 +1993,7 @@ declare_commands! {
     ],
 
     Read => [
-        name: "READ",
+        name: KEYWORD_READ,
         variant: Read(Option<Arg>),
         syntax: "READ [<path>]",
         summary: "Read file to stdout.",
@@ -1999,7 +2012,7 @@ declare_commands! {
     ],
 
     ReadLine => [
-        name: "READ_LINE",
+        name: KEYWORD_READ_LINE,
         variant: ReadLine { var: String },
         syntax: "READ_LINE $var",
         summary: "Read one line from stdin into a variable.",
@@ -2020,23 +2033,23 @@ declare_commands! {
             ASSERT_EQ $reply "first"
         "#} } ],
         lower: |_flags, args| {
-            let arg = args.into_iter().next().ok_or_else(|| ParseError::validation("READ_LINE", "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
+            let arg = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_READ_LINE, "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
             let var = match arg {
                 Arg::Expr(Expr::Var(name)) => name,
                 // Quoted "$var" keeps its sigil through the generic string
                 // path; templates defer untouched exactly as before.
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
-                other => return Err(ParseError::validation("READ_LINE", format!("READ_LINE requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+                other => return Err(ParseError::validation(KEYWORD_READ_LINE, format!("READ_LINE requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
             if var.is_empty() {
-                return Err(ParseError::validation("READ_LINE", "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::validation(KEYWORD_READ_LINE, "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))
             }
             Ok(StepKind::ReadLine { var })
         },
     ],
 
     Prompt => [
-        name: "PROMPT",
+        name: KEYWORD_PROMPT,
         variant: Prompt { var: String, message: Arg, default: Option<Arg> },
         syntax: "PROMPT $var <message> [<default>]",
         summary: "Prompt on the terminal into a variable.",
@@ -2063,23 +2076,23 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let var_arg = it.next().ok_or_else(|| ParseError::validation("PROMPT", "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))?;
+            let var_arg = it.next().ok_or_else(|| ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))?;
             let var = match var_arg {
                 Arg::Expr(Expr::Var(name)) => name,
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
-                other => return Err(ParseError::validation("PROMPT", format!("PROMPT requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+                other => return Err(ParseError::validation(KEYWORD_PROMPT, format!("PROMPT requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
             if var.is_empty() {
-                return Err(ParseError::validation("PROMPT", "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))
             }
-            let message = it.next().ok_or_else(|| ParseError::validation("PROMPT", "PROMPT requires a message".to_string(), &SpanContext::line_only(0)))?;
+            let message = it.next().ok_or_else(|| ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a message".to_string(), &SpanContext::line_only(0)))?;
             let default = it.next();
             Ok(StepKind::Prompt { var, message, default })
         },
     ],
 
     Write => [
-        name: "WRITE",
+        name: KEYWORD_WRITE,
         variant: Write { path: Arg, contents: Option<Arg> },
         syntax: "WRITE <path> [<contents>]",
         summary: "Write to file.",
@@ -2097,15 +2110,15 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| ParseError::validation("WRITE", "WRITE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = it.next().ok_or_else(|| ParseError::validation(KEYWORD_WRITE, "WRITE requires a path".to_string(), &SpanContext::line_only(0)))?;
             let remaining: Vec<Arg> = it.collect();
-            let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, "WRITE")?) };
+            let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, KEYWORD_WRITE)?) };
             Ok(StepKind::Write { path, contents })
         },
     ],
 
     Append => [
-        name: "APPEND",
+        name: KEYWORD_APPEND,
         variant: Append { path: Arg, contents: Option<Arg> },
         syntax: "APPEND <path> [<contents>]",
         summary: "Append to file.",
@@ -2127,15 +2140,15 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| ParseError::validation("APPEND", "APPEND requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = it.next().ok_or_else(|| ParseError::validation(KEYWORD_APPEND, "APPEND requires a path".to_string(), &SpanContext::line_only(0)))?;
             let remaining: Vec<Arg> = it.collect();
-            let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, "APPEND")?) };
+            let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, KEYWORD_APPEND)?) };
             Ok(StepKind::Append { path, contents })
         },
     ],
 
     AppendLine => [
-        name: "APPEND_LINE",
+        name: KEYWORD_APPEND_LINE,
         variant: AppendLine { path: Arg, contents: Arg },
         syntax: "APPEND_LINE <path> <contents>",
         summary: "Append one line to a file.",
@@ -2157,15 +2170,15 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| ParseError::validation("APPEND_LINE", "APPEND_LINE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = it.next().ok_or_else(|| ParseError::validation(KEYWORD_APPEND_LINE, "APPEND_LINE requires a path".to_string(), &SpanContext::line_only(0)))?;
             let remaining: Vec<Arg> = it.collect();
-            let contents = join_value(remaining, "APPEND_LINE")?;
+            let contents = join_value(remaining, KEYWORD_APPEND_LINE)?;
             Ok(StepKind::AppendLine { path, contents })
         },
     ],
 
     Remove => [
-        name: "REMOVE",
+        name: KEYWORD_REMOVE,
         variant: Remove { path: Arg, recursive: bool },
         syntax: "REMOVE [--recursive] <path>",
         summary: "Remove a file, symlink, or directory.",
@@ -2190,13 +2203,13 @@ declare_commands! {
         "#} } ],
         lower: |flags, args| {
             let recursive = flags.iter().any(|(k, _)| k == "recursive");
-            let path = args.into_iter().next().ok_or_else(|| ParseError::validation("REMOVE", "REMOVE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_REMOVE, "REMOVE requires a path".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Remove { path, recursive })
         },
     ],
 
     Expand => [
-        name: "EXPAND",
+        name: KEYWORD_EXPAND,
         variant: Expand { path: Option<Arg>, overrides: Vec<(String, Arg)> },
         syntax: "EXPAND [<path>] [<KEY=val> ...]",
         summary: "Expand a template file (or stdin) to stdout.",
@@ -2337,17 +2350,17 @@ declare_commands! {
             let mut overrides = Vec::new();
             for arg in args {
                 let text = arg.as_str();
-                if let Some((key, value)) = split_assignment(text).map_err(|e| ParseError::validation("EXPAND", e.to_string(), &SpanContext::line_only(0)))? {
+                if let Some((key, value)) = split_assignment(text).map_err(|e| ParseError::validation(KEYWORD_EXPAND, e.to_string(), &SpanContext::line_only(0)))? {
                     overrides.push((key, value));
                 } else if path.is_none() { path = Some(arg); }
-                else { return Err(ParseError::validation("EXPAND", "EXPAND accepts at most one path".to_string(), &SpanContext::line_only(0))) }
+                else { return Err(ParseError::validation(KEYWORD_EXPAND, "EXPAND accepts at most one path".to_string(), &SpanContext::line_only(0))) }
             }
             Ok(StepKind::Expand { path, overrides })
         },
     ],
 
     AssertEq => [
-        name: Command::AssertEq.as_str(),
+        name: KEYWORD_ASSERT_EQ,
         variant: AssertEq { hash: Option<String>, actual: AssertTarget, expected: Option<Arg> },
         syntax: Command::AssertEq.syntax(),
         summary: "Assert strict equality.",
@@ -2393,7 +2406,7 @@ declare_commands! {
     ],
 
     AssertNe => [
-        name: Command::AssertNe.as_str(),
+        name: KEYWORD_ASSERT_NE,
         variant: AssertNe { hash: Option<String>, actual: AssertTarget, expected: Option<Arg> },
         syntax: Command::AssertNe.syntax(),
         summary: "Assert strict inequality.",
@@ -2441,7 +2454,7 @@ declare_commands! {
     ],
 
     AssertContains => [
-        name: Command::AssertContains.as_str(),
+        name: KEYWORD_ASSERT_CONTAINS,
         variant: AssertContains { haystack: AssertTarget, needle: Arg },
         syntax: Command::AssertContains.syntax(),
         summary: "Assert containment.",
@@ -2482,7 +2495,7 @@ declare_commands! {
     ],
 
     Exit => [
-        name: "EXIT",
+        name: KEYWORD_EXIT,
         variant: Exit(Arg),
         syntax: "EXIT <code>",
         summary: "Exit pipeline.",
@@ -2504,13 +2517,13 @@ declare_commands! {
         lower: |_flags, args| {
             // Static literals were already Int-checked by the central
             // validator; dynamics resolve (and validate) at runtime.
-            let code = args.into_iter().next().ok_or_else(|| ParseError::validation("EXIT", "EXIT requires a code".to_string(), &SpanContext::line_only(0)))?;
+            let code = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_EXIT, "EXIT requires a code".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Exit(code))
         },
     ],
 
     Sleep => [
-        name: "SLEEP",
+        name: KEYWORD_SLEEP,
         variant: Sleep { duration: Arg },
         syntax: "SLEEP <duration>",
         summary: "Pause execution for a duration.",
@@ -2544,9 +2557,9 @@ declare_commands! {
             let mut it = args.into_iter();
             let raw = it
                 .next()
-                .ok_or_else(|| ParseError::validation("SLEEP", "SLEEP requires a duration (e.g. SLEEP 500ms)".to_string(), &SpanContext::line_only(0)))?;
+                .ok_or_else(|| ParseError::validation(KEYWORD_SLEEP, "SLEEP requires a duration (e.g. SLEEP 500ms)".to_string(), &SpanContext::line_only(0)))?;
             if it.next().is_some() {
-                return Err(ParseError::validation("SLEEP", "SLEEP takes exactly one duration argument".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::validation(KEYWORD_SLEEP, "SLEEP takes exactly one duration argument".to_string(), &SpanContext::line_only(0)))
             }
             // Static literals were Duration-checked by the central
             // validator; dynamics ($var, templates) resolve at runtime.
@@ -2555,7 +2568,7 @@ declare_commands! {
     ],
 
     ListAppend => [
-        name: "LIST_APPEND",
+        name: KEYWORD_LIST_APPEND,
         variant: ListAppend { list: String, item: Arg },
         syntax: "LIST_APPEND $list <item>",
         summary: "Append an item to a LIST variable in place.",
@@ -2585,20 +2598,20 @@ declare_commands! {
             let mut it = args.into_iter();
             let raw_list = it
                 .next()
-                .ok_or_else(|| ParseError::validation("LIST_APPEND", "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
+                .ok_or_else(|| ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
             let list = match raw_list {
                 Arg::Expr(Expr::Var(name)) => name,
                 Arg::String(s, _) => s.trim_start_matches('$').to_string(),
-                other => return Err(ParseError::validation("LIST_APPEND", format!("LIST_APPEND requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+                other => return Err(ParseError::validation(KEYWORD_LIST_APPEND, format!("LIST_APPEND requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
             if list.is_empty() {
-                return Err(ParseError::validation("LIST_APPEND", "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))
             }
             let item = it
                 .next()
-                .ok_or_else(|| ParseError::validation("LIST_APPEND", "LIST_APPEND requires an item to append (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
+                .ok_or_else(|| ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires an item to append (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
             if it.next().is_some() {
-                return Err(ParseError::validation("LIST_APPEND", "LIST_APPEND takes exactly two arguments: LIST_APPEND $list <item>".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND takes exactly two arguments: LIST_APPEND $list <item>".to_string(), &SpanContext::line_only(0)))
             }
             Ok(StepKind::ListAppend { list, item })
         },
@@ -2616,7 +2629,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
     vec![
         CommandMeta {
             in_index: true,
-            name: "WITH_IO",
+            name: KEYWORD_WITH_IO,
             syntax: "WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> } | WITH_IO [tty[, stdin=$p][, rows=<int>][, cols=<int>]] RUN ...",
             summary: "Reroute standard streams.",
             description: indoc! {r#"
@@ -2732,7 +2745,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "FOR",
+            name: KEYWORD_FOR,
             syntax: "FOR $item: TYPE IN <expr> { <commands> } | FOR $key: STRING, $value: TYPE IN <expr> { <commands> }",
             summary: "Iterate over a list or map.",
             description: indoc! {r#"
@@ -2787,7 +2800,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "IF",
+            name: KEYWORD_IF,
             syntax: "IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]",
             summary: "Conditional execution.",
             description: indoc! {r#"
@@ -2880,7 +2893,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "SWITCH",
+            name: KEYWORD_SWITCH,
             syntax: "SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }",
             summary: "Multi-way branch on a value or a condition list.",
             description: indoc! {r#"
@@ -3199,7 +3212,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "LET",
+            name: KEYWORD_LET,
             syntax: "LET $var: TYPE = <expr> | LET $p: PIPE | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task | LET $var: TYPE = { <commands> }",
             summary: "Bind script-local variables.",
             description: indoc! {r#"
@@ -3595,7 +3608,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "ASYNC",
+            name: KEYWORD_ASYNC,
             syntax: "ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE<T> = ASYNC { <commands> }",
             summary: "Run steps in a background thread.",
             description: indoc! {r#"
@@ -3647,7 +3660,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "AWAIT",
+            name: KEYWORD_AWAIT,
             syntax: "AWAIT $var | LET $out: STRING = AWAIT $var",
             summary: "Join a background task.",
             description: indoc! {r#"
@@ -3690,7 +3703,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "CANCEL",
+            name: KEYWORD_CANCEL,
             syntax: "CANCEL $var",
             summary: "Synchronously cancel a background task.",
             description: indoc! {r#"
@@ -3726,7 +3739,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "TIMEOUT",
+            name: KEYWORD_TIMEOUT,
             syntax: "TIMEOUT <duration> <command...> | TIMEOUT <duration> { <commands> } | TIMEOUT <duration> AWAIT $var",
             summary: "Enforce an execution deadline.",
             description: indoc! {r#"
@@ -3804,7 +3817,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "ISOLATED",
+            name: KEYWORD_ISOLATED,
             syntax: "ISOLATED { INHERIT_ENV [...] <commands> } | ISOLATED <command...>",
             summary: "Run steps with the seeded script environment.",
             description: indoc! {r#"
@@ -3916,7 +3929,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "REMOTE",
+            name: KEYWORD_REMOTE,
             syntax: "REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }",
             summary: "Run a sealed block on a remote target.",
             description: indoc! {r#"
@@ -4090,7 +4103,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "FUNC",
+            name: KEYWORD_FUNC,
             syntax: "FUNC NAME([$param: TYPE, ...]): RET { <commands> } | ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }",
             summary: "Define a user function.",
             description: indoc! {r#"
@@ -4268,7 +4281,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "RETURN",
+            name: KEYWORD_RETURN,
             syntax: "RETURN [<expr>]",
             summary: "Return a value from a function, task, or inline block.",
             description: indoc! {r#"
@@ -4306,7 +4319,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "WHILE",
+            name: KEYWORD_WHILE,
             syntax: "WHILE <bool-expr> { <commands> }",
             summary: "Loop while a condition holds.",
             description: indoc! {r#"
@@ -4339,8 +4352,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "BREAK",
-            syntax: "BREAK",
+            name: KEYWORD_BREAK,
+            syntax: KEYWORD_BREAK,
             summary: "Exit the innermost loop.",
             description: indoc! {r#"
                 Exits the innermost enclosing FOR or WHILE loop.
@@ -4389,8 +4402,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             in_index: true,
-            name: "CONTINUE",
-            syntax: "CONTINUE",
+            name: KEYWORD_CONTINUE,
+            syntax: KEYWORD_CONTINUE,
             summary: "Skip to the next loop iteration.",
             description: indoc! {r#"
                 Skips the rest of the innermost enclosing FOR or WHILE body and starts
@@ -4764,18 +4777,20 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 impl fmt::Display for StepKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StepKind::InheritEnv { keys } => write!(f, "INHERIT_ENV [{}]", keys.join(", ")),
-            StepKind::Workdir(a) => write!(f, "WORKDIR {}", fmt_value(a, quote_arg)),
-            StepKind::Workspace(t) => write!(f, "WORKSPACE {}", t),
-            StepKind::Env { key, value } => {
-                write!(f, "ENV {}={}", key, fmt_value(value, quote_arg))
+            StepKind::InheritEnv { keys } => {
+                write!(f, "{} [{}]", KEYWORD_INHERIT_ENV, keys.join(", "))
             }
-            StepKind::Run(c) => write!(f, "RUN {}", fmt_value(c, quote_run)),
+            StepKind::Workdir(a) => write!(f, "{} {}", KEYWORD_WORKDIR, fmt_value(a, quote_arg)),
+            StepKind::Workspace(t) => write!(f, "{} {}", KEYWORD_WORKSPACE, t),
+            StepKind::Env { key, value } => {
+                write!(f, "{} {}={}", KEYWORD_ENV, key, fmt_value(value, quote_arg))
+            }
+            StepKind::Run(c) => write!(f, "{} {}", KEYWORD_RUN, fmt_value(c, quote_run)),
             StepKind::RunExec { argv } => {
                 let parts: Vec<String> = argv.iter().map(fmt_exec_arg).collect();
-                write!(f, "RUN [{}]", parts.join(", "))
+                write!(f, "{} [{}]", KEYWORD_RUN, parts.join(", "))
             }
-            StepKind::Echo(m) => write!(f, "ECHO {}", fmt_value(m, quote_msg)),
+            StepKind::Echo(m) => write!(f, "{} {}", KEYWORD_ECHO, fmt_value(m, quote_msg)),
             StepKind::Copy {
                 from_workspace,
                 from_host,
@@ -4783,7 +4798,7 @@ impl fmt::Display for StepKind {
                 from,
                 to,
             } => {
-                let mut head = String::from("COPY");
+                let mut head = String::from(KEYWORD_COPY);
                 if let Some(target) = from_workspace {
                     head.push_str(&format!(" --from-workspace {target}"));
                 }
@@ -4808,7 +4823,8 @@ impl fmt::Display for StepKind {
                 if let Some(target) = from_workspace {
                     write!(
                         f,
-                        "SYMLINK --from-workspace {} {} {}",
+                        "{} --from-workspace {} {} {}",
+                        KEYWORD_SYMLINK,
                         target,
                         fmt_value(from, quote_arg),
                         fmt_value(to, quote_arg)
@@ -4816,34 +4832,43 @@ impl fmt::Display for StepKind {
                 } else {
                     write!(
                         f,
-                        "SYMLINK {} {}",
+                        "{} {} {}",
+                        KEYWORD_SYMLINK,
                         fmt_value(from, quote_arg),
                         fmt_value(to, quote_arg)
                     )
                 }
             }
-            StepKind::Mkdir(a) => write!(f, "MKDIR {}", fmt_value(a, quote_arg)),
+            StepKind::Mkdir(a) => write!(f, "{} {}", KEYWORD_MKDIR, fmt_value(a, quote_arg)),
             StepKind::Install { from, to } => write!(
                 f,
-                "INSTALL {} {}",
+                "{} {} {}",
+                KEYWORD_INSTALL,
                 fmt_value(from, quote_arg),
                 fmt_value(to, quote_arg)
             ),
             StepKind::SetExecutable { path } => {
-                write!(f, "SET_EXECUTABLE {}", fmt_value(path, quote_arg))
+                write!(
+                    f,
+                    "{} {}",
+                    KEYWORD_SET_EXECUTABLE,
+                    fmt_value(path, quote_arg)
+                )
             }
             StepKind::Archive { src, dst, raw } => {
                 if *raw {
                     write!(
                         f,
-                        "ARCHIVE --raw {} {}",
+                        "{} --raw {} {}",
+                        KEYWORD_ARCHIVE,
                         fmt_value(src, quote_arg),
                         fmt_value(dst, quote_arg)
                     )
                 } else {
                     write!(
                         f,
-                        "ARCHIVE {} {}",
+                        "{} {} {}",
+                        KEYWORD_ARCHIVE,
                         fmt_value(src, quote_arg),
                         fmt_value(dst, quote_arg)
                     )
@@ -4854,7 +4879,7 @@ impl fmt::Display for StepKind {
                 dst,
                 max_bytes,
             } => {
-                write!(f, "UNARCHIVE")?;
+                write!(f, "{KEYWORD_UNARCHIVE}")?;
                 if let Some(n) = max_bytes {
                     write!(f, " --max-bytes {}", fmt_value(n, quote_arg))?;
                 }
@@ -4866,40 +4891,46 @@ impl fmt::Display for StepKind {
                 )
             }
             StepKind::Ls(a) => {
-                write!(f, "LS")?;
+                write!(f, "{KEYWORD_LS}")?;
                 if let Some(x) = a {
                     write!(f, " {}", fmt_value(x, quote_arg))?;
                 }
                 Ok(())
             }
             StepKind::Read(a) => {
-                write!(f, "READ")?;
+                write!(f, "{KEYWORD_READ}")?;
                 if let Some(x) = a {
                     write!(f, " {}", fmt_value(x, quote_arg))?;
                 }
                 Ok(())
             }
-            StepKind::ReadLine { var } => write!(f, "READ_LINE ${}", var),
+            StepKind::ReadLine { var } => write!(f, "{} ${}", KEYWORD_READ_LINE, var),
             StepKind::Prompt {
                 var,
                 message,
                 default,
             } => {
-                write!(f, "PROMPT ${} {}", var, fmt_value(message, quote_arg))?;
+                write!(
+                    f,
+                    "{} ${} {}",
+                    KEYWORD_PROMPT,
+                    var,
+                    fmt_value(message, quote_arg)
+                )?;
                 if let Some(d) = default {
                     write!(f, " {}", fmt_value(d, quote_arg))?;
                 }
                 Ok(())
             }
             StepKind::Write { path, contents } => {
-                write!(f, "WRITE {}", fmt_value(path, quote_arg))?;
+                write!(f, "{} {}", KEYWORD_WRITE, fmt_value(path, quote_arg))?;
                 if let Some(b) = contents {
                     write!(f, " {}", fmt_value(b, quote_msg))?;
                 }
                 Ok(())
             }
             StepKind::Append { path, contents } => {
-                write!(f, "APPEND {}", fmt_value(path, quote_arg))?;
+                write!(f, "{} {}", KEYWORD_APPEND, fmt_value(path, quote_arg))?;
                 if let Some(b) = contents {
                     write!(f, " {}", fmt_value(b, quote_msg))?;
                 }
@@ -4908,20 +4939,26 @@ impl fmt::Display for StepKind {
             StepKind::AppendLine { path, contents } => {
                 write!(
                     f,
-                    "APPEND_LINE {} {}",
+                    "{} {} {}",
+                    KEYWORD_APPEND_LINE,
                     fmt_value(path, quote_arg),
                     fmt_value(contents, quote_msg)
                 )
             }
             StepKind::Remove { path, recursive } => {
                 if *recursive {
-                    write!(f, "REMOVE --recursive {}", fmt_value(path, quote_arg))
+                    write!(
+                        f,
+                        "{} --recursive {}",
+                        KEYWORD_REMOVE,
+                        fmt_value(path, quote_arg)
+                    )
                 } else {
-                    write!(f, "REMOVE {}", fmt_value(path, quote_arg))
+                    write!(f, "{} {}", KEYWORD_REMOVE, fmt_value(path, quote_arg))
                 }
             }
             StepKind::Expand { path, overrides } => {
-                write!(f, "EXPAND")?;
+                write!(f, "{KEYWORD_EXPAND}")?;
                 if let Some(p) = path {
                     write!(f, " {}", fmt_value(p, quote_arg))?;
                 }
@@ -4941,8 +4978,8 @@ impl fmt::Display for StepKind {
                 expected,
             } => {
                 let verb = match self {
-                    StepKind::AssertEq { .. } => Command::AssertEq.as_str(),
-                    _ => Command::AssertNe.as_str(),
+                    StepKind::AssertEq { .. } => KEYWORD_ASSERT_EQ,
+                    _ => KEYWORD_ASSERT_NE,
                 };
                 if let Some(d) = hash {
                     write!(f, "{verb} --hash {d} {}", fmt_assert_target(actual))?;
@@ -4964,17 +5001,17 @@ impl fmt::Display for StepKind {
             StepKind::AssertContains { haystack, needle } => write!(
                 f,
                 "{} {} {}",
-                Command::AssertContains.as_str(),
+                KEYWORD_ASSERT_CONTAINS,
                 fmt_assert_target(haystack),
                 fmt_value(needle, quote_msg)
             ),
             StepKind::WithIo { bindings, cmd } => {
                 let p: Vec<String> = bindings.iter().map(fmt_io).collect();
-                write!(f, "WITH_IO [{}] {}", p.join(", "), cmd)
+                write!(f, "{} [{}] {}", KEYWORD_WITH_IO, p.join(", "), cmd)
             }
             StepKind::WithIoBlock { bindings } => {
                 let p: Vec<String> = bindings.iter().map(fmt_io).collect();
-                write!(f, "WITH_IO [{}] {{...}}", p.join(", "))
+                write!(f, "{} [{}] {{...}}", KEYWORD_WITH_IO, p.join(", "))
             }
             StepKind::CopyGit {
                 rev,
@@ -4985,7 +5022,8 @@ impl fmt::Display for StepKind {
                 if *include_dirty {
                     write!(
                         f,
-                        "COPY_GIT --include-dirty {} {} {}",
+                        "{} --include-dirty {} {} {}",
+                        KEYWORD_COPY_GIT,
                         fmt_value(rev, quote_arg),
                         fmt_value(from, quote_arg),
                         fmt_value(to, quote_arg)
@@ -4993,17 +5031,20 @@ impl fmt::Display for StepKind {
                 } else {
                     write!(
                         f,
-                        "COPY_GIT {} {} {}",
+                        "{} {} {} {}",
+                        KEYWORD_COPY_GIT,
                         fmt_value(rev, quote_arg),
                         fmt_value(from, quote_arg),
                         fmt_value(to, quote_arg)
                     )
                 }
             }
-            StepKind::Exit(code) => write!(f, "EXIT {}", fmt_raw_arg(code)),
-            StepKind::Sleep { duration } => write!(f, "SLEEP {}", fmt_raw_arg(duration)),
+            StepKind::Exit(code) => write!(f, "{} {}", KEYWORD_EXIT, fmt_raw_arg(code)),
+            StepKind::Sleep { duration } => {
+                write!(f, "{} {}", KEYWORD_SLEEP, fmt_raw_arg(duration))
+            }
             StepKind::ListAppend { list, item } => {
-                write!(f, "LIST_APPEND ${} {}", list, fmt_raw_arg(item))
+                write!(f, "{} ${} {}", KEYWORD_LIST_APPEND, list, fmt_raw_arg(item))
             }
             StepKind::For {
                 key_var,
@@ -5018,11 +5059,15 @@ impl fmt::Display for StepKind {
                         let kt = key_type.as_deref().unwrap_or("STRING");
                         write!(
                             f,
-                            "FOR ${}: {}, ${}: {} IN {} {{",
-                            k, kt, var, var_type, in_expr
+                            "{} ${}: {}, ${}: {} IN {} {{",
+                            KEYWORD_FOR, k, kt, var, var_type, in_expr
                         )?
                     }
-                    None => write!(f, "FOR ${}: {} IN {} {{", var, var_type, in_expr)?,
+                    None => write!(
+                        f,
+                        "{} ${}: {} IN {} {{",
+                        KEYWORD_FOR, var, var_type, in_expr
+                    )?,
                 }
                 for s in body {
                     write!(f, "\n    {}", s)?;
@@ -5035,20 +5080,20 @@ impl fmt::Display for StepKind {
                 else_ifs,
                 else_body,
             } => {
-                write!(f, "IF {} {{", cond)?;
+                write!(f, "{} {} {{", KEYWORD_IF, cond)?;
                 for s in then_body {
                     write!(f, "\n    {}", s)?;
                 }
                 write!(f, " }}")?;
                 for (c, b) in else_ifs {
-                    write!(f, " ELSE IF {} {{", c)?;
+                    write!(f, " {} {} {} {{", KEYWORD_ELSE, KEYWORD_IF, c)?;
                     for s in b {
                         write!(f, "\n    {}", s)?;
                     }
                     write!(f, " }}")?;
                 }
                 if let Some(b) = else_body {
-                    write!(f, " ELSE {{")?;
+                    write!(f, " {} {{", KEYWORD_ELSE)?;
                     for s in b {
                         write!(f, "\n    {}", s)?;
                     }
@@ -5062,11 +5107,11 @@ impl fmt::Display for StepKind {
                 default_body,
             } => {
                 match discriminant {
-                    Some(disc) => write!(f, "SWITCH {} {{", disc)?,
-                    None => write!(f, "SWITCH {{")?,
+                    Some(disc) => write!(f, "{} {} {{", KEYWORD_SWITCH, disc)?,
+                    None => write!(f, "{} {{", KEYWORD_SWITCH)?,
                 }
                 for (exprs, body) in cases {
-                    write!(f, " CASE ")?;
+                    write!(f, " {} ", KEYWORD_CASE)?;
                     for (i, expr) in exprs.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
@@ -5080,7 +5125,7 @@ impl fmt::Display for StepKind {
                     write!(f, " }}")?;
                 }
                 if let Some(b) = default_body {
-                    write!(f, " DEFAULT {{")?;
+                    write!(f, " {} {{", KEYWORD_DEFAULT)?;
                     for s in b {
                         write!(f, "\n    {}", s)?;
                     }
@@ -5095,9 +5140,9 @@ impl fmt::Display for StepKind {
             } => {
                 // Bare pipe declarations round-trip without an initializer.
                 if matches!(expr, Expr::FreshPipe) {
-                    write!(f, "LET ${}: {}", var, decl_type)
+                    write!(f, "{} ${}: {}", KEYWORD_LET, var, decl_type)
                 } else {
-                    write!(f, "LET ${}: {} = {}", var, decl_type, expr)
+                    write!(f, "{} ${}: {} = {}", KEYWORD_LET, var, decl_type, expr)
                 }
             }
             StepKind::Set { var, expr } => write!(f, "${} = {}", var, expr),
@@ -5106,10 +5151,10 @@ impl fmt::Display for StepKind {
                 decl_type,
                 cmd,
             } => {
-                write!(f, "LET ${}: {} = {}", var, decl_type, cmd)
+                write!(f, "{} ${}: {} = {}", KEYWORD_LET, var, decl_type, cmd)
             }
             StepKind::AsyncBlock { body } => {
-                write!(f, "ASYNC {{")?;
+                write!(f, "{} {{", KEYWORD_ASYNC)?;
                 for s in body {
                     write!(f, "\n    {}", s)?;
                 }
@@ -5120,30 +5165,38 @@ impl fmt::Display for StepKind {
                 decl_type,
                 body,
             } => {
-                write!(f, "LET ${}: {} = ASYNC {{", var, decl_type)?;
+                write!(
+                    f,
+                    "{} ${}: {} = {} {{",
+                    KEYWORD_LET, var, decl_type, KEYWORD_ASYNC
+                )?;
                 for s in body {
                     write!(f, "\n    {}", s)?;
                 }
                 write!(f, "\n}}")
             }
-            StepKind::Await { var } => write!(f, "AWAIT ${}", var),
+            StepKind::Await { var } => write!(f, "{} ${}", KEYWORD_AWAIT, var),
             StepKind::AwaitCapture {
                 out_var,
                 out_type,
                 task_var,
             } => {
-                write!(f, "LET ${}: {} = AWAIT ${}", out_var, out_type, task_var)
+                write!(
+                    f,
+                    "{} ${}: {} = {} ${}",
+                    KEYWORD_LET, out_var, out_type, KEYWORD_AWAIT, task_var
+                )
             }
-            StepKind::Cancel { var } => write!(f, "CANCEL ${}", var),
+            StepKind::Cancel { var } => write!(f, "{} ${}", KEYWORD_CANCEL, var),
             StepKind::Timeout { duration, body } => {
                 let budget = fmt_raw_arg(duration);
                 // Single-command form cannot carry an inner guard (the
                 // grammar has no guard slot there), so guarded singles
                 // take block form rather than silently dropping it.
                 if body.len() == 1 && body[0].guard.is_none() {
-                    write!(f, "TIMEOUT {} {}", budget, body[0].kind)
+                    write!(f, "{} {} {}", KEYWORD_TIMEOUT, budget, body[0].kind)
                 } else {
-                    write!(f, "TIMEOUT {} {{", budget)?;
+                    write!(f, "{} {} {{", KEYWORD_TIMEOUT, budget)?;
                     for s in body {
                         write!(f, "\n    {}", s)?;
                     }
@@ -5152,9 +5205,9 @@ impl fmt::Display for StepKind {
             }
             StepKind::Isolated { body } => {
                 if body.len() == 1 && body[0].guard.is_none() {
-                    write!(f, "ISOLATED {}", body[0].kind)
+                    write!(f, "{} {}", KEYWORD_ISOLATED, body[0].kind)
                 } else {
-                    write!(f, "ISOLATED {{")?;
+                    write!(f, "{} {{", KEYWORD_ISOLATED)?;
                     for s in body {
                         write!(f, "\n    {}", s)?;
                     }
@@ -5165,7 +5218,7 @@ impl fmt::Display for StepKind {
                 // Deliberately the prelude spelling: the node only ever
                 // renders nested inside ISOLATED Display, where readers
                 // see the enclosing block for what it is.
-                write!(f, "INHERIT_ENV [{}]", keys.join(", "))
+                write!(f, "{} [{}]", KEYWORD_INHERIT_ENV, keys.join(", "))
             }
             StepKind::RemoteBlock {
                 target,
@@ -5176,9 +5229,9 @@ impl fmt::Display for StepKind {
                 let mut entries: Vec<String> = vars.iter().map(|v| format!("${v}")).collect();
                 entries.extend(env.iter().map(|e| format!("env:{e}")));
                 if entries.is_empty() {
-                    write!(f, "REMOTE {target} {{")?;
+                    write!(f, "{} {target} {{", KEYWORD_REMOTE)?;
                 } else {
-                    write!(f, "REMOTE {target} [{}] {{", entries.join(", "))?;
+                    write!(f, "{} {target} [{}] {{", KEYWORD_REMOTE, entries.join(", "))?;
                 }
                 for s in body {
                     write!(f, "\n    {}", s)?;
@@ -5210,13 +5263,22 @@ impl fmt::Display for StepKind {
                 if *is_async {
                     write!(
                         f,
-                        "ASYNC FUNC {}({}): {} {{",
+                        "{} {} {}({}): {} {{",
+                        KEYWORD_ASYNC,
+                        KEYWORD_FUNC,
                         name,
                         ps.join(", "),
                         return_type
                     )?;
                 } else {
-                    write!(f, "FUNC {}({}): {} {{", name, ps.join(", "), return_type)?;
+                    write!(
+                        f,
+                        "{} {}({}): {} {{",
+                        KEYWORD_FUNC,
+                        name,
+                        ps.join(", "),
+                        return_type
+                    )?;
                 }
                 for s in body {
                     write!(f, "\n    {}", s)?;
@@ -5228,7 +5290,7 @@ impl fmt::Display for StepKind {
                 write!(f, "{}({})", name, ps.join(", "))
             }
             StepKind::ImportFile { path, alias } => {
-                write!(f, "IMPORT [\"{}\" AS {}]", path, alias)
+                write!(f, "{} [\"{}\" AS {}]", KEYWORD_IMPORT, path, alias)
             }
             StepKind::ImportFuncs {
                 path,
@@ -5238,7 +5300,7 @@ impl fmt::Display for StepKind {
             } => {
                 let mut parts: Vec<String> = Vec::new();
                 for t in type_names {
-                    parts.push(format!("TYPE {t}"));
+                    parts.push(format!("{KEYWORD_TYPE} {t}"));
                 }
                 for n in func_names {
                     parts.push(n.clone());
@@ -5246,31 +5308,40 @@ impl fmt::Display for StepKind {
                 match alias {
                     Some(alias) => write!(
                         f,
-                        "IMPORT [[{} FROM \"{}\" AS {}]]",
+                        "{} [[{} FROM \"{}\" AS {}]]",
+                        KEYWORD_IMPORT,
                         parts.join(", "),
                         path,
                         alias
                     ),
-                    None => write!(f, "IMPORT [[{} FROM \"{}\"]]", parts.join(", "), path),
+                    None => write!(
+                        f,
+                        "{} [[{} FROM \"{}\"]]",
+                        KEYWORD_IMPORT,
+                        parts.join(", "),
+                        path
+                    ),
                 }
             }
             StepKind::Return { expr, is_bare } => {
                 if *is_bare {
-                    write!(f, "RETURN")
+                    write!(f, "{KEYWORD_RETURN}")
                 } else {
-                    write!(f, "RETURN {}", expr)
+                    write!(f, "{} {}", KEYWORD_RETURN, expr)
                 }
             }
-            StepKind::TypeAlias { name, target } => write!(f, "TYPE {} = {}", name, target),
+            StepKind::TypeAlias { name, target } => {
+                write!(f, "{} {} = {}", KEYWORD_TYPE, name, target)
+            }
             StepKind::While { cond, body } => {
-                write!(f, "WHILE {} {{", cond)?;
+                write!(f, "{} {} {{", KEYWORD_WHILE, cond)?;
                 for s in body {
                     write!(f, "\n    {}", s)?;
                 }
                 write!(f, "\n}}")
             }
-            StepKind::Break => write!(f, "BREAK"),
-            StepKind::Continue => write!(f, "CONTINUE"),
+            StepKind::Break => write!(f, "{KEYWORD_BREAK}"),
+            StepKind::Continue => write!(f, "{KEYWORD_CONTINUE}"),
         }
     }
 }
@@ -5287,7 +5358,7 @@ pub(crate) enum InsToken {
 pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<StepKind> {
     if tokens.is_empty() {
         return Err(ParseError::validation(
-            "ENV",
+            KEYWORD_ENV,
             "ENV requires KEY=value".to_string(),
             ctx,
         ));
@@ -5297,11 +5368,11 @@ pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> Pars
             // Same KEY=value check the ENV lower applies on the
             // `lower_command` path, over the joined assignment form.
             if crate::command::split_assignment(&format!("{key}={}", value.render()))
-                .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
+                .map_err(|e| ParseError::validation(KEYWORD_ENV, e.to_string(), ctx))?
                 .is_none()
             {
                 return Err(ParseError::validation(
-                    "ENV",
+                    KEYWORD_ENV,
                     "ENV requires KEY=value format".to_string(),
                     ctx,
                 ));
@@ -5312,17 +5383,17 @@ pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> Pars
             })
         }
         [InsToken::Pos(Arg::String(text, _))] => match crate::command::split_assignment(text)
-            .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
+            .map_err(|e| ParseError::validation(KEYWORD_ENV, e.to_string(), ctx))?
         {
             Some((key, value)) => Ok(StepKind::Env { key, value }),
             None => Err(ParseError::validation(
-                "ENV",
+                KEYWORD_ENV,
                 "ENV requires KEY=value format".to_string(),
                 ctx,
             )),
         },
         _ => Err(ParseError::validation(
-            "ENV",
+            KEYWORD_ENV,
             "ENV requires KEY=value format".to_string(),
             ctx,
         )),
@@ -5343,7 +5414,7 @@ pub(crate) fn lower_expand_tokens(
             InsToken::Assign(key, value) => {
                 if key.is_empty() {
                     return Err(ParseError::validation(
-                        "EXPAND",
+                        KEYWORD_EXPAND,
                         "EXPAND requires KEY=value format for overrides".to_string(),
                         ctx,
                     ));
@@ -5353,10 +5424,10 @@ pub(crate) fn lower_expand_tokens(
             InsToken::Pos(arg) => match &arg {
                 Arg::String(text, quoted) if !quoted && text.contains('=') => {
                     let Some((key, value)) = crate::command::split_assignment(text)
-                        .map_err(|e| ParseError::validation("EXPAND", e.to_string(), ctx))?
+                        .map_err(|e| ParseError::validation(KEYWORD_EXPAND, e.to_string(), ctx))?
                     else {
                         return Err(ParseError::validation(
-                            "EXPAND",
+                            KEYWORD_EXPAND,
                             "EXPAND requires KEY=value format for overrides".to_string(),
                             ctx,
                         ));
@@ -5368,13 +5439,13 @@ pub(crate) fn lower_expand_tokens(
                         // Path-typed positional, checked like every other
                         // `lower_command` path arg (literals always pass;
                         // resolution stays runtime).
-                        ArgType::Path
-                            .check_arg(&arg)
-                            .map_err(|e| ParseError::validation("EXPAND", e.to_string(), ctx))?;
+                        ArgType::Path.check_arg(&arg).map_err(|e| {
+                            ParseError::validation(KEYWORD_EXPAND, e.to_string(), ctx)
+                        })?;
                         path = Some(arg);
                     } else {
                         return Err(ParseError::validation(
-                            "EXPAND",
+                            KEYWORD_EXPAND,
                             "EXPAND accepts at most one path".to_string(),
                             ctx,
                         ));

@@ -74,7 +74,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
-use oxdock_parser::constants::{KEYWORD_BREAK, KEYWORD_CONTINUE};
+use oxdock_parser::constants::{KEYWORD_BREAK, KEYWORD_CONTINUE, KEYWORD_IMPORT};
 use oxdock_parser::template::{
     PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
 };
@@ -2499,7 +2499,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
         let scope = Scope {
             label,
-            ret: RetCtx::Func("IMPORT".to_string()),
+            ret: RetCtx::Func(KEYWORD_IMPORT.to_string()),
             loops: 0,
             switches: 0,
             site: None,
