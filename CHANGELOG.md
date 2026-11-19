@@ -7,9 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Added
+
+- `STD::IS_FILE($path)`, `STD::IS_DIR($path)`, and `STD::EXISTS($path)` predicates (#310): no-follow workspace probes sharing `PATH_TYPE`'s rule, so a symlink is neither file nor directory (false for `IS_FILE`/`IS_DIR`, true for `EXISTS`). Missing or unresolvable paths read false, never error. AST-only like `PATH_TYPE`: there is no RPN arm for filesystem IO.
+- `STD::PATH_BASE($path)` and `STD::PATH_REL($base, $path)` lexical path builtins (pure, #310): no filesystem access, so both run in templates like every pure builtin. `PATH_BASE` binds the final segment (backslashes normalize to slashes, trailing slashes trim with root staying `/`); empty input fails. `PATH_REL` binds the remainder of `$path` below `$base` on a segment boundary, with equal paths binding `.`; non-prefix inputs, mixed absolute/relative shapes, and `..` segments fail closed naming both sides.
+- Entry-tree import reads for explicitly named scripts (#310): when the script file lives outside the workspace root, top-level `IMPORT`s probe the entry directory first and read through a narrow import-only exemption — each resolved path stays guard-checked under its own root while general file ops keep workspace containment. Sibling imports next to a staged entry load; without one, resolution falls back to the workspace root as before. The fallback only fires on host-backed filesystems, so synthetic backends (mocks, embedded content) fail closed with the original error instead of probing the host disk.
+- `ALIAS` alternate spellings for `TYPE FLAGS` fields (#310): `MAP<h: BOOL ALIAS help>` accepts `--h` and `--help` (short `-h` included) on the command line and binds one canonical key (`h`) in the parsed map. Canonical and alias together fail as duplicate naming both spellings; a missing required flag with an alias names both (`--h/--help`). The rule is shared by `PARSE_ARGS`, `PARSE_FLAGS`, and `PARSE_POSITIONALS`; unknown flags still fail, `= default` fills when neither spelling is present, and aliases compose with `?` optionals. Aliases ride named `MAP` fields only and render in canonical spellings.
+- `WorkspaceFs::is_host_backed()` (Host Rust API only, scripts are unaffected): reports whether a filesystem backend reads from the host OS disk. Defaults to false so synthetic backends stay hermetic; `PathResolver` opts in, gating the entry-tree import fallback above.
+
 ### Changed
 
 - [breaking] Scripts are affected: `STD::TEXT_CONTAINS` is removed in favor of polymorphic `STD::CONTAINS`, which dispatches on the haystack like `LEN`: `STRING` does a literal substring search while `LIST<ANY>` compares members with strict `values_equal` (numerics compare across `INT`/`FLOAT`, every other cross-type pair is unequal, matching `==` and `SWITCH`). Update string call sites from `TEXT_CONTAINS($text, $needle)` to `CONTAINS($text, $needle)`; list call sites replace hand-rolled `FOR` plus flag loops with `CONTAINS($list, $needle)`.
+
+### Fixed
+
+- `SWITCH CASE` with a missing value fails at parse time naming the miss (`SWITCH CASE requires a value or condition before '{'`) instead of consuming the arm body as a block expression and failing later at runtime.
 
 ## [0.42.0-alpha] - 2026-11-18
 
