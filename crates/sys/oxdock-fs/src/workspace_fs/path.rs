@@ -188,7 +188,9 @@ impl GuardedPath {
     }
 
     /// Join a CLI script argument: relative paths resolve under the
-    /// guard root (existing behavior); absolute paths re-root at
+    /// guard root (existing behavior); absolute paths inside the guard
+    /// root keep it, so the entry resolves exactly like its relative
+    /// spelling. Only absolute paths outside the root re-root at
     /// their own parent, so an explicit location loads like stdin
     /// text instead of failing guard containment. Never creates
     /// directories: a missing parent fails instead of materializing
@@ -198,6 +200,21 @@ impl GuardedPath {
         let raw = Path::new(text);
         if !raw.is_absolute() {
             return self.join(text);
+        }
+        // Absolute paths inside the guard root keep the root: the
+        // entry participates in the workspace exactly like its
+        // relative spelling, so parent-relative IMPORTs (`../shared`)
+        // keep resolving instead of escaping a parent-scoped root.
+        // Only genuinely outside paths re-root at their own parent.
+        // Host check only (mirrors the pre-emption below): the
+        // missing-parent early error must survive, so an absent
+        // parent skips the keep-root attempt entirely.
+        #[cfg(not(miri))]
+        if let Some(parent) = raw.parent()
+            && parent.exists()
+            && let Ok(guarded) = Self::new(&self.root, raw)
+        {
+            return Ok(guarded);
         }
         let parent = raw
             .parent()
@@ -1184,6 +1201,30 @@ mod tests {
         let root = temp.as_guarded_path().clone();
         let scripted = root.join_script("sub/step.ox").expect("relative");
         assert_eq!(scripted, root.join("sub/step.ox").expect("join"));
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[cfg_attr(
+        miri,
+        ignore = "asserts host directories are created; blocked under Miri isolation"
+    )]
+    fn join_script_keeps_root_for_absolute_paths_inside_it() {
+        // Absolute entries inside the workspace resolve exactly like
+        // their relative spelling (same guard root), so
+        // parent-relative IMPORTs (`../shared`) keep resolving no
+        // matter how the entry was spelled on the command line.
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        std::fs::create_dir_all(root.as_path().join("sub")).expect("subdir");
+        let text = root
+            .as_path()
+            .join("sub/step.ox")
+            .to_string_lossy()
+            .into_owned();
+        let scripted = root.join_script(&text).expect("absolute inside root");
+        assert_eq!(scripted, root.join("sub/step.ox").expect("join"));
+        assert_eq!(scripted.root(), root.as_path());
     }
 
     #[test]
