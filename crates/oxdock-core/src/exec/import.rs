@@ -1644,8 +1644,22 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
         );
     }
     let Some(file) = holders.into_iter().next() else {
-        let hint = state.modules.values().flat_map(|record| {
-            record.init.as_ref().and_then(|init| {
+        // Hint only from the queried alias's own files: an unexported
+        // CONST or private LET in an unrelated module must not supply
+        // misleading text on a typo under a different alias.
+        let hint = targets
+            .get(alias)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|(file, _)| file.as_ref())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|file| state.modules.get(*file))
+            .filter_map(|record| record.init.as_ref())
+            .find_map(|init| {
                 init.vars.get(name).map(|_| {
                     if init.const_vars.contains(name) {
                         format!("module holds `{name}` as CONST but does not export it: add `EXPORT CONST {name}`")
@@ -1653,8 +1667,7 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
                         format!("`{name}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary")
                     }
                 })
-            })
-        }).next();
+            });
         match hint {
             Some(hint) => bail!("unknown CONST `${qualified}`: {hint}"),
             None => {

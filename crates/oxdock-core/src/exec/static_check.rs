@@ -4449,8 +4449,24 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         match tags.into_iter().next() {
             Some(tag) => Ok(tag),
             None => {
-                let hint = self.module_lets.values().flat_map(|lets| {
-                    lets.iter().find(|entry| entry.name == name).map(|entry| {
+                // Hint only from the queried alias's own files: an
+                // unexported CONST or private LET in an unrelated
+                // module must not supply misleading text on a typo
+                // under a different alias.
+                let hint = self
+                    .alias_targets
+                    .get(alias)
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|(file, _)| file.as_deref())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|file| self.module_lets.get(*file))
+                    .flat_map(|lets| lets.iter().find(|entry| entry.name == name))
+                    .map(|entry| {
                         if entry.is_const {
                             format!(
                                 "module holds `{name}` as CONST but does not export it: add `EXPORT CONST {name}`"
@@ -4461,7 +4477,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             )
                         }
                     })
-                }).next();
+                    .next();
                 match hint {
                     Some(hint) => bail!("{}: unknown CONST `${qualified}`: {hint}", at()),
                     None => bail!(
