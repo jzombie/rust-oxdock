@@ -81,6 +81,8 @@ fn schema_nesting_projects() {
                 docs: "",
                 optional: false,
                 default: None,
+
+                alias: None,
             },
             oxdock_parser::Field {
                 name: "nick".to_string(),
@@ -88,6 +90,8 @@ fn schema_nesting_projects() {
                 docs: "",
                 optional: true,
                 default: None,
+
+                alias: None,
             },
         ]
         .into(),

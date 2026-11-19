@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- [breaking] Scripts are affected: `STD::TEXT_CONTAINS` is removed in favor of polymorphic `STD::CONTAINS`, which dispatches on the haystack like `LEN`: `STRING` does a literal substring search while `LIST<ANY>` compares members with strict `values_equal` (numerics compare across `INT`/`FLOAT`, every other cross-type pair is unequal, matching `==` and `SWITCH`). Update string call sites from `TEXT_CONTAINS($text, $needle)` to `CONTAINS($text, $needle)`; list call sites replace hand-rolled `FOR` plus flag loops with `CONTAINS($list, $needle)`.
+
 ## [0.42.0-alpha] - 2026-11-18
 
 ### Added

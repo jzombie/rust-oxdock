@@ -4849,6 +4849,8 @@ mod tests {
                     docs: "",
                     optional: false,
                     default: None,
+
+                    alias: None,
                 }]
                 .into(),
             ),
@@ -4894,6 +4896,8 @@ mod tests {
                         docs: "",
                         optional: false,
                         default: None,
+
+                        alias: None,
                     },
                     oxdock_parser::Field {
                         name: "opt".to_string(),
@@ -4901,6 +4905,8 @@ mod tests {
                         docs: "",
                         optional: true,
                         default: None,
+
+                        alias: None,
                     },
                 ]
                 .into(),

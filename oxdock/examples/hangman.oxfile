@@ -46,7 +46,7 @@ FUNC PLAY(): BOOL {
         LET $shown: STRING = ""
 
         FOR $j: INT, $ch: STRING IN $chars {
-            IF TEXT_CONTAINS($known, $ch) {
+            IF CONTAINS($known, $ch) {
                 $shown = "{{ $shown }}{{ $ch }} "
             } ELSE {
                 $shown = "{{ $shown }}_ "
@@ -73,14 +73,14 @@ FUNC PLAY(): BOOL {
 
         LET $seen: STRING = TEXT_JOIN($guessed, "")
 
-        IF TEXT_CONTAINS($seen, $letter) {
+        IF CONTAINS($seen, $letter) {
             ECHO "Already guessed {{ $letter }}."
             CONTINUE
         }
 
         LIST_APPEND $guessed $letter
 
-        IF TEXT_CONTAINS($secret, $letter) {
+        IF CONTAINS($secret, $letter) {
             ECHO "Hit!"
         } ELSE {
             $misses = $misses + 1

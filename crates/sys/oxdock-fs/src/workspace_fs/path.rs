@@ -786,6 +786,88 @@ pub fn to_forward_slashes(s: &str) -> String {
     s.replace('\\', "/")
 }
 
+/// Final segment of a lexical path (`PATH_BASE`).
+/// Pure string surgery with no filesystem access: backslashes normalize
+/// to slashes, trailing slashes trim (root stays `/`), then the text
+/// after the last slash binds. Empty input fails closed.
+pub fn path_base(path: &str) -> Result<String> {
+    if path.is_empty() {
+        anyhow::bail!("PATH_BASE needs a non-empty path");
+    }
+    let normalized = to_forward_slashes(path);
+    let trimmed = normalized.trim_end_matches('/');
+    if trimmed.is_empty() {
+        if normalized.starts_with('/') {
+            return Ok("/".to_string());
+        }
+        anyhow::bail!("PATH_BASE needs a non-empty path");
+    }
+    match trimmed.rfind('/') {
+        Some(idx) => Ok(trimmed[idx + 1..].to_string()),
+        None => Ok(trimmed.to_string()),
+    }
+}
+
+/// Lexical relativization (`PATH_REL`): remainder of `path` below `base`.
+/// Pure string surgery with no filesystem access: both sides normalize
+/// backslashes to slashes, trim trailing slashes (root stays `/`), split
+/// on slashes ignoring empty and `.` segments, then require `base`
+/// segments prefix `path` segments on a segment boundary. Equal paths bind
+/// `.`; non-prefix inputs fail closed naming both sides. Absolute and
+/// relative shapes never mix.
+pub fn path_rel(base: &str, path: &str) -> Result<String> {
+    if base.is_empty() || path.is_empty() {
+        anyhow::bail!("PATH_REL needs non-empty base and path");
+    }
+    let norm_base = to_forward_slashes(base);
+    let norm_path = to_forward_slashes(path);
+    let trim_root = |s: &str| -> String {
+        let t = s.trim_end_matches('/');
+        if t.is_empty() && s.starts_with('/') {
+            "/".to_string()
+        } else {
+            t.to_string()
+        }
+    };
+    let clean_base = trim_root(&norm_base);
+    let clean_path = trim_root(&norm_path);
+    let split = |s: &str| -> Result<(bool, Vec<String>)> {
+        let absolute = s.starts_with('/');
+        let mut segs = Vec::new();
+        for seg in s.split('/') {
+            if seg.is_empty() || seg == "." {
+                continue;
+            }
+            // `..` never relativizes: it escapes the base lexically, so
+            // fail closed naming both sides instead of emitting `../`.
+            if seg == ".." {
+                anyhow::bail!(
+                    "PATH_REL base {base:?} is not a prefix of {path:?}: \"..\" segments never relativize"
+                );
+            }
+            segs.push(seg.to_string());
+        }
+        Ok((absolute, segs))
+    };
+    let (base_abs, base_segs) = split(&clean_base)?;
+    let (path_abs, path_segs) = split(&clean_path)?;
+    if base_abs != path_abs {
+        anyhow::bail!(
+            "PATH_REL base {base:?} is not a prefix of {path:?}: absolute and relative shapes never mix"
+        );
+    }
+    if base_segs.len() > path_segs.len()
+        || base_segs.iter().zip(path_segs.iter()).any(|(b, p)| b != p)
+    {
+        anyhow::bail!("PATH_REL base {base:?} is not a prefix of {path:?}");
+    }
+    let rest = &path_segs[base_segs.len()..];
+    if rest.is_empty() {
+        return Ok(".".to_string());
+    }
+    Ok(rest.join("/"))
+}
+
 /// Join a directory and a file name with the host-native separator.
 /// Pure string join with `std::path` semantics and no filesystem
 /// access: the parent may not exist yet. Lives here (not in

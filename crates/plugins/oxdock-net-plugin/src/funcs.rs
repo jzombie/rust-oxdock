@@ -184,7 +184,8 @@ fn net_listen<P: ProcessManager>(
     docs: "True when the connection closed cleanly.",
     optional: false,
     default: None,
-}])), summary = "Accept one connection into pipes.")]
+
+    alias: None,}])), summary = "Accept one connection into pipes.")]
 #[example(
     name = "accept and greet",
     code = r###"
@@ -365,7 +366,8 @@ fn net_close<P: ProcessManager>(cx: &mut StepCtx<P>, listener: NetListenerTag) -
         docs: "True when the connection closed cleanly.",
         optional: false,
         default: None,
-    }])),
+
+        alias: None,}])),
     summary = "Dial a TCP endpoint into pipes.",
 )]
 #[example(
@@ -600,6 +602,8 @@ fn listen_result_fields() -> Arc<[Field]> {
             docs: "Listener handle for `NET_ACCEPT` and `NET_CLOSE`.",
             optional: false,
             default: None,
+
+            alias: None,
         },
         Field {
             name: FIELD_ADDR.to_string(),
@@ -607,6 +611,8 @@ fn listen_result_fields() -> Arc<[Field]> {
             docs: "Bound socket address (`ip:port`), or the virtual endpoint echo when socketless.",
             optional: false,
             default: None,
+
+            alias: None,
         },
         Field {
             name: FIELD_VIRTUAL.to_string(),
@@ -614,6 +620,8 @@ fn listen_result_fields() -> Arc<[Field]> {
             docs: "Virtual endpoint echo of the claimed slot.",
             optional: false,
             default: None,
+
+            alias: None,
         },
     ])
 }

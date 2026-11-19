@@ -404,7 +404,38 @@ impl<P: ProcessManager> ExecState<P> {
                 docs: "",
                 optional: arg.optional,
                 default,
+                alias: arg.alias.clone(),
             });
+        }
+        // Alias uniqueness: one spelling maps to one field. Canonical
+        // names and aliases share one namespace, so a clash fails here
+        // naming both sides instead of shadowing at parse time.
+        {
+            use std::collections::HashMap;
+            let mut seen: HashMap<&str, &str> = HashMap::new();
+            for field in &fields {
+                if let Some(prev) = seen.insert(field.name.as_str(), field.name.as_str()) {
+                    let _ = prev;
+                    bail!("duplicate field '{}' in MAP spelling", field.name);
+                }
+                if let Some(alias) = field.alias.as_ref() {
+                    if alias == &field.name {
+                        bail!(
+                            "alias '{}' duplicates its own field '{}'",
+                            alias,
+                            field.name
+                        );
+                    }
+                    if let Some(owner) = seen.insert(alias.as_str(), field.name.as_str()) {
+                        bail!(
+                            "alias '{}' for field '{}' clashes with '{}'",
+                            alias,
+                            field.name,
+                            owner
+                        );
+                    }
+                }
+            }
         }
         Ok(TypeTag::Record(std::sync::Arc::from(fields)))
     }

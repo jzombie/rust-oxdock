@@ -4179,6 +4179,21 @@ fn parse_type_field(toks: &[Tok], pos: usize) -> Option<usize> {
         }
     }
     let mut p = parse_type_shape(toks, p)?;
+    // Optional `ALIAS name` clause (#310.5): one alternate CLI spelling
+    // for `TYPE FLAGS` fields. Skipped as a unit here so the shape
+    // matcher covers it; the spelling parser owns validation, and the
+    // renderer carries the raw tokens through. Order is fixed:
+    // `TYPE [ALIAS alias] [= default]`. The alias word itself rides
+    // along regardless of case so a miscapitalized alias still reaches
+    // the spelling diagnostic instead of missing to unknown-command.
+    let q = skip_type_nl(toks, p);
+    if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Word(w)) if w == crate::tag::ALIAS_KEYWORD)
+    {
+        p = skip_type_nl(toks, q + 1);
+        if matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Word(_))) {
+            p = skip_type_nl(toks, p + 1);
+        }
+    }
     // Optional `= ...` default tail: consume to the next field
     // delimiter (`,`, `>`, `|` at angle depth zero), tracking `<>`
     // so nested shapes ride along. Any spacing, any tokens:
@@ -4375,6 +4390,18 @@ fn parse_case_values(
             Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
             Err(e) => return Err(e),
         };
+        // A `{ ... }` block is never a case value: without this, a
+        // missing `CASE` value consumes the arm body as a block
+        // expression and fails downstream instead of naming the miss.
+        if matches!(value, Expr::Block(_)) {
+            return Err(TokenError {
+                stmt,
+                line: 0,
+                col: 0,
+                msg: "SWITCH CASE requires a value or condition before '{'".to_string(),
+                kind: None,
+            });
+        }
         values.push(value);
         p = start + vcur.pos;
         let mut gcur = Cursor::expr(&toks[p..], stmt);

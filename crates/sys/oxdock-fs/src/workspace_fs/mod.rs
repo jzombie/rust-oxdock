@@ -190,7 +190,9 @@ pub fn reserve_cargo_scratch() -> Result<CargoScratch> {
 
 pub mod path;
 pub use path::{GuardedPath, GuardedTempDir, LazyGuardedTempDir};
-pub use path::{command_path, embed_path, join_native, normalized_path, to_forward_slashes};
+pub use path::{
+    command_path, embed_path, join_native, normalized_path, path_base, path_rel, to_forward_slashes,
+};
 pub(crate) mod cache;
 pub(crate) mod io;
 pub use io::SpillFile;

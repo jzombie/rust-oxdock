@@ -5401,6 +5401,8 @@ fn resolve_tag_combines_schema_and_alias_leaves() {
         docs: "",
         optional: false,
         default: None,
+
+        alias: None,
     }]);
     state.register_record_schema("EMP", schema_fields);
     state

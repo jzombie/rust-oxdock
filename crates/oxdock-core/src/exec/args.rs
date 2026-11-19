@@ -656,6 +656,30 @@ pub(crate) fn path_type_from_value<P: ProcessManager>(
     Ok(Value::string(kind.to_string()))
 }
 
+/// Shared no-follow probe for `IS_FILE`, `IS_DIR`, and `EXISTS`.
+/// Single owner so all three read identically: resolve failures and
+/// missing entries are `None`, never errors. Symlinks stay distinct:
+/// callers compare against `File` or `Dir`, so a symlink is neither.
+fn path_entry_kind<P: ProcessManager>(cx: &StepCtx<'_, P>, path: &str) -> Option<EntryKind> {
+    let target = cx.state.fs.resolve_write(&cx.state.cwd, path).ok()?;
+    cx.state.fs.entry_kind_no_follow(&target).ok()
+}
+
+/// True iff the path names an ordinary file (no-follow).
+pub(crate) fn path_is_file<P: ProcessManager>(cx: &StepCtx<'_, P>, path: &str) -> bool {
+    matches!(path_entry_kind(cx, path), Some(EntryKind::File))
+}
+
+/// True iff the path names a directory (no-follow).
+pub(crate) fn path_is_dir<P: ProcessManager>(cx: &StepCtx<'_, P>, path: &str) -> bool {
+    matches!(path_entry_kind(cx, path), Some(EntryKind::Dir))
+}
+
+/// True iff the path exists in any form (file, dir, or symlink).
+pub(crate) fn path_exists<P: ProcessManager>(cx: &StepCtx<'_, P>, path: &str) -> bool {
+    path_entry_kind(cx, path).is_some()
+}
+
 /// Value-semantics core of `IS_EXEC()` (#100): true iff the name
 /// resolves to an executable file on the current platform. Bare
 /// command names search `env:PATH` (plus a `.exe` spelling on
