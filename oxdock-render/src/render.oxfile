@@ -10,14 +10,14 @@ IMPORT [STD]
 IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "types.oxfile"]
 
 FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): STRING {
-    LET $clean: BOOL = STD::TEXT_CONTAINS($types, "\\")
+    LET $clean: BOOL = STD::CONTAINS($types, "\\")
     IF $clean {
         ECHO "types path '{{ $types }}' uses backslashes; use forward slashes"
         EXIT 1
     }
     LET $entries: LIST<PLUGIN> = []
     FOR $path: STRING IN $plugins {
-        LET $bad: BOOL = STD::TEXT_CONTAINS($path, "\\")
+        LET $bad: BOOL = STD::CONTAINS($path, "\\")
         IF $bad {
             ECHO "plugin path '{{ $path }}' uses backslashes; use forward slashes"
             EXIT 1

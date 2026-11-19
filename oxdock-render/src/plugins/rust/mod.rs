@@ -58,42 +58,48 @@ fn workspace_version<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
         docs: "First author display name.",
         optional: false,
         default: None,
-    },
+
+        alias: None,},
     Field {
         name: "author_given".to_string(),
         ty: TypeTag::String,
         docs: "First author given name.",
         optional: false,
         default: None,
-    },
+
+        alias: None,},
     Field {
         name: "author_family".to_string(),
         ty: TypeTag::String,
         docs: "First author family name.",
         optional: false,
         default: None,
-    },
+
+        alias: None,},
     Field {
         name: "author_email".to_string(),
         ty: TypeTag::String,
         docs: "First author email.",
         optional: false,
         default: None,
-    },
+
+        alias: None,},
     Field {
         name: "license".to_string(),
         ty: TypeTag::String,
         docs: "SPDX license expression.",
         optional: false,
         default: None,
-    },
+
+        alias: None,},
     Field {
         name: "repository".to_string(),
         ty: TypeTag::String,
         docs: "Repository URL.",
         optional: false,
         default: None,
-    },
+
+        alias: None,},
 ])))]
 fn workspace_package<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     let (root, resolver) = docs_resolver(cx)?;
@@ -127,14 +133,16 @@ fn workspace_package<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
         docs: "Package name, empty when no manifest names it.",
         optional: false,
         default: None,
-    },
+
+        alias: None,},
     Field {
         name: "description".to_string(),
         ty: TypeTag::String,
         docs: "Package description, empty when absent.",
         optional: false,
         default: None,
-    },
+
+        alias: None,},
 ])))]
 fn cargo_package<P: ProcessManager>(
     cx: &mut StepCtx<P>,

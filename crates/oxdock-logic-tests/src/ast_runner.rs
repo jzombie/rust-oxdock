@@ -797,6 +797,7 @@ fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
         | StepKind::While { body, .. }
         | StepKind::FuncDef { body, .. }
         | StepKind::Timeout { body, .. }
+        | StepKind::Fail { body, .. }
         | StepKind::RemoteBlock { body, .. }
         | StepKind::AssignAsync { body, .. }
         | StepKind::Isolated { body, .. }
@@ -1520,6 +1521,7 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::AwaitCapture { .. } => "AwaitCapture",
         StepKind::Cancel { .. } => "Cancel",
         StepKind::Timeout { .. } => "Timeout",
+        StepKind::Fail { .. } => "Fail",
         StepKind::Isolated { .. } => "Isolated",
         StepKind::IsolatedInheritEnv { .. } => "IsolatedInheritEnv",
         StepKind::RemoteBlock { .. } => "RemoteBlock",

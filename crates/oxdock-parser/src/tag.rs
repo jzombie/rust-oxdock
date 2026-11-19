@@ -56,6 +56,10 @@ pub struct Field {
     /// against the field type there, so ill-typed defaults fail
     /// naming the declaration.
     pub default: Option<Value>,
+    /// Alternate CLI spelling (`MAP<h: BOOL ALIAS help>`): accepted on
+    /// the command line, canonical key stays `name` in the parsed map.
+    /// `None` for ordinary fields and every hand-registered schema.
+    pub alias: Option<String>,
 }
 
 /// A declarative type for function params, returns, and bindings.
@@ -160,6 +164,11 @@ pub const SEMAPHORE_TYPE_NAME: &str = "SEMAPHORE";
 
 /// The canonical source spelling of the permit word.
 pub const PERMIT_TYPE_NAME: &str = "PERMIT";
+
+/// The canonical source spelling of the `ALIAS` field-alias keyword:
+/// spelling and shape matching compare against this instead of a
+/// literal, so the keyword lives once beside the tags it modifies.
+pub const ALIAS_KEYWORD: &str = "ALIAS";
 impl std::fmt::Debug for TypeTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -303,10 +312,15 @@ pub fn render_structural(tag: &TypeTag) -> String {
                 .iter()
                 .map(|field| {
                     format!(
-                        "{}{}: {}{}",
+                        "{}{}: {}{}{}",
                         field.name,
                         if field.optional { "?" } else { "" },
                         render_structural(&field.ty),
+                        field
+                            .alias
+                            .as_ref()
+                            .map(|a| format!(" {ALIAS_KEYWORD} {a}"))
+                            .unwrap_or_default(),
                         field
                             .default
                             .as_ref()
@@ -340,14 +354,16 @@ pub enum Spelled {
 }
 
 /// One generic argument: a bare type or a named (possibly optional)
-/// record field carrying its nested spelling and optional `= literal`
-/// default. Defaults are plain data here and become Values where the
+/// record field carrying its nested spelling, optional `ALIAS`
+/// alternate flag spelling, and optional `= literal` default.
+/// Defaults are plain data here and become Values where the
 /// alias resolves, so spellings stay total and comparable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpelledField {
     pub name: Option<String>,
     pub optional: bool,
     pub ty: Spelled,
+    pub alias: Option<String>,
     pub default: Option<SpelledDefault>,
 }
 
@@ -442,10 +458,15 @@ pub fn render_spelled(spelled: &Spelled) -> String {
                 .iter()
                 .map(|field| match &field.name {
                     Some(field_name) => format!(
-                        "{}{}: {}{}",
+                        "{}{}: {}{}{}",
                         field_name,
                         if field.optional { "?" } else { "" },
                         render_spelled(&field.ty),
+                        field
+                            .alias
+                            .as_ref()
+                            .map(|a| format!(" {ALIAS_KEYWORD} {a}"))
+                            .unwrap_or_default(),
                         field
                             .default
                             .as_ref()
@@ -476,21 +497,48 @@ pub fn parse_spelling(s: &str) -> Result<Spelled, String> {
     Ok(spelled)
 }
 
+/// Boundary marker surviving whitespace stripping: records where
+/// whitespace separated two word characters, so keywords fused by
+/// stripping stay distinguishable (`BOOL ALIAS help` keeps its
+/// boundaries while `FLAG_ALIAS` never gains one). Never valid in
+/// spellings; matched transiently mid-parse only.
+const WS_SENTINEL: char = '\u{1f}';
+
+/// Word characters for boundary tracking: ASCII alphanumerics plus
+/// underscore, matching field, type, and alias name shapes.
+fn is_spelling_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
 /// Strip whitespace outside double-quoted default strings: quoted
-/// regions keep their bytes verbatim, everything else drops gaps.
+/// regions keep their bytes verbatim, everything else drops gaps,
+/// except a [`WS_SENTINEL`] is left where whitespace separated two
+/// word characters so later stages still see the boundary.
 /// No escapes: a quote always toggles, so a default string cannot
 /// contain one (parse fails loudly instead of misreading).
 fn strip_spelling_whitespace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut quoted = false;
+    let mut pending_space = false;
+    let mut prev_word = false;
     for ch in s.chars() {
         if ch == '"' {
+            pending_space = false;
+            out.push(ch);
             quoted = !quoted;
-        }
-        if !quoted && ch.is_whitespace() {
+            prev_word = false;
             continue;
         }
+        if !quoted && ch.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && prev_word && !quoted && is_spelling_word_char(ch) {
+            out.push(WS_SENTINEL);
+        }
+        pending_space = false;
         out.push(ch);
+        prev_word = !quoted && is_spelling_word_char(ch);
     }
     out
 }
@@ -544,11 +592,20 @@ fn parse_spelled_shape(text: &str, depth: usize) -> Result<(Spelled, &str), Stri
     loop {
         let (field_name, optional, after_name) = parse_spelled_field_name(rest);
         let (arg, after_arg) = parse_spelled_one(after_name, depth + 1)?;
-        let (default, after_default) = parse_spelled_default(after_arg)?;
+        let (alias, after_alias) = parse_spelled_alias(after_arg)?;
+        // Aliases ride named MAP fields only: bare arguments never
+        // carry an alternate spelling.
+        if alias.is_some() && field_name.is_none() {
+            return Err(format!(
+                "{ALIAS_KEYWORD} needs a named field, found bare {rest:?}"
+            ));
+        }
+        let (default, after_default) = parse_spelled_default(after_alias)?;
         args.push(SpelledField {
             name: field_name,
             optional,
             ty: arg,
+            alias,
             default,
         });
         rest = after_default;
@@ -596,6 +653,50 @@ fn parse_spelled_field_name(text: &str) -> (Option<String>, bool, &str) {
         Some(after) => (Some(candidate.to_string()), optional, after),
         None => (None, false, text),
     }
+}
+
+/// Optional `ALIAS name` after a field type: one alternate CLI
+/// spelling for `TYPE FLAGS` fields. Whitespace stripping leaves a
+/// [`WS_SENTINEL`] boundary around a separately-written keyword, so
+/// `BOOL ALIAS help` arrives splittable while `FLAG_ALIAS` never
+/// does; lowercase alias names keep the same shape as field names.
+/// No `ALIAS` means no alternate spelling.
+fn parse_spelled_alias(text: &str) -> Result<(Option<String>, &str), String> {
+    let text = text.strip_prefix(WS_SENTINEL).unwrap_or(text);
+    let Some(after_keyword) = text.strip_prefix(ALIAS_KEYWORD) else {
+        return Ok((None, text));
+    };
+    let after_keyword = after_keyword
+        .strip_prefix(WS_SENTINEL)
+        .unwrap_or(after_keyword);
+    if after_keyword.is_empty() {
+        return Err(format!("{ALIAS_KEYWORD} needs a lowercase alias name"));
+    }
+    let mut chars = after_keyword.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return Err(format!("{ALIAS_KEYWORD} needs a lowercase alias name"));
+    };
+    if !first.is_ascii_lowercase() {
+        if !first.is_ascii_alphabetic() {
+            return Err(format!("{ALIAS_KEYWORD} needs a lowercase alias name"));
+        }
+        return Err(format!(
+            "{ALIAS_KEYWORD} name must start lowercase, found {first:?} in {after_keyword:?}"
+        ));
+    }
+    let mut end = first.len_utf8();
+    for (idx, ch) in chars {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let (alias, rest) = after_keyword.split_at(end);
+    if alias.is_empty() {
+        return Err(format!("{ALIAS_KEYWORD} needs a lowercase alias name"));
+    }
+    Ok((Some(alias.to_string()), rest))
 }
 
 /// Optional `= literal` default after a field type: integers
@@ -907,6 +1008,8 @@ mod tests {
                 docs: "",
                 optional: false,
                 default: None,
+
+                alias: None,
             },
             Field {
                 name: "b".to_string(),
@@ -914,6 +1017,8 @@ mod tests {
                 docs: "",
                 optional: false,
                 default: None,
+
+                alias: None,
             },
         ]);
         let tag = TypeTag::Record(fields);
@@ -947,6 +1052,8 @@ mod tests {
                 docs: "",
                 optional: false,
                 default: None,
+
+                alias: None,
             },
             Field {
                 name: "permit".to_string(),
@@ -954,6 +1061,8 @@ mod tests {
                 docs: "",
                 optional: true,
                 default: None,
+
+                alias: None,
             },
         ]);
         let tag = TypeTag::Record(fields);
@@ -1014,6 +1123,8 @@ mod tests {
                     optional: false,
                     ty: Spelled::Named("MAP".to_string()),
                     default: None,
+
+                    alias: None,
                 }],
             }
         );
@@ -1026,6 +1137,8 @@ mod tests {
                     optional: false,
                     ty: Spelled::Named("STRING".to_string()),
                     default: None,
+
+                    alias: None,
                 }],
             }
         );
@@ -1048,6 +1161,8 @@ mod tests {
                     optional: true,
                     ty: Spelled::Named("PERMIT".to_string()),
                     default: None,
+
+                    alias: None,
                 }],
             }
         );
@@ -1117,6 +1232,8 @@ mod tests {
             docs: "",
             optional: false,
             default: Some(Value::int(2)),
+
+            alias: None,
         }]));
         assert_eq!(
             render_structural(&tag),
@@ -1154,6 +1271,8 @@ mod tests {
                     optional: false,
                     ty: Spelled::Named("ANY".to_string()),
                     default: None,
+
+                    alias: None,
                 }],
             }
         );
@@ -1228,6 +1347,8 @@ mod tests {
             docs: "",
             optional: false,
             default: None,
+
+            alias: None,
         }]);
         let record = TypeTag::Record(fields);
         let list = TypeTag::ListOf(Arc::new(record));

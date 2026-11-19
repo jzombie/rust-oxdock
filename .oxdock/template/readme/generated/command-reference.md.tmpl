@@ -43,6 +43,7 @@ See the [changelog]({{ $global.changelog_url }}) for what changed in each releas
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
+| [`FAIL`](#fail) | `FAIL [<code>] [<message>] [{ <commands> }]` |
 | [`ISOLATED`](#isolated) | `ISOLATED { INHERIT_ENV [...] <commands> } \| ISOLATED <command...>` |
 | [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
 | [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]): RET { <commands> } \| ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }` |

@@ -98,6 +98,8 @@ fn emp_fields() -> std::sync::Arc<[Field]> {
         docs: "",
         optional: false,
         default: None,
+
+        alias: None,
     }])
 }
 

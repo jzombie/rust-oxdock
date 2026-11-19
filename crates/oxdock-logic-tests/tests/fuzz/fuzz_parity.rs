@@ -695,6 +695,11 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             needle: needle.into(),
         }),
         (0i32..255).prop_map(|i| StepKind::Exit(Arg::String(i.to_string(), false))),
+        (any_msg(), arb_command_body()).prop_map(|(m, body)| StepKind::Fail {
+            code: None,
+            message: Some(m.into()),
+            body,
+        }),
         (
             "[A-Z][A-Z0-9_]*",
             prop_oneof![
@@ -950,6 +955,7 @@ fn zero_kind_markers(kind: &mut StepKind) {
         | StepKind::While { body, .. }
         | StepKind::FuncDef { body, .. }
         | StepKind::Timeout { body, .. }
+        | StepKind::Fail { body, .. }
         | StepKind::Isolated { body, .. }
         | StepKind::AsyncBlock { body, .. }
         | StepKind::AssignAsync { body, .. }
@@ -1630,6 +1636,32 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             },
         ) => {
             assert!(arg_content_eq(ld, rd), "Timeout duration mismatch: {}", msg);
+            assert_bodies_eq(lb, rb, msg);
+        }
+        (
+            StepKind::Fail {
+                code: lc,
+                message: lm,
+                body: lb,
+            },
+            StepKind::Fail {
+                code: rc,
+                message: rm,
+                body: rb,
+            },
+        ) => {
+            assert_eq!(
+                lc.as_ref().map(|a| a.as_str()),
+                rc.as_ref().map(|a| a.as_str()),
+                "Fail code mismatch: {}",
+                msg
+            );
+            assert_eq!(
+                lm.as_ref().map(|a| a.as_str()),
+                rm.as_ref().map(|a| a.as_str()),
+                "Fail message mismatch: {}",
+                msg
+            );
             assert_bodies_eq(lb, rb, msg);
         }
         (StepKind::Isolated { body: lb }, StepKind::Isolated { body: rb }) => {
@@ -2329,6 +2361,18 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 col: 0,
             }],
         },
+        StepKind::Fail {
+            code: None,
+            message: Some("coverage fail".into()),
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+                line: 0,
+                col: 0,
+            }],
+        },
         StepKind::Isolated {
             body: vec![Step {
                 guard: None,
@@ -2469,6 +2513,7 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         StepKind::Await { .. } => true,
         StepKind::Cancel { .. } => true,
         StepKind::Timeout { .. } => true,
+        StepKind::Fail { .. } => true,
         StepKind::Isolated { .. } => true,
         // Covered nested inside `Isolated` bodies (the rewrite's only
         // source): top-level generation would bypass the rewrite that

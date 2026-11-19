@@ -8,7 +8,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.42.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.43.0-alpha/oxdock/)
 
 ## Dynamically embed assets at compile time
 
@@ -101,8 +101,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.42.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.42.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.43.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.43.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -114,7 +114,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.42.0-alpha"
+    "alpha OxDock 0.43.0-alpha"
 );
 ```
 
@@ -1173,6 +1173,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
+| [`FAIL`](#fail) | `FAIL [<code>] [<message>] [{ <commands> }]` |
 | [`ISOLATED`](#isolated) | `ISOLATED { INHERIT_ENV [...] <commands> } \| ISOLATED <command...>` |
 | [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
 | [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]): RET { <commands> } \| ASYNC FUNC NAME([$param: TYPE, ...]): HANDLE<T> { <commands> }` |
@@ -2312,6 +2313,72 @@ LET $quick: HANDLE<VOID> = ASYNC {
 }
 TIMEOUT 30s AWAIT $quick
 ```
+
+
+### FAIL
+
+Print a failure message and exit.
+
+**Syntax:** `FAIL [<code>] [<message>] [{ <commands> }]`
+
+Prints the message to stderr (the `ECHO` plus `EXIT` idiom as
+one step, rerouted to the error stream), runs the optional
+block first, then exits through the `EXIT` path with
+`EXIT requested with code <code>`.
+
+With no code the exit code is 1; with a code it clamps to
+0..=255 like `EXIT`. The block runs first in a child scope
+that reads caller locals, with its stdout rerouted to
+stderr, so usage text, cleanup, and callee output all land
+on the error stream while stdout stays empty: the only
+form a `FUNC` cannot express, since functions take values,
+never blocks. At least one of message or block is required.
+
+A lone bare int is a silent code (`FAIL 2` exits 2 with no
+output); quoting decides, so `FAIL "2"` prints `2` and
+exits 1.
+
+
+**Output:** Stderr
+
+**Examples:**
+
+**Example: fail**
+
+```oxdock expect_error:"EXIT requested with code 1"
+# The message prints to stderr, never stdout, so a
+# failure cannot pollute captured output. No code
+# means exit 1.
+FAIL "cargo not found in image"
+```
+
+**Expected error:** `EXIT requested with code 1`
+
+**Example: fail code**
+
+```oxdock expect_error:"EXIT requested with code 2"
+# An explicit code exits with that code (clamped to
+# 0..=255 like EXIT); the message still prints to
+# stderr.
+FAIL 2 "cargo not found in image"
+```
+
+**Expected error:** `EXIT requested with code 2`
+
+**Example: fail block**
+
+```oxdock expect_error:"EXIT requested with code 1"
+# The block runs first with its stdout rerouted to
+# stderr: usage text and cleanup land on the error
+# stream beside the message, and stdout stays empty.
+# Callee output reroutes too: a FUNC called here
+# inherits the swapped handle.
+FAIL "unknown command" {
+    ECHO usage-text
+}
+```
+
+**Expected error:** `EXIT requested with code 1`
 
 
 ### ISOLATED
@@ -4894,6 +4961,70 @@ LET $off: BOOL = BOOL_OR("false", true)
 ASSERT_EQ $off false
 ```
 
+### STD::CONTAINS
+
+Report whether a `STRING` holds a substring or a `LIST` holds a member.
+
+Dispatches on the haystack like `LEN`: `STRING` does a literal
+substring search (case-sensitive, no case-insensitive mode);
+`LIST<ANY>` compares members with strict `values_equal` (numeric
+`INT` and `FLOAT` compare across types, every other cross-type pair
+is unequal, matching `SWITCH`). Returns `BOOL`; misses are false,
+never failures.
+
+
+**Signature:** `STD::CONTAINS($haystack: STRING|LIST, $needle: ANY): BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$haystack` (`STRING|LIST`): Text to search or list to probe.
+- `$needle` (`ANY`): Literal substring or member to look for.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: contains**
+
+```oxdock
+# Present needles report true; misses report false.
+IMPORT [STD]
+LET $hit: BOOL = CONTAINS("x86_64-linux-musl", "musl")
+ASSERT_EQ $hit true
+
+# A miss is false, not a failure.
+LET $miss: BOOL = CONTAINS("x86_64-linux-gnu", "musl")
+ASSERT_EQ $miss false
+```
+
+**Example: contains list**
+
+```oxdock
+# List membership uses strict equality across any element type.
+IMPORT [STD]
+LET $hit: BOOL = CONTAINS(["a", "b", "c"], "b")
+ASSERT_EQ $hit true
+LET $miss: BOOL = CONTAINS(["a", "b", "c"], "z")
+ASSERT_EQ $miss false
+LET $num: BOOL = CONTAINS([1, 2, 3], 2.0)
+ASSERT_EQ $num true
+
+# Stringified numbers never coerce to integers.
+LET $strnum: BOOL = CONTAINS(["1", "2", "3"], 2)
+ASSERT_EQ $strnum false
+
+# Boolean lists match true and miss false with no coercion.
+LET $bools: LIST<BOOL> = [true]
+LET $bhit: BOOL = CONTAINS($bools, true)
+ASSERT_EQ $bhit true
+LET $bmiss: BOOL = CONTAINS($bools, false)
+ASSERT_EQ $bmiss false
+LET $nocoerce: BOOL = CONTAINS($bools, 1)
+ASSERT_EQ $nocoerce false
+```
+
 ### STD::CWD
 
 Current working directory as a workspace-absolute path.
@@ -5012,6 +5143,39 @@ WHILE !EOF($cap) {
     $n = $n + 1
 }
 ASSERT_EQ $n 2
+```
+
+### STD::EXISTS
+
+Report whether a workspace path exists in any form.
+
+True for files, directories, and symlinks; false for absent or
+unresolvable paths, never an error. AST-only by design, like
+`PATH_TYPE`: there is no RPN arm for filesystem IO.
+
+
+**Signature:** `STD::EXISTS($path: STRING|PATH): BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$path` (`STRING|PATH`): Workspace path to probe.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: probe**
+
+```oxdock
+# Present entries read true; absent paths read false.
+IMPORT [STD]
+WRITE "entry.txt" "words"
+LET $hit: BOOL = EXISTS("entry.txt")
+ASSERT_EQ $hit true
+LET $miss: BOOL = EXISTS("no-such-entry.txt")
+ASSERT_EQ $miss false
 ```
 
 ### STD::FLOAT
@@ -5346,6 +5510,40 @@ ASSERT_CONTAINS $out "hello Ada!"
 ASSERT_CONTAINS $out "child sees Grace!"
 ```
 
+### STD::IS_DIR
+
+Report whether a workspace path names a directory.
+
+No-follow by design like `PATH_TYPE`: a symlink is neither a file
+nor a directory, so it reads false here. Missing or unresolvable
+paths read false, never error. AST-only by design, like `PATH_TYPE`:
+there is no RPN arm for filesystem IO.
+
+
+**Signature:** `STD::IS_DIR($path: STRING|PATH): BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$path` (`STRING|PATH`): Workspace path to probe.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: probe**
+
+```oxdock
+# Directories read true; files read false.
+IMPORT [STD]
+LET $hit: BOOL = IS_DIR(".")
+ASSERT_EQ $hit true
+WRITE "entry.txt" "words"
+LET $miss: BOOL = IS_DIR("entry.txt")
+ASSERT_EQ $miss false
+```
+
 ### STD::IS_EXEC
 
 Report whether a name resolves to an executable file (#100).
@@ -5385,6 +5583,40 @@ ASSERT_EQ $missing false
 WRITE tool.txt payload
 LET $plain: BOOL = IS_EXEC("tool.txt")
 ASSERT_EQ $plain false
+```
+
+### STD::IS_FILE
+
+Report whether a workspace path names an ordinary file.
+
+No-follow by design like `PATH_TYPE`: a symlink is neither a file
+nor a directory, so it reads false here. Missing or unresolvable
+paths read false, never error. AST-only by design, like `PATH_TYPE`:
+there is no RPN arm for filesystem IO.
+
+
+**Signature:** `STD::IS_FILE($path: STRING|PATH): BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$path` (`STRING|PATH`): Workspace path to probe.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: probe**
+
+```oxdock
+# Ordinary files read true; missing paths read false.
+IMPORT [STD]
+WRITE "entry.txt" "words"
+LET $hit: BOOL = IS_FILE("entry.txt")
+ASSERT_EQ $hit true
+LET $miss: BOOL = IS_FILE("no-such-entry.txt")
+ASSERT_EQ $miss false
 ```
 
 ### STD::IS_MAIN
@@ -5774,6 +6006,44 @@ LET $parsed: PARSED = PARSE_ARGS(["--model=x", "--nope=1"])
 
 **Expected error:** `unknown flag`
 
+**Example: alias accepted**
+
+```oxdock
+IMPORT [STD]
+# One canonical key binds both spellings; the
+# alias never appears as a separate key.
+TYPE FLAGS = MAP<h: BOOL ALIAS help>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $a: PARSED = PARSE_ARGS(["--help"])
+ASSERT_EQ $a.flags.h true
+LET $b: PARSED = PARSE_ARGS(["--h"])
+ASSERT_EQ $b.flags.h true
+```
+
+**Example: alias duplicate fails**
+
+```oxdock expect_error:"duplicate flag"
+IMPORT [STD]
+# Canonical and alias together fail naming both.
+TYPE FLAGS = MAP<h: BOOL ALIAS help>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $p: PARSED = PARSE_ARGS(["--h", "--help"])
+```
+
+**Expected error:** `duplicate flag`
+
+**Example: alias missing names both**
+
+```oxdock expect_error:"--h/--help"
+IMPORT [STD]
+# Missing required flags name both spellings.
+TYPE FLAGS = MAP<h: BOOL ALIAS help>
+TYPE PARSED = MAP<flags: FLAGS>
+LET $p: PARSED = PARSE_ARGS([])
+```
+
+**Expected error:** `--h/--help`
+
 ### STD::PARSE_BYTE_COUNT
 
 Parse a byte-count token to `INT` bytes.
@@ -5994,6 +6264,41 @@ LET $doc: MAP<ANY> = PARSE_TOML("title = \"demo\"")
 ASSERT_EQ $doc.title "demo"
 ```
 
+### STD::PATH_BASE
+
+Final segment of a path (`PATH_BASE`).
+
+Pure lexical surgery with no filesystem access: backslashes normalize
+to slashes, trailing slashes trim (root stays `/`), then the text
+after the last slash binds. Empty input fails closed. Runs in
+templates like every pure builtin.
+
+
+**Signature:** `STD::PATH_BASE($path: STRING|PATH): STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$path` (`STRING|PATH`): Path whose final segment to bind.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: base**
+
+```oxdock
+# Final segments bind without filesystem access.
+IMPORT [STD]
+LET $b: STRING = PATH_BASE("some-dir/some-file")
+ASSERT_EQ $b "some-file"
+
+# Trailing slashes trim before the split.
+LET $d: STRING = PATH_BASE("some-dir/")
+ASSERT_EQ $d "some-dir"
+```
+
 ### STD::PATH_JOIN
 
 Join a directory and a file name with the host-native separator.
@@ -6030,6 +6335,44 @@ IMPORT [STD]
 LET $p: STRING = PATH_JOIN("some-dir", "some-file")
 [family:unix] ASSERT_EQ $p "some-dir/some-file"
 [family:windows] ASSERT_EQ $p "some-dir\some-file"
+```
+
+### STD::PATH_REL
+
+Lexical relativization (`PATH_REL`): remainder of a path below a base.
+
+Pure string surgery with no filesystem access: both sides normalize
+backslashes to slashes and trim trailing slashes, then `base`
+segments must prefix `path` segments on a segment boundary. Equal
+paths bind `.`; non-prefix inputs fail closed naming both sides.
+Absolute and relative shapes never mix. Runs in templates like
+every pure builtin.
+
+
+**Signature:** `STD::PATH_REL($base: STRING|PATH, $path: STRING|PATH): STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$base` (`STRING|PATH`): Base prefix segments must match.
+- `$path` (`STRING|PATH`): Path below the base to relativize.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: relativize**
+
+```oxdock
+# Prefix bases strip to their remainder.
+IMPORT [STD]
+LET $r: STRING = PATH_REL("some-dir", "some-dir/some-file")
+ASSERT_EQ $r "some-file"
+
+# Equal paths bind dot.
+LET $dot: STRING = PATH_REL("some-dir", "some-dir")
+ASSERT_EQ $dot "."
 ```
 
 ### STD::PATH_TYPE
@@ -6404,41 +6747,6 @@ ASSERT_EQ $m.state "finished"
 ASSERT_EQ $m.result "done"
 LET $o: STRING = AWAIT $t
 ASSERT_EQ $o "done"
-```
-
-### STD::TEXT_CONTAINS
-
-Report whether text holds a literal substring.
-
-Returns `BOOL`; the substring search behind target filtering
-alongside the prefix and suffix tests. Matching is
-case-sensitive; there is no case-insensitive mode.
-
-
-**Signature:** `STD::TEXT_CONTAINS($text: STRING, $needle: STRING): BOOL`
-
-**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
-
-**Parameters:**
-
-- `$text` (`STRING`): Text to search.
-- `$needle` (`STRING`): Literal substring to look for.
-
-**Returns:** `BOOL`
-
-**Examples:**
-
-**Example: contains**
-
-```oxdock
-# Present needles report true; misses report false.
-IMPORT [STD]
-LET $hit: BOOL = TEXT_CONTAINS("x86_64-linux-musl", "musl")
-ASSERT_EQ $hit true
-
-# A miss is false, not a failure.
-LET $miss: BOOL = TEXT_CONTAINS("x86_64-linux-gnu", "musl")
-ASSERT_EQ $miss false
 ```
 
 ### STD::TEXT_COUNT

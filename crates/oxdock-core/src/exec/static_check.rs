@@ -3294,6 +3294,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(out)
             }
+            StepKind::Fail { body, .. } => {
+                self.check_step_args(&step.kind, env, scope, idx, depth)?;
+                let inner = self.walk_body(body, env, scope, depth + 1)?;
+                let mut out = live;
+                // FAIL never yields a value (it exits or propagates
+                // control flow): unlike TIMEOUT, body types do not
+                // flow through.
+                out.has_return = inner.has_return;
+                out.bare_return = inner.bare_return;
+                out.falls_through = false;
+                Ok(out)
+            }
             StepKind::Isolated { body } => {
                 // Same in-place scoping as TIMEOUT: `RETURN` inside
                 // still returns from the enclosing function; only the
@@ -4849,6 +4861,8 @@ mod tests {
                     docs: "",
                     optional: false,
                     default: None,
+
+                    alias: None,
                 }]
                 .into(),
             ),
@@ -4894,6 +4908,8 @@ mod tests {
                         docs: "",
                         optional: false,
                         default: None,
+
+                        alias: None,
                     },
                     oxdock_parser::Field {
                         name: "opt".to_string(),
@@ -4901,6 +4917,8 @@ mod tests {
                         docs: "",
                         optional: true,
                         default: None,
+
+                        alias: None,
                     },
                 ]
                 .into(),

@@ -776,6 +776,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             PathType::registration(),
             PathWritable::registration(),
             IsExec::registration(),
+            IsFile::registration(),
+            IsDir::registration(),
+            Exists::registration(),
             HasKey::registration(),
             Get::registration(),
             MapSet::registration(),
@@ -801,6 +804,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TextTrimPrefix::registration(),
             TextTrimSuffix::registration(),
             PathJoin::registration(),
+            PathBase::registration(),
+            PathRel::registration(),
             TextToUpper::registration(),
             TextToLower::registration(),
             TextReplace::registration(),
@@ -813,7 +818,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TextExtract::registration(),
             TextStartsWith::registration(),
             TextEndsWith::registration(),
-            TextContains::registration(),
+            Contains::registration(),
             Len::registration(),
             TextCount::registration(),
             TextCountMatches::registration(),
@@ -1987,6 +1992,95 @@ fn is_exec<P: ProcessManager>(
     super::args::is_exec_from_value(&[Value::string(text)], cx)
 }
 
+/// Report whether a workspace path names an ordinary file.
+///
+/// No-follow by design like `PATH_TYPE`: a symlink is neither a file
+/// nor a directory, so it reads false here. Missing or unresolvable
+/// paths read false, never error. AST-only by design, like `PATH_TYPE`:
+/// there is no RPN arm for filesystem IO.
+///
+#[oxdock_func(returns = TypeTag::Bool)]
+#[example(
+    name = "probe",
+    code = r###"
+    # Ordinary files read true; missing paths read false.
+    IMPORT [STD]
+    WRITE "entry.txt" "words"
+    LET $hit: BOOL = IS_FILE("entry.txt")
+    ASSERT_EQ $hit true
+    LET $miss: BOOL = IS_FILE("no-such-entry.txt")
+    ASSERT_EQ $miss false
+    "###
+)]
+fn is_file<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Workspace path to probe.
+    #[union(String, Path)]
+    path: Value,
+) -> Result<Value> {
+    let text = super::args::string_or_path_text(&path)?;
+    Ok(Value::bool(super::args::path_is_file(cx, &text)))
+}
+
+/// Report whether a workspace path names a directory.
+///
+/// No-follow by design like `PATH_TYPE`: a symlink is neither a file
+/// nor a directory, so it reads false here. Missing or unresolvable
+/// paths read false, never error. AST-only by design, like `PATH_TYPE`:
+/// there is no RPN arm for filesystem IO.
+///
+#[oxdock_func(returns = TypeTag::Bool)]
+#[example(
+    name = "probe",
+    code = r###"
+    # Directories read true; files read false.
+    IMPORT [STD]
+    LET $hit: BOOL = IS_DIR(".")
+    ASSERT_EQ $hit true
+    WRITE "entry.txt" "words"
+    LET $miss: BOOL = IS_DIR("entry.txt")
+    ASSERT_EQ $miss false
+    "###
+)]
+fn is_dir<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Workspace path to probe.
+    #[union(String, Path)]
+    path: Value,
+) -> Result<Value> {
+    let text = super::args::string_or_path_text(&path)?;
+    Ok(Value::bool(super::args::path_is_dir(cx, &text)))
+}
+
+/// Report whether a workspace path exists in any form.
+///
+/// True for files, directories, and symlinks; false for absent or
+/// unresolvable paths, never an error. AST-only by design, like
+/// `PATH_TYPE`: there is no RPN arm for filesystem IO.
+///
+#[oxdock_func(returns = TypeTag::Bool)]
+#[example(
+    name = "probe",
+    code = r###"
+    # Present entries read true; absent paths read false.
+    IMPORT [STD]
+    WRITE "entry.txt" "words"
+    LET $hit: BOOL = EXISTS("entry.txt")
+    ASSERT_EQ $hit true
+    LET $miss: BOOL = EXISTS("no-such-entry.txt")
+    ASSERT_EQ $miss false
+    "###
+)]
+fn exists<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Workspace path to probe.
+    #[union(String, Path)]
+    path: Value,
+) -> Result<Value> {
+    let text = super::args::string_or_path_text(&path)?;
+    Ok(Value::bool(super::args::path_exists(cx, &text)))
+}
+
 /// Report whether a map holds a key.
 ///
 /// Pure MAP probe so scripts can branch on optional fields without
@@ -2370,6 +2464,8 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
                         docs: "Flags coerced to `TYPE FLAGS`.",
                         optional: false,
                         default: None,
+
+                        alias: None,
                     },
                     Field {
                         name: "positionals".to_string(),
@@ -2377,6 +2473,8 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
                         docs: "Trailing values and entries after the first double dash. Omitted when empty.",
                         optional: true,
                         default: None,
+
+                        alias: None,
                     },
                 ]))),
                 rpn: true,
@@ -2479,6 +2577,43 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
                             LET $parsed: PARSED = PARSE_ARGS(["--model=x", "--nope=1"])
                         "#},
                     },
+                    crate::Example {
+                        name: "alias accepted",
+                        fence_meta: None,
+                        code: indoc::indoc! {r#"
+                            IMPORT [STD]
+                            # One canonical key binds both spellings; the
+                            # alias never appears as a separate key.
+                            TYPE FLAGS = MAP<h: BOOL ALIAS help>
+                            TYPE PARSED = MAP<flags: FLAGS>
+                            LET $a: PARSED = PARSE_ARGS(["--help"])
+                            ASSERT_EQ $a.flags.h true
+                            LET $b: PARSED = PARSE_ARGS(["--h"])
+                            ASSERT_EQ $b.flags.h true
+                        "#},
+                    },
+                    crate::Example {
+                        name: "alias duplicate fails",
+                        fence_meta: Some("expect_error:\"duplicate flag\""),
+                        code: indoc::indoc! {r#"
+                            IMPORT [STD]
+                            # Canonical and alias together fail naming both.
+                            TYPE FLAGS = MAP<h: BOOL ALIAS help>
+                            TYPE PARSED = MAP<flags: FLAGS>
+                            LET $p: PARSED = PARSE_ARGS(["--h", "--help"])
+                        "#},
+                    },
+                    crate::Example {
+                        name: "alias missing names both",
+                        fence_meta: Some("expect_error:\"--h/--help\""),
+                        code: indoc::indoc! {r#"
+                            IMPORT [STD]
+                            # Missing required flags name both spellings.
+                            TYPE FLAGS = MAP<h: BOOL ALIAS help>
+                            TYPE PARSED = MAP<flags: FLAGS>
+                            LET $p: PARSED = PARSE_ARGS([])
+                        "#},
+                    },
                 ],
             },
             func,
@@ -2543,10 +2678,19 @@ fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> Result<Value> {
     }
 }
 
-/// One CLI flag spec: target type, required bit, and filled default.
-/// Single alias so the tokenizer, coercion, and both entry points
-/// share one signature.
-type CliSpecs = BTreeMap<String, (CliType, bool, Option<Value>)>;
+/// One CLI flag spec: target type, required bit, filled default, and
+/// optional alternate spelling. Single owner so the tokenizer,
+/// coercion, and both entry points share one signature.
+#[derive(Debug, Clone)]
+struct CliSpec {
+    target: CliType,
+    required: bool,
+    default: Option<Value>,
+    alias: Option<String>,
+}
+
+/// Canonical specs keyed by canonical flag name.
+type CliSpecs = BTreeMap<String, CliSpec>;
 
 /// Checked `LIST<STRING>` extraction for the CLI trio. Single owner
 /// so all three functions admit exactly the same argv shape.
@@ -2609,27 +2753,51 @@ fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<
 
 /// Shared flag coercion. Single owner so `PARSE_ARGS` and
 /// `PARSE_FLAGS` fill, require, and reject identically: present flags
-/// coerce, missing defaulted flags fill, missing required flags fail,
-/// missing optionals stay absent, unknown flags fail.
+/// (canonical or alias) coerce, missing defaulted flags fill, missing
+/// required flags fail, missing optionals stay absent, unknown flags
+/// fail. One canonical key lands in the parsed map; alias spellings
+/// ride the command line only. Missing and duplicate errors name both
+/// spellings when an alias exists.
 fn coerce_flags(
     specs: &CliSpecs,
     raw: &BTreeMap<String, Value>,
 ) -> Result<BTreeMap<String, Value>> {
+    // Alias reverse map: alias spelling to canonical key. Validated
+    // unique at type resolution, so a duplicate insert is unreachable.
+    let mut alias_to_canonical: BTreeMap<&str, &str> = BTreeMap::new();
+    for (canonical, spec) in specs.iter() {
+        if let Some(alias) = spec.alias.as_ref() {
+            alias_to_canonical.insert(alias.as_str(), canonical.as_str());
+        }
+    }
     let mut coerced: BTreeMap<String, Value> = BTreeMap::new();
-    for (flag, (target, required, default)) in specs.iter() {
+    for (flag, spec) in specs.iter() {
         if flag.is_empty() {
             anyhow::bail!("PARSE_ARGS schema flag names must be non-empty");
         }
-        if let Some(raw) = raw.get(flag) {
-            coerced.insert(flag.clone(), coerce_cli_flag(*target, flag, raw.clone())?);
-        } else if let Some(d) = default {
+        let canonical_raw = raw.get(flag);
+        let alias_raw = spec.alias.as_ref().and_then(|alias| raw.get(alias));
+        // Display name names both spellings when an alias exists.
+        let display = match spec.alias.as_ref() {
+            Some(alias) => format!("--{flag}/--{alias}"),
+            None => format!("--{flag}"),
+        };
+        if canonical_raw.is_some() && alias_raw.is_some() {
+            anyhow::bail!("PARSE_ARGS duplicate flag {display}");
+        }
+        if let Some(raw_val) = canonical_raw.or(alias_raw) {
+            coerced.insert(
+                flag.clone(),
+                coerce_cli_flag(spec.target, flag, raw_val.clone())?,
+            );
+        } else if let Some(d) = spec.default.as_ref() {
             coerced.insert(flag.clone(), d.clone());
-        } else if *required {
-            anyhow::bail!("PARSE_ARGS missing required flag --{flag}");
+        } else if spec.required {
+            anyhow::bail!("PARSE_ARGS missing required flag {display}");
         }
     }
     for flag in raw.keys() {
-        if !specs.contains_key(flag) {
+        if !specs.contains_key(flag) && !alias_to_canonical.contains_key(flag.as_str()) {
             anyhow::bail!("PARSE_ARGS unknown flag --{flag}");
         }
     }
@@ -2638,9 +2806,10 @@ fn coerce_flags(
 
 /// Resolve the fixed `TYPE FLAGS` schema into coercion specs: one entry
 /// per record field, targets from scalar field types, required unless
-/// optional or defaulted, defaults filled from the shape. Single owner
-/// so both pair and flags only entry points admit exactly the same
-/// set. Non-record types and non-scalar fields fail naming the flag.
+/// optional or defaulted, defaults filled from the shape, aliases
+/// carried for command-line acceptance. Single owner so both pair and
+/// flags only entry points admit exactly the same set. Non-record
+/// types and non-scalar fields fail naming the flag.
 fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpecs> {
     let name = "FLAGS";
     let tag = cx
@@ -2665,11 +2834,12 @@ fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpec
         };
         specs.insert(
             field.name.clone(),
-            (
+            CliSpec {
                 target,
-                !field.optional && field.default.is_none(),
-                field.default.clone(),
-            ),
+                required: !field.optional && field.default.is_none(),
+                default: field.default.clone(),
+                alias: field.alias.clone(),
+            },
         );
     }
     Ok(specs)
@@ -2818,19 +2988,22 @@ impl<P: ProcessManager> OxDockFn<P> for ParsePositionals {
         docs: "Qualified function name.",
         optional: false,
         default: None,
-    }, Field {
+
+        alias: None,}, Field {
         name: "module".to_string(),
         ty: TypeTag::String,
         docs: "Owning module.",
         optional: false,
         default: None,
-    }, Field {
+
+        alias: None,}, Field {
         name: "kind".to_string(),
         ty: TypeTag::String,
         docs: "Origin label (`host` or `script`).",
         optional: false,
         default: None,
-    }, Field {
+
+        alias: None,}, Field {
         name: "params".to_string(),
         ty: TypeTag::ListOf(std::sync::Arc::new(TypeTag::MapOf(std::sync::Arc::new(
             TypeTag::Any,
@@ -2838,25 +3011,29 @@ impl<P: ProcessManager> OxDockFn<P> for ParsePositionals {
         docs: "Parameter entries (empty for parameterless functions).",
         optional: false,
         default: None,
-    }, Field {
+
+        alias: None,}, Field {
         name: "returns".to_string(),
         ty: TypeTag::String,
         docs: "Structural return shape (empty when untagged).",
         optional: false,
         default: None,
-    }, Field {
+
+        alias: None,}, Field {
         name: "rpn".to_string(),
         ty: TypeTag::Bool,
         docs: "True when callable in RPN position.",
         optional: false,
         default: None,
-    }, Field {
+
+        alias: None,}, Field {
         name: "summary".to_string(),
         ty: TypeTag::String,
         docs: "One-line description.",
         optional: false,
         default: None,
-    }]))
+
+        alias: None,}]))
     summary = "Describe one function by qualified name."
 )]
 #[example(
@@ -2918,19 +3095,22 @@ fn types<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     docs: "Queried type name.",
     optional: false,
     default: None,
-}, Field {
+
+    alias: None,}, Field {
     name: "summary".to_string(),
     ty: TypeTag::String,
     docs: "One-line description.",
     optional: false,
     default: None,
-}, Field {
+
+    alias: None,}, Field {
     name: "docs".to_string(),
     ty: TypeTag::String,
     docs: "Full documentation text.",
     optional: false,
     default: None,
-}])))]
+
+    alias: None,}])))]
 #[example(
     name = "describe",
     code = r###"
@@ -3252,13 +3432,15 @@ fn semaphore_new<P: ProcessManager>(
     docs: "`true` with the permit under `permit`, `false` with no `permit` key.",
     optional: false,
     default: None,
-}, Field {
+
+    alias: None,}, Field {
     name: "permit".to_string(),
     ty: TypeTag::Permit,
     docs: "Permit handle; read only when `held`.",
     optional: true,
     default: None,
-}])))]
+
+    alias: None,}])))]
 #[example(
     name = "acquire",
     code = r###"
@@ -3575,6 +3757,74 @@ fn path_join<P: ProcessManager>(
     let d = super::args::string_or_path_text(&dir)?;
     let n = super::args::string_or_path_text(&name)?;
     Ok(Value::string(oxdock_fs::join_native(&d, &n)))
+}
+
+/// Final segment of a path (`PATH_BASE`).
+///
+/// Pure lexical surgery with no filesystem access: backslashes normalize
+/// to slashes, trailing slashes trim (root stays `/`), then the text
+/// after the last slash binds. Empty input fails closed. Runs in
+/// templates like every pure builtin.
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "base",
+    code = r###"
+    # Final segments bind without filesystem access.
+    IMPORT [STD]
+    LET $b: STRING = PATH_BASE("some-dir/some-file")
+    ASSERT_EQ $b "some-file"
+
+    # Trailing slashes trim before the split.
+    LET $d: STRING = PATH_BASE("some-dir/")
+    ASSERT_EQ $d "some-dir"
+    "###
+)]
+fn path_base(
+    /// Path whose final segment to bind.
+    #[union(String, Path)]
+    path: Value,
+) -> Result<Value> {
+    let text = super::args::string_or_path_text(&path)?;
+    let base = oxdock_fs::path_base(&text).map_err(|e| anyhow::anyhow!("PATH_BASE: {e:#}"))?;
+    Ok(Value::string(base))
+}
+
+/// Lexical relativization (`PATH_REL`): remainder of a path below a base.
+///
+/// Pure string surgery with no filesystem access: both sides normalize
+/// backslashes to slashes and trim trailing slashes, then `base`
+/// segments must prefix `path` segments on a segment boundary. Equal
+/// paths bind `.`; non-prefix inputs fail closed naming both sides.
+/// Absolute and relative shapes never mix. Runs in templates like
+/// every pure builtin.
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "relativize",
+    code = r###"
+    # Prefix bases strip to their remainder.
+    IMPORT [STD]
+    LET $r: STRING = PATH_REL("some-dir", "some-dir/some-file")
+    ASSERT_EQ $r "some-file"
+
+    # Equal paths bind dot.
+    LET $dot: STRING = PATH_REL("some-dir", "some-dir")
+    ASSERT_EQ $dot "."
+    "###
+)]
+fn path_rel(
+    /// Base prefix segments must match.
+    #[union(String, Path)]
+    base: Value,
+    /// Path below the base to relativize.
+    #[union(String, Path)]
+    path: Value,
+) -> Result<Value> {
+    let b = super::args::string_or_path_text(&base)?;
+    let p = super::args::string_or_path_text(&path)?;
+    let rel = oxdock_fs::path_rel(&b, &p).map_err(|e| anyhow::anyhow!("PATH_REL: {e:#}"))?;
+    Ok(Value::string(rel))
 }
 
 /// Uppercase text with full Unicode mapping.
@@ -4273,11 +4523,14 @@ fn text_ends_with(
     Ok(Value::bool(text.ends_with(suffix.as_str())))
 }
 
-/// Report whether text holds a literal substring.
+/// Report whether a `STRING` holds a substring or a `LIST` holds a member.
 ///
-/// Returns `BOOL`; the substring search behind target filtering
-/// alongside the prefix and suffix tests. Matching is
-/// case-sensitive; there is no case-insensitive mode.
+/// Dispatches on the haystack like `LEN`: `STRING` does a literal
+/// substring search (case-sensitive, no case-insensitive mode);
+/// `LIST<ANY>` compares members with strict `values_equal` (numeric
+/// `INT` and `FLOAT` compare across types, every other cross-type pair
+/// is unequal, matching `SWITCH`). Returns `BOOL`; misses are false,
+/// never failures.
 ///
 #[oxdock_func(pure, returns = TypeTag::Bool)]
 #[example(
@@ -4285,21 +4538,68 @@ fn text_ends_with(
     code = r###"
     # Present needles report true; misses report false.
     IMPORT [STD]
-    LET $hit: BOOL = TEXT_CONTAINS("x86_64-linux-musl", "musl")
+    LET $hit: BOOL = CONTAINS("x86_64-linux-musl", "musl")
     ASSERT_EQ $hit true
 
     # A miss is false, not a failure.
-    LET $miss: BOOL = TEXT_CONTAINS("x86_64-linux-gnu", "musl")
+    LET $miss: BOOL = CONTAINS("x86_64-linux-gnu", "musl")
     ASSERT_EQ $miss false
     "###
 )]
-fn text_contains(
-    /// Text to search.
-    text: String,
-    /// Literal substring to look for.
-    needle: String,
+#[example(
+    name = "contains list",
+    code = r###"
+    # List membership uses strict equality across any element type.
+    IMPORT [STD]
+    LET $hit: BOOL = CONTAINS(["a", "b", "c"], "b")
+    ASSERT_EQ $hit true
+    LET $miss: BOOL = CONTAINS(["a", "b", "c"], "z")
+    ASSERT_EQ $miss false
+    LET $num: BOOL = CONTAINS([1, 2, 3], 2.0)
+    ASSERT_EQ $num true
+
+    # Stringified numbers never coerce to integers.
+    LET $strnum: BOOL = CONTAINS(["1", "2", "3"], 2)
+    ASSERT_EQ $strnum false
+
+    # Boolean lists match true and miss false with no coercion.
+    LET $bools: LIST<BOOL> = [true]
+    LET $bhit: BOOL = CONTAINS($bools, true)
+    ASSERT_EQ $bhit true
+    LET $bmiss: BOOL = CONTAINS($bools, false)
+    ASSERT_EQ $bmiss false
+    LET $nocoerce: BOOL = CONTAINS($bools, 1)
+    ASSERT_EQ $nocoerce false
+    "###
+)]
+fn contains(
+    /// Text to search or list to probe.
+    #[union(String, List)]
+    haystack: Value,
+    /// Literal substring or member to look for.
+    needle: Value,
 ) -> Result<Value> {
-    Ok(Value::bool(text.contains(needle.as_str())))
+    if let Some(text) = haystack.as_str() {
+        let Some(n) = needle.as_str() else {
+            return Err(anyhow::anyhow!(
+                "CONTAINS needs a STRING needle for a STRING haystack, found {}",
+                needle.type_name()
+            ));
+        };
+        return Ok(Value::bool(text.contains(n)));
+    }
+    if let Some(items) = haystack.as_list() {
+        for item in items {
+            if super::args::values_equal(item, &needle) {
+                return Ok(Value::bool(true));
+            }
+        }
+        return Ok(Value::bool(false));
+    }
+    Err(anyhow::anyhow!(
+        "CONTAINS needs a STRING or LIST haystack, found {}",
+        haystack.type_name()
+    ))
 }
 
 /// Count the elements of a text, list, or map as an `INT`.
@@ -4544,6 +4844,8 @@ fn task_poll_result_fields() -> Arc<[Field]> {
             docs: "Task phase: `running` or `finished`.",
             optional: false,
             default: None,
+
+            alias: None,
         },
         Field {
             name: "ok".to_string(),
@@ -4551,6 +4853,8 @@ fn task_poll_result_fields() -> Arc<[Field]> {
             docs: "True unless the task failed.",
             optional: false,
             default: None,
+
+            alias: None,
         },
         Field {
             name: "stdout_tail".to_string(),
@@ -4558,6 +4862,8 @@ fn task_poll_result_fields() -> Arc<[Field]> {
             docs: "Bounded stdout tail, live while running.",
             optional: false,
             default: None,
+
+            alias: None,
         },
         Field {
             name: "stderr_tail".to_string(),
@@ -4565,6 +4871,8 @@ fn task_poll_result_fields() -> Arc<[Field]> {
             docs: "Bounded stderr tail, live while running.",
             optional: false,
             default: None,
+
+            alias: None,
         },
         Field {
             name: "truncated_bytes".to_string(),
@@ -4572,6 +4880,8 @@ fn task_poll_result_fields() -> Arc<[Field]> {
             docs: "Dropped head bytes past the per-stream cap.",
             optional: false,
             default: None,
+
+            alias: None,
         },
         Field {
             name: "exit_code".to_string(),
@@ -4579,6 +4889,8 @@ fn task_poll_result_fields() -> Arc<[Field]> {
             docs: "Process exit code, present once finished.",
             optional: true,
             default: None,
+
+            alias: None,
         },
         Field {
             name: "result".to_string(),
@@ -4586,6 +4898,8 @@ fn task_poll_result_fields() -> Arc<[Field]> {
             docs: "Task `RETURN` value, present on clean finish.",
             optional: true,
             default: None,
+
+            alias: None,
         },
         Field {
             name: "error".to_string(),
@@ -4593,6 +4907,8 @@ fn task_poll_result_fields() -> Arc<[Field]> {
             docs: "Failure text, present on failed finish.",
             optional: true,
             default: None,
+
+            alias: None,
         },
     ])
 }

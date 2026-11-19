@@ -15,6 +15,8 @@ mod common;
 mod env_display;
 #[path = "integration/error_kinds.rs"]
 mod error_kinds;
+#[path = "integration/fail.rs"]
+mod fail;
 #[path = "integration/guard_tests.rs"]
 mod guard_tests;
 #[path = "integration/import.rs"]

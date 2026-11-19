@@ -40,7 +40,8 @@ pub use workspace_fs::{
     LazyGuardedTempDir, PathResolver, WorkspaceSelection, reserve_cargo_scratch,
 };
 pub use workspace_fs::{
-    SpillFile, command_path, embed_path, join_native, normalized_path, to_forward_slashes,
+    SpillFile, command_path, embed_path, join_native, normalized_path, path_base, path_rel,
+    to_forward_slashes,
 };
 
 #[allow(clippy::disallowed_types)]
@@ -128,6 +129,15 @@ pub trait WorkspaceFs: Send + Sync {
 
     fn root(&self) -> &GuardedPath;
     fn build_context(&self) -> &GuardedPath;
+    /// Whether this backend reads from the host OS disk. The import-only
+    /// entry-tree fallback (`read_import_bytes`) probes the host through
+    /// a fresh `PathResolver`, so it must only fire on host-backed
+    /// filesystems; synthetic backends (mocks, embedded content) fail
+    /// closed with the original error instead of leaking host IO into
+    /// hermetic runs. Fail-closed default; `PathResolver` opts in.
+    fn is_host_backed(&self) -> bool {
+        false
+    }
     /// Selection last applied through `switch_to_*`: the four-way
     /// workspace selector plus the cache flavor. Scope save/restore
     /// and module-context reset round-trip through this instead of
@@ -329,6 +339,10 @@ impl WorkspaceFs for PathResolver {
 
     fn root(&self) -> &GuardedPath {
         PathResolver::root(self)
+    }
+
+    fn is_host_backed(&self) -> bool {
+        true
     }
 
     fn workspace_root(&self) -> Option<&GuardedPath> {

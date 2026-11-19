@@ -767,6 +767,8 @@ mod tests {
             docs: "",
             optional: false,
             default: None,
+
+            alias: None,
         }]));
         for tag in [&string_path, &list_union, &map_union, &record_union] {
             assert_eq!(

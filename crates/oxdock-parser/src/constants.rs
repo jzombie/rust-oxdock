@@ -73,6 +73,7 @@ pub const KEYWORD_ASSERT_EQ: &str = "ASSERT_EQ";
 pub const KEYWORD_ASSERT_NE: &str = "ASSERT_NE";
 pub const KEYWORD_ASSERT_CONTAINS: &str = "ASSERT_CONTAINS";
 pub const KEYWORD_EXIT: &str = "EXIT";
+pub const KEYWORD_FAIL: &str = "FAIL";
 pub const KEYWORD_SLEEP: &str = "SLEEP";
 pub const KEYWORD_LIST_APPEND: &str = "LIST_APPEND";
 

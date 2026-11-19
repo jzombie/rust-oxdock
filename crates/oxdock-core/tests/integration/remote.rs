@@ -721,6 +721,49 @@ fn remote_inside_async_block_keeps_live_stdout_backend() {
 }
 
 #[test]
+fn fail_block_remote_gets_no_caller_stdout_pipe() {
+    // Inverse of the ASYNC preservation above: a REMOTE step inside a
+    // FAIL block must not inherit the enclosing stdout pipe backend.
+    // The block's stdout is rerouted to stderr, so the guest request
+    // carries no stdout pipe and the response bytes fall back to the
+    // rerouted error stream instead of the caller's pipe.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let seen = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let steps = oxdock_core::parse_script(indoc! {r#"
+        LET $cap: PIPE
+        WITH_IO [stdout=$cap] {
+            FAIL "msg" {
+                REMOTE prod {
+                    ECHO "guest-hi"
+                }
+            }
+        }
+    "#})
+    .unwrap();
+    let fs: Box<dyn WorkspaceFs> = Box::new(PathResolver::new(root.root(), root.root()).unwrap());
+    let mut io = ExecIo::new();
+    io.set_remote_runner_for_target(
+        "prod".to_string(),
+        Arc::new(BackendProbeRunner {
+            saw_live_stdout: Arc::clone(&seen),
+        }),
+    );
+    let err = run_steps_with_manager(fs, &steps, MockProcessManager::default(), io)
+        .map(|_| ())
+        .expect_err("FAIL must abort");
+    assert_eq!(
+        oxdock_core::exit_code_of(&err),
+        Some(1),
+        "FAIL without a code exits 1, got: {err:#}"
+    );
+    assert!(
+        !seen.load(std::sync::atomic::Ordering::SeqCst),
+        "REMOTE in a FAIL block must not see the caller's stdout pipe"
+    );
+}
+
+#[test]
 fn remote_guest_exit_fails_host_step() {
     // EXIT inside a REMOTE body runs in the guest: it kills guest
     // background children and bails the guest script with its code.

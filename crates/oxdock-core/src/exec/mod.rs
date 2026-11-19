@@ -36,7 +36,7 @@ pub(crate) use self::handlers::{
     dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
     dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
     dispatch_copy, dispatch_copy_git, dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand,
-    dispatch_for_loop, dispatch_func_def, dispatch_if_then, dispatch_import_file,
+    dispatch_fail, dispatch_for_loop, dispatch_func_def, dispatch_if_then, dispatch_import_file,
     dispatch_import_funcs, dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env,
     dispatch_isolated_step, dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step,
     dispatch_read, dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return,

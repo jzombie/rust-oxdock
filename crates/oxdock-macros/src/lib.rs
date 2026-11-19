@@ -1339,6 +1339,28 @@ fn emit_stepkind(
             let c = emit_arg(code, interp);
             quote! { StepKind::Exit(#c) }
         }
+        StepKind::Fail {
+            code,
+            message,
+            body,
+        } => {
+            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+            let code_tokens = match code {
+                Some(c) => {
+                    let t = emit_arg(c, interp);
+                    quote! { Some(#t) }
+                }
+                None => quote! { None },
+            };
+            let msg_tokens = match message {
+                Some(m) => {
+                    let t = emit_arg(m, interp);
+                    quote! { Some(#t) }
+                }
+                None => quote! { None },
+            };
+            quote! { StepKind::Fail { code: #code_tokens, message: #msg_tokens, body: vec![#(#steps),*] } }
+        }
         StepKind::For {
             key_var,
             key_type,

@@ -22,6 +22,47 @@ use super::resolve_script_params;
 use super::state::ExecState;
 use super::steps::{Flow, StepCtx, execute_steps};
 
+/// Import-only read exemption (#310.1): the entry tree stays readable
+/// for `IMPORT` loads when the script file was explicitly named, even
+/// when the entry sits outside the workspace root (workspace stays
+/// CWD). Each resolved path stays guard-checked under its own root;
+/// general file ops keep workspace containment. Single owner for the
+/// fallback so expansion, execution, and dry-run previews agree.
+fn read_import_bytes(fs: &dyn WorkspaceFs, resolved: &GuardedPath) -> Result<Vec<u8>> {
+    match fs.read_file(resolved) {
+        Ok(bytes) => Ok(bytes),
+        Err(first) => {
+            #[cfg(miri)]
+            {
+                let _ = resolved;
+                Err(first)
+            }
+            #[cfg(not(miri))]
+            {
+                // Fallback resolver rooted at the resolved file's own
+                // root (entry dir for outside entries): guard-checked
+                // like CLI `read_script`, so sibling imports load.
+                // Host-backed filesystems only: synthetic backends
+                // (mocks, embedded content) fail closed with the
+                // original error instead of probing the host disk.
+                // Missing files fail here too; return the original
+                // workspace error to preserve the containment message.
+                if !fs.is_host_backed() {
+                    return Err(first);
+                }
+                let root = resolved.root();
+                match oxdock_fs::PathResolver::new(root, root) {
+                    Ok(fallback) => match fallback.read_file(resolved) {
+                        Ok(bytes) => Ok(bytes),
+                        Err(_) => Err(first),
+                    },
+                    Err(_) => Err(first),
+                }
+            }
+        }
+    }
+}
+
 /// One previewed step for `--dry-run` (#115, #82): the owning file plus
 /// the step itself (line/col ride on the step).
 #[derive(Debug, Clone)]
@@ -331,8 +372,7 @@ fn read_and_parse_import(
     path: &str,
     table: &ModuleTable,
 ) -> Result<Vec<Step>> {
-    let bytes = fs
-        .read_file(resolved)
+    let bytes = read_import_bytes(fs, resolved)
         .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be read: {e}"))?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|e| anyhow::anyhow!("IMPORT `{path}` is not valid UTF-8: {e}"))?;
@@ -1171,6 +1211,7 @@ pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
         | StepKind::While { body, .. }
         | StepKind::FuncDef { body, .. }
         | StepKind::Timeout { body, .. }
+        | StepKind::Fail { body, .. }
         | StepKind::Isolated { body, .. }
         | StepKind::AssignAsync { body, .. }
         | StepKind::AsyncBlock { body, .. }
@@ -1386,9 +1427,7 @@ fn load_file<P: ProcessManager>(
             type_exports: record.type_exports.clone(),
         });
     }
-    let bytes = state
-        .fs
-        .read_file(&resolved)
+    let bytes = read_import_bytes(state.fs.as_ref(), &resolved)
         .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be read: {e}"))?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|e| anyhow::anyhow!("IMPORT `{path}` is not valid UTF-8: {e}"))?;

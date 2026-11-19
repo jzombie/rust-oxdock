@@ -95,8 +95,8 @@ use crate::commands::{
 use crate::constants::{
     INJECT_PREFIX, INJECT_SUFFIX, KEYWORD_AS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
     KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_DEFAULT, KEYWORD_ELSE, KEYWORD_ENV,
-    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC, KEYWORD_IF,
-    KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED,
+    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC,
+    KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED,
     KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH, KEYWORD_TIMEOUT,
     KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
 };
@@ -3972,6 +3972,140 @@ fn parse_isolated_single(
     Ok(Some((StepKind::Isolated { body }, 1 + used)))
 }
 
+/// `FAIL [<code>] [<message>] [{ <block> }]`: message and/or block
+/// required, code optional. The trailing brace (when present and not
+/// a `{{ }}` template) parses as a child-scope body that reads
+/// caller locals; the remaining tokens lower as 0-2 plain args (no `KEY=VAL`). One arg
+/// is the message unless it is a bare int literal, which is the
+/// code (`FAIL 2` exits silently, `FAIL "2"` prints); two args are
+/// code plus message with the code statically int-checked like
+/// `EXIT`. `None` on shape miss (joint head, `KEY=VAL`, >2 args fall
+/// to generic, which fails with the `FAIL` hint).
+fn parse_fail_single(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let head_ok =
+        matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_FAIL);
+    if !head_ok {
+        return Ok(None);
+    }
+    let next_joint = toks.get(pos + 1).is_some_and(|t| t.joint);
+    if next_joint {
+        return Ok(None);
+    }
+    let end = toks.len();
+    let mut arg_end = end;
+    let mut body: Vec<Step> = Vec::new();
+    // Brace presence is tracked apart from body length: `FAIL {}`
+    // is a valid empty block, while a missing block leaves no
+    // braces at all.
+    let mut has_block = false;
+    if let Some(last) = toks.last()
+        && matches!(
+            &last.kind,
+            TokKind::Group {
+                delim: GroupDelim::Brace,
+                ..
+            }
+        )
+        && !is_template_brace(last)
+        && end > pos + 1
+    {
+        let inner = match &last.kind {
+            TokKind::Group { inner, .. } => inner.clone(),
+            _ => unreachable!(),
+        };
+        body = parse_body_steps(&inner, stmt, ctx, false)?;
+        arg_end = end - 1;
+        has_block = true;
+    }
+    let arg_toks = if arg_end > pos + 1 {
+        &toks[pos + 1..arg_end]
+    } else {
+        &[]
+    };
+    if !arg_toks.is_empty() && arg_toks.first().is_some_and(|t| t.joint) {
+        return Ok(None);
+    }
+    let (tokens, deferred) = build_arg_tokens(arg_toks, stmt, ctx)?;
+    let mut args: Vec<Arg> = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        match token {
+            InsToken::Pos(arg) => args.push(arg),
+            InsToken::Assign(..) => return Ok(None),
+        }
+    }
+    if args.len() > 2 {
+        return Ok(None);
+    }
+    if args.is_empty() && !has_block {
+        return Ok(None);
+    }
+    if let Some(err) = deferred {
+        return Err(err);
+    }
+    let (code, message) = match args.len() {
+        0 => (None, None),
+        1 => {
+            let mut it = args.into_iter();
+            let only = it.next();
+            // A lone bare int is a silent code (`FAIL 2`); anything
+            // else (quoted text, `$var`, templates) is the message.
+            // Quoting decides: `FAIL "2"` prints `2` and exits 1.
+            match &only {
+                Some(Arg::String(s, false))
+                    if crate::command::strip_digit_separators(s)
+                        .parse::<i64>()
+                        .is_ok() =>
+                {
+                    (only, None)
+                }
+                _ => (None, only),
+            }
+        }
+        _ => {
+            let mut it = args.into_iter();
+            let code = it.next();
+            let message = it.next();
+            // The code position is statically int-checked like
+            // `EXIT`: a non-int literal fails here, while `$var`
+            // and templates defer to runtime resolution.
+            if let Some(arg) = &code {
+                crate::command::ArgType::Int
+                    .check_arg(arg)
+                    .map_err(|e| TokenError {
+                        stmt,
+                        msg: e.to_string(),
+                        line: 0,
+                        col: 0,
+                        kind: Some(ParseErrorKind::Validation {
+                            command: KEYWORD_FAIL.to_string(),
+                        }),
+                    })?;
+            }
+            (code, message)
+        }
+    };
+    crate::commands::rewrite_isolated_inherit(&mut body);
+    let kind = StepKind::Fail {
+        code,
+        message,
+        body,
+    };
+    let span = lowering_ctx(stmt);
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
+        stmt,
+        msg: e.to_string(),
+        line: 0,
+        col: 0,
+        kind: None,
+    })?;
+    Ok(Some((kind, end - pos)))
+}
+
 /// Single (non-block) `ASYNC`: one inner command or block (blocks
 /// admit a joint brace, like `async_statement_block`'s `sep?`).
 /// Top-level `WITH_IO` steps fail through the shared reject; the
@@ -4179,6 +4313,21 @@ fn parse_type_field(toks: &[Tok], pos: usize) -> Option<usize> {
         }
     }
     let mut p = parse_type_shape(toks, p)?;
+    // Optional `ALIAS name` clause (#310.5): one alternate CLI spelling
+    // for `TYPE FLAGS` fields. Skipped as a unit here so the shape
+    // matcher covers it; the spelling parser owns validation, and the
+    // renderer carries the raw tokens through. Order is fixed:
+    // `TYPE [ALIAS alias] [= default]`. The alias word itself rides
+    // along regardless of case so a miscapitalized alias still reaches
+    // the spelling diagnostic instead of missing to unknown-command.
+    let q = skip_type_nl(toks, p);
+    if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Word(w)) if w == crate::tag::ALIAS_KEYWORD)
+    {
+        p = skip_type_nl(toks, q + 1);
+        if matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Word(_))) {
+            p = skip_type_nl(toks, p + 1);
+        }
+    }
     // Optional `= ...` default tail: consume to the next field
     // delimiter (`,`, `>`, `|` at angle depth zero), tracking `<>`
     // so nested shapes ride along. Any spacing, any tokens:
@@ -4375,6 +4524,18 @@ fn parse_case_values(
             Err(e) if e.msg.starts_with("unsupported in parse_tokens") => return Err(e),
             Err(e) => return Err(e),
         };
+        // A `{ ... }` block is never a case value: without this, a
+        // missing `CASE` value consumes the arm body as a block
+        // expression and fails downstream instead of naming the miss.
+        if matches!(value, Expr::Block(_)) {
+            return Err(TokenError {
+                stmt,
+                line: 0,
+                col: 0,
+                msg: "SWITCH CASE requires a value or condition before '{'".to_string(),
+                kind: None,
+            });
+        }
         values.push(value);
         p = start + vcur.pos;
         let mut gcur = Cursor::expr(&toks[p..], stmt);
@@ -8127,6 +8288,11 @@ fn parse_element_at(
         }
         Some(KEYWORD_ISOLATED) => {
             if let Some((kind, used)) = parse_isolated_single(toks, pos, stmt, ctx)? {
+                return Ok((vec![step(kind)], used));
+            }
+        }
+        Some(KEYWORD_FAIL) => {
+            if let Some((kind, used)) = parse_fail_single(toks, pos, stmt, ctx)? {
                 return Ok((vec![step(kind)], used));
             }
         }

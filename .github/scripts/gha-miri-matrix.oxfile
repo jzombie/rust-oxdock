@@ -106,7 +106,7 @@ FOR $j: LIST<STRING> IN $jobs {
     LET $cur: STRING = ""
     LET $n: INT = 0
     FOR $line: STRING IN $lines {
-        IF TEXT_CONTAINS($line, ": test") {
+        IF CONTAINS($line, ": test") {
             LET $name: STRING = TEXT_TRIM_SUFFIX($line, ": test")
             IF $cur == "" {
                 $cur = $name

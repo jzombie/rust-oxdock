@@ -333,6 +333,7 @@ fn record_tag(fields: &[RecordField]) -> TokenStream2 {
                     docs: "",
                     optional: #optional,
                     default: None,
+                    alias: None,
                 }
             }
         })

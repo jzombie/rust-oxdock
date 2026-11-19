@@ -380,6 +380,28 @@ where
     }
 }
 
+pub(super) fn write_stderr<F>(handle: Option<StreamHandle>, op: F) -> Result<()>
+where
+    F: FnOnce(&mut dyn Write) -> Result<()>,
+{
+    match handle {
+        Some(StreamHandle::Stream(writer)) => {
+            if let Ok(mut guard) = writer.lock() {
+                op(&mut *guard)?;
+            }
+            Ok(())
+        }
+        #[cfg(not(miri))]
+        Some(StreamHandle::Os(_)) => {
+            bail!("cannot write DSL output to a live OS pipe")
+        }
+        None => {
+            let mut stderr = io::stderr();
+            op(&mut stderr)
+        }
+    }
+}
+
 /// Slice-based byte adapter over pipe halves for host (`#[oxdock_func]`)
 ///
 /// stateful functions. All byte movement goes through the standard traits

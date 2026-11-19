@@ -39,6 +39,7 @@ define_pipeline! {
     StepKind::AssertNe { .. } => exec::dispatch_assert_ne,
     StepKind::AssertContains { .. } => exec::dispatch_assert_contains,
     StepKind::Exit(..) => exec::dispatch_exit,
+    StepKind::Fail { .. } => exec::dispatch_fail,
     StepKind::AssignAsync { .. } => exec::dispatch_assign_async_step,
     StepKind::Set { .. } => exec::dispatch_set,
     StepKind::Await { .. } => exec::dispatch_await_step,

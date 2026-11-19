@@ -28,7 +28,7 @@ use oxdock_utils::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
 
 use super::args::parse_bool_str;
 use super::fs_ops::copy_entry;
-use super::io::{StreamHandle, TaskTee, TeeStream, write_stdout};
+use super::io::{StreamHandle, TaskTee, TeeStream, write_stderr, write_stdout};
 use super::native::FuncBody;
 use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
 use super::steps::{Flow, StepCtx, TtyRequest};
@@ -3260,6 +3260,7 @@ fn collect_body_bindings<P: ProcessManager>(
             collect_body_bindings(cmd, state, out);
         }
         StepKind::Timeout { body, .. }
+        | StepKind::Fail { body, .. }
         | StepKind::Isolated { body }
         | StepKind::For { body, .. }
         | StepKind::While { body, .. } => {
@@ -4125,6 +4126,92 @@ pub(crate) fn dispatch_exit<P: ProcessManager>(
     };
     let code = super::args::resolve_arg_as_int(code, cx)?;
     exit(cx, code)
+}
+
+/// Write a `FAIL` message to stderr: same single-`write_all` atomicity
+/// as [`echo`], but on the error stream so failures never pollute
+/// captured stdout.
+pub(super) fn fail_message<P: ProcessManager>(cx: &mut StepCtx<'_, P>, msg: &str) -> Result<()> {
+    let line = format!("{msg}\n");
+    write_stderr(cx.err.clone(), |writer| {
+        writer.write_all(line.as_bytes())?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Run a `FAIL` step: the optional block executes first with its stdout
+/// rerouted to the error stream (every nested `ECHO`, `RUN`, or callee
+/// inherits the swapped handle unless an inner `WITH_IO` overrides it),
+/// then the optional message prints to stderr and the pipeline exits
+/// through the shared [`exit`] path with `code` (default 1).
+pub(crate) fn fail<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    code: &Option<Arg>,
+    message: &Option<Arg>,
+    body: &[Step],
+) -> Result<Flow> {
+    if !body.is_empty() {
+        // Rerouted body stdout must not leak into the caller's
+        // stdout pipe: `None` carries no backend, so a nested
+        // `REMOTE` (or any future `out_pipe` consumer) has no
+        // caller pipe to stream into, and its output falls back
+        // to the rerouted error stream. `stdin_pipe` still rides
+        // along: input routing is unaffected by the swap.
+        // `None` also inherits host stdout, so a bare swap would be
+        // a no-op there: pin an explicit host-stderr sink in that
+        // case, while captured setups reuse the live `err` handle.
+        // Every nested `ECHO`, `RUN`, or callee inherits the swap
+        // unless an inner `WITH_IO` overrides it for that step.
+        let body_out = match cx.err.clone() {
+            Some(handle) => Some(handle),
+            None => Some(StreamHandle::Stream(Arc::new(
+                Mutex::new(std::io::stderr()),
+            ))),
+        };
+        let flow = super::steps::execute_scoped_steps(
+            cx.state,
+            cx.process,
+            body,
+            cx.stdin.clone(),
+            cx.expose_stdin,
+            body_out,
+            cx.err.clone(),
+            None,
+            cx.stdin_pipe.clone(),
+            false,
+        )?;
+        if !matches!(flow, Flow::Done) {
+            return Ok(flow);
+        }
+    }
+    // Argument resolution runs after the block: the block executes
+    // first, so a body mutation of the code variable takes effect
+    // and an invalid code cannot skip cleanup.
+    let code = match code {
+        Some(arg) => super::args::resolve_arg_as_int(arg, cx)?,
+        None => 1,
+    };
+    if let Some(msg) = message {
+        let msg = super::args::resolve_arg(msg, cx)?;
+        fail_message(cx, &msg)?;
+    }
+    exit(cx, code).map(|()| Flow::Done)
+}
+
+pub(crate) fn dispatch_fail<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Fail {
+        code,
+        message,
+        body,
+    } = step
+    else {
+        unreachable!()
+    };
+    top_level_flow(fail(cx, code, message, body)?)
 }
 
 pub(crate) fn dispatch_inherit_env<P: ProcessManager>(
