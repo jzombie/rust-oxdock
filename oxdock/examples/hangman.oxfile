@@ -5,10 +5,38 @@
 IMPORT [STD]
 WORKSPACE SYSTEM
 
+CONST $words: LIST<STRING> = [
+    "alpha",
+    "bravo",
+    "charlie",
+    "delta",
+    "echo",
+    "foxtrot",
+    "golf",
+    "hotel",
+    "india",
+    "juliett",
+    "kilo",
+    "lima",
+    "mike",
+    "november",
+    "oscar",
+    "papa",
+    "quebec",
+    "romeo",
+    "sierra",
+    "tango",
+    "uniform",
+    "victor",
+    "whiskey",
+    "x-ray",
+    "yankee",
+    "zulu"
+]
+
 # Pick a word: RAND gives [0, 1), so scale by the word count,
 # count off whole ones, then take the word at that index.
 FUNC PICK_WORD(): STRING {
-    LET $words: LIST<STRING> = ["oxdock", "shell", "script", "prompt", "terminal"]
     LET $draw: FLOAT = RAND()
     LET $rest: FLOAT = $draw * FLOAT(LEN($words))
     LET $pick: INT = 0
@@ -45,11 +73,15 @@ FUNC PLAY(): BOOL {
         LET $known: STRING = TEXT_JOIN($guessed, "")
         LET $shown: STRING = ""
 
+        # Non-letters reveal from the start: only [a-z] hides behind
+        # "_", so the "-" in "x-ray" stays visible and winnable.
         FOR $j: INT, $ch: STRING IN $chars {
             IF CONTAINS($known, $ch) {
                 $shown = "{{ $shown }}{{ $ch }} "
-            } ELSE {
+            } ELSE IF TEXT_MATCH($ch, "^[a-z]$") {
                 $shown = "{{ $shown }}_ "
+            } ELSE {
+                $shown = "{{ $shown }}{{ $ch }} "
             }
         }
 
