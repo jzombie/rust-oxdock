@@ -866,6 +866,333 @@ fn nested_funcdef_does_not_inherit_enclosing_call_jail() {
 }
 
 #[test]
+fn cross_module_same_name_internal_call_hits_own_def() {
+    // Confusion proof (#322): entry and lib define the same
+    // function name with the same arity but different bodies, and
+    // the lib keeps its helper private. The lib internal unqualified
+    // call must resolve home-scope to its own def; the entry bare
+    // call must resolve to its own. Same arity is the dangerous
+    // shape: a wrong resolution would silently return the other
+    // party's data with no error.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            EXPORT [FUNC CALLIT]
+            FUNC FOO(): STRING {
+                RETURN "lib-foo"
+            }
+            FUNC CALLIT(): STRING {
+                RETURN FOO()
+            }
+        "#},
+    );
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "lib.oxfile" AS LIB]
+                FUNC FOO(): STRING {
+                    RETURN "entry-foo"
+                }
+                LET $internal: STRING = LIB::CALLIT()
+                LET $own: STRING = FOO()
+            "#},
+        )
+        .expect("same-name shadowing runs");
+    assert_eq!(
+        out.bindings.get("internal").and_then(|v| v.as_str()),
+        Some("lib-foo"),
+        "lib internal unqualified call must hit the lib def, never the entry shadow"
+    );
+    assert_eq!(
+        out.bindings.get("own").and_then(|v| v.as_str()),
+        Some("entry-foo"),
+        "entry bare call still hits the entry def"
+    );
+}
+
+#[test]
+fn mismatched_shadow_validates_against_home_signature() {
+    // Static/runtime agreement proof (#322): the entry defines a
+    // same-named function with a DIFFERENT signature (one arg vs
+    // none). Validation of the lib internal call must use the lib's
+    // own 0-arg signature, not the entry's 1-arg one.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            EXPORT [FUNC CALLIT]
+            FUNC FOO(): STRING {
+                RETURN "lib-foo"
+            }
+            FUNC CALLIT(): STRING {
+                RETURN FOO()
+            }
+        "#},
+    );
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "lib.oxfile" AS LIB]
+                FUNC FOO($x: INT): INT {
+                    RETURN $x
+                }
+                LET $internal: STRING = LIB::CALLIT()
+            "#},
+        )
+        .expect("module internal call validates against the home signature");
+    assert_eq!(
+        out.bindings.get("internal").and_then(|v| v.as_str()),
+        Some("lib-foo"),
+        "runtime must serve the lib def"
+    );
+}
+
+#[test]
+fn bare_harvested_caller_still_hits_lib_def() {
+    // Harvest variant of the confusion proof: only `CALLIT` is
+    // imported, called bare with no alias prefix, while the entry
+    // defines its own same-named private `FOO`. The harvested body
+    // must still resolve its internal call home-scope to the lib def.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            EXPORT [FUNC CALLIT]
+            FUNC FOO(): STRING {
+                RETURN "lib-foo"
+            }
+            FUNC CALLIT(): STRING {
+                RETURN FOO()
+            }
+        "#},
+    );
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, [FUNC CALLIT FROM "lib.oxfile"]]
+                FUNC FOO(): STRING {
+                    RETURN "entry-foo"
+                }
+                LET $internal: STRING = CALLIT()
+                LET $own: STRING = FOO()
+            "#},
+        )
+        .expect("bare harvest runs");
+    assert_eq!(
+        out.bindings.get("internal").and_then(|v| v.as_str()),
+        Some("lib-foo"),
+        "harvested body must hit the lib def, never the entry shadow"
+    );
+    assert_eq!(
+        out.bindings.get("own").and_then(|v| v.as_str()),
+        Some("entry-foo"),
+        "entry bare call still hits the entry def"
+    );
+}
+
+#[test]
+fn module_nested_shadow_beats_top_level_home_def() {
+    // Precedence proof (#322): a nested `FUNC` inside a module body
+    // shadows the module's own top-level def of the same name for
+    // calls within that body. Deliberately DIFFERENT signatures
+    // (nested takes an arg, top-level takes none) so static and
+    // runtime must both resolve the nested def: validating against
+    // the top-level would false-reject, executing it would take the
+    // wrong body.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            EXPORT [FUNC CALLIT, FUNC CALLTOP]
+            FUNC FOO(): STRING {
+                RETURN "top"
+            }
+            FUNC CALLIT(): STRING {
+                FUNC FOO($x: INT): STRING {
+                    RETURN "nested"
+                }
+                RETURN FOO(41)
+            }
+            FUNC CALLTOP(): STRING {
+                RETURN FOO()
+            }
+        "#},
+    );
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "lib.oxfile" AS LIB]
+                LET $got: STRING = LIB::CALLIT()
+                LET $top: STRING = LIB::CALLTOP()
+            "#},
+        )
+        .expect("nested shadow runs");
+    assert_eq!(
+        out.bindings.get("got").and_then(|v| v.as_str()),
+        Some("nested"),
+        "innermost nested def wins over the module top-level def"
+    );
+    assert_eq!(
+        out.bindings.get("top").and_then(|v| v.as_str()),
+        Some("top"),
+        "outside the nested scope the home top-level def still serves"
+    );
+}
+
+#[test]
+fn entry_bare_call_to_foreign_only_def_fails_closed() {
+    // No silent cross-unit execution (#322): the entry never
+    // imported `FOO` (no alias use, no harvest). The parser
+    // qualifies the bare call to the sole opaque alias and execution
+    // fails closed instead of running the lib's private def.
+    // Same-unit and explicitly imported spellings are unaffected.
+    // (Explicit `SCRIPT::` spellings never reach runtime: the
+    // parser rejects unknown `SCRIPT::` modules up front.)
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            FUNC FOO(): STRING {
+                RETURN "lib-foo"
+            }
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "lib.oxfile" AS LIB]
+                LET $got: STRING = FOO()
+            "#},
+        )
+        .expect_err("bare call to a foreign-only def must fail");
+    assert!(
+        format!("{err:#}").contains("unknown function `LIB::FOO`"),
+        "fails closed on the qualified spelling, got: {err:#}"
+    );
+}
+
+#[test]
+fn module_cannot_reach_caller_nested_def() {
+    // Lexical scoping across calls (#322): a nested `FUNC` defined
+    // in the caller's body is invisible inside the callee, even in
+    // the same file. Only the callee's own nested defs, its file
+    // top-level, and its explicit imports resolve there.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            EXPORT [FUNC OUTER, FUNC INNER]
+            FUNC OUTER(): STRING {
+                FUNC FOO(): STRING {
+                    RETURN "caller-nested"
+                }
+                RETURN INNER()
+            }
+            FUNC INNER(): STRING {
+                RETURN FOO()
+            }
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "lib.oxfile" AS LIB]
+                LET $got: STRING = LIB::OUTER()
+            "#},
+        )
+        .expect_err("callee must not see the caller nested def");
+    assert!(
+        format!("{err:#}").contains("unknown function `FOO`"),
+        "fails closed naming the function, got: {err:#}"
+    );
+}
+
+#[test]
+fn entry_caller_nested_def_invisible_to_sibling_callee() {
+    // Same rule, entry edition (#322): a nested `FUNC` defined in an
+    // entry caller's body is invisible inside the sibling callee,
+    // even though both live in the entry file. The callee's own
+    // nested defs, the entry top-level index, and explicit imports
+    // resolve there; the caller's frames do not.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                FUNC OUTER(): STRING {
+                    FUNC FOO(): STRING {
+                        RETURN "caller-nested"
+                    }
+                    RETURN INNER()
+                }
+                FUNC INNER(): STRING {
+                    RETURN FOO()
+                }
+                LET $got: STRING = OUTER()
+            "#},
+        )
+        .expect_err("sibling callee must not see the caller nested def");
+    assert!(
+        format!("{err:#}").contains("unknown function `FOO`"),
+        "fails closed naming the function, got: {err:#}"
+    );
+}
+
+#[test]
+fn entry_forward_reference_executes() {
+    // Alignment (#322): the static pass already validated forward
+    // calls; the runtime file frame serves them instead of bailing
+    // unknown-function. Matches module behavior, where the home
+    // index always resolved regardless of definition order.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                LET $got: STRING = FOO()
+                FUNC FOO(): STRING {
+                    RETURN "hi"
+                }
+            "#},
+        )
+        .expect("entry forward reference runs");
+    assert_eq!(
+        out.bindings.get("got").and_then(|v| v.as_str()),
+        Some("hi"),
+        "entry top-level defs resolve regardless of position"
+    );
+}
+
+#[test]
 fn cross_module_explicit_args_reach_callee_jail() {
     // Only arguments cross: the entry passes a dir name plus string
     // data, and the lib callee applies them inside its own jail with

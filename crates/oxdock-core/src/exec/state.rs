@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use anyhow::Result;
 use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs, WorkspaceSelection};
 use oxdock_parser::constants::KEYWORD_CONST;
-use oxdock_parser::{Field, Step, TypeDescriptor, TypeTag, Value};
+use oxdock_parser::{Field, GuardExpr, Step, TypeDescriptor, TypeTag, Value};
 use oxdock_process::{BackgroundHandle, CancelHub, CommandContext, ProcessManager};
 
 use super::exit::exit_code_of;
@@ -239,6 +239,23 @@ pub struct ExecState<P: ProcessManager> {
     /// static per-function overlays shadow the unit imports; popping on
     /// return (via an RAII guard) restores the caller's view.
     pub(super) call_alias_frames: Vec<(String, super::native::AliasTargets)>,
+    /// Frame-2..N floor (#322): `functions.scopes` index at which the
+    /// current module call (or init) body starts. Nested-frame lookup
+    /// walks down to this floor and no further, so caller frames from
+    /// other units are unreachable by construction. Pushed alongside
+    /// `call_alias_frames` (and init scopes) on every path. Entry
+    /// calls walk all live frames: with inits popped, every live
+    /// frame is entry-owned by construction.
+    pub(super) func_floors: Vec<usize>,
+    /// Bare-harvest visibility per importing unit (#322): (unit, base)
+    /// to defining file key. Harvests persist through this map past
+    /// init pops, never through scope frames.
+    pub(super) harvest_map: HashMap<(String, String), String>,
+    /// Entry file top-level `FUNC`s (#322): the entry unit's Frame-1
+    /// file scope, collected once per validation. `validate_closure_for_run`
+    /// is the single choke every execution path funnels through, so
+    /// one build here covers Engine, MCP, and dry runs alike.
+    pub(super) entry_tops: HashMap<String, Vec<RawFuncDef>>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -281,6 +298,26 @@ pub(super) struct ModuleRecord {
     /// bindings) are readable through `$ALIAS::NAME`.
     pub(super) const_exports: Vec<String>,
     pub(super) init: Option<ModuleInit>,
+    /// Frame-1 file scope (#322): every top-level `FUNC` of the file
+    /// (exported, harvested, and private alike), indexed once at load
+    /// so calls resolve without scanning steps on every invocation.
+    /// Single owner for the defining-file view; the runtime walk and
+    /// the static home index read the same shape.
+    pub(super) top_funcs: HashMap<String, Vec<RawFuncDef>>,
+}
+
+/// One top-level `FUNC` definition as parsed: the file frame of the
+/// unit scope stack (#322). Params and return stay in source spelling
+/// until a call resolves tags. Guards ride along and are evaluated
+/// with the live env at use time, mirroring the previous per-call
+/// step scan exactly (init-gated defs behave as before).
+#[derive(Clone, Debug, Default)]
+pub(super) struct RawFuncDef {
+    pub(super) params: Vec<(String, String, bool)>,
+    pub(super) return_spelling: String,
+    pub(super) is_async: bool,
+    pub(super) body: Vec<Step>,
+    pub(super) guard: Option<GuardExpr>,
 }
 
 /// Initialized module state (#115): the shared globals every alias of
@@ -785,6 +822,9 @@ impl<P: ProcessManager> ExecState<P> {
             module_stack: self.module_stack.clone(),
             executed_alias_targets: self.executed_alias_targets.clone(),
             call_alias_frames: self.call_alias_frames.clone(),
+            func_floors: self.func_floors.clone(),
+            harvest_map: self.harvest_map.clone(),
+            entry_tops: self.entry_tops.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),

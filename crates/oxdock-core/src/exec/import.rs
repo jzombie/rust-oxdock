@@ -19,7 +19,7 @@ use oxdock_parser::{MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value};
 use oxdock_process::ProcessManager;
 
 use super::resolve_script_params;
-use super::state::ExecState;
+use super::state::{ExecState, RawFuncDef};
 use super::steps::{Flow, StepCtx, execute_steps};
 
 /// Import-only read exemption (#310.1): the entry tree stays readable
@@ -523,6 +523,15 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                             Some(&key),
                         )?;
                     }
+                    // Harvest visibility per importing unit (#322):
+                    // record the defining file so calls resolve through
+                    // the harvest map, surviving init pops that evict
+                    // scope frames. Last harvest wins, mirroring the
+                    // registry slot it replaces for lookup.
+                    let unit = active_unit_key(cx.state);
+                    cx.state
+                        .harvest_map
+                        .insert((unit, name.clone()), key.clone());
                 }
             }
         }
@@ -821,6 +830,12 @@ fn ensure_module_init<P: ProcessManager>(
         }
         cx.state.import_stack.push(resolved.clone());
         cx.state.push_scope();
+        // Frame floor for the nested walk (#322): the init body's
+        // own frames start here. Popped with the scope below on
+        // every path.
+        cx.state
+            .func_floors
+            .push(cx.state.functions.scope_depth().saturating_sub(1));
         // Fixed default jail for the module top-level (#322): the
         // snapshot root with the seed env. Caller workspace, cwd,
         // env, and isolated scrubs never flow into init. The init
@@ -932,6 +947,7 @@ fn ensure_module_init<P: ProcessManager>(
         Ok(value)
     })();
     let pop_res = cx.state.pop_scope();
+    let _ = cx.state.func_floors.pop();
     cx.state.var_scopes = saved_vars;
     cx.state.const_scopes = saved_consts;
     cx.state.isolated_stack = saved_isolated;
@@ -1565,6 +1581,7 @@ fn load_file<P: ProcessManager>(
             type_exports: parsed.type_exports.clone(),
             const_exports: parsed.const_exports.clone(),
             init: None,
+            top_funcs: collect_top_funcs(&parsed.steps),
         },
     );
     Ok(LoadedFile {
@@ -1630,61 +1647,127 @@ pub(crate) fn resolve_top_level<P: ProcessManager>(
 /// display paths, which never equal this sentinel.
 pub(crate) const ENTRY_UNIT: &str = "entry";
 
-/// Raw home-scope `FUNC` header plus body (#319): spelled params,
-/// return spelling, async flag, body steps, and the defining file key.
-/// Stored unregistered so `LIB::PRIVATE` stays unknown while home
-/// `PRIVATE()` resolves; callers resolve tags on use like every other
-/// definition path.
-type HomeFuncdef = (Vec<(String, String, bool)>, String, bool, Vec<Step>, String);
-/// Home-scope sibling lookup (#319): the defining file's own `FUNC`
-/// definitions, including private and unharvested names, for callee
-/// bodies resolving against their home file instead of only the
-/// importer's scope. Searches the active module's parsed steps for a
-/// top-level `FUNC` with the base name, returning its raw header plus
-/// body for on-demand execution without registry pollution (so
-/// `LIB::PRIVATE` stays unknown while home `PRIVATE()` works).
-/// Guards evaluate like execution (see `execute_steps`): skipped
-/// steps never define, so a disabled-platform `FUNC` never resolves
-/// and disjoint platform variants resolve the live one; overlapping
-/// live duplicates resolve last-wins, mirroring definition order.
-/// Only `SCRIPT::BASE` and bare `BASE` spellings qualify; qualified
-/// `ALIAS::` and host calls never fall back.
-pub(crate) fn find_home_funcdef<P: ProcessManager>(
-    state: &ExecState<P>,
-    name: &str,
-) -> Option<HomeFuncdef> {
-    let base = match name.split_once(MODULE_SEPARATOR) {
-        Some((module, base)) if module == oxdock_parser::SCRIPT_MODULE_NAME => base,
-        Some(_) => return None,
-        None => name,
-    };
-    let module_key = state.current_module()?;
-    let record = state.modules.get(&module_key)?;
-    let mut found = None;
-    for step in &record.steps {
-        if !oxdock_parser::guard_option_allows(step.guard.as_ref(), &state.envs) {
-            continue;
-        }
+/// Frame-1 file scope, indexed once per load (#322): every top-level
+/// `FUNC` of one step body in definition order, guards unevaluated.
+/// Guards ride along and are evaluated with the live env at use time,
+/// so gated definitions behave exactly like the previous per-call
+/// step scan. Single owner for the file-frame shape; the runtime
+/// frame walk reads this, never the steps directly.
+pub(super) fn collect_top_funcs(steps: &[Step]) -> HashMap<String, Vec<RawFuncDef>> {
+    let mut out: HashMap<String, Vec<RawFuncDef>> = HashMap::new();
+    for step in steps {
         if let StepKind::FuncDef {
-            name: def_name,
+            name,
             params,
             return_type,
             is_async,
             body,
             ..
         } = &step.kind
-            && def_name == base
         {
-            found = Some((
-                params.clone(),
-                return_type.clone(),
-                *is_async,
-                body.clone(),
-                module_key.clone(),
-            ));
+            out.entry(name.clone()).or_default().push(RawFuncDef {
+                params: params.clone(),
+                return_spelling: return_type.clone(),
+                is_async: *is_async,
+                body: body.clone(),
+                guard: step.guard.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Live top-level def of one file frame (#322): last definition wins,
+/// gated definitions filtered against the live env. Mirrors the
+/// previous scan's forward-overwrite order exactly.
+pub(super) fn live_top_func(
+    defs: &[RawFuncDef],
+    envs: &impl oxdock_parser::EnvLookup,
+) -> Option<RawFuncDef> {
+    let mut found = None;
+    for def in defs {
+        if oxdock_parser::guard_option_allows(def.guard.as_ref(), envs) {
+            found = Some(def.clone());
         }
     }
     found
+}
+
+/// One script resolution site (#322): the single frame walk both
+/// the runtime dispatcher and the expression router share, so they
+/// can never disagree. Variants carry owned data; callers build
+/// entries or route on presence alone.
+pub(super) enum ScriptSite<P: ProcessManager> {
+    /// Live nested definition from scope frames (covers entry
+    /// top-level and nested defs positionally).
+    Live(super::native::FuncEntry<P>),
+    /// Owning-file top-level definition: raw def plus the defining
+    /// unit key for jail attribution (`None` for the entry unit,
+    /// whose calls push no module context).
+    File {
+        raw: RawFuncDef,
+        unit: Option<String>,
+    },
+}
+
+/// Single frame walk for bare and `SCRIPT::` call spellings (#322):
+/// nested frames down to the call/init floor, then the owning file
+/// frame (entry included via its precomputed index), then the
+/// per-unit harvest map. Caller frames below the floor are
+/// unreachable by construction; at entry the live frames hold only
+/// entry-owned and explicitly harvested defs (inits pop). Qualified
+/// non-`SCRIPT` spellings and canonical matches never reach here:
+/// the caller handles those through the alias matcher first.
+/// Returns `None` when only hosts/natives (or nothing) answer.
+pub(super) fn find_script_site<P: ProcessManager>(
+    state: &ExecState<P>,
+    name: &str,
+) -> Result<Option<ScriptSite<P>>> {
+    let base = match name.split_once(MODULE_SEPARATOR) {
+        Some((module, base)) if module == oxdock_parser::SCRIPT_MODULE_NAME => base,
+        Some(_) => return Ok(None),
+        None => name,
+    };
+    let current = state.current_module();
+    // Uniform floor: the innermost call/init boundary, or 0 at the
+    // top level. Entry and module calls use the same rule; entry
+    // top-level defs resolve through the entry file frame below.
+    let floor = state.func_floors.last().copied().unwrap_or(0);
+    if let Some(entry) = state.functions.get_scoped(base, floor) {
+        return Ok(Some(ScriptSite::Live(entry)));
+    }
+    // Owning file frame: the module index, or the entry index.
+    // Guards evaluate against the live env, mirroring execution.
+    // Entry hits carry no unit key so calls push no module context
+    // (a `Some("entry")` key would trip the reentrant-init guard
+    // and skip the snapshot reset).
+    let tops = match current.as_deref() {
+        Some(key) => state.modules.get(key).map(|r| &r.top_funcs),
+        None => Some(&state.entry_tops),
+    };
+    if let Some(defs) = tops.and_then(|t| t.get(base))
+        && let Some(raw) = live_top_func(defs, &state.envs)
+    {
+        let unit = current.clone();
+        return Ok(Some(ScriptSite::File { raw, unit }));
+    }
+    // Per-unit harvests: explicit global names, served from the
+    // defining file like the registry slot they replace. First
+    // textual definition wins, mirroring harvest registration.
+    let unit = active_unit_key(state);
+    if let Some(defining) = state.harvest_map.get(&(unit, base.to_string()))
+        && let Some(raw) = state
+            .modules
+            .get(defining)
+            .and_then(|r| r.top_funcs.get(base))
+            .and_then(|defs| defs.first().cloned())
+    {
+        return Ok(Some(ScriptSite::File {
+            raw,
+            unit: Some(defining.clone()),
+        }));
+    }
+    Ok(None)
 }
 
 /// Runtime #319 missing-import suffix for an unknown function:

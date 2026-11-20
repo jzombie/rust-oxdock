@@ -934,6 +934,33 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         self.entries.get(name).cloned()
     }
 
+    /// Number of live function scope frames. Callers record this as
+    /// their frame floor so nested lookup stays within the current
+    /// call (or init), never reaching caller frames.
+    pub(super) fn scope_depth(&self) -> usize {
+        self.scopes.len()
+    }
+
+    /// Frame-2..N lookup (#322): innermost scope frame at or above
+    /// `floor` defining `SCRIPT::BASE`, innermost first. The live
+    /// slot always holds the innermost defining frame's value
+    /// (save/restore discipline), so a hit here is definitionally
+    /// lexical: nested defs shadow everything below them with no
+    /// owner tags consulted. Cross-unit exclusion comes from the
+    /// caller choosing `floor` (call/init boundary), never from
+    /// inspecting whose definition was found.
+    pub(super) fn get_scoped(&self, base: &str, floor: usize) -> Option<FuncEntry<P>> {
+        let qualified = qualify(SCRIPT_MODULE_NAME, base);
+        let len = self.scopes.len();
+        let start = floor.min(len);
+        for frame in self.scopes[start..].iter().rev() {
+            if frame.defined.contains(&qualified) {
+                return self.entries.get(&qualified).cloned();
+            }
+        }
+        None
+    }
+
     /// Single lazy miss classifier for runtime placeholder paths with
     /// registry access: one borrow, no `FuncEntry` clones, invoked only
     /// on resolver failure. Classification runs first (matching

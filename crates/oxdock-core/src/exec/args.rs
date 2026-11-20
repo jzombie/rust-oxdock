@@ -500,9 +500,11 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             if cx.state.functions.contains_script(lookup_name) {
                 return super::handlers::call_func_value(cx, name, args);
             }
-            // Home-scope fallback (#319): sibling `FUNC`s absent from
-            // the registry still run via `call_func_value`'s home path.
-            if super::import::find_home_funcdef(cx.state, name.as_str()).is_some() {
+            // Frame walk (#322): file frames and per-unit harvests
+            // never register under the queried spelling, so the
+            // registry alone cannot see them. Same walk the
+            // dispatcher uses, so routing can never disagree with it.
+            if super::import::find_script_site(cx.state, name.as_str())?.is_some() {
                 return super::handlers::call_func_value(cx, name, args);
             }
             // Native entries gate before effects too: existence, the depth

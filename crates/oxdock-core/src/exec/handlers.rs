@@ -31,7 +31,7 @@ use super::args::parse_bool_str;
 use super::fs_ops::copy_entry;
 use super::io::{StreamHandle, TaskTee, TeeStream, write_stderr, write_stdout};
 use super::native::FuncBody;
-use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
+use super::state::{ExecState, MAX_CALL_DEPTH, RawFuncDef, TaskPhase};
 use super::steps::{Flow, StepCtx, TtyRequest};
 use oxdock_pipe::{KeeperGuard, PipeHandle, PipeInner, SharedOutput};
 
@@ -2532,6 +2532,56 @@ pub(crate) fn define_func<P: ProcessManager>(
     )
 }
 
+/// Build a script [`FuncEntry`](super::native::FuncEntry) from a
+/// file-frame definition (#322): the single construction site for
+/// frame-walk hits, so arity, tags, and metadata can never disagree
+/// across lookup paths.
+fn build_script_entry<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    name: &str,
+    raw: &RawFuncDef,
+    module: Option<String>,
+) -> Result<super::native::FuncEntry<P>> {
+    let resolved_params = super::native::resolve_script_params(state, name, &raw.params)?;
+    let return_tag = state
+        .resolve_tag(&raw.return_spelling)
+        .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+    state.check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
+    Ok(super::native::FuncEntry {
+        meta: super::native::FuncMeta {
+            name: name.to_string(),
+            module: module.clone().unwrap_or_default(),
+            kind: super::native::FuncKind::Script,
+            params: Some(
+                resolved_params
+                    .iter()
+                    .map(|(pname, param_type, optional)| super::native::FuncParam {
+                        name: pname.clone(),
+                        param_type: Some(param_type.clone()),
+                        allowed: None,
+                        docs: "",
+                        options: None,
+                        optional: *optional,
+                    })
+                    .collect(),
+            ),
+            returns: Some(return_tag.clone()),
+            rpn: false,
+            summary: "DSL-defined function.",
+            docs: "Defined via FUNC in script.",
+            examples: &[],
+        },
+        body: FuncBody::Script(super::native::FuncDefData {
+            params: resolved_params,
+            return_type: return_tag,
+            return_spelling: raw.return_spelling.clone(),
+            is_async: raw.is_async,
+            body: raw.body.clone(),
+            module,
+        }),
+    })
+}
+
 /// Invoke a function by UPPERCASE name and return its value. One lookup
 /// against the unified registry, then gates, then effects: depth budget
 /// and arity (mandatory metadata on every entry) validate before any
@@ -2545,69 +2595,49 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     name: &str,
     args: &[Expr],
 ) -> Result<Value> {
-    // 1. Registry lookup through the shared alias-target matcher.
-    // Home-scope fallback (#319): a module-owned body calling a
-    // sibling resolves against its defining file when the registry
-    // holds no such entry (unharvested or private). The helper reads
-    // the active module's parsed steps, so no registry pollution and
-    // `LIB::PRIVATE` stays unknown.
+    // 1. Single frame walk (#322). Qualified non-`SCRIPT`
+    // spellings resolve through the shared alias-target matcher to
+    // canonical per-file keys first (explicit cross-unit naming):
+    // hit serves, miss fails unknown. Everything else consults the
+    // registry as spelled for hosts and natives (script bodies
+    // never serve here), then walks nested frames down to the
+    // call/init floor, then the owning file frame, then the
+    // per-unit harvest map. Entry calls walk from frame 0 (every
+    // live entry frame is entry-owned: inits pop, harvests are
+    // explicit), while module calls stop at their boundary so
+    // caller frames are unreachable by construction. No owner tags,
+    // no step scans: the frames are the mechanism.
     let canonical = cx
         .state
         .functions
         .resolve_file_call_key(&super::import::active_unit_alias_targets(cx.state), name)?;
-    let lookup_name: &str = canonical.as_deref().unwrap_or(name);
-    let entry: super::native::FuncEntry<P> = match cx.state.functions.get(lookup_name) {
-        Some(entry) => entry,
-        None => {
-            let Some((params, return_spelling, is_async, body, module_key)) =
-                super::import::find_home_funcdef(cx.state, name)
-            else {
-                bail!(
+    let entry: super::native::FuncEntry<P> = match canonical {
+        Some(key) => match cx.state.functions.get(&key) {
+            Some(entry) => entry,
+            None => bail!(
+                "unknown function `{name}`{}",
+                super::import::missing_import_hint(cx.state, name)
+            ),
+        },
+        None => match cx.state.functions.get(name) {
+            // Hosts and natives resolve as spelled (including
+            // qualified host calls like `STD::X`, which never go
+            // through the matcher). Script bodies never serve here:
+            // nested frames, the file frame, and the harvest map
+            // below own every script spelling, so a script hit here
+            // is always foreign and falls through to fail below.
+            Some(entry) if !matches!(entry.body, FuncBody::Script(_)) => entry,
+            _ => match super::import::find_script_site(cx.state, name)? {
+                Some(super::import::ScriptSite::Live(entry)) => entry,
+                Some(super::import::ScriptSite::File { raw, unit }) => {
+                    build_script_entry(cx.state, name, &raw, unit)?
+                }
+                None => bail!(
                     "unknown function `{name}`{}",
                     super::import::missing_import_hint(cx.state, name)
-                );
-            };
-            let resolved_params = super::native::resolve_script_params(cx.state, name, &params)?;
-            let return_tag = cx
-                .state
-                .resolve_tag(&return_spelling)
-                .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-            cx.state
-                .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
-            super::native::FuncEntry {
-                meta: super::native::FuncMeta {
-                    name: name.to_string(),
-                    module: module_key.clone(),
-                    kind: super::native::FuncKind::Script,
-                    params: Some(
-                        resolved_params
-                            .iter()
-                            .map(|(pname, param_type, optional)| super::native::FuncParam {
-                                name: pname.clone(),
-                                param_type: Some(param_type.clone()),
-                                allowed: None,
-                                docs: "",
-                                options: None,
-                                optional: *optional,
-                            })
-                            .collect(),
-                    ),
-                    returns: Some(return_tag.clone()),
-                    rpn: false,
-                    summary: "DSL-defined function.",
-                    docs: "Defined via FUNC in script.",
-                    examples: &[],
-                },
-                body: FuncBody::Script(super::native::FuncDefData {
-                    params: resolved_params,
-                    return_type: return_tag,
-                    return_spelling,
-                    is_async,
-                    body,
-                    module: Some(module_key),
-                }),
-            }
-        }
+                ),
+            },
+        },
     };
     // 2. Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {
@@ -2782,6 +2812,13 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                     .clone()
                     .unwrap_or_else(|| super::import::ENTRY_UNIT.to_string());
                 cx.state.call_alias_frames.push((unit_key, HashMap::new()));
+                // Frame floor for the nested walk (#322): scope frames
+                // at or above this index belong to the current call;
+                // anything below is caller context and unreachable.
+                // Pushed and popped with the alias frame on every path.
+                cx.state
+                    .func_floors
+                    .push(cx.state.functions.scope_depth().saturating_sub(1));
                 let flow = (|| {
                     for ((pname, ptype, _), pval) in def.params.iter().zip(arg_vals) {
                         cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
@@ -2799,12 +2836,13 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                         false,
                     )
                 })();
-                // Unconditional pop before `?` propagates: errors and
-                // early boundary exits never leak the frame, matching
+                // Unconditional pops before `?` propagates: errors and
+                // early boundary exits never leak frames, matching
                 // `pop_scope` below. (Panics propagate without popping,
                 // exactly like the scope stack: no `catch_unwind`
                 // anywhere unwraps them.)
                 let _ = cx.state.call_alias_frames.pop();
+                let _ = cx.state.func_floors.pop();
                 let flow = flow?;
                 match flow {
                     Flow::Done => Ok(Value::string(String::new())),

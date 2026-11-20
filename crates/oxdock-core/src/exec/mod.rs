@@ -467,6 +467,9 @@ pub(crate) fn new_state<P: ProcessManager>(
         import_stack: Vec::new(),
         executed_alias_targets: std::collections::HashMap::new(),
         call_alias_frames: Vec::new(),
+        func_floors: Vec::new(),
+        harvest_map: std::collections::HashMap::new(),
+        entry_tops: std::collections::HashMap::new(),
         modules: std::collections::HashMap::new(),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
@@ -553,6 +556,12 @@ pub fn validate_closure_for_run<P: ProcessManager>(
 ) -> Result<Vec<String>> {
     state.restore_aliases(self::typing::collect_type_aliases(steps, state)?);
     state.validate_function_type_tags()?;
+    // Entry Frame-1 file scope (#322): index the entry top-level
+    // `FUNC`s once. Every execution path (Engine, MCP, dry run)
+    // funnels through here with the steps it is about to run, so
+    // one build covers them all and entry calls resolve their own
+    // file without scanning steps.
+    state.entry_tops = self::import::collect_top_funcs(steps);
     let saved_aliases = state.type_aliases.clone();
     let closure = self::import::expand_import_closure(state, steps)?;
     static_check::validate_script_closure(steps, &closure, state)?;

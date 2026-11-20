@@ -118,7 +118,7 @@ enum StaticTy {
 /// One collected script function: resolved params, body, and owning
 /// file module (#115, `None` for entry/REPL functions). The owner
 /// decides whose shared store the body resolves against.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct FuncInfo {
     params: Vec<(String, TypeTag, bool)>,
     declared: TypeTag,
@@ -187,6 +187,12 @@ struct Env {
     /// every other `env:` read must be preceded by an explicit
     /// declaration in the same file.
     env_frames: Vec<HashSet<String>>,
+    /// Body-local nested `FUNC` definitions, one map per lexical
+    /// frame (#322): mirrors the runtime registry save/restore
+    /// frames, so a nested def shadows the home top-level and
+    /// globals for the rest of its block in both layers. Pushed and
+    /// popped with every other frame below, never separately.
+    func_frames: Vec<HashMap<String, FuncInfo>>,
 }
 
 /// Module-shared bindings plus a fork-shared touch flag. `Rc` (not
@@ -316,7 +322,20 @@ struct Checker<'a, P: ProcessManager> {
     /// base name). Lets module bodies validate against unharvested
     /// and private siblings without making them externally
     /// resolvable (unlike `funcs`, which only holds collected names).
+    /// Entry top-level `FUNC`s index under (`"entry"`, base) the same
+    /// way, so entry bodies resolve their own file frame (#322).
     home_funcs: HashMap<(String, String), FuncInfo>,
+    /// First textual top-level `FUNC` per file, keyed like
+    /// `home_funcs` (#322): harvests bind the first matching
+    /// definition (mirroring `import_funcs`' first-match lookup),
+    /// while the file frame serves the last live one. Separate
+    /// index so neither lookup can drift into the other's rule.
+    harvest_first: HashMap<(String, String), FuncInfo>,
+    /// Bare-harvest visibility (#322): (importing unit, base) to
+    /// defining file. An explicit harvest names its file, served in
+    /// the importing unit like the runtime harvest map. Entry imports
+    /// key under `"entry"`.
+    harvested: HashMap<(String, String), String>,
     /// Outbound alias targets for the checked unit: `ALIAS` to
     /// (defining file, import guard) pairs. `resolve_call` requires a
     /// unique resolvable target, so same-alias different-file imports
@@ -607,6 +626,53 @@ fn merge_harvest<P: ProcessManager>(
     Ok(())
 }
 
+/// Bare-harvest edges (#322): (importing unit, base) to defining
+/// file, walked per importing file (entry keyed `"entry"`). Path
+/// resolution reuses the shared static top-level resolver, so
+/// defining keys match the runtime harvest map exactly. Host-module
+/// paths are skipped: host funcs resolve through the host map.
+/// Nested bodies included: validation is conservative, like
+/// expansion; unexecuted conditional harvests fail loud at runtime.
+fn collect_func_harvest_edges<P: ProcessManager>(
+    exec: &ExecState<P>,
+    files: &[super::import::ClosureFile],
+    dir: &GuardedPath,
+    steps: &[Step],
+    unit: &str,
+    is_entry: bool,
+    out: &mut HashMap<(String, String), String>,
+) -> Result<()> {
+    for step in steps {
+        if let StepKind::ImportFuncs {
+            path,
+            alias: None,
+            func_names,
+            ..
+        } = &step.kind
+            && !func_names.is_empty()
+            && !exec.module_table.modules.contains_key(path)
+        {
+            let entry_parent = exec.entry_file.as_ref().and_then(|entry| entry.parent());
+            let Some(key) = super::import::resolve_static_top_level(
+                entry_parent.as_ref(),
+                dir,
+                files,
+                path,
+                is_entry,
+            ) else {
+                anyhow::bail!("IMPORT `{path}` cannot be read: not in the import closure");
+            };
+            for name in func_names {
+                out.insert((unit.to_string(), name.clone()), key.clone());
+            }
+        }
+        for body in super::import::child_bodies(&step.kind) {
+            collect_func_harvest_edges(exec, files, dir, body, unit, is_entry, out)?;
+        }
+    }
+    Ok(())
+}
+
 /// Merge every `IMPORT [TYPE ...]` harvest in `steps` (including
 /// nested bodies: validation is conservative, like expansion).
 /// `is_entry` selects entry-first closure-key resolution for the entry
@@ -728,6 +794,14 @@ pub fn validate_script_closure<P: ProcessManager>(
         // exported or private, for sibling validation. Built
         // alongside `all_funcs` so both see identical definitions.
         let mut home_funcs: HashMap<(String, String), FuncInfo> = HashMap::new();
+        // First textual def per file for harvest binding (#322):
+        // mirrors `import_funcs` first-match. Extended alongside
+        // `home_funcs` so both indexes see identical definitions.
+        let mut harvest_first: HashMap<(String, String), FuncInfo> = HashMap::new();
+        // Bare-harvest visibility (#322): base name to defining file
+        // for every bare harvest in the closure. Global like the
+        // runtime harvest map: an explicit harvest names its file.
+        let mut harvested: HashMap<(String, String), String> = HashMap::new();
         // Per-unit file-import aliases: the entry's own outbound imports
         // plus each file's own outbound imports (nested included).
         // Zero-function modules contribute no `ALIAS::` func keys, so
@@ -782,7 +856,39 @@ pub fn validate_script_closure<P: ProcessManager>(
         with_scope_aliases(exec, &entry_defs, |exec| {
             let mut checker = Checker::new(exec);
             checker.collect(entry)?;
+            // Entry file frame (#322): index the entry top-level
+            // `FUNC`s under the entry unit key, mirroring
+            // `collect_home` for files (dead-guarded defs skipped).
+            for step in entry {
+                if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+                    continue;
+                }
+                if let StepKind::FuncDef {
+                    name,
+                    params,
+                    return_type,
+                    is_async,
+                    body,
+                    ..
+                } = &step.kind
+                {
+                    let info = checker.make_func_info(
+                        name,
+                        params,
+                        return_type,
+                        *is_async,
+                        body,
+                        None,
+                        step.line,
+                        step.col,
+                    )?;
+                    checker
+                        .home_funcs
+                        .insert((super::import::ENTRY_UNIT.to_string(), name.clone()), info);
+                }
+            }
             extend_funcs_checked(&mut all_funcs, checker.funcs, "entry")?;
+            home_funcs.extend(checker.home_funcs);
             entry_lets = module_lets(entry, exec)?;
             Ok(())
         })?;
@@ -799,10 +905,34 @@ pub fn validate_script_closure<P: ProcessManager>(
                 checker.collect_home(file)?;
                 extend_funcs_checked(&mut all_funcs, checker.funcs, &file.path)?;
                 home_funcs.extend(checker.home_funcs);
+                harvest_first.extend(checker.harvest_first);
                 all_lets.insert(file.key.clone(), module_lets(&file.steps, exec)?);
                 all_const_exports.insert(file.key.clone(), file.const_exports.clone());
                 Ok(())
             })?;
+        }
+        // Bare-harvest edges (#322): walk the entry and every file for
+        // unaliased harvests, attributed to the file holding the step.
+        // Entry imports key under the entry unit.
+        collect_func_harvest_edges(
+            exec,
+            files,
+            &entry_base,
+            entry,
+            super::import::ENTRY_UNIT,
+            true,
+            &mut harvested,
+        )?;
+        for file in files {
+            collect_func_harvest_edges(
+                exec,
+                files,
+                &file.dir,
+                &file.steps,
+                &file.key,
+                false,
+                &mut harvested,
+            )?;
         }
         // Earliest-call LET views for entry functions (entry runs
         // top level sequentially, so calls only observe earlier
@@ -842,6 +972,8 @@ pub fn validate_script_closure<P: ProcessManager>(
                     exec,
                     &all_funcs,
                     &home_funcs,
+                    &harvest_first,
+                    &harvested,
                     &all_lets,
                     &all_const_exports,
                     &entry_lets,
@@ -889,6 +1021,8 @@ pub fn validate_script_closure<P: ProcessManager>(
                     exec,
                     &all_funcs,
                     &home_funcs,
+                    &harvest_first,
+                    &harvested,
                     &all_lets,
                     &all_const_exports,
                     &entry_lets,
@@ -917,6 +1051,8 @@ pub fn validate_script_closure<P: ProcessManager>(
             exec: &'a mut ExecState<P>,
             funcs: &HashMap<String, FuncInfo>,
             home_funcs: &HashMap<(String, String), FuncInfo>,
+            harvest_first: &HashMap<(String, String), FuncInfo>,
+            harvested: &HashMap<(String, String), String>,
             lets: &ModuleLets,
             const_exports: &HashMap<String, Vec<String>>,
             entry_lets: &[GuardedLet],
@@ -930,6 +1066,8 @@ pub fn validate_script_closure<P: ProcessManager>(
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
             checker.home_funcs = home_funcs.clone();
+            checker.harvest_first = harvest_first.clone();
+            checker.harvested = harvested.clone();
             checker.module_lets = lets.clone();
             checker.module_const_exports = const_exports.clone();
             checker.module_func_exports = files
@@ -950,6 +1088,8 @@ pub fn validate_script_closure<P: ProcessManager>(
                 exec,
                 &all_funcs,
                 &home_funcs,
+                &harvest_first,
+                &harvested,
                 &all_lets,
                 &all_const_exports,
                 &entry_lets,
@@ -973,6 +1113,8 @@ pub fn validate_script_closure<P: ProcessManager>(
                     exec,
                     &all_funcs,
                     &home_funcs,
+                    &harvest_first,
+                    &harvested,
                     &all_lets,
                     &all_const_exports,
                     &entry_lets,
@@ -1666,7 +1808,17 @@ impl Env {
             frames: vec![top],
             module: None,
             env_frames: vec![HashSet::new()],
+            func_frames: vec![HashMap::new()],
         }
+    }
+
+    /// Push one lexical frame across every stack (bindings, env
+    /// names, nested functions): single owner mirroring runtime
+    /// `push_scope`, so the three can never desync.
+    fn push_frame(&mut self) {
+        self.frames.push(HashMap::new());
+        self.env_frames.push(HashSet::new());
+        self.func_frames.push(HashMap::new());
     }
 
     /// Fork for a scoped body: clone the stack and push a fresh frame,
@@ -1674,8 +1826,7 @@ impl Env {
     /// loop declarations never leak at runtime.
     fn fork(&self) -> Self {
         let mut fork = self.clone();
-        fork.frames.push(HashMap::new());
-        fork.env_frames.push(HashSet::new());
+        fork.push_frame();
         fork
     }
 
@@ -1960,6 +2111,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             visits: 0,
             strict_qualified: false,
             home_funcs: HashMap::new(),
+            harvest_first: HashMap::new(),
+            harvested: HashMap::new(),
             entry_let_scopes: HashMap::new(),
             alias_targets: HashMap::new(),
             module_const_exports: HashMap::new(),
@@ -2184,9 +2337,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.funcs.contains_key(key)
             }) {
                 // Global spellings resolve as written; only `SCRIPT::`
-                // names can hit a script entry this way.
+                // names can hit a script entry this way. Visibility
+                // walks the same frames as call resolution (#322):
+                // nested defs, then the owning file (entry included),
+                // then bare harvests.
                 super::native::AliasResolution::Global => {
                     is_script_visible = self.funcs.contains_key(&qualified);
+                    if module == oxdock_parser::SCRIPT_MODULE_NAME {
+                        let unit = env
+                            .module
+                            .as_ref()
+                            .map(|m| m.key.as_str())
+                            .unwrap_or(super::import::ENTRY_UNIT);
+                        if self.find_frame_hit(unit, name, &env.func_frames).is_some() {
+                            is_script_visible = true;
+                        }
+                    }
                 }
                 super::native::AliasResolution::Canonical(canonical) => {
                     is_script_visible = self.funcs.contains_key(&canonical);
@@ -2541,6 +2707,37 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// index, like collection.
     fn collect_home(&mut self, file: &super::import::ClosureFile) -> Result<()> {
         for step in &file.steps {
+            if let StepKind::FuncDef {
+                name,
+                params,
+                return_type,
+                is_async,
+                body,
+                ..
+            } = &step.kind
+            {
+                // Harvests bind the first textual definition
+                // (mirroring `import_funcs`' guard-blind first match),
+                // recorded before the dead-guard skip below so the
+                // harvest arm resolves exactly what the runtime
+                // registers. Dead defs still fail validation here
+                // rather than silently validating: a dead harvest
+                // target is a loud error, never a quiet wrong body.
+                let key = (file.key.clone(), name.clone());
+                if !self.harvest_first.contains_key(&key) {
+                    let info = self.make_func_info(
+                        name,
+                        params,
+                        return_type,
+                        *is_async,
+                        body,
+                        Some(file.key.as_str()),
+                        step.line,
+                        step.col,
+                    )?;
+                    self.harvest_first.insert(key, info);
+                }
+            }
             if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
                 continue;
             }
@@ -3029,6 +3226,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
         let base_frames = env.frames.len();
         let base_env_frames = env.env_frames.len();
+        let base_func_frames = env.func_frames.len();
         let mut out = WalkOut {
             falls_through: true,
             has_return: false,
@@ -3062,8 +3260,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             // before the guard check, restored after the step, even
             // for dead steps (net effect zero there).
             for _ in 0..step.scope_enter {
-                env.frames.push(HashMap::new());
-                env.env_frames.push(HashSet::new());
+                env.push_frame();
             }
             // Guard `[env:KEY]` references read the environment: they
             // need the same declaration as any other use. Checked
@@ -3102,6 +3299,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 if env.env_frames.len() > base_env_frames {
                     env.env_frames.pop();
+                }
+                if env.func_frames.len() > base_func_frames {
+                    env.func_frames.pop();
                 }
             }
             // Early terminal returns above skip the pops and discard
@@ -3184,15 +3384,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // capture_yield): without it a TIMEOUT-wrapped (or any
         // non-call) command sails through with an incompatible
         // declaration and fails only at runtime coercion.
-        if let Some(yield_tag) =
-            self.capture_yield(cmd, env.module.as_ref().map(|m| m.key.as_str()), depth)?
-            && self
-                .check_arg(
-                    &tag,
-                    StaticTy::Ty(yield_tag.clone()),
-                    &format!("step {}", idx + 1),
-                )
-                .is_err()
+        if let Some(yield_tag) = self.capture_yield(
+            cmd,
+            env.module.as_ref().map(|m| m.key.as_str()),
+            &env.func_frames,
+            depth,
+        )? && self
+            .check_arg(
+                &tag,
+                StaticTy::Ty(yield_tag.clone()),
+                &format!("step {}", idx + 1),
+            )
+            .is_err()
         {
             let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
             bail!(
@@ -3594,6 +3797,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     line: step.line,
                     col: step.col,
                 };
+                // Register before validating the body: later steps in
+                // this walk resolve the nested def (mirroring runtime
+                // definition order), including the body's own
+                // self-calls. Block forks discard it on exit, exactly
+                // like runtime scope pops.
+                if let Some(frame) = env.func_frames.last_mut() {
+                    frame.insert(name.clone(), info.clone());
+                }
                 self.check_function_body(name, &info, depth + 1)?;
                 Ok(live)
             }
@@ -3817,8 +4028,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 // Body declarations shadow injected names: the seal
                 // pushes a scope exactly like a braced block.
-                sealed.frames.push(HashMap::new());
-                sealed.env_frames.push(HashSet::new());
+                sealed.push_frame();
                 let remote = Scope {
                     label: scope.label,
                     ret: RetCtx::Top,
@@ -4118,6 +4328,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         &mut self,
         cmd: &StepKind,
         env_module: Option<&str>,
+        nested: &[HashMap<String, FuncInfo>],
         depth: usize,
     ) -> Result<Option<TypeTag>> {
         let mut current = cmd;
@@ -4128,7 +4339,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     current = &body[0].kind;
                 }
                 StepKind::Call { name, .. } => {
-                    let callee = self.resolve_call(name, env_module, depth)?;
+                    let callee = self.resolve_call(name, env_module, nested, depth)?;
                     return Ok(match callee.ret {
                         StaticTy::Ty(tag) => Some(tag),
                         // A VOID callee still binds something at
@@ -4342,18 +4553,58 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         .unwrap_or_default()
     }
 
+    /// Frame walk shared by call resolution and the template gate
+    /// (#322): innermost nested frame outward, then the owning file
+    /// frame (entry included via its unit key), then bare harvests.
+    /// Single owner for the precedence both consumers enforce, so
+    /// static checking can never disagree with itself, and the
+    /// runtime walk mirrors it arm for arm. Returns the defining
+    /// info plus the memoization key; hosts and canonical file views
+    /// stay with their existing checks.
+    fn find_frame_hit(
+        &self,
+        unit: &str,
+        base: &str,
+        nested: &[HashMap<String, FuncInfo>],
+    ) -> Option<(FuncInfo, String)> {
+        for frame in nested.iter().rev() {
+            if let Some(info) = frame.get(base) {
+                let info = info.clone();
+                let key = format!("nested:{unit}:{base}:{}:{}", info.line, info.col);
+                return Some((info, key));
+            }
+        }
+        if let Some(info) = self.home_funcs.get(&(unit.to_string(), base.to_string())) {
+            let info = info.clone();
+            let key = super::native::file_func_key(unit, base);
+            return Some((info, key));
+        }
+        if let Some(defining) = self.harvested.get(&(unit.to_string(), base.to_string()))
+            && let Some(info) = self
+                .harvest_first
+                .get(&(defining.clone(), base.to_string()))
+        {
+            let info = info.clone();
+            let key = super::native::file_func_key(defining, base);
+            return Some((info, key));
+        }
+        None
+    }
+
     /// Resolve a callee through the shared alias-target matcher;
     /// script functions (bare or `SCRIPT::`) win over host metas.
     /// Unknown names yield `ANY`: the parse-time unknown-function gate
     /// owns that error, not this pass. `env_module` is the owning file
     /// of the body under check (from `env.module`): `SCRIPT::BASE` and
-    /// bare `BASE` calls fall back to that file's collected siblings
-    /// (#319 home scope), so canonically-keyed imports infer declared
-    /// returns instead of `ANY`.
+    /// bare `BASE` calls resolve through the frame walk (nested, then
+    /// that file, then harvests), so canonically-keyed imports infer
+    /// declared returns instead of `ANY`. `nested` carries the live
+    /// body-local definitions from the walk environment.
     fn resolve_call(
         &mut self,
         name: &str,
         env_module: Option<&str>,
+        nested: &[HashMap<String, FuncInfo>],
         depth: usize,
     ) -> Result<Callee> {
         // Canonical lookup key through the single alias-target
@@ -4467,35 +4718,30 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
             }
         }
-        if let Some(info) = self.funcs.get(&lookup) {
-            let info = info.clone();
-            let ret = self.func_return_owned(&info, &lookup, depth)?;
-            let params = info.params;
-            return Ok(Callee {
-                params: Some(params),
-                ret,
-                host_params: None,
-            });
-        }
-        // Home-scope fallback (#319): a module-owned body calling a
-        // sibling resolves against its defining file's complete
-        // top-level index (exported, harvested, and private alike),
-        // which `funcs` alone cannot see. Only `SCRIPT::BASE` and
-        // bare `BASE` qualify; alias-qualified calls never fall back.
-        // Entry bodies (no module) keep the lenient path below.
-        if let Some(module) = env_module {
-            let base: Option<&str> = match name.split_once(MODULE_SEPARATOR) {
-                Some((head, tail)) if head == oxdock_parser::SCRIPT_MODULE_NAME => Some(tail),
-                Some(_) => None,
-                None => Some(name),
-            };
-            if let Some(base) = base
-                && let Some(info) = self
-                    .home_funcs
-                    .get(&(module.to_string(), base.to_string()))
-                    .cloned()
-            {
-                let key = super::native::file_func_key(module, base);
+        if lookup != name {
+            // Canonical qualified spelling: the file's own index.
+            if let Some(info) = self.funcs.get(&lookup) {
+                let info = info.clone();
+                let ret = self.func_return_owned(&info, &lookup, depth)?;
+                let params = info.params;
+                return Ok(Callee {
+                    params: Some(params),
+                    ret,
+                    host_params: None,
+                });
+            }
+        } else if let Some(base) = match name.split_once(MODULE_SEPARATOR) {
+            Some((head, tail)) if head == oxdock_parser::SCRIPT_MODULE_NAME => Some(tail),
+            Some(_) => None,
+            None => Some(name),
+        } {
+            // Bare and `SCRIPT::` spellings walk the frame stack
+            // (#322): innermost nested frame outward, then the
+            // owning file frame (entry included), then bare
+            // harvests. Entry bodies resolve their own file; module
+            // bodies resolve theirs. No flat cross-file reads.
+            let unit = env_module.unwrap_or(super::import::ENTRY_UNIT);
+            if let Some((info, key)) = self.find_frame_hit(unit, base, nested) {
                 let ret = self.func_return_owned(&info, &key, depth)?;
                 let params = info.params;
                 return Ok(Callee {
@@ -4729,7 +4975,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // Order mirrors execution: the arity gate fires before any
         // argument evaluates, so undeclared names in extra arguments
         // never surface. (`native_arity_failure_...` pins this.)
-        let callee = self.resolve_call(name, env.module.as_ref().map(|m| m.key.as_str()), depth)?;
+        let callee = self.resolve_call(
+            name,
+            env.module.as_ref().map(|m| m.key.as_str()),
+            &env.func_frames,
+            depth,
+        )?;
         // Arity range comes from the full host metadata (which carries
         // the optional flags); script FUNCs and bare shape lists are
         // always exact. Missing lists (INSPECT-like) skip the check:
@@ -5334,6 +5585,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     let callee = self.resolve_call(
                         name,
                         env.module.as_ref().map(|m| m.key.as_str()),
+                        &env.func_frames,
                         depth,
                     )?;
                     let ret = self.apply_checked(name, &callee, &taken, &blanks, None)?;
