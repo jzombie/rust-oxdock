@@ -266,15 +266,6 @@ pub struct ExecState<P: ProcessManager> {
     /// never another script, ever: same per-call re-read rule as
     /// `ModuleInit::inherit_names`.
     pub(super) entry_inherit_names: Vec<String>,
-    /// Entry file top-level jail (#322): the workspace selection and
-    /// cwd the entry top-level left behind, tracked as they execute
-    /// (same `is_entry_top_level` gate as the env prelude). Entry
-    /// `FUNC` calls restore this exactly like module calls restore
-    /// `ModuleInit` jail, so every file behaves one way. Initialized
-    /// to the snapshot default; a top-level `WORKSPACE`/`WORKDIR`
-    /// overwrites it.
-    pub(super) entry_selection: WorkspaceSelection,
-    pub(super) entry_cwd: GuardedPath,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -329,7 +320,12 @@ pub(super) struct ModuleRecord {
 /// unit scope stack (#322). Params and return stay in source spelling
 /// until a call resolves tags. Guards ride along and are evaluated
 /// with the live env at use time, mirroring the previous per-call
-/// step scan exactly (init-gated defs behave as before).
+/// step scan exactly (init-gated defs behave as before). `jail` is
+/// sealed at execution: the first top-level execution of this
+/// definition pins the live workspace selection and cwd, so later
+/// calls restore the definition site, never caller ambient. `None`
+/// for never-executed defs (forward refs, skipped harvests), which
+/// fall back to the defining file default at call time.
 #[derive(Clone, Debug, Default)]
 pub(super) struct RawFuncDef {
     pub(super) params: Vec<(String, String, bool)>,
@@ -337,6 +333,7 @@ pub(super) struct RawFuncDef {
     pub(super) is_async: bool,
     pub(super) body: Vec<Step>,
     pub(super) guard: Option<GuardExpr>,
+    pub(super) jail: Option<(WorkspaceSelection, GuardedPath)>,
 }
 
 /// Initialized module state (#115): the shared globals every alias of
@@ -856,8 +853,6 @@ impl<P: ProcessManager> ExecState<P> {
             entry_tops: self.entry_tops.clone(),
             entry_envs: self.entry_envs.clone(),
             entry_inherit_names: self.entry_inherit_names.clone(),
-            entry_selection: self.entry_selection,
-            entry_cwd: self.entry_cwd.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
@@ -944,13 +939,30 @@ impl<P: ProcessManager> ExecState<P> {
     }
 
     /// Defining-file call context (#322): the single owner resolving
-    /// what a `FUNC` body restores. `Some(key)` reads the module
-    /// init jail; `None` reads the entry file jail. Both shapes are
-    /// identical (envs, inherit names, selection, cwd); entry always
-    /// resolves (defaulting to the snapshot jail), modules resolve
-    /// once initialized. Callers branch on this one value, never
+    /// what a `FUNC` body restores. The definition-site jail wins
+    /// when the definition sealed one; otherwise the defining file
+    /// fallback applies (module init jail, entry snapshot default).
+    /// Env always resolves file-level (module init delta, entry
+    /// prelude) with `INHERIT_ENV` re-read from the engine, never
+    /// caller ambient. Callers branch on this one value, never
     /// restating the lookup. Spelled once as [`FileCallCtx`].
-    pub(super) fn callee_file_ctx(&self, module_key: Option<&str>) -> Option<FileCallCtx> {
+    pub(super) fn callee_file_ctx(
+        &self,
+        module_key: Option<&str>,
+        def_jail: Option<(WorkspaceSelection, GuardedPath)>,
+    ) -> Option<FileCallCtx> {
+        if let Some((selection, cwd)) = def_jail {
+            let (envs, inherit_names) = match module_key {
+                Some(key) => self.modules.get(key).and_then(|record| {
+                    record
+                        .init
+                        .as_ref()
+                        .map(|init| (init.envs.clone(), init.inherit_names.clone()))
+                })?,
+                None => (self.entry_envs.clone(), self.entry_inherit_names.clone()),
+            };
+            return Some((envs, inherit_names, selection, cwd));
+        }
         match module_key {
             Some(key) => self.modules.get(key).and_then(|record| {
                 record.init.as_ref().map(|init| {
@@ -965,8 +977,8 @@ impl<P: ProcessManager> ExecState<P> {
             None => Some((
                 self.entry_envs.clone(),
                 self.entry_inherit_names.clone(),
-                self.entry_selection,
-                self.entry_cwd.clone(),
+                WorkspaceSelection::Snapshot,
+                self.fs.root().clone(),
             )),
         }
     }

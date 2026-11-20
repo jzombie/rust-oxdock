@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use oxdock_fs::to_forward_slashes;
+use oxdock_fs::{GuardedPath, WorkspaceSelection};
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
@@ -553,6 +554,12 @@ pub(super) struct FuncDefData {
     /// lexical frames miss. `None` for entry/REPL definitions, which
     /// stay params-only.
     pub(super) module: Option<String>,
+    /// Definition-site jail (#322): the workspace selection and cwd
+    /// as they stood when this `FUNC` was defined. `Some` for
+    /// definitions executed at file top level (entry or module init);
+    /// `None` for call-time materializations and bodies, which must
+    /// never capture caller ambient (the file fallback applies).
+    pub(super) def_jail: Option<(WorkspaceSelection, GuardedPath)>,
 }
 
 /// Zero value for an omitted trailing optional script param, by
@@ -1194,6 +1201,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         is_async: bool,
         body: &[Step],
         module: Option<&str>,
+        def_jail: Option<(WorkspaceSelection, GuardedPath)>,
     ) -> Result<()> {
         let qualified = qualify(SCRIPT_MODULE_NAME, name);
         let shadowable = matches!(
@@ -1256,6 +1264,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     is_async,
                     body: body.to_vec(),
                     module: module.map(|m| m.to_string()),
+                    def_jail,
                 }),
             },
         );
@@ -1349,6 +1358,11 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     is_async,
                     body: body.to_vec(),
                     module: Some(defining.to_string()),
+                    // Harvest registration never captures a jail: it
+                    // runs in the importer context, so capturing here
+                    // would leak caller ambient into the defining
+                    // file. The file fallback applies at call time.
+                    def_jail: None,
                 }),
             },
         );
@@ -1359,6 +1373,26 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             }
         }
         Ok(())
+    }
+
+    /// Backfill a definition-site jail onto an import-registered
+    /// canonical entry (#322). Imports register canonical slots
+    /// before init runs, so they start jail-less; the first
+    /// top-level definition seals them exactly once, mirroring the
+    /// file frame. Later definitions never overwrite. Harvest-only
+    /// registrations stay `None`: without init there is no
+    /// definition site to seal.
+    pub(super) fn seal_canonical_jail(
+        &mut self,
+        canonical: &str,
+        jail: (WorkspaceSelection, GuardedPath),
+    ) {
+        if let Some(entry) = self.entries.get_mut(canonical)
+            && let FuncBody::Script(def) = &mut entry.body
+            && def.def_jail.is_none()
+        {
+            def.def_jail = Some(jail);
+        }
     }
 
     /// Open a lexical scope frame for script definitions. Native entries

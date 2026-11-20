@@ -438,8 +438,6 @@ pub(crate) fn new_state<P: ProcessManager>(
     // counter so every pump worker this run spawns attributes to it.
     let worker_counter = io.worker_counter();
     let entry_envs = (*seed).clone();
-    let entry_selection = fs.selection();
-    let entry_cwd = cwd.clone();
     let mut state = ExecState {
         fs,
         cargo_scratch,
@@ -475,8 +473,6 @@ pub(crate) fn new_state<P: ProcessManager>(
         entry_tops: std::collections::HashMap::new(),
         entry_envs,
         entry_inherit_names: Vec::new(),
-        entry_selection,
-        entry_cwd,
         modules: std::collections::HashMap::new(),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),

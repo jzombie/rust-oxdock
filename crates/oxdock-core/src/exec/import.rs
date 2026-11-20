@@ -521,6 +521,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                             def.2,
                             &def.3,
                             Some(&key),
+                            None,
                         )?;
                     }
                     // Harvest visibility per importing unit (#322):
@@ -888,6 +889,11 @@ fn ensure_module_init<P: ProcessManager>(
                 .last_mut()
                 .expect("import pushed exactly one const scope"),
         );
+        // Capture the init-final jail alongside: the workspace
+        // selection and cwd as the top-level left them. Def-carrying
+        // calls restore their own definition-site jail instead; this
+        // final state serves materialized defs that never executed.
+        // The pop below restores the importer afterwards.
         let init_selection = cx.state.fs.selection();
         let init_cwd = cx.state.cwd.clone();
         let value = match flow {
@@ -1671,6 +1677,7 @@ pub(super) fn collect_top_funcs(steps: &[Step]) -> HashMap<String, Vec<RawFuncDe
                 is_async: *is_async,
                 body: body.clone(),
                 guard: step.guard.clone(),
+                jail: None,
             });
         }
     }

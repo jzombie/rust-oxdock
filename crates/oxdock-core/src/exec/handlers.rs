@@ -109,13 +109,6 @@ pub(super) fn workdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) ->
         .fs
         .resolve_workdir(&cx.state.cwd, path)
         .with_context(|| format!("WORKDIR {}", path))?;
-    // Entry file jail tracking: same gate as the env prelude. The
-    // entry top-level `WORKDIR` becomes the entry default every
-    // `FUNC` restores; block-scoped moves unwind without poisoning
-    // it. One rule for every file, never caller ambient.
-    if cx.state.is_entry_top_level() {
-        cx.state.entry_cwd = cx.state.cwd.clone();
-    }
     Ok(())
 }
 
@@ -148,14 +141,6 @@ pub(super) fn workspace<P: ProcessManager>(
             let cwd = cx.state.cwd.clone();
             cx.state.cwd = cx.state.fs.system_entry_cwd(&cwd);
         }
-    }
-    // Entry file jail tracking: same gate as the env prelude. The
-    // entry top-level `WORKSPACE` becomes the entry default every
-    // `FUNC` restores; block-scoped selections unwind without
-    // poisoning it. One rule for every file, never caller ambient.
-    if cx.state.is_entry_top_level() {
-        cx.state.entry_selection = cx.state.fs.selection();
-        cx.state.entry_cwd = cx.state.cwd.clone();
     }
     Ok(())
 }
@@ -2561,6 +2546,17 @@ pub(crate) fn define_func<P: ProcessManager>(
     // owner is the innermost module on the stack (lexically enclosing
     // file), or `None` for entry definitions, which stay params-only.
     let owner = cx.state.current_module();
+    // Definition-site jail (#322): sealed here, at the definition,
+    // never at the call, and only for file-top-level definitions
+    // (depth zero: bodies run inside calls and must never capture,
+    // or the enclosing call jail would leak into the new def).
+    // Sealed into the registry entry for direct hits and into the
+    // owning file frame for frame-walk hits, so both lookup paths
+    // serve the same site. Harvest registration and call-time
+    // materialization pass `None` at their own sites: importer and
+    // caller context must never leak into the defining file.
+    let def_jail =
+        (cx.state.call_depth == 0).then(|| (cx.state.fs.selection(), cx.state.cwd.clone()));
     cx.state.functions.define_script(
         name,
         &resolved,
@@ -2569,7 +2565,30 @@ pub(crate) fn define_func<P: ProcessManager>(
         is_async,
         body,
         owner.as_deref(),
-    )
+        def_jail.clone(),
+    )?;
+    if let Some(jail) = def_jail {
+        let bucket = match owner.as_deref() {
+            Some(key) => cx.state.modules.get_mut(key).map(|r| &mut r.top_funcs),
+            None => Some(&mut cx.state.entry_tops),
+        };
+        if let Some(defs) = bucket.and_then(|tops| tops.get_mut(name))
+            && let Some(raw) = defs
+                .iter_mut()
+                .find(|r| r.jail.is_none() && r.params == params)
+        {
+            raw.jail = Some(jail.clone());
+        }
+        // Canonical slots are registered at import time, before the
+        // defining file runs: seal the first top-level definition
+        // into them too, so qualified cross-module calls serve the
+        // same site as frame-walk hits.
+        if let Some(file) = owner.as_deref() {
+            let canonical = super::native::file_func_key(file, name);
+            cx.state.functions.seal_canonical_jail(&canonical, jail);
+        }
+    }
+    Ok(())
 }
 
 /// Build a script [`FuncEntry`](super::native::FuncEntry) from a
@@ -2618,6 +2637,11 @@ fn build_script_entry<P: ProcessManager>(
             is_async: raw.is_async,
             body: raw.body.clone(),
             module,
+            // Sealed at definition execution, carried here: the frame
+            // walk serves the def as its file left it, never caller
+            // ambient. `None` for never-executed defs (forward refs,
+            // skipped harvests); the file fallback applies instead.
+            def_jail: raw.jail.clone(),
         }),
     })
 }
@@ -2727,12 +2751,13 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // A callee that forgets its jail fails safe into the
             // defining file default, never caller ambient.
             let module_key = def.module.clone();
-            // One lookup for every file, entry included: the defining
-            // file context (envs, inherit names, selection, cwd).
-            // Entry always resolves (snapshot default until the entry
-            // top-level overwrites it); modules resolve once
-            // initialized. No per-kind restatement below.
-            let callee_ctx = cx.state.callee_file_ctx(module_key.as_deref());
+            // One lookup for every file, entry included: the
+            // definition-site jail when the definition sealed one,
+            // else the defining file fallback. No per-kind
+            // restatement below.
+            let callee_ctx = cx
+                .state
+                .callee_file_ctx(module_key.as_deref(), def.def_jail.clone());
             cx.state.call_depth += 1;
             // All calls swap the whole variable stack for a fresh one
             // before the call frame pushes, and restore after it pops
@@ -2750,16 +2775,16 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             let saved_isolated = std::mem::take(&mut cx.state.isolated_stack);
             cx.state.push_scope();
             // Callee jail (#322): every call restores the workspace
-            // selection and cwd the defining file top-level left
-            // behind, so a file declaring `WORKSPACE SYSTEM` at the
-            // top serves its FUNCs from there no matter which
-            // workspace the caller sits in. A FUNC-level `WORKSPACE`
-            // or `WORKDIR` overrides the file default for that call.
-            // The caller selection returns via the scope pop.
-            // Reentrant init-time self-calls (no stored context yet)
-            // keep the in-progress init scope untouched, since that
-            // is the file own context under construction. Entry and
-            // module share this one path, never per-kind branches.
+            // selection and cwd sealed at the definition site, so a
+            // file that establishes its jail before its `FUNC`s serves
+            // them from there no matter which workspace the caller
+            // sits in. A FUNC-level `WORKSPACE` or `WORKDIR` overrides
+            // the sealed site for that call. The caller selection
+            // returns via the scope pop. Reentrant init-time
+            // self-calls (no stored context yet) keep the in-progress
+            // init scope untouched, since that is the file own
+            // context under construction. Entry and module share this
+            // one path, never per-kind branches.
             let reentrant = module_key.is_some() && callee_ctx.is_none();
             if !reentrant && let Some((_, _, selection, cwd)) = &callee_ctx {
                 cx.state.fs.restore_selection(*selection);

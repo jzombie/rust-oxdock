@@ -29,16 +29,21 @@ fn lazy_bindings(
 
 #[test]
 fn same_module_caller_workspace_never_reaches_callee() {
-    // Every file serves its own top-level jail: the entry file
-    // declares LOCAL/sub, MID overrides to LOCAL/other mid-call,
-    // and INNER still reports the file default (sub). Chained
-    // through MID so the intermediate override cannot smuggle in.
+    // Every file serves its own definition-site jail: the top-level
+    // establishes LOCAL/sub before any FUNC is defined, MID overrides
+    // to LOCAL/other mid-call, and INNER still reports the pinned
+    // sub jail. Chained through MID so the intermediate override
+    // cannot smuggle in.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let bindings = lazy_bindings(
         &root,
         indoc! {r#"
             IMPORT [STD]
+            WORKSPACE LOCAL
+            MKDIR sub
+            MKDIR other
+            WORKDIR sub
             FUNC INNER(): STRING {
                 LET $c: STRING = CWD()
                 RETURN $c
@@ -50,10 +55,6 @@ fn same_module_caller_workspace_never_reaches_callee() {
                 LET $inner: STRING = INNER()
                 RETURN "{{ $mid }}|{{ $inner }}"
             }
-            WORKSPACE LOCAL
-            MKDIR sub
-            MKDIR other
-            WORKDIR sub
             LET $caller: STRING = CWD()
             LET $both: STRING = MID()
         "#},
@@ -72,10 +73,10 @@ fn same_module_caller_workspace_never_reaches_callee() {
 
 #[test]
 fn same_module_workdir_never_reaches_callee() {
-    // No WORKSPACE statement: the file default is the snapshot jail
-    // moved to sub. MID moves to other mid-call; the callee still
-    // reports the file default (sub), proving the intermediate move
-    // never leaks in.
+    // No WORKSPACE statement: the setup moves to sub before any
+    // FUNC is defined, pinning the snapshot jail there. MID moves
+    // to other mid-call; the callee still reports the pinned sub,
+    // proving the intermediate move never leaks in.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let out = Engine::new()
@@ -83,6 +84,9 @@ fn same_module_workdir_never_reaches_callee() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
+                MKDIR sub
+                MKDIR other
+                WORKDIR sub
                 FUNC WHERE(): STRING {
                     LET $c: STRING = CWD()
                     RETURN $c
@@ -93,9 +97,6 @@ fn same_module_workdir_never_reaches_callee() {
                     LET $inner: STRING = WHERE()
                     RETURN "{{ $mid }}|{{ $inner }}"
                 }
-                MKDIR sub
-                MKDIR other
-                WORKDIR sub
                 LET $caller: STRING = CWD()
                 LET $both: STRING = MID()
             "#},
@@ -111,6 +112,216 @@ fn same_module_workdir_never_reaches_callee() {
         "callee serves the file default, got {callee}"
     );
     assert_ne!(mid, callee, "intermediate move must not leak in");
+}
+
+#[test]
+fn entry_def_site_jails_hold_across_workspaces_with_env() {
+    // Each `FUNC` serves the jail its definition stood in, at every
+    // call site: WHICH_ONE stays in one, WHICH_TWO in two, even when
+    // called late or from MID's three-workspace. `ENV` names ride
+    // the file prelude (caller never contributes). Same
+    // definition-site rule as module init.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let bindings = lazy_bindings(
+        &root,
+        indoc! {r#"
+            IMPORT [STD]
+            WORKSPACE LOCAL
+            MKDIR one
+            MKDIR two
+            MKDIR three
+            WORKDIR one
+            ENV FOO_ONE=alpha
+            FUNC WHICH_ONE(): STRING {
+                LET $c: STRING = CWD()
+                RETURN "{{ $c }}|{{ env:FOO_ONE }}"
+            }
+            LET $early: STRING = WHICH_ONE()
+            WORKDIR two
+            ENV FOO_TWO=beta
+            FUNC WHICH_TWO(): STRING {
+                LET $c: STRING = CWD()
+                RETURN "{{ $c }}|{{ env:FOO_TWO }}"
+            }
+            FUNC MID(): STRING {
+                WORKSPACE LOCAL
+                WORKDIR three
+                LET $a: STRING = WHICH_ONE()
+                LET $b: STRING = WHICH_TWO()
+                RETURN "{{ $a }};{{ $b }}"
+            }
+            LET $late_one: STRING = WHICH_ONE()
+            LET $late_two: STRING = WHICH_TWO()
+            LET $mid: STRING = MID()
+        "#},
+    );
+    let early = bindings.get("early").and_then(|v| v.as_str()).unwrap();
+    let late_one = bindings.get("late_one").and_then(|v| v.as_str()).unwrap();
+    let late_two = bindings.get("late_two").and_then(|v| v.as_str()).unwrap();
+    let mid = bindings.get("mid").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        early.ends_with("one|alpha"),
+        "def-site jail plus file env, got {early}"
+    );
+    assert_eq!(
+        late_one, early,
+        "same FUNC, same args, same jail at every call site"
+    );
+    assert!(
+        late_two.ends_with("two|beta"),
+        "second def serves its own site, got {late_two}"
+    );
+    let (mid_one, mid_two) = mid.split_once(';').expect("mid|mid shape");
+    assert_eq!(
+        mid_one, early,
+        "cross-workspace call still serves one, got {mid_one}"
+    );
+    assert_eq!(
+        mid_two, late_two,
+        "cross-workspace call still serves two, got {mid_two}"
+    );
+}
+
+#[test]
+fn entry_system_jail_serves_entry_funcs() {
+    // The install.oxfile shape (#322): the entry file establishes
+    // `WORKSPACE SYSTEM` before its `FUNC`s, and every call serves
+    // that jail instead of falling back to the snapshot default.
+    // A caller in any other workspace gets the same answer.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                WORKSPACE SYSTEM
+                FUNC WHERE(): STRING {
+                    LET $c: STRING = CWD()
+                    RETURN $c
+                }
+                WORKSPACE LOCAL
+                MKDIR elsewheresub
+                WORKDIR elsewheresub
+                LET $caller: STRING = CWD()
+                LET $callee: STRING = WHERE()
+            "#},
+        )
+        .expect("entry SYSTEM jail serves entry funcs");
+    let callee = out.bindings.get("callee").and_then(|v| v.as_str()).unwrap();
+    assert_ne!(
+        callee, SNAPSHOT_PENDING_DISPLAY,
+        "a SYSTEM-established def must not fall back to snapshot"
+    );
+    let caller = out.bindings.get("caller").and_then(|v| v.as_str()).unwrap();
+    assert_ne!(
+        caller, callee,
+        "caller moved on to LOCAL while the callee stayed pinned: {caller} vs {callee}"
+    );
+}
+
+#[test]
+fn entry_def_between_workspaces_serves_definition_site() {
+    // Definition site, not call site and not the last statement:
+    // `SOME_FUNCT` is defined while the file sits in `SYSTEM`, a
+    // later top-level `WORKSPACE LOCAL` moves the flow on, and the
+    // call still serves `SYSTEM`.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                WORKSPACE SYSTEM
+                FUNC WHICH(): STRING {
+                    LET $c: STRING = CWD()
+                    RETURN $c
+                }
+                WORKSPACE LOCAL
+                MKDIR latersub
+                WORKDIR latersub
+                LET $late: STRING = WHICH()
+            "#},
+        )
+        .expect("def-site jail survives later top-level moves");
+    let late = out.bindings.get("late").and_then(|v| v.as_str()).unwrap();
+    assert_ne!(
+        late, SNAPSHOT_PENDING_DISPLAY,
+        "def-site SYSTEM must survive, got snapshot"
+    );
+    assert!(
+        !late.ends_with("latersub"),
+        "later top-level move must not relocate the callee, got {late}"
+    );
+}
+
+#[test]
+fn module_def_site_jails_hold_across_workspaces_with_env() {
+    // Module twin of the entry matrix above: the lib defines one
+    // `FUNC` per workdir plus a cross-workspace caller, and the
+    // entry (sitting in `SYSTEM`) observes each def-site jail. One
+    // rule for every file.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            WORKSPACE LOCAL
+            MKDIR mone
+            MKDIR mtwo
+            MKDIR mthree
+            WORKDIR mone
+            ENV MFOO_ONE=alpha
+            EXPORT [FUNC MWHICH_ONE, FUNC MWHICH_TWO, FUNC MMID]
+            FUNC MWHICH_ONE(): STRING {
+                LET $c: STRING = CWD()
+                RETURN "{{ $c }}|{{ env:MFOO_ONE }}"
+            }
+            WORKDIR mtwo
+            ENV MFOO_TWO=beta
+            FUNC MWHICH_TWO(): STRING {
+                LET $c: STRING = CWD()
+                RETURN "{{ $c }}|{{ env:MFOO_TWO }}"
+            }
+            FUNC MMID(): STRING {
+                WORKSPACE LOCAL
+                WORKDIR mthree
+                LET $a: STRING = MWHICH_ONE()
+                LET $b: STRING = MWHICH_TWO()
+                RETURN "{{ $a }};{{ $b }}"
+            }
+        "#},
+    );
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "lib.oxfile" AS LIB]
+                WORKSPACE SYSTEM
+                LET $a: STRING = LIB::MWHICH_ONE()
+                LET $b: STRING = LIB::MWHICH_TWO()
+                LET $m: STRING = LIB::MMID()
+            "#},
+        )
+        .expect("module def-site matrix runs");
+    let a = out.bindings.get("a").and_then(|v| v.as_str()).unwrap();
+    let b = out.bindings.get("b").and_then(|v| v.as_str()).unwrap();
+    let m = out.bindings.get("m").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        a.ends_with("mone|alpha"),
+        "module def in mone serves mone, got {a}"
+    );
+    assert!(
+        b.ends_with("mtwo|beta"),
+        "module def in mtwo serves mtwo, got {b}"
+    );
+    let (m_one, m_two) = m.split_once(';').expect("mid|mid shape");
+    assert_eq!(m_one, a, "cross-workspace call still serves mone");
+    assert_eq!(m_two, b, "cross-workspace call still serves mtwo");
 }
 
 #[test]
