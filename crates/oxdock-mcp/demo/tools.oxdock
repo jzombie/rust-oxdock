@@ -35,7 +35,7 @@ FUNC COUNT($from: INT, $to: INT): LIST<INT> {
 
 # Reports the session working directory. Proves which root the server answers from.
 FUNC WHEREAMI(): STRING {
-  LET $dir: STRING = CWD
+  LET $dir: STRING = CWD()
   RETURN TEXT_TRIM($dir)
 }
 # Agent self-help: one tool over the whole introspection surface.

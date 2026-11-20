@@ -619,7 +619,7 @@ const BG_WORKSPACE_DEMO: &str = indoc! {r#"
     FUNC BG_WHERE(): HANDLE<STRING> {
       LET $t: HANDLE<STRING> = ASYNC {
         WORKSPACE LOCAL
-        LET $d: STRING = CWD
+        LET $d: STRING = CWD()
         LET $trimmed: STRING = TEXT_TRIM($d)
         RETURN $trimmed
       }
