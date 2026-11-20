@@ -1,0 +1,5 @@
+# Deeply immutable binding: reads exactly like LET in expressions
+# and templates, but any write to it fails.
+CONST $greeting: STRING = "hello"
+CONST $count: INT = 3
+WRITE result.txt "{{ $greeting }}-{{ $count }}"
