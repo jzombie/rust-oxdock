@@ -9,6 +9,11 @@ fn main() {
         RUN ["cargo", "run", "-p", "oxdock-render"]
     };
 
-    oxdock_core::run_steps_with_context_result_with_io(&root, &root, &steps, oxdock_core::ExecIo::new())
-        .expect("build docs");
+    oxdock_core::run_steps_with_context_result_with_io(
+        &root,
+        &root,
+        &steps,
+        oxdock_core::ExecIo::new(),
+    )
+    .expect("build docs");
 }
