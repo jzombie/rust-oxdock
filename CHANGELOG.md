@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Changed
 
+- [breaking] `FUNC` callee isolation (#322): the only thing crossing a function boundary is explicit arguments. Same module or across modules, no distinction: no ambient `WORKSPACE`, `WORKDIR`, `ENV`, or outer-variable leakage. Module init runs isolated in the snapshot jail, and the selection plus cwd its top-level leaves behind become the default every `FUNC` of that file restores on entry (unless the body overrides them); a lib declaring `WORKSPACE LOCAL` at the top serves its functions from there no matter which workspace the caller sits in. Entry bodies reset to the snapshot jail. Module top-level `LET` bindings stay visible to that module's functions through the shared store; entry top-level bindings never enter a callee. Update call sites to pass paths, env values, and variables as arguments and to declare `WORKSPACE`/`WORKDIR`/`ENV` inside each body that needs them.
 - [breaking] `oxdock-render` is a single binary: it interprets its own pipeline stages via `--interpret` (script on stdin, same full engine) instead of spawning a separate `oxdock-render-child` sidecar, which is deleted. Driver and stages always share one build, so a stale sidecar silently rendering old metadata is impossible; `cargo run -p oxdock-render` regenerates everything. Release tarballs and installs carry the single binary; the `OXDOCK_RENDER_CHILD` override still selects a custom interpreter.
 
 ### Added

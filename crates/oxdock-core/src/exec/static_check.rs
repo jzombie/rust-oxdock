@@ -2917,36 +2917,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
             }
         } else {
-            // Entry functions capture the entry's top-level `LET`s
-            // through the runtime outer scope, so the body seeds from
-            // the bindings declared before its earliest reachable call
-            // site (a call before a `LET` executes reads uninitialized
-            // memory at runtime). Uncalled functions and single-file
-            // probes keep the full union. Params stay on top: re-`LET`
-            // inside the body shadows instead of redeclaring. Guards
-            // accumulate per name so disjoint platform declarations
-            // enforce coverage instead of overwriting.
-            let scoped = self
-                .entry_let_scopes
-                .get(&(info.name.clone(), info.line, info.col))
-                .cloned()
-                .unwrap_or_else(|| self.entry_lets.clone());
-            if !scoped.is_empty() {
-                let mut bottom: HashMap<String, Vec<Binding>> = HashMap::new();
-                for entry in &scoped {
-                    bottom.entry(entry.name.clone()).or_default().push(Binding {
-                        tag: entry.tag.clone(),
-                        guard: entry.guard.clone(),
-                        is_const: entry.is_const,
-                    });
-                }
-                env.frames.insert(0, bottom);
-            }
-            // Entry top-level declarations persist globally for later
-            // calls, so entry functions seed from the entry union.
-            for name in self.entry_env_union.clone() {
-                env.declare_env(name);
-            }
+            // Hard isolation (#322): entry bodies observe params plus
+            // locals only. Entry top-level bindings never seed the
+            // body: the runtime swaps the whole variable stack and
+            // resets env to the seed, so an outer name read here fails
+            // exactly like the runtime undefined variable. A body
+            // needing caller data takes it as an argument.
         }
         let scope = Scope {
             label: key,

@@ -2650,38 +2650,65 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     // 5. Execution by body kind.
     match entry.body {
         FuncBody::Script(def) => {
-            // Snapshot the caller's context first; module-owned bodies
-            // then reset to their own below, and the pop restores the
-            // caller on every path.
+            // Hard isolation (#322): the only thing crossing a FUNC
+            // boundary is explicit arguments. Every script call resets
+            // workspace, workdir, env, and outer variables to the
+            // callee definition site, restoring the caller on return.
+            // Snapshot is the lexical default jail, so a callee that
+            // forgets its jail fails safe into scratch, never the host.
             let module_key = def.module.clone();
-            let module_env = module_key.as_deref().and_then(|key| {
+            let module_ctx = module_key.as_deref().and_then(|key| {
                 cx.state.modules.get(key).and_then(|record| {
-                    record
-                        .init
-                        .as_ref()
-                        .map(|init| (init.envs.clone(), init.inherit_names.clone()))
+                    record.init.as_ref().map(|init| {
+                        (
+                            init.envs.clone(),
+                            init.inherit_names.clone(),
+                            init.selection,
+                            init.cwd.clone(),
+                        )
+                    })
                 })
             });
             cx.state.call_depth += 1;
-            // Module-owned calls observe nothing of the importer: the
-            // whole variable stack swaps for a fresh one before the
-            // call frame pushes, and restores after it pops (#115).
-            // Own-module bindings stay visible through the
-            // module-store fallback in every accessor, so this only
-            // cuts importer frames, never module state.
-            let saved_vars = if module_env.as_ref().is_some() {
-                Some(std::mem::take(&mut cx.state.var_scopes))
-            } else {
-                None
-            };
-            // `CONST` marks ride the same swap: module-owned code
-            // declares into a fresh const frame and restores after.
-            let saved_consts = if module_env.as_ref().is_some() {
-                Some(std::mem::take(&mut cx.state.const_scopes))
-            } else {
-                None
-            };
+            // All calls swap the whole variable stack for a fresh one
+            // before the call frame pushes, and restore after it pops
+            // (#115, #322). Module-owned bindings stay visible through
+            // the module-store fallback in every accessor, so this
+            // cuts importer frames and entry globals alike, never
+            // module file state. Entry calls have no store fallback,
+            // so they observe params plus locals only.
+            let saved_vars = Some(std::mem::take(&mut cx.state.var_scopes));
+            // `CONST` marks ride the same swap: every callee declares
+            // into a fresh const frame and restores after.
+            let saved_consts = Some(std::mem::take(&mut cx.state.const_scopes));
+            // `ISOLATED` snapshots belong to the caller: the callee
+            // env resets below, so inherited scrubs must not leak in.
+            let saved_isolated = std::mem::take(&mut cx.state.isolated_stack);
             cx.state.push_scope();
+            // Callee jail (#322): module-owned calls restore the
+            // workspace selection and cwd the module top-level left
+            // behind, so a lib declaring `WORKSPACE LOCAL` at the top
+            // serves its FUNCs from there no matter which workspace
+            // the caller sits in. Entry calls have no stored file
+            // context and reset to the snapshot default jail instead.
+            // A FUNC-level `WORKSPACE` or `WORKDIR` overrides the file
+            // default for that call. The caller selection returns via
+            // the scope pop. Reentrant init-time self-calls (no stored
+            // context yet) keep the in-progress init scope untouched,
+            // since that is the module own context under construction.
+            let reentrant = module_key.is_some() && module_ctx.is_none();
+            if !reentrant {
+                match &module_ctx {
+                    Some((_, _, selection, cwd)) => {
+                        cx.state.fs.restore_selection(*selection);
+                        cx.state.cwd = cwd.clone();
+                    }
+                    None => {
+                        cx.state.fs.switch_to_snapshot();
+                        cx.state.cwd = cx.state.fs.root().clone();
+                    }
+                }
+            }
             // Module-owned bodies resolve their own file's TYPE aliases
             // first, shadowing globals for the call: a file's bodies
             // validate against the same view (see phase 1), so imports
@@ -2705,24 +2732,24 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // entry functions params-only even when called from module
             // code. Balanced below on every exit path.
             cx.state.module_stack.push(module_key);
-            // A module must not inherit its caller's namespace
-            // (#115): env resets to the seed plus the module init's
-            // own contributions. Workspace selection and cwd flow
-            // through untouched, so module code observes the same
-            // workspace its importer does. Declared `INHERIT_ENV`
-            // names re-read from the host here (a re-inherit of an
-            // already-present value leaves no init delta, yet must
-            // still admit the name). A module that reads outside that
-            // (e.g. the host checkout) declares its own
-            // `WORKSPACE`/`WORKDIR` in-function. When the module is
-            // still initializing (reentrant init-time self-call) there
-            // is no stored env yet: the init scope stays as-is, since
-            // it is the module's own in-progress context.
-            if let Some((envs, inherit_names)) = module_env {
+            // A callee never inherits its caller namespace (#115,
+            // #322): module bodies reset to the seed plus the module
+            // init own contributions, entry bodies to the seed alone.
+            // Declared `INHERIT_ENV` names re-read from the host here
+            // (a re-inherit of an already-present value leaves no init
+            // delta, yet must still admit the name). A body needing
+            // caller env takes it as an argument. Reentrant init-time
+            // self-calls keep the in-progress init env, since that is
+            // the module own context under construction.
+            if reentrant {
+                // Keep the in-progress init scope untouched.
+            } else if let Some((envs, inherit_names, _, _)) = module_ctx {
                 cx.state.reset_module_env(envs);
                 if !inherit_names.is_empty() {
                     inherit_env(cx, &inherit_names)?;
                 }
+            } else {
+                cx.state.envs = std::sync::Arc::new((*cx.state.seed).clone());
             }
             // Omitted trailing optionals fill with zero values before
             // the body binds: the arity gate above guarantees every
@@ -2803,6 +2830,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             if let Some(saved) = saved_consts {
                 cx.state.const_scopes = saved;
             }
+            cx.state.isolated_stack = saved_isolated;
             cx.state.call_depth -= 1;
             let _ = cx.state.module_stack.pop();
             cx.state.restore_aliases(saved_type_aliases);

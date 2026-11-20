@@ -312,6 +312,14 @@ pub(super) struct ModuleInit {
     /// reads, and the values flow from the host (or literals) at
     /// init/call time.
     pub(super) inherit_names: Vec<String>,
+    /// The module top-level jail (#322): the workspace selection and
+    /// cwd as the init body left them. Module-owned `FUNC`s restore
+    /// this on entry (unless the body overrides it), so a callee
+    /// executes in its defining file context no matter which
+    /// workspace the caller sits in. Captured before the init scope
+    /// pops; the pop restores the importer afterwards.
+    pub(super) selection: WorkspaceSelection,
+    pub(super) cwd: GuardedPath,
 }
 
 /// One anonymous background worker: the thread-join handle plus the
@@ -839,11 +847,11 @@ impl<P: ProcessManager> ExecState<P> {
         self.const_scopes.pop();
     }
 
-    /// Reset module-owned env (#115): env to the module init's
-    /// stored map. Nothing else is touched: workspace selection and
-    /// cwd are ambient and flow through from the caller, so a module
-    /// operates in the same workspace its importer does. The
-    /// surrounding `push_scope` restores the caller afterwards.
+    /// Reset module-owned env (#115, #322): env to the module init
+    /// stored map. Workspace and cwd are reset separately by the
+    /// caller to the snapshot jail, so a module never observes the
+    /// importer workspace. The surrounding `push_scope` restores the
+    /// caller afterwards.
     pub(super) fn reset_module_env(&mut self, envs: HashMap<String, String>) {
         self.envs = Arc::new(envs);
     }

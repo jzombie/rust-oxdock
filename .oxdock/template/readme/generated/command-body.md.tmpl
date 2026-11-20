@@ -1555,7 +1555,17 @@ definition, and an optional param with no zero value
 (records with required fields, unions, handles, custom
 types) fails at definition naming the fix: drop the `?`
 or pass the argument explicitly.
-Bodies run in a fresh variable scope; LETs inside do not leak. A nested
+Bodies run isolated: a fresh variable scope plus the
+callee definition-site jail (workspace, cwd, and env
+reset; only explicit arguments cross, #322). Module
+bodies restore the workspace selection and cwd their
+own top-level left behind, so a lib declaring
+WORKSPACE at the top serves its FUNCs from there no
+matter which workspace the caller sits in; entry
+bodies reset to the snapshot jail instead. A FUNC-level
+WORKSPACE or WORKDIR statement overrides the file
+default for that call, and the caller context returns
+on every exit path. LETs inside do not leak. A nested
 FUNC definition is scoped to its block and reverts on exit. Names share
 one namespace with native and host-registered functions, which a FUNC
 may never shadow.
@@ -1960,9 +1970,11 @@ Paths:
 - Workspace-side, against the importing file's
   directory (entry parent at top level; off-workspace
   entries resolve like stdin against the root).
-- Relative operation paths resolve against the ambient
-  cwd in every file, module or entry alike. `WORKSPACE`
-  and `WORKDIR` mean the same everywhere.
+- Relative operation paths resolve against the
+  defining file's own jail: each module top-level
+  runs isolated in the snapshot jail, and its
+  WORKSPACE and WORKDIR statements establish the
+  context its FUNCs restore on every call (#322).
 - Missing files fail before the first step runs.
   Write-then-import in one script is rejected; check
   libraries into the tree, or combine them at runtime
@@ -1974,18 +1986,26 @@ Module rules (every file import is a module):
   resets to the seed plus the module init's own
   contributions (declared `INHERIT_ENV` names re-read
   from the host on every call). Workspace selection
-  and cwd flow through untouched, so module code
-  observes the same workspace its importer does.
+  and cwd reset to the module top-level jail: the
+  init body runs isolated in the snapshot jail, and
+  the selection plus cwd it leaves behind become the
+  default every FUNC of that file restores on entry,
+  unless the FUNC body overrides them. A module
+  function needing the caller directory takes it as
+  a path argument.
 - Determinism: behavior is a pure function of the
-  script. The same file with the same ambient cwd and
-  selection behaves identically no matter who imports
-  it.
+  file. The same file behaves identically no matter
+  who imports it or which workspace the importer
+  sits in.
 - State: one init per file, shared by every alias.
   Top-level `LET` bindings drain into a single store
   visible to all of the module's functions.
-- Workspace: `WORKSPACE` and `WORKDIR` mean the same
-  in module scope as in entry code, selecting the
-  shared workspace and moving the shared cwd.
+- Workspace: `WORKSPACE` and `WORKDIR` at a module
+  top-level establish that module's jail for its
+  FUNCs; `WORKSPACE` and `WORKDIR` inside a FUNC
+  body override the file default for that call.
+  Caller and callee selections never leak across
+  the call in either direction.
 - Exports: only `EXPORT`ed top-level `FUNC`s and
   `EXPORT TYPE` aliases cross. Variables never cross.
 - Imports: whole-file or harvest, only exported

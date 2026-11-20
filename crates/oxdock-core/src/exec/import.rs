@@ -442,7 +442,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
     // Join the import stack like a full import: nested loads need this
     // file on the chain for cycle/depth detection and for
     // importer-relative resolution.
-    cx.state.import_stack.push(resolved);
+    cx.state.import_stack.push(resolved.clone());
     let saved_aliases = cx.state.type_aliases.clone();
     let outcome: Result<()> = (|| {
         let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
@@ -574,6 +574,20 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         let _ = cx.state.module_stack.pop();
         if let Some(e) = nested_cause {
             return Err(e);
+        }
+        // Jail setup for harvested FUNCs (#322): the file body never
+        // ran on this path, so a module top-level `WORKSPACE` or
+        // `WORKDIR` would be dropped and harvested FUNCs would serve
+        // from the snapshot default instead of the module jail.
+        // Ensuring init when the top-level sets a jail gives harvests
+        // the exact jail whole-file imports observe; cached inits
+        // return without re-running. Modules without a top-level jail
+        // skip init entirely, so pure harvests stay side-effect free
+        // (see `file_import_from_bare_harvest_skips_body`). Stateful
+        // harvests already failed above, so only pure names reach
+        // their jail.
+        if module_top_level_sets_jail(&steps) {
+            ensure_module_init(cx, &key, &resolved, &steps, path)?;
         }
         Ok(())
     })();
@@ -731,6 +745,182 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
     Ok(())
 }
 
+/// Whether a module top-level establishes its own jail (#322):
+/// any top-level `WORKSPACE` or `WORKDIR` step (guarded or not,
+/// conservative by construction). Single owner for the harvest
+/// init-requirement gate below, so the classifier can never
+/// disagree with the init it triggers.
+fn module_top_level_sets_jail(steps: &[Step]) -> bool {
+    steps
+        .iter()
+        .any(|step| matches!(step.kind, StepKind::Workspace(_) | StepKind::Workdir(_)))
+}
+
+/// Run a module top-level init body once per file (#322): the jail
+/// the module FUNCs restore on every call. Shared by full imports
+/// and harvests so both observe the same module context: a harvest
+/// that skipped init would serve its FUNCs from the snapshot root
+/// instead of the module top-level `WORKSPACE`/`WORKDIR`. Cached
+/// inits return the stored value without re-running. The caller
+/// holds no stack entry; this pushes `resolved` for the run and pops
+/// it after, restoring every swapped scope on all paths.
+fn ensure_module_init<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    key: &str,
+    resolved: &GuardedPath,
+    steps: &[Step],
+    path: &str,
+) -> Result<Value> {
+    // Cached init: every alias shares the first run's state and
+    // `RETURN`. Nothing pushed below, so unwinds stay balanced.
+    if let Some(init) = cx
+        .state
+        .modules
+        .get(key)
+        .and_then(|record| record.init.as_ref())
+    {
+        return Ok(init.return_value.clone());
+    }
+    // The init body observes nothing of the importer: the whole
+    // variable stack swaps for a fresh one, exactly like a
+    // module-owned call, and restores after the scope pops. The
+    // workspace, cwd, and env reset to the snapshot jail and seed
+    // first, so the init top-level establishes the module own
+    // context from a fixed default, never caller ambient (#322).
+    let saved_vars = std::mem::take(&mut cx.state.var_scopes);
+    let saved_consts = std::mem::take(&mut cx.state.const_scopes);
+    let saved_aliases = cx.state.type_aliases.clone();
+    let saved_isolated = std::mem::take(&mut cx.state.isolated_stack);
+    let outcome: Result<Value> = (|| {
+        let aliases = super::typing::collect_type_aliases(steps, cx.state)?;
+        for (name, target) in aliases {
+            cx.state.register_alias(name, target);
+        }
+        cx.state.import_stack.push(resolved.clone());
+        cx.state.push_scope();
+        // Fixed default jail for the module top-level (#322): the
+        // snapshot root with the seed env. Caller workspace, cwd,
+        // env, and isolated scrubs never flow into init. The init
+        // body own WORKSPACE, WORKDIR, and ENV statements then build
+        // the module context its FUNCs restore on every call.
+        cx.state.fs.switch_to_snapshot();
+        cx.state.cwd = cx.state.fs.root().clone();
+        cx.state.envs = std::sync::Arc::new((*cx.state.seed).clone());
+        cx.state.isolated_stack = Vec::new();
+        // Baseline for the call-time env delta: the seed. Every init
+        // contribution counts, importer values cannot appear by
+        // construction since the live env already reset above.
+        let env_before: std::collections::HashMap<String, String> = (*cx.state.seed).clone();
+        // The init body runs with its module on the context stack so
+        // nested definitions owner-tag correctly; lexical reads still
+        // resolve through the pushed frames first.
+        cx.state.module_stack.push(Some(key.to_string()));
+        let flow = execute_steps(
+            cx.state,
+            cx.process,
+            steps,
+            cx.stdin.clone(),
+            false,
+            cx.out.clone(),
+            cx.err.clone(),
+            cx.out_pipe.clone(),
+            cx.stdin_pipe.clone(),
+            false,
+        );
+        // Unwind the module context on every path: nested definitions
+        // below already owner-tagged while it was up.
+        let _ = cx.state.module_stack.pop();
+        let flow = flow?;
+        // Drain the init frame's top-level bindings into the shared
+        // store before the scope pops: this is the module's global
+        // state, visible to every module-owned function and alias.
+        // Capture the init-final jail alongside: the workspace
+        // selection and cwd the top-level left behind become the
+        // module default its FUNCs restore on entry (#322). The pop
+        // below restores the importer afterwards.
+        let drained = std::mem::take(
+            cx.state
+                .var_scopes
+                .last_mut()
+                .expect("import pushed exactly one var scope"),
+        );
+        let drained_consts = std::mem::take(
+            cx.state
+                .const_scopes
+                .last_mut()
+                .expect("import pushed exactly one const scope"),
+        );
+        let init_selection = cx.state.fs.selection();
+        let init_cwd = cx.state.cwd.clone();
+        let value = match flow {
+            Flow::Done => Value::string(String::new()),
+            Flow::Return { value, .. } => value,
+            Flow::Break { idx } => {
+                bail!(
+                    "step {}: BREAK cannot cross import boundary (in IMPORT `{}`)",
+                    idx + 1,
+                    path
+                );
+            }
+            Flow::Continue { idx } => {
+                bail!(
+                    "step {}: CONTINUE cannot cross import boundary (in IMPORT `{}`)",
+                    idx + 1,
+                    path
+                );
+            }
+        };
+        let record = cx.state.modules.entry(key.to_string()).or_default();
+        // Module call-time env (#115): the session seed plus this
+        // init's own contributions. Comparing against the seed keeps
+        // importer-established values out, so module functions never
+        // inherit caller context. Removals (e.g. `INHERIT_ENV` of a
+        // removed name) drop seed rows too. A re-inherit of an
+        // already-present value leaves no delta, so `INHERIT_ENV`
+        // names are additionally recorded for per-call
+        // re-establishment from the host.
+        let after = cx.state.envs.clone();
+        let mut module_env = (*cx.state.seed).clone();
+        for (name, value) in after.iter() {
+            if env_before.get(name) != Some(value) {
+                module_env.insert(name.clone(), value.clone());
+            }
+        }
+        for name in env_before.keys() {
+            if !after.contains_key(name) {
+                module_env.remove(name);
+            }
+        }
+        let mut inherit_names = Vec::new();
+        for step in steps {
+            if let StepKind::InheritEnv { keys } = &step.kind {
+                inherit_names.extend(keys.iter().cloned());
+            }
+        }
+        record.init = Some(super::state::ModuleInit {
+            vars: drained,
+            const_vars: drained_consts,
+            return_value: value.clone(),
+            envs: module_env,
+            inherit_names,
+            selection: init_selection,
+            cwd: init_cwd,
+        });
+        Ok(value)
+    })();
+    let pop_res = cx.state.pop_scope();
+    cx.state.var_scopes = saved_vars;
+    cx.state.const_scopes = saved_consts;
+    cx.state.isolated_stack = saved_isolated;
+    let _ = cx.state.import_stack.pop();
+    cx.state.restore_aliases(saved_aliases);
+    match (outcome, pop_res) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(e), _) => Err(e),
+        (Ok(_), Err(e)) => Err(e),
+    }
+}
+
 pub(crate) fn import_file<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
@@ -868,122 +1058,11 @@ pub(crate) fn import_file<P: ProcessManager>(
     if let Some(value) = cached {
         return Ok(value);
     }
-    // Phase 2 (init): runs once per file. Pushes unwind below.
-    // The init body observes nothing of the importer either: the
-    // whole variable stack swaps for a fresh one, exactly like a
-    // module-owned call, and restores after the scope pops.
-    let saved_vars = std::mem::take(&mut cx.state.var_scopes);
-    let saved_consts = std::mem::take(&mut cx.state.const_scopes);
-    let saved_aliases = cx.state.type_aliases.clone();
-    let outcome: Result<Value> = (|| {
-        let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
-        for (name, target) in aliases {
-            cx.state.register_alias(name, target);
-        }
-        cx.state.import_stack.push(resolved.clone());
-        cx.state.push_scope();
-        // Snapshot the pre-init env: the module's call-time env is the
-        // seed plus only what this init body contributes. Values the
-        // importer established stay out by construction (the delta
-        // below is taken against this map, not the seed).
-        let env_before: std::collections::HashMap<String, String> = (*cx.state.envs).clone();
-        // The init body runs with its module on the context stack so
-        // nested definitions owner-tag correctly; lexical reads still
-        // resolve through the pushed frames first. Relative paths in
-        // the init body resolve against the ambient cwd like any
-        // other code: there is no module-dir anchoring.
-        cx.state.module_stack.push(Some(key.clone()));
-        let flow = execute_steps(
-            cx.state,
-            cx.process,
-            &steps,
-            cx.stdin.clone(),
-            false,
-            cx.out.clone(),
-            cx.err.clone(),
-            cx.out_pipe.clone(),
-            cx.stdin_pipe.clone(),
-            false,
-        );
-        // Unwind the module context on every path: nested definitions
-        // below already owner-tagged while it was up.
-        let _ = cx.state.module_stack.pop();
-        let flow = flow?;
-        // Drain the init frame's top-level bindings into the shared
-        // store before the scope pops: this is the module's global
-        // state, visible to every module-owned function and alias.
-        // Ambient run state (cwd/envs/root) still reverts on pop.
-        let drained = std::mem::take(
-            cx.state
-                .var_scopes
-                .last_mut()
-                .expect("import pushed exactly one var scope"),
-        );
-        let drained_consts = std::mem::take(
-            cx.state
-                .const_scopes
-                .last_mut()
-                .expect("import pushed exactly one const scope"),
-        );
-        let value = match flow {
-            Flow::Done => Value::string(String::new()),
-            Flow::Return { value, .. } => value,
-            Flow::Break { idx } => {
-                bail!(
-                    "step {}: BREAK cannot cross import boundary (in IMPORT `{}`)",
-                    idx + 1,
-                    path
-                );
-            }
-            Flow::Continue { idx } => {
-                bail!(
-                    "step {}: CONTINUE cannot cross import boundary (in IMPORT `{}`)",
-                    idx + 1,
-                    path
-                );
-            }
-        };
-        let record = cx.state.modules.entry(key.clone()).or_default();
-        // Module call-time env (#115): the session seed plus this
-        // init's own contributions. Comparing against the pre-init
-        // map (not the seed) keeps importer-established values out,
-        // so module functions never inherit caller context. Removals
-        // (e.g. `INHERIT_ENV` of a removed name) drop seed rows too.
-        // A re-inherit of an already-present value leaves no delta, so
-        // `INHERIT_ENV` names are additionally recorded for
-        // per-call re-establishment from the host.
-        let after = cx.state.envs.clone();
-        let mut module_env = (*cx.state.seed).clone();
-        for (name, value) in after.iter() {
-            if env_before.get(name) != Some(value) {
-                module_env.insert(name.clone(), value.clone());
-            }
-        }
-        for name in env_before.keys() {
-            if !after.contains_key(name) {
-                module_env.remove(name);
-            }
-        }
-        let mut inherit_names = Vec::new();
-        for step in &steps {
-            if let StepKind::InheritEnv { keys } = &step.kind {
-                inherit_names.extend(keys.iter().cloned());
-            }
-        }
-        record.init = Some(super::state::ModuleInit {
-            vars: drained,
-            const_vars: drained_consts,
-            return_value: value.clone(),
-            envs: module_env,
-            inherit_names,
-        });
-        Ok(value)
-    })();
-    let pop_res = cx.state.pop_scope();
-    cx.state.var_scopes = saved_vars;
-    cx.state.const_scopes = saved_consts;
-    let _ = cx.state.import_stack.pop();
-    cx.state.restore_aliases(saved_aliases);
+    // Phase 2 (init): runs once per file. Shared with harvests so
+    // both observe the same module jail (see `ensure_module_init`);
+    // the file's own harvest re-application below stays
+    // full-import-only.
+    let outcome = ensure_module_init(cx, &key, &resolved, &steps, path);
     // Re-apply the file's own harvests after the init restore: the
     // restore drops everything but exports, while harvested funcs
     // persist through the registry. Types persist like funcs do, so
@@ -991,11 +1070,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     if outcome.is_ok() {
         resolve_own_type_harvests(cx, &steps, &resolved)?;
     }
-    match (outcome, pop_res) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(e), _) => Err(e),
-        (Ok(_), Err(e)) => Err(e),
-    }
+    outcome
 }
 
 /// One site importing a file in the closure (#115): the alias it

@@ -11,6 +11,8 @@ mod commands;
 mod const_;
 #[path = "integration/custom_types.rs"]
 mod custom_types;
+#[path = "integration/func_isolation.rs"]
+mod func_isolation;
 #[path = "integration/glob_sandbox.rs"]
 mod glob_sandbox;
 #[path = "integration/guard_isolation.rs"]
