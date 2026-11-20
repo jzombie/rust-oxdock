@@ -11507,7 +11507,29 @@ fn missing_import_hint_names_exporter_and_spelling() {
         "multi-file list, got: {hint}"
     );
     assert!(
-        super::native::missing_import_hint(files, &empty, "LIB2::NOPE").is_none(),
+        super::native::missing_import_hint(files.clone(), &empty, "LIB2::NOPE").is_none(),
         "unexported names stay silent"
+    );
+    // A second alias for the same file wins over the self-view: the
+    // failed spelling stays diagnostic only when no working spelling
+    // exists.
+    targets.insert(
+        "LIBB".to_string(),
+        vec![(Some("shared.oxfile".to_string()), None)],
+    );
+    let hint =
+        super::native::missing_import_hint(files.clone(), &targets, "LIB::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("did you mean `LIBB::OUT_DIR`?"),
+        "secondary alias preferred, got: {hint}"
+    );
+    // Windows separators normalize in the quoted FROM path: raw
+    // backslashes would read as escapes in the suggestion.
+    let win_exports = vec!["OUT_DIR".to_string()];
+    let win = vec![("C:\\proj\\shared.oxfile", win_exports.as_slice())];
+    let hint = super::native::missing_import_hint(win, &empty, "LIB2::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("[FUNC OUT_DIR FROM \"C:/proj/shared.oxfile\"]"),
+        "forward-slash FROM path, got: {hint}"
     );
 }

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
+use oxdock_fs::to_forward_slashes;
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
@@ -222,7 +223,17 @@ pub(super) fn missing_import_hint<'a>(
     };
     if exporters.len() == 1 {
         let file = exporters[0];
-        let suggestion = match imported_as(file).first() {
+        let aliases = imported_as(file);
+        // Prefer a working spelling: when the file is imported under
+        // several aliases, an alias spelling the failed call
+        // differently resolves, so suggest it before falling back to
+        // the self-view diagnostic.
+        let import_alias = aliases
+            .iter()
+            .find(|alias| qualify(alias, base) != name)
+            .or(aliases.first())
+            .copied();
+        let suggestion = match import_alias {
             Some(import_alias) => {
                 let spelling = qualify(import_alias, base);
                 if spelling == name {
@@ -235,9 +246,14 @@ pub(super) fn missing_import_hint<'a>(
                     format!("did you mean `{spelling}`? (file \"{file}\" exports `{base}`)")
                 }
             }
-            None => format!(
-                "file \"{file}\" exports `{base}`: add `[FUNC {base} FROM \"{file}\"]` to an IMPORT"
-            ),
+            None => {
+                // Forward slashes: a raw Windows path would emit
+                // invalid escapes inside the quoted suggestion.
+                let path = to_forward_slashes(file);
+                format!(
+                    "file \"{file}\" exports `{base}`: add `[FUNC {base} FROM \"{path}\"]` to an IMPORT"
+                )
+            }
         };
         return Some(format!("; {suggestion}"));
     }
