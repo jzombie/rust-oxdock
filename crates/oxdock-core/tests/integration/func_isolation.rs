@@ -555,6 +555,73 @@ fn cross_module_module_top_level_context_reaches_its_funcs() {
 }
 
 #[test]
+fn cross_module_system_caller_with_shadowed_state_stays_isolated() {
+    // The ticket proof in one call (#322): caller sits in WORKSPACE
+    // SYSTEM with a custom workdir, a conflicting ENV, and a
+    // shadowing local; the lib callee still reports its own
+    // declared root/dir/env/values. SYSTEM keeps cwd (rebased), so
+    // the MKDIR/WORKDIR setup happens under LOCAL first and only
+    // reads run under SYSTEM.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            WORKSPACE LOCAL
+            MKDIR modsub
+            WORKDIR modsub
+            ENV COMBINED=lib-val
+            LET $G: STRING = "lib-global"
+            EXPORT [FUNC CTX]
+            FUNC CTX(): STRING {
+                LET $c: STRING = CWD()
+                LET $e: STRING = "{{ env:COMBINED }}"
+                RETURN "{{ $c }}|{{ $e }}|{{ $G }}"
+            }
+        "#},
+    );
+    let steps = parse_script(indoc! {r#"
+        IMPORT [STD, "lib.oxfile" AS LIB]
+        WORKSPACE LOCAL
+        MKDIR entry-sub
+        WORKDIR entry-sub
+        ENV COMBINED=entry-val
+        LET $G: STRING = "entry-global"
+        WORKSPACE SYSTEM
+        LET $caller: STRING = CWD()
+        LET $got: STRING = LIB::CTX()
+        LET $after: STRING = "{{ env:COMBINED }}"
+    "#})
+    .unwrap();
+    let bindings = Engine::new().run_steps(&root, &steps).unwrap().bindings;
+    let caller = bindings.get("caller").and_then(|v| v.as_str()).unwrap();
+    let got = bindings.get("got").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        caller.ends_with("entry-sub"),
+        "caller really holds its custom cwd under SYSTEM: {caller}"
+    );
+    let (cwd, rest) = got.split_once('|').expect("cwd|env|global shape");
+    let (env, global) = rest.split_once('|').expect("env|global shape");
+    assert_eq!(env, "lib-val", "caller ENV must not leak into callee");
+    assert_eq!(
+        global, "lib-global",
+        "caller shadowing local must not leak into callee"
+    );
+    assert!(
+        cwd.ends_with("modsub"),
+        "callee runs in its own declared WORKDIR, got {cwd}"
+    );
+    assert_ne!(cwd, caller, "caller SYSTEM cwd must not leak into callee");
+    assert_eq!(
+        bindings.get("after").and_then(|v| v.as_str()),
+        Some("entry-val"),
+        "callee must not leak its ENV back into the SYSTEM caller"
+    );
+}
+
+#[test]
 fn cross_module_func_level_workspace_overrides_module_top() {
     // Unless the called function overrides it: a FUNC-level
     // WORKSPACE statement wins over the module top-level for that

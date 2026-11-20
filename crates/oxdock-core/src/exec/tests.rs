@@ -7498,7 +7498,7 @@ fn file_import_function_env_does_not_leak_out() {
 /// result. A callee needing the caller directory takes it as a path
 /// argument.
 #[test]
-fn file_import_function_cwd_is_ambient_cwd() {
+fn file_import_function_cwd_is_definition_site() {
     let fs = MockFs::new();
     seed_lib(
         &fs,
