@@ -1032,7 +1032,8 @@ impl<P: ProcessManager> ExecState<P> {
         Ok(())
     }
 
-    /// Declare a `CONST` binding: same namespace as [`declare_var`]
+    /// Declare a `CONST` binding: same namespace as
+    /// [`declare_var`](Self::declare_var)
     /// (a `LET` and a `CONST` cannot share a name in one frame), then
     /// mark the frame const and deep-freeze the value, so nested
     /// containers freeze with the binding instead of aliasing a
