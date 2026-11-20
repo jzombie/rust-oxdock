@@ -4291,7 +4291,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 bodies reset to the snapshot jail instead. A FUNC-level
                 WORKSPACE or WORKDIR statement overrides the file
                 default for that call, and the caller context returns
-                on every exit path. LETs inside do not leak. A nested
+                on every exit path. Conditional top-level configuration
+                uses guards (`[env:FLAG] WORKSPACE LOCAL`): `IF` bodies
+                unwind on exit and never become the jail; see IMPORT.
+                LETs inside do not leak. A nested
                 FUNC definition is scoped to its block and reverts on exit. Names share
                 one namespace with native and host-registered functions, which a FUNC
                 may never shadow.
@@ -4749,6 +4752,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   body override the file default for that call.
                   Caller and callee selections never leak across
                   the call in either direction.
+                - Conditional top-level: `IF` bodies unwind on exit,
+                  so a `WORKSPACE` inside one never becomes the jail.
+                  Guard-gated steps (`[env:FLAG]`) run in place, so
+                  they persist: use guards for conditional config.
                 - Exports: only `EXPORT`ed top-level `FUNC`s and
                   `EXPORT TYPE` aliases cross. Variables never cross.
                 - Imports: whole-file or harvest, only exported
@@ -4788,6 +4795,64 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IMPORT [STD]
                 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
                 ASSERT_CONTAINS stdout "hi World!"
+            "#},
+                },
+                Example {
+                    name: "module top-level jail",
+                    fence_meta: Some("roots:unified"),
+                    code: indoc! {r#"
+                # A module top-level establishes its own jail: the lib
+                # selects WORKSPACE LOCAL and a WORKDIR up front, and
+                # its FUNC restores both on entry while the entry sits
+                # elsewhere. Unified roots: the child inherits one
+                # workspace, so parent and child see the same files.
+                IMPORT [STD]
+                WRITE lib.oxfile """
+                    IMPORT [STD]
+                    WORKSPACE LOCAL
+                    MKDIR modsub
+                    WORKDIR modsub
+                    EXPORT [FUNC WHERE]
+                    FUNC WHERE(): STRING {
+                        LET $c: STRING = CWD()
+                        RETURN $c
+                    }
+                    """
+                WRITE main.oxfile """
+                    IMPORT [STD, "lib.oxfile" AS LIB]
+                    MKDIR entry-sub
+                    WORKDIR entry-sub
+                    LET $caller: STRING = CWD()
+                    LET $callee: STRING = LIB::WHERE()
+                    ASSERT_NE $caller $callee
+                    LET $base: STRING = STD::PATH_BASE($callee)
+                    ECHO "base \{{ $base }}"
+                    """
+                LET $exe: STRING = INTERPRETER()
+                LET $out: STRING = RUN [$exe, "main.oxfile"]
+                ASSERT_CONTAINS $out "base modsub"
+            "#},
+                },
+                Example {
+                    name: "blocks unwind, guards persist",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Blocks unwind on exit: the WORKDIR inside IF reverts,
+                # so it never becomes a module jail. Guards only skip,
+                # never push a scope, so a guard-gated step persists.
+                IMPORT [STD]
+                WORKSPACE LOCAL
+                LET $root: STRING = CWD()
+                LET $go: BOOL = true
+                IF $go {
+                    MKDIR inner
+                    WORKDIR inner
+                }
+                LET $after_if: STRING = CWD()
+                ASSERT_EQ $root $after_if
+                [bool:true] WORKDIR inner
+                LET $after_guard: STRING = CWD()
+                ASSERT_NE $root $after_guard
             "#},
                 },
                 Example {
