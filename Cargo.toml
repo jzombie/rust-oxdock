@@ -24,6 +24,7 @@ members = [
     "crates/sys/oxdock-sys-test-utils",
     "oxdock",
     "oxdock-render",
+    "xtask",
 ]
 # Bare `cargo run` at the workspace root defaults to the `oxdock` binary.
 # `cargo build/test/...` with explicit `--workspace`/`-p` flags are unaffected.

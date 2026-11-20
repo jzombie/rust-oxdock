@@ -3580,6 +3580,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xtask"
+version = "0.43.0-alpha"
+dependencies = [
+ "oxdock-core",
+ "oxdock-fs",
+ "oxdock-macros",
+ "oxdock-parser",
+]
+
+[[package]]
 name = "xxhash-rust"
 version = "0.8.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
