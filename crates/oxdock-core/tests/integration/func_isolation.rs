@@ -636,6 +636,169 @@ fn harvested_func_observes_module_top_level_jail() {
 }
 
 #[test]
+fn harvested_func_observes_guarded_top_level_jail() {
+    // Guards only skip, never push a scope, so a conditional
+    // top-level jail set through `[env:...]` persists to init-final
+    // and reaches harvested FUNCs. Contrast with the `IF`-block
+    // case above, which unwinds on block exit.
+    let _flag = oxdock_process::TestEnvGuard::set("OXDOCK_JAIL_FLAG", "1");
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            INHERIT_ENV [OXDOCK_JAIL_FLAG]
+            [env:OXDOCK_JAIL_FLAG] WORKSPACE LOCAL
+            [env:OXDOCK_JAIL_FLAG] MKDIR gsub
+            [env:OXDOCK_JAIL_FLAG] WORKDIR gsub
+            EXPORT [FUNC GWHERE]
+            FUNC GWHERE(): STRING {
+                LET $c: STRING = CWD()
+                RETURN $c
+            }
+        "#},
+    );
+    let steps = parse_script(indoc! {r#"
+        IMPORT [STD, [FUNC GWHERE FROM "lib.oxfile"]]
+        LET $callee: STRING = GWHERE()
+    "#})
+    .unwrap();
+    let bindings = Engine::new().run_steps(&root, &steps).unwrap().bindings;
+    let callee = bindings.get("callee").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        callee.ends_with("gsub"),
+        "guard-gated module jail persists to harvested FUNCs, got {callee}"
+    );
+}
+
+#[test]
+fn harvested_func_runs_init_for_conditional_top_level_jail() {
+    // The classifier walks control-flow blocks: a conditional
+    // `IF ... { WORKSPACE LOCAL }` at the module top-level still
+    // triggers init on harvest. Block scoping unwinds the selection
+    // on IF exit (like every block), so the restored callee jail is
+    // the snapshot default; the proof that init ran is its surviving
+    // filesystem effect, visible from an explicit `WORKSPACE LOCAL`
+    // in the entry.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            LET $flag: BOOL = true
+            IF $flag {
+                WORKSPACE LOCAL
+                WRITE csub-marker.txt "conditional-init-ran"
+            }
+            EXPORT [FUNC CWHERE]
+            FUNC CWHERE(): STRING {
+                LET $c: STRING = CWD()
+                RETURN $c
+            }
+        "#},
+    );
+    let steps = parse_script(indoc! {r#"
+        IMPORT [STD, [FUNC CWHERE FROM "lib.oxfile"]]
+        LET $callee: STRING = CWHERE()
+        WORKSPACE LOCAL
+        LET $hits: LIST<STRING> = GLOB("csub-marker.txt")
+        LET $n: INT = LEN($hits)
+    "#})
+    .unwrap();
+    let bindings = Engine::new().run_steps(&root, &steps).unwrap().bindings;
+    assert_eq!(
+        bindings.get("n").and_then(|v| v.as_i64()),
+        Some(1),
+        "conditional top-level jail must trigger init on harvest"
+    );
+    assert_eq!(
+        bindings.get("callee").and_then(|v| v.as_str()),
+        Some(SNAPSHOT_PENDING_DISPLAY),
+        "block-scoped WORKSPACE unwinds on IF exit, so the callee keeps the snapshot default"
+    );
+}
+
+#[test]
+fn harvested_func_ignores_nested_funcdef_jail() {
+    // `WORKSPACE` inside a nested `FUNC` body never counts: it runs
+    // in that function call jail, never the init flow. Harvesting an
+    // unrelated pure FUNC skips init entirely, so the top-level
+    // side effect never runs.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            WRITE side.txt "effect"
+            EXPORT [FUNC PURE, FUNC INNER]
+            FUNC INNER(): STRING {
+                WORKSPACE LOCAL
+                RETURN "inner"
+            }
+            FUNC PURE($x: STRING): STRING {
+                RETURN $x
+            }
+        "#},
+    );
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, [FUNC PURE FROM "lib.oxfile"]]
+                LET $v: STRING = PURE("ok")
+                LET $hits: LIST<STRING> = GLOB("side.txt")
+                LET $n: INT = LEN($hits)
+            "#},
+        )
+        .expect("harvest runs");
+    assert_eq!(out.bindings.get("v").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(
+        out.bindings.get("n").and_then(|v| v.as_i64()),
+        Some(0),
+        "harvest must not execute the module body"
+    );
+}
+
+#[test]
+fn nested_funcdef_does_not_inherit_enclosing_call_jail() {
+    // A `FUNC` defined inside another `FUNC` body still enters
+    // through `call_func_value`, so it resets to the definition-site
+    // jail like any other callee: the enclosing call frame workspace,
+    // workdir, and env never leak into it, and there is no breakout
+    // path around the boundary.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let steps = parse_script(indoc! {r#"
+        IMPORT [STD]
+        FUNC OUTER(): STRING {
+            WORKSPACE LOCAL
+            MKDIR outer-sub
+            WORKDIR outer-sub
+            ENV NESTED_PROBE=outer-val
+            FUNC INNER(): STRING {
+                LET $c: STRING = CWD()
+                RETURN $c
+            }
+            RETURN INNER()
+        }
+        LET $got: STRING = OUTER()
+    "#})
+    .unwrap();
+    let bindings = Engine::new().run_steps(&root, &steps).unwrap().bindings;
+    assert_eq!(
+        bindings.get("got").and_then(|v| v.as_str()),
+        Some(SNAPSHOT_PENDING_DISPLAY),
+        "nested callee resets to the snapshot default despite the enclosing LOCAL jail"
+    );
+}
+
+#[test]
 fn cross_module_explicit_args_reach_callee_jail() {
     // Only arguments cross: the entry passes a dir name plus string
     // data, and the lib callee applies them inside its own jail with

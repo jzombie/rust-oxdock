@@ -745,15 +745,38 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
     Ok(())
 }
 
-/// Whether a module top-level establishes its own jail (#322):
-/// any top-level `WORKSPACE` or `WORKDIR` step (guarded or not,
-/// conservative by construction). Single owner for the harvest
-/// init-requirement gate below, so the classifier can never
-/// disagree with the init it triggers.
+/// Whether a module top-level establishes its own jail (#322): a
+/// top-level `WORKSPACE` or `WORKDIR` step, including inside nested
+/// control-flow blocks (a conditional `IF ... { WORKSPACE LOCAL }`
+/// still reroutes the init-final jail on its path, so harvests must
+/// observe it). Conservative by construction: any path that may set
+/// the jail triggers init. Nested `FUNC` bodies never count: they
+/// run in their own call jail, never the init flow. Single owner for
+/// the harvest init-requirement gate, so the classifier can never
+/// disagree with the init it triggers. The block walk reuses
+/// `walk_child_kinds`, the shared child-step owner, instead of
+/// restating per-variant bodies.
 fn module_top_level_sets_jail(steps: &[Step]) -> bool {
-    steps
-        .iter()
-        .any(|step| matches!(step.kind, StepKind::Workspace(_) | StepKind::Workdir(_)))
+    steps.iter().any(|step| step_sets_jail(&step.kind))
+}
+
+/// One step's contribution to [`module_top_level_sets_jail`]: direct
+/// jail setters count; nested function definitions never do; every
+/// other block shape defers to the shared child walk.
+fn step_sets_jail(kind: &StepKind) -> bool {
+    match kind {
+        StepKind::Workspace(_) | StepKind::Workdir(_) => true,
+        StepKind::FuncDef { .. } => false,
+        _ => {
+            let mut found = false;
+            kind.walk_child_kinds(&mut |child| {
+                if step_sets_jail(child) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
 }
 
 /// Run a module top-level init body once per file (#322): the jail
