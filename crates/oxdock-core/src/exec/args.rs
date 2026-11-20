@@ -1381,7 +1381,7 @@ fn resolve_const_call_arg<P: ProcessManager>(
     if let Some((alias, rest)) = trimmed.split_once("::")
         && !alias.is_empty()
         && !rest.is_empty()
-        && !rest.contains(|c: char| c == '.' || c == ',' || c == ' ' || c == '\t')
+        && !rest.contains(['.', ',', ' ', '\t'])
         && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     {

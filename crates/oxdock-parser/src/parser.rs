@@ -2837,10 +2837,9 @@ fn predeclare_forward_consts(stmts: &[Stmt], ctx: &ParseCtx) {
         if let TokKind::Word(w) = &tok.kind
             && is_ident_word(w)
             && crate::constants::is_const_name(w)
+            && let Some(frame) = ctx.forward_consts.borrow_mut().last_mut()
         {
-            if let Some(frame) = ctx.forward_consts.borrow_mut().last_mut() {
-                frame.insert(w.clone());
-            }
+            frame.insert(w.clone());
         }
     }
 }
@@ -8918,10 +8917,9 @@ fn parse_element_at(
     if let Some(TokKind::Word(w)) = toks.get(pos).map(|t| &t.kind)
         && is_ident_word(w)
         && ctx.is_const_visible(w)
+        && let Ok((kind, used)) = parse_set_body(&toks[pos..], stmt, ctx)
     {
-        if let Ok((kind, used)) = parse_set_body(&toks[pos..], stmt, ctx) {
-            return Ok((vec![step(kind)], used));
-        }
+        return Ok((vec![step(kind)], used));
     }
     if head_word.as_deref() == Some(KEYWORD_RETURN) {
         let (kind, used) = parse_return_body(&toks[pos..], stmt, ctx)?;
