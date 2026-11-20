@@ -60,7 +60,7 @@ fn home_scope_harvested_func_resolves_siblings() {
         .expect("harvested STAGE resolves home siblings");
     assert_eq!(
         out.bindings.get("snap").and_then(|v| v.as_str()),
-        Some("/work/.oxdock-codebook")
+        Some(oxdock_fs::join_native("/work", ".oxdock-codebook").as_str())
     );
 }
 
@@ -84,7 +84,7 @@ fn home_scope_file_import_resolves_siblings() {
         .expect("file-imported STAGE resolves home siblings");
     assert_eq!(
         out.bindings.get("snap").and_then(|v| v.as_str()),
-        Some("/work/.oxdock-codebook")
+        Some(oxdock_fs::join_native("/work", ".oxdock-codebook").as_str())
     );
 }
 
@@ -108,7 +108,7 @@ fn home_scope_harvest_with_alias_resolves_siblings() {
         .expect("aliased harvest resolves home siblings");
     assert_eq!(
         out.bindings.get("snap").and_then(|v| v.as_str()),
-        Some("/work/.oxdock-codebook")
+        Some(oxdock_fs::join_native("/work", ".oxdock-codebook").as_str())
     );
 }
 
