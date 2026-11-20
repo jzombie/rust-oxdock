@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Changed
+
+- [breaking] `oxdock-render` is a single binary: it interprets its own pipeline stages via `--interpret` (script on stdin, same full engine) instead of spawning a separate `oxdock-render-child` sidecar, which is deleted. Driver and stages always share one build, so a stale sidecar silently rendering old metadata is impossible; `cargo run -p oxdock-render` regenerates everything. Release tarballs and installs carry the single binary; the `OXDOCK_RENDER_CHILD` override still selects a custom interpreter.
+
 ### Added
 
 - `CONST $name: TYPE = <expr>` bindings (#318): deeply immutable values in every shape `LET` accepts. `SET`, `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS` on a `CONST` fail; nested containers freeze with the binding. `CONST` and `LET` share one namespace. Only `CONST` is `EXPORT`able from modules, read as `$ALIAS::NAME`.
