@@ -1046,7 +1046,7 @@ impl<P: ProcessManager> ExecState<P> {
             .unwrap_or(false)
         {
             anyhow::bail!(
-                "redeclaration error: ${key} already declared in this scope; {kw} bindings are immutable and cannot redeclare it",
+                "redeclaration error: {key} already declared in this scope; {kw} bindings are immutable and cannot redeclare it",
                 kw = KEYWORD_CONST,
             );
         }
@@ -1108,7 +1108,7 @@ impl<P: ProcessManager> ExecState<P> {
 
     pub(super) fn mutate_var(&mut self, key: &str, value: Value) -> Result<()> {
         if self.is_const_var(key) {
-            return Err(const_mutation_error(&format!("${key}")));
+            return Err(const_mutation_error(key));
         }
         let kind = self
             .var_scopes
@@ -1145,7 +1145,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// corrupt the shape the declaration promises.
     pub(super) fn push_into_list(&mut self, key: &str, item: Value) -> Result<()> {
         if self.is_const_var(key) {
-            return Err(const_mutation_error(&format!("${key}")));
+            return Err(const_mutation_error(key));
         }
         let kind = self
             .var_scopes
@@ -1168,7 +1168,7 @@ impl<P: ProcessManager> ExecState<P> {
         for scope in self.var_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key) {
                 if slot.1.is_frozen() {
-                    return Err(const_mutation_error(&format!("${key}")));
+                    return Err(const_mutation_error(key));
                 }
                 let list = slot.1.as_list_mut().ok_or_else(|| {
                     anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
@@ -1189,7 +1189,7 @@ impl<P: ProcessManager> ExecState<P> {
         // module-owned functions with no importer visibility.
         if let Some((_, value)) = self.module_var_mut(key) {
             if value.is_frozen() {
-                return Err(const_mutation_error(&format!("${key}")));
+                return Err(const_mutation_error(key));
             }
             let list = value.as_list_mut().ok_or_else(|| {
                 anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")

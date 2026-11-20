@@ -121,7 +121,7 @@ impl ArgType {
             }
             Arg::String(_, _) => Ok(CheckOutcome::Deferred),
             Arg::Parts(_) => Ok(CheckOutcome::Deferred),
-            Arg::Expr(Expr::Var(_)) => {
+            Arg::Expr(Expr::Var(_)) | Arg::Expr(Expr::Const(_)) => {
                 if matches!(*self, ArgType::List) {
                     Ok(CheckOutcome::Static)
                 } else {

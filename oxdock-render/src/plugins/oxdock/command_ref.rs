@@ -54,7 +54,8 @@ fn render_math_op(op: &MathOp) -> String {
     match op {
         MathOp::PushConst(value) => format!("PushConst({value})"),
         MathOp::LoadVar(name) => format!("LoadVar(${name})"),
-        MathOp::LoadConstRef { alias, name } => format!("LoadConstRef(${alias}::{name})"),
+        MathOp::LoadConst(name) => format!("LoadConst({name})"),
+        MathOp::LoadConstRef { alias, name } => format!("LoadConstRef({alias}::{name})"),
         MathOp::LoadEnv(key) => format!("LoadEnv(env:{key})"),
         MathOp::LoadKeyPath { base, keys } => {
             let mut rendered = format!("${base}");
@@ -64,8 +65,17 @@ fn render_math_op(op: &MathOp) -> String {
             }
             format!("LoadKeyPath({rendered})")
         }
+        MathOp::LoadConstKeyPath { base, keys } => {
+            let mut rendered = base.clone();
+            for key in keys {
+                rendered.push('.');
+                rendered.push_str(key);
+            }
+            format!("LoadConstKeyPath({rendered})")
+        }
         MathOp::Call { name, arity } => format!("Call({name}/{arity})"),
         MathOp::Inspect(name) => format!("Inspect(${name})"),
+        MathOp::InspectConst(name) => format!("Inspect({name})"),
         MathOp::Neg => "Neg".to_string(),
         MathOp::Add => "Add".to_string(),
         MathOp::Sub => "Sub".to_string(),
@@ -1017,6 +1027,7 @@ mod tests {
         let cases = [
             (MathOp::PushConst(Value::int(2)), "PushConst(2)"),
             (MathOp::LoadVar("a".to_string()), "LoadVar($a)"),
+            (MathOp::LoadConst("C".to_string()), "LoadConst(C)"),
             (
                 MathOp::LoadEnv(oxdock_fs::env::os::unix::HOME.to_string()),
                 "LoadEnv(env:HOME)",
@@ -1029,6 +1040,13 @@ mod tests {
                 "LoadKeyPath($m.key.0)",
             ),
             (
+                MathOp::LoadConstKeyPath {
+                    base: "C".to_string(),
+                    keys: vec!["key".to_string()],
+                },
+                "LoadConstKeyPath(C.key)",
+            ),
+            (
                 MathOp::Call {
                     name: "STD::ABS".to_string(),
                     arity: 1,
@@ -1036,6 +1054,7 @@ mod tests {
                 "Call(STD::ABS/1)",
             ),
             (MathOp::Inspect("x".to_string()), "Inspect($x)"),
+            (MathOp::InspectConst("C".to_string()), "Inspect(C)"),
             (MathOp::Neg, "Neg"),
             (MathOp::Add, "Add"),
             (MathOp::Sub, "Sub"),

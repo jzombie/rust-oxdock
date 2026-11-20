@@ -7614,7 +7614,7 @@ fn file_import_function_template_reads_module_store() {
         indoc! {r#"
                 LET $shared: STRING = "module-value"
                 FUNC SHOW(): STRING {
-                    RETURN "{{ shared }}"
+                    RETURN "{{ $shared }}"
                 }
                 EXPORT SHOW
             "#},

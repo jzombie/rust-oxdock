@@ -5,7 +5,7 @@
 IMPORT [STD]
 WORKSPACE SYSTEM
 
-CONST $words: LIST<STRING> = [
+CONST WORDS: LIST<STRING> = [
     "alpha",
     "bravo",
     "charlie",
@@ -38,7 +38,7 @@ CONST $words: LIST<STRING> = [
 # count off whole ones, then take the word at that index.
 FUNC PICK_WORD(): STRING {
     LET $draw: FLOAT = RAND()
-    LET $rest: FLOAT = $draw * FLOAT(LEN($words))
+    LET $rest: FLOAT = $draw * FLOAT(LEN(WORDS))
     LET $pick: INT = 0
 
     WHILE $rest >= 1.0 {
@@ -48,7 +48,7 @@ FUNC PICK_WORD(): STRING {
 
     LET $secret: STRING = "oxdock"
 
-    FOR $i: INT, $w: STRING IN $words {
+    FOR $i: INT, $w: STRING IN WORDS {
         IF $i == $pick {
             $secret = $w
         }

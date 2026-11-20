@@ -445,14 +445,14 @@ fn remote_shipped_const_arrives_as_mutable_snapshot() {
     run_with_runner(
         &root,
         indoc! {r#"
-            CONST $flags: LIST<STRING> = ["a"]
-            REMOTE prod [$flags] {
-                LIST_APPEND $flags "b"
-                LET $joined: STRING = "{{ $flags.0 }}-{{ $flags.1 }}"
+            CONST FLAGS: LIST<STRING> = ["a"]
+            REMOTE prod [FLAGS] {
+                LIST_APPEND $FLAGS "b"
+                LET $joined: STRING = "{{ $FLAGS.0 }}-{{ $FLAGS.1 }}"
                 WRITE out.txt $joined
                 COPY --to-host ./out.txt out.txt
             }
-            ASSERT_EQ $flags.0 "a"
+            ASSERT_EQ FLAGS.0 "a"
         "#},
     )
     .expect("guest mutates its CONST snapshot");

@@ -628,11 +628,14 @@ pub enum ArithOp {
 pub enum MathOp {
     PushConst(Value),
     LoadVar(String),
+    LoadConst(String),
     LoadConstRef { alias: String, name: String },
     LoadEnv(String),
     LoadKeyPath { base: String, keys: Vec<String> },
+    LoadConstKeyPath { base: String, keys: Vec<String> },
     Call { name: String, arity: usize },
     Inspect(String),
+    InspectConst(String),
     Neg,
     Add,
     Sub,
@@ -656,9 +659,15 @@ pub enum LogicalOp {
 pub enum Expr {
     Literal(Value),
     Var(String),
-    /// Qualified immutable read (`$ALIAS::NAME`): a `CONST` exported by
-    /// the module imported under `ALIAS`. Parsed only for the `$`-led
-    /// qualified shape; evaluation resolves through the active unit's
+    /// Bare immutable read (`NAME`): a `CONST` binding visible here.
+    /// Parsed only for bare names that resolve to a `CONST`; `LET`
+    /// bindings never read bare (use `$name`). Evaluation mirrors
+    /// `Var` but consults the const gate for misuse diagnostics.
+    Const(String),
+    /// Qualified immutable read (`ALIAS::NAME`): a `CONST` exported by
+    /// the module imported under `ALIAS`. Parsed only for the bare
+    /// qualified shape; `$ALIAS::NAME` is a hard error (use bare).
+    /// Evaluation resolves through the active unit's
     /// alias targets and fails closed on unknown aliases, non-exported
     /// names, and `LET` bindings (never exportable).
     ConstRef {
@@ -669,6 +678,12 @@ pub enum Expr {
     /// environment at evaluation time.
     Env(String),
     KeyPath {
+        base: String,
+        keys: Vec<String>,
+    },
+    /// Bare const key path (`NAME.key`): traversal over a `CONST`
+    /// binding, mirroring `KeyPath` for `LET`.
+    ConstKeyPath {
         base: String,
         keys: Vec<String>,
     },
@@ -688,6 +703,9 @@ pub enum Expr {
     /// the parser for the exact `INSPECT` name; evaluators match on this
     /// variant and never on a function-name string.
     Inspect(String),
+    /// Const inspection (`INSPECT(NAME)`): bare twin of `Inspect` for
+    /// `CONST` bindings.
+    InspectConst(String),
     Compare {
         op: CompareOp,
         left: Box<Expr>,
@@ -761,10 +779,13 @@ impl Expr {
         match self {
             Expr::Literal(_)
             | Expr::Var(_)
+            | Expr::Const(_)
             | Expr::ConstRef { .. }
             | Expr::Env(_)
             | Expr::KeyPath { .. }
+            | Expr::ConstKeyPath { .. }
             | Expr::Inspect(_)
+            | Expr::InspectConst(_)
             | Expr::FreshPipe
             | Expr::UnsignedIntBoundary(_) => {}
             Expr::Call { args, .. } => {
@@ -809,10 +830,13 @@ impl Expr {
         match self {
             Expr::Literal(_)
             | Expr::Var(_)
+            | Expr::Const(_)
             | Expr::ConstRef { .. }
             | Expr::Env(_)
             | Expr::KeyPath { .. }
+            | Expr::ConstKeyPath { .. }
             | Expr::Inspect(_)
+            | Expr::InspectConst(_)
             | Expr::FreshPipe
             | Expr::UnsignedIntBoundary(_) => {}
             Expr::Call { args, .. } => {
@@ -1276,12 +1300,20 @@ impl fmt::Display for Expr {
         match self {
             Expr::Literal(v) => write!(f, "{}", v),
             Expr::Var(name) => write!(f, "${}", name),
+            Expr::Const(name) => write!(f, "{}", name),
             Expr::ConstRef { alias, name } => {
-                write!(f, "${}::{name}", alias)
+                write!(f, "{alias}::{name}")
             }
             Expr::Env(key) => write!(f, "env:{}", key),
             Expr::KeyPath { base, keys } => {
                 write!(f, "${}", base)?;
+                for key in keys {
+                    write!(f, ".{}", key)?;
+                }
+                Ok(())
+            }
+            Expr::ConstKeyPath { base, keys } => {
+                write!(f, "{}", base)?;
                 for key in keys {
                     write!(f, ".{}", key)?;
                 }
@@ -1298,6 +1330,7 @@ impl fmt::Display for Expr {
                 write!(f, ")")
             }
             Expr::Inspect(var) => write!(f, "INSPECT(${})", var),
+            Expr::InspectConst(var) => write!(f, "INSPECT({})", var),
             Expr::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
@@ -1396,10 +1429,19 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
         match op {
             MathOp::PushConst(v) => stack.push(format!("{}", v)),
             MathOp::LoadVar(name) => stack.push(format!("${}", name)),
-            MathOp::LoadConstRef { alias, name } => stack.push(format!("${alias}::{name}")),
+            MathOp::LoadConst(name) => stack.push(name.clone()),
+            MathOp::LoadConstRef { alias, name } => stack.push(format!("{alias}::{name}")),
             MathOp::LoadEnv(key) => stack.push(format!("env:{}", key)),
             MathOp::LoadKeyPath { base, keys } => {
                 let mut s = format!("${}", base);
+                for key in keys {
+                    s.push('.');
+                    s.push_str(key);
+                }
+                stack.push(s);
+            }
+            MathOp::LoadConstKeyPath { base, keys } => {
+                let mut s = base.clone();
                 for key in keys {
                     s.push('.');
                     s.push_str(key);
@@ -1415,6 +1457,7 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
                 stack.push(format!("{}({})", name, args.join(", ")));
             }
             MathOp::Inspect(name) => stack.push(format!("INSPECT(${})", name)),
+            MathOp::InspectConst(name) => stack.push(format!("INSPECT({})", name)),
             MathOp::Neg => {
                 let inner = stack.pop().unwrap_or_else(|| "<underflow>".to_string());
                 stack.push(format!("(-{})", inner));

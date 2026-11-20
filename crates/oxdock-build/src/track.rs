@@ -153,7 +153,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     out.extend(env_placeholders(text));
                 }
             }
-            Expr::Var(_) | Expr::ConstRef { .. } => {}
+            Expr::Var(_) | Expr::Const(_) | Expr::ConstRef { .. } | Expr::ConstKeyPath { .. } => {}
             Expr::Env(key) => {
                 out.insert(key.clone());
             }
@@ -180,7 +180,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     walk_expr(out, arg);
                 }
             }
-            Expr::Inspect(_) => {}
+            Expr::Inspect(_) | Expr::InspectConst(_) => {}
             // Fresh pipe backends carry no env references.
             Expr::FreshPipe => {}
             Expr::Compare { left, right, .. } => {

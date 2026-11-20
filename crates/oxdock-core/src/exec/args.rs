@@ -457,10 +457,18 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             }
             Ok(v.clone())
         }
-        Expr::Var(name) => cx
+        Expr::Var(name) => {
+            if cx.state.is_const_var(name) {
+                bail!("CONST reads bare: use {name}, not ${name}");
+            }
+            cx.state
+                .get_var(name)
+                .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))
+        }
+        Expr::Const(name) => cx
             .state
             .get_var(name)
-            .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}")),
+            .ok_or_else(|| anyhow::anyhow!("undefined CONST {name}")),
         Expr::ConstRef { alias, name } => super::import::resolve_const_ref(cx.state, alias, name),
         Expr::Env(key) => match cx.state.get_env(key) {
             Some(v) => Ok(Value::string(v.to_string())),
@@ -469,7 +477,13 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             // the static gate rejects them before any step runs.
             None => Ok(Value::string(String::new())),
         },
-        Expr::KeyPath { base, keys } => resolve_key_path_value(cx.state, base, keys),
+        Expr::KeyPath { base, keys } => {
+            if cx.state.is_const_var(base) {
+                bail!("CONST reads bare: use {base}, not ${base}");
+            }
+            resolve_key_path_value(cx.state, base, keys)
+        }
+        Expr::ConstKeyPath { base, keys } => resolve_key_path_value(cx.state, base, keys),
         Expr::List(items) => {
             let mut result = Vec::new();
             for item in items {
@@ -583,6 +597,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         // Variable inspection carries the binding name unevaluated (see
         // `Expr::Inspect`): no function-name matching happens here.
         Expr::Inspect(var) => evaluate_inspect_var(var, cx),
+        Expr::InspectConst(var) => evaluate_inspect_var(var, cx),
         // Bare `LET $p: PIPE`: mint a fresh unbound handle tagged with
         // the declaring task. Backends materialize lazily on first
         // binding, so declaration never pre-commits a backend type with
@@ -1340,28 +1355,39 @@ fn resolve_key_path_value<P: ProcessManager>(
 /// module-exported `CONST` to its value, or `None` when the argument
 /// is any other shape (the flat var map owns those). Key paths never
 /// ride qualified names, mirroring expression and template reads, so
-/// both sides fail with one message.
+/// both sides fail with one message. `$ALIAS::NAME` is a hard error;
+/// bare `ALIAS::NAME` resolves.
 fn resolve_const_call_arg<P: ProcessManager>(
     state: &ExecState<P>,
     src: &str,
 ) -> Result<Option<Value>> {
     use oxdock_parser::template::{TemplateArg, classify_template_arg, parse_var_path};
-    let TemplateArg::Dollar(rest) = classify_template_arg(src.trim()) else {
+    let trimmed = src.trim();
+    if let TemplateArg::Dollar(rest) = classify_template_arg(trimmed) {
+        let Some(parts) = parse_var_path(rest) else {
+            return Ok(None);
+        };
+        let (base, segs) = parts.split_first().expect("split always yields one");
+        if let Some((alias, name)) = base.split_once("::") {
+            if !segs.is_empty() {
+                anyhow::bail!(
+                    "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+                );
+            }
+            anyhow::bail!("CONST reads bare: use {alias}::{name}, not ${alias}::{name}");
+        }
         return Ok(None);
-    };
-    let Some(parts) = parse_var_path(rest) else {
-        return Ok(None);
-    };
-    let (base, segs) = parts.split_first().expect("split always yields one");
-    let Some((alias, name)) = base.split_once("::") else {
-        return Ok(None);
-    };
-    if !segs.is_empty() {
-        anyhow::bail!(
-            "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
-        );
     }
-    super::import::resolve_const_ref(state, alias, name).map(Some)
+    if let Some((alias, rest)) = trimmed.split_once("::")
+        && !alias.is_empty()
+        && !rest.is_empty()
+        && !rest.contains(|c: char| c == '.' || c == ',' || c == ' ' || c == '\t')
+        && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return super::import::resolve_const_ref(state, alias, rest).map(Some);
+    }
+    Ok(None)
 }
 
 /// Descend one value through map keys / list indices: the shared
@@ -1409,10 +1435,20 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 }
             }
             MathOp::LoadVar(name) => {
+                if cx.state.is_const_var(name) {
+                    bail!("CONST reads bare: use {name}, not ${name}");
+                }
                 let val = cx
                     .state
                     .get_var(name)
                     .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))?;
+                stack.push(val);
+            }
+            MathOp::LoadConst(name) => {
+                let val = cx
+                    .state
+                    .get_var(name)
+                    .ok_or_else(|| anyhow::anyhow!("undefined CONST {name}"))?;
                 stack.push(val);
             }
             MathOp::LoadConstRef { alias, name } => {
@@ -1424,6 +1460,12 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 None => stack.push(Value::string(String::new())),
             },
             MathOp::LoadKeyPath { base, keys } => {
+                if cx.state.is_const_var(base) {
+                    bail!("CONST reads bare: use {base}, not ${base}");
+                }
+                stack.push(resolve_key_path_value(cx.state, base, keys)?);
+            }
+            MathOp::LoadConstKeyPath { base, keys } => {
                 stack.push(resolve_key_path_value(cx.state, base, keys)?);
             }
             MathOp::Call { name, arity } => {
@@ -1456,6 +1498,9 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 stack.push(val);
             }
             MathOp::Inspect(name) => {
+                stack.push(Value::map(super::handlers::inspect_var_map(cx, name)?));
+            }
+            MathOp::InspectConst(name) => {
                 stack.push(Value::map(super::handlers::inspect_var_map(cx, name)?));
             }
             MathOp::Neg => {
@@ -1916,23 +1961,23 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     // $var never reads the environment; use {{ env:KEY }}.
                     // Split through the single template owner; the base
                     // lookup below mirrors `resolve_key_path_value`.
-                    // `$ALIAS::NAME` reads a module-exported CONST
-                    // through the same resolver expressions use; key
-                    // paths never ride qualified names.
+                    // `ALIAS::NAME` reads bare; `$ALIAS::NAME` is a
+                    // hard error. `$CONST` is a hard error (bare reads).
                     let parts = split_var_path(rest);
                     let (base, segs) = parts.split_first().expect("split always yields one");
                     if let Some((alias, name)) = base.split_once("::") {
                         if !segs.is_empty() {
                             bail!(
-                                "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+                                "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
                             );
                         }
-                        let value = super::import::resolve_const_ref(state, alias, name)?;
-                        output.push_str(&format_value_for_string(&value)?);
-                    } else {
-                        let value = resolve_key_path_value(state, base, segs)?;
-                        output.push_str(&format_value_for_string(&value)?);
+                        bail!("CONST reads bare: use {alias}::{name}, not ${alias}::{name}");
                     }
+                    if state.is_const_var(base) {
+                        bail!("CONST reads bare: use {base}, not ${base}");
+                    }
+                    let value = resolve_key_path_value(state, base, segs)?;
+                    output.push_str(&format_value_for_string(&value)?);
                 }
                 // `{{ env:KEY }}` reads the script env: absent names
                 // read empty. Undeclared names never reach here: the
@@ -1974,10 +2019,33 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         output.push_str(v);
                     }
                 }
-                // `{{ bare_key }}` reads DSL variables only, never env.
+                // `{{ NAME }}`, `{{ ALIAS::NAME }}`, `{{ NAME.key }}` read
+                // CONST bindings only, never env and never LET (use
+                // `{{ $var }}` for LET).
                 PlaceholderKey::Bare(key) => {
-                    if let Some(val) = state.get_var(key) {
-                        output.push_str(&format_value_for_string(&val)?);
+                    if let Some((alias, rest)) = key.split_once("::") {
+                        if rest.contains('.') {
+                            bail!(
+                                "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+                            );
+                        }
+                        let value = super::import::resolve_const_ref(state, alias, rest)?;
+                        output.push_str(&format_value_for_string(&value)?);
+                    } else if let Some((base, tail)) = key.split_once('.') {
+                        let segs = tail.split('.').map(|s| s.to_string()).collect::<Vec<_>>();
+                        if !state.is_const_var(base) {
+                            bail!("undefined CONST '{key}'; did you mean '${base}'?");
+                        }
+                        let value = resolve_key_path_value(state, base, &segs)?;
+                        output.push_str(&format_value_for_string(&value)?);
+                    } else if state.is_const_var(key) {
+                        if let Some(val) = state.get_var(key) {
+                            output.push_str(&format_value_for_string(&val)?);
+                        } else {
+                            return Err(missing_key(key));
+                        }
+                    } else if state.get_var(key).is_some() {
+                        bail!("`{key}` is a LET binding; use `$` sigil form");
                     } else {
                         return Err(missing_key(key));
                     }

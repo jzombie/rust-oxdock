@@ -549,7 +549,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`SWITCH`](#switch) | `SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
-| [`CONST`](#const) | `CONST $var: TYPE = <expr> \| CONST $p: PIPE \| CONST $var: TYPE = ASYNC { <commands> } \| CONST $var: TYPE = <command> \| CONST $var: TYPE = AWAIT $task \| CONST $var: TYPE = { <commands> }` |
+| [`CONST`](#const) | `CONST NAME: TYPE = <expr> \| CONST NAME: PIPE \| CONST NAME: TYPE = ASYNC { <commands> } \| CONST NAME: TYPE = <command> \| CONST NAME: TYPE = AWAIT TASK \| CONST NAME: TYPE = { <commands> }` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE<T> = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
@@ -1425,27 +1425,29 @@ ASSERT_EQ $t "absent"
 
 Bind deeply immutable script-local values.
 
-**Syntax:** `CONST $var: TYPE = <expr> | CONST $p: PIPE | CONST $var: TYPE = ASYNC { <commands> } | CONST $var: TYPE = <command> | CONST $var: TYPE = AWAIT $task | CONST $var: TYPE = { <commands> }`
+**Syntax:** `CONST NAME: TYPE = <expr> | CONST NAME: PIPE | CONST NAME: TYPE = ASYNC { <commands> } | CONST NAME: TYPE = <command> | CONST NAME: TYPE = AWAIT TASK | CONST NAME: TYPE = { <commands> }`
 
 Declares a script-local constant with an explicit type. The
 right-hand side accepts every `LET` form (expression,
 capture, `ASYNC`, `AWAIT`, inline block, bare `PIPE`).
 
-Immutability is deep and total: `SET` (`$var = ...`),
+Immutability is deep and total: `SET` (`NAME = ...`),
 `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS` on a `CONST`
 value all fail. Nested containers freeze with the binding,
 so reaching a list or map through a `CONST` never exposes
-a mutable handle. Reads behave exactly like `LET`.
+a mutable handle. Reads use the bare name (never `$NAME`).
 
 `CONST` and `LET` share one namespace: declaring either
 twice in the same scope frame is a redeclaration error.
-Shadowing an outer binding in an inner block stays legal
-and the inner declaration reverts on block exit.
+A `CONST` name cannot collide with a `FUNC`, a reserved
+word, or another binding. Shadowing an outer binding in
+an inner block stays legal and the inner declaration
+reverts on block exit.
 
 `CONST` is the only variable binding an `EXPORT` can name
 (`EXPORT CONST_NAME`, `EXPORT [CONST A, B]`): `LET`
 bindings never cross the module boundary. Importers read
-the value as `$ALIAS::NAME` (see IMPORT).
+the value as `ALIAS::NAME` (see IMPORT).
 
 
 **Examples:**
@@ -1453,22 +1455,22 @@ the value as `$ALIAS::NAME` (see IMPORT).
 **Example: const**
 
 ```oxdock
-# CONST reads exactly like LET.
-CONST $name: STRING = "world"
-ECHO "hello, {{ $name }}"
+# CONST reads bare, LET reads sigiled.
+CONST NAME: STRING = "world"
+ECHO "hello, {{ NAME }}"
 ASSERT_CONTAINS stdout "hello, world"
 
 # Containers freeze with the binding.
-CONST $items: LIST<STRING> = ["a", "b"]
-ASSERT_CONTAINS $items "a"
+CONST ITEMS: LIST<STRING> = ["a", "b"]
+ASSERT_CONTAINS ITEMS "a"
 ```
 
 **Example: const rejects mutation**
 
 ```oxdock expect_error:"cannot mutate CONST"
 # SET on a CONST fails instead of rebinding.
-CONST $n: INT = 1
-$n = 2
+CONST N: INT = 1
+N = 2
 ```
 
 **Expected error:** `cannot mutate CONST`
@@ -1477,8 +1479,8 @@ $n = 2
 
 ```oxdock expect_error:"cannot mutate CONST"
 # LIST_APPEND on a CONST fails instead of pushing.
-CONST $items: LIST<STRING> = ["a"]
-LIST_APPEND $items "b"
+CONST ITEMS: LIST<STRING> = ["a"]
+LIST_APPEND ITEMS "b"
 ```
 
 **Expected error:** `cannot mutate CONST`
@@ -2868,7 +2870,8 @@ ASSERT_EQ $body "generated-under-workdir"
 
 ```oxdock
 # The block reverts to the starting directory on exit.
-LET $outside: STRING = CWD
+IMPORT [STD]
+LET $outside: STRING = CWD()
 MKDIR project
 
 [bool:true] {
@@ -2876,7 +2879,7 @@ MKDIR project
     WRITE inner.txt inner
 }
 
-LET $back: STRING = CWD
+LET $back: STRING = CWD()
 ASSERT_EQ $back $outside
 LET $body: STRING = READ project/inner.txt
 ASSERT_EQ $body "inner"
@@ -3132,13 +3135,13 @@ ASSERT_EQ stdout "braced:World\nWorld\n"
 
 ```oxdock
 # `{{ env:KEY }}` reads the script environment; a bare name
-# resolves a DSL variable instead. Spelling rules:
+# resolves a CONST, `$name` resolves a LET. Spelling rules:
 # `script_env:` is always case-sensitive; `env:` is
 # case-sensitive too, except on Windows where it matches
 # case-insensitively. Every read must be declared first:
 # KEY here comes from the ENV below.
 ENV USER=OxDock
-LET $WHO: STRING = "Ada"
+CONST WHO: STRING = "Ada"
 ECHO "Hello {{ env:USER }}! Hi {{ WHO }}! Again {{ script_env:USER }}!"
 ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada! Again OxDock!"
 ```

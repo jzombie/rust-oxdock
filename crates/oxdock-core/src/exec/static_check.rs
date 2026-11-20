@@ -1582,10 +1582,13 @@ fn expr_call_names(expr: &Expr, enter_funcdefs: bool, out: &mut Vec<String>) {
         }
         Expr::Not(inner) => expr_call_names(inner, enter_funcdefs, out),
         Expr::Var(_)
+        | Expr::Const(_)
         | Expr::ConstRef { .. }
         | Expr::Env(_)
         | Expr::KeyPath { .. }
+        | Expr::ConstKeyPath { .. }
         | Expr::Inspect(_)
+        | Expr::InspectConst(_)
         | Expr::FreshPipe
         | Expr::UnsignedIntBoundary(_) => {}
     }
@@ -2047,7 +2050,7 @@ impl Env {
                 if oxdock_parser::guards_overlap(entry.guard.as_ref(), guard) {
                     if entry.is_const || is_const {
                         bail!(
-                            "step {}: redeclaration error: ${key} is a CONST binding and cannot be redeclared; CONST and LET share one namespace",
+                            "step {}: redeclaration error: {key} is a CONST binding and cannot be redeclared; CONST and LET share one namespace",
                             idx + 1
                         );
                     }
@@ -2267,7 +2270,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// One template variable read through expression inference, so
     /// templates and code agree on every error. `$a.b` traverses like
-    /// `KeyPath`; bare keys read like `Var`; `$ALIAS::NAME` reads like
+    /// `KeyPath`; bare keys read like `Const`; `ALIAS::NAME` reads like
     /// `ConstRef`. Key paths never ride qualified names: copy to a
     /// local binding first, mirroring the expression parser.
     fn check_template_var(
@@ -2285,16 +2288,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .expect("placeholder_vars never emits empty paths");
                 if rest.is_empty() {
                     if let Some((alias, name)) = base.split_once("::") {
-                        Expr::ConstRef {
-                            alias: alias.to_string(),
-                            name: name.to_string(),
-                        }
+                        bail!("CONST reads bare: use {alias}::{name}, not ${alias}::{name}");
                     } else {
                         Expr::Var(base.clone())
                     }
                 } else if base.contains("::") {
                     bail!(
-                        "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+                        "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
                     );
                 } else {
                     Expr::KeyPath {
@@ -2303,7 +2303,27 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     }
                 }
             }
-            TemplateVar::Bare(name) => Expr::Var(name.clone()),
+            TemplateVar::Bare(name) => {
+                if let Some((alias, rest)) = name.split_once("::") {
+                    if rest.contains('.') {
+                        bail!(
+                            "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+                        );
+                    }
+                    Expr::ConstRef {
+                        alias: alias.to_string(),
+                        name: rest.to_string(),
+                    }
+                } else if let Some((base, tail)) = name.split_once('.') {
+                    let keys = tail.split('.').map(|s| s.to_string()).collect::<Vec<_>>();
+                    Expr::ConstKeyPath {
+                        base: base.to_string(),
+                        keys,
+                    }
+                } else {
+                    Expr::Const(name.clone())
+                }
+            }
         };
         let idx = scope.idx;
         let _ = self.infer_expr(&expr, env, scope, idx, depth + 1)?;
@@ -2486,16 +2506,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let (base, segs) = parts.split_first().expect("split always yields one");
                 let expr = if segs.is_empty() {
                     if let Some((alias, name)) = base.split_once("::") {
-                        Expr::ConstRef {
-                            alias: alias.to_string(),
-                            name: name.to_string(),
-                        }
+                        bail!("CONST reads bare: use {alias}::{name}, not ${alias}::{name}");
                     } else {
                         Expr::Var(base.clone())
                     }
                 } else if base.contains("::") {
                     bail!(
-                        "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+                        "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
                     );
                 } else {
                     Expr::KeyPath {
@@ -2528,6 +2545,39 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }))
             }
             TemplateArg::Invalid(invalid) => {
+                let trimmed = invalid.trim();
+                if let Some((alias, rest)) = trimmed.split_once("::")
+                    && !alias.is_empty()
+                    && !rest.is_empty()
+                    && !rest.contains('.')
+                    && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    let expr = Expr::ConstRef {
+                        alias: alias.to_string(),
+                        name: rest.to_string(),
+                    };
+                    return self.infer_expr(&expr, env, scope, scope.idx, depth + 1);
+                }
+                if let Some((base, tail)) = trimmed.split_once('.')
+                    && !base.is_empty()
+                    && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    let keys = tail.split('.').map(|s| s.to_string()).collect::<Vec<_>>();
+                    let expr = Expr::ConstKeyPath {
+                        base: base.to_string(),
+                        keys,
+                    };
+                    return self.infer_expr(&expr, env, scope, scope.idx, depth + 1);
+                }
+                if !trimmed.is_empty()
+                    && trimmed
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    let expr = Expr::Const(trimmed.to_string());
+                    return self.infer_expr(&expr, env, scope, scope.idx, depth + 1);
+                }
                 bail!("invalid placeholder call argument '{invalid}'")
             }
         }
@@ -3855,7 +3905,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 if env.is_const(&key, scope.site.as_ref()) {
                     bail!(
-                        "step {}: cannot mutate CONST ${key}: CONST bindings are deeply immutable",
+                        "step {}: cannot mutate CONST {key}: CONST bindings are deeply immutable",
                         idx + 1
                     );
                 }
@@ -4059,7 +4109,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let key = clean_var(var);
                 if env.is_const(&key, scope.site.as_ref()) {
                     bail!(
-                        "step {}: cannot mutate CONST ${key}: CONST bindings are deeply immutable",
+                        "step {}: cannot mutate CONST {key}: CONST bindings are deeply immutable",
                         idx + 1
                     );
                 }
@@ -4074,7 +4124,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let key = clean_var(var);
                 if env.is_const(&key, scope.site.as_ref()) {
                     bail!(
-                        "step {}: cannot mutate CONST ${key}: CONST bindings are deeply immutable",
+                        "step {}: cannot mutate CONST {key}: CONST bindings are deeply immutable",
                         idx + 1
                     );
                 }
@@ -4110,7 +4160,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         let key = clean_var(list);
                         if env.is_const(&key, scope.site.as_ref()) {
                             bail!(
-                                "step {}: cannot mutate CONST ${key}: CONST bindings are deeply immutable",
+                                "step {}: cannot mutate CONST {key}: CONST bindings are deeply immutable",
                                 idx + 1
                             );
                         }
@@ -5279,8 +5329,24 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             Expr::Var(name) => {
                 let key = clean_var(name);
+                if env.is_const(&key, scope.site.as_ref()) {
+                    bail!(
+                        "{}CONST reads bare: use {key}, not ${key}",
+                        loc(Some(&at()))
+                    );
+                }
                 if !env.is_declared(&key) {
                     bail!("{}undefined variable ${key}", loc(Some(&at())));
+                }
+                Ok(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?))
+            }
+            Expr::Const(name) => {
+                let key = clean_var(name);
+                if !env.is_declared(&key) {
+                    bail!("{}undefined CONST {key}", loc(Some(&at())));
+                }
+                if !env.is_const(&key, scope.site.as_ref()) {
+                    bail!("{}`{key}` is a LET binding; use ${key}", loc(Some(&at())));
                 }
                 Ok(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?))
             }
@@ -5373,6 +5439,76 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(StaticTy::Ty(current))
             }
+            Expr::ConstKeyPath { base, keys } => {
+                let key = clean_var(base);
+                if !env.is_declared(&key) {
+                    bail!("{}undefined CONST {key}", loc(Some(&at())));
+                }
+                if !env.is_const(&key, scope.site.as_ref()) {
+                    bail!("{}`{key}` is a LET binding; use ${key}", loc(Some(&at())));
+                }
+                let mut current = env.read_guarded(&key, scope.site.as_ref())?;
+                for part in keys {
+                    match current {
+                        TypeTag::Record(fields) => {
+                            let Some(field) = fields
+                                .iter()
+                                .find(|field| field.name.as_str() == part.as_str())
+                            else {
+                                bail!(
+                                    "{}: unknown field '{part}'; expected fields: {}",
+                                    at(),
+                                    fields
+                                        .iter()
+                                        .map(|field| field.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                );
+                            };
+                            current = field.ty.clone();
+                        }
+                        TypeTag::ListOf(element) => {
+                            if part.parse::<usize>().is_err() {
+                                bail!("{}: Invalid array index '{part}'", at());
+                            }
+                            current = element.as_ref().clone();
+                        }
+                        TypeTag::MapOf(values) => {
+                            current = values.as_ref().clone();
+                        }
+                        TypeTag::Map | TypeTag::List | TypeTag::Any => {
+                            return Ok(StaticTy::Ty(TypeTag::Any));
+                        }
+                        TypeTag::Union(_, members) => {
+                            let traversable = |member: &TypeTag| {
+                                matches!(
+                                    member,
+                                    TypeTag::Record(_)
+                                        | TypeTag::MapOf(_)
+                                        | TypeTag::Map
+                                        | TypeTag::ListOf(_)
+                                        | TypeTag::List
+                                        | TypeTag::Any
+                                )
+                            };
+                            if members.iter().all(|member| !traversable(member)) {
+                                bail!(
+                                    "{}: Cannot traverse into scalar value at key '{part}'",
+                                    at()
+                                );
+                            }
+                            return Ok(StaticTy::Ty(TypeTag::Any));
+                        }
+                        _ => {
+                            bail!(
+                                "{}: Cannot traverse into scalar value at key '{part}'",
+                                at()
+                            );
+                        }
+                    }
+                }
+                Ok(StaticTy::Ty(current))
+            }
             Expr::List(items) => self.infer_list_literal(items, env, scope, idx, depth),
             Expr::Map(entries) => self.infer_map_literal(entries, env, scope, idx, depth),
             Expr::Block(steps) => {
@@ -5421,6 +5557,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let key = clean_var(name);
                 if !env.is_declared(&key) {
                     bail!("{}undefined variable ${key}", loc(Some(&at())));
+                }
+                env.read_guarded(&key, scope.site.as_ref())?;
+                Ok(StaticTy::Ty(TypeTag::Any))
+            }
+            Expr::InspectConst(name) => {
+                let key = clean_var(name);
+                if !env.is_declared(&key) {
+                    bail!("{}undefined CONST {key}", loc(Some(&at())));
                 }
                 env.read_guarded(&key, scope.site.as_ref())?;
                 Ok(StaticTy::Ty(TypeTag::Any))
@@ -5496,8 +5640,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 MathOp::LoadVar(name) => {
                     let key = clean_var(name);
+                    if env.is_const(&key, scope.site.as_ref()) {
+                        bail!("CONST reads bare: use {key}, not ${key}");
+                    }
                     if !env.is_declared(&key) {
                         bail!("undefined variable ${key}");
+                    }
+                    stack.push(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?));
+                }
+                MathOp::LoadConst(name) => {
+                    let key = clean_var(name);
+                    if !env.is_declared(&key) {
+                        bail!("undefined CONST {key}");
+                    }
+                    if !env.is_const(&key, scope.site.as_ref()) {
+                        bail!("`{key}` is a LET binding; use ${key}");
                     }
                     stack.push(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?));
                 }
@@ -5572,6 +5729,69 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     }
                     stack.push(StaticTy::Ty(current));
                 }
+                MathOp::LoadConstKeyPath { base, keys } => {
+                    let key = clean_var(base);
+                    if !env.is_declared(&key) {
+                        bail!("undefined CONST {key}");
+                    }
+                    if !env.is_const(&key, scope.site.as_ref()) {
+                        bail!("`{key}` is a LET binding; use ${key}");
+                    }
+                    let mut current = env.read_guarded(&key, scope.site.as_ref())?;
+                    for part in keys {
+                        match current {
+                            TypeTag::Record(fields) => {
+                                let Some(field) = fields.iter().find(|field| field.name == *part)
+                                else {
+                                    bail!(
+                                        "unknown field '{part}'; expected fields: {}",
+                                        fields
+                                            .iter()
+                                            .map(|field| field.name.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    );
+                                };
+                                current = field.ty.clone();
+                            }
+                            TypeTag::ListOf(element) => {
+                                if part.parse::<usize>().is_err() {
+                                    bail!("Invalid array index '{part}'");
+                                }
+                                current = element.as_ref().clone();
+                            }
+                            TypeTag::MapOf(values) => {
+                                current = values.as_ref().clone();
+                            }
+                            TypeTag::Map | TypeTag::List | TypeTag::Any => {
+                                current = TypeTag::Any;
+                                break;
+                            }
+                            TypeTag::Union(_, members) => {
+                                let traversable = |member: &TypeTag| {
+                                    matches!(
+                                        member,
+                                        TypeTag::Record(_)
+                                            | TypeTag::ListOf(_)
+                                            | TypeTag::MapOf(_)
+                                            | TypeTag::Map
+                                            | TypeTag::List
+                                            | TypeTag::Any
+                                    )
+                                };
+                                if members.iter().all(|member| !traversable(member)) {
+                                    bail!("Cannot traverse into scalar value at key '{part}'");
+                                }
+                                current = TypeTag::Any;
+                                break;
+                            }
+                            _ => {
+                                bail!("Cannot traverse into scalar value at key '{part}'");
+                            }
+                        }
+                    }
+                    stack.push(StaticTy::Ty(current));
+                }
                 MathOp::Call { name, arity } => {
                     let before = stack.len();
                     if before < *arity {
@@ -5600,6 +5820,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     let key = clean_var(name);
                     if !env.is_declared(&key) {
                         bail!("undefined variable ${key}");
+                    }
+                    env.read_guarded(&key, scope.site.as_ref())?;
+                    stack.push(StaticTy::Ty(TypeTag::Any));
+                }
+                MathOp::InspectConst(name) => {
+                    let key = clean_var(name);
+                    if !env.is_declared(&key) {
+                        bail!("undefined CONST {key}");
                     }
                     env.read_guarded(&key, scope.site.as_ref())?;
                     stack.push(StaticTy::Ty(TypeTag::Any));

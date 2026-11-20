@@ -447,15 +447,22 @@ fn arb_leaf_expr() -> impl Strategy<Value = Expr> {
     prop_oneof![
         arb_scalar_literal(),
         "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Var),
+        "[A-Z][A-Z0-9_]*".prop_map(Expr::Const),
         ("[A-Z][A-Z0-9_]*", "[A-Z][A-Z0-9_]*")
             .prop_map(|(alias, name)| Expr::ConstRef { alias, name }),
         "[A-Z][A-Z0-9_]*".prop_map(Expr::Env),
         "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Inspect),
+        "[A-Z][A-Z0-9_]*".prop_map(Expr::InspectConst),
         (
             "[a-z][a-zA-Z0-9_]*",
             prop::collection::vec("[a-z][a-zA-Z0-9_]*", 1..=2),
         )
             .prop_map(|(base, keys)| Expr::KeyPath { base, keys }),
+        (
+            "[A-Z][A-Z0-9_]*",
+            prop::collection::vec("[a-z][a-zA-Z0-9_]*", 1..=2),
+        )
+            .prop_map(|(base, keys)| Expr::ConstKeyPath { base, keys }),
         prop::collection::vec(safe_string(), 0..=3).prop_map(|items| {
             Expr::List(
                 items
@@ -727,7 +734,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                     expr: Expr::Literal(Value::string(s)),
                 }
             }),
-            ("[a-z][a-zA-Z0-9_]*", safe_string()).prop_map(|(var, s)| {
+            ("[A-Z][A-Z0-9_]*", safe_string()).prop_map(|(var, s)| {
                 StepKind::Const {
                     var,
                     decl_type: "STRING".to_string(),
@@ -867,7 +874,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             decl_type: "HANDLE".to_string(),
             body,
         }),
-        ("[a-z][a-zA-Z0-9_]*", arb_body()).prop_map(|(var, body)| StepKind::ConstAsync {
+        ("[A-Z][A-Z0-9_]*", arb_body()).prop_map(|(var, body)| StepKind::ConstAsync {
             var,
             decl_type: "HANDLE".to_string(),
             body,
@@ -883,7 +890,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             decl_type: "STRING".to_string(),
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         }),
-        ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::ConstCapture {
+        ("[A-Z][A-Z0-9_]*",).prop_map(|(var,)| StepKind::ConstCapture {
             var,
             decl_type: "STRING".to_string(),
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
@@ -893,10 +900,12 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             out_type: "STRING".to_string(),
             task_var: var,
         }),
-        ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::ConstAwaitCapture {
-            out_var: var.clone(),
-            out_type: "STRING".to_string(),
-            task_var: var,
+        ("[A-Z][A-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(out_var, task_var)| {
+            StepKind::ConstAwaitCapture {
+                out_var,
+                out_type: "STRING".to_string(),
+                task_var,
+            }
         }),
         ("[a-z][a-zA-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(var, item)| {
             StepKind::For {
@@ -2263,7 +2272,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             expr: Expr::Literal(Value::string("covered".to_string())),
         },
         StepKind::Const {
-            var: "coverage".to_string(),
+            var: "COVERAGE".to_string(),
             decl_type: "STRING".to_string(),
             expr: Expr::Literal(Value::string("covered".to_string())),
         },
@@ -2484,7 +2493,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             }],
         },
         StepKind::ConstAsync {
-            var: "coverage".to_string(),
+            var: "COVERAGE".to_string(),
             decl_type: "HANDLE".to_string(),
             body: vec![Step {
                 guard: None,
@@ -2514,7 +2523,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         },
         StepKind::ConstCapture {
-            var: "coverage".to_string(),
+            var: "COVERAGE".to_string(),
             decl_type: "STRING".to_string(),
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         },
@@ -2524,7 +2533,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             task_var: "coverage".to_string(),
         },
         StepKind::ConstAwaitCapture {
-            out_var: "coverage".to_string(),
+            out_var: "COVERAGE".to_string(),
             out_type: "STRING".to_string(),
             task_var: "coverage".to_string(),
         },
@@ -2721,14 +2730,17 @@ fn expr_covers_kind(expr: &Expr) -> bool {
     match expr {
         Expr::Literal(..)
         | Expr::Var(..)
+        | Expr::Const(..)
         | Expr::ConstRef { .. }
         | Expr::Env(..)
         | Expr::KeyPath { .. }
+        | Expr::ConstKeyPath { .. }
         | Expr::List(..)
         | Expr::Map(..)
         | Expr::Block(..)
         | Expr::Call { .. }
         | Expr::Inspect(..)
+        | Expr::InspectConst(..)
         | Expr::Compare { .. }
         | Expr::Arithmetic { .. }
         | Expr::Not(..)
@@ -2754,6 +2766,7 @@ fn sample_covered_exprs() -> Vec<Expr> {
         Expr::Literal(Value::int(7)),
         Expr::Literal(Value::bool(true)),
         Expr::Var("coverage".to_string()),
+        Expr::Const("COVERAGE".to_string()),
         Expr::ConstRef {
             alias: "COVERAGE".to_string(),
             name: "COVERAGE".to_string(),
@@ -2763,12 +2776,17 @@ fn sample_covered_exprs() -> Vec<Expr> {
             base: "coverage".to_string(),
             keys: vec!["key".to_string()],
         },
+        Expr::ConstKeyPath {
+            base: "COVERAGE".to_string(),
+            keys: vec!["key".to_string()],
+        },
         Expr::List(vec![Expr::Literal(Value::string("covered".to_string()))]),
         Expr::Map(vec![(
             "coverage".to_string(),
             Expr::Literal(Value::string("covered".to_string())),
         )]),
         Expr::Inspect("coverage".to_string()),
+        Expr::InspectConst("COVERAGE".to_string()),
         Expr::FreshPipe,
         Expr::Block(vec![Step {
             guard: None,
@@ -2818,10 +2836,13 @@ fn assert_expr_tree_claimed(expr: &Expr) {
     match expr {
         Expr::Literal(..)
         | Expr::Var(..)
+        | Expr::Const(..)
         | Expr::ConstRef { .. }
         | Expr::Env(..)
         | Expr::KeyPath { .. }
+        | Expr::ConstKeyPath { .. }
         | Expr::Inspect(..)
+        | Expr::InspectConst(..)
         | Expr::FreshPipe
         | Expr::CompiledMath(..)
         | Expr::UnsignedIntBoundary(..) => {}

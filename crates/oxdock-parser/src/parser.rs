@@ -105,7 +105,7 @@ use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 use crate::resolve::resolve_call_name;
 use crate::tok::{GroupDelim, LexError, Tok, TokKind, lex_str};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// Backend error. Carries the statement index and message; the string
@@ -1283,8 +1283,9 @@ fn try_squote_value(region: &[Tok]) -> Option<String> {
 }
 
 /// Lone assignable shapes (`assign_expr` without continuation): `$var`,
-/// key paths, `env:KEY`, and full-region calls (resolved). Anything
-/// longer renders raw; the caller decides strictness.
+/// key paths, `env:KEY`, bare `CONST`, and full-region calls
+/// (resolved). Anything longer renders raw; the caller decides
+/// strictness.
 fn try_lone_value_expr(
     region: &[Tok],
     stmt: usize,
@@ -1304,6 +1305,42 @@ fn try_lone_value_expr(
             }
             _ => return Ok(None),
         };
+        // `$ALIAS::NAME` is a hard error (bare `ALIAS::NAME` reads).
+        let first = matches!(
+            cur.toks.get(cur.pos).map(|t| &t.kind),
+            Some(TokKind::Punct(':'))
+        ) && cur.toks.get(cur.pos).is_some_and(|t| t.joint);
+        let second = matches!(
+            cur.toks.get(cur.pos + 1).map(|t| &t.kind),
+            Some(TokKind::Punct(':'))
+        ) && cur.toks.get(cur.pos + 1).is_some_and(|t| t.joint);
+        let name_tok = cur.toks.get(cur.pos + 2);
+        let qualified = first
+            && second
+            && matches!(name_tok.map(|t| &t.kind), Some(TokKind::Word(w)) if is_ident_word(w))
+            && name_tok.is_some_and(|t| t.joint);
+        if qualified {
+            let name = match &name_tok.expect("checked").kind {
+                TokKind::Word(w) => w.clone(),
+                _ => unreachable!(),
+            };
+            return Err(TokenError {
+                stmt,
+                msg: format!("CONST reads bare: use {base}::{name}, not ${base}::{name}"),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
+        if ctx.is_const_visible(&base) {
+            return Err(TokenError {
+                stmt,
+                msg: format!("CONST reads bare: use {base}, not ${base}"),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
         let mut keys = Vec::new();
         loop {
             let dot = matches!(
@@ -1349,6 +1386,9 @@ fn try_lone_value_expr(
     if let Some(arg) = try_lone_call_expr(region, stmt, ctx)? {
         return Ok(Some(arg));
     }
+    if let Some(arg) = try_bare_const_region(region, ctx, stmt)? {
+        return Ok(Some(arg));
+    }
     Ok(None)
 }
 
@@ -1373,7 +1413,8 @@ fn try_lone_call_expr(
             let [arg] = args.as_slice() else {
                 return Err(TokenError {
                     stmt,
-                    msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
+                    msg: "INSPECT requires exactly one argument: INSPECT($var) or INSPECT(NAME)"
+                        .to_string(),
                     line: 0,
                     col: 0,
                     kind: None,
@@ -1382,9 +1423,12 @@ fn try_lone_call_expr(
             if let Expr::Var(var) = arg {
                 return Ok(Some(Arg::Expr(Expr::Inspect(var.clone()))));
             }
+            if let Expr::Const(var) = arg {
+                return Ok(Some(Arg::Expr(Expr::InspectConst(var.clone()))));
+            }
             return Err(TokenError {
                 stmt,
-                msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
+                msg: format!("INSPECT requires a $variable or bare CONST argument, found {arg:?}"),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -1396,7 +1440,83 @@ fn try_lone_call_expr(
             args,
         })));
     }
+    if let Some(arg) = try_bare_const_region(region, ctx, stmt)? {
+        return Ok(Some(arg));
+    }
     Ok(None)
+}
+
+/// Bare `CONST` shape over one argument run: `NAME`, `ALIAS::NAME`,
+/// or `NAME.key` chains, all joint. `ALIAS::NAME` always parses as a
+/// qualified const ref; bare `NAME` parses only when a `CONST` is
+/// visible here. Single owner for arg-position bare resolution,
+/// shared by assignment values and positional args.
+fn try_bare_const_region(
+    region: &[Tok],
+    ctx: &ParseCtx,
+    stmt: usize,
+) -> Result<Option<Arg>, TokenError> {
+    let _ = ctx;
+    if region.is_empty() {
+        return Ok(None);
+    }
+    let base = match &region[0].kind {
+        TokKind::Word(w) if is_ident_word(w) => w.clone(),
+        _ => return Ok(None),
+    };
+    if region.len() == 1 {
+        if ctx.is_const_visible(&base) {
+            return Ok(Some(Arg::Expr(Expr::Const(base))));
+        }
+        return Ok(None);
+    }
+    let is_qualified = region.len() >= 4
+        && matches!(&region[1].kind, TokKind::Punct(':'))
+        && region[1].joint
+        && matches!(&region[2].kind, TokKind::Punct(':'))
+        && region[2].joint
+        && matches!(&region[3].kind, TokKind::Word(w) if is_ident_word(w))
+        && region[3].joint;
+    if is_qualified {
+        if region.len() == 4 {
+            let name = match &region[3].kind {
+                TokKind::Word(w) => w.clone(),
+                _ => unreachable!(),
+            };
+            return Ok(Some(Arg::Expr(Expr::ConstRef { alias: base, name })));
+        }
+        return Err(TokenError {
+            stmt,
+            msg: "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+                .to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
+    }
+    if !ctx.is_const_visible(&base) {
+        return Ok(None);
+    }
+    let mut keys = Vec::new();
+    let mut idx = 1;
+    while idx + 1 < region.len() {
+        let dot_ok = matches!(&region[idx].kind, TokKind::Punct('.')) && region[idx].joint;
+        let seg_ok = match &region[idx + 1].kind {
+            TokKind::Word(w) if is_key_segment(w) => region[idx + 1].joint,
+            _ => false,
+        };
+        if !dot_ok || !seg_ok {
+            return Ok(None);
+        }
+        if let TokKind::Word(w) = &region[idx + 1].kind {
+            keys.push(w.clone());
+        }
+        idx += 2;
+    }
+    if idx != region.len() || keys.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Arg::Expr(Expr::ConstKeyPath { base, keys })))
 }
 
 /// Expression extension for `$`/`env:`-led argument starts: parse a
@@ -2474,6 +2594,13 @@ fn parse_guard_groups(guard: &[Tok], stmt: usize) -> Result<Option<GuardExpr>, T
 // cores instead of the injected dispatcher.
 
 /// Parse context: shared lowering dispatcher plus module table for
+/// Binding family for `LET`/`CONST` names tracked per scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingKind {
+    Let,
+    Const,
+}
+
 /// static call resolution, with `FUNC`/import frames per braced body.
 pub struct ParseCtx<'a> {
     pub lower: &'a dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
@@ -2495,13 +2622,19 @@ pub struct ParseCtx<'a> {
     pub type_exports: RefCell<Vec<String>>,
     /// `EXPORT CONST` names in source order, validated at end of parse
     /// like the other export lists. Only `CONST` bindings (never `LET`)
-    /// satisfy these; reads arrive as `$ALIAS::NAME`.
+    /// satisfy these; reads arrive as `ALIAS::NAME`.
     pub const_exports: RefCell<Vec<String>>,
     /// Top-level `FUNC` names pre-declared before lowering, so forward
     /// references resolve regardless of order. Separate from `funcs`
     /// frames so duplicate detection in `declare_func` stays intact;
     /// `visible_snapshot` unions this set.
     pub forward: RefCell<Vec<HashSet<String>>>,
+    /// `LET`/`CONST` bindings defined so far per scope (innermost last),
+    /// plus pre-declared `CONST` names per scope for bare resolution
+    /// ahead of definition order. Bare `NAME` reads resolve through
+    /// these; `$NAME` misuse checks consult them too.
+    pub bindings: RefCell<Vec<HashMap<String, BindingKind>>>,
+    pub forward_consts: RefCell<Vec<HashSet<String>>>,
     /// 1-based source line of the statement currently lowering (the
     /// innermost split statement; updated per statement by the body
     /// loops, read as the base for nested splits). Lets every error
@@ -2527,6 +2660,8 @@ impl<'a> ParseCtx<'a> {
             type_exports: RefCell::new(Vec::new()),
             const_exports: RefCell::new(Vec::new()),
             forward: RefCell::new(vec![HashSet::new()]),
+            bindings: RefCell::new(vec![HashMap::new()]),
+            forward_consts: RefCell::new(vec![HashSet::new()]),
             current_line: RefCell::new(0),
         }
     }
@@ -2581,6 +2716,36 @@ impl<'a> ParseCtx<'a> {
             None => {
                 self.imports.borrow_mut().push(modules.to_vec());
             }
+        }
+    }
+
+    /// Innermost binding kind for `name`, if any: defined entries win
+    /// over pre-declared `CONST` names in the same frame, then outer
+    /// frames decide. Single owner for the bare versus sigil gate.
+    fn binding_kind_visible(&self, name: &str) -> Option<BindingKind> {
+        let bindings = self.bindings.borrow();
+        let forward = self.forward_consts.borrow();
+        for idx in (0..bindings.len()).rev() {
+            if let Some(kind) = bindings[idx].get(name) {
+                return Some(*kind);
+            }
+            if forward.get(idx).is_some_and(|set| set.contains(name)) {
+                return Some(BindingKind::Const);
+            }
+        }
+        None
+    }
+
+    /// Whether `name` reads as a `CONST` here: the innermost frame
+    /// holding the name holds a `CONST` (defined or pre-declared).
+    fn is_const_visible(&self, name: &str) -> bool {
+        self.binding_kind_visible(name) == Some(BindingKind::Const)
+    }
+
+    /// Record a `LET`/`CONST` binding in the innermost scope.
+    fn declare_binding(&self, name: &str, kind: BindingKind) {
+        if let Some(frame) = self.bindings.borrow_mut().last_mut() {
+            frame.insert(name.to_string(), kind);
         }
     }
 }
@@ -2643,6 +2808,39 @@ fn predeclare_forward_funcs(stmts: &[Stmt], ctx: &ParseCtx) {
         }
         if let Some(frame) = ctx.forward.borrow_mut().last_mut() {
             frame.insert(header.name.clone());
+        }
+    }
+}
+
+/// Pre-declare bare `CONST` names before lowering, so bare reads
+/// resolve regardless of definition order (use-before-def still fails
+/// in the static gate, which checks declaration order). Only bare
+/// `CONST NAME` heads hoist; `CONST $NAME` never hoists (it is a hard
+/// error in the main pass). Runs per scope like func hoisting.
+fn predeclare_forward_consts(stmts: &[Stmt], ctx: &ParseCtx) {
+    for stmt in stmts {
+        let body = &stmt.body;
+        if !matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_CONST) {
+            continue;
+        }
+        let mut idx = 1;
+        while idx < body.len() && matches!(&body[idx].kind, TokKind::Comment(_) | TokKind::Newline)
+        {
+            idx += 1;
+        }
+        let Some(tok) = body.get(idx) else {
+            continue;
+        };
+        if matches!(&tok.kind, TokKind::Punct('$')) {
+            continue;
+        }
+        if let TokKind::Word(w) = &tok.kind
+            && is_ident_word(w)
+            && crate::constants::is_const_name(w)
+        {
+            if let Some(frame) = ctx.forward_consts.borrow_mut().last_mut() {
+                frame.insert(w.clone());
+            }
         }
     }
 }
@@ -2788,8 +2986,9 @@ fn parse_call_args(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Vec<Exp
 }
 
 /// Lower a call-shape to `Expr`: `INSPECT` keeps its variable
-/// unevaluated; everything else
-/// resolves statically through the shared resolver.
+/// unevaluated (`INSPECT($var)` for `LET`, `INSPECT(NAME)` for
+/// `CONST`); everything else resolves statically through the shared
+/// resolver.
 fn parse_expr_call(
     name: String,
     inner: &[Tok],
@@ -2801,7 +3000,8 @@ fn parse_expr_call(
         let [arg] = args.as_slice() else {
             return Err(TokenError {
                 stmt,
-                msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
+                msg: "INSPECT requires exactly one argument: INSPECT($var) or INSPECT(NAME)"
+                    .to_string(),
                 line: 0,
                 col: 0,
                 kind: None,
@@ -2810,9 +3010,12 @@ fn parse_expr_call(
         if let Expr::Var(var) = arg {
             return Ok(Expr::Inspect(var.clone()));
         }
+        if let Expr::Const(var) = arg {
+            return Ok(Expr::InspectConst(var.clone()));
+        }
         return Err(TokenError {
             stmt,
-            msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
+            msg: format!("INSPECT requires a $variable or bare CONST argument, found {arg:?}"),
             line: 0,
             col: 0,
             kind: None,
@@ -3086,7 +3289,11 @@ fn parse_timeout_duration_at(
 /// Grammar-matched but invalid bindings (tty
 /// values, out-of-range geometry) fail loudly, mirroring
 /// `parse_io_binding`'s messages one by one.
-fn parse_io_bindings(inner: &[Tok], stmt: usize) -> Result<Option<Vec<IoBinding>>, TokenError> {
+fn parse_io_bindings(
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<Vec<IoBinding>>, TokenError> {
     let mut parts: Vec<&[Tok]> = Vec::new();
     let mut start = 0;
     for (i, tok) in inner.iter().enumerate() {
@@ -3108,7 +3315,7 @@ fn parse_io_bindings(inner: &[Tok], stmt: usize) -> Result<Option<Vec<IoBinding>
             .iter()
             .filter(|t| !matches!(&t.kind, TokKind::Newline))
             .collect();
-        match parse_io_binding_part(&part, stmt)? {
+        match parse_io_binding_part(&part, stmt, ctx)? {
             Some(binding) => out.push(binding),
             None => return Ok(None),
         }
@@ -3119,12 +3326,17 @@ fn parse_io_bindings(inner: &[Tok], stmt: usize) -> Result<Option<Vec<IoBinding>
     Ok(Some(out))
 }
 
-/// One `stream[=$var]` / `rows|cols=int` binding. Gaps ride free
-/// around `=`/`,`/names like `ws?`; only `$`+name stays gapless
-/// (atomic `dollar_ident`). Streams and size names outside the
-/// grammar's words miss the shape; a valued `tty` and out-of-range
-/// geometry fail loudly with exact messages.
-fn parse_io_binding_part(part: &[&Tok], stmt: usize) -> Result<Option<IoBinding>, TokenError> {
+/// One `stream[=$var]` / `stream[=NAME]` / `rows|cols=int` binding.
+/// Gaps ride free around `=`/`,`/names like `ws?`; only `$`+name
+/// stays gapless (atomic `dollar_ident`), while bare `NAME` reads a
+/// `CONST` pipe. Streams and size names outside the grammar's words
+/// miss the shape; a valued `tty` and out-of-range geometry fail
+/// loudly with exact messages.
+fn parse_io_binding_part(
+    part: &[&Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<IoBinding>, TokenError> {
     let fail = |msg: String| TokenError {
         stmt,
         msg,
@@ -3190,30 +3402,45 @@ fn parse_io_binding_part(part: &[&Tok], stmt: usize) -> Result<Option<IoBinding>
             pipe: None,
         }));
     }
-    // Stream pipe: `= $var` with a gapless name.
-    if value.len() != 2 {
-        return Ok(None);
+    // Stream pipe: `= $var` with a gapless name, or `= NAME`
+    // for a bare `CONST` pipe.
+    if value.len() == 2
+        && matches!(&value[0].kind, TokKind::Punct('$'))
+        && let TokKind::Word(var) = &value[1].kind
+        && value[1].joint
+        && is_ident_word(var)
+    {
+        if stream == "tty" {
+            return Err(fail(
+                "WITH_IO [tty] takes no value: use bare `tty`, with `rows = <int>` / `cols = <int>` for geometry (e.g. `[tty, rows=40, cols=100]`)"
+                    .to_string(),
+            ));
+        }
+        if ctx.is_const_visible(var) {
+            return Err(fail(format!("CONST reads bare: use {var}, not ${var}")));
+        }
+        return Ok(Some(IoBinding {
+            stream: io_stream_of(stream),
+            pipe: Some(crate::ast::PipeTarget::Var(var.clone())),
+        }));
     }
-    if !matches!(&value[0].kind, TokKind::Punct('$')) {
-        return Ok(None);
+    if value.len() == 1
+        && let TokKind::Word(var) = &value[0].kind
+        && is_ident_word(var)
+        && ctx.is_const_visible(var)
+    {
+        if stream == "tty" {
+            return Err(fail(
+                "WITH_IO [tty] takes no value: use bare `tty`, with `rows = <int>` / `cols = <int>` for geometry (e.g. `[tty, rows=40, cols=100]`)"
+                    .to_string(),
+            ));
+        }
+        return Ok(Some(IoBinding {
+            stream: io_stream_of(stream),
+            pipe: Some(crate::ast::PipeTarget::Var(var.clone())),
+        }));
     }
-    let TokKind::Word(var) = &value[1].kind else {
-        return Ok(None);
-    };
-    if !value[1].joint || !is_ident_word(var) {
-        return Ok(None);
-    }
-    if stream == "tty" {
-        // `tty` is a bare flag (mirrors `parse_io_binding`).
-        return Err(fail(
-            "WITH_IO [tty] takes no value: use bare `tty`, with `rows = <int>` / `cols = <int>` for geometry (e.g. `[tty, rows=40, cols=100]`)"
-                .to_string(),
-        ));
-    }
-    Ok(Some(IoBinding {
-        stream: io_stream_of(stream),
-        pipe: Some(crate::ast::PipeTarget::Var(var.clone())),
-    }))
+    Ok(None)
 }
 
 /// Stream word to [`IoStream`]: only grammar words reach here, so
@@ -3227,57 +3454,79 @@ fn io_stream_of(name: &str) -> IoStream {
     }
 }
 
-/// `AWAIT`/`CANCEL $var` shape at `pos`. A head without `$` misses
-/// (`None`: generic fails it in lowering); once `$`
-/// commits, the name must follow and parse errors stay loud, like
-/// the grammar's committed `"$" ~ ident`. `var_joint` enforces the
-/// atomic `$var` adjacency inside compound-atomic parents; element
-/// level admits the gap (probed `AWAIT $ t`). The caller continues
-/// its element loop past the shape.
+/// `AWAIT`/`CANCEL $var` shape at `pos`, plus bare `AWAIT NAME`
+/// for `CONST` handles. A head without `$` or bare const misses
+/// (`None`: generic fails it in lowering); once `$` commits, the
+/// name must follow and parse errors stay loud. `var_joint`
+/// enforces atomic adjacency inside compound parents.
 fn parse_await_cancel_at(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
     var_joint: bool,
+    ctx: &ParseCtx,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
     let head = match toks.get(pos).map(|t| &t.kind) {
         Some(TokKind::Word(w)) if w == KEYWORD_AWAIT || w == KEYWORD_CANCEL => w.clone(),
         _ => return Ok(None),
     };
-    if !matches!(
+    if matches!(
         toks.get(pos + 1).map(|t| &t.kind),
         Some(TokKind::Punct('$'))
     ) {
-        return Ok(None);
-    }
-    let var = match toks.get(pos + 2) {
-        Some(t)
-            if matches!(&t.kind, TokKind::Word(w) if is_ident_word(w))
-                && (!var_joint || t.joint) =>
-        {
-            match &t.kind {
-                TokKind::Word(w) => w.clone(),
-                _ => unreachable!(),
+        let var = match toks.get(pos + 2) {
+            Some(t)
+                if matches!(&t.kind, TokKind::Word(w) if is_ident_word(w))
+                    && (!var_joint || t.joint) =>
+            {
+                match &t.kind {
+                    TokKind::Word(w) => w.clone(),
+                    _ => unreachable!(),
+                }
             }
-        }
-        _ => {
+            _ => {
+                return Err(TokenError {
+                    stmt,
+                    msg: format!("{head} requires a variable"),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                });
+            }
+        };
+        if ctx.is_const_visible(&var) {
             return Err(TokenError {
                 stmt,
-                msg: format!("{head} requires a variable"),
+                msg: format!("CONST reads bare: use {head} {var}, not {head} ${var}"),
                 line: 0,
                 col: 0,
                 kind: None,
             });
         }
-    };
-    Ok(Some((
-        if head == KEYWORD_AWAIT {
-            StepKind::Await { var }
-        } else {
-            StepKind::Cancel { var }
-        },
-        3,
-    )))
+        return Ok(Some((
+            if head == KEYWORD_AWAIT {
+                StepKind::Await { var }
+            } else {
+                StepKind::Cancel { var }
+            },
+            3,
+        )));
+    }
+    if let Some(t) = toks.get(pos + 1)
+        && let TokKind::Word(w) = &t.kind
+        && is_ident_word(w)
+        && ctx.is_const_visible(w)
+    {
+        return Ok(Some((
+            if head == KEYWORD_AWAIT {
+                StepKind::Await { var: w.clone() }
+            } else {
+                StepKind::Cancel { var: w.clone() }
+            },
+            2,
+        )));
+    }
+    Ok(None)
 }
 
 /// Wrapper strictness for one single-command inner: `AWAIT` parses
@@ -3338,12 +3587,12 @@ fn parse_single_inner(
     // they decline falls through to generic below.
     if head_word.as_deref() == Some(KEYWORD_AWAIT)
         && rules.allow_await
-        && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true)?
+        && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true, ctx)?
     {
         return Ok(found);
     }
     if head_word.as_deref() == Some(KEYWORD_CANCEL)
-        && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true)?
+        && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true, ctx)?
     {
         return Ok(found);
     }
@@ -3714,6 +3963,21 @@ fn parse_body_steps(
     ctx: &ParseCtx,
     mark: bool,
 ) -> Result<Vec<Step>, TokenError> {
+    parse_body_steps_with_lets(inner, stmt, ctx, mark, &[])
+}
+
+/// Brace body with pre-declared `LET` names (function parameters,
+/// `FOR` loop variables): they shadow outer `CONST`s for bare
+/// versus sigil resolution, mirroring runtime scoping. Single owner
+/// for scoped `LET` seeding so new binders gain it without
+/// duplicating frame plumbing.
+fn parse_body_steps_with_lets(
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+    mark: bool,
+    extra_lets: &[String],
+) -> Result<Vec<Step>, TokenError> {
     // One function/import scope per braced body (mirroring the
     // runtime push/pop boundary): same-block
     // `FUNC` redefinition errors, nested shadowing stays allowed.
@@ -3722,6 +3986,11 @@ fn parse_body_steps(
     ctx.funcs.borrow_mut().push(HashSet::new());
     ctx.imports.borrow_mut().push(Vec::new());
     ctx.forward.borrow_mut().push(HashSet::new());
+    ctx.bindings.borrow_mut().push(HashMap::new());
+    ctx.forward_consts.borrow_mut().push(HashSet::new());
+    for name in extra_lets {
+        ctx.declare_binding(name, BindingKind::Let);
+    }
     // Nested splits count lines from the enclosing statement's line
     // (headers are single-line, so the brace shares it). Save and
     // restore the discipline around the loop: sibling bodies after
@@ -3731,6 +4000,7 @@ fn parse_body_steps(
     let mut out = Vec::new();
     let stmts = split_statements(inner, saved)?;
     predeclare_forward_funcs(&stmts, ctx);
+    predeclare_forward_consts(&stmts, ctx);
     for s in &stmts {
         // The innermost statement owns error positions: record it for
         // nested splits and stamp failures that have none yet (deeper
@@ -3744,6 +4014,8 @@ fn parse_body_steps(
     ctx.funcs.borrow_mut().pop();
     ctx.imports.borrow_mut().pop();
     ctx.forward.borrow_mut().pop();
+    ctx.bindings.borrow_mut().pop();
+    ctx.forward_consts.borrow_mut().pop();
     Ok(out)
 }
 
@@ -3779,7 +4051,7 @@ fn parse_with_io_single(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let bindings = match parse_io_bindings(&inner, stmt)? {
+    let bindings = match parse_io_bindings(&inner, stmt, ctx)? {
         Some(bindings) => bindings,
         None => return Ok(None),
     };
@@ -4836,7 +5108,7 @@ fn parse_for_at(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let body = parse_body_steps(&inner, stmt, ctx, false)?;
+    let body = parse_body_steps_with_lets(&inner, stmt, ctx, false, &idents)?;
     p += 1;
     if idents.len() != types.len() {
         return Err(TokenError {
@@ -5186,7 +5458,8 @@ fn parse_func_at(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let body = parse_body_steps(&inner, stmt, ctx, false)?;
+    let param_names: Vec<String> = params.iter().map(|(n, _, _)| n.clone()).collect();
+    let body = parse_body_steps_with_lets(&inner, stmt, ctx, false, &param_names)?;
     let kind = StepKind::FuncDef {
         name: def_name,
         params,
@@ -5208,6 +5481,7 @@ fn parse_func_at(
 fn parse_remote_bindings(
     inner: &[Tok],
     stmt: usize,
+    ctx: &ParseCtx,
 ) -> Result<Option<(Vec<String>, Vec<String>)>, TokenError> {
     let _ = stmt;
     let mut parts: Vec<&[Tok]> = Vec::new();
@@ -5244,7 +5518,7 @@ fn parse_remote_bindings(
         ) {
             part = &part[..part.len() - 1];
         }
-        // `$var`: gapless `$` + ident.
+        // `$var`: gapless `$` + ident, or bare `NAME` for a `CONST`.
         if matches!(part.first().map(|t| &t.kind), Some(TokKind::Punct('$'))) && part.len() == 2 {
             if part[1].joint
                 && let TokKind::Word(w) = &part[1].kind
@@ -5254,6 +5528,14 @@ fn parse_remote_bindings(
                 continue;
             }
             return Ok(None);
+        }
+        if part.len() == 1
+            && let TokKind::Word(w) = &part[0].kind
+            && is_ident_word(w)
+            && (ctx.is_const_visible(w) || crate::constants::is_const_name(w))
+        {
+            vars.push(w.clone());
+            continue;
         }
         // `env:KEY`: gapless triple with an uppercase key.
         if part.len() == 3
@@ -6243,7 +6525,7 @@ fn parse_remote_single(
             TokKind::Group { inner, .. } => inner.clone(),
             _ => unreachable!(),
         };
-        match parse_remote_bindings(&inner, stmt)? {
+        match parse_remote_bindings(&inner, stmt, ctx)? {
             Some((v, e)) => {
                 vars = v;
                 env = e;
@@ -6268,7 +6550,7 @@ fn parse_remote_single(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let body = parse_body_steps(&inner, stmt, ctx, false)?;
+    let body = parse_body_steps_with_lets(&inner, stmt, ctx, false, &vars)?;
     p += 1;
     if body.is_empty() {
         return Err(fail("REMOTE requires a non-empty braced block".to_string()));
@@ -6722,10 +7004,9 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
                 _ => return Err(cur.err("`$` requires a variable name")),
             };
             let mut keys = Vec::new();
-            // Qualified immutable read (`$ALIAS::NAME`): joint `::`
-            // plus a joint name selects a module-exported `CONST`.
-            // Key paths never ride qualified names in v1: copy to a
-            // local binding first, then traverse.
+            // Qualified immutable read is bare (`ALIAS::NAME`); the
+            // sigiled shape is a hard error. Key paths never ride
+            // qualified names: copy to a local binding first.
             let qualified = {
                 let first = matches!(
                     cur.toks.get(cur.pos).map(|t| &t.kind),
@@ -6756,10 +7037,15 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
                 ) && cur.toks.get(cur.pos).is_some_and(|t| t.joint)
                 {
                     return Err(cur.err(
-                        "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first",
+                        "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first",
                     ));
                 }
-                return Ok(Expr::ConstRef { alias: base, name });
+                return Err(cur.err(format!(
+                    "CONST reads bare: use {base}::{name}, not ${base}::{name}"
+                )));
+            }
+            if ctx.is_const_visible(&base) {
+                return Err(cur.err(format!("CONST reads bare: use {base}, not ${base}")));
             }
             loop {
                 // Key-path dots are gapless too (`~` without `gap`).
@@ -6845,7 +7131,12 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
         Some(TokKind::Word(w)) if w.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
             parse_numeric_atom(cur, ctx)
         }
-        Some(TokKind::Word(_)) => parse_bare_atom(cur, ctx, false),
+        Some(TokKind::Word(_)) => {
+            if let Some(expr) = try_parse_bare_const(cur, ctx)? {
+                return Ok(expr);
+            }
+            parse_bare_atom(cur, ctx, false)
+        }
         Some(TokKind::Punct('-')) => parse_bare_atom(cur, ctx, true),
         Some(TokKind::Punct('/')) => parse_bare_atom(cur, ctx, false),
         _ => Err(cur.err("missing expression operand")),
@@ -6865,6 +7156,78 @@ fn parse_bare_atom(
         "true" => Ok(Expr::Literal(Value::bool(true))),
         "false" => Ok(Expr::Literal(Value::bool(false))),
         _ => Ok(Expr::Literal(Value::string(text))),
+    }
+}
+
+/// Bare `CONST` read in expression position: `ALIAS::NAME` always
+/// parses as a qualified const ref (resolution fails closed later);
+/// a bare `NAME` parses as `Const` only when a `CONST` is visible
+/// here (defined or pre-declared). Anything else returns `None` so
+/// the caller falls back to a string literal. Key paths ride bare
+/// const bases the same way `$` paths ride `LET` bases.
+fn try_parse_bare_const(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Option<Expr>, TokenError> {
+    let _ = ctx;
+    let base = match cur.toks.get(cur.pos).map(|t| &t.kind) {
+        Some(TokKind::Word(w)) if is_ident_word(w) => w.clone(),
+        _ => return Ok(None),
+    };
+    let first = matches!(
+        cur.toks.get(cur.pos + 1).map(|t| &t.kind),
+        Some(TokKind::Punct(':'))
+    ) && cur.toks.get(cur.pos + 1).is_some_and(|t| t.joint);
+    let second = matches!(
+        cur.toks.get(cur.pos + 2).map(|t| &t.kind),
+        Some(TokKind::Punct(':'))
+    ) && cur.toks.get(cur.pos + 2).is_some_and(|t| t.joint);
+    let name_tok = cur.toks.get(cur.pos + 3);
+    let qualified = first
+        && second
+        && matches!(name_tok.map(|t| &t.kind), Some(TokKind::Word(w)) if is_ident_word(w))
+        && name_tok.is_some_and(|t| t.joint);
+    if qualified {
+        let name = match &name_tok.expect("checked").kind {
+            TokKind::Word(w) => w.clone(),
+            _ => unreachable!(),
+        };
+        cur.pos += 4;
+        if matches!(
+            cur.toks.get(cur.pos).map(|t| &t.kind),
+            Some(TokKind::Punct('.'))
+        ) && cur.toks.get(cur.pos).is_some_and(|t| t.joint)
+        {
+            return Err(cur.err(
+                "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first",
+            ));
+        }
+        return Ok(Some(Expr::ConstRef { alias: base, name }));
+    }
+    if could_be_const_name(&base) {
+        cur.pos += 1;
+        let mut keys = Vec::new();
+        loop {
+            let dot = matches!(
+                cur.toks.get(cur.pos).map(|t| &t.kind),
+                Some(TokKind::Punct('.'))
+            ) && cur.toks.get(cur.pos).is_some_and(|t| t.joint);
+            let seg = cur.toks.get(cur.pos + 1);
+            let seg_ok = dot
+                && matches!(seg.map(|t| &t.kind), Some(TokKind::Word(w)) if is_key_segment(w))
+                && seg.is_some_and(|t| t.joint);
+            if !seg_ok {
+                break;
+            }
+            if let Some(TokKind::Word(w)) = seg.map(|t| &t.kind) {
+                keys.push(w.clone());
+            }
+            cur.pos += 2;
+        }
+        if keys.is_empty() {
+            Ok(Some(Expr::Const(base)))
+        } else {
+            Ok(Some(Expr::ConstKeyPath { base, keys }))
+        }
+    } else {
+        Ok(None)
     }
 }
 
@@ -7191,7 +7554,7 @@ fn expect_dollar_var(cur: &mut Cursor, msg: &str) -> Result<String, TokenError> 
 
 /// Reject a qualified `$ALIAS::NAME` where a declaration or mutation
 /// target stands: bindings declare bare locals, and module `CONST`s
-/// are immutable (reads use `$ALIAS::NAME` in expressions).
+/// are immutable (reads use `ALIAS::NAME` in expressions).
 /// Single owner for the qualified-target gate, shared by the binding
 /// and `SET` heads so both fail with one message shape.
 fn reject_qualified_target(cur: &Cursor, base: &str) -> Result<(), TokenError> {
@@ -7205,7 +7568,7 @@ fn reject_qualified_target(cur: &Cursor, base: &str) -> Result<(), TokenError> {
     ) && cur.toks.get(cur.pos + 1).is_some_and(|t| t.joint);
     if first && second {
         return Err(cur.err(format!(
-            "cannot declare or assign ${base}::...: module values read as $ALIAS::NAME in expressions and are never binding targets"
+            "cannot declare or assign ${base}::...: module values read as ALIAS::NAME in expressions and are never binding targets"
         )));
     }
     Ok(())
@@ -7237,7 +7600,8 @@ fn parse_const_body(
 }
 
 /// Shared `LET`/`CONST` body: the head keyword is already matched.
-/// `kw` must be `KEYWORD_LET` or `KEYWORD_CONST`.
+/// `kw` must be `KEYWORD_LET` or `KEYWORD_CONST`. `LET` keeps the
+/// `$var` head; `CONST` takes a bare `NAME` head and rejects `$`.
 fn parse_binding_body(
     body: &[Tok],
     stmt: usize,
@@ -7248,6 +7612,9 @@ fn parse_binding_body(
     match cur.next() {
         Some(t) if matches!(&t.kind, TokKind::Word(w) if w == kw) => {}
         _ => return Err(cur.err("unreachable")),
+    }
+    if kw == KEYWORD_CONST {
+        return parse_const_binding_body(body, &mut cur, stmt, ctx);
     }
     // No `$var`: no binding form can match (miss, never a hard fail).
     let var = match expect_dollar_var(&mut cur, &format!("{kw} requires a variable")) {
@@ -7283,19 +7650,12 @@ fn parse_binding_body(
             body.get(type_start).map(|t| &t.kind),
             Some(TokKind::Word(w)) if w == crate::TypeTag::Pipe.name()
         ) {
-            let kind = if kw == KEYWORD_CONST {
-                StepKind::Const {
-                    var,
-                    decl_type: crate::TypeTag::Pipe.name().to_string(),
-                    expr: Expr::FreshPipe,
-                }
-            } else {
-                StepKind::Assign {
-                    var,
-                    decl_type: crate::TypeTag::Pipe.name().to_string(),
-                    expr: Expr::FreshPipe,
-                }
+            let kind = StepKind::Assign {
+                var: var.clone(),
+                decl_type: crate::TypeTag::Pipe.name().to_string(),
+                expr: Expr::FreshPipe,
             };
+            ctx.declare_binding(&var, BindingKind::Let);
             return Ok(Some((kind, type_start + 1)));
         }
         return Err(cur.err(
@@ -7303,8 +7663,129 @@ fn parse_binding_body(
         ));
     };
     let decl_type = render_type_region(&body[type_start..eq], stmt)?;
+    let var_for_rhs = var.clone();
     let (kind, rhs_used) = parse_let_rhs(&body[eq + 1..], var, decl_type, stmt, ctx, kw)?;
-    Ok(Some((binding_kind(kind, kw), eq + 1 + rhs_used)))
+    let kind = binding_kind(kind, kw);
+    ctx.declare_binding(&var_for_rhs, BindingKind::Let);
+    Ok(Some((kind, eq + 1 + rhs_used)))
+}
+
+/// Bare `CONST NAME: TYPE` body. `CONST $NAME` is a hard error, never
+/// a miss. Bare `NAME` colliding with a keyword or a same-scope
+/// `LET`/`CONST` fails here.
+fn parse_const_binding_body(
+    body: &[Tok],
+    cur: &mut Cursor,
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    cur.skip_gap();
+    if matches!(
+        cur.toks.get(cur.pos).map(|t| &t.kind),
+        Some(TokKind::Punct('$'))
+    ) {
+        return Err(cur.err("CONST rejects `$`: write CONST NAME: TYPE = ... (bare, no sigil)"));
+    }
+    let var = match cur.next() {
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if is_ident_word(w)) => match &t.kind {
+            TokKind::Word(w) => w.clone(),
+            _ => unreachable!(),
+        },
+        _ => return Ok(None),
+    };
+    reject_qualified_target_bare(cur, &var)?;
+    validate_const_name(ctx, cur, &var)?;
+    cur.skip_gap();
+    if !cur.eat_punct(':') {
+        return Err(TokenError {
+            stmt,
+            msg: format!(
+                "{kw} requires explicit types: {kw} NAME: TYPE = <expr>",
+                kw = KEYWORD_CONST
+            ),
+            line: 0,
+            col: 0,
+            kind: Some(ParseErrorKind::InvalidSyntax {
+                command: KEYWORD_CONST.to_string(),
+            }),
+        });
+    }
+    let type_start = cur.pos;
+    let assign = find_assign_eq(&body[type_start..]).map(|i| i + type_start);
+    let Some(eq) = assign else {
+        if matches!(
+            body.get(type_start).map(|t| &t.kind),
+            Some(TokKind::Word(w)) if w == crate::TypeTag::Pipe.name()
+        ) {
+            let kind = StepKind::Const {
+                var: var.clone(),
+                decl_type: crate::TypeTag::Pipe.name().to_string(),
+                expr: Expr::FreshPipe,
+            };
+            ctx.declare_binding(&var, BindingKind::Const);
+            return Ok(Some((kind, type_start + 1)));
+        }
+        return Err(cur.err(format!(
+            "{kw} requires an expression: {kw} NAME: TYPE = <expr> (only {kw} NAME: PIPE omits the initializer)",
+            kw = KEYWORD_CONST
+        )));
+    };
+    let decl_type = render_type_region(&body[type_start..eq], stmt)?;
+    let var_for_rhs = var.clone();
+    let (kind, rhs_used) =
+        parse_let_rhs(&body[eq + 1..], var, decl_type, stmt, ctx, KEYWORD_CONST)?;
+    let kind = binding_kind(kind, KEYWORD_CONST);
+    ctx.declare_binding(&var_for_rhs, BindingKind::Const);
+    Ok(Some((kind, eq + 1 + rhs_used)))
+}
+
+/// Reject a qualified `NAME::...` after a bare `CONST NAME` head:
+/// bindings declare bare locals, never qualified targets.
+fn reject_qualified_target_bare(cur: &Cursor, base: &str) -> Result<(), TokenError> {
+    let first = matches!(
+        cur.toks.get(cur.pos).map(|t| &t.kind),
+        Some(TokKind::Punct(':'))
+    ) && cur.toks.get(cur.pos).is_some_and(|t| t.joint);
+    let second = matches!(
+        cur.toks.get(cur.pos + 1).map(|t| &t.kind),
+        Some(TokKind::Punct(':'))
+    ) && cur.toks.get(cur.pos + 1).is_some_and(|t| t.joint);
+    if first && second {
+        return Err(cur.err(format!(
+            "cannot declare or assign {base}::...: module values read as ALIAS::NAME in expressions and are never binding targets"
+        )));
+    }
+    Ok(())
+}
+
+/// Collision gate for bare `CONST` names: uppercase plus keywords,
+/// commands, types, and workspace targets. `FUNC` names and host
+/// functions live in separate namespaces and may share a spelling
+/// with a private `CONST`.
+/// Same-scope `LET`/`CONST` duplicates rely on the static gate so
+/// guard-disjoint declarations stay legal.
+fn validate_const_name(ctx: &ParseCtx, cur: &Cursor, name: &str) -> Result<(), TokenError> {
+    let _ = ctx;
+    if !crate::constants::is_const_name(name) {
+        return Err(cur.err(format!("CONST names must be UPPERCASE: got `{name}`")));
+    }
+    if crate::commands::is_reserved_const_name(name) {
+        return Err(cur.err(format!(
+            "CONST {name} collides with reserved keyword `{name}`"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `name` could ever be a `CONST`: uppercase spelling plus
+/// freedom from reserved keywords, commands, types, and workspace
+/// targets. Single owner for the bare-read gate: bare uppercase
+/// that could be a `CONST` parses as one (letting the static gate
+/// report undeclared versus `LET` misuse), while reserved uppers
+/// stay string literals so `WORKSPACE LOCAL` and `WRITE a MUTATION`
+/// never misread as const refs.
+fn could_be_const_name(name: &str) -> bool {
+    crate::constants::is_const_name(name) && !crate::commands::is_reserved_const_name(name)
 }
 
 /// Map an `Assign`-family kind to the `kw` binding family: `LET`
@@ -7432,8 +7913,9 @@ fn parse_let_rhs(
         ));
     }
     // `AWAIT $v` captures the task output (`$`+name ride gapless in
-    // this atomic position, like the grammar); anything else
-    // `AWAIT`-led goes generic below (lowering fails it, probed).
+    // this atomic position, like the grammar); `AWAIT NAME` captures
+    // from a bare `CONST` handle. Anything else `AWAIT`-led goes
+    // generic below (lowering fails it, probed).
     if head_word.as_deref() == Some(KEYWORD_AWAIT)
         && rhs.len() == 3
         && let (Some(dollar), Some(task)) = (rhs.get(1), rhs.get(2))
@@ -7442,6 +7924,15 @@ fn parse_let_rhs(
         && let TokKind::Word(task_var) = &task.kind
         && is_ident_word(task_var)
     {
+        if ctx.is_const_visible(task_var) {
+            return Err(TokenError {
+                stmt,
+                msg: format!("CONST reads bare: use AWAIT {task_var}, not AWAIT ${task_var}"),
+                line: 0,
+                col: 0,
+                kind: None,
+            });
+        }
         return Ok((
             StepKind::AwaitCapture {
                 out_var: var,
@@ -7449,6 +7940,22 @@ fn parse_let_rhs(
                 task_var: task_var.clone(),
             },
             skipped + 3,
+        ));
+    }
+    if head_word.as_deref() == Some(KEYWORD_AWAIT)
+        && rhs.len() == 2
+        && let Some(task) = rhs.get(1)
+        && let TokKind::Word(task_var) = &task.kind
+        && is_ident_word(task_var)
+        && ctx.is_const_visible(task_var)
+    {
+        return Ok((
+            StepKind::AwaitCapture {
+                out_var: var,
+                out_type: decl_type,
+                task_var: task_var.clone(),
+            },
+            skipped + 2,
         ));
     }
     // RUN exec form captures the structured argv (gapped bracket;
@@ -7595,7 +8102,7 @@ fn try_let_with_io_rhs(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let bindings = match parse_io_bindings(&inner, stmt)? {
+    let bindings = match parse_io_bindings(&inner, stmt, ctx)? {
         Some(bindings) => bindings,
         None => return Ok(None),
     };
@@ -7879,20 +8386,47 @@ fn parse_set_body(
     ctx: &ParseCtx,
 ) -> Result<(StepKind, usize), TokenError> {
     let mut cur = Cursor::expr(body, stmt);
-    let var = expect_dollar_var(&mut cur, "mutation requires a variable: $var = <expr>")?;
-    reject_qualified_target(&cur, &var)?;
-    let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);
-    let eq = match assign {
-        Some(eq) => eq,
-        None => {
-            return Err(cur.err("mutation requires a variable: $var = <expr>"));
-        }
+    if matches!(
+        cur.toks.get(cur.pos).map(|t| &t.kind),
+        Some(TokKind::Punct('$'))
+    ) {
+        let var = expect_dollar_var(&mut cur, "mutation requires a variable: $var = <expr>")?;
+        reject_qualified_target(&cur, &var)?;
+        let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);
+        let eq = match assign {
+            Some(eq) => eq,
+            None => {
+                return Err(cur.err("mutation requires a variable: $var = <expr>"));
+            }
+        };
+        cur.pos = eq + 1;
+        cur.skip_gap();
+        let expr = parse_expr_checked(&mut cur, ctx)?;
+        return Ok((StepKind::Set { var, expr }, cur.pos));
+    }
+    let base = match cur.next() {
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if is_ident_word(w)) => match &t.kind {
+            TokKind::Word(w) => w.clone(),
+            _ => unreachable!(),
+        },
+        _ => return Err(cur.err("mutation requires a variable: $var = <expr>")),
     };
-    cur.pos = eq + 1;
-    // Leading gap comments vanish like the `=` gap.
-    cur.skip_gap();
-    let expr = parse_expr_checked(&mut cur, ctx)?;
-    Ok((StepKind::Set { var, expr }, cur.pos))
+    if ctx.is_const_visible(&base) {
+        reject_qualified_target_bare(&cur, &base)?;
+        cur.skip_gap();
+        let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);
+        let eq = match assign {
+            Some(eq) => eq,
+            None => {
+                return Err(cur.err("mutation requires a variable: $var = <expr>"));
+            }
+        };
+        cur.pos = eq + 1;
+        cur.skip_gap();
+        let expr = parse_expr_checked(&mut cur, ctx)?;
+        return Ok((StepKind::Set { var: base, expr }, cur.pos));
+    }
+    Err(cur.err("mutation requires a variable: $var = <expr>"))
 }
 
 fn parse_return_body(
@@ -8381,6 +8915,14 @@ fn parse_element_at(
         let (kind, used) = parse_set_body(&toks[pos..], stmt, ctx)?;
         return Ok((vec![step(kind)], used));
     }
+    if let Some(TokKind::Word(w)) = toks.get(pos).map(|t| &t.kind)
+        && is_ident_word(w)
+        && ctx.is_const_visible(w)
+    {
+        if let Ok((kind, used)) = parse_set_body(&toks[pos..], stmt, ctx) {
+            return Ok((vec![step(kind)], used));
+        }
+    }
     if head_word.as_deref() == Some(KEYWORD_RETURN) {
         let (kind, used) = parse_return_body(&toks[pos..], stmt, ctx)?;
         return Ok((vec![step(kind)], used));
@@ -8392,6 +8934,26 @@ fn parse_element_at(
     if call_shape_at(toks, pos, true).is_some() {
         let (kind, used) = parse_inner_command(&toks[pos..], stmt, ctx)?;
         return Ok((vec![step(kind)], used));
+    }
+    if let Some(TokKind::Word(_)) = toks.get(pos).map(|t| &t.kind)
+        && toks
+            .get(pos + 1)
+            .is_some_and(|t| t.joint && matches!(&t.kind, TokKind::Punct(':')))
+        && toks
+            .get(pos + 2)
+            .is_some_and(|t| t.joint && matches!(&t.kind, TokKind::Punct(':')))
+        && let Some(TokKind::Word(_)) = toks.get(pos + 3).map(|t| &t.kind)
+        && toks.get(pos + 3).is_some_and(|t| t.joint)
+    {
+        // Qualified calls already returned above; anything else
+        // starting `ALIAS::NAME` is a binding-target misuse.
+        return Err(TokenError {
+            stmt,
+            msg: "cannot declare or assign ALIAS::NAME: module values read as ALIAS::NAME in expressions and are never binding targets".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
     }
     // Block statements (shape misses fall to generic, which fails
     // them in lowering like the grammar's committed `instruction`).
@@ -8473,11 +9035,12 @@ fn parse_element_at(
         _ => {}
     }
     // AWAIT/CANCEL statements (element level admits the `$` gap,
-    // probed); heads without `$` go generic (lowering fails them).
+    // probed); heads without `$` go generic unless a bare CONST
+    // handle is visible (lowering fails the rest).
     if matches!(
         head_word.as_deref(),
         Some(KEYWORD_AWAIT) | Some(KEYWORD_CANCEL)
-    ) && let Some((kind, used)) = parse_await_cancel_at(toks, pos, stmt, false)?
+    ) && let Some((kind, used)) = parse_await_cancel_at(toks, pos, stmt, false, ctx)?
     {
         return Ok((vec![step(kind)], used));
     }
@@ -8679,7 +9242,7 @@ fn parse_with_io_element(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let bindings = match parse_io_bindings(&inner, stmt)? {
+    let bindings = match parse_io_bindings(&inner, stmt, ctx)? {
         Some(bindings) => bindings,
         // Shape miss: generic fails it.
         None => {

@@ -252,10 +252,53 @@ fn escape_block_text(s: &str) -> String {
     out
 }
 
+/// Reserved uppers that never name a `CONST`: statement keywords,
+/// known commands, builtin types, and workspace targets. Single
+/// owner for the definition gate and the bare-read gate so a word
+/// the definition rejects never parses as a const read. Type
+/// spellings reuse the canonical `*_TYPE_NAME` constants and
+/// workspace targets reuse `REMOTE_RESERVED_WORDS` instead of
+/// restating the literals.
+pub(crate) fn is_reserved_const_name(name: &str) -> bool {
+    if crate::Command::is_statement_keyword(name) || is_known_command(name) {
+        return true;
+    }
+    if [
+        crate::tag::STRING_TYPE_NAME,
+        crate::tag::INT_TYPE_NAME,
+        crate::tag::FLOAT_TYPE_NAME,
+        crate::tag::BOOL_TYPE_NAME,
+        crate::tag::LIST_TYPE_NAME,
+        crate::tag::MAP_TYPE_NAME,
+        crate::tag::PIPE_TYPE_NAME,
+        crate::tag::HANDLE_TYPE_NAME,
+        crate::tag::VOID_TYPE_NAME,
+        crate::tag::DURATION_TYPE_NAME,
+        crate::tag::PATH_TYPE_NAME,
+        crate::tag::SEMAPHORE_TYPE_NAME,
+        crate::tag::PERMIT_TYPE_NAME,
+        crate::tag::ANY_TYPE_NAME,
+    ]
+    .contains(&name)
+    {
+        return true;
+    }
+    REMOTE_RESERVED_WORDS.contains(&name)
+}
+
+/// Whether `s` reads as a bare `CONST` word: uppercase spelling
+/// without a reserved collision. Single owner for display quoting
+/// so rendered string literals that look like consts quote instead
+/// of misparsing on re-parse.
+fn is_bare_const_word(s: &str) -> bool {
+    crate::constants::is_const_name(s) && !is_reserved_const_name(s)
+}
+
 fn quote_arg(s: &str) -> String {
     let is_safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '/' || c == '.')
-        && !crate::Command::is_statement_keyword(s);
+        && !crate::Command::is_statement_keyword(s)
+        && !is_bare_const_word(s);
     if is_safe && !s.is_empty() {
         s.to_string()
     } else {
@@ -266,7 +309,8 @@ fn quote_arg(s: &str) -> String {
 fn quote_msg(s: &str) -> String {
     let safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.starts_with(|c: char| c.is_ascii_digit())
-        && !crate::Command::is_statement_keyword(s);
+        && !crate::Command::is_statement_keyword(s)
+        && !is_bare_const_word(s);
     if safe && !s.is_empty() {
         s.to_string()
     } else {
@@ -1374,7 +1418,8 @@ declare_commands! {
             ASSERT_EQ $body "generated-under-workdir"
         "#} },             Example { name: "workdir in a scoped block", fence_meta: None, code: indoc! {r#"
             # The block reverts to the starting directory on exit.
-            LET $outside: STRING = CWD
+            IMPORT [STD]
+            LET $outside: STRING = CWD()
             MKDIR project
 
             [bool:true] {
@@ -1382,7 +1427,7 @@ declare_commands! {
                 WRITE inner.txt inner
             }
 
-            LET $back: STRING = CWD
+            LET $back: STRING = CWD()
             ASSERT_EQ $back $outside
             LET $body: STRING = READ project/inner.txt
             ASSERT_EQ $body "inner"
@@ -1596,13 +1641,13 @@ declare_commands! {
             "#} },
             Example { name: "interpolation", fence_meta: None, code: indoc! {r#"
                 # `{{ env:KEY }}` reads the script environment; a bare name
-                # resolves a DSL variable instead. Spelling rules:
+                # resolves a CONST, `$name` resolves a LET. Spelling rules:
                 # `script_env:` is always case-sensitive; `env:` is
                 # case-sensitive too, except on Windows where it matches
                 # case-insensitively. Every read must be declared first:
                 # KEY here comes from the ENV below.
                 ENV USER=OxDock
-                LET $WHO: STRING = "Ada"
+                CONST WHO: STRING = "Ada"
                 ECHO "Hello {{ env:USER }}! Hi {{ WHO }}! Again {{ script_env:USER }}!"
                 ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada! Again OxDock!"
             "#} },
@@ -2063,6 +2108,7 @@ declare_commands! {
             let arg = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_READ_LINE, "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
             let var = match arg {
                 Arg::Expr(Expr::Var(name)) => name,
+                Arg::Expr(Expr::Const(name)) => name,
                 // Quoted "$var" keeps its sigil through the generic string
                 // path; templates defer untouched exactly as before.
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
@@ -2106,6 +2152,7 @@ declare_commands! {
             let var_arg = it.next().ok_or_else(|| ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))?;
             let var = match var_arg {
                 Arg::Expr(Expr::Var(name)) => name,
+                Arg::Expr(Expr::Const(name)) => name,
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
                 other => return Err(ParseError::validation(KEYWORD_PROMPT, format!("PROMPT requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
@@ -2633,6 +2680,7 @@ declare_commands! {
                 .ok_or_else(|| ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
             let list = match raw_list {
                 Arg::Expr(Expr::Var(name)) => name,
+                Arg::Expr(Expr::Const(name)) => name,
                 Arg::String(s, _) => s.trim_start_matches('$').to_string(),
                 other => return Err(ParseError::validation(KEYWORD_LIST_APPEND, format!("LIST_APPEND requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
@@ -3554,28 +3602,30 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         CommandMeta {
             in_index: true,
             name: KEYWORD_CONST,
-            syntax: "CONST $var: TYPE = <expr> | CONST $p: PIPE | CONST $var: TYPE = ASYNC { <commands> } | CONST $var: TYPE = <command> | CONST $var: TYPE = AWAIT $task | CONST $var: TYPE = { <commands> }",
+            syntax: "CONST NAME: TYPE = <expr> | CONST NAME: PIPE | CONST NAME: TYPE = ASYNC { <commands> } | CONST NAME: TYPE = <command> | CONST NAME: TYPE = AWAIT TASK | CONST NAME: TYPE = { <commands> }",
             summary: "Bind deeply immutable script-local values.",
             description: indoc! {r#"
                 Declares a script-local constant with an explicit type. The
                 right-hand side accepts every `LET` form (expression,
                 capture, `ASYNC`, `AWAIT`, inline block, bare `PIPE`).
 
-                Immutability is deep and total: `SET` (`$var = ...`),
+                Immutability is deep and total: `SET` (`NAME = ...`),
                 `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS` on a `CONST`
                 value all fail. Nested containers freeze with the binding,
                 so reaching a list or map through a `CONST` never exposes
-                a mutable handle. Reads behave exactly like `LET`.
+                a mutable handle. Reads use the bare name (never `$NAME`).
 
                 `CONST` and `LET` share one namespace: declaring either
                 twice in the same scope frame is a redeclaration error.
-                Shadowing an outer binding in an inner block stays legal
-                and the inner declaration reverts on block exit.
+                A `CONST` name cannot collide with a `FUNC`, a reserved
+                word, or another binding. Shadowing an outer binding in
+                an inner block stays legal and the inner declaration
+                reverts on block exit.
 
                 `CONST` is the only variable binding an `EXPORT` can name
                 (`EXPORT CONST_NAME`, `EXPORT [CONST A, B]`): `LET`
                 bindings never cross the module boundary. Importers read
-                the value as `$ALIAS::NAME` (see IMPORT).
+                the value as `ALIAS::NAME` (see IMPORT).
             "#},
             args: &[],
             flags: &[],
@@ -3585,14 +3635,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "const",
                     fence_meta: None,
                     code: indoc! {r#"
-                # CONST reads exactly like LET.
-                CONST $name: STRING = "world"
-                ECHO "hello, {{ $name }}"
+                # CONST reads bare, LET reads sigiled.
+                CONST NAME: STRING = "world"
+                ECHO "hello, {{ NAME }}"
                 ASSERT_CONTAINS stdout "hello, world"
 
                 # Containers freeze with the binding.
-                CONST $items: LIST<STRING> = ["a", "b"]
-                ASSERT_CONTAINS $items "a"
+                CONST ITEMS: LIST<STRING> = ["a", "b"]
+                ASSERT_CONTAINS ITEMS "a"
             "#},
                 },
                 Example {
@@ -3600,8 +3650,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: Some("expect_error:\"cannot mutate CONST\""),
                     code: indoc! {r#"
                 # SET on a CONST fails instead of rebinding.
-                CONST $n: INT = 1
-                $n = 2
+                CONST N: INT = 1
+                N = 2
             "#},
                 },
                 Example {
@@ -3609,8 +3659,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: Some("expect_error:\"cannot mutate CONST\""),
                     code: indoc! {r#"
                 # LIST_APPEND on a CONST fails instead of pushing.
-                CONST $items: LIST<STRING> = ["a"]
-                LIST_APPEND $items "b"
+                CONST ITEMS: LIST<STRING> = ["a"]
+                LIST_APPEND ITEMS "b"
             "#},
                 },
             ],
@@ -5440,9 +5490,9 @@ impl fmt::Display for StepKind {
             } => {
                 // Bare pipe declarations round-trip without an initializer.
                 if matches!(expr, Expr::FreshPipe) {
-                    write!(f, "{} ${}: {}", KEYWORD_CONST, var, decl_type)
+                    write!(f, "{} {}: {}", KEYWORD_CONST, var, decl_type)
                 } else {
-                    write!(f, "{} ${}: {} = {}", KEYWORD_CONST, var, decl_type, expr)
+                    write!(f, "{} {}: {} = {}", KEYWORD_CONST, var, decl_type, expr)
                 }
             }
             StepKind::Set { var, expr } => write!(f, "${} = {}", var, expr),
@@ -5458,7 +5508,7 @@ impl fmt::Display for StepKind {
                 decl_type,
                 cmd,
             } => {
-                write!(f, "{} ${}: {} = {}", KEYWORD_CONST, var, decl_type, cmd)
+                write!(f, "{} {}: {} = {}", KEYWORD_CONST, var, decl_type, cmd)
             }
             StepKind::AsyncBlock { body } => {
                 write!(f, "{} {{", KEYWORD_ASYNC)?;
@@ -5489,7 +5539,7 @@ impl fmt::Display for StepKind {
             } => {
                 write!(
                     f,
-                    "{} ${}: {} = {} {{",
+                    "{} {}: {} = {} {{",
                     KEYWORD_CONST, var, decl_type, KEYWORD_ASYNC
                 )?;
                 for s in body {
@@ -5497,30 +5547,58 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
-            StepKind::Await { var } => write!(f, "{} ${}", KEYWORD_AWAIT, var),
+            StepKind::Await { var } => {
+                if crate::constants::is_const_name(var) {
+                    write!(f, "{} {}", KEYWORD_AWAIT, var)
+                } else {
+                    write!(f, "{} ${}", KEYWORD_AWAIT, var)
+                }
+            }
             StepKind::AwaitCapture {
                 out_var,
                 out_type,
                 task_var,
             } => {
-                write!(
-                    f,
-                    "{} ${}: {} = {} ${}",
-                    KEYWORD_LET, out_var, out_type, KEYWORD_AWAIT, task_var
-                )
+                if crate::constants::is_const_name(task_var) {
+                    write!(
+                        f,
+                        "{} ${}: {} = {} {}",
+                        KEYWORD_LET, out_var, out_type, KEYWORD_AWAIT, task_var
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{} ${}: {} = {} ${}",
+                        KEYWORD_LET, out_var, out_type, KEYWORD_AWAIT, task_var
+                    )
+                }
             }
             StepKind::ConstAwaitCapture {
                 out_var,
                 out_type,
                 task_var,
             } => {
-                write!(
-                    f,
-                    "{} ${}: {} = {} ${}",
-                    KEYWORD_CONST, out_var, out_type, KEYWORD_AWAIT, task_var
-                )
+                if crate::constants::is_const_name(task_var) {
+                    write!(
+                        f,
+                        "{} {}: {} = {} {}",
+                        KEYWORD_CONST, out_var, out_type, KEYWORD_AWAIT, task_var
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{} {}: {} = {} ${}",
+                        KEYWORD_CONST, out_var, out_type, KEYWORD_AWAIT, task_var
+                    )
+                }
             }
-            StepKind::Cancel { var } => write!(f, "{} ${}", KEYWORD_CANCEL, var),
+            StepKind::Cancel { var } => {
+                if crate::constants::is_const_name(var) {
+                    write!(f, "{} {}", KEYWORD_CANCEL, var)
+                } else {
+                    write!(f, "{} ${}", KEYWORD_CANCEL, var)
+                }
+            }
             StepKind::Timeout { duration, body } => {
                 let budget = fmt_raw_arg(duration);
                 // Single-command form cannot carry an inner guard (the
@@ -6498,12 +6576,17 @@ pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
     match expr {
         Expr::Literal(v) => Some(vec![MathOp::PushConst(v.clone())]),
         Expr::Var(name) => Some(vec![MathOp::LoadVar(name.clone())]),
+        Expr::Const(name) => Some(vec![MathOp::LoadConst(name.clone())]),
         Expr::ConstRef { alias, name } => Some(vec![MathOp::LoadConstRef {
             alias: alias.clone(),
             name: name.clone(),
         }]),
         Expr::Env(key) => Some(vec![MathOp::LoadEnv(key.clone())]),
         Expr::KeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
+            base: base.clone(),
+            keys: keys.clone(),
+        }]),
+        Expr::ConstKeyPath { base, keys } => Some(vec![MathOp::LoadConstKeyPath {
             base: base.clone(),
             keys: keys.clone(),
         }]),
@@ -6519,6 +6602,7 @@ pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
             Some(ops)
         }
         Expr::Inspect(var) => Some(vec![MathOp::Inspect(var.clone())]),
+        Expr::InspectConst(var) => Some(vec![MathOp::InspectConst(var.clone())]),
         Expr::Arithmetic { op, left, right } => {
             let mut ops = expr_to_rpn(left)?;
             ops.extend(expr_to_rpn(right)?);
