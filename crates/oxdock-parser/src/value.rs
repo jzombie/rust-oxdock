@@ -141,7 +141,7 @@ impl PartialEq for ListValue {
 }
 
 /// String-keyed map of values. Shared heap: cloning bumps a refcount.
-/// Freezing mirrors [`ListValue`]: `as_map_mut` refuses frozen
+/// Freezing mirrors `ListValue`: `as_map_mut` refuses frozen
 /// buffers and only [`Value::deep_freeze`] sets the flag.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "MAP", shared)]
 #[derive(Debug, Clone)]
