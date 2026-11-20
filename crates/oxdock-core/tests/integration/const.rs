@@ -492,35 +492,6 @@ fn const_export_names_share_one_registry() {
 }
 
 #[test]
-fn const_module_local_shadow_stays_mutable() {
-    let temp = GuardedPath::tempdir().unwrap();
-    let root = guard_root(&temp);
-    write_lib(
-        &root,
-        "lib.oxdock",
-        indoc! {r#"
-            CONST $X: INT = 1
-            FUNC SHADOWED(): INT {
-                LET $X: INT = 2
-                $X = 3
-                RETURN $X
-            }
-            EXPORT SHADOWED
-        "#},
-    );
-    let script = indoc! {r#"
-        # A module function that shadows a module-level CONST with
-        # a local LET mutates the local: static and runtime agree.
-        IMPORT ["lib.oxdock" AS LIB]
-        LET $r: INT = LIB::SHADOWED()
-        ASSERT_EQ $r 3
-    "#};
-    Engine::new()
-        .run_script(&root, script)
-        .expect("module-local LET shadows module CONST");
-}
-
-#[test]
 fn const_readline_and_prompt_refuse_const() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -924,6 +895,35 @@ fn const_func_export_with_private_const_coexists() {
 }
 
 #[test]
+fn const_module_local_shadow_stays_mutable() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxdock",
+        indoc! {r#"
+            CONST $X: INT = 1
+            FUNC SHADOWED(): INT {
+                LET $X: INT = 2
+                $X = 3
+                RETURN $X
+            }
+            EXPORT SHADOWED
+        "#},
+    );
+    let script = indoc! {r#"
+        # A module function that shadows a module-level CONST with
+        # a local LET mutates the local: static and runtime agree.
+        IMPORT ["lib.oxdock" AS LIB]
+        LET $r: INT = LIB::SHADOWED()
+        ASSERT_EQ $r 3
+    "#};
+    Engine::new()
+        .run_script(&root, script)
+        .expect("module-local LET shadows module CONST");
+}
+
+#[test]
 fn const_local_scalar_alias_rebinds() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -942,4 +942,178 @@ fn const_local_scalar_alias_rebinds() {
             "#},
         )
         .expect("scalar CONST alias rebinds, original holds");
+}
+
+#[test]
+fn const_qualified_targets_never_bind() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxdock",
+        indoc! {r#"
+            CONST $N: INT = 4
+            CONST $ITEMS: LIST<STRING> = ["a"]
+            EXPORT CONST N
+            EXPORT [CONST ITEMS]
+        "#},
+    );
+    // `$ALIAS::NAME` is a read-only expression: it never serves as
+    // a `SET`, `LIST_APPEND`, or `READ_LINE` target.
+    for (script, fragment) in [
+        (
+            indoc! {r#"
+                IMPORT ["lib.oxdock" AS LIB]
+                $LIB::N = 5
+            "#},
+            "never binding targets",
+        ),
+        (
+            indoc! {r#"
+                IMPORT ["lib.oxdock" AS LIB]
+                LIST_APPEND $LIB::ITEMS "b"
+            "#},
+            "got expression $LIB::ITEMS",
+        ),
+        (
+            indoc! {r#"
+                IMPORT ["lib.oxdock" AS LIB]
+                READ_LINE $LIB::N
+            "#},
+            "requires a $variable",
+        ),
+    ] {
+        let err = Engine::new()
+            .run_script(&root, script)
+            .expect_err("qualified binding target must fail");
+        assert!(format!("{err:#}").contains(fragment), "{err:#}");
+    }
+}
+
+#[test]
+fn const_direct_qualified_functional_rebuild_fails() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxdock",
+        indoc! {r#"
+            CONST $LIMITS: MAP<ANY> = {max: 10}
+            EXPORT CONST LIMITS
+        "#},
+    );
+    // No local copy needed: the qualified value itself carries the
+    // frozen flag, so a direct functional rebuild refuses.
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                IMPORT ["lib.oxdock" AS LIB]
+                LET $z: MAP<ANY> = MAP_SET($LIB::LIMITS, "x", 1)
+            "#},
+        )
+        .expect_err("direct MAP_SET on qualified CONST must fail");
+    assert!(
+        format!("{err:#}").contains("cannot mutate CONST"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn const_func_param_shadows_outer_const() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // Parameters bind in the function scope: same name as an outer
+    // `CONST` shadows for the call, and the outer holds after.
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                CONST $X: INT = 1
+                FUNC F($X: INT): INT {
+                    RETURN $X
+                }
+                LET $r: INT = F(7)
+                ASSERT_EQ $r 7
+                ASSERT_EQ $X 1
+            "#},
+        )
+        .expect("func param shadows outer CONST");
+}
+
+#[test]
+fn const_declares_inside_loop_bodies() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // A `CONST` inside a loop body binds fresh per iteration like
+    // any block-scoped declaration.
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                FOR $i: INT IN [1, 2] {
+                    CONST $c: INT = 5
+                    ECHO $c
+                }
+                ECHO loop-ok
+            "#},
+        )
+        .expect("CONST binds inside loop bodies");
+}
+
+#[test]
+fn const_local_reads_in_templates_math_and_calls() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // Local `CONST` rides every expression position a `LET` does.
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                FUNC D($x: INT): INT {
+                    RETURN $x * 2
+                }
+                CONST $s: STRING = "hi"
+                CONST $a: INT = 3
+                LET $t: STRING = "{{ $s }}!"
+                ASSERT_EQ $t "hi!"
+                LET $m: INT = $a * 2
+                ASSERT_EQ $m 6
+                LET $d: INT = D($a)
+                ASSERT_EQ $d 6
+            "#},
+        )
+        .expect("local CONST in templates, math, call args");
+}
+
+#[test]
+fn const_switch_case_and_kv_iteration_read_const() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // `CONST` values ride `SWITCH` case patterns and key-value
+    // iteration over a `CONST` map reads every entry.
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                CONST $go: STRING = "go"
+                LET $mode: STRING = "go"
+                SWITCH $mode {
+                    CASE $go {
+                        WRITE hit.txt "matched"
+                    }
+                }
+                LET $h: STRING = READ hit.txt
+                ASSERT_EQ $h "matched"
+                CONST $m: MAP<ANY> = {a: "x", b: "y"}
+                FOR $k: STRING, $v: STRING IN $m {
+                    APPEND seen.txt "{{ $k }}={{ $v }}"
+                }
+                LET $g: STRING = READ seen.txt
+                ASSERT_CONTAINS $g "a=x"
+                ASSERT_CONTAINS $g "b=y"
+            "#},
+        )
+        .expect("SWITCH CASE and FOR k,v read CONST");
 }
