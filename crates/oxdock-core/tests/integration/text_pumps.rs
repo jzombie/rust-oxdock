@@ -179,3 +179,47 @@ fn template_calls_reject_stateful_functions() {
         "error names the stateful boundary: {err:#}"
     );
 }
+
+#[test]
+fn unique_dedups_projection_in_template_and_ast() {
+    // The #319 shape: project parent dirs, then collapse to one call.
+    // `UNIQUE` is pure, so the AST call and the `{{ }}` placeholder
+    // agree; order is first occurrence and the empty list stays empty.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $parents: LIST<STRING> = ["a/x", "b/y", "a/z"]
+        LET $proj: LIST<STRING> = []
+        FOR $f: STRING IN $parents {
+            LET $parent: STRING = STD::TEXT_REPLACE_REGEX($f, "/[^/]*$", "")
+            LIST_APPEND $proj $parent
+        }
+        LET $seen: LIST<STRING> = STD::UNIQUE($proj)
+        ASSERT_EQ $seen.0 "a"
+        ASSERT_EQ $seen.1 "b"
+        ASSERT_EQ LEN($seen) 2
+        LET $tpl: STRING = 'dirs:{{ STD::UNIQUE($proj) }}'
+        ASSERT_CONTAINS $tpl "a"
+        LET $empty: LIST<STRING> = STD::UNIQUE([])
+        ASSERT_EQ LEN($empty) 0
+    "#};
+    run_script(&root, script).expect("projection plus UNIQUE dedups");
+}
+
+#[test]
+fn unique_rejects_non_list_statically() {
+    // The parameter contract is `LIST<ANY>`: a `STRING` argument fails
+    // at static check with the list gate, never at runtime extraction.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $x: LIST<STRING> = STD::UNIQUE("nope")
+    "#};
+    let err = run_script(&root, script).expect_err("non-list UNIQUE must fail");
+    assert!(
+        format!("{err:#}").contains("expected LIST<ANY>"),
+        "names the list contract: {err:#}"
+    );
+}

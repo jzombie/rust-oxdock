@@ -15,6 +15,8 @@ mod custom_types;
 mod glob_sandbox;
 #[path = "integration/guard_isolation.rs"]
 mod guard_isolation;
+#[path = "integration/home_scope.rs"]
+mod home_scope;
 #[path = "integration/incremental.rs"]
 mod incremental;
 #[path = "integration/key_path.rs"]

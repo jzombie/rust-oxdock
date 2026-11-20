@@ -7196,6 +7196,62 @@ LET $word: STRING = TYPE_OF(42)
 ASSERT_EQ $word "INT"
 ```
 
+### STD::UNIQUE
+
+Deduplicate a `LIST`, keeping the first occurrence of each member.
+
+Membership uses strict `values_equal` (numeric `INT` and `FLOAT`
+compare across types, every other cross-type pair is unequal,
+matching `CONTAINS` and `==`), so `[1, 1.0]` collapses to one
+element while `["1", 1]` keeps both. Order is first occurrence;
+the empty list binds empty, never failing.
+
+**Signature:** `STD::UNIQUE($items: LIST<ANY>): LIST`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$items` (`LIST<ANY>`): List to deduplicate.
+
+**Returns:** `LIST`
+
+**Examples:**
+
+**Example: deduplicate**
+
+```oxdock
+# First occurrences win, later repeats drop.
+IMPORT [STD]
+LET $seen: LIST<STRING> = UNIQUE(["a", "b", "a", "c", "b"])
+ASSERT_EQ $seen.0 "a"
+ASSERT_EQ $seen.1 "b"
+ASSERT_EQ $seen.2 "c"
+ASSERT_EQ LEN($seen) 3
+
+# The empty list stays empty.
+LET $empty: LIST<STRING> = UNIQUE([])
+ASSERT_EQ LEN($empty) 0
+```
+
+**Example: strict membership**
+
+```oxdock
+# Numerics collapse across INT and FLOAT like CONTAINS.
+IMPORT [STD]
+LET $nums: LIST<ANY> = UNIQUE([1, 2.0, 1, 3])
+ASSERT_EQ $nums.0 1
+ASSERT_EQ $nums.1 2.0
+ASSERT_EQ $nums.2 3
+ASSERT_EQ LEN($nums) 3
+
+# Stringified numbers never coerce to integers.
+LET $mixed: LIST<ANY> = UNIQUE(["1", 1])
+ASSERT_EQ $mixed.0 "1"
+ASSERT_EQ $mixed.1 1
+ASSERT_EQ LEN($mixed) 2
+```
+
 ### STD::VERSION
 
 Report the running engine version.

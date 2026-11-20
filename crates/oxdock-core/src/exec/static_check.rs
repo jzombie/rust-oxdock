@@ -75,7 +75,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::constants::{
-    KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_IMPORT, KEYWORD_LET,
+    KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_IMPORT, KEYWORD_LET, MODULE_SEPARATOR,
 };
 use oxdock_parser::template::{
     PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
@@ -311,6 +311,12 @@ struct Checker<'a, P: ProcessManager> {
     /// touch probes) stay lenient: without the closure they cannot
     /// tell an unimported alias from a not-yet-collected one.
     strict_qualified: bool,
+    /// Home-scope function index (#319): every top-level `FUNC` per
+    /// closure file, exported or private, keyed by (defining file,
+    /// base name). Lets module bodies validate against unharvested
+    /// and private siblings without making them externally
+    /// resolvable (unlike `funcs`, which only holds collected names).
+    home_funcs: HashMap<(String, String), FuncInfo>,
     /// Outbound alias targets for the checked unit: `ALIAS` to
     /// (defining file, import guard) pairs. `resolve_call` requires a
     /// unique resolvable target, so same-alias different-file imports
@@ -713,6 +719,10 @@ pub fn validate_script_closure<P: ProcessManager>(
         let mut all_funcs = HashMap::new();
         let mut all_lets: ModuleLets = HashMap::new();
         let mut all_const_exports: HashMap<String, Vec<String>> = HashMap::new();
+        // Home-scope index (#319): every top-level `FUNC` per file,
+        // exported or private, for sibling validation. Built
+        // alongside `all_funcs` so both see identical definitions.
+        let mut home_funcs: HashMap<(String, String), FuncInfo> = HashMap::new();
         // Per-unit file-import aliases: the entry's own outbound imports
         // plus each file's own outbound imports (nested included).
         // Zero-function modules contribute no `ALIAS::` func keys, so
@@ -781,7 +791,9 @@ pub fn validate_script_closure<P: ProcessManager>(
                 for site in &file.sites {
                     checker.collect_site(site, file)?;
                 }
+                checker.collect_home(file)?;
                 extend_funcs_checked(&mut all_funcs, checker.funcs, &file.path)?;
+                home_funcs.extend(checker.home_funcs);
                 all_lets.insert(file.key.clone(), module_lets(&file.steps, exec)?);
                 all_const_exports.insert(file.key.clone(), file.const_exports.clone());
                 Ok(())
@@ -824,6 +836,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 let mut checker = seeded_checker(
                     exec,
                     &all_funcs,
+                    &home_funcs,
                     &all_lets,
                     &all_const_exports,
                     &entry_lets,
@@ -839,6 +852,53 @@ pub fn validate_script_closure<P: ProcessManager>(
                 Ok(())
             })?;
         }
+        // Infer private home entries under the same owner scope, so a
+        // broken unexported helper fails here like any collected
+        // function instead of surfacing only when a sibling calls it.
+        // Entries already inferred under a collected key are skipped.
+        // Sorted for determinism.
+        let mut home_keys: Vec<(String, String)> = home_funcs.keys().cloned().collect();
+        home_keys.sort();
+        for (module, base) in home_keys {
+            let canonical = super::native::file_func_key(&module, &base);
+            if inferred.contains_key(&canonical) {
+                continue;
+            }
+            let Some(info) = home_funcs.get(&(module.clone(), base.clone())) else {
+                continue;
+            };
+            let info = info.clone();
+            let defs: Vec<(String, String)> = files
+                .iter()
+                .find(|f| f.key == module)
+                .map(|file| {
+                    super::typing::collect_type_aliases(&file.steps, exec)
+                        .map(|aliases| aliases.into_iter().collect())
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let owner_targets: super::native::AliasTargets =
+                file_targets.get(&module).cloned().unwrap_or_default();
+            with_scope_aliases(exec, &defs, |exec| {
+                let mut checker = seeded_checker(
+                    exec,
+                    &all_funcs,
+                    &home_funcs,
+                    &all_lets,
+                    &all_const_exports,
+                    &entry_lets,
+                    &inferred,
+                    entry,
+                    files,
+                    &owner_targets,
+                    &body_scopes,
+                    &entry_let_scopes,
+                );
+                let ty = checker.func_return_owned(&info, &canonical, 0)?;
+                inferred.insert(canonical.clone(), ty);
+                Ok(())
+            })?;
+        }
         // Check every body with exactly its own scope visible: entry
         // defs for the entry, file defs for each file. Calls resolve
         // against the pre-inferred signatures; bodies never see
@@ -851,6 +911,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         fn seeded_checker<'a, P: ProcessManager>(
             exec: &'a mut ExecState<P>,
             funcs: &HashMap<String, FuncInfo>,
+            home_funcs: &HashMap<(String, String), FuncInfo>,
             lets: &ModuleLets,
             const_exports: &HashMap<String, Vec<String>>,
             entry_lets: &[GuardedLet],
@@ -863,6 +924,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         ) -> Checker<'a, P> {
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
+            checker.home_funcs = home_funcs.clone();
             checker.module_lets = lets.clone();
             checker.module_const_exports = const_exports.clone();
             checker.entry_lets = entry_lets.to_vec();
@@ -878,6 +940,7 @@ pub fn validate_script_closure<P: ProcessManager>(
             seeded_checker(
                 exec,
                 &all_funcs,
+                &home_funcs,
                 &all_lets,
                 &all_const_exports,
                 &entry_lets,
@@ -900,6 +963,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 seeded_checker(
                     exec,
                     &all_funcs,
+                    &home_funcs,
                     &all_lets,
                     &all_const_exports,
                     &entry_lets,
@@ -1886,6 +1950,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             inferring: Vec::new(),
             visits: 0,
             strict_qualified: false,
+            home_funcs: HashMap::new(),
             entry_let_scopes: HashMap::new(),
             alias_targets: HashMap::new(),
             module_const_exports: HashMap::new(),
@@ -2398,6 +2463,41 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Define one collected function under explicit keys: resolve the
     /// param tags now (the same error execution reports), store the
     /// body for return inference, and collect nested definitions.
+    /// `FuncInfo` construction is shared with [`Self::collect_home`]:
+    /// one owner for resolved params, declared returns, and owner
+    /// tagging, so home entries check exactly like collected ones.
+    #[allow(clippy::too_many_arguments)]
+    fn make_func_info(
+        &self,
+        name: &str,
+        params: &[(String, String, bool)],
+        return_type: &str,
+        is_async: bool,
+        body: &[Step],
+        module: Option<&str>,
+        line: usize,
+        col: usize,
+    ) -> Result<FuncInfo> {
+        let resolved = resolve_script_params(self.exec, name, params)?;
+        let declared = self
+            .exec
+            .resolve_tag(return_type)
+            .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+        self.exec
+            .check_return_tag(&format!("function `{name}` returns"), &declared)
+            .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+        Ok(FuncInfo {
+            params: resolved,
+            declared,
+            is_async,
+            body: body.to_vec(),
+            module: module.map(|m| m.to_string()),
+            name: name.to_string(),
+            line,
+            col,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn define_collected(
         &mut self,
@@ -2411,31 +2511,52 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         line: usize,
         col: usize,
     ) -> Result<()> {
-        let resolved = resolve_script_params(self.exec, name, params)?;
-        let declared = self
-            .exec
-            .resolve_tag(return_type)
-            .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-        self.exec
-            .check_return_tag(&format!("function `{name}` returns"), &declared)
-            .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+        let info =
+            self.make_func_info(name, params, return_type, is_async, body, module, line, col)?;
         for key in keys {
-            self.funcs.insert(
-                key,
-                FuncInfo {
-                    params: resolved.clone(),
-                    declared: declared.clone(),
-                    is_async,
-                    body: body.to_vec(),
-                    module: module.map(|m| m.to_string()),
-                    name: name.to_string(),
-                    line,
-                    col,
-                },
-            );
+            self.funcs.insert(key, info.clone());
         }
         let nested = body.to_vec();
         self.collect_owned(&nested, module)?;
+        Ok(())
+    }
+
+    /// Index every top-level `FUNC` of one closure file for home-scope
+    /// resolution (#319): exported, harvested, and private alike, keyed
+    /// by (defining file, base name). Separate from `funcs` so
+    /// `LIB::PRIVATE` stays unresolvable externally while home bodies
+    /// still validate against the sibling's declared signature.
+    /// Last definition wins, mirroring `define_collected` overwrite
+    /// and runtime definition order; statically-dead steps never
+    /// index, like collection.
+    fn collect_home(&mut self, file: &super::import::ClosureFile) -> Result<()> {
+        for step in &file.steps {
+            if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+                continue;
+            }
+            if let StepKind::FuncDef {
+                name,
+                params,
+                return_type,
+                is_async,
+                body,
+                ..
+            } = &step.kind
+            {
+                let info = self.make_func_info(
+                    name,
+                    params,
+                    return_type,
+                    *is_async,
+                    body,
+                    Some(file.key.as_str()),
+                    step.line,
+                    step.col,
+                )?;
+                self.home_funcs
+                    .insert((file.key.clone(), name.clone()), info);
+            }
+        }
         Ok(())
     }
 
@@ -3077,7 +3198,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // capture_yield): without it a TIMEOUT-wrapped (or any
         // non-call) command sails through with an incompatible
         // declaration and fails only at runtime coercion.
-        if let Some(yield_tag) = self.capture_yield(cmd, depth)?
+        if let Some(yield_tag) =
+            self.capture_yield(cmd, env.module.as_ref().map(|m| m.key.as_str()), depth)?
             && self
                 .check_arg(
                     &tag,
@@ -4006,7 +4128,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// binds captured stdout `TEXT`. `TIMEOUT` peels exactly where
     /// the runtime peels, so a deadline never changes the checked
     /// type — only whether the binding happens before it fires.
-    fn capture_yield(&mut self, cmd: &StepKind, depth: usize) -> Result<Option<TypeTag>> {
+    fn capture_yield(
+        &mut self,
+        cmd: &StepKind,
+        env_module: Option<&str>,
+        depth: usize,
+    ) -> Result<Option<TypeTag>> {
         let mut current = cmd;
         loop {
             match current {
@@ -4015,7 +4142,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     current = &body[0].kind;
                 }
                 StepKind::Call { name, .. } => {
-                    let callee = self.resolve_call(name, depth)?;
+                    let callee = self.resolve_call(name, env_module, depth)?;
                     return Ok(match callee.ret {
                         StaticTy::Ty(tag) => Some(tag),
                         // A VOID callee still binds something at
@@ -4217,8 +4344,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Resolve a callee through the shared alias-target matcher;
     /// script functions (bare or `SCRIPT::`) win over host metas.
     /// Unknown names yield `ANY`: the parse-time unknown-function gate
-    /// owns that error, not this pass.
-    fn resolve_call(&mut self, name: &str, depth: usize) -> Result<Callee> {
+    /// owns that error, not this pass. `env_module` is the owning file
+    /// of the body under check (from `env.module`): `SCRIPT::BASE` and
+    /// bare `BASE` calls fall back to that file's collected siblings
+    /// (#319 home scope), so canonically-keyed imports infer declared
+    /// returns instead of `ANY`.
+    fn resolve_call(
+        &mut self,
+        name: &str,
+        env_module: Option<&str>,
+        depth: usize,
+    ) -> Result<Callee> {
         // Canonical lookup key through the single alias-target
         // matcher: file-aliased spellings map to the defining file,
         // everything else resolves as spelled.
@@ -4331,6 +4467,34 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 host_params: None,
             });
         }
+        // Home-scope fallback (#319): a module-owned body calling a
+        // sibling resolves against its defining file's complete
+        // top-level index (exported, harvested, and private alike),
+        // which `funcs` alone cannot see. Only `SCRIPT::BASE` and
+        // bare `BASE` qualify; alias-qualified calls never fall back.
+        // Entry bodies (no module) keep the lenient path below.
+        if let Some(module) = env_module {
+            let base: Option<&str> = match name.split_once(MODULE_SEPARATOR) {
+                Some((head, tail)) if head == oxdock_parser::SCRIPT_MODULE_NAME => Some(tail),
+                Some(_) => None,
+                None => Some(name),
+            };
+            if let Some(base) = base
+                && let Some(info) = self
+                    .home_funcs
+                    .get(&(module.to_string(), base.to_string()))
+                    .cloned()
+            {
+                let key = super::native::file_func_key(module, base);
+                let ret = self.func_return_owned(&info, &key, depth)?;
+                let params = info.params;
+                return Ok(Callee {
+                    params: Some(params),
+                    ret,
+                    host_params: None,
+                });
+            }
+        }
         if let Some(meta) = self.hosts.get(name) {
             let meta = meta.clone();
             let ret = meta
@@ -4369,7 +4533,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // Single-file and probe checkers stay lenient: without the
         // closure they cannot tell unimported from uncollected.
         if self.strict_qualified
-            && let Some((alias, _)) = name.split_once("::")
+            && let Some((alias, _)) = name.split_once(MODULE_SEPARATOR)
             && alias != oxdock_parser::SCRIPT_MODULE_NAME
             && !self.hosts.contains_key(name)
         {
@@ -4552,7 +4716,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // Order mirrors execution: the arity gate fires before any
         // argument evaluates, so undeclared names in extra arguments
         // never surface. (`native_arity_failure_...` pins this.)
-        let callee = self.resolve_call(name, depth)?;
+        let callee = self.resolve_call(name, env.module.as_ref().map(|m| m.key.as_str()), depth)?;
         // Arity range comes from the full host metadata (which carries
         // the optional flags); script FUNCs and bare shape lists are
         // always exact. Missing lists (INSPECT-like) skip the check:
@@ -5154,7 +5318,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     // arity still are. (Math-position calls are
                     // numeric builtins in practice.)
                     let blanks = vec![None; taken.len()];
-                    let callee = self.resolve_call(name, depth)?;
+                    let callee = self.resolve_call(
+                        name,
+                        env.module.as_ref().map(|m| m.key.as_str()),
+                        depth,
+                    )?;
                     let ret = self.apply_checked(name, &callee, &taken, &blanks, None)?;
                     stack.push(ret);
                 }

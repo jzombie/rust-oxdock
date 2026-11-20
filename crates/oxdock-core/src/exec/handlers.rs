@@ -2546,13 +2546,65 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     args: &[Expr],
 ) -> Result<Value> {
     // 1. Registry lookup through the shared alias-target matcher.
+    // Home-scope fallback (#319): a module-owned body calling a
+    // sibling resolves against its defining file when the registry
+    // holds no such entry (unharvested or private). The helper reads
+    // the active module's parsed steps, so no registry pollution and
+    // `LIB::PRIVATE` stays unknown.
     let canonical = cx
         .state
         .functions
         .resolve_file_call_key(&super::import::active_unit_alias_targets(cx.state), name)?;
     let lookup_name: &str = canonical.as_deref().unwrap_or(name);
-    let Some(entry) = cx.state.functions.get(lookup_name) else {
-        bail!("unknown function `{name}`");
+    let entry: super::native::FuncEntry<P> = match cx.state.functions.get(lookup_name) {
+        Some(entry) => entry,
+        None => {
+            let Some((params, return_spelling, is_async, body, module_key)) =
+                super::import::find_home_funcdef(cx.state, name)
+            else {
+                bail!("unknown function `{name}`");
+            };
+            let resolved_params = super::native::resolve_script_params(cx.state, name, &params)?;
+            let return_tag = cx
+                .state
+                .resolve_tag(&return_spelling)
+                .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+            cx.state
+                .check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
+            super::native::FuncEntry {
+                meta: super::native::FuncMeta {
+                    name: name.to_string(),
+                    module: module_key.clone(),
+                    kind: super::native::FuncKind::Script,
+                    params: Some(
+                        resolved_params
+                            .iter()
+                            .map(|(pname, param_type, optional)| super::native::FuncParam {
+                                name: pname.clone(),
+                                param_type: Some(param_type.clone()),
+                                allowed: None,
+                                docs: "",
+                                options: None,
+                                optional: *optional,
+                            })
+                            .collect(),
+                    ),
+                    returns: Some(return_tag.clone()),
+                    rpn: false,
+                    summary: "DSL-defined function.",
+                    docs: "Defined via FUNC in script.",
+                    examples: &[],
+                },
+                body: FuncBody::Script(super::native::FuncDefData {
+                    params: resolved_params,
+                    return_type: return_tag,
+                    return_spelling,
+                    is_async,
+                    body,
+                    module: Some(module_key),
+                }),
+            }
+        }
     };
     // 2. Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {

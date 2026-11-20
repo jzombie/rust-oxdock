@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use oxdock_fs::{GuardedPath, WorkspaceFs};
-use oxdock_parser::{ModuleTable, Step, StepKind, Value};
+use oxdock_parser::{MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value};
 use oxdock_process::ProcessManager;
 
 use super::resolve_script_params;
@@ -1531,6 +1531,63 @@ pub(crate) fn resolve_top_level<P: ProcessManager>(
 /// [`ExecState::executed_alias_targets`]. File keys are resolved
 /// display paths, which never equal this sentinel.
 pub(crate) const ENTRY_UNIT: &str = "entry";
+
+/// Raw home-scope `FUNC` header plus body (#319): spelled params,
+/// return spelling, async flag, body steps, and the defining file key.
+/// Stored unregistered so `LIB::PRIVATE` stays unknown while home
+/// `PRIVATE()` resolves; callers resolve tags on use like every other
+/// definition path.
+type HomeFuncdef = (Vec<(String, String, bool)>, String, bool, Vec<Step>, String);
+/// Home-scope sibling lookup (#319): the defining file's own `FUNC`
+/// definitions, including private and unharvested names, for callee
+/// bodies resolving against their home file instead of only the
+/// importer's scope. Searches the active module's parsed steps for a
+/// top-level `FUNC` with the base name, returning its raw header plus
+/// body for on-demand execution without registry pollution (so
+/// `LIB::PRIVATE` stays unknown while home `PRIVATE()` works).
+/// Guards evaluate like execution (see `execute_steps`): skipped
+/// steps never define, so a disabled-platform `FUNC` never resolves
+/// and disjoint platform variants resolve the live one; overlapping
+/// live duplicates resolve last-wins, mirroring definition order.
+/// Only `SCRIPT::BASE` and bare `BASE` spellings qualify; qualified
+/// `ALIAS::` and host calls never fall back.
+pub(crate) fn find_home_funcdef<P: ProcessManager>(
+    state: &ExecState<P>,
+    name: &str,
+) -> Option<HomeFuncdef> {
+    let base = match name.split_once(MODULE_SEPARATOR) {
+        Some((module, base)) if module == oxdock_parser::SCRIPT_MODULE_NAME => base,
+        Some(_) => return None,
+        None => name,
+    };
+    let module_key = state.current_module()?;
+    let record = state.modules.get(&module_key)?;
+    let mut found = None;
+    for step in &record.steps {
+        if !oxdock_parser::guard_option_allows(step.guard.as_ref(), &state.envs) {
+            continue;
+        }
+        if let StepKind::FuncDef {
+            name: def_name,
+            params,
+            return_type,
+            is_async,
+            body,
+            ..
+        } = &step.kind
+            && def_name == base
+        {
+            found = Some((
+                params.clone(),
+                return_type.clone(),
+                *is_async,
+                body.clone(),
+                module_key.clone(),
+            ));
+        }
+    }
+    found
+}
 
 /// Active unit for runtime alias attribution: the innermost module
 /// on the context stack, else the entry.
