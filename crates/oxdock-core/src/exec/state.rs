@@ -266,6 +266,15 @@ pub struct ExecState<P: ProcessManager> {
     /// never another script, ever: same per-call re-read rule as
     /// `ModuleInit::inherit_names`.
     pub(super) entry_inherit_names: Vec<String>,
+    /// Entry file top-level jail (#322): the workspace selection and
+    /// cwd the entry top-level left behind, tracked as they execute
+    /// (same `is_entry_top_level` gate as the env prelude). Entry
+    /// `FUNC` calls restore this exactly like module calls restore
+    /// `ModuleInit` jail, so every file behaves one way. Initialized
+    /// to the snapshot default; a top-level `WORKSPACE`/`WORKDIR`
+    /// overwrites it.
+    pub(super) entry_selection: WorkspaceSelection,
+    pub(super) entry_cwd: GuardedPath,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -688,6 +697,16 @@ impl KeeperExpiry {
     }
 }
 
+/// Defining-file call context (#322): (envs, inherit names,
+/// selection, cwd). One alias shared by the resolver and every call
+/// site, never a restated tuple.
+pub(super) type FileCallCtx = (
+    HashMap<String, String>,
+    Vec<String>,
+    WorkspaceSelection,
+    GuardedPath,
+);
+
 impl<P: ProcessManager> ExecState<P> {
     /// Script-map environment lookup for DSL evaluation (`is_exec_name`,
     /// `Expr::Env`, expansions): exact hit first, case-insensitive
@@ -837,6 +856,8 @@ impl<P: ProcessManager> ExecState<P> {
             entry_tops: self.entry_tops.clone(),
             entry_envs: self.entry_envs.clone(),
             entry_inherit_names: self.entry_inherit_names.clone(),
+            entry_selection: self.entry_selection,
+            entry_cwd: self.entry_cwd.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
@@ -920,6 +941,34 @@ impl<P: ProcessManager> ExecState<P> {
     /// inherits from the engine, never another script, ever.
     pub(super) fn is_entry_top_level(&self) -> bool {
         self.call_depth == 0 && self.module_stack.is_empty() && self.scope_stack.is_empty()
+    }
+
+    /// Defining-file call context (#322): the single owner resolving
+    /// what a `FUNC` body restores. `Some(key)` reads the module
+    /// init jail; `None` reads the entry file jail. Both shapes are
+    /// identical (envs, inherit names, selection, cwd); entry always
+    /// resolves (defaulting to the snapshot jail), modules resolve
+    /// once initialized. Callers branch on this one value, never
+    /// restating the lookup. Spelled once as [`FileCallCtx`].
+    pub(super) fn callee_file_ctx(&self, module_key: Option<&str>) -> Option<FileCallCtx> {
+        match module_key {
+            Some(key) => self.modules.get(key).and_then(|record| {
+                record.init.as_ref().map(|init| {
+                    (
+                        init.envs.clone(),
+                        init.inherit_names.clone(),
+                        init.selection,
+                        init.cwd.clone(),
+                    )
+                })
+            }),
+            None => Some((
+                self.entry_envs.clone(),
+                self.entry_inherit_names.clone(),
+                self.entry_selection,
+                self.entry_cwd.clone(),
+            )),
+        }
     }
 
     /// Enter a lexical scope: snapshot cwd/root/envs and open a fresh

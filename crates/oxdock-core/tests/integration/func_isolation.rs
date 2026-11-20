@@ -29,9 +29,10 @@ fn lazy_bindings(
 
 #[test]
 fn same_module_caller_workspace_never_reaches_callee() {
-    // Caller selects LOCAL and moves; the callee still reports the
-    // pending snapshot jail. Chained through MID so no caller in the
-    // chain can smuggle its workspace in.
+    // Every file serves its own top-level jail: the entry file
+    // declares LOCAL/sub, MID overrides to LOCAL/other mid-call,
+    // and INNER still reports the file default (sub). Chained
+    // through MID so the intermediate override cannot smuggle in.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let bindings = lazy_bindings(
@@ -44,28 +45,37 @@ fn same_module_caller_workspace_never_reaches_callee() {
             }
             FUNC MID(): STRING {
                 WORKSPACE LOCAL
-                RETURN INNER()
+                WORKDIR other
+                LET $mid: STRING = CWD()
+                LET $inner: STRING = INNER()
+                RETURN "{{ $mid }}|{{ $inner }}"
             }
             WORKSPACE LOCAL
             MKDIR sub
+            MKDIR other
             WORKDIR sub
             LET $caller: STRING = CWD()
-            LET $callee: STRING = MID()
+            LET $both: STRING = MID()
         "#},
     );
     let caller = bindings.get("caller").and_then(|v| v.as_str()).unwrap();
-    let callee = bindings.get("callee").and_then(|v| v.as_str()).unwrap();
+    let both = bindings.get("both").and_then(|v| v.as_str()).unwrap();
+    let (mid, callee) = both.split_once('|').expect("mid|inner shape");
     assert!(caller.ends_with("sub"), "caller really moved: {caller}");
-    assert_eq!(
-        callee, SNAPSHOT_PENDING_DISPLAY,
-        "callee stays in the snapshot jail, got {callee}"
+    assert!(mid.ends_with("other"), "mid really overrode: {mid}");
+    assert!(
+        callee.ends_with("sub"),
+        "callee serves the file default, got {callee}"
     );
+    assert_ne!(mid, callee, "intermediate override must not leak in");
 }
 
 #[test]
 fn same_module_workdir_never_reaches_callee() {
-    // Direct runner: snapshot and local collapse, but the subdir
-    // offset must not leak. The callee reports the root.
+    // No WORKSPACE statement: the file default is the snapshot jail
+    // moved to sub. MID moves to other mid-call; the callee still
+    // reports the file default (sub), proving the intermediate move
+    // never leaks in.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let out = Engine::new()
@@ -77,21 +87,30 @@ fn same_module_workdir_never_reaches_callee() {
                     LET $c: STRING = CWD()
                     RETURN $c
                 }
+                FUNC MID(): STRING {
+                    WORKDIR other
+                    LET $mid: STRING = CWD()
+                    LET $inner: STRING = WHERE()
+                    RETURN "{{ $mid }}|{{ $inner }}"
+                }
                 MKDIR sub
+                MKDIR other
                 WORKDIR sub
                 LET $caller: STRING = CWD()
-                LET $callee: STRING = WHERE()
+                LET $both: STRING = MID()
             "#},
         )
         .expect("workdir isolation runs");
     let caller = out.bindings.get("caller").and_then(|v| v.as_str()).unwrap();
-    let callee = out.bindings.get("callee").and_then(|v| v.as_str()).unwrap();
+    let both = out.bindings.get("both").and_then(|v| v.as_str()).unwrap();
+    let (mid, callee) = both.split_once('|').expect("mid|inner shape");
     assert!(caller.ends_with("sub"), "caller really moved: {caller}");
-    assert_ne!(caller, callee, "callee must not inherit the caller workdir");
+    assert!(mid.ends_with("other"), "mid really overrode: {mid}");
     assert!(
-        !callee.ends_with("sub"),
-        "callee stays at the jail root, got {callee}"
+        callee.ends_with("sub"),
+        "callee serves the file default, got {callee}"
     );
+    assert_ne!(mid, callee, "intermediate move must not leak in");
 }
 
 #[test]

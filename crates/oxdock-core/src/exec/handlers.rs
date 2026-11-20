@@ -109,6 +109,13 @@ pub(super) fn workdir<P: ProcessManager>(cx: &mut StepCtx<'_, P>, path: &str) ->
         .fs
         .resolve_workdir(&cx.state.cwd, path)
         .with_context(|| format!("WORKDIR {}", path))?;
+    // Entry file jail tracking: same gate as the env prelude. The
+    // entry top-level `WORKDIR` becomes the entry default every
+    // `FUNC` restores; block-scoped moves unwind without poisoning
+    // it. One rule for every file, never caller ambient.
+    if cx.state.is_entry_top_level() {
+        cx.state.entry_cwd = cx.state.cwd.clone();
+    }
     Ok(())
 }
 
@@ -141,6 +148,14 @@ pub(super) fn workspace<P: ProcessManager>(
             let cwd = cx.state.cwd.clone();
             cx.state.cwd = cx.state.fs.system_entry_cwd(&cwd);
         }
+    }
+    // Entry file jail tracking: same gate as the env prelude. The
+    // entry top-level `WORKSPACE` becomes the entry default every
+    // `FUNC` restores; block-scoped selections unwind without
+    // poisoning it. One rule for every file, never caller ambient.
+    if cx.state.is_entry_top_level() {
+        cx.state.entry_selection = cx.state.fs.selection();
+        cx.state.entry_cwd = cx.state.cwd.clone();
     }
     Ok(())
 }
@@ -2708,22 +2723,16 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // Hard isolation (#322): the only thing crossing a FUNC
             // boundary is explicit arguments. Every script call resets
             // workspace, workdir, env, and outer variables to the
-            // callee definition site, restoring the caller on return.
-            // Snapshot is the lexical default jail, so a callee that
-            // forgets its jail fails safe into scratch, never the host.
+            // callee defining file, restoring the caller on return.
+            // A callee that forgets its jail fails safe into the
+            // defining file default, never caller ambient.
             let module_key = def.module.clone();
-            let module_ctx = module_key.as_deref().and_then(|key| {
-                cx.state.modules.get(key).and_then(|record| {
-                    record.init.as_ref().map(|init| {
-                        (
-                            init.envs.clone(),
-                            init.inherit_names.clone(),
-                            init.selection,
-                            init.cwd.clone(),
-                        )
-                    })
-                })
-            });
+            // One lookup for every file, entry included: the defining
+            // file context (envs, inherit names, selection, cwd).
+            // Entry always resolves (snapshot default until the entry
+            // top-level overwrites it); modules resolve once
+            // initialized. No per-kind restatement below.
+            let callee_ctx = cx.state.callee_file_ctx(module_key.as_deref());
             cx.state.call_depth += 1;
             // All calls swap the whole variable stack for a fresh one
             // before the call frame pushes, and restore after it pops
@@ -2740,29 +2749,21 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // env resets below, so inherited scrubs must not leak in.
             let saved_isolated = std::mem::take(&mut cx.state.isolated_stack);
             cx.state.push_scope();
-            // Callee jail (#322): module-owned calls restore the
-            // workspace selection and cwd the module top-level left
-            // behind, so a lib declaring `WORKSPACE LOCAL` at the top
-            // serves its FUNCs from there no matter which workspace
-            // the caller sits in. Entry calls have no stored file
-            // context and reset to the snapshot default jail instead.
-            // A FUNC-level `WORKSPACE` or `WORKDIR` overrides the file
-            // default for that call. The caller selection returns via
-            // the scope pop. Reentrant init-time self-calls (no stored
-            // context yet) keep the in-progress init scope untouched,
-            // since that is the module own context under construction.
-            let reentrant = module_key.is_some() && module_ctx.is_none();
-            if !reentrant {
-                match &module_ctx {
-                    Some((_, _, selection, cwd)) => {
-                        cx.state.fs.restore_selection(*selection);
-                        cx.state.cwd = cwd.clone();
-                    }
-                    None => {
-                        cx.state.fs.switch_to_snapshot();
-                        cx.state.cwd = cx.state.fs.root().clone();
-                    }
-                }
+            // Callee jail (#322): every call restores the workspace
+            // selection and cwd the defining file top-level left
+            // behind, so a file declaring `WORKSPACE SYSTEM` at the
+            // top serves its FUNCs from there no matter which
+            // workspace the caller sits in. A FUNC-level `WORKSPACE`
+            // or `WORKDIR` overrides the file default for that call.
+            // The caller selection returns via the scope pop.
+            // Reentrant init-time self-calls (no stored context yet)
+            // keep the in-progress init scope untouched, since that
+            // is the file own context under construction. Entry and
+            // module share this one path, never per-kind branches.
+            let reentrant = module_key.is_some() && callee_ctx.is_none();
+            if !reentrant && let Some((_, _, selection, cwd)) = &callee_ctx {
+                cx.state.fs.restore_selection(*selection);
+                cx.state.cwd = cwd.clone();
             }
             // Module-owned bodies resolve their own file's TYPE aliases
             // first, shadowing globals for the call: a file's bodies
@@ -2788,31 +2789,19 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // code. Balanced below on every exit path.
             cx.state.module_stack.push(module_key);
             // A callee never inherits its caller namespace (#115,
-            // #322): module bodies reset to the seed plus the module
-            // init own contributions, entry bodies to the seed plus
-            // the entry prelude. Declared `INHERIT_ENV` names re-read
-            // from the engine here, never the caller (a re-inherit of
-            // an already-present value leaves no init delta, yet must
-            // still admit the name). A body needing caller env takes
-            // it as an argument. Reentrant init-time
+            // #322): every body resets to the seed plus its defining
+            // file own contributions. Declared `INHERIT_ENV` names
+            // re-read from the engine here, never the caller (a
+            // re-inherit of an already-present value leaves no init
+            // delta, yet must still admit the name). A body needing
+            // caller env takes it as an argument. Reentrant init-time
             // self-calls keep the in-progress init env, since that is
-            // the module own context under construction.
+            // the file own context under construction. One env path
+            // for entry and module alike.
             if reentrant {
                 // Keep the in-progress init scope untouched.
-            } else if let Some((envs, inherit_names, _, _)) = module_ctx {
+            } else if let Some((envs, inherit_names, _, _)) = callee_ctx {
                 cx.state.reset_module_env(envs);
-                if !inherit_names.is_empty() {
-                    inherit_env(cx, &inherit_names)?;
-                }
-            } else {
-                // Entry calls serve their own file prelude: the seed
-                // plus entry top-level `ENV`, with `INHERIT_ENV` names
-                // re-read from the engine. Caller mutations never flow
-                // in; a callee-declared `ENV` shadows the prelude, so
-                // the isolation pins still hold.
-                let prelude = cx.state.entry_envs.clone();
-                cx.state.reset_module_env(prelude);
-                let inherit_names = cx.state.entry_inherit_names.clone();
                 if !inherit_names.is_empty() {
                     inherit_env(cx, &inherit_names)?;
                 }
