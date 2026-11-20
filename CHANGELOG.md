@@ -15,7 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
-- `CONST $name: TYPE = <expr>` bindings (#318): deeply immutable values in every shape `LET` accepts. `SET`, `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS` on a `CONST` fail; nested containers freeze with the binding. `CONST` and `LET` share one namespace. Only `CONST` is `EXPORT`able from modules, read as `$ALIAS::NAME`.
+- `CONST NAME: TYPE = <expr>` bindings (#318): deeply immutable values in every shape `LET` accepts, with bare `UPPERCASE` names and no `$` sigil (`CONST $NAME` is a parse error; `LET` keeps `$`). `$NAME` reads of a `CONST` fail naming the bare form. `SET`, `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS` on a `CONST` fail; nested containers freeze with the binding. `CONST` and `LET` share one stripped namespace. Only `CONST` is `EXPORT`able from modules, read bare as `ALIAS::NAME`.
 - Callee home-scope resolution (#319): a `FUNC` body resolves bare and `SCRIPT::` calls against its defining file first, so an `IMPORT` names only what the importing file itself calls. Harvesting `STAGE` alone now runs its unharvested and private siblings; `LIB::PRIVATE` stays unknown. Static inference sees the same scope, so declared `-> STRING` returns flow into union-typed params through home calls. Unknown `ALIAS::FUNC` failures now name the fix when another loaded file exports the name (`did you mean` for alias-imported files, a harvest spelling otherwise).
 - `STD::UNIQUE($items: LIST<ANY>): LIST` pure builtin (#319): first-occurrence dedup with strict `values_equal` membership (numerics compare across `INT`/`FLOAT`, every other cross-type pair is unequal, matching `CONTAINS`/`==`). Collapses projection-plus-flag dedup loops to one call.
 
