@@ -3920,6 +3920,9 @@ Assert strict equality.
 Compares two evaluated values with typed equality (no coercion:
 `INT(42)` never equals `STRING("42")`), aborting the pipeline
 with a step-numbered error showing expected vs actual otherwise.
+The mismatch error prints both values to stderr, so never
+assert against a live secret: a failure would write it into
+the log.
 
 Both sides are values: `$var`, literals, templates, and calls
 evaluate in memory and never touch disk. Read files explicitly
@@ -3980,7 +3983,9 @@ Assert strict inequality.
 Compares two evaluated values with typed inequality (no coercion:
 `INT(42)` never equals `STRING("42")`), aborting the pipeline
 with a step-numbered error showing expected vs actual when they
-are equal; differing values pass silently.
+are equal; differing values pass silently. The match error
+prints both values to stderr, so never assert against a live
+secret: a failure would write it into the log.
 
 Both sides are values: `$var`, literals, templates, and calls
 evaluate in memory and never touch disk. Read files explicitly
