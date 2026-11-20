@@ -2562,7 +2562,10 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             let Some((params, return_spelling, is_async, body, module_key)) =
                 super::import::find_home_funcdef(cx.state, name)
             else {
-                bail!("unknown function `{name}`");
+                bail!(
+                    "unknown function `{name}`{}",
+                    super::import::missing_import_hint(cx.state, name)
+                );
             };
             let resolved_params = super::native::resolve_script_params(cx.state, name, &params)?;
             let return_tag = cx

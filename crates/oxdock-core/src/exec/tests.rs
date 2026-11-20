@@ -11464,3 +11464,50 @@ fn expand_template_with_sequential_conditional_imports_fails_ambiguous() {
         "EXPAND ambiguity must match the static gate, got: {err:#}"
     );
 }
+
+#[test]
+fn missing_import_hint_names_exporter_and_spelling() {
+    // Single owner for the #319 hint, exercised directly: alias
+    // suggestion, FROM suggestion, multi-file list, self-view, and
+    // the silent no-match case.
+    let shared_exports = vec!["OUT_DIR".to_string()];
+    let files = vec![("shared.oxfile", shared_exports.as_slice())];
+    let mut targets: super::native::AliasTargets = HashMap::new();
+    targets.insert(
+        "LIB".to_string(),
+        vec![(Some("shared.oxfile".to_string()), None)],
+    );
+    let hint =
+        super::native::missing_import_hint(files.clone(), &targets, "LIB2::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("did you mean `LIB::OUT_DIR`?") && hint.contains("exports `OUT_DIR`"),
+        "alias suggestion, got: {hint}"
+    );
+    let empty: super::native::AliasTargets = HashMap::new();
+    let hint =
+        super::native::missing_import_hint(files.clone(), &empty, "LIB2::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("[FUNC OUT_DIR FROM \"shared.oxfile\"]"),
+        "FROM suggestion, got: {hint}"
+    );
+    let hint =
+        super::native::missing_import_hint(files.clone(), &targets, "LIB::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("does not resolve it here"),
+        "self-view names the disjoint alias instead of echoing it, got: {hint}"
+    );
+    let other_exports = vec!["OUT_DIR".to_string()];
+    let both = vec![
+        ("a.oxfile", shared_exports.as_slice()),
+        ("b.oxfile", other_exports.as_slice()),
+    ];
+    let hint = super::native::missing_import_hint(both, &empty, "LIB2::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("files \"a.oxfile\", \"b.oxfile\""),
+        "multi-file list, got: {hint}"
+    );
+    assert!(
+        super::native::missing_import_hint(files, &empty, "LIB2::NOPE").is_none(),
+        "unexported names stay silent"
+    );
+}

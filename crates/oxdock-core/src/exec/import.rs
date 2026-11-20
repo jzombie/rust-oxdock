@@ -1589,6 +1589,23 @@ pub(crate) fn find_home_funcdef<P: ProcessManager>(
     found
 }
 
+/// Runtime #319 missing-import suffix for an unknown function:
+/// empty when no loaded module exports the base name. Single
+/// owner for the runtime exporter view; every runtime
+/// unknown-function error appends this instead of restating the
+/// module scan.
+pub(crate) fn missing_import_hint<P: ProcessManager>(state: &ExecState<P>, name: &str) -> String {
+    super::native::missing_import_hint(
+        state
+            .modules
+            .iter()
+            .map(|(file, record)| (file.as_str(), record.func_exports.as_slice())),
+        &active_unit_alias_targets(state),
+        name,
+    )
+    .unwrap_or_default()
+}
+
 /// Active unit for runtime alias attribution: the innermost module
 /// on the context stack, else the entry.
 pub(crate) fn active_unit_key<P: ProcessManager>(state: &ExecState<P>) -> String {

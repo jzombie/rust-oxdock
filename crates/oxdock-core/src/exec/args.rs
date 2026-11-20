@@ -511,7 +511,10 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             // step context exists at this layer); DSL-routed calls above
             // keep their step prefix.
             let Some(meta) = cx.state.native_meta(name.as_str()) else {
-                bail!("unknown function {name}");
+                bail!(
+                    "unknown function {name}{}",
+                    super::import::missing_import_hint(cx.state, name)
+                );
             };
             if cx.state.call_depth >= super::state::MAX_CALL_DEPTH {
                 bail!(
@@ -569,7 +572,10 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
                 )?;
                 Ok(value)
             } else {
-                bail!("unknown function {name}")
+                bail!(
+                    "unknown function {name}{}",
+                    super::import::missing_import_hint(cx.state, name)
+                )
             }
         }
         // Variable inspection carries the binding name unevaluated (see
@@ -1440,7 +1446,10 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 } else if let Some(func) = cx.state.clone_native_pure(name.as_str()) {
                     func(args)?
                 } else {
-                    bail!("unknown function {name}")
+                    bail!(
+                        "unknown function {name}{}",
+                        super::import::missing_import_hint(cx.state, name)
+                    )
                 };
                 stack.push(val);
             }

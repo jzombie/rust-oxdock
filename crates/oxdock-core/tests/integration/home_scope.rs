@@ -113,6 +113,123 @@ fn home_scope_harvest_with_alias_resolves_siblings() {
 }
 
 #[test]
+fn home_scope_unknown_alias_call_suggests_exporting_file() {
+    // #319 diagnostic: `LIB2::OUT_DIR` names the file that exports
+    // the name plus the working spelling, instead of dead-ending at
+    // `unknown function`.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(&root, "shared.oxfile", shared_lib());
+    write_lib(
+        &root,
+        "other.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            EXPORT [FUNC Q]
+            FUNC Q(): STRING {
+                WORKSPACE SYSTEM
+                RETURN "q"
+            }
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "shared.oxfile" AS LIB, "other.oxfile" AS LIB2]
+                WORKSPACE SYSTEM
+                LET $x: STRING = LIB2::OUT_DIR()
+            "#},
+        )
+        .expect_err("wrong-alias call must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown function `LIB2::OUT_DIR`"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("did you mean `LIB::OUT_DIR`?") && rendered.contains("exports `OUT_DIR`"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn home_scope_unknown_call_names_unimported_exporter() {
+    // Nested-only exports are not alias-imported by the entry, so
+    // the hint suggests the harvest spelling with the file it names.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "nested.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            EXPORT [FUNC NESTED]
+            FUNC NESTED(): STRING {
+                WORKSPACE SYSTEM
+                RETURN "nested"
+            }
+        "#},
+    );
+    write_lib(
+        &root,
+        "mid.oxfile",
+        indoc! {r#"
+            IMPORT [STD, [FUNC NESTED FROM "nested.oxfile"]]
+            EXPORT [FUNC STAGE]
+            FUNC STAGE(): STRING {
+                WORKSPACE SYSTEM
+                RETURN NESTED()
+            }
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "mid.oxfile" AS LIB]
+                WORKSPACE SYSTEM
+                LET $x: STRING = LIB::NESTED()
+            "#},
+        )
+        .expect_err("nested-only call must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown function `LIB::NESTED`"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("exports `NESTED`") && rendered.contains("FROM"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn home_scope_unknown_call_without_exporter_stays_bare() {
+    // Nothing exports the name: the error keeps its bare form with
+    // no speculative suffix.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(&root, "shared.oxfile", shared_lib());
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "shared.oxfile" AS LIB]
+                WORKSPACE SYSTEM
+                LET $x: STRING = LIB::NOPE()
+            "#},
+        )
+        .expect_err("unexported call must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("unknown function `LIB::NOPE`"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("exports"), "{rendered}");
+}
+
+#[test]
 fn home_scope_private_helper_resolves_but_stays_private() {
     // A private helper (never exported) still serves home bodies,
     // but the alias never exposes it: `LIB::HELPER` fails while

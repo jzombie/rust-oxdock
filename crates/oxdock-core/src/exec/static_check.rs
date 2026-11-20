@@ -327,6 +327,11 @@ struct Checker<'a, P: ProcessManager> {
     /// reads gate against these: only listed names resolve, and only
     /// to `CONST` bindings.
     module_const_exports: HashMap<String, Vec<String>>,
+    /// `EXPORT FUNC` names per module key, built from the closure
+    /// files alongside `module_const_exports`. `resolve_call` reads
+    /// these for the #319 missing-import hint: only listed
+    /// (exported, never private) names can be suggested.
+    module_func_exports: HashMap<String, Vec<String>>,
     /// Per-function import overlays: file-top imports plus the
     /// function's own subtree imports, keyed by (owner module key,
     /// `"entry"` for entry functions, function name). Swapped in while
@@ -927,6 +932,10 @@ pub fn validate_script_closure<P: ProcessManager>(
             checker.home_funcs = home_funcs.clone();
             checker.module_lets = lets.clone();
             checker.module_const_exports = const_exports.clone();
+            checker.module_func_exports = files
+                .iter()
+                .map(|file| (file.key.clone(), file.func_exports.clone()))
+                .collect();
             checker.entry_lets = entry_lets.to_vec();
             checker.entry_let_scopes = entry_let_scopes.clone();
             checker.inferred = inferred.clone();
@@ -1954,6 +1963,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             entry_let_scopes: HashMap::new(),
             alias_targets: HashMap::new(),
             module_const_exports: HashMap::new(),
+            module_func_exports: HashMap::new(),
             body_scopes: HashMap::new(),
             isolated_depth: 0,
         }
@@ -4341,6 +4351,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
     }
 
+    /// #319 missing-import suffix for an unknown function: empty
+    /// when no closure file exports the base name. Single owner for
+    /// the static exporter view; every `resolve_call` unknown
+    /// failure appends this instead of restating the search.
+    fn missing_import_hint(&self, name: &str) -> String {
+        super::native::missing_import_hint(
+            self.module_func_exports
+                .iter()
+                .map(|(file, exports)| (file.as_str(), exports.as_slice())),
+            &self.alias_targets,
+            name,
+        )
+        .unwrap_or_default()
+    }
+
     /// Resolve a callee through the shared alias-target matcher;
     /// script functions (bare or `SCRIPT::`) win over host metas.
     /// Unknown names yield `ANY`: the parse-time unknown-function gate
@@ -4366,7 +4391,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 super::native::AliasResolution::Global => {}
                 super::native::AliasResolution::Canonical(key) => lookup = key,
                 super::native::AliasResolution::Unknown => {
-                    bail!("unknown function `{name}`");
+                    bail!(
+                        "unknown function `{name}`{}",
+                        self.missing_import_hint(name)
+                    );
                 }
                 super::native::AliasResolution::Ambiguous { alias, base, files } => {
                     bail!(
@@ -4387,7 +4415,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     // A host-harvest branch holds no file functions, so
                     // any file-backed call misses there.
                     if has_host {
-                        bail!("unknown function `{name}`");
+                        bail!(
+                            "unknown function `{name}`{}",
+                            self.missing_import_hint(name)
+                        );
                     }
                     // Every disjoint target must export the name: a
                     // missing branch fails the call on its platform.
@@ -4395,7 +4426,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     for file in files {
                         let canonical = super::native::file_func_key(file.as_str(), base.as_str());
                         let Some(info) = self.funcs.get(&canonical) else {
-                            bail!("unknown function `{name}`");
+                            bail!(
+                                "unknown function `{name}`{}",
+                                self.missing_import_hint(name)
+                            );
                         };
                         canonicals.push((canonical, info.clone()));
                     }
@@ -4537,7 +4571,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             && alias != oxdock_parser::SCRIPT_MODULE_NAME
             && !self.hosts.contains_key(name)
         {
-            bail!("unknown function `{name}`");
+            bail!(
+                "unknown function `{name}`{}",
+                self.missing_import_hint(name)
+            );
         }
         Ok(Callee {
             params: None,

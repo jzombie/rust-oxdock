@@ -175,6 +175,80 @@ pub(super) fn classify_alias_call(
     AliasResolution::Unknown
 }
 
+/// Missing-import hint for an unknown function (#319): when `base`
+/// is `EXPORT`ed by already-loaded files, name them so the error
+/// directs the author to the fix instead of dead-ending. `files`
+/// pairs each loaded file's key with its exported func names (only
+/// exported names suggest: privates would fail the `EXPORT` gate);
+/// `unit_targets` is the failing unit's alias map for `did you mean
+/// ALIAS::BASE` suggestions. Bare and `SCRIPT::` spellings search
+/// the same way. Labels sort for determinism. Only unknown-function
+/// errors append this; nothing else restates the exporter search.
+pub(super) fn missing_import_hint<'a>(
+    files: impl IntoIterator<Item = (&'a str, &'a [String])>,
+    unit_targets: &AliasTargets,
+    name: &str,
+) -> Option<String> {
+    let base = match split_qualified(name) {
+        Some((_, base)) => base,
+        None => name,
+    };
+    if base.is_empty() {
+        return None;
+    }
+    let mut exporters: Vec<&str> = files
+        .into_iter()
+        .filter(|(_, exports)| exports.iter().any(|exported| exported == base))
+        .map(|(file, _)| file)
+        .collect();
+    exporters.sort();
+    exporters.dedup();
+    if exporters.is_empty() {
+        return None;
+    }
+    // Aliases the failing unit already imports each exporter under.
+    let imported_as = |file: &str| {
+        let mut aliases: Vec<&str> = unit_targets
+            .iter()
+            .filter(|(_, targets)| {
+                targets
+                    .iter()
+                    .any(|(target, _)| target.as_deref() == Some(file))
+            })
+            .map(|(alias, _)| alias.as_str())
+            .collect();
+        aliases.sort();
+        aliases
+    };
+    if exporters.len() == 1 {
+        let file = exporters[0];
+        let suggestion = match imported_as(file).first() {
+            Some(import_alias) => {
+                let spelling = qualify(import_alias, base);
+                if spelling == name {
+                    // Disjoint-guard view: the file exports the name
+                    // but this alias resolves it elsewhere here.
+                    format!(
+                        "file \"{file}\" exports `{base}` but the `{import_alias}` view does not resolve it here"
+                    )
+                } else {
+                    format!("did you mean `{spelling}`? (file \"{file}\" exports `{base}`)")
+                }
+            }
+            None => format!(
+                "file \"{file}\" exports `{base}`: add `[FUNC {base} FROM \"{file}\"]` to an IMPORT"
+            ),
+        };
+        return Some(format!("; {suggestion}"));
+    }
+    let mut files = exporters.join("\", \"");
+    files.insert(0, '"');
+    files.push('"');
+    Some(format!(
+        "; files {files} export `{base}`: qualify the call with the importing alias"
+    ))
+}
+
 /// Whether a disjoint-alias template call names a script function,
 /// owned here so every placeholder path agrees with `resolve_call`:
 /// visible only when no host-harvest branch competes (`!has_host`)
