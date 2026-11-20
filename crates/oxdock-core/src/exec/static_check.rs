@@ -3114,12 +3114,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
             }
         } else {
-            // Hard isolation (#322): entry bodies observe params plus
-            // locals only. Entry top-level bindings never seed the
-            // body: the runtime swaps the whole variable stack and
-            // resets env to the seed, so an outer name read here fails
-            // exactly like the runtime undefined variable. A body
-            // needing caller data takes it as an argument.
+            // Entry bodies observe their own file prelude (#322
+            // follow-up): params plus every top-level `ENV` /
+            // `INHERIT_ENV` name, never caller or module state. The
+            // runtime resets entry calls to the seed plus this same
+            // prelude (re-reading inherits from the engine), so the
+            // gate here approves exactly what execution provides. A
+            // body-level declaration shadows the prelude, preserving
+            // the isolation pins.
+            for name in &self.entry_env_union {
+                env.declare_env(name.clone());
+            }
         }
         let scope = Scope {
             label: key,

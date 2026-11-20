@@ -6,7 +6,7 @@
 //! out) plus the positive (explicit arguments do).
 
 use indoc::indoc;
-use oxdock_core::{Engine, SNAPSHOT_PENDING_DISPLAY, parse_script};
+use oxdock_core::{Engine, ExecIo, SNAPSHOT_PENDING_DISPLAY, parse_script};
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver};
 
 fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
@@ -1226,6 +1226,140 @@ fn cross_module_explicit_args_reach_callee_jail() {
     assert_eq!(
         out.bindings.get("got").and_then(|v| v.as_str()),
         Some("entry-data")
+    );
+}
+
+#[test]
+fn cross_module_inherit_env_stays_independent() {
+    // Modules inherit from the engine, never each other (#322
+    // follow-up): A declares MOD_A_TOKEN, B declares MOD_B_TOKEN.
+    // A calls B::GET_VALUE and gets B's engine value back even
+    // though A never inherited it; A reading B's name directly
+    // fails closed. Neither callee observes caller env, only its
+    // own file prelude plus engine re-reads.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "b.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            INHERIT_ENV [MOD_B_TOKEN]
+            EXPORT [FUNC GET_VALUE]
+            FUNC GET_VALUE(): STRING {
+                RETURN "{{ env:MOD_B_TOKEN }}"
+            }
+        "#},
+    );
+    write_lib(
+        &root,
+        "a.oxfile",
+        indoc! {r#"
+            INHERIT_ENV [MOD_A_TOKEN]
+            IMPORT [STD, "b.oxfile" AS B]
+            EXPORT [FUNC CALL_B, FUNC GET_OWN]
+            FUNC GET_OWN(): STRING {
+                RETURN "{{ env:MOD_A_TOKEN }}"
+            }
+            FUNC CALL_B(): STRING {
+                RETURN B::GET_VALUE()
+            }
+        "#},
+    );
+    let mut io = ExecIo::new();
+    io.insert_inherit_env("MOD_A_TOKEN", "aye-value");
+    io.insert_inherit_env("MOD_B_TOKEN", "bee-value");
+    let out = Engine::new()
+        .with_io(io.clone())
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "a.oxfile" AS A]
+                LET $via_a: STRING = A::CALL_B()
+                LET $own: STRING = A::GET_OWN()
+            "#},
+        )
+        .expect("cross-module inherit runs");
+    assert_eq!(
+        out.bindings.get("via_a").and_then(|v| v.as_str()),
+        Some("bee-value"),
+        "A serves B's engine value without inheriting it"
+    );
+    assert_eq!(
+        out.bindings.get("own").and_then(|v| v.as_str()),
+        Some("aye-value"),
+        "A still serves its own engine value"
+    );
+    // Negative direction: A reading B's name directly fails closed,
+    // proving A never inherited it. Separate file so the positive
+    // closure above validates clean.
+    write_lib(
+        &root,
+        "a.oxfile",
+        indoc! {r#"
+            INHERIT_ENV [MOD_A_TOKEN]
+            IMPORT [STD, "b.oxfile" AS B]
+            EXPORT [FUNC TRY_READ_B]
+            FUNC TRY_READ_B(): STRING {
+                RETURN "{{ env:MOD_B_TOKEN }}"
+            }
+        "#},
+    );
+    let err = Engine::new()
+        .with_io(io)
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "a.oxfile" AS A]
+                LET $got: STRING = A::TRY_READ_B()
+            "#},
+        )
+        .expect_err("A must not see B's inherit");
+    assert!(
+        format!("{err:#}").contains("env:MOD_B_TOKEN"),
+        "fails closed naming the uninherited name, got: {err:#}"
+    );
+}
+
+#[test]
+fn entry_prelude_ignores_block_scoped_env() {
+    // Blocks unwind: `ENV` / `INHERIT_ENV` inside `ISOLATED`, `IF`,
+    // `FOR` and friends must never seed the entry prelude. Only
+    // true top-level (and guard-gated top-level) declarations serve
+    // entry calls; block writes leak neither via `entry_envs` nor
+    // `entry_inherit_names`.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let mut io = ExecIo::new();
+    io.insert_inherit_env("PRELUDE_OK", "ok");
+    io.insert_inherit_env("SECRET", "eng");
+    let out = Engine::new()
+        .with_io(io)
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                INHERIT_ENV [PRELUDE_OK, SECRET]
+                ENV BLOCK_ONLY=top
+                ISOLATED {
+                    INHERIT_ENV [PRELUDE_OK]
+                    ENV SECRET=hacked
+                    ENV BLOCK_ONLY=hacked2
+                }
+                IF true {
+                    ENV BLOCK_ONLY=hacked3
+                }
+                FUNC PROBE(): STRING {
+                    RETURN "{{ env:SECRET }}|{{ env:BLOCK_ONLY }}|{{ env:PRELUDE_OK }}"
+                }
+                LET $got: STRING = PROBE()
+            "#},
+        )
+        .expect("block-scoped env must not poison the prelude");
+    assert_eq!(
+        out.bindings.get("got").and_then(|v| v.as_str()),
+        Some("eng|top|ok"),
+        "entry call serves the prelude, never unwound block writes"
     );
 }
 

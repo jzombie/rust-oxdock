@@ -437,6 +437,7 @@ pub(crate) fn new_state<P: ProcessManager>(
     // Run-scoped worker telemetry: the root hub adopts the staged
     // counter so every pump worker this run spawns attributes to it.
     let worker_counter = io.worker_counter();
+    let entry_envs = (*seed).clone();
     let mut state = ExecState {
         fs,
         cargo_scratch,
@@ -470,6 +471,8 @@ pub(crate) fn new_state<P: ProcessManager>(
         func_floors: Vec::new(),
         harvest_map: std::collections::HashMap::new(),
         entry_tops: std::collections::HashMap::new(),
+        entry_envs,
+        entry_inherit_names: Vec::new(),
         modules: std::collections::HashMap::new(),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),

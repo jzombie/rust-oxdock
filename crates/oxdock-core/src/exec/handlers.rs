@@ -60,6 +60,11 @@ pub(super) fn inherit_env<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     keys: &[String],
 ) -> Result<()> {
+    // Entry prelude capture: top-level `INHERIT_ENV` names and values
+    // belong to the entry file, re-read from the engine on every
+    // entry call. Never caller env: this reads only `io` overrides
+    // and `std::env` (the engine), ever.
+    let track_entry = cx.state.is_entry_top_level();
     let mut removals: Vec<String> = Vec::new();
     let mut inserts: Vec<(String, String)> = Vec::new();
     for key in keys {
@@ -76,11 +81,24 @@ pub(super) fn inherit_env<P: ProcessManager>(
         }
     }
     let envs = Arc::make_mut(&mut cx.state.envs);
-    for key in removals {
-        envs.remove(&key);
+    for key in &removals {
+        envs.remove(key);
     }
-    for (key, value) in inserts {
-        envs.insert(key, value);
+    for (key, value) in &inserts {
+        envs.insert(key.clone(), value.clone());
+    }
+    if track_entry {
+        for key in &removals {
+            cx.state.entry_envs.remove(key);
+        }
+        for (key, value) in &inserts {
+            cx.state.entry_envs.insert(key.clone(), value.clone());
+        }
+        for key in keys {
+            if !cx.state.entry_inherit_names.contains(key) {
+                cx.state.entry_inherit_names.push(key.clone());
+            }
+        }
     }
     Ok(())
 }
@@ -133,6 +151,13 @@ pub(super) fn env<P: ProcessManager>(
     value: &str,
 ) -> Result<()> {
     Arc::make_mut(&mut cx.state.envs).insert(key.to_owned(), value.to_owned());
+    // Entry prelude capture: the entry file's own top-level `ENV`
+    // declarations seed every entry call. Tracked only at entry
+    // top level, never inside a call or module, so caller mutations
+    // can never flow into the callee prelude.
+    if cx.state.is_entry_top_level() {
+        cx.state.entry_envs.insert(key.to_owned(), value.to_owned());
+    }
     Ok(())
 }
 
@@ -2764,11 +2789,12 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             cx.state.module_stack.push(module_key);
             // A callee never inherits its caller namespace (#115,
             // #322): module bodies reset to the seed plus the module
-            // init own contributions, entry bodies to the seed alone.
-            // Declared `INHERIT_ENV` names re-read from the host here
-            // (a re-inherit of an already-present value leaves no init
-            // delta, yet must still admit the name). A body needing
-            // caller env takes it as an argument. Reentrant init-time
+            // init own contributions, entry bodies to the seed plus
+            // the entry prelude. Declared `INHERIT_ENV` names re-read
+            // from the engine here, never the caller (a re-inherit of
+            // an already-present value leaves no init delta, yet must
+            // still admit the name). A body needing caller env takes
+            // it as an argument. Reentrant init-time
             // self-calls keep the in-progress init env, since that is
             // the module own context under construction.
             if reentrant {
@@ -2779,7 +2805,17 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                     inherit_env(cx, &inherit_names)?;
                 }
             } else {
-                cx.state.envs = std::sync::Arc::new((*cx.state.seed).clone());
+                // Entry calls serve their own file prelude: the seed
+                // plus entry top-level `ENV`, with `INHERIT_ENV` names
+                // re-read from the engine. Caller mutations never flow
+                // in; a callee-declared `ENV` shadows the prelude, so
+                // the isolation pins still hold.
+                let prelude = cx.state.entry_envs.clone();
+                cx.state.reset_module_env(prelude);
+                let inherit_names = cx.state.entry_inherit_names.clone();
+                if !inherit_names.is_empty() {
+                    inherit_env(cx, &inherit_names)?;
+                }
             }
             // Omitted trailing optionals fill with zero values before
             // the body binds: the arity gate above guarantees every

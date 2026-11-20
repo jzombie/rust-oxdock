@@ -256,6 +256,16 @@ pub struct ExecState<P: ProcessManager> {
     /// is the single choke every execution path funnels through, so
     /// one build here covers Engine, MCP, and dry runs alike.
     pub(super) entry_tops: HashMap<String, Vec<RawFuncDef>>,
+    /// Entry call-time env (#322 follow-up): the session seed plus the
+    /// entry top-level's own `ENV` contributions, tracked as they
+    /// execute. Entry `FUNC` calls reset to this map (never caller
+    /// env), mirroring how module calls reset to `ModuleInit::envs`.
+    pub(super) entry_envs: HashMap<String, String>,
+    /// Entry top-level `INHERIT_ENV` names, re-read from the engine
+    /// on every entry call. `INHERIT_ENV` inherits from the engine,
+    /// never another script, ever: same per-call re-read rule as
+    /// `ModuleInit::inherit_names`.
+    pub(super) entry_inherit_names: Vec<String>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -825,6 +835,8 @@ impl<P: ProcessManager> ExecState<P> {
             func_floors: self.func_floors.clone(),
             harvest_map: self.harvest_map.clone(),
             entry_tops: self.entry_tops.clone(),
+            entry_envs: self.entry_envs.clone(),
+            entry_inherit_names: self.entry_inherit_names.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
@@ -894,6 +906,20 @@ impl<P: ProcessManager> ExecState<P> {
     /// caller afterwards.
     pub(super) fn reset_module_env(&mut self, envs: HashMap<String, String>) {
         self.envs = Arc::new(envs);
+    }
+
+    /// Entry top-level tracking (#322 follow-up): true only for the
+    /// entry prelude itself, never inside any call, module, or
+    /// lexical block. Blocks (`ISOLATED`, `IF`, `FOR`, `WHILE`,
+    /// `SWITCH`, `WITH_IO`) push `scope_stack` so their env unwinds
+    /// on exit; capturing those writes would leak block-scoped and
+    /// isolated secrets into every later entry call. Guard-gated
+    /// top-level statements execute without pushing a scope, so
+    /// conditional configuration still seeds the prelude. Caller
+    /// env must never flow into the entry prelude store: `INHERIT_ENV`
+    /// inherits from the engine, never another script, ever.
+    pub(super) fn is_entry_top_level(&self) -> bool {
+        self.call_depth == 0 && self.module_stack.is_empty() && self.scope_stack.is_empty()
     }
 
     /// Enter a lexical scope: snapshot cwd/root/envs and open a fresh
