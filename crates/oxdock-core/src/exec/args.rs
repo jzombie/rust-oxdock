@@ -1479,7 +1479,11 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 // scalar fns; anything else (PATH_TYPE, FUNCTIONS,
                 // DESCRIBE, TYPES, TYPE_DESCRIBE) is AST-only by
                 // design. Dual entries answer with their ctx arm here,
-                // like every other context carrying cx.
+                // like every other context carrying cx. Script
+                // functions serve through the same resolution and
+                // execution as statement calls, so math can nest
+                // them; anything unresolvable still fails below with
+                // the same shape as before.
                 let val = if cx
                     .state
                     .native_meta(name.as_str())
@@ -1490,10 +1494,15 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 } else if let Some(func) = cx.state.clone_native_pure(name.as_str()) {
                     func(args)?
                 } else {
-                    bail!(
-                        "unknown function {name}{}",
-                        super::import::missing_import_hint(cx.state, name)
-                    )
+                    let entry = super::handlers::resolve_call_entry(cx, name.as_str())?;
+                    if !matches!(entry.body, super::native::FuncBody::Script(_)) {
+                        bail!(
+                            "unknown function {name}{}",
+                            super::import::missing_import_hint(cx.state, name)
+                        )
+                    }
+                    super::handlers::gate_call(cx, name.as_str(), &entry, args.len())?;
+                    super::handlers::execute_call_entry(cx, name.as_str(), entry, args)?
                 };
                 stack.push(val);
             }

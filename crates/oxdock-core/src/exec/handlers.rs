@@ -2654,23 +2654,21 @@ fn build_script_entry<P: ProcessManager>(
 /// coercion on parameter binding; `RETURN` inside yields the value and
 /// fallthrough yields `""`. `BREAK`/`CONTINUE` escaping the body are
 /// boundary errors (they must not reach a caller loop).
-pub(crate) fn call_func_value<P: ProcessManager>(
+/// Resolve one call-site spelling to its registry entry: file-aliased
+/// spellings through the shared alias-target matcher first, then the
+/// registry as spelled for hosts and natives (script bodies never
+/// serve there), then the frame walk down to the call/init floor, the
+/// owning file frame, and the per-unit harvest map. Entry calls walk
+/// from frame 0 (every live entry frame is entry-owned: inits pop,
+/// harvests are explicit), while module calls stop at their boundary
+/// so caller frames are unreachable by construction. No owner tags,
+/// no step scans: the frames are the mechanism. Single owner for call
+/// resolution; statement calls, expression calls, and RPN math route
+/// here instead of restating the order.
+pub(crate) fn resolve_call_entry<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     name: &str,
-    args: &[Expr],
-) -> Result<Value> {
-    // 1. Single frame walk (#322). Qualified non-`SCRIPT`
-    // spellings resolve through the shared alias-target matcher to
-    // canonical per-file keys first (explicit cross-unit naming):
-    // hit serves, miss fails unknown. Everything else consults the
-    // registry as spelled for hosts and natives (script bodies
-    // never serve here), then walks nested frames down to the
-    // call/init floor, then the owning file frame, then the
-    // per-unit harvest map. Entry calls walk from frame 0 (every
-    // live entry frame is entry-owned: inits pop, harvests are
-    // explicit), while module calls stop at their boundary so
-    // caller frames are unreachable by construction. No owner tags,
-    // no step scans: the frames are the mechanism.
+) -> Result<super::native::FuncEntry<P>> {
     let canonical = cx
         .state
         .functions
@@ -2703,25 +2701,37 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             },
         },
     };
-    // 2. Global recursion check.
+    Ok(entry)
+}
+
+/// Depth budget and arity gate for one invocation: exact counts, or
+/// the optional-MAP range. Single owner; every routed call gates here
+/// before any argument evaluates.
+pub(crate) fn gate_call<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    name: &str,
+    entry: &super::native::FuncEntry<P>,
+    nargs: usize,
+) -> Result<()> {
+    // Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {
         bail!(
             "recursion depth limit exceeded in FUNC {}",
             super::base_name(name)
         );
     }
-    // 3. Pre-evaluation arity gate from the entry metadata. Trailing
+    // Pre-evaluation arity gate from the entry metadata. Trailing
     // optional MAP params widen exact counts to ranges; everything
     // else stays exact.
     if let Some(params) = entry.meta.params.as_deref() {
         let required = super::required_arity(params);
-        if args.len() < required || args.len() > params.len() {
+        if nargs < required || nargs > params.len() {
             if required == params.len() {
                 bail!(
                     "{}() expects {} argument(s), got {}",
                     super::base_name(name),
                     params.len(),
-                    args.len()
+                    nargs
                 );
             }
             bail!(
@@ -2729,10 +2739,22 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                 super::base_name(name),
                 required,
                 params.len(),
-                args.len()
+                nargs
             );
         }
     }
+    Ok(())
+}
+
+pub(crate) fn call_func_value<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    name: &str,
+    args: &[Expr],
+) -> Result<Value> {
+    // Resolve, gate, evaluate, execute: the phase owners below serve
+    // statement calls, expression calls, and RPN math alike.
+    let entry = resolve_call_entry(cx, name)?;
+    gate_call(cx, name, &entry, args.len())?;
     // 4. Argument evaluation: only reachable for a valid invocation.
     // Omitted trailing optionals fill with zero values first, so
     // binding below always sees a full argument list. The arity gate
@@ -2741,6 +2763,18 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     for arg in args {
         arg_vals.push(super::args::evaluate_expr(arg, cx)?);
     }
+    execute_call_entry(cx, name, entry, arg_vals)
+}
+
+/// Execute a resolved entry with evaluated arguments. Single owner
+/// for the call body; every routed call (statement, expression, RPN
+/// math) ends here.
+pub(crate) fn execute_call_entry<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    name: &str,
+    entry: super::native::FuncEntry<P>,
+    mut arg_vals: Vec<Value>,
+) -> Result<Value> {
     // 5. Execution by body kind.
     match entry.body {
         FuncBody::Script(def) => {
