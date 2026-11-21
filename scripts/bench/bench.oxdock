@@ -28,18 +28,18 @@ FUNC TIME_EVENT($label: STRING, $cmd: STRING, $want: STRING): STRING {
   LET $seen: BOOL = false
   FOR $line: STRING IN $lines {
     LET $t: STRING = TEXT_TRIM($line)
-    IF TEXT_LENGTH($t) > 0 {
+    IF LEN($t) > 0 {
       IF $t == $want {
         $seen = true
       } ELSE {
-        IF TEXT_LENGTH($secs) == 0 {
+        IF LEN($secs) == 0 {
           $secs = $t
         }
       }
     }
   }
   ASSERT_EQ $seen true
-  IF TEXT_LENGTH($secs) == 0 {
+  IF LEN($secs) == 0 {
     ASSERT_EQ "timed" "no timing line captured"
   }
   RETURN "{{ $label }}: {{ $secs }}s"
