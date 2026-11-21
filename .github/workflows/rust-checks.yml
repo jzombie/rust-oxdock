@@ -488,6 +488,77 @@ jobs:
     permissions:
       contents: read
 
+  # Static gate over every shipped script: dry-run proves no parser
+  # or static regressions without executing anything. Discovery is
+  # structural (`**` over the whole tree), so new scripts in new
+  # directories are covered automatically with no list to maintain.
+  # Exclusions are by category, each with a verified reason:
+  # build output (`target/`) is never gated — absent from CI
+  # checkouts and stale-version noise locally; every `fixtures/`
+  # script executes in its harness (`ast_commands` cases by
+  # directory walk, `inherit_env_scoping` by explicit allowlist —
+  # no fixture script is harness-orphaned); the render pipeline
+  # files execute live from the embedded copy in oxdock-render's
+  # own end-to-end suite, which needs its custom modules and
+  # overlay. Everything else — including dot-dirs like .term-wm —
+  # dry-runs here.
+  examples-dryrun:
+    name: examples-dryrun (static check of shipped scripts)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install OxDock engine
+        uses: ./
+        with:
+          source: ${{ env.OXDOCK_ENGINE_SOURCE }}
+
+      - name: Dry-run every shipped script
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE LOCAL
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+
+          # Extensions to gate. New extensions get one entry here.
+          CONST PATTERNS: LIST<STRING> = ["**/*.oxfile", "**/*.oxdock"]
+          # Path markers owned elsewhere: build output, fixture
+          # scripts (logic-tests harness), render pipeline (render suite).
+          CONST EXCLUDE_MARKERS: LIST<STRING> = ["target/", "fixtures/", "oxdock-render/src/"]
+
+          FUNC KEEP($f: STRING): BOOL {
+            IF IS_DIR($f) { RETURN false }
+            FOR $e: STRING IN EXCLUDE_MARKERS {
+              IF CONTAINS($f, $e) { RETURN false }
+            }
+            RETURN true
+          }
+
+          LET $files: LIST<STRING> = []
+          FOR $pat: STRING IN PATTERNS {
+            FOR $f: STRING IN GLOB($pat) {
+              IF KEEP($f) { LIST_APPEND $files $f }
+            }
+          }
+
+          LET $n: INT = LEN($files)
+          ASSERT_NE $n 0
+
+          ECHO "checking {{ $n }} files"
+          FOR $f: STRING IN $files {
+            RUN ["oxdock", "--dry-run", $f]
+          }
+          ECHO "examples dry-run OK"
+
   # End-to-end Docker proof: the multi-container pipeline example
   # builds one image from a piped Dockerfile and streams stdio
   # through three containers. Ubuntu-only: it needs a Docker
@@ -526,7 +597,7 @@ jobs:
   verdict:
     name: verdict
     runs-on: ubuntu-latest
-    needs: [lint-stable, lint-nightly, test, coverage, docs-fresh, docker-pipeline]
+    needs: [lint-stable, lint-nightly, test, coverage, docs-fresh, docker-pipeline, examples-dryrun]
     if: ${{ always() }}
     permissions:
       contents: read
@@ -560,4 +631,6 @@ jobs:
           ASSERT_EQ $docs "success"
           LET $docker: STRING = "${{ needs.docker-pipeline.result }}"
           ASSERT_EQ $docker "success"
+          LET $dryrun: STRING = "${{ needs.examples-dryrun.result }}"
+          ASSERT_EQ $dryrun "success"
           ECHO "All checks succeeded."
