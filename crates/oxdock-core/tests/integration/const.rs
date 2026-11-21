@@ -1568,3 +1568,114 @@ fn uppercase_let_handle_display_round_trips() {
     );
     oxdock_core::parse_script(&rendered).expect("re-parse rendered LET handle");
 }
+
+#[test]
+fn func_body_same_frame_const_redeclare_fails() {
+    // Same-frame rule inside `FUNC` bodies: two `CONST X` at the
+    // function top level share the call frame with params, so the
+    // second fails exactly like top-level redeclaration. A file
+    // top-level `CONST X` is present to prove the error is the
+    // same-frame double, not the legal shadowing of the file binding:
+    // a single body-local `CONST X` shadows it cleanly.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                CONST X: INT = 99
+                FUNC F(): INT {
+                    CONST X: INT = 1
+                    RETURN X
+                }
+                LET $r: INT = F()
+                ASSERT_EQ $r 1
+                ASSERT_EQ X 99
+            "#},
+        )
+        .expect("single body-local CONST shadows file CONST");
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                CONST X: INT = 99
+                FUNC F(): INT {
+                    CONST X: INT = 1
+                    CONST X: INT = 2
+                    RETURN X
+                }
+                LET $r: INT = F()
+            "#},
+        )
+        .expect_err("double CONST in one function frame must fail");
+    assert!(format!("{err:#}").contains("redeclaration error"), "{err:#}");
+    assert!(format!("{err:#}").contains("CONST"), "{err:#}");
+}
+
+#[test]
+fn func_body_nested_block_const_shadows_cleanly() {
+    // Separate frames shadow cleanly across all three levels: file
+    // `CONST X`, function-body `CONST X`, and `FOR`-body `CONST X`.
+    // The innermost wins inside the loop, the function binding
+    // decides after it, and the file binding survives the call.
+    // (Bare guard blocks share the function frame statically, so
+    // `FOR` is the nested scope that isolates here.)
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                CONST X: INT = 100
+                FUNC F(): INT {
+                    CONST X: INT = 1
+                    LET $r: INT = 0
+                    FOR $i: INT IN [7] {
+                        CONST X: INT = 10
+                        $r = X
+                    }
+                    RETURN $r + X
+                }
+                LET $r: INT = F()
+                ASSERT_EQ $r 11
+                ASSERT_EQ X 100
+            "#},
+        )
+        .expect("nested-block CONST shadows function-body CONST");
+}
+
+#[test]
+fn local_bare_const_coexists_with_alias_const() {
+    // Namespace split: imported `CONST`s read only as `ALIAS::NAME`
+    // and never occupy the importer `var_scopes`, so a file
+    // top-level bare `CONST VERSION` coexists with `LIB::VERSION`
+    // at top level and inside a seeded `FUNC` body, which observes
+    // both the seeded file binding and the qualified import.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxdock",
+        indoc! {r#"
+            CONST VERSION: STRING = "1.2.3"
+            EXPORT CONST VERSION
+        "#},
+    );
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["lib.oxdock" AS LIB]
+                CONST VERSION: STRING = "local"
+                FUNC GETBOTH(): STRING {
+                    RETURN "{{ VERSION }}|{{ LIB::VERSION }}"
+                }
+                LET $q: STRING = LIB::VERSION
+                ASSERT_EQ $q "1.2.3"
+                ASSERT_EQ VERSION "local"
+                LET $b: STRING = GETBOTH()
+                ASSERT_EQ $b "local|1.2.3"
+            "#},
+        )
+        .expect("local bare CONST coexists with alias CONST");
+}
