@@ -3609,16 +3609,20 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 right-hand side accepts every `LET` form (expression,
                 capture, `ASYNC`, `AWAIT`, inline block, bare `PIPE`).
 
-                Immutability is deep and total: `SET` (`NAME = ...`),
-                `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS` on a `CONST`
-                value all fail. Nested containers freeze with the binding,
-                so reaching a list or map through a `CONST` never exposes
-                a mutable handle. Reads use the bare name (never `$NAME`).
+                Immutability is deep and total: reassignment (`$var = ...`,
+                `NAME = ...`), `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS`
+                on a `CONST` value all fail. Nested containers freeze with
+                the binding, so reaching a list or map through a `CONST`
+                never exposes a mutable handle. Reads use the bare name
+                (never `$NAME`).
 
                 `CONST` and `LET` share one namespace: declaring either
                 twice in the same scope frame is a redeclaration error.
-                A `CONST` name cannot collide with a `FUNC`, a reserved
-                word, or another binding. Shadowing an outer binding in
+                A `CONST` name cannot collide with a reserved word or
+                another binding. `FUNC` names live in a separate namespace
+                and may share the spelling; only `EXPORT`s share one
+                registry, so at most one of a same-named `FUNC`/`CONST`
+                pair may be exported. Shadowing an outer binding in
                 an inner block stays legal and the inner declaration
                 reverts on block exit.
 
