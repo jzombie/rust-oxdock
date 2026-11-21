@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Callee home-scope resolution (#319): a `FUNC` body resolves bare and `SCRIPT::` calls against its defining file first, so an `IMPORT` names only what the importing file itself calls. Harvesting `STAGE` alone now runs its unharvested and private siblings; `LIB::PRIVATE` stays unknown. Static inference sees the same scope, so declared `-> STRING` returns flow into union-typed params through home calls. Unknown `ALIAS::FUNC` failures now name the fix when another loaded file exports the name (`did you mean` for alias-imported files, a harvest spelling otherwise).
 - `STD::UNIQUE($items: LIST<ANY>): LIST` pure builtin (#319): first-occurrence dedup with strict `values_equal` membership (numerics compare across `INT`/`FLOAT`, every other cross-type pair is unequal, matching `CONTAINS`/`==`). Collapses projection-plus-flag dedup loops to one call.
 
+### Fixed
+
+- Script `FUNC` calls resolve inside RPN arithmetic: `LET $t: INT = DOUBLE() * 2` and `RETURN DOUBLE() * 2` route through the same resolution and execution as statement calls instead of failing with `unknown function SCRIPT::DOUBLE`. Resolution, the recursion depth budget, and the arity gate are single-sourced behind the statement-call path, so math calls guard identically; AST-only natives keep their existing rejection.
+
 ## [0.43.0-alpha] - 2026-11-19
 
 ### Added
