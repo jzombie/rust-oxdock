@@ -1608,7 +1608,10 @@ fn func_body_same_frame_const_redeclare_fails() {
             "#},
         )
         .expect_err("double CONST in one function frame must fail");
-    assert!(format!("{err:#}").contains("redeclaration error"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("redeclaration error"),
+        "{err:#}"
+    );
     assert!(format!("{err:#}").contains("CONST"), "{err:#}");
 }
 
