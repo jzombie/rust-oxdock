@@ -488,20 +488,8 @@ jobs:
     permissions:
       contents: read
 
-  # Static gate over every shipped script: dry-run proves no parser
-  # or static regressions without executing anything. Discovery is
-  # structural (`**` over the whole tree), so new scripts in new
-  # directories are covered automatically with no list to maintain.
-  # Exclusions are by category, each with a verified reason:
-  # build output (`target/`) is never gated — absent from CI
-  # checkouts and stale-version noise locally; every `fixtures/`
-  # script executes in its harness (`ast_commands` cases by
-  # directory walk, `inherit_env_scoping` by explicit allowlist —
-  # no fixture script is harness-orphaned); the render pipeline
-  # files execute live from the embedded copy in oxdock-render's
-  # own end-to-end suite, which needs its custom modules and
-  # overlay. Everything else — including dot-dirs like .term-wm —
-  # dry-runs here.
+  # Static gate over every shipped script. Discovery is structural
+  # (`**` over the tree); the rest is routed to its owning harness.
   examples-dryrun:
     name: examples-dryrun (static check of shipped scripts)
     runs-on: ubuntu-latest
