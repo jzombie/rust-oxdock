@@ -1624,3 +1624,78 @@ fn explicit_path_and_value_args_reach_callee() {
         Some("entry-data|entry-env")
     );
 }
+
+#[test]
+fn block_scoped_func_does_not_capture_block_jail() {
+    // Block-scoped `FUNC`s never seal unwound state: a `FUNC`
+    // defined inside an `IF` block is called inside that block,
+    // yet serves the file default instead of the block's `WORKDIR`.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                WORKSPACE LOCAL
+                MKDIR sub
+                LET $here: STRING = CWD()
+                LET $flag: BOOL = true
+                IF $flag {
+                    WORKDIR sub
+                    FUNC F(): STRING {
+                        LET $c: STRING = CWD()
+                        RETURN $c
+                    }
+                    LET $got: STRING = F()
+                    WRITE got.txt $got
+                }
+                LET $got: STRING = READ sub/got.txt
+            "#},
+        )
+        .expect("block-scoped FUNC runs");
+    let got = out.bindings.get("got").and_then(|v| v.as_str()).unwrap();
+    let here = out.bindings.get("here").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        !got.ends_with("sub"),
+        "unwound block WORKDIR must not leak into the callee, got {got}"
+    );
+    assert_eq!(
+        got, here,
+        "block-scoped def falls back to the file default, got {got} vs {here}"
+    );
+}
+
+#[test]
+fn guarded_func_seals_live_definition_jail() {
+    // Guard-gated top-level statements never push a scope, so a
+    // live guarded `FUNC` seals its definition-site jail like any
+    // top-level definition. Same-name guarded duplicates are
+    // rejected at parse time, so this pins the single live
+    // definition path with an engine-controlled env guard.
+    let _flag = oxdock_process::TestEnvGuard::set("OXDOCK_GUARD_JAIL_FLAG", "1");
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let out = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                INHERIT_ENV [OXDOCK_GUARD_JAIL_FLAG]
+                WORKSPACE LOCAL
+                MKDIR gsub
+                [env:OXDOCK_GUARD_JAIL_FLAG] WORKDIR gsub
+                [env:OXDOCK_GUARD_JAIL_FLAG] FUNC F(): STRING {
+                    LET $c: STRING = CWD()
+                    RETURN $c
+                }
+                LET $got: STRING = F()
+            "#},
+        )
+        .expect("guarded FUNC runs");
+    let got = out.bindings.get("got").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        got.ends_with("gsub"),
+        "live guarded definition jail wins, got {got}"
+    );
+}

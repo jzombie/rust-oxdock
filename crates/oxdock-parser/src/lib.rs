@@ -1931,7 +1931,7 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Await { var } => {
+            StepKind::Await { var, .. } => {
                 assert_eq!(var, "task");
             }
             other => panic!("expected Await, got {:?}", other),

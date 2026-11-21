@@ -937,7 +937,9 @@ fn ensure_module_init<P: ProcessManager>(
         }
         let mut inherit_names = Vec::new();
         for step in steps {
-            if let StepKind::InheritEnv { keys } = &step.kind {
+            if let StepKind::InheritEnv { keys } = &step.kind
+                && oxdock_parser::guard_option_allows(step.guard.as_ref(), &cx.state.envs)
+            {
                 inherit_names.extend(keys.iter().cloned());
             }
         }

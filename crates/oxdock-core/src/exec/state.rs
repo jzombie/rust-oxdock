@@ -266,6 +266,11 @@ pub struct ExecState<P: ProcessManager> {
     /// never another script, ever: same per-call re-read rule as
     /// `ModuleInit::inherit_names`.
     pub(super) entry_inherit_names: Vec<String>,
+    /// Entry top-level `CONST` bindings, seeded into every entry
+    /// call. Single owner for the entry prelude: `declare_const`
+    /// captures here when `is_entry_top_level`, and `execute_call_entry`
+    /// seeds from here, never from caller frames.
+    pub(super) entry_consts: HashMap<String, (TypeTag, Value)>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -853,6 +858,7 @@ impl<P: ProcessManager> ExecState<P> {
             entry_tops: self.entry_tops.clone(),
             entry_envs: self.entry_envs.clone(),
             entry_inherit_names: self.entry_inherit_names.clone(),
+            entry_consts: self.entry_consts.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
@@ -1039,6 +1045,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// containers freeze with the binding instead of aliasing a
     /// mutable buffer.
     pub(super) fn declare_const(&mut self, key: String, kind: TypeTag, value: Value) -> Result<()> {
+        let at_entry_top = self.is_entry_top_level();
         if self
             .var_scopes
             .last()
@@ -1056,9 +1063,12 @@ impl<P: ProcessManager> ExecState<P> {
             .var_scopes
             .last_mut()
             .ok_or_else(|| anyhow::anyhow!("no variable scope for declaration"))?;
-        scope.insert(key.clone(), (kind, frozen));
+        scope.insert(key.clone(), (kind.clone(), frozen.clone()));
         if let Some(frame) = self.const_scopes.last_mut() {
-            frame.insert(key);
+            frame.insert(key.clone());
+        }
+        if at_entry_top {
+            self.entry_consts.insert(key, (kind, frozen));
         }
         Ok(())
     }

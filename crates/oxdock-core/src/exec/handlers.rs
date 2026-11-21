@@ -2547,16 +2547,21 @@ pub(crate) fn define_func<P: ProcessManager>(
     // file), or `None` for entry definitions, which stay params-only.
     let owner = cx.state.current_module();
     // Definition-site jail (#322): sealed here, at the definition,
-    // never at the call, and only for file-top-level definitions
-    // (depth zero: bodies run inside calls and must never capture,
-    // or the enclosing call jail would leak into the new def).
+    // never at the call, and only for file-top-level definitions.
+    // File-top means the innermost call/init frame floor plus one
+    // scope: entry top-level runs at depth one with no floor, module
+    // init top-level runs one above its floor, and any nested block
+    // or call body runs deeper. Block-scoped `FUNC`s never capture
+    // unwound workspace state.
     // Sealed into the registry entry for direct hits and into the
     // owning file frame for frame-walk hits, so both lookup paths
     // serve the same site. Harvest registration and call-time
     // materialization pass `None` at their own sites: importer and
     // caller context must never leak into the defining file.
-    let def_jail =
-        (cx.state.call_depth == 0).then(|| (cx.state.fs.selection(), cx.state.cwd.clone()));
+    let at_file_top = cx.state.call_depth == 0
+        && cx.state.functions.scope_depth()
+            == cx.state.func_floors.last().copied().unwrap_or(0) + 1;
+    let def_jail = at_file_top.then(|| (cx.state.fs.selection(), cx.state.cwd.clone()));
     cx.state.functions.define_script(
         name,
         &resolved,
@@ -2573,9 +2578,11 @@ pub(crate) fn define_func<P: ProcessManager>(
             None => Some(&mut cx.state.entry_tops),
         };
         if let Some(defs) = bucket.and_then(|tops| tops.get_mut(name))
-            && let Some(raw) = defs
-                .iter_mut()
-                .find(|r| r.jail.is_none() && r.params == params)
+            && let Some(raw) = defs.iter_mut().find(|r| {
+                r.jail.is_none()
+                    && r.params == params
+                    && oxdock_parser::guard_option_allows(r.guard.as_ref(), &cx.state.envs)
+            })
         {
             raw.jail = Some(jail.clone());
         }
@@ -2811,30 +2818,26 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             cx.state.push_scope();
             // Entry file `CONST`s are visible by scope (#318): an
             // entry-owned callee called from entry code restores the
-            // caller bottom frame's `CONST` marks and values into a
-            // dedicated seed frame beneath its params, so the body
-            // reads exactly the top-level `CONST`s declared so far.
-            // `LET`s never cross (unmarked); module callers seed
-            // nothing (entry file state is not caller state, and
-            // modules cannot name entry functions). Params and locals
-            // shadow structurally above the seed; reads and the
-            // mutation gates ride `get_var`/`is_const_var` unchanged.
-            // Mirrors the static entry seeding; keep the two in
-            // lockstep.
+            // entry prelude `CONST`s into a dedicated seed frame
+            // beneath its params, so the body reads exactly the
+            // top-level `CONST`s. `LET`s never cross; module callers
+            // seed nothing. Seeded from the dedicated prelude store,
+            // never caller frames, so body-local `CONST`s cannot leak
+            // into nested callees. Mirrors the static entry seeding.
             let mut seeded_entry_consts = false;
             if module_key.is_none()
                 && matches!(cx.state.module_stack.last(), None | Some(None))
-                && let (Some(vars), Some(marks)) = (
-                    saved_vars.as_ref().and_then(|stack| stack.first()),
-                    saved_consts.as_ref().and_then(|stack| stack.first()),
-                )
+                && !cx.state.entry_consts.is_empty()
             {
-                for name in marks {
-                    if let Some((tag, value)) = vars.get(name) {
-                        cx.state
-                            .declare_const(name.clone(), tag.clone(), value.clone())?;
-                        seeded_entry_consts = true;
-                    }
+                let prelude: Vec<(String, TypeTag, Value)> = cx
+                    .state
+                    .entry_consts
+                    .iter()
+                    .map(|(k, (t, v))| (k.clone(), t.clone(), v.clone()))
+                    .collect();
+                for (name, tag, value) in prelude {
+                    cx.state.declare_const(name, tag, value)?;
+                    seeded_entry_consts = true;
                 }
                 if seeded_entry_consts {
                     cx.state.push_var_scope();
@@ -5270,7 +5273,7 @@ pub(crate) fn dispatch_await_step<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::Await { var } = step else {
+    let StepKind::Await { var, .. } = step else {
         unreachable!()
     };
     dispatch_await(var, cx)
@@ -5333,6 +5336,7 @@ pub(crate) fn dispatch_await_capture_step<P: ProcessManager>(
         out_var,
         out_type,
         task_var,
+        ..
     } = step
     else {
         unreachable!()
@@ -5349,6 +5353,7 @@ pub(crate) fn dispatch_const_await_capture_step<P: ProcessManager>(
         out_var,
         out_type,
         task_var,
+        ..
     } = step
     else {
         unreachable!()
@@ -5361,7 +5366,7 @@ pub(crate) fn dispatch_cancel_step<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::Cancel { var } = step else {
+    let StepKind::Cancel { var, .. } = step else {
         unreachable!()
     };
     dispatch_cancel(var, cx)

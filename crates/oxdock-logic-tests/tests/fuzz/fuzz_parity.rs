@@ -812,8 +812,14 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                 item: Arg::String(item, false),
             }
         }),
-        "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Await { var: var.clone() }),
-        "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Cancel { var: var.clone() }),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Await {
+            var: var.clone(),
+            is_const: false
+        }),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Cancel {
+            var: var.clone(),
+            is_const: false
+        }),
         (safe_string(), any_msg()).prop_map(|(path, contents)| StepKind::Append {
             path: path.into(),
             contents: Some(contents.into()),
@@ -899,12 +905,14 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             out_var: var.clone(),
             out_type: "STRING".to_string(),
             task_var: var,
+            task_is_const: false,
         }),
         ("[A-Z][A-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(out_var, task_var)| {
             StepKind::ConstAwaitCapture {
                 out_var,
                 out_type: "STRING".to_string(),
                 task_var,
+                task_is_const: false,
             }
         }),
         ("[a-z][a-zA-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(var, item)| {
@@ -1566,11 +1574,31 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_eq!(ll, rl, "ListAppend list mismatch: {}", msg);
             assert!(arg_content_eq(li, ri), "ListAppend item mismatch: {}", msg);
         }
-        (StepKind::Await { var: l }, StepKind::Await { var: r }) => {
-            assert_eq!(l, r, "Await var mismatch: {}", msg)
+        (
+            StepKind::Await {
+                var: l,
+                is_const: lc,
+            },
+            StepKind::Await {
+                var: r,
+                is_const: rc,
+            },
+        ) => {
+            assert_eq!(l, r, "Await var mismatch: {}", msg);
+            assert_eq!(lc, rc, "Await sigil mismatch: {}", msg);
         }
-        (StepKind::Cancel { var: l }, StepKind::Cancel { var: r }) => {
-            assert_eq!(l, r, "Cancel var mismatch: {}", msg)
+        (
+            StepKind::Cancel {
+                var: l,
+                is_const: lc,
+            },
+            StepKind::Cancel {
+                var: r,
+                is_const: rc,
+            },
+        ) => {
+            assert_eq!(l, r, "Cancel var mismatch: {}", msg);
+            assert_eq!(lc, rc, "Cancel sigil mismatch: {}", msg);
         }
         (
             StepKind::If {
@@ -1792,32 +1820,38 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 out_var: lo,
                 out_type: lt,
                 task_var: lv,
+                task_is_const: lc,
             },
             StepKind::AwaitCapture {
                 out_var: ro,
                 out_type: rt,
                 task_var: rv,
+                task_is_const: rc,
             },
         ) => {
             assert_eq!(lo, ro, "AwaitCapture out mismatch: {}", msg);
             assert_eq!(lt, rt, "AwaitCapture type mismatch: {}", msg);
             assert_eq!(lv, rv, "AwaitCapture task mismatch: {}", msg);
+            assert_eq!(lc, rc, "AwaitCapture sigil mismatch: {}", msg);
         }
         (
             StepKind::ConstAwaitCapture {
                 out_var: lo,
                 out_type: lt,
                 task_var: lv,
+                task_is_const: lc,
             },
             StepKind::ConstAwaitCapture {
                 out_var: ro,
                 out_type: rt,
                 task_var: rv,
+                task_is_const: rc,
             },
         ) => {
             assert_eq!(lo, ro, "ConstAwaitCapture out mismatch: {}", msg);
             assert_eq!(lt, rt, "ConstAwaitCapture type mismatch: {}", msg);
             assert_eq!(lv, rv, "ConstAwaitCapture task mismatch: {}", msg);
+            assert_eq!(lc, rc, "ConstAwaitCapture sigil mismatch: {}", msg);
         }
         (
             StepKind::WithIo {
@@ -2305,9 +2339,11 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         },
         StepKind::Await {
             var: "coverage".to_string(),
+            is_const: false,
         },
         StepKind::Cancel {
             var: "coverage".to_string(),
+            is_const: false,
         },
         StepKind::Append {
             path: "coverage.txt".into(),
@@ -2531,11 +2567,13 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             out_var: "coverage".to_string(),
             out_type: "STRING".to_string(),
             task_var: "coverage".to_string(),
+            task_is_const: false,
         },
         StepKind::ConstAwaitCapture {
             out_var: "COVERAGE".to_string(),
             out_type: "STRING".to_string(),
             task_var: "coverage".to_string(),
+            task_is_const: false,
         },
         StepKind::For {
             key_var: None,

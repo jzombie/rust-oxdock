@@ -1040,18 +1040,20 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             decl_type,
             body,
         } => handlers::dispatch_assign_async(var, decl_type.clone(), body, &mut cx, true),
-        StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
+        StepKind::Await { var, .. } => handlers::dispatch_await(var, &mut cx),
         StepKind::AwaitCapture {
             out_var,
             out_type,
             task_var,
+            ..
         } => handlers::dispatch_await_capture(out_var, out_type.clone(), task_var, &mut cx, false),
         StepKind::ConstAwaitCapture {
             out_var,
             out_type,
             task_var,
+            ..
         } => handlers::dispatch_await_capture(out_var, out_type.clone(), task_var, &mut cx, true),
-        StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
+        StepKind::Cancel { var, .. } => handlers::dispatch_cancel(var, &mut cx),
         StepKind::Sleep { duration } => {
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
             handlers::sleep(&mut cx, &duration)
@@ -1461,11 +1463,12 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 &mut cx,
                                 true,
                             ),
-                            StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
+                            StepKind::Await { var, .. } => handlers::dispatch_await(var, &mut cx),
                             StepKind::AwaitCapture {
                                 out_var,
                                 out_type,
                                 task_var,
+                                ..
                             } => handlers::dispatch_await_capture(
                                 out_var,
                                 out_type.clone(),
@@ -1477,6 +1480,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 out_var,
                                 out_type,
                                 task_var,
+                                ..
                             } => handlers::dispatch_await_capture(
                                 out_var,
                                 out_type.clone(),
@@ -1484,7 +1488,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 &mut cx,
                                 true,
                             ),
-                            StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
+                            StepKind::Cancel { var, .. } => handlers::dispatch_cancel(var, &mut cx),
                             StepKind::Sleep { duration } => {
                                 let duration =
                                     super::args::resolve_arg_as_duration(duration, &mut cx)?;

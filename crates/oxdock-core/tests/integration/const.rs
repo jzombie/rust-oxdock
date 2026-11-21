@@ -1526,3 +1526,45 @@ fn entry_body_local_const_in_seeded_func_stays_immutable() {
         );
     }
 }
+
+#[test]
+fn template_call_reads_local_const_and_key_path() {
+    // Runtime/static agreement: `{{ STD::LEN(ITEMS) }}` and
+    // `{{ STD::LEN(CFG.items) }}` resolve bare local `CONST`s and
+    // `CONST` key paths at runtime exactly as the static gate admits.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                CONST ITEMS: LIST<STRING> = ["a", "b"]
+                LET $t: STRING = "n={{ STD::LEN(ITEMS) }}"
+                ASSERT_EQ $t "n=2"
+                CONST CFG: MAP<items:LIST<STRING>> = {items: ["a", "b", "c"]}
+                LET $u: STRING = "n={{ STD::LEN(CFG.items) }}"
+                ASSERT_EQ $u "n=3"
+            "#},
+        )
+        .expect("template calls read local CONST and key path");
+}
+
+#[test]
+fn uppercase_let_handle_display_round_trips() {
+    // Uppercase `LET` handles keep their `$` sigil through
+    // `Display`: the rendered steps re-parse without error.
+    let script = "LET $TASK: HANDLE<INT> = ASYNC { RETURN 1 }\nAWAIT $TASK\n";
+    let steps = oxdock_core::parse_script(script).expect("parse uppercase LET handle");
+    let rendered = steps
+        .iter()
+        .map(|s| s.kind.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    assert!(
+        rendered.contains("AWAIT $TASK"),
+        "Display must keep the sigil, got: {rendered}"
+    );
+    oxdock_core::parse_script(&rendered).expect("re-parse rendered LET handle");
+}

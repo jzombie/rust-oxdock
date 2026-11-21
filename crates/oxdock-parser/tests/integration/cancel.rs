@@ -8,7 +8,7 @@ fn cancel_case(script: &str) -> String {
     let steps = parse_script(script, mock_lower).expect("parse CANCEL");
     assert_eq!(steps.len(), 1, "expected a single CANCEL step");
     match &steps[0].kind {
-        StepKind::Cancel { var } => var.clone(),
+        StepKind::Cancel { var, .. } => var.clone(),
         other => panic!("expected Cancel, got {other:?}"),
     }
 }

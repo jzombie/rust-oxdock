@@ -853,6 +853,7 @@ fn async_stdin_pipe_unblocks_background_write() {
         },
         step(StepKind::Await {
             var: "writer".into(),
+            is_const: false,
         }),
     ];
     let (_cwd, files) = run_with_mock_fs(&steps);
@@ -959,6 +960,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         entry_tops: std::collections::HashMap::new(),
         entry_envs: std::collections::HashMap::new(),
         entry_inherit_names: Vec::new(),
+        entry_consts: std::collections::HashMap::new(),
         modules: std::collections::HashMap::new(),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
@@ -3790,7 +3792,10 @@ fn timeout_scope_does_not_join_prior_background_work() {
             col: 0,
         },
         timeout_step("30s", vec![step(StepKind::Run("echo quick".into()))]),
-        step(StepKind::Cancel { var: "srv".into() }),
+        step(StepKind::Cancel {
+            var: "srv".into(),
+            is_const: false,
+        }),
     ];
     let mock = MockProcessManager::default();
     // Two never-ready plans, not one: the ASYNC worker thread and the
@@ -10735,6 +10740,7 @@ fn workflow_inline_scripts_pass_static_gate() {
                 entry_tops: std::collections::HashMap::new(),
                 entry_envs: std::collections::HashMap::new(),
                 entry_inherit_names: Vec::new(),
+                entry_consts: std::collections::HashMap::new(),
                 modules: std::collections::HashMap::new(),
                 validated_modules: std::collections::HashSet::new(),
                 module_stack: Vec::new(),

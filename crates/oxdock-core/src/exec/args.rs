@@ -1351,12 +1351,12 @@ fn resolve_key_path_value<P: ProcessManager>(
     descend_value(current, keys)
 }
 
-/// One `$ALIAS::NAME` placeholder call argument: resolve a
-/// module-exported `CONST` to its value, or `None` when the argument
-/// is any other shape (the flat var map owns those). Key paths never
-/// ride qualified names, mirroring expression and template reads, so
-/// both sides fail with one message. `$ALIAS::NAME` is a hard error;
-/// bare `ALIAS::NAME` resolves.
+/// Placeholder call arguments naming `CONST`s: `ALIAS::NAME`,
+/// bare `NAME`, and `NAME.key` chains, mirroring `PlaceholderKey::Bare`
+/// in `expand_string` and `TemplateArg::Invalid` in the static gate.
+/// Anything else returns `None` for the flat var map. Key paths never
+/// ride qualified names, mirroring expression and template reads.
+/// `$ALIAS::NAME` is a hard error; bare `ALIAS::NAME` resolves.
 fn resolve_const_call_arg<P: ProcessManager>(
     state: &ExecState<P>,
     src: &str,
@@ -1386,6 +1386,30 @@ fn resolve_const_call_arg<P: ProcessManager>(
         && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
         return super::import::resolve_const_ref(state, alias, rest).map(Some);
+    }
+    if let Some((base, tail)) = trimmed.split_once('.')
+        && !base.is_empty()
+        && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !tail.is_empty()
+        && !tail.contains([',', ' ', '\t'])
+        && state.is_const_var(base)
+    {
+        let segs = tail.split('.').map(|s| s.to_string()).collect::<Vec<_>>();
+        if segs.iter().all(|s| !s.is_empty()) {
+            return resolve_key_path_value(state, base, &segs).map(Some);
+        }
+        return Ok(None);
+    }
+    if !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && state.is_const_var(trimmed)
+    {
+        return state
+            .get_var(trimmed)
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("undefined CONST '{trimmed}'"));
     }
     Ok(None)
 }

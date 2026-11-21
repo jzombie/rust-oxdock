@@ -1456,7 +1456,6 @@ fn try_bare_const_region(
     ctx: &ParseCtx,
     stmt: usize,
 ) -> Result<Option<Arg>, TokenError> {
-    let _ = ctx;
     if region.is_empty() {
         return Ok(None);
     }
@@ -3504,9 +3503,15 @@ fn parse_await_cancel_at(
         }
         return Ok(Some((
             if head == KEYWORD_AWAIT {
-                StepKind::Await { var }
+                StepKind::Await {
+                    var,
+                    is_const: false,
+                }
             } else {
-                StepKind::Cancel { var }
+                StepKind::Cancel {
+                    var,
+                    is_const: false,
+                }
             },
             3,
         )));
@@ -3518,9 +3523,15 @@ fn parse_await_cancel_at(
     {
         return Ok(Some((
             if head == KEYWORD_AWAIT {
-                StepKind::Await { var: w.clone() }
+                StepKind::Await {
+                    var: w.clone(),
+                    is_const: true,
+                }
             } else {
-                StepKind::Cancel { var: w.clone() }
+                StepKind::Cancel {
+                    var: w.clone(),
+                    is_const: true,
+                }
             },
             2,
         )));
@@ -7131,7 +7142,7 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
             parse_numeric_atom(cur, ctx)
         }
         Some(TokKind::Word(_)) => {
-            if let Some(expr) = try_parse_bare_const(cur, ctx)? {
+            if let Some(expr) = try_parse_bare_const(cur)? {
                 return Ok(expr);
             }
             parse_bare_atom(cur, ctx, false)
@@ -7160,12 +7171,12 @@ fn parse_bare_atom(
 
 /// Bare `CONST` read in expression position: `ALIAS::NAME` always
 /// parses as a qualified const ref (resolution fails closed later);
-/// a bare `NAME` parses as `Const` only when a `CONST` is visible
-/// here (defined or pre-declared). Anything else returns `None` so
-/// the caller falls back to a string literal. Key paths ride bare
-/// const bases the same way `$` paths ride `LET` bases.
-fn try_parse_bare_const(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Option<Expr>, TokenError> {
-    let _ = ctx;
+/// a bare uppercase `NAME` parses as `Const` (shape-gated by
+/// `could_be_const_name`, letting the static gate report undeclared
+/// versus `LET` misuse). Anything else returns `None` so the caller
+/// falls back to a string literal. Key paths ride bare const bases
+/// the same way `$` paths ride `LET` bases.
+fn try_parse_bare_const(cur: &mut Cursor) -> Result<Option<Expr>, TokenError> {
     let base = match cur.toks.get(cur.pos).map(|t| &t.kind) {
         Some(TokKind::Word(w)) if is_ident_word(w) => w.clone(),
         _ => return Ok(None),
@@ -7827,10 +7838,12 @@ fn binding_kind(kind: StepKind, kw: &'static str) -> StepKind {
             out_var,
             out_type,
             task_var,
+            task_is_const,
         } => StepKind::ConstAwaitCapture {
             out_var,
             out_type,
             task_var,
+            task_is_const,
         },
         other => other,
     }
@@ -7937,6 +7950,7 @@ fn parse_let_rhs(
                 out_var: var,
                 out_type: decl_type,
                 task_var: task_var.clone(),
+                task_is_const: false,
             },
             skipped + 3,
         ));
@@ -7953,6 +7967,7 @@ fn parse_let_rhs(
                 out_var: var,
                 out_type: decl_type,
                 task_var: task_var.clone(),
+                task_is_const: true,
             },
             skipped + 2,
         ));

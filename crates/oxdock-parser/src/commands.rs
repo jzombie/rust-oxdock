@@ -1367,13 +1367,13 @@ declare_commands! {
         Set { var: String, expr: Expr },
         AssignCapture { var: String, decl_type: String, cmd: Box<StepKind> },
         ConstCapture { var: String, decl_type: String, cmd: Box<StepKind> },
-        AwaitCapture { out_var: String, out_type: String, task_var: String },
-        ConstAwaitCapture { out_var: String, out_type: String, task_var: String },
+        AwaitCapture { out_var: String, out_type: String, task_var: String, task_is_const: bool },
+        ConstAwaitCapture { out_var: String, out_type: String, task_var: String, task_is_const: bool },
         AsyncBlock { body: Vec<Step> },
         AssignAsync { var: String, decl_type: String, body: Vec<Step> },
         ConstAsync { var: String, decl_type: String, body: Vec<Step> },
-        Await { var: String },
-        Cancel { var: String },
+        Await { var: String, is_const: bool },
+        Cancel { var: String, is_const: bool },
         Timeout { duration: Arg, body: Vec<Step> },
         Fail { code: Option<Arg>, message: Option<Arg>, body: Vec<Step> },
         Isolated { body: Vec<Step> },
@@ -5569,8 +5569,8 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
-            StepKind::Await { var } => {
-                if crate::constants::is_const_name(var) {
+            StepKind::Await { var, is_const } => {
+                if *is_const {
                     write!(f, "{} {}", KEYWORD_AWAIT, var)
                 } else {
                     write!(f, "{} ${}", KEYWORD_AWAIT, var)
@@ -5580,8 +5580,9 @@ impl fmt::Display for StepKind {
                 out_var,
                 out_type,
                 task_var,
+                task_is_const,
             } => {
-                if crate::constants::is_const_name(task_var) {
+                if *task_is_const {
                     write!(
                         f,
                         "{} ${}: {} = {} {}",
@@ -5599,8 +5600,9 @@ impl fmt::Display for StepKind {
                 out_var,
                 out_type,
                 task_var,
+                task_is_const,
             } => {
-                if crate::constants::is_const_name(task_var) {
+                if *task_is_const {
                     write!(
                         f,
                         "{} {}: {} = {} {}",
@@ -5614,8 +5616,8 @@ impl fmt::Display for StepKind {
                     )
                 }
             }
-            StepKind::Cancel { var } => {
-                if crate::constants::is_const_name(var) {
+            StepKind::Cancel { var, is_const } => {
+                if *is_const {
                     write!(f, "{} {}", KEYWORD_CANCEL, var)
                 } else {
                     write!(f, "{} ${}", KEYWORD_CANCEL, var)
@@ -7836,11 +7838,13 @@ mod tests {
                 out_var: "o".to_string(),
                 out_type: "STRING".to_string(),
                 task_var: "t".to_string(),
+                task_is_const: false,
             },
             StepKind::ConstAwaitCapture {
                 out_var: "o".to_string(),
                 out_type: "STRING".to_string(),
                 task_var: "t".to_string(),
+                task_is_const: false,
             },
             StepKind::AsyncBlock { body: Vec::new() },
             StepKind::AssignAsync {
@@ -7855,9 +7859,11 @@ mod tests {
             },
             StepKind::Await {
                 var: "t".to_string(),
+                is_const: false,
             },
             StepKind::Cancel {
                 var: "t".to_string(),
+                is_const: false,
             },
             StepKind::Timeout {
                 duration: Arg::String("1s".to_string(), false),

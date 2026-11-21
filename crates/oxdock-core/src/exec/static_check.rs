@@ -3948,6 +3948,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 out_var,
                 out_type,
                 task_var,
+                ..
             } => self.check_await_binding(
                 out_var, out_type, task_var, env, scope, step, idx, false, live,
             ),
@@ -3955,6 +3956,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 out_var,
                 out_type,
                 task_var,
+                ..
             } => self.check_await_binding(
                 out_var, out_type, task_var, env, scope, step, idx, true, live,
             ),
@@ -4177,7 +4179,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // arms above, so nothing here double-checks.
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
                 match &step.kind {
-                    StepKind::Await { var } | StepKind::Cancel { var } => {
+                    StepKind::Await { var, .. } | StepKind::Cancel { var, .. } => {
                         Self::check_name_read(env, var, scope, idx)?;
                     }
                     StepKind::WithIoBlock { bindings } => {

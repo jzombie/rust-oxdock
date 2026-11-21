@@ -1037,25 +1037,29 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
                 out_var: ox,
                 out_type: tx,
                 task_var: vx,
+                task_is_const: cx,
             },
             StepKind::AwaitCapture {
                 out_var: oy,
                 out_type: ty,
                 task_var: vy,
+                task_is_const: cy,
             },
-        ) => ox == oy && tx == ty && vx == vy,
+        ) => ox == oy && tx == ty && vx == vy && cx == cy,
         (
             StepKind::ConstAwaitCapture {
                 out_var: ox,
                 out_type: tx,
                 task_var: vx,
+                task_is_const: cx,
             },
             StepKind::ConstAwaitCapture {
                 out_var: oy,
                 out_type: ty,
                 task_var: vy,
+                task_is_const: cy,
             },
-        ) => ox == oy && tx == ty && vx == vy,
+        ) => ox == oy && tx == ty && vx == vy && cx == cy,
         (StepKind::AsyncBlock { body: x }, StepKind::AsyncBlock { body: y }) => {
             steps_content_eq(x, y)
         }
@@ -1083,8 +1087,26 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
                 body: by,
             },
         ) => vx == vy && tx == ty && steps_content_eq(bx, by),
-        (StepKind::Await { var: x }, StepKind::Await { var: y }) => x == y,
-        (StepKind::Cancel { var: x }, StepKind::Cancel { var: y }) => x == y,
+        (
+            StepKind::Await {
+                var: x,
+                is_const: cx,
+            },
+            StepKind::Await {
+                var: y,
+                is_const: cy,
+            },
+        ) => x == y && cx == cy,
+        (
+            StepKind::Cancel {
+                var: x,
+                is_const: cx,
+            },
+            StepKind::Cancel {
+                var: y,
+                is_const: cy,
+            },
+        ) => x == y && cx == cy,
         (
             StepKind::Timeout {
                 duration: dx,

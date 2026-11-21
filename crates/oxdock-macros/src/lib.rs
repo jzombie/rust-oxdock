@@ -1518,17 +1518,19 @@ fn emit_stepkind(
             out_var,
             out_type,
             task_var,
+            task_is_const,
         } => {
             let t = emit_typekind(out_type);
-            quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string() } }
+            quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string(), task_is_const: #task_is_const } }
         }
         StepKind::ConstAwaitCapture {
             out_var,
             out_type,
             task_var,
+            task_is_const,
         } => {
             let t = emit_typekind(out_type);
-            quote! { StepKind::ConstAwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string() } }
+            quote! { StepKind::ConstAwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string(), task_is_const: #task_is_const } }
         }
         StepKind::AssignAsync {
             var,
@@ -1548,11 +1550,11 @@ fn emit_stepkind(
             let t = emit_typekind(decl_type);
             quote! { StepKind::ConstAsync { var: #var.to_string(), decl_type: #t, body: vec![#(#steps),*] } }
         }
-        StepKind::Await { var } => {
-            quote! { StepKind::Await { var: #var.to_string() } }
+        StepKind::Await { var, is_const } => {
+            quote! { StepKind::Await { var: #var.to_string(), is_const: #is_const } }
         }
-        StepKind::Cancel { var } => {
-            quote! { StepKind::Cancel { var: #var.to_string() } }
+        StepKind::Cancel { var, is_const } => {
+            quote! { StepKind::Cancel { var: #var.to_string(), is_const: #is_const } }
         }
         StepKind::Timeout { duration, body } => {
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
@@ -2220,6 +2222,7 @@ mod tests {
 
         let awaited = StepKind::Await {
             var: "job".to_string(),
+            is_const: false,
         };
         let rendered = emit_stepkind(&awaited, &[]).to_string();
         assert!(rendered.contains("Await"), "shape: {rendered}");
