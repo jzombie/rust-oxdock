@@ -275,7 +275,7 @@ Two trade offs come with the form. Cloning a string still deep copies it, since 
 
 ### Transport: pipes
 
-A command's standard streams can be rerouted through pipes declared with `LET $p: PIPE`, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
+Pipes are runtime-managed streams, not file descriptors. There is exactly one interface: declare (`LET $p: PIPE`), wire (`WITH_IO [stdout=$p]` or `[stdin=$p]`), and pass or copy the handle across calls, tasks, and module boundaries. Scripts never allocate descriptors, never manage temp files, and never write platform plumbing: the runtime owns backend selection, lifetime, and EOF. Buffers stay in memory and spill to a guarded temp file past 8 MiB, background single command tasks can promote a pipe to a zero copy OS kernel pair instead, the last drop closes, and keepers pin background gaps. The same spelling runs identically on Linux, macOS, and Windows.
 
 ```oxdock
 LET $log: PIPE
@@ -4971,10 +4971,15 @@ Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
 
 ### Value type: PIPE
 
-Anonymous pipe handle. The backend materializes lazily on first
-binding (never eagerly at declaration), so the choice always has full
-usage context. Cloning shares the backend (explicit-sharing fan-out);
-equality is handle identity, never byte comparison.
+Runtime-managed stream handle, never a raw descriptor. A `PIPE` names a
+runtime-managed byte stream with exactly one interface: declare it
+(`LET $p: PIPE`), wire it (`WITH_IO`), and pass or copy it across
+calls and module boundaries. Script code never manages descriptors,
+temp files, or platform plumbing. The backend materializes lazily
+on first binding (never eagerly at declaration), so the choice
+always has full usage context. Cloning shares the backend
+(explicit-sharing fan-out); equality is handle identity, never
+byte comparison.
 
 ### Value type: HANDLE
 

@@ -4,10 +4,15 @@ Anonymous pipe backends for OxDock: spillable script buffers, OS pairs, and owne
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
 
-Anonymous pipe backends. Handles start unbound and materialize lazily on
-first binding (script buffers by default, OS kernel pairs for pure
-single-`RUN` pipelines); cloning a handle shares the backend, and the last
-drop closes. Under Miri everything stays on script pipes.
+Runtime-managed stream backends, never raw descriptors. A pipe is a
+runtime-managed byte stream with exactly one interface: declare it, wire
+it with `WITH_IO`, and pass or copy the handle across calls, tasks,
+and module boundaries. No descriptor bookkeeping, no temp file
+management, no platform plumbing in script code. Handles start unbound
+and materialize lazily on first binding (script buffers by default, OS
+kernel pairs for pure single-`RUN` pipelines); cloning a handle shares
+the backend, and the last drop closes. Under Miri everything stays on
+script pipes.
 
 ### Layout
 

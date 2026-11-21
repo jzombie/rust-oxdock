@@ -1682,3 +1682,57 @@ fn local_bare_const_coexists_with_alias_const() {
         )
         .expect("local bare CONST coexists with alias CONST");
 }
+
+#[test]
+fn pipe_talks_across_module_boundary() {
+    // Pipes share their backend cell on clone, so a pipe crosses
+    // the module boundary by value: as a FUNC argument or as a
+    // copied `EXPORT CONST PIPE`. `WITH_IO` bindings take a local
+    // `$var`, so a qualified `LIB::P` must be copied first.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxdock",
+        indoc! {r#"
+            FUNC EMIT($p: PIPE): VOID {
+                WITH_IO [stdout=$p] {
+                    ECHO hello-from-lib
+                }
+            }
+            CONST P: PIPE
+            EXPORT EMIT
+            EXPORT CONST P
+        "#},
+    );
+    // Entry mints the pipe and hands it to the module: the module
+    // writes, the entry reads back on the same backend.
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["lib.oxdock" AS LIB]
+                LET $p: PIPE
+                LIB::EMIT($p)
+                WITH_IO [stdin=$p] READ_LINE $line
+                ASSERT_EQ $line "hello-from-lib"
+            "#},
+        )
+        .expect("pipe passed as FUNC arg talks across the boundary");
+    // The module mints the pipe and exports it as CONST: the entry
+    // copies it to a local and both sides share the backend.
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["lib.oxdock" AS LIB]
+                LET $q: PIPE = LIB::P
+                WITH_IO [stdout=$q] {
+                    ECHO hi-via-const-pipe
+                }
+                WITH_IO [stdin=$q] READ_LINE $line
+                ASSERT_EQ $line "hi-via-const-pipe"
+            "#},
+        )
+        .expect("exported CONST PIPE talks across the boundary");
+}

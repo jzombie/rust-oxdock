@@ -169,14 +169,19 @@ struct PathValue(#[allow(clippy::disallowed_types)] pub std::path::PathBuf);
 #[derive(Debug, Clone, PartialEq)]
 struct DurationValue(pub Duration);
 
-/// Anonymous pipe handle. The backend materializes lazily on first
-/// binding (never eagerly at declaration), so the choice always has full
-/// usage context. Cloning shares the backend (explicit-sharing fan-out);
-/// equality is handle identity, never byte comparison.
+/// Runtime-managed stream handle, never a raw descriptor. A `PIPE` names a
+/// runtime-managed byte stream with exactly one interface: declare it
+/// (`LET $p: PIPE`), wire it (`WITH_IO`), and pass or copy it across
+/// calls and module boundaries. Script code never manages descriptors,
+/// temp files, or platform plumbing. The backend materializes lazily
+/// on first binding (never eagerly at declaration), so the choice
+/// always has full usage context. Cloning shares the backend
+/// (explicit-sharing fan-out); equality is handle identity, never
+/// byte comparison.
 #[oxdock_type(
     crate_path = "::oxdock_parser",
     name = "PIPE",
-    summary = "Anonymous pipe handle.",
+    summary = "Runtime-managed stream handle.",
     shared
 )]
 #[derive(Debug, Clone)]

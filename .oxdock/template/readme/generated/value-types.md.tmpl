@@ -41,10 +41,15 @@ Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
 
 ### Value type: PIPE
 
-Anonymous pipe handle. The backend materializes lazily on first
-binding (never eagerly at declaration), so the choice always has full
-usage context. Cloning shares the backend (explicit-sharing fan-out);
-equality is handle identity, never byte comparison.
+Runtime-managed stream handle, never a raw descriptor. A `PIPE` names a
+runtime-managed byte stream with exactly one interface: declare it
+(`LET $p: PIPE`), wire it (`WITH_IO`), and pass or copy it across
+calls and module boundaries. Script code never manages descriptors,
+temp files, or platform plumbing. The backend materializes lazily
+on first binding (never eagerly at declaration), so the choice
+always has full usage context. Cloning shares the backend
+(explicit-sharing fan-out); equality is handle identity, never
+byte comparison.
 
 ### Value type: HANDLE
 

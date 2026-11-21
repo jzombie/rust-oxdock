@@ -510,7 +510,7 @@ Two trade offs come with the form. Cloning a string still deep copies it, since 
 
 ### Transport: pipes
 
-A command's standard streams can be rerouted through pipes declared with `LET $p: PIPE`, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
+Pipes are runtime-managed streams, not file descriptors. There is exactly one interface: declare (`LET $p: PIPE`), wire (`WITH_IO [stdout=$p]` or `[stdin=$p]`), and pass or copy the handle across calls, tasks, and module boundaries. Scripts never allocate descriptors, never manage temp files, and never write platform plumbing: the runtime owns backend selection, lifetime, and EOF. Buffers stay in memory and spill to a guarded temp file past 8 MiB, background single command tasks can promote a pipe to a zero copy OS kernel pair instead, the last drop closes, and keepers pin background gaps. The same spelling runs identically on Linux, macOS, and Windows.
 
 ```oxdock
 LET $log: PIPE
