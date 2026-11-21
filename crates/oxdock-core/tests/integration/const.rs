@@ -1147,3 +1147,382 @@ fn const_await_cancel_display_round_trips_bare() {
         .expect_err("WITH_IO must reject $CONST pipe");
     assert!(err.to_string().contains("CONST reads bare"), "{err}");
 }
+
+#[test]
+fn entry_const_visible_in_entry_func() {
+    // File-top-level `CONST`s read inside the file's own `FUNC`s
+    // (#318): immutable file state is visible by scope, while only
+    // mutable state crosses as explicit arguments.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                CONST WORDS: LIST<STRING> = ["alpha", "bravo", "charlie"]
+                FUNC COUNT(): INT {
+                    RETURN LEN(WORDS)
+                }
+                FUNC FIRST(): STRING {
+                    LET $first: STRING = ""
+                    FOR $i: INT, $w: STRING IN WORDS {
+                        IF $i == 0 {
+                            $first = $w
+                        }
+                    }
+                    RETURN $first
+                }
+                LET $n: INT = COUNT()
+                ASSERT_EQ $n 3
+                LET $f: STRING = FIRST()
+                ASSERT_EQ $f "alpha"
+            "#},
+        )
+        .expect("entry CONST reads inside entry FUNCs");
+}
+
+#[test]
+fn entry_const_call_before_declare_fails() {
+    // Declaration order gates visibility: a call landing before the
+    // `CONST` executes would read uninitialized memory, so the
+    // static gate fails it instead of seeding the full union.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                FUNC EARLY(): STRING {
+                    RETURN MARKER
+                }
+                LET $r: STRING = EARLY()
+                CONST MARKER: STRING = "late"
+            "#},
+        )
+        .expect_err("call before CONST declaration must fail");
+    assert!(
+        format!("{err:#}").contains("undefined CONST MARKER"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn entry_const_visible_across_nested_entry_calls() {
+    // Seeding is transitive: a callee called from a callee observes
+    // the same file `CONST`s, never caller locals.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                CONST BASE: INT = 21
+                FUNC DOUBLE(): INT {
+                    RETURN BASE * 2
+                }
+                FUNC QUAD(): INT {
+                    LET $d: INT = DOUBLE()
+                    RETURN $d * 2
+                }
+                LET $q: INT = QUAD()
+                ASSERT_EQ $q 84
+            "#},
+        )
+        .expect("nested entry calls observe file CONSTs");
+}
+
+#[test]
+fn entry_const_mutation_from_func_fails() {
+    // The const gate rides the seed: writes through a file `CONST`
+    // fail inside bodies with the same one-shape message.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for script in [
+        indoc! {r#"
+            IMPORT [STD]
+            CONST GREETING: STRING = "hi"
+            FUNC REASSIGN(): VOID {
+                GREETING = "bye"
+            }
+            REASSIGN()
+        "#},
+        indoc! {r#"
+            IMPORT [STD]
+            CONST ITEMS: LIST<STRING> = ["a"]
+            FUNC TAMPER(): VOID {
+                LIST_APPEND ITEMS "b"
+            }
+            TAMPER()
+        "#},
+    ] {
+        let err = Engine::new()
+            .run_script(&root, script)
+            .expect_err("file CONST mutation from a body must fail");
+        assert!(
+            format!("{err:#}").contains("cannot mutate CONST"),
+            "{err:#}"
+        );
+    }
+}
+
+#[test]
+fn entry_let_stays_invisible_while_const_shows() {
+    // The exact boundary in one scope: the file `CONST` reads, the
+    // file `LET` does not.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                CONST C: STRING = "const-val"
+                LET $v: STRING = "let-val"
+                FUNC MIXED(): STRING {
+                    RETURN C
+                }
+                LET $c: STRING = MIXED()
+                ASSERT_EQ $c "const-val"
+            "#},
+        )
+        .expect("file CONST reads while file LET stays out");
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                CONST C: STRING = "const-val"
+                LET $v: STRING = "let-val"
+                FUNC LEAK(): STRING {
+                    RETURN $v
+                }
+                LET $c: STRING = LEAK()
+            "#},
+        )
+        .expect_err("file LET must stay invisible in the body");
+    assert!(format!("{err:#}").contains("undefined variable"), "{err:#}");
+}
+
+#[test]
+fn module_const_visible_in_module_func() {
+    // The module precedent: a file's own top-level `CONST` reads in
+    // its bodies through the module store.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            CONST TAG: STRING = "lib-tag"
+            EXPORT [CONST TAG, FUNC TAGOF]
+            FUNC TAGOF(): STRING {
+                RETURN TAG
+            }
+        "#},
+    );
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "lib.oxfile" AS LIB]
+                LET $t: STRING = LIB::TAGOF()
+                ASSERT_EQ $t "lib-tag"
+            "#},
+        )
+        .expect("module CONST reads in module bodies");
+}
+
+#[test]
+fn qualified_const_readable_in_func_bodies() {
+    // Cross-module `CONST`s resolve through the export registry, so
+    // they read inside bodies exactly like at top level: an entry
+    // body reads the import, and a module body reads another
+    // module's export.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a.oxfile",
+        indoc! {r#"
+            CONST FLAG: STRING = "a-flag"
+            EXPORT [CONST FLAG]
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxfile",
+        indoc! {r#"
+            IMPORT ["a.oxfile" AS A]
+            EXPORT [FUNC SHOW]
+            FUNC SHOW(): STRING {
+                RETURN A::FLAG
+            }
+        "#},
+    );
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "a.oxfile" AS A, "b.oxfile" AS B]
+                FUNC READQ(): STRING {
+                    RETURN A::FLAG
+                }
+                LET $q: STRING = READQ()
+                ASSERT_EQ $q "a-flag"
+                LET $s: STRING = B::SHOW()
+                ASSERT_EQ $s "a-flag"
+            "#},
+        )
+        .expect("qualified CONST reads in entry and module bodies");
+}
+
+#[test]
+fn entry_param_and_local_shadow_const_stays_mutable() {
+    // Shadowing runs both ways inside bodies too: a param or a
+    // body-local LET shadowing a file CONST stays mutable while
+    // the file CONST holds. The seed frame sits beneath the params
+    // frame, so the innermost binding decides on both sides.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                CONST X: INT = 1
+                FUNC SHADOW($X: INT): INT {
+                    $X = $X + 10
+                    RETURN $X
+                }
+                FUNC LOCALSHADOW(): INT {
+                    LET $X: INT = 2
+                    $X = $X + 10
+                    RETURN $X
+                }
+                LET $s: INT = SHADOW(5)
+                ASSERT_EQ $s 15
+                ASSERT_EQ X 1
+                LET $l: INT = LOCALSHADOW()
+                ASSERT_EQ $l 12
+                ASSERT_EQ X 1
+            "#},
+        )
+        .expect("shadowing param and local stay mutable");
+}
+
+#[test]
+fn entry_nested_callee_sees_file_const_not_caller_param() {
+    // Caller locals never cross: `INNER` observes the file `CONST`
+    // even when the caller shadows it with a parameter, and the
+    // static seeding agrees exactly (no divergence to debug).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                CONST BASE: INT = 21
+                FUNC INNER(): INT {
+                    RETURN BASE
+                }
+                FUNC SHADOW($BASE: INT): INT {
+                    LET $inner: INT = INNER()
+                    RETURN $inner + $BASE
+                }
+                LET $r: INT = SHADOW(99)
+                ASSERT_EQ $r 120
+            "#},
+        )
+        .expect("nested callee sees file CONST, caller keeps its param");
+}
+
+#[test]
+fn entry_body_local_const_does_not_leak_to_nested_callee() {
+    // A body-local `CONST` belongs to its own call frame: a nested
+    // callee reads the file `CONST` of the same name, never the
+    // caller's local.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                CONST V: INT = 1
+                FUNC INNER(): INT {
+                    RETURN V
+                }
+                FUNC OUTER(): INT {
+                    CONST V: INT = 2
+                    LET $inner: INT = INNER()
+                    RETURN $inner + V
+                }
+                LET $r: INT = OUTER()
+                ASSERT_EQ $r 3
+            "#},
+        )
+        .expect("body-local CONST stays local, file CONST stays visible");
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD]
+                FUNC OUTER(): INT {
+                    CONST ONLY_LOCAL: INT = 5
+                    RETURN INNER()
+                }
+                FUNC INNER(): INT {
+                    RETURN ONLY_LOCAL
+                }
+                LET $r: INT = OUTER()
+            "#},
+        )
+        .expect_err("body-local CONST must stay invisible to nested callees");
+    assert!(
+        format!("{err:#}").contains("undefined CONST ONLY_LOCAL"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn entry_body_local_const_in_seeded_func_stays_immutable() {
+    // The frame-skew shape: a body-local CONST declared inside a
+    // seeded entry FUNC (file top-level CONST present) must refuse
+    // every write exactly like a file CONST, scalar and container.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for script in [
+        indoc! {r#"
+            IMPORT [STD]
+            CONST A: INT = 1
+            FUNC F(): INT {
+                CONST B: INT = 2
+                B = 3
+                RETURN B
+            }
+            LET $r: INT = F()
+        "#},
+        indoc! {r#"
+            IMPORT [STD]
+            CONST A: INT = 1
+            FUNC F(): LIST<STRING> {
+                CONST C: LIST<STRING> = ["x"]
+                LIST_APPEND C "y"
+                RETURN C
+            }
+            LET $r: LIST<STRING> = F()
+        "#},
+    ] {
+        let err = Engine::new()
+            .run_script(&root, script)
+            .expect_err("body-local CONST in a seeded body must stay immutable");
+        assert!(
+            format!("{err:#}").contains("cannot mutate CONST"),
+            "{err:#}"
+        );
+    }
+}

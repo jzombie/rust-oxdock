@@ -150,6 +150,23 @@ struct GuardedLet {
 /// Module-owned bindings by module key.
 type ModuleLets = HashMap<String, Vec<GuardedLet>>;
 
+/// Fold top-level bindings into a static scope map: one entry list
+/// per name so disjoint guards coexist exactly like the runtime
+/// same-frame walk. Single owner behind module-store seeding and
+/// entry `CONST` seeding; callers filter first (modules seed every
+/// family, entry seeds `CONST` only).
+fn seed_map(bindings: &[GuardedLet]) -> HashMap<String, Vec<Binding>> {
+    let mut map: HashMap<String, Vec<Binding>> = HashMap::new();
+    for entry in bindings {
+        map.entry(entry.name.clone()).or_default().push(Binding {
+            tag: entry.tag.clone(),
+            guard: entry.guard.clone(),
+            is_const: entry.is_const,
+        });
+    }
+    map
+}
+
 /// Lexical environment: a stack of frames mirroring the runtime
 /// `var_scopes`. Frames push on `scope_enter` markers, branch and
 /// loop bodies, and function entries; they pop on `scope_exit` or are
@@ -3138,19 +3155,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
         let mut env = Env::one_frame(info.params.clone());
         if let Some(module) = info.module.as_deref() {
-            let lets = self.module_lets.get(module).cloned().unwrap_or_default();
             let touched = probe.unwrap_or_default();
-            let mut module_lets: HashMap<String, Vec<Binding>> = HashMap::new();
-            for entry in lets {
-                module_lets.entry(entry.name).or_default().push(Binding {
-                    tag: entry.tag,
-                    guard: entry.guard,
-                    is_const: entry.is_const,
-                });
-            }
             env.module = Some(ModuleScope {
                 key: module.to_string(),
-                lets: module_lets,
+                lets: seed_map(
+                    self.module_lets
+                        .get(module)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                ),
                 touched,
             });
             // The file's prelude union seeds the body: a module
@@ -3164,14 +3177,28 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
             }
         } else {
-            // Entry bodies observe their own file prelude (#322
-            // follow-up): params plus every top-level `ENV` /
-            // `INHERIT_ENV` name, never caller or module state. The
-            // runtime resets entry calls to the seed plus this same
-            // prelude (re-reading inherits from the engine), so the
-            // gate here approves exactly what execution provides. A
-            // body-level declaration shadows the prelude, preserving
-            // the isolation pins.
+            // Entry functions observe params plus the file's top-level
+            // `CONST`s declared before their earliest reachable call
+            // (#318): immutable file state is visible by scope, while
+            // mutable state crosses only as explicit arguments. Seeds
+            // sit beneath the params frame, so param shadowing and the
+            // const gate ride the existing frame walk with no special
+            // cases. Uncalled bodies keep the full union (dead code
+            // stays lenient). The runtime seeds the same view from the
+            // caller bottom const frame; keep the two in lockstep.
+            let scoped = self
+                .entry_let_scopes
+                .get(&(info.name.clone(), info.line, info.col));
+            let source: &[GuardedLet] = match scoped {
+                Some(scope) => scope,
+                None => &self.entry_lets,
+            };
+            let seeds: Vec<GuardedLet> = source.iter().filter(|b| b.is_const).cloned().collect();
+            if !seeds.is_empty() {
+                env.frames.insert(0, seed_map(&seeds));
+                env.env_frames.insert(0, HashSet::new());
+                env.func_frames.insert(0, HashMap::new());
+            }
             for name in &self.entry_env_union {
                 env.declare_env(name.clone());
             }

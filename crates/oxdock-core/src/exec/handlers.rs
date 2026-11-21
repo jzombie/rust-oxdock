@@ -2764,8 +2764,9 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // (#115, #322). Module-owned bindings stay visible through
             // the module-store fallback in every accessor, so this
             // cuts importer frames and entry globals alike, never
-            // module file state. Entry calls have no store fallback,
-            // so they observe params plus locals only.
+            // module file state. Entry calls have no store fallback:
+            // they observe params, locals, and (seeded below) the
+            // file's top-level `CONST`s.
             let saved_vars = Some(std::mem::take(&mut cx.state.var_scopes));
             // `CONST` marks ride the same swap: every callee declares
             // into a fresh const frame and restores after.
@@ -2774,6 +2775,37 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // env resets below, so inherited scrubs must not leak in.
             let saved_isolated = std::mem::take(&mut cx.state.isolated_stack);
             cx.state.push_scope();
+            // Entry file `CONST`s are visible by scope (#318): an
+            // entry-owned callee called from entry code restores the
+            // caller bottom frame's `CONST` marks and values into a
+            // dedicated seed frame beneath its params, so the body
+            // reads exactly the top-level `CONST`s declared so far.
+            // `LET`s never cross (unmarked); module callers seed
+            // nothing (entry file state is not caller state, and
+            // modules cannot name entry functions). Params and locals
+            // shadow structurally above the seed; reads and the
+            // mutation gates ride `get_var`/`is_const_var` unchanged.
+            // Mirrors the static entry seeding; keep the two in
+            // lockstep.
+            let mut seeded_entry_consts = false;
+            if module_key.is_none()
+                && matches!(cx.state.module_stack.last(), None | Some(None))
+                && let (Some(vars), Some(marks)) = (
+                    saved_vars.as_ref().and_then(|stack| stack.first()),
+                    saved_consts.as_ref().and_then(|stack| stack.first()),
+                )
+            {
+                for name in marks {
+                    if let Some((tag, value)) = vars.get(name) {
+                        cx.state
+                            .declare_const(name.clone(), tag.clone(), value.clone())?;
+                        seeded_entry_consts = true;
+                    }
+                }
+                if seeded_entry_consts {
+                    cx.state.push_var_scope();
+                }
+            }
             // Callee jail (#322): every call restores the workspace
             // selection and cwd sealed at the definition site, so a
             // file that establishes its jail before its `FUNC`s serves
@@ -2911,6 +2943,12 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                     }
                 }
             })();
+            // Drop the entry `CONST` seed frame first, so `pop_scope`
+            // removes the call frame it pushed; the wholesale restores
+            // below discard both either way.
+            if seeded_entry_consts {
+                cx.state.pop_var_scope();
+            }
             let pop_res = cx.state.pop_scope();
             if let Some(saved) = saved_vars {
                 cx.state.var_scopes = saved;

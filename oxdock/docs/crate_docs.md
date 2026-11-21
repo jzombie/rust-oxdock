@@ -2069,6 +2069,16 @@ pair may be exported. Shadowing an outer binding in
 an inner block stays legal and the inner declaration
 reverts on block exit.
 
+A file's top-level `CONST`s read inside that file's
+own `FUNC` bodies: immutable file state is visible by
+scope, while mutable state crosses only as explicit
+arguments. Visibility is declaration-ordered: a call
+landing before the `CONST` executes fails instead of
+reading uninitialized memory. `ALIAS::NAME` reads work
+in bodies exactly like at top level. Writes stay
+forbidden everywhere: a body mutating a file `CONST`
+fails with the same message as a top-level write.
+
 `CONST` is the only variable binding an `EXPORT` can name
 (`EXPORT CONST_NAME`, `EXPORT [CONST A, B]`): `LET`
 bindings never cross the module boundary. Importers read
@@ -2088,6 +2098,14 @@ ASSERT_CONTAINS stdout "hello, world"
 # Containers freeze with the binding.
 CONST ITEMS: LIST<STRING> = ["a", "b"]
 ASSERT_CONTAINS ITEMS "a"
+
+# File CONSTs read inside the file's own FUNCs.
+CONST GREETING: STRING = "hi"
+FUNC SHOUT(): STRING {
+    RETURN GREETING
+}
+LET $s: STRING = SHOUT()
+ASSERT_EQ $s "hi"
 ```
 
 **Example: const rejects mutation**
