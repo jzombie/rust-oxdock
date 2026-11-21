@@ -1,0 +1,4 @@
+name = "const_capture"
+
+[expect]
+files = { "result.txt" = "captured\n" }

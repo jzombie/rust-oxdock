@@ -153,7 +153,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     out.extend(env_placeholders(text));
                 }
             }
-            Expr::Var(_) => {}
+            Expr::Var(_) | Expr::Const(_) | Expr::ConstRef { .. } | Expr::ConstKeyPath { .. } => {}
             Expr::Env(key) => {
                 out.insert(key.clone());
             }
@@ -180,7 +180,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     walk_expr(out, arg);
                 }
             }
-            Expr::Inspect(_) => {}
+            Expr::Inspect(_) | Expr::InspectConst(_) => {}
             // Fresh pipe backends carry no env references.
             Expr::FreshPipe => {}
             Expr::Compare { left, right, .. } => {
@@ -446,14 +446,16 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     }
                 }
             }
-            StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => {
+            StepKind::Assign { expr, .. }
+            | StepKind::Const { expr, .. }
+            | StepKind::Set { expr, .. } => {
                 walk_expr(&mut keys, expr);
             }
-            StepKind::AssignCapture { cmd, .. } => {
+            StepKind::AssignCapture { cmd, .. } | StepKind::ConstCapture { cmd, .. } => {
                 collect_env_references_inner(&mut keys, cmd);
             }
-            StepKind::AwaitCapture { .. } => {}
-            StepKind::AssignAsync { body, .. } => {
+            StepKind::AwaitCapture { .. } | StepKind::ConstAwaitCapture { .. } => {}
+            StepKind::AssignAsync { body, .. } | StepKind::ConstAsync { body, .. } => {
                 for k in collect_env_references(body) {
                     keys.insert(k);
                 }

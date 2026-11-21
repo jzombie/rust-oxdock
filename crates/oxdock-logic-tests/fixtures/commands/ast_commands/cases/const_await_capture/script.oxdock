@@ -1,0 +1,7 @@
+# CONST await capture: AWAIT binds the task's RETURN value into the
+# immutable variable; a task that succeeds without RETURN yields 0.
+LET $task: HANDLE<ANY> = ASYNC ECHO "task-output"
+CONST OUT: INT = AWAIT $task
+LET $t2: HANDLE<STRING> = ASYNC { RETURN "explicit" }
+CONST V: STRING = AWAIT $t2
+WRITE result.txt "{{ OUT }}-{{ V }}"

@@ -1,0 +1,94 @@
+# Multi-container Docker pipeline in a single oxdock file.
+#
+# Proves, end to end:
+# 1. Docker availability is probed with STD::IS_EXEC.
+# 2. One multi-line variable holds the Dockerfile, fed to
+#    `docker build` over stdin (zero files written).
+# 3. Three containers run off that image with stdio streamed
+#    through DSL pipes, transformed by the DSL itself.
+#
+# Run: `oxdock oxdock/examples/docker-pipeline.oxdock`
+# Without docker the script skips cleanly instead of failing.
+
+IMPORT [STD]
+
+# Absolute PATH probes resolve through the workspace, so the
+# availability check runs under SYSTEM where the host is visible.
+# (No INHERIT_ENV needed: PATH is a host-mirrored default per
+# ENV_CONTRACTS.md and arrives seeded.)
+WORKSPACE SYSTEM
+
+LET $has_docker: BOOL = IS_EXEC("docker")
+
+IF !$has_docker {
+    FAIL "docker not available, skipping pipeline"
+} ELSE {
+    # Empty ephemeral root: the `docker build -f - .` context below
+    # stays tiny, and nothing here WRITEs any file.
+    WORKSPACE SNAPSHOT
+
+    # One multi-line variable is the entire build definition.
+        LET $dockerfile: STRING = """
+        FROM alpine:latest
+        CMD ["cat"]
+        """
+
+    # No Dockerfile artifact: prove nothing landed on disk.
+    LET $probe: BOOL = EXISTS("Dockerfile")
+    ASSERT_EQ $probe false
+
+    # Belt and braces: the directory listing itself shows no Dockerfile.
+    LET $entries: STRING = LS
+    LET $leaked: BOOL = CONTAINS($entries, "Dockerfile")
+    ASSERT_EQ $leaked false
+
+    # Feed the Dockerfile via stdin: producer ECHOs the variable
+    # into a pipe, the build consumes it with `-f -`. Zero files.
+    LET $build_pipe: PIPE
+    WITH_IO [stdout=$build_pipe] ECHO "{{ $dockerfile }}"
+    LET $raw_id: STRING = WITH_IO [stdin=$build_pipe] RUN docker build -q -f - .
+    LET $iid: STRING = TEXT_TRIM($raw_id)
+    ECHO "built {{ $iid }}"
+
+    # Two concurrent containers, each streaming its own stdin.
+    # Pipes are script pipes (in-memory, spilling past 8 MiB), so
+    # each producer may finish before its consumer starts.
+    LET $in1: PIPE
+    LET $in2: PIPE
+    WITH_IO [stdout=$in1] ECHO "hello oxdock"
+    WITH_IO [stdout=$in2] ECHO "pipeline proves stdio"
+
+    LET $t1: HANDLE<STRING> = ASYNC {
+        LET $o: STRING = WITH_IO [stdin=$in1] RUN docker run --rm -i {{ $iid }} cat
+        RETURN $o
+    }
+    LET $t2: HANDLE<STRING> = ASYNC {
+        LET $o: STRING = WITH_IO [stdin=$in2] RUN docker run --rm -i {{ $iid }} cat
+        RETURN $o
+    }
+
+    LET $r1: STRING = AWAIT $t1
+    LET $r2: STRING = AWAIT $t2
+    ASSERT_CONTAINS $r1 "hello oxdock"
+    ASSERT_CONTAINS $r2 "pipeline proves stdio"
+
+    # The DSL itself transforms between containers: join the two
+    # outputs, then uppercase. No container logic involved here.
+    LET $c1: STRING = TEXT_TRIM($r1)
+    LET $c2: STRING = TEXT_TRIM($r2)
+    LET $combined: STRING = TEXT_JOIN([$c1, $c2], " ")
+    LET $upper: STRING = TEXT_TO_UPPER($combined)
+    ECHO "dsl combined: {{ $combined }}"
+    ECHO "dsl upper: {{ $upper }}"
+
+    # Third container streams the DSL output back down: `tr`
+    # lowercases what the DSL uppercased, closing the loop and
+    # proving stdio flows DSL -> container -> DSL.
+    LET $in3: PIPE
+    WITH_IO [stdout=$in3] ECHO "{{ $upper }}"
+    LET $back: STRING = WITH_IO [stdin=$in3] RUN docker run --rm -i {{ $iid }} tr A-Z a-z
+    LET $lower: STRING = TEXT_TRIM($back)
+    ASSERT_EQ $lower $combined
+
+    ECHO "docker pipeline OK: 3 containers, stdio round-tripped through the DSL"
+}

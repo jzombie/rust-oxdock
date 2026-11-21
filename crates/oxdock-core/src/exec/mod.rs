@@ -34,16 +34,17 @@ pub(crate) use self::handlers::{
     dispatch_append, dispatch_append_line, dispatch_archive, dispatch_assert_contains,
     dispatch_assert_eq, dispatch_assert_ne, dispatch_assign, dispatch_assign_async_step,
     dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
-    dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
-    dispatch_copy, dispatch_copy_git, dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand,
-    dispatch_fail, dispatch_for_loop, dispatch_func_def, dispatch_if_then, dispatch_import_file,
-    dispatch_import_funcs, dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env,
-    dispatch_isolated_step, dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step,
-    dispatch_read, dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return,
-    dispatch_run, dispatch_run_exec, dispatch_set, dispatch_set_executable, dispatch_sleep_step,
-    dispatch_switch, dispatch_symlink, dispatch_timeout_step, dispatch_unarchive,
-    dispatch_while_loop, dispatch_with_io, dispatch_with_io_block, dispatch_workdir,
-    dispatch_workspace, dispatch_write,
+    dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_const,
+    dispatch_const_async_step, dispatch_const_await_capture_step, dispatch_const_capture_step,
+    dispatch_continue, dispatch_copy, dispatch_copy_git, dispatch_echo, dispatch_env,
+    dispatch_exit, dispatch_expand, dispatch_fail, dispatch_for_loop, dispatch_func_def,
+    dispatch_if_then, dispatch_import_file, dispatch_import_funcs, dispatch_inherit_env,
+    dispatch_install, dispatch_isolated_inherit_env, dispatch_isolated_step, dispatch_ls,
+    dispatch_mkdir, dispatch_prompt, dispatch_push_into_step, dispatch_read, dispatch_read_line,
+    dispatch_remote, dispatch_remove, dispatch_return, dispatch_run, dispatch_run_exec,
+    dispatch_set, dispatch_set_executable, dispatch_sleep_step, dispatch_switch, dispatch_symlink,
+    dispatch_timeout_step, dispatch_unarchive, dispatch_while_loop, dispatch_with_io,
+    dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
 };
 pub use self::import::{DryRunStep, dry_run_closure};
 pub use self::io::ExecIo;
@@ -59,6 +60,7 @@ pub use self::native::{
 };
 pub use self::state::ExecState;
 pub use self::state::MAX_RUNNING_TASKS;
+pub use self::state::const_mutation_error;
 pub use self::steps::StepCtx;
 pub use self::typing::{
     Field, LIST_TAG, MAP_TAG, OxDockType, TypeDescriptor, TypeTag, Value, ValuePayload,
@@ -435,6 +437,7 @@ pub(crate) fn new_state<P: ProcessManager>(
     // Run-scoped worker telemetry: the root hub adopts the staged
     // counter so every pump worker this run spawns attributes to it.
     let worker_counter = io.worker_counter();
+    let entry_envs = (*seed).clone();
     let mut state = ExecState {
         fs,
         cargo_scratch,
@@ -449,6 +452,7 @@ pub(crate) fn new_state<P: ProcessManager>(
         assert_windows_stderr: assert_windows_stderr.clone(),
         exact_stdout: exact_stdout.clone(),
         var_scopes: Vec::new(),
+        const_scopes: Vec::new(),
         cancel_token: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cancel_hub: std::sync::Arc::new(oxdock_process::CancelHub::with_counter(worker_counter)),
         active_process: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -464,6 +468,11 @@ pub(crate) fn new_state<P: ProcessManager>(
         import_stack: Vec::new(),
         executed_alias_targets: std::collections::HashMap::new(),
         call_alias_frames: Vec::new(),
+        func_floors: Vec::new(),
+        harvest_map: std::collections::HashMap::new(),
+        entry_tops: std::collections::HashMap::new(),
+        entry_envs,
+        entry_inherit_names: Vec::new(),
         modules: std::collections::HashMap::new(),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
@@ -550,6 +559,12 @@ pub fn validate_closure_for_run<P: ProcessManager>(
 ) -> Result<Vec<String>> {
     state.restore_aliases(self::typing::collect_type_aliases(steps, state)?);
     state.validate_function_type_tags()?;
+    // Entry Frame-1 file scope (#322): index the entry top-level
+    // `FUNC`s once. Every execution path (Engine, MCP, dry run)
+    // funnels through here with the steps it is about to run, so
+    // one build covers them all and entry calls resolve their own
+    // file without scanning steps.
+    state.entry_tops = self::import::collect_top_funcs(steps);
     let saved_aliases = state.type_aliases.clone();
     let closure = self::import::expand_import_closure(state, steps)?;
     static_check::validate_script_closure(steps, &closure, state)?;

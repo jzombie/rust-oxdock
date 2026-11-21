@@ -2976,11 +2976,15 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::If { .. } => {}
         StepKind::Switch { .. } => {}
         StepKind::Assign { .. } => {}
+        StepKind::Const { .. } => {}
         StepKind::Set { .. } => {}
         StepKind::AssignCapture { .. } => {}
+        StepKind::ConstCapture { .. } => {}
         StepKind::AssignAsync { .. } => {}
+        StepKind::ConstAsync { .. } => {}
         StepKind::Await { .. } => {}
         StepKind::AwaitCapture { .. } => {}
+        StepKind::ConstAwaitCapture { .. } => {}
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
         StepKind::Isolated { .. } => {}
@@ -4927,12 +4931,12 @@ fn fail_block_reroutes_nested_output_to_stderr() {
         &root,
         indoc! {r#"
             LET $who: STRING = "caller-val"
-            FUNC SHOUT(): VOID {
+            FUNC SHOUT($who: STRING): VOID {
                 ECHO "func-sees:{{ $who }}"
             }
             FAIL "fail-msg" {
                 ECHO "block-sees:{{ $who }}"
-                SHOUT()
+                SHOUT($who)
             }
             WRITE never.txt written
         "#},
@@ -5263,12 +5267,13 @@ fn func_return_only_inside_loop_fails() {
 #[test]
 fn func_guarded_return_without_fallback_fails() {
     // A conditionally-guarded RETURN with no unconditional fallback
-    // leaves fallthrough reachable.
+    // leaves fallthrough reachable. The guard name declares inside
+    // the body: entry top-level ENV never leaks into a callee (#322).
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        ENV STATIC_CHECK_DEMO_GUARD=1
         FUNC MAYBE(): STRING {
+            ENV STATIC_CHECK_DEMO_GUARD=1
             [env:STATIC_CHECK_DEMO_GUARD] RETURN "yes"
         }
     "#};

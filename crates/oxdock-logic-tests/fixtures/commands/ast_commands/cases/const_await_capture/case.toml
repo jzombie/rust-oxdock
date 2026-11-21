@@ -1,0 +1,4 @@
+name = "const_await_capture"
+
+[expect]
+files = { "result.txt" = "0-explicit" }

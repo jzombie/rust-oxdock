@@ -251,11 +251,17 @@ fn parse_returns(value: syn::Expr) -> syn::Result<syn::Expr> {
 /// `String` parameters; `options` comes from `#[options(...)]` and is
 /// valid only on `MAP` parameters: the same token list feeds the
 /// metadata, so the documented set cannot rot apart from the check.
+/// `reject_frozen` comes from `#[reject_frozen]` and is valid only on
+/// container (`MAP`/`LIST`) or `Value` parameters: the generated
+/// extractor refuses frozen `CONST` buffers (and, for lists, frozen
+/// elements, which are the merged operands) with the shared
+/// `const_mutation_error` shape.
 struct Param {
     ident: syn::Ident,
     kind: ParamKind,
     allowed: Option<Vec<String>>,
     options: Option<Vec<OptSpec>>,
+    reject_frozen: bool,
     /// `#[optional]` omittable trailing options MAP: omission fills
     /// `{}`, and the rendered signature marks `$name?`. Valid only
     /// trailing (expansion-enforced, mirroring run-start validation).
@@ -621,10 +627,35 @@ impl ParamKind {
         param: &syn::Ident,
         dsl_name: &str,
         allowed: Option<&[String]>,
+        reject_frozen: bool,
     ) -> TokenStream2 {
+        // Frozen-operand guard shared by every container extractor
+        // below: the value itself plus, for lists, each top-level
+        // element (merged/sorted operands). Map values are data, never
+        // operands, so they stay unchecked. One template so all
+        // rejecting params report one shape.
+        let frozen_guard = reject_frozen.then(|| {
+            quote! {
+                if __oxdock_v.is_frozen()
+                    || __oxdock_v
+                        .as_list()
+                        .is_some_and(|items| items.iter().any(|item| item.is_frozen()))
+                {
+                    return Err(::oxdock_core::const_mutation_error(&format!(
+                        "${} in {}()",
+                        stringify!(#param),
+                        #dsl_name,
+                    )));
+                }
+            }
+        });
         match self {
             ParamKind::Value => quote! {
-                __oxdock_values.next().expect("arity checked above")
+                {
+                    let __oxdock_v = __oxdock_values.next().expect("arity checked above");
+                    #frozen_guard
+                    __oxdock_v
+                }
             },
             ParamKind::String => {
                 let membership = match allowed {
@@ -797,6 +828,7 @@ impl ParamKind {
                 quote! {
                     {
                         let __oxdock_v = __oxdock_values.next().expect("arity checked above");
+                        #frozen_guard
                         ::oxdock_core::check_value_at(
                             &(#tag),
                             &__oxdock_v,
@@ -1415,6 +1447,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
         let mut options: Option<Vec<OptSpec>> = None;
         let mut union_members: Option<Vec<Type>> = None;
         let mut record_fields: Option<Vec<RecordField>> = None;
+        let mut reject_frozen = false;
         let mut omittable = false;
         for attr in &typed.attrs {
             if attr.path().is_ident("values") {
@@ -1453,6 +1486,11 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                     syn::Error::new_spanned(attr, "`#[optional]` takes no arguments")
                 })?;
                 omittable = true;
+            } else if attr.path().is_ident("reject_frozen") {
+                attr.meta.require_path_only().map_err(|_| {
+                    syn::Error::new_spanned(attr, "`#[reject_frozen]` takes no arguments")
+                })?;
+                reject_frozen = true;
             }
         }
         let mut kind = param_kind(&typed.ty)?;
@@ -1506,6 +1544,17 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                 "`#[options(...)]` needs a MAP parameter",
             ));
         }
+        if reject_frozen
+            && !matches!(
+                kind,
+                ParamKind::Shaped(_) | ParamKind::Value | ParamKind::Record(_)
+            )
+        {
+            return Err(syn::Error::new_spanned(
+                &typed.ty,
+                "`#[reject_frozen]` needs a MAP, LIST, or Value parameter; frozen buffers only exist on containers",
+            ));
+        }
         if omittable && options.is_none() {
             return Err(syn::Error::new_spanned(
                 &typed.ty,
@@ -1522,6 +1571,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
             kind,
             allowed,
             options,
+            reject_frozen,
             optional: omittable,
             docs: param_docs,
         });
@@ -1538,7 +1588,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
         ));
     }
     // `#[values(...)]`, `#[options(...)]`, `#[union(...)]`,
-    // `#[record(...)]`, `#[optional]`, and per-parameter `///` docs
+    // `#[record(...)]`, `#[reject_frozen]`, `#[optional]`, and per-parameter `///` docs
     // are macro input, not real attributes: strip them so the
     // re-emitted function compiles (`doc` is not a legal parameter
     // attribute for rustc) without unknown-attribute errors. The
@@ -1552,6 +1602,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                     && !attr.path().is_ident("options")
                     && !attr.path().is_ident("union")
                     && !attr.path().is_ident("record")
+                    && !attr.path().is_ident("reject_frozen")
                     && !attr.path().is_ident("optional")
                     && !attr.path().is_ident("doc")
             });
@@ -1661,7 +1712,9 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
         .enumerate()
         .map(|(option_idx, p)| {
             let name = &p.ident;
-            let extract = p.kind.extractor(name, &dsl_name, p.allowed.as_deref());
+            let extract = p
+                .kind
+                .extractor(name, &dsl_name, p.allowed.as_deref(), p.reject_frozen);
             // Options-bearing MAP params validate their keys against the
             // same static the metadata renders: unknown keys fail here,
             // in the wrapper, so bodies never re-check them. The binding

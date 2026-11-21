@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.44.0-alpha] - 2026-11-21
+
+### Changed
+
+- [breaking] `FUNC` callee isolation (#322): the only thing crossing a function boundary is explicit arguments. Same module or across modules, no distinction: no ambient `WORKSPACE`, `WORKDIR`, `ENV`, or outer-variable leakage. Module init runs isolated in the snapshot jail, and the selection plus cwd its top-level leaves behind become the default every `FUNC` of that file restores on entry (unless the body overrides them); a lib declaring `WORKSPACE LOCAL` at the top serves its functions from there no matter which workspace the caller sits in. Entry bodies reset to the snapshot jail. Module top-level `LET` bindings stay visible to that module's functions through the shared store; entry top-level bindings never enter a callee. Update call sites to pass paths, env values, and variables as arguments and to declare `WORKSPACE`/`WORKDIR`/`ENV` inside each body that needs them.
+- [breaking] `FUNC` resolution is a single frame walk per call, innermost scope outward (#322, supersedes the #319 home-scope fallback mechanism with identical behavior plus nested shadowing): body-local nested `FUNC`s first, then the owning file's top-level index (entry included), then bare harvests, then hosts; `ALIAS::FUNC` spellings keep resolving through the calling unit's imports. Bare calls never address another unit: an entry call to a lib-only name and a module call into its caller's nested scope both fail closed with `unknown function`. Bare harvests are explicit globals: they resolve from the defining file (first textual definition) and survive init scope pops, so harvested functions serve identically whether the caller sits at top level or inside another call. Entry forward references now execute: the static pass already validated them, and the runtime file frame serves them regardless of definition order (retiring the 0.40.0 limitation that calls must run after both definitions).
+- [breaking] `oxdock-render` is a single binary: it interprets its own pipeline stages via `--interpret` (script on stdin, same full engine) instead of spawning a separate `oxdock-render-child` sidecar, which is deleted. Driver and stages always share one build, so a stale sidecar silently rendering old metadata is impossible; `cargo run -p oxdock-render` regenerates everything. Release tarballs and installs carry the single binary; the `OXDOCK_RENDER_CHILD` override still selects a custom interpreter.
+
+### Added
+
+- `CONST NAME: TYPE = <expr>` bindings (#318): deeply immutable values in every shape `LET` accepts, with bare `UPPERCASE` names and no `$` sigil (`CONST $NAME` is a parse error; `LET` keeps `$`). `$NAME` reads of a `CONST` fail naming the bare form. Reassignment, `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS` on a `CONST` fail; nested containers freeze with the binding. `CONST` and `LET` share one stripped namespace. Only `CONST` is `EXPORT`able from modules, read bare as `ALIAS::NAME`. File-top-level `CONST`s read inside the file's own `FUNC`s (declaration-ordered); `LET`s still cross only as explicit arguments.
+- Callee home-scope resolution (#319): a `FUNC` body resolves bare and `SCRIPT::` calls against its defining file first, so an `IMPORT` names only what the importing file itself calls. Harvesting `STAGE` alone now runs its unharvested and private siblings; `LIB::PRIVATE` stays unknown. Static inference sees the same scope, so declared `-> STRING` returns flow into union-typed params through home calls. Unknown `ALIAS::FUNC` failures now name the fix when another loaded file exports the name (`did you mean` for alias-imported files, a harvest spelling otherwise).
+- `STD::UNIQUE($items: LIST<ANY>): LIST` pure builtin (#319): first-occurrence dedup with strict `values_equal` membership (numerics compare across `INT`/`FLOAT`, every other cross-type pair is unequal, matching `CONTAINS`/`==`). Collapses projection-plus-flag dedup loops to one call.
+
+### Fixed
+
+- Script `FUNC` calls resolve inside RPN arithmetic: `LET $t: INT = DOUBLE() * 2` and `RETURN DOUBLE() * 2` route through the same resolution and execution as statement calls instead of failing with `unknown function SCRIPT::DOUBLE`. Resolution, the recursion depth budget, and the arity gate are single-sourced behind the statement-call path, so math calls guard identically; AST-only natives keep their existing rejection.
+
 ## [0.43.0-alpha] - 2026-11-19
 
 ### Added

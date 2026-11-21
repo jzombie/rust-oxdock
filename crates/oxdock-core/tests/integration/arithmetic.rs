@@ -470,3 +470,49 @@ fn unary_interleaved_dynamic() {
     "#};
     run_script(&root, script).expect("unary interleaved");
 }
+
+#[test]
+fn script_calls_resolve_inside_arithmetic() {
+    // RPN math routes script calls through the same resolution and
+    // execution as statement calls (was: unknown function SCRIPT::*).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC DOUBLE(): INT {
+            RETURN 21
+        }
+        FUNC QUAD(): INT {
+            RETURN DOUBLE() * 2
+        }
+        LET $top: INT = DOUBLE() * 2
+        ASSERT_EQ $top 42
+        LET $q: INT = QUAD()
+        ASSERT_EQ $q 42
+    "#};
+    run_script(&root, script).expect("script calls serve arithmetic");
+}
+
+#[test]
+fn math_calls_enforce_arity() {
+    // The shared gate rides along into math: arity mismatches fail
+    // before executing. (Depth is pinned by the statement-call BOOM
+    // test through the same gate owner; a 64-deep RPN recursion
+    // overflows test-thread stacks, so it stays a manual check:
+    // `FUNC F(): ANY { RETURN F() + 1 }` trips the budget on the CLI.)
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            FUNC ONE($a: INT): INT {
+                RETURN $a
+            }
+            LET $r: INT = ONE() * 2
+        "#},
+    )
+    .expect_err("math calls must enforce arity");
+    assert!(
+        format!("{err:#}").contains("expects 1 argument(s), got 0"),
+        "{err:#}"
+    );
+}

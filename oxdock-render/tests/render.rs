@@ -16,8 +16,8 @@ use oxdock_process::DefaultProcessManager;
 /// the suite; a missing file fails naming the required build step.
 #[allow(clippy::disallowed_methods)]
 fn child_bin() -> String {
-    oxdock_sys_test_utils::find_built_binary("oxdock-render-child")
-        .expect("pipe-child binary missing: run `cargo build -p oxdock-render` first")
+    oxdock_sys_test_utils::find_built_binary("oxdock-render")
+        .expect("pipe interpreter binary missing: run `cargo build -p oxdock-render` first")
 }
 
 /// Lifecycle override plus scope contract every fixture config gets:
@@ -92,10 +92,10 @@ fn read(resolver: &PathResolver, root: &GuardedPath, rel: &str) -> String {
     String::from_utf8(resolver.read_file(&path).expect("read")).expect("utf8")
 }
 
-/// Explicit pipeline options for every test: the pipe child is the
-/// built `oxdock-render-child` binary, never the pipeline binary
-/// itself. No process-global mutation: options travel by value, so
-/// parallel tests cannot race on `OXDOCK_RENDER_CHILD`.
+/// Explicit pipeline options for every test: the pipe interpreter
+/// is the built `oxdock-render` binary itself (`--interpret` mode),
+/// never a sidecar. No process-global mutation: options travel by
+/// value, so parallel tests cannot race on `OXDOCK_RENDER_CHILD`.
 fn test_options() -> oxdock_render::RunOptions {
     oxdock_render::RunOptions {
         config: None,

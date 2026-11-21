@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
+use oxdock_fs::to_forward_slashes;
+use oxdock_fs::{GuardedPath, WorkspaceSelection};
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
@@ -173,6 +175,95 @@ pub(super) fn classify_alias_call(
         };
     }
     AliasResolution::Unknown
+}
+
+/// Missing-import hint for an unknown function (#319): when `base`
+/// is `EXPORT`ed by already-loaded files, name them so the error
+/// directs the author to the fix instead of dead-ending. `files`
+/// pairs each loaded file's key with its exported func names (only
+/// exported names suggest: privates would fail the `EXPORT` gate);
+/// `unit_targets` is the failing unit's alias map for `did you mean
+/// ALIAS::BASE` suggestions. Bare and `SCRIPT::` spellings search
+/// the same way. Labels sort for determinism. Only unknown-function
+/// errors append this; nothing else restates the exporter search.
+pub(super) fn missing_import_hint<'a>(
+    files: impl IntoIterator<Item = (&'a str, &'a [String])>,
+    unit_targets: &AliasTargets,
+    name: &str,
+) -> Option<String> {
+    let base = match split_qualified(name) {
+        Some((_, base)) => base,
+        None => name,
+    };
+    if base.is_empty() {
+        return None;
+    }
+    let mut exporters: Vec<&str> = files
+        .into_iter()
+        .filter(|(_, exports)| exports.iter().any(|exported| exported == base))
+        .map(|(file, _)| file)
+        .collect();
+    exporters.sort();
+    exporters.dedup();
+    if exporters.is_empty() {
+        return None;
+    }
+    // Aliases the failing unit already imports each exporter under.
+    let imported_as = |file: &str| {
+        let mut aliases: Vec<&str> = unit_targets
+            .iter()
+            .filter(|(_, targets)| {
+                targets
+                    .iter()
+                    .any(|(target, _)| target.as_deref() == Some(file))
+            })
+            .map(|(alias, _)| alias.as_str())
+            .collect();
+        aliases.sort();
+        aliases
+    };
+    if exporters.len() == 1 {
+        let file = exporters[0];
+        let aliases = imported_as(file);
+        // Prefer a working spelling: when the file is imported under
+        // several aliases, an alias spelling the failed call
+        // differently resolves, so suggest it before falling back to
+        // the self-view diagnostic.
+        let import_alias = aliases
+            .iter()
+            .find(|alias| qualify(alias, base) != name)
+            .or(aliases.first())
+            .copied();
+        let suggestion = match import_alias {
+            Some(import_alias) => {
+                let spelling = qualify(import_alias, base);
+                if spelling == name {
+                    // Disjoint-guard view: the file exports the name
+                    // but this alias resolves it elsewhere here.
+                    format!(
+                        "file \"{file}\" exports `{base}` but the `{import_alias}` view does not resolve it here"
+                    )
+                } else {
+                    format!("did you mean `{spelling}`? (file \"{file}\" exports `{base}`)")
+                }
+            }
+            None => {
+                // Forward slashes: a raw Windows path would emit
+                // invalid escapes inside the quoted suggestion.
+                let path = to_forward_slashes(file);
+                format!(
+                    "file \"{file}\" exports `{base}`: add `[FUNC {base} FROM \"{path}\"]` to an IMPORT"
+                )
+            }
+        };
+        return Some(format!("; {suggestion}"));
+    }
+    let mut files = exporters.join("\", \"");
+    files.insert(0, '"');
+    files.push('"');
+    Some(format!(
+        "; files {files} export `{base}`: qualify the call with the importing alias"
+    ))
 }
 
 /// Whether a disjoint-alias template call names a script function,
@@ -463,6 +554,12 @@ pub(super) struct FuncDefData {
     /// lexical frames miss. `None` for entry/REPL definitions, which
     /// stay params-only.
     pub(super) module: Option<String>,
+    /// Definition-site jail (#322): the workspace selection and cwd
+    /// as they stood when this `FUNC` was defined. `Some` for
+    /// definitions executed at file top level (entry or module init);
+    /// `None` for call-time materializations and bodies, which must
+    /// never capture caller ambient (the file fallback applies).
+    pub(super) def_jail: Option<(WorkspaceSelection, GuardedPath)>,
 }
 
 /// Zero value for an omitted trailing optional script param, by
@@ -819,6 +916,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TextStartsWith::registration(),
             TextEndsWith::registration(),
             Contains::registration(),
+            Unique::registration(),
             Len::registration(),
             TextCount::registration(),
             TextCountMatches::registration(),
@@ -841,6 +939,33 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// Single lookup for every callable: script, pure, or stateful.
     pub(super) fn get(&self, name: &str) -> Option<FuncEntry<P>> {
         self.entries.get(name).cloned()
+    }
+
+    /// Number of live function scope frames. Callers record this as
+    /// their frame floor so nested lookup stays within the current
+    /// call (or init), never reaching caller frames.
+    pub(super) fn scope_depth(&self) -> usize {
+        self.scopes.len()
+    }
+
+    /// Frame-2..N lookup (#322): innermost scope frame at or above
+    /// `floor` defining `SCRIPT::BASE`, innermost first. The live
+    /// slot always holds the innermost defining frame's value
+    /// (save/restore discipline), so a hit here is definitionally
+    /// lexical: nested defs shadow everything below them with no
+    /// owner tags consulted. Cross-unit exclusion comes from the
+    /// caller choosing `floor` (call/init boundary), never from
+    /// inspecting whose definition was found.
+    pub(super) fn get_scoped(&self, base: &str, floor: usize) -> Option<FuncEntry<P>> {
+        let qualified = qualify(SCRIPT_MODULE_NAME, base);
+        let len = self.scopes.len();
+        let start = floor.min(len);
+        for frame in self.scopes[start..].iter().rev() {
+            if frame.defined.contains(&qualified) {
+                return self.entries.get(&qualified).cloned();
+            }
+        }
+        None
     }
 
     /// Single lazy miss classifier for runtime placeholder paths with
@@ -1076,6 +1201,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         is_async: bool,
         body: &[Step],
         module: Option<&str>,
+        def_jail: Option<(WorkspaceSelection, GuardedPath)>,
     ) -> Result<()> {
         let qualified = qualify(SCRIPT_MODULE_NAME, name);
         let shadowable = matches!(
@@ -1138,6 +1264,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     is_async,
                     body: body.to_vec(),
                     module: module.map(|m| m.to_string()),
+                    def_jail,
                 }),
             },
         );
@@ -1231,6 +1358,11 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     is_async,
                     body: body.to_vec(),
                     module: Some(defining.to_string()),
+                    // Harvest registration never captures a jail: it
+                    // runs in the importer context, so capturing here
+                    // would leak caller ambient into the defining
+                    // file. The file fallback applies at call time.
+                    def_jail: None,
                 }),
             },
         );
@@ -1241,6 +1373,26 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             }
         }
         Ok(())
+    }
+
+    /// Backfill a definition-site jail onto an import-registered
+    /// canonical entry (#322). Imports register canonical slots
+    /// before init runs, so they start jail-less; the first
+    /// top-level definition seals them exactly once, mirroring the
+    /// file frame. Later definitions never overwrite. Harvest-only
+    /// registrations stay `None`: without init there is no
+    /// definition site to seal.
+    pub(super) fn seal_canonical_jail(
+        &mut self,
+        canonical: &str,
+        jail: (WorkspaceSelection, GuardedPath),
+    ) {
+        if let Some(entry) = self.entries.get_mut(canonical)
+            && let FuncBody::Script(def) = &mut entry.body
+            && def.def_jail.is_none()
+        {
+            def.def_jail = Some(jail);
+        }
     }
 
     /// Open a lexical scope frame for script definitions. Native entries
@@ -2135,10 +2287,14 @@ fn get(
     Ok(map.get(&key).cloned().unwrap_or(default))
 }
 
-/// Insert one key into a map.
+/// Insert one key into a map, returning the extended map.
 ///
 /// Fails on duplicates so two entries sharing a key fail the run
 /// instead of silently shadowing each other.
+///
+/// A frozen (`CONST`-derived) map fails instead of deriving: `CONST`
+/// bindings never produce a mutable map, so snapshot explicitly
+/// through a `LET` copy of unfrozen data if derivation is intended.
 ///
 #[oxdock_func(pure, returns = TypeTag::MapOf(std::sync::Arc::new(TypeTag::Any)))]
 #[example(
@@ -2151,6 +2307,7 @@ fn get(
 )]
 fn map_set(
     /// Map to insert into.
+    #[reject_frozen]
     map: BTreeMap<String, Value>,
     /// Key to insert; duplicates fail.
     key: String,
@@ -2308,6 +2465,10 @@ fn type_of(
 /// other. `overwrite` lets later files win, for environment overlays.
 /// Non MAP elements fail naming their position.
 ///
+/// A frozen (`CONST`-derived) list or element fails instead of
+/// deriving, mirroring `MAP_SET`: `CONST` bindings never produce a
+/// mutable map.
+///
 #[oxdock_func(pure, returns = TypeTag::MapOf(std::sync::Arc::new(TypeTag::Any)))]
 #[example(
     name = "merge",
@@ -2320,6 +2481,7 @@ fn type_of(
 )]
 fn merge_maps(
     /// LIST of MAPs to merge in order.
+    #[reject_frozen]
     maps: Vec<BTreeMap<String, Value>>,
     /// Duplicate policy.
     #[values("fail_on_duplicate", "overwrite")]
@@ -4600,6 +4762,64 @@ fn contains(
         "CONTAINS needs a STRING or LIST haystack, found {}",
         haystack.type_name()
     ))
+}
+
+/// Deduplicate a `LIST`, keeping the first occurrence of each member.
+///
+/// Membership uses strict `values_equal` (numeric `INT` and `FLOAT`
+/// compare across types, every other cross-type pair is unequal,
+/// matching `CONTAINS` and `==`), so `[1, 1.0]` collapses to one
+/// element while `["1", 1]` keeps both. Order is first occurrence;
+/// the empty list binds empty, never failing.
+#[oxdock_func(pure, returns = TypeTag::List)]
+#[example(
+    name = "deduplicate",
+    code = r###"
+    # First occurrences win, later repeats drop.
+    IMPORT [STD]
+    LET $seen: LIST<STRING> = UNIQUE(["a", "b", "a", "c", "b"])
+    ASSERT_EQ $seen.0 "a"
+    ASSERT_EQ $seen.1 "b"
+    ASSERT_EQ $seen.2 "c"
+    ASSERT_EQ LEN($seen) 3
+
+    # The empty list stays empty.
+    LET $empty: LIST<STRING> = UNIQUE([])
+    ASSERT_EQ LEN($empty) 0
+    "###
+)]
+#[example(
+    name = "strict membership",
+    code = r###"
+    # Numerics collapse across INT and FLOAT like CONTAINS.
+    IMPORT [STD]
+    LET $nums: LIST<ANY> = UNIQUE([1, 2.0, 1, 3])
+    ASSERT_EQ $nums.0 1
+    ASSERT_EQ $nums.1 2.0
+    ASSERT_EQ $nums.2 3
+    ASSERT_EQ LEN($nums) 3
+
+    # Stringified numbers never coerce to integers.
+    LET $mixed: LIST<ANY> = UNIQUE(["1", 1])
+    ASSERT_EQ $mixed.0 "1"
+    ASSERT_EQ $mixed.1 1
+    ASSERT_EQ LEN($mixed) 2
+    "###
+)]
+fn unique(
+    /// List to deduplicate.
+    items: Vec<Value>,
+) -> Result<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(items.len());
+    for item in items {
+        if !out
+            .iter()
+            .any(|seen| super::args::values_equal(seen, &item))
+        {
+            out.push(item);
+        }
+    }
+    Ok(Value::list(out))
 }
 
 /// Count the elements of a text, list, or map as an `INT`.

@@ -17,6 +17,10 @@ pub struct Options {
     pub config: Option<String>,
     /// Print the generated child script instead of running it.
     pub print_child: bool,
+    /// Pipe-stage mode: read a script from stdin and interpret it
+    /// with the full pipeline engine (`--root`/`--config` still
+    /// apply). This is how the binary serves its own stages.
+    pub interpret: bool,
     /// Write a template `render.json` and stop.
     pub init: bool,
     /// Print usage and stop.
@@ -45,6 +49,7 @@ pub fn usage() -> String {
           --root <path>     workspace root (default: discovered)
           --config <path>   pipeline config (default: {CONFIG_FILENAME})
           --print-child     print the generated script, skip the run
+          --interpret       read a script from stdin and run it (pipe stage mode)
           --init            write a template render.json, then stop
           --help, -h        print this help and exit
           --version, -V, -v print the version and exit
@@ -96,6 +101,7 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
                 }
             },
             "--print-child" => opts.print_child = true,
+            "--interpret" => opts.interpret = true,
             "--init" => opts.init = true,
             "--help" | "-h" => opts.help = true,
             "--version" | "-V" | "-v" => opts.version = true,
@@ -113,6 +119,12 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
     if opts.init && (opts.print_child || opts.config.is_some()) {
         anyhow::bail!(
             "'--init' cannot be combined with '--config' or '--print-child'\n\n{}",
+            usage()
+        )
+    }
+    if opts.interpret && (opts.init || opts.print_child) {
+        anyhow::bail!(
+            "'--interpret' cannot be combined with '--init' or '--print-child'\n\n{}",
             usage()
         )
     }
@@ -144,6 +156,7 @@ mod tests {
             "--root",
             "--config",
             "--print-child",
+            "--interpret",
             "--init",
             "--help",
             "-h",
@@ -165,6 +178,7 @@ mod tests {
                 root: Some("/tmp/ws".to_string()),
                 config: Some("custom.json".to_string()),
                 print_child: false,
+                interpret: false,
                 init: false,
                 help: false,
                 version: false,
@@ -174,6 +188,30 @@ mod tests {
         assert!(opts.print_child);
         let opts = parse_options(&args(&["--init"])).expect("init parses");
         assert!(opts.init);
+    }
+
+    #[test]
+    fn parses_interpret_alone_and_rejects_driver_modes() {
+        // `--interpret` reads the stage script from stdin; driver-side
+        // modes (`--init`, `--print-child`) never combine with it.
+        let opts = parse_options(&args(&["--interpret"])).expect("interpret parses");
+        assert!(opts.interpret);
+        let opts = parse_options(&args(&["--interpret", "--root", "/tmp/ws"]))
+            .expect("interpret keeps spawn flags");
+        assert!(opts.interpret);
+        assert_eq!(opts.root.as_deref(), Some("/tmp/ws"));
+        let err =
+            parse_options(&args(&["--interpret", "--init"])).expect_err("interpret+init must fail");
+        assert!(
+            format!("{err:#}").contains("'--interpret' cannot be combined"),
+            "{err:#}"
+        );
+        let err = parse_options(&args(&["--interpret", "--print-child"]))
+            .expect_err("interpret+print-child must fail");
+        assert!(
+            format!("{err:#}").contains("'--interpret' cannot be combined"),
+            "{err:#}"
+        );
     }
 
     #[test]

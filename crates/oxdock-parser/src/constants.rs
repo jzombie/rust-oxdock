@@ -20,6 +20,7 @@ pub const SCRIPT_MODULE_NAME: &str = "SCRIPT";
 /// lowering. Each is referenced by [`crate::STRUCTURAL_KEYWORDS`]; spelling
 /// lives here exactly once.
 pub const KEYWORD_LET: &str = "LET";
+pub const KEYWORD_CONST: &str = "CONST";
 pub const KEYWORD_FOR: &str = "FOR";
 pub const KEYWORD_IF: &str = "IF";
 pub const KEYWORD_ELSE: &str = "ELSE";
@@ -76,6 +77,17 @@ pub const KEYWORD_EXIT: &str = "EXIT";
 pub const KEYWORD_FAIL: &str = "FAIL";
 pub const KEYWORD_SLEEP: &str = "SLEEP";
 pub const KEYWORD_LIST_APPEND: &str = "LIST_APPEND";
+
+/// Uppercase `CONST` spelling: leading `A-Z`, then `A-Z`, digits,
+/// or `_`. Single owner for the definition gate and the bare-read
+/// gate so both agree on what counts as a const word.
+pub fn is_const_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.as_bytes()[0].is_ascii_uppercase()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
 
 /// Variable inspection: a dedicated AST node, never a registry entry, so it
 /// needs no import and accepts no qualifier.

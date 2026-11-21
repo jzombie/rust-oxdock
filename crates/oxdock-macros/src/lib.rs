@@ -850,6 +850,12 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
                 quote! { Expr::Var(#s.to_string()) }
             }
         }
+        Expr::Const(s) => {
+            quote! { Expr::Const(#s.to_string()) }
+        }
+        Expr::ConstRef { alias, name } => {
+            quote! { Expr::ConstRef { alias: #alias.to_string(), name: #name.to_string() } }
+        }
         Expr::Env(k) => {
             quote! { Expr::Env(#k.to_string()) }
         }
@@ -872,6 +878,9 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
                 })
                 .collect();
             quote! { Expr::KeyPath { base: #base_stream, keys: vec![#(#key_strs),*] } }
+        }
+        Expr::ConstKeyPath { base, keys } => {
+            quote! { Expr::ConstKeyPath { base: #base.to_string(), keys: vec![#(#keys.to_string()),*] } }
         }
         Expr::List(items) => {
             let item_tokens: Vec<_> = items.iter().map(|e| emit_expr(e, interp)).collect();
@@ -897,6 +906,9 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
         }
         Expr::Inspect(var) => {
             quote! { Expr::Inspect(#var.to_string()) }
+        }
+        Expr::InspectConst(var) => {
+            quote! { Expr::InspectConst(#var.to_string()) }
         }
         Expr::Compare { op, left, right } => {
             let op_token = match op {
@@ -974,14 +986,24 @@ fn emit_math_op(op: &oxdock_parser::ast::MathOp) -> proc_macro2::TokenStream {
             quote! { oxdock_parser::ast::MathOp::PushConst(#raw) }
         }
         M::LoadVar(s) => quote! { oxdock_parser::ast::MathOp::LoadVar(#s.to_string()) },
+        M::LoadConst(s) => quote! { oxdock_parser::ast::MathOp::LoadConst(#s.to_string()) },
+        M::LoadConstRef { alias, name } => {
+            quote! { oxdock_parser::ast::MathOp::LoadConstRef { alias: #alias.to_string(), name: #name.to_string() } }
+        }
         M::LoadEnv(k) => quote! { oxdock_parser::ast::MathOp::LoadEnv(#k.to_string()) },
         M::LoadKeyPath { base, keys } => {
             quote! { oxdock_parser::ast::MathOp::LoadKeyPath { base: #base.to_string(), keys: vec![#(#keys.to_string()),*] } }
+        }
+        M::LoadConstKeyPath { base, keys } => {
+            quote! { oxdock_parser::ast::MathOp::LoadConstKeyPath { base: #base.to_string(), keys: vec![#(#keys.to_string()),*] } }
         }
         M::Call { name, arity } => {
             quote! { oxdock_parser::ast::MathOp::Call { name: #name.to_string(), arity: #arity } }
         }
         M::Inspect(name) => quote! { oxdock_parser::ast::MathOp::Inspect(#name.to_string()) },
+        M::InspectConst(name) => {
+            quote! { oxdock_parser::ast::MathOp::InspectConst(#name.to_string()) }
+        }
         M::Neg => quote! { oxdock_parser::ast::MathOp::Neg },
         M::Add => quote! { oxdock_parser::ast::MathOp::Add },
         M::Sub => quote! { oxdock_parser::ast::MathOp::Sub },
@@ -1461,6 +1483,15 @@ fn emit_stepkind(
             let t = emit_typekind(decl_type);
             quote! { StepKind::Assign { var: #var.to_string(), decl_type: #t, expr: #e } }
         }
+        StepKind::Const {
+            var,
+            decl_type,
+            expr,
+        } => {
+            let e = emit_expr(expr, interp);
+            let t = emit_typekind(decl_type);
+            quote! { StepKind::Const { var: #var.to_string(), decl_type: #t, expr: #e } }
+        }
         StepKind::Set { var, expr } => {
             let e = emit_expr(expr, interp);
             quote! { StepKind::Set { var: #var.to_string(), expr: #e } }
@@ -1474,6 +1505,15 @@ fn emit_stepkind(
             let t = emit_typekind(decl_type);
             quote! { StepKind::AssignCapture { var: #var.to_string(), decl_type: #t, cmd: Box::new(#c) } }
         }
+        StepKind::ConstCapture {
+            var,
+            decl_type,
+            cmd,
+        } => {
+            let c = emit_stepkind(cmd, interp);
+            let t = emit_typekind(decl_type);
+            quote! { StepKind::ConstCapture { var: #var.to_string(), decl_type: #t, cmd: Box::new(#c) } }
+        }
         StepKind::AwaitCapture {
             out_var,
             out_type,
@@ -1481,6 +1521,14 @@ fn emit_stepkind(
         } => {
             let t = emit_typekind(out_type);
             quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string() } }
+        }
+        StepKind::ConstAwaitCapture {
+            out_var,
+            out_type,
+            task_var,
+        } => {
+            let t = emit_typekind(out_type);
+            quote! { StepKind::ConstAwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string() } }
         }
         StepKind::AssignAsync {
             var,
@@ -1490,6 +1538,15 @@ fn emit_stepkind(
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             let t = emit_typekind(decl_type);
             quote! { StepKind::AssignAsync { var: #var.to_string(), decl_type: #t, body: vec![#(#steps),*] } }
+        }
+        StepKind::ConstAsync {
+            var,
+            decl_type,
+            body,
+        } => {
+            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+            let t = emit_typekind(decl_type);
+            quote! { StepKind::ConstAsync { var: #var.to_string(), decl_type: #t, body: vec![#(#steps),*] } }
         }
         StepKind::Await { var } => {
             quote! { StepKind::Await { var: #var.to_string() } }

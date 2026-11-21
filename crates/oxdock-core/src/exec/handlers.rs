@@ -13,6 +13,7 @@ use oxdock_fs::PolicyPath;
 use oxdock_fs::command_path;
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::constants::KEYWORD_RUN;
+use oxdock_parser::constants::{KEYWORD_CONST, KEYWORD_LET};
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value,
     WorkspaceTarget, render_structural,
@@ -30,7 +31,7 @@ use super::args::parse_bool_str;
 use super::fs_ops::copy_entry;
 use super::io::{StreamHandle, TaskTee, TeeStream, write_stderr, write_stdout};
 use super::native::FuncBody;
-use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
+use super::state::{ExecState, MAX_CALL_DEPTH, RawFuncDef, TaskPhase};
 use super::steps::{Flow, StepCtx, TtyRequest};
 use oxdock_pipe::{KeeperGuard, PipeHandle, PipeInner, SharedOutput};
 
@@ -59,6 +60,11 @@ pub(super) fn inherit_env<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     keys: &[String],
 ) -> Result<()> {
+    // Entry prelude capture: top-level `INHERIT_ENV` names and values
+    // belong to the entry file, re-read from the engine on every
+    // entry call. Never caller env: this reads only `io` overrides
+    // and `std::env` (the engine), ever.
+    let track_entry = cx.state.is_entry_top_level();
     let mut removals: Vec<String> = Vec::new();
     let mut inserts: Vec<(String, String)> = Vec::new();
     for key in keys {
@@ -75,11 +81,24 @@ pub(super) fn inherit_env<P: ProcessManager>(
         }
     }
     let envs = Arc::make_mut(&mut cx.state.envs);
-    for key in removals {
-        envs.remove(&key);
+    for key in &removals {
+        envs.remove(key);
     }
-    for (key, value) in inserts {
-        envs.insert(key, value);
+    for (key, value) in &inserts {
+        envs.insert(key.clone(), value.clone());
+    }
+    if track_entry {
+        for key in &removals {
+            cx.state.entry_envs.remove(key);
+        }
+        for (key, value) in &inserts {
+            cx.state.entry_envs.insert(key.clone(), value.clone());
+        }
+        for key in keys {
+            if !cx.state.entry_inherit_names.contains(key) {
+                cx.state.entry_inherit_names.push(key.clone());
+            }
+        }
     }
     Ok(())
 }
@@ -132,6 +151,13 @@ pub(super) fn env<P: ProcessManager>(
     value: &str,
 ) -> Result<()> {
     Arc::make_mut(&mut cx.state.envs).insert(key.to_owned(), value.to_owned());
+    // Entry prelude capture: the entry file's own top-level `ENV`
+    // declarations seed every entry call. Tracked only at entry
+    // top level, never inside a call or module, so caller mutations
+    // can never flow into the callee prelude.
+    if cx.state.is_entry_top_level() {
+        cx.state.entry_envs.insert(key.to_owned(), value.to_owned());
+    }
     Ok(())
 }
 
@@ -2520,6 +2546,17 @@ pub(crate) fn define_func<P: ProcessManager>(
     // owner is the innermost module on the stack (lexically enclosing
     // file), or `None` for entry definitions, which stay params-only.
     let owner = cx.state.current_module();
+    // Definition-site jail (#322): sealed here, at the definition,
+    // never at the call, and only for file-top-level definitions
+    // (depth zero: bodies run inside calls and must never capture,
+    // or the enclosing call jail would leak into the new def).
+    // Sealed into the registry entry for direct hits and into the
+    // owning file frame for frame-walk hits, so both lookup paths
+    // serve the same site. Harvest registration and call-time
+    // materialization pass `None` at their own sites: importer and
+    // caller context must never leak into the defining file.
+    let def_jail =
+        (cx.state.call_depth == 0).then(|| (cx.state.fs.selection(), cx.state.cwd.clone()));
     cx.state.functions.define_script(
         name,
         &resolved,
@@ -2528,7 +2565,85 @@ pub(crate) fn define_func<P: ProcessManager>(
         is_async,
         body,
         owner.as_deref(),
-    )
+        def_jail.clone(),
+    )?;
+    if let Some(jail) = def_jail {
+        let bucket = match owner.as_deref() {
+            Some(key) => cx.state.modules.get_mut(key).map(|r| &mut r.top_funcs),
+            None => Some(&mut cx.state.entry_tops),
+        };
+        if let Some(defs) = bucket.and_then(|tops| tops.get_mut(name))
+            && let Some(raw) = defs
+                .iter_mut()
+                .find(|r| r.jail.is_none() && r.params == params)
+        {
+            raw.jail = Some(jail.clone());
+        }
+        // Canonical slots are registered at import time, before the
+        // defining file runs: seal the first top-level definition
+        // into them too, so qualified cross-module calls serve the
+        // same site as frame-walk hits.
+        if let Some(file) = owner.as_deref() {
+            let canonical = super::native::file_func_key(file, name);
+            cx.state.functions.seal_canonical_jail(&canonical, jail);
+        }
+    }
+    Ok(())
+}
+
+/// Build a script [`FuncEntry`](super::native::FuncEntry) from a
+/// file-frame definition (#322): the single construction site for
+/// frame-walk hits, so arity, tags, and metadata can never disagree
+/// across lookup paths.
+fn build_script_entry<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    name: &str,
+    raw: &RawFuncDef,
+    module: Option<String>,
+) -> Result<super::native::FuncEntry<P>> {
+    let resolved_params = super::native::resolve_script_params(state, name, &raw.params)?;
+    let return_tag = state
+        .resolve_tag(&raw.return_spelling)
+        .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+    state.check_return_tag(&format!("function `{name}` returns"), &return_tag)?;
+    Ok(super::native::FuncEntry {
+        meta: super::native::FuncMeta {
+            name: name.to_string(),
+            module: module.clone().unwrap_or_default(),
+            kind: super::native::FuncKind::Script,
+            params: Some(
+                resolved_params
+                    .iter()
+                    .map(|(pname, param_type, optional)| super::native::FuncParam {
+                        name: pname.clone(),
+                        param_type: Some(param_type.clone()),
+                        allowed: None,
+                        docs: "",
+                        options: None,
+                        optional: *optional,
+                    })
+                    .collect(),
+            ),
+            returns: Some(return_tag.clone()),
+            rpn: false,
+            summary: "DSL-defined function.",
+            docs: "Defined via FUNC in script.",
+            examples: &[],
+        },
+        body: FuncBody::Script(super::native::FuncDefData {
+            params: resolved_params,
+            return_type: return_tag,
+            return_spelling: raw.return_spelling.clone(),
+            is_async: raw.is_async,
+            body: raw.body.clone(),
+            module,
+            // Sealed at definition execution, carried here: the frame
+            // walk serves the def as its file left it, never caller
+            // ambient. `None` for never-executed defs (forward refs,
+            // skipped harvests); the file fallback applies instead.
+            def_jail: raw.jail.clone(),
+        }),
+    })
 }
 
 /// Invoke a function by UPPERCASE name and return its value. One lookup
@@ -2539,39 +2654,84 @@ pub(crate) fn define_func<P: ProcessManager>(
 /// coercion on parameter binding; `RETURN` inside yields the value and
 /// fallthrough yields `""`. `BREAK`/`CONTINUE` escaping the body are
 /// boundary errors (they must not reach a caller loop).
-pub(crate) fn call_func_value<P: ProcessManager>(
+/// Resolve one call-site spelling to its registry entry: file-aliased
+/// spellings through the shared alias-target matcher first, then the
+/// registry as spelled for hosts and natives (script bodies never
+/// serve there), then the frame walk down to the call/init floor, the
+/// owning file frame, and the per-unit harvest map. Entry calls walk
+/// from frame 0 (every live entry frame is entry-owned: inits pop,
+/// harvests are explicit), while module calls stop at their boundary
+/// so caller frames are unreachable by construction. No owner tags,
+/// no step scans: the frames are the mechanism. Single owner for call
+/// resolution; statement calls, expression calls, and RPN math route
+/// here instead of restating the order.
+pub(crate) fn resolve_call_entry<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     name: &str,
-    args: &[Expr],
-) -> Result<Value> {
-    // 1. Registry lookup through the shared alias-target matcher.
+) -> Result<super::native::FuncEntry<P>> {
     let canonical = cx
         .state
         .functions
         .resolve_file_call_key(&super::import::active_unit_alias_targets(cx.state), name)?;
-    let lookup_name: &str = canonical.as_deref().unwrap_or(name);
-    let Some(entry) = cx.state.functions.get(lookup_name) else {
-        bail!("unknown function `{name}`");
+    let entry: super::native::FuncEntry<P> = match canonical {
+        Some(key) => match cx.state.functions.get(&key) {
+            Some(entry) => entry,
+            None => bail!(
+                "unknown function `{name}`{}",
+                super::import::missing_import_hint(cx.state, name)
+            ),
+        },
+        None => match cx.state.functions.get(name) {
+            // Hosts and natives resolve as spelled (including
+            // qualified host calls like `STD::X`, which never go
+            // through the matcher). Script bodies never serve here:
+            // nested frames, the file frame, and the harvest map
+            // below own every script spelling, so a script hit here
+            // is always foreign and falls through to fail below.
+            Some(entry) if !matches!(entry.body, FuncBody::Script(_)) => entry,
+            _ => match super::import::find_script_site(cx.state, name)? {
+                Some(super::import::ScriptSite::Live(entry)) => entry,
+                Some(super::import::ScriptSite::File { raw, unit }) => {
+                    build_script_entry(cx.state, name, &raw, unit)?
+                }
+                None => bail!(
+                    "unknown function `{name}`{}",
+                    super::import::missing_import_hint(cx.state, name)
+                ),
+            },
+        },
     };
-    // 2. Global recursion check.
+    Ok(entry)
+}
+
+/// Depth budget and arity gate for one invocation: exact counts, or
+/// the optional-MAP range. Single owner; every routed call gates here
+/// before any argument evaluates.
+pub(crate) fn gate_call<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    name: &str,
+    entry: &super::native::FuncEntry<P>,
+    nargs: usize,
+) -> Result<()> {
+    // Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {
         bail!(
             "recursion depth limit exceeded in FUNC {}",
             super::base_name(name)
         );
     }
-    // 3. Pre-evaluation arity gate from the entry metadata. Trailing
+    // Pre-evaluation arity gate from the entry metadata. Trailing
     // optional MAP params widen exact counts to ranges; everything
     // else stays exact.
     if let Some(params) = entry.meta.params.as_deref() {
         let required = super::required_arity(params);
-        if args.len() < required || args.len() > params.len() {
+        if nargs < required || nargs > params.len() {
             if required == params.len() {
                 bail!(
                     "{}() expects {} argument(s), got {}",
                     super::base_name(name),
                     params.len(),
-                    args.len()
+                    nargs
                 );
             }
             bail!(
@@ -2579,10 +2739,22 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                 super::base_name(name),
                 required,
                 params.len(),
-                args.len()
+                nargs
             );
         }
     }
+    Ok(())
+}
+
+pub(crate) fn call_func_value<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    name: &str,
+    args: &[Expr],
+) -> Result<Value> {
+    // Resolve, gate, evaluate, execute: the phase owners below serve
+    // statement calls, expression calls, and RPN math alike.
+    let entry = resolve_call_entry(cx, name)?;
+    gate_call(cx, name, &entry, args.len())?;
     // 4. Argument evaluation: only reachable for a valid invocation.
     // Omitted trailing optionals fill with zero values first, so
     // binding below always sees a full argument list. The arity gate
@@ -2591,34 +2763,99 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     for arg in args {
         arg_vals.push(super::args::evaluate_expr(arg, cx)?);
     }
+    execute_call_entry(cx, name, entry, arg_vals)
+}
+
+/// Execute a resolved entry with evaluated arguments. Single owner
+/// for the call body; every routed call (statement, expression, RPN
+/// math) ends here.
+pub(crate) fn execute_call_entry<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    name: &str,
+    entry: super::native::FuncEntry<P>,
+    mut arg_vals: Vec<Value>,
+) -> Result<Value> {
     // 5. Execution by body kind.
     match entry.body {
         FuncBody::Script(def) => {
-            // Snapshot the caller's context first; module-owned bodies
-            // then reset to their own below, and the pop restores the
-            // caller on every path.
+            // Hard isolation (#322): the only thing crossing a FUNC
+            // boundary is explicit arguments. Every script call resets
+            // workspace, workdir, env, and outer variables to the
+            // callee defining file, restoring the caller on return.
+            // A callee that forgets its jail fails safe into the
+            // defining file default, never caller ambient.
             let module_key = def.module.clone();
-            let module_env = module_key.as_deref().and_then(|key| {
-                cx.state.modules.get(key).and_then(|record| {
-                    record
-                        .init
-                        .as_ref()
-                        .map(|init| (init.envs.clone(), init.inherit_names.clone()))
-                })
-            });
+            // One lookup for every file, entry included: the
+            // definition-site jail when the definition sealed one,
+            // else the defining file fallback. No per-kind
+            // restatement below.
+            let callee_ctx = cx
+                .state
+                .callee_file_ctx(module_key.as_deref(), def.def_jail.clone());
             cx.state.call_depth += 1;
-            // Module-owned calls observe nothing of the importer: the
-            // whole variable stack swaps for a fresh one before the
-            // call frame pushes, and restores after it pops (#115).
-            // Own-module bindings stay visible through the
-            // module-store fallback in every accessor, so this only
-            // cuts importer frames, never module state.
-            let saved_vars = if module_env.as_ref().is_some() {
-                Some(std::mem::take(&mut cx.state.var_scopes))
-            } else {
-                None
-            };
+            // All calls swap the whole variable stack for a fresh one
+            // before the call frame pushes, and restore after it pops
+            // (#115, #322). Module-owned bindings stay visible through
+            // the module-store fallback in every accessor, so this
+            // cuts importer frames and entry globals alike, never
+            // module file state. Entry calls have no store fallback:
+            // they observe params, locals, and (seeded below) the
+            // file's top-level `CONST`s.
+            let saved_vars = Some(std::mem::take(&mut cx.state.var_scopes));
+            // `CONST` marks ride the same swap: every callee declares
+            // into a fresh const frame and restores after.
+            let saved_consts = Some(std::mem::take(&mut cx.state.const_scopes));
+            // `ISOLATED` snapshots belong to the caller: the callee
+            // env resets below, so inherited scrubs must not leak in.
+            let saved_isolated = std::mem::take(&mut cx.state.isolated_stack);
             cx.state.push_scope();
+            // Entry file `CONST`s are visible by scope (#318): an
+            // entry-owned callee called from entry code restores the
+            // caller bottom frame's `CONST` marks and values into a
+            // dedicated seed frame beneath its params, so the body
+            // reads exactly the top-level `CONST`s declared so far.
+            // `LET`s never cross (unmarked); module callers seed
+            // nothing (entry file state is not caller state, and
+            // modules cannot name entry functions). Params and locals
+            // shadow structurally above the seed; reads and the
+            // mutation gates ride `get_var`/`is_const_var` unchanged.
+            // Mirrors the static entry seeding; keep the two in
+            // lockstep.
+            let mut seeded_entry_consts = false;
+            if module_key.is_none()
+                && matches!(cx.state.module_stack.last(), None | Some(None))
+                && let (Some(vars), Some(marks)) = (
+                    saved_vars.as_ref().and_then(|stack| stack.first()),
+                    saved_consts.as_ref().and_then(|stack| stack.first()),
+                )
+            {
+                for name in marks {
+                    if let Some((tag, value)) = vars.get(name) {
+                        cx.state
+                            .declare_const(name.clone(), tag.clone(), value.clone())?;
+                        seeded_entry_consts = true;
+                    }
+                }
+                if seeded_entry_consts {
+                    cx.state.push_var_scope();
+                }
+            }
+            // Callee jail (#322): every call restores the workspace
+            // selection and cwd sealed at the definition site, so a
+            // file that establishes its jail before its `FUNC`s serves
+            // them from there no matter which workspace the caller
+            // sits in. A FUNC-level `WORKSPACE` or `WORKDIR` overrides
+            // the sealed site for that call. The caller selection
+            // returns via the scope pop. Reentrant init-time
+            // self-calls (no stored context yet) keep the in-progress
+            // init scope untouched, since that is the file own
+            // context under construction. Entry and module share this
+            // one path, never per-kind branches.
+            let reentrant = module_key.is_some() && callee_ctx.is_none();
+            if !reentrant && let Some((_, _, selection, cwd)) = &callee_ctx {
+                cx.state.fs.restore_selection(*selection);
+                cx.state.cwd = cwd.clone();
+            }
             // Module-owned bodies resolve their own file's TYPE aliases
             // first, shadowing globals for the call: a file's bodies
             // validate against the same view (see phase 1), so imports
@@ -2642,20 +2879,19 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             // entry functions params-only even when called from module
             // code. Balanced below on every exit path.
             cx.state.module_stack.push(module_key);
-            // A module must not inherit its caller's namespace
-            // (#115): env resets to the seed plus the module init's
-            // own contributions. Workspace selection and cwd flow
-            // through untouched, so module code observes the same
-            // workspace its importer does. Declared `INHERIT_ENV`
-            // names re-read from the host here (a re-inherit of an
-            // already-present value leaves no init delta, yet must
-            // still admit the name). A module that reads outside that
-            // (e.g. the host checkout) declares its own
-            // `WORKSPACE`/`WORKDIR` in-function. When the module is
-            // still initializing (reentrant init-time self-call) there
-            // is no stored env yet: the init scope stays as-is, since
-            // it is the module's own in-progress context.
-            if let Some((envs, inherit_names)) = module_env {
+            // A callee never inherits its caller namespace (#115,
+            // #322): every body resets to the seed plus its defining
+            // file own contributions. Declared `INHERIT_ENV` names
+            // re-read from the engine here, never the caller (a
+            // re-inherit of an already-present value leaves no init
+            // delta, yet must still admit the name). A body needing
+            // caller env takes it as an argument. Reentrant init-time
+            // self-calls keep the in-progress init env, since that is
+            // the file own context under construction. One env path
+            // for entry and module alike.
+            if reentrant {
+                // Keep the in-progress init scope untouched.
+            } else if let Some((envs, inherit_names, _, _)) = callee_ctx {
                 cx.state.reset_module_env(envs);
                 if !inherit_names.is_empty() {
                     inherit_env(cx, &inherit_names)?;
@@ -2692,6 +2928,13 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                     .clone()
                     .unwrap_or_else(|| super::import::ENTRY_UNIT.to_string());
                 cx.state.call_alias_frames.push((unit_key, HashMap::new()));
+                // Frame floor for the nested walk (#322): scope frames
+                // at or above this index belong to the current call;
+                // anything below is caller context and unreachable.
+                // Pushed and popped with the alias frame on every path.
+                cx.state
+                    .func_floors
+                    .push(cx.state.functions.scope_depth().saturating_sub(1));
                 let flow = (|| {
                     for ((pname, ptype, _), pval) in def.params.iter().zip(arg_vals) {
                         cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
@@ -2709,12 +2952,13 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                         false,
                     )
                 })();
-                // Unconditional pop before `?` propagates: errors and
-                // early boundary exits never leak the frame, matching
+                // Unconditional pops before `?` propagates: errors and
+                // early boundary exits never leak frames, matching
                 // `pop_scope` below. (Panics propagate without popping,
                 // exactly like the scope stack: no `catch_unwind`
                 // anywhere unwraps them.)
                 let _ = cx.state.call_alias_frames.pop();
+                let _ = cx.state.func_floors.pop();
                 let flow = flow?;
                 match flow {
                     Flow::Done => Ok(Value::string(String::new())),
@@ -2733,10 +2977,20 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                     }
                 }
             })();
+            // Drop the entry `CONST` seed frame first, so `pop_scope`
+            // removes the call frame it pushed; the wholesale restores
+            // below discard both either way.
+            if seeded_entry_consts {
+                cx.state.pop_var_scope();
+            }
             let pop_res = cx.state.pop_scope();
             if let Some(saved) = saved_vars {
                 cx.state.var_scopes = saved;
             }
+            if let Some(saved) = saved_consts {
+                cx.state.const_scopes = saved;
+            }
+            cx.state.isolated_stack = saved_isolated;
             cx.state.call_depth -= 1;
             let _ = cx.state.module_stack.pop();
             cx.state.restore_aliases(saved_type_aliases);
@@ -2887,6 +3141,19 @@ pub(crate) fn assign<P: ProcessManager>(
     Ok(())
 }
 
+pub(crate) fn assign_const<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    var: &str,
+    decl_type: String,
+    expr: &Expr,
+) -> Result<()> {
+    let value = super::args::evaluate_expr(expr, cx)?;
+    let clean_var = var.trim_start_matches('$').to_string();
+    let tag = cx.state.resolve_tag(&decl_type)?;
+    cx.state.declare_const(clean_var, tag, value)?;
+    Ok(())
+}
+
 pub(crate) fn set_var_value<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     var: &str,
@@ -2898,7 +3165,8 @@ pub(crate) fn set_var_value<P: ProcessManager>(
     Ok(())
 }
 
-/// Dispatch `LET $var: STRING = <sync command>` : run the command to completion with
+/// Dispatch `LET $var: STRING = <sync command>` (or `CONST`, via
+/// `is_const`) : run the command to completion with
 /// a spillable capture sink as its stdout, then bind the exact bytes as a
 /// string. Only stdout is captured (stderr keeps the parent wiring; stdin
 /// passes through so `WITH_IO [stdin=$p]` still works). Captured bytes
@@ -2918,9 +3186,11 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     var: &str,
     decl_type: String,
     cmd: &StepKind,
+    is_const: bool,
 ) -> Result<Flow> {
     use std::sync::Arc;
 
+    let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
     match peel_capture_command(cx, cmd)? {
         PeeledCapture::Import {
             bindings,
@@ -2937,7 +3207,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
                 bail!(
-                    "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+                    "{kw} capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
                 );
             }
             let guard = arm_deadline(cx, deadline);
@@ -2968,7 +3238,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             let value = disarm_deadline(cx, guard, deadline, result)?;
             let clean_var = var.trim_start_matches('$').to_string();
             let tag = cx.state.resolve_tag(&decl_type)?;
-            cx.state.declare_var(clean_var, tag, value)?;
+            cx.state.declare_binding(clean_var, tag, value, is_const)?;
             return Ok(Flow::Done);
         }
         PeeledCapture::Call {
@@ -2986,7 +3256,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
                 .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
             {
                 bail!(
-                    "LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
+                    "{kw} capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value"
                 );
             }
             let guard = arm_deadline(cx, deadline);
@@ -3018,7 +3288,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             let value = disarm_deadline(cx, guard, deadline, result)?;
             let clean_var = var.trim_start_matches('$').to_string();
             let tag = cx.state.resolve_tag(&decl_type)?;
-            cx.state.declare_var(clean_var, tag, value)?;
+            cx.state.declare_binding(clean_var, tag, value, is_const)?;
             return Ok(Flow::Done);
         }
         PeeledCapture::Sink => {}
@@ -3063,10 +3333,11 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     }
     let text = sink
         .drain_string_strict()
-        .map_err(|e| anyhow!("LET ${var} capture is not valid UTF-8: {e}"))?;
+        .map_err(|e| anyhow!("{kw} ${var} capture is not valid UTF-8: {e}"))?;
     let clean_var = var.trim_start_matches('$').to_string();
     let tag = cx.state.resolve_tag(&decl_type)?;
-    cx.state.declare_var(clean_var, tag, Value::string(text))?;
+    cx.state
+        .declare_binding(clean_var, tag, Value::string(text), is_const)?;
     Ok(Flow::Done)
 }
 
@@ -4308,6 +4579,21 @@ pub(crate) fn dispatch_assign<P: ProcessManager>(
     assign(cx, var, decl_type.clone(), expr)
 }
 
+pub(crate) fn dispatch_const<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Const {
+        var,
+        decl_type,
+        expr,
+    } = step
+    else {
+        unreachable!()
+    };
+    assign_const(cx, var, decl_type.clone(), expr)
+}
+
 pub(crate) fn dispatch_set<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -4493,6 +4779,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     decl_type: String,
     body: &[Step],
     cx: &mut StepCtx<'_, P>,
+    is_const: bool,
 ) -> Result<()> {
     // Generate a unique task ID. Allocation refuses past the live-task
     // cap, so a spawn storm fails the step loudly instead of wedging
@@ -4629,7 +4916,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     // Store the task handle in the variable scope
     let tag = cx.state.resolve_tag(&decl_type)?;
     cx.state
-        .declare_var(var.to_string(), tag, Value::handle(task_id))?;
+        .declare_binding(var.to_string(), tag, Value::handle(task_id), is_const)?;
     Ok(())
 }
 
@@ -4842,7 +5129,8 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
     Ok(())
 }
 
-/// Dispatch `LET $out: TYPE = AWAIT $task` : join like bare `AWAIT` (identical
+/// Dispatch `LET $out: TYPE = AWAIT $task` (or `CONST`, via
+/// `is_const`) : join like bare `AWAIT` (identical
 /// cancellation/timeout/double-await semantics via [`await_task_entry`]),
 /// then bind the task's explicit `RETURN` value (coerced to the declared
 /// type). A task whose body cannot return yields `INT` 0 on success, like
@@ -4855,7 +5143,9 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     out_type: String,
     task_var: &str,
     cx: &mut StepCtx<'_, P>,
+    is_const: bool,
 ) -> Result<()> {
+    let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
     let entry = resolve_task_entry(task_var, cx)?;
     await_task_entry(&entry, &cx.state.cancel_token, task_var)?;
     let (return_value, returns_value) = {
@@ -4864,20 +5154,25 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     };
     if let Some(value) = return_value {
         let tag = cx.state.resolve_tag(&out_type)?;
-        cx.state
-            .declare_var(out_var.trim_start_matches('$').to_string(), tag, value)?;
+        cx.state.declare_binding(
+            out_var.trim_start_matches('$').to_string(),
+            tag,
+            value,
+            is_const,
+        )?;
         return Ok(());
     }
     if returns_value {
         anyhow::bail!(
-            "LET ${out_var} = AWAIT ${task_var} fell off the end without RETURN: the task body can return a value on some path but this run produced none"
+            "{kw} ${out_var} = AWAIT ${task_var} fell off the end without RETURN: the task body can return a value on some path but this run produced none"
         );
     }
     let tag = cx.state.resolve_tag(&out_type)?;
-    cx.state.declare_var(
+    cx.state.declare_binding(
         out_var.trim_start_matches('$').to_string(),
         tag,
         Value::int(0),
+        is_const,
     )?;
     Ok(())
 }
@@ -4951,7 +5246,23 @@ pub(crate) fn dispatch_assign_async_step<P: ProcessManager>(
     else {
         unreachable!()
     };
-    dispatch_assign_async(var, decl_type.clone(), body, cx)
+    dispatch_assign_async(var, decl_type.clone(), body, cx, false)
+}
+
+/// Pipeline dispatch wrapper for `ConstAsync`
+pub(crate) fn dispatch_const_async_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::ConstAsync {
+        var,
+        decl_type,
+        body,
+    } = step
+    else {
+        unreachable!()
+    };
+    dispatch_assign_async(var, decl_type.clone(), body, cx, true)
 }
 
 /// Pipeline dispatch wrapper for `Await`
@@ -4985,6 +5296,31 @@ pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
         var,
         decl_type.clone(),
         cmd,
+        false,
+    )?)
+}
+
+/// Pipeline dispatch wrapper for `ConstCapture`
+pub(crate) fn dispatch_const_capture_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::ConstCapture {
+        var,
+        decl_type,
+        cmd,
+    } = step
+    else {
+        unreachable!()
+    };
+    top_level_flow(assign_capture(
+        cx,
+        super::steps::allocate_assert_generation(),
+        0,
+        var,
+        decl_type.clone(),
+        cmd,
+        true,
     )?)
 }
 
@@ -5001,7 +5337,23 @@ pub(crate) fn dispatch_await_capture_step<P: ProcessManager>(
     else {
         unreachable!()
     };
-    dispatch_await_capture(out_var, out_type.clone(), task_var, cx)
+    dispatch_await_capture(out_var, out_type.clone(), task_var, cx, false)
+}
+
+/// Pipeline dispatch wrapper for `ConstAwaitCapture`
+pub(crate) fn dispatch_const_await_capture_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::ConstAwaitCapture {
+        out_var,
+        out_type,
+        task_var,
+    } = step
+    else {
+        unreachable!()
+    };
+    dispatch_await_capture(out_var, out_type.clone(), task_var, cx, true)
 }
 
 /// Pipeline dispatch wrapper for `Cancel`

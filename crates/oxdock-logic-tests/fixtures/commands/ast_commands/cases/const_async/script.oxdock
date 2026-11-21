@@ -1,0 +1,9 @@
+# CONST async handle: the TASK runs concurrently exactly like LET;
+# only the binding is immutable, and AWAIT reads through it.
+LET $bg_out: PIPE
+CONST TASK: HANDLE<VOID> = ASYNC {
+    WITH_IO [stdout=$bg_out] ECHO "async_worked"
+}
+WITH_IO [stdin=$bg_out] WRITE result.txt
+AWAIT TASK
+READ result.txt
