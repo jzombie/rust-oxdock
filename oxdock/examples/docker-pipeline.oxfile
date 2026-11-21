@@ -34,8 +34,13 @@ IF !$has_docker {
         """
 
     # No Dockerfile artifact: prove nothing landed on disk.
-    LET $probe: STRING = PATH_TYPE("Dockerfile")
-    ASSERT_EQ $probe "absent"
+    LET $probe: BOOL = EXISTS("Dockerfile")
+    ASSERT_EQ $probe false
+
+    # Belt and braces: the directory listing itself shows no Dockerfile.
+    LET $entries: STRING = LS
+    LET $leaked: BOOL = CONTAINS($entries, "Dockerfile")
+    ASSERT_EQ $leaked false
 
     # Feed the Dockerfile via stdin: producer ECHOs the variable
     # into a pipe, the build consumes it with `-f -`. Zero files.
