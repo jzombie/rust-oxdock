@@ -140,7 +140,10 @@ fn arb_scalar_literal() -> impl Strategy<Value = Expr> {
 /// Variable operand pool for math/logic generation: short names both
 /// pathways spell identically, with no quoting or module involvement.
 fn arb_math_var() -> impl Strategy<Value = Expr> {
-    "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Var)
+    "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Var {
+        name,
+        is_const: false,
+    })
 }
 
 /// Numeric leaves for arithmetic: vars plus non-negative ints and
@@ -446,23 +449,43 @@ fn flat_body_image_eq(a: &Step, b: &Step) -> bool {
 fn arb_leaf_expr() -> impl Strategy<Value = Expr> {
     prop_oneof![
         arb_scalar_literal(),
-        "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Var),
-        "[A-Z][A-Z0-9_]*".prop_map(Expr::Const),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Var {
+            name,
+            is_const: false
+        }),
+        "[A-Z][A-Z0-9_]*".prop_map(|name| Expr::Var {
+            name,
+            is_const: true
+        }),
         ("[A-Z][A-Z0-9_]*", "[A-Z][A-Z0-9_]*")
             .prop_map(|(alias, name)| Expr::ConstRef { alias, name }),
         "[A-Z][A-Z0-9_]*".prop_map(Expr::Env),
-        "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Inspect),
-        "[A-Z][A-Z0-9_]*".prop_map(Expr::InspectConst),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Inspect {
+            name,
+            is_const: false
+        }),
+        "[A-Z][A-Z0-9_]*".prop_map(|name| Expr::Inspect {
+            name,
+            is_const: true
+        }),
         (
             "[a-z][a-zA-Z0-9_]*",
             prop::collection::vec("[a-z][a-zA-Z0-9_]*", 1..=2),
         )
-            .prop_map(|(base, keys)| Expr::KeyPath { base, keys }),
+            .prop_map(|(base, keys)| Expr::KeyPath {
+                base,
+                keys,
+                is_const: false
+            }),
         (
             "[A-Z][A-Z0-9_]*",
             prop::collection::vec("[a-z][a-zA-Z0-9_]*", 1..=2),
         )
-            .prop_map(|(base, keys)| Expr::ConstKeyPath { base, keys }),
+            .prop_map(|(base, keys)| Expr::KeyPath {
+                base,
+                keys,
+                is_const: true
+            }),
         prop::collection::vec(safe_string(), 0..=3).prop_map(|items| {
             Expr::List(
                 items
@@ -1065,15 +1088,27 @@ fn arb_command_body_kind() -> impl Strategy<Value = StepKind> {
 fn arb_bool_expr() -> impl Strategy<Value = Expr> {
     prop_oneof![
         any::<bool>().prop_map(|b| Expr::Literal(Value::bool(b))),
-        "[a-z][a-zA-Z0-9_]*".prop_map(|v| Expr::Not(Box::new(Expr::Var(v)))),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|v| Expr::Not(Box::new(Expr::Var {
+            name: v,
+            is_const: false
+        }))),
         ("[a-z][a-zA-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(l, r)| Expr::Logical {
             op: LogicalOp::And,
-            left: Box::new(Expr::Var(l)),
-            right: Box::new(Expr::Var(r)),
+            left: Box::new(Expr::Var {
+                name: l,
+                is_const: false
+            }),
+            right: Box::new(Expr::Var {
+                name: r,
+                is_const: false
+            }),
         }),
         ("[a-z][a-zA-Z0-9_]*", 0u32..999).prop_map(|(v, i)| Expr::Compare {
             op: CompareOp::Eq,
-            left: Box::new(Expr::Var(v)),
+            left: Box::new(Expr::Var {
+                name: v,
+                is_const: false
+            }),
             right: Box::new(Expr::Literal(Value::int(i as i64))),
         }),
     ]
@@ -2367,8 +2402,14 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             decl_type: "INT".to_string(),
             expr: Expr::Arithmetic {
                 op: ArithOp::Add,
-                left: Box::new(Expr::Var("coverage".to_string())),
-                right: Box::new(Expr::Var("coverage".to_string())),
+                left: Box::new(Expr::Var {
+                    name: "coverage".to_string(),
+                    is_const: false,
+                }),
+                right: Box::new(Expr::Var {
+                    name: "coverage".to_string(),
+                    is_const: false,
+                }),
             },
         },
         StepKind::Assign {
@@ -2376,22 +2417,34 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             decl_type: "BOOL".to_string(),
             expr: Expr::Compare {
                 op: CompareOp::Eq,
-                left: Box::new(Expr::Var("coverage".to_string())),
+                left: Box::new(Expr::Var {
+                    name: "coverage".to_string(),
+                    is_const: false,
+                }),
                 right: Box::new(Expr::Literal(Value::int(7))),
             },
         },
         StepKind::Assign {
             var: "coverage".to_string(),
             decl_type: "BOOL".to_string(),
-            expr: Expr::Not(Box::new(Expr::Var("coverage".to_string()))),
+            expr: Expr::Not(Box::new(Expr::Var {
+                name: "coverage".to_string(),
+                is_const: false,
+            })),
         },
         StepKind::Assign {
             var: "coverage".to_string(),
             decl_type: "BOOL".to_string(),
             expr: Expr::Logical {
                 op: LogicalOp::And,
-                left: Box::new(Expr::Var("coverage".to_string())),
-                right: Box::new(Expr::Var("coverage".to_string())),
+                left: Box::new(Expr::Var {
+                    name: "coverage".to_string(),
+                    is_const: false,
+                }),
+                right: Box::new(Expr::Var {
+                    name: "coverage".to_string(),
+                    is_const: false,
+                }),
             },
         },
         StepKind::Assign {
@@ -2767,18 +2820,15 @@ fn fuzz_inventory_covers_claimed_kinds() {
 fn expr_covers_kind(expr: &Expr) -> bool {
     match expr {
         Expr::Literal(..)
-        | Expr::Var(..)
-        | Expr::Const(..)
+        | Expr::Var { .. }
         | Expr::ConstRef { .. }
         | Expr::Env(..)
         | Expr::KeyPath { .. }
-        | Expr::ConstKeyPath { .. }
         | Expr::List(..)
         | Expr::Map(..)
         | Expr::Block(..)
         | Expr::Call { .. }
-        | Expr::Inspect(..)
-        | Expr::InspectConst(..)
+        | Expr::Inspect { .. }
         | Expr::Compare { .. }
         | Expr::Arithmetic { .. }
         | Expr::Not(..)
@@ -2803,8 +2853,14 @@ fn sample_covered_exprs() -> Vec<Expr> {
         Expr::Literal(Value::string("coverage".to_string())),
         Expr::Literal(Value::int(7)),
         Expr::Literal(Value::bool(true)),
-        Expr::Var("coverage".to_string()),
-        Expr::Const("COVERAGE".to_string()),
+        Expr::Var {
+            name: "coverage".to_string(),
+            is_const: false,
+        },
+        Expr::Var {
+            name: "COVERAGE".to_string(),
+            is_const: true,
+        },
         Expr::ConstRef {
             alias: "COVERAGE".to_string(),
             name: "COVERAGE".to_string(),
@@ -2813,18 +2869,26 @@ fn sample_covered_exprs() -> Vec<Expr> {
         Expr::KeyPath {
             base: "coverage".to_string(),
             keys: vec!["key".to_string()],
+            is_const: false,
         },
-        Expr::ConstKeyPath {
+        Expr::KeyPath {
             base: "COVERAGE".to_string(),
             keys: vec!["key".to_string()],
+            is_const: true,
         },
         Expr::List(vec![Expr::Literal(Value::string("covered".to_string()))]),
         Expr::Map(vec![(
             "coverage".to_string(),
             Expr::Literal(Value::string("covered".to_string())),
         )]),
-        Expr::Inspect("coverage".to_string()),
-        Expr::InspectConst("COVERAGE".to_string()),
+        Expr::Inspect {
+            name: "coverage".to_string(),
+            is_const: false,
+        },
+        Expr::Inspect {
+            name: "COVERAGE".to_string(),
+            is_const: true,
+        },
         Expr::FreshPipe,
         Expr::Block(vec![Step {
             guard: None,
@@ -2843,19 +2907,37 @@ fn sample_covered_exprs() -> Vec<Expr> {
         },
         Expr::Compare {
             op: CompareOp::Eq,
-            left: Box::new(Expr::Var("coverage".to_string())),
+            left: Box::new(Expr::Var {
+                name: "coverage".to_string(),
+                is_const: false,
+            }),
             right: Box::new(Expr::Literal(Value::int(7))),
         },
         Expr::Arithmetic {
             op: ArithOp::Add,
-            left: Box::new(Expr::Var("coverage".to_string())),
-            right: Box::new(Expr::Var("coverage".to_string())),
+            left: Box::new(Expr::Var {
+                name: "coverage".to_string(),
+                is_const: false,
+            }),
+            right: Box::new(Expr::Var {
+                name: "coverage".to_string(),
+                is_const: false,
+            }),
         },
-        Expr::Not(Box::new(Expr::Var("coverage".to_string()))),
+        Expr::Not(Box::new(Expr::Var {
+            name: "coverage".to_string(),
+            is_const: false,
+        })),
         Expr::Logical {
             op: LogicalOp::And,
-            left: Box::new(Expr::Var("coverage".to_string())),
-            right: Box::new(Expr::Var("coverage".to_string())),
+            left: Box::new(Expr::Var {
+                name: "coverage".to_string(),
+                is_const: false,
+            }),
+            right: Box::new(Expr::Var {
+                name: "coverage".to_string(),
+                is_const: false,
+            }),
         },
     ]
 }
@@ -2873,14 +2955,11 @@ fn assert_expr_tree_claimed(expr: &Expr) {
     );
     match expr {
         Expr::Literal(..)
-        | Expr::Var(..)
-        | Expr::Const(..)
+        | Expr::Var { .. }
         | Expr::ConstRef { .. }
         | Expr::Env(..)
         | Expr::KeyPath { .. }
-        | Expr::ConstKeyPath { .. }
-        | Expr::Inspect(..)
-        | Expr::InspectConst(..)
+        | Expr::Inspect { .. }
         | Expr::FreshPipe
         | Expr::CompiledMath(..)
         | Expr::UnsignedIntBoundary(..) => {}

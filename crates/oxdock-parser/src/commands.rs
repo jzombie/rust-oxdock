@@ -2107,8 +2107,7 @@ declare_commands! {
         lower: |_flags, args| {
             let arg = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_READ_LINE, "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
             let var = match arg {
-                Arg::Expr(Expr::Var(name)) => name,
-                Arg::Expr(Expr::Const(name)) => name,
+                Arg::Expr(Expr::Var { name, .. }) => name,
                 // Quoted "$var" keeps its sigil through the generic string
                 // path; templates defer untouched exactly as before.
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
@@ -2151,8 +2150,7 @@ declare_commands! {
             let mut it = args.into_iter();
             let var_arg = it.next().ok_or_else(|| ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))?;
             let var = match var_arg {
-                Arg::Expr(Expr::Var(name)) => name,
-                Arg::Expr(Expr::Const(name)) => name,
+                Arg::Expr(Expr::Var { name, .. }) => name,
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
                 other => return Err(ParseError::validation(KEYWORD_PROMPT, format!("PROMPT requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
@@ -2679,8 +2677,7 @@ declare_commands! {
                 .next()
                 .ok_or_else(|| ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
             let list = match raw_list {
-                Arg::Expr(Expr::Var(name)) => name,
-                Arg::Expr(Expr::Const(name)) => name,
+                Arg::Expr(Expr::Var { name, .. }) => name,
                 Arg::String(s, _) => s.trim_start_matches('$').to_string(),
                 other => return Err(ParseError::validation(KEYWORD_LIST_APPEND, format!("LIST_APPEND requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
@@ -6609,28 +6606,23 @@ pub(crate) fn make_compare(
 pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
     match expr {
         Expr::Literal(v) => Some(vec![MathOp::PushConst(v.clone())]),
-        Expr::Var(name) => Some(vec![MathOp::Load {
+        Expr::Var { name, is_const } => Some(vec![MathOp::Load {
             name: name.clone(),
-            is_const: false,
-        }]),
-        Expr::Const(name) => Some(vec![MathOp::Load {
-            name: name.clone(),
-            is_const: true,
+            is_const: *is_const,
         }]),
         Expr::ConstRef { alias, name } => Some(vec![MathOp::LoadConstRef {
             alias: alias.clone(),
             name: name.clone(),
         }]),
         Expr::Env(key) => Some(vec![MathOp::LoadEnv(key.clone())]),
-        Expr::KeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
+        Expr::KeyPath {
+            base,
+            keys,
+            is_const,
+        } => Some(vec![MathOp::LoadKeyPath {
             base: base.clone(),
             keys: keys.clone(),
-            is_const: false,
-        }]),
-        Expr::ConstKeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
-            base: base.clone(),
-            keys: keys.clone(),
-            is_const: true,
+            is_const: *is_const,
         }]),
         Expr::Call { name, args } => {
             let mut ops = Vec::new();
@@ -6643,13 +6635,9 @@ pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
             });
             Some(ops)
         }
-        Expr::Inspect(var) => Some(vec![MathOp::Inspect {
-            name: var.clone(),
-            is_const: false,
-        }]),
-        Expr::InspectConst(var) => Some(vec![MathOp::Inspect {
-            name: var.clone(),
-            is_const: true,
+        Expr::Inspect { name, is_const } => Some(vec![MathOp::Inspect {
+            name: name.clone(),
+            is_const: *is_const,
         }]),
         Expr::Arithmetic { op, left, right } => {
             let mut ops = expr_to_rpn(left)?;

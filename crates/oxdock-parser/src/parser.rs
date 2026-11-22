@@ -1363,9 +1363,16 @@ fn try_lone_value_expr(
             return Ok(None);
         }
         return Ok(Some(Arg::Expr(if keys.is_empty() {
-            Expr::Var(base)
+            Expr::Var {
+                name: base,
+                is_const: false,
+            }
         } else {
-            Expr::KeyPath { base, keys }
+            Expr::KeyPath {
+                base,
+                keys,
+                is_const: false,
+            }
         })));
     }
     // `env:KEY` read, gapless and exact.
@@ -1420,11 +1427,11 @@ fn try_lone_call_expr(
                     kind: None,
                 });
             };
-            if let Expr::Var(var) = arg {
-                return Ok(Some(Arg::Expr(Expr::Inspect(var.clone()))));
-            }
-            if let Expr::Const(var) = arg {
-                return Ok(Some(Arg::Expr(Expr::InspectConst(var.clone()))));
+            if let Expr::Var { name, is_const } = arg {
+                return Ok(Some(Arg::Expr(Expr::Inspect {
+                    name: name.clone(),
+                    is_const: *is_const,
+                })));
             }
             return Err(TokenError {
                 stmt,
@@ -1465,7 +1472,10 @@ fn try_bare_const_region(
     };
     if region.len() == 1 {
         if ctx.is_const_visible(&base) {
-            return Ok(Some(Arg::Expr(Expr::Const(base))));
+            return Ok(Some(Arg::Expr(Expr::Var {
+                name: base,
+                is_const: true,
+            })));
         }
         return Ok(None);
     }
@@ -1515,7 +1525,11 @@ fn try_bare_const_region(
     if idx != region.len() || keys.is_empty() {
         return Ok(None);
     }
-    Ok(Some(Arg::Expr(Expr::ConstKeyPath { base, keys })))
+    Ok(Some(Arg::Expr(Expr::KeyPath {
+        base,
+        keys,
+        is_const: true,
+    })))
 }
 
 /// Expression extension for `$`/`env:`-led argument starts: parse a
@@ -3005,11 +3019,11 @@ fn parse_expr_call(
                 kind: None,
             });
         };
-        if let Expr::Var(var) = arg {
-            return Ok(Expr::Inspect(var.clone()));
-        }
-        if let Expr::Const(var) = arg {
-            return Ok(Expr::InspectConst(var.clone()));
+        if let Expr::Var { name, is_const } = arg {
+            return Ok(Expr::Inspect {
+                name: name.clone(),
+                is_const: *is_const,
+            });
         }
         return Err(TokenError {
             stmt,
@@ -3246,7 +3260,10 @@ fn parse_timeout_duration_at(
         TokKind::Punct('$') => match toks.get(pos + 1) {
             Some(var) if var.joint && matches!(&var.kind, TokKind::Word(w) if is_ident_word(w)) => {
                 match &var.kind {
-                    TokKind::Word(w) => Arg::Expr(Expr::Var(w.clone())),
+                    TokKind::Word(w) => Arg::Expr(Expr::Var {
+                        name: w.clone(),
+                        is_const: false,
+                    }),
                     _ => unreachable!(),
                 }
             }
@@ -7076,9 +7093,16 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
                 cur.pos += 2;
             }
             if keys.is_empty() {
-                Ok(Expr::Var(base))
+                Ok(Expr::Var {
+                    name: base,
+                    is_const: false,
+                })
             } else {
-                Ok(Expr::KeyPath { base, keys })
+                Ok(Expr::KeyPath {
+                    base,
+                    keys,
+                    is_const: false,
+                })
             }
         }
         Some(TokKind::Word(w)) if w == "env" => {
@@ -7232,9 +7256,16 @@ fn try_parse_bare_const(cur: &mut Cursor) -> Result<Option<Expr>, TokenError> {
             cur.pos += 2;
         }
         if keys.is_empty() {
-            Ok(Some(Expr::Const(base)))
+            Ok(Some(Expr::Var {
+                name: base,
+                is_const: true,
+            }))
         } else {
-            Ok(Some(Expr::ConstKeyPath { base, keys }))
+            Ok(Some(Expr::KeyPath {
+                base,
+                keys,
+                is_const: true,
+            }))
         }
     } else {
         Ok(None)

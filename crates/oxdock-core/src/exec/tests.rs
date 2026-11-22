@@ -206,7 +206,10 @@ fn run_exec_resolves_and_flattens_argv() {
             kind: StepKind::RunExec {
                 argv: vec![
                     Arg::Expr(Expr::Literal(Value::string("cargo".to_string()))),
-                    Arg::Expr(Expr::Var("args".to_string())),
+                    Arg::Expr(Expr::Var {
+                        name: "args".to_string(),
+                        is_const: false,
+                    }),
                     Arg::Expr(Expr::Literal(Value::int(3))),
                     Arg::Expr(Expr::Literal(Value::bool(true))),
                     Arg::String("{{ env:GREETING }}".to_string(), false),
@@ -323,8 +326,12 @@ fn run_exec_resolves_every_variable_type() {
                 argv: vec![
                     Arg::Expr(Expr::Literal(Value::string("echo".to_string()))),
                     // Whole-element `$var` and `$map.key` references.
-                    Arg::Expr(Expr::Var("who".to_string())),
+                    Arg::Expr(Expr::Var {
+                        name: "who".to_string(),
+                        is_const: false,
+                    }),
                     Arg::Expr(Expr::KeyPath {
+                        is_const: false,
                         base: "m".to_string(),
                         keys: vec!["k".to_string()],
                     }),
@@ -470,7 +477,10 @@ fn run_exec_treats_variable_values_as_opaque() {
             kind: StepKind::RunExec {
                 argv: vec![
                     Arg::Expr(Expr::Literal(Value::string("echo".to_string()))),
-                    Arg::Expr(Expr::Var("data".to_string())),
+                    Arg::Expr(Expr::Var {
+                        name: "data".to_string(),
+                        is_const: false,
+                    }),
                 ],
             },
             scope_enter: 0,

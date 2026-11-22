@@ -457,18 +457,20 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             }
             Ok(v.clone())
         }
-        Expr::Var(name) => {
-            if cx.state.is_const_var(name) {
-                bail!("CONST reads bare: use {name}, not ${name}");
+        Expr::Var { name, is_const } => {
+            if *is_const {
+                cx.state
+                    .get_var(name)
+                    .ok_or_else(|| anyhow::anyhow!("undefined CONST {name}"))
+            } else {
+                if cx.state.is_const_var(name) {
+                    bail!("CONST reads bare: use {name}, not ${name}");
+                }
+                cx.state
+                    .get_var(name)
+                    .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))
             }
-            cx.state
-                .get_var(name)
-                .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))
         }
-        Expr::Const(name) => cx
-            .state
-            .get_var(name)
-            .ok_or_else(|| anyhow::anyhow!("undefined CONST {name}")),
         Expr::ConstRef { alias, name } => super::import::resolve_const_ref(cx.state, alias, name),
         Expr::Env(key) => match cx.state.get_env(key) {
             Some(v) => Ok(Value::string(v.to_string())),
@@ -477,13 +479,16 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             // the static gate rejects them before any step runs.
             None => Ok(Value::string(String::new())),
         },
-        Expr::KeyPath { base, keys } => {
-            if cx.state.is_const_var(base) {
+        Expr::KeyPath {
+            base,
+            keys,
+            is_const,
+        } => {
+            if !is_const && cx.state.is_const_var(base) {
                 bail!("CONST reads bare: use {base}, not ${base}");
             }
             resolve_key_path_value(cx.state, base, keys)
         }
-        Expr::ConstKeyPath { base, keys } => resolve_key_path_value(cx.state, base, keys),
         Expr::List(items) => {
             let mut result = Vec::new();
             for item in items {
@@ -596,8 +601,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         }
         // Variable inspection carries the binding name unevaluated (see
         // `Expr::Inspect`): no function-name matching happens here.
-        Expr::Inspect(var) => evaluate_inspect_var(var, cx),
-        Expr::InspectConst(var) => evaluate_inspect_var(var, cx),
+        Expr::Inspect { name, .. } => evaluate_inspect_var(name, cx),
         // Bare `LET $p: PIPE`: mint a fresh unbound handle tagged with
         // the declaring task. Backends materialize lazily on first
         // binding, so declaration never pre-commits a backend type with

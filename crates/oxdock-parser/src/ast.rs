@@ -627,16 +627,28 @@ pub enum ArithOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MathOp {
     PushConst(Value),
-    Load { name: String, is_const: bool },
-    LoadConstRef { alias: String, name: String },
+    Load {
+        name: String,
+        is_const: bool,
+    },
+    LoadConstRef {
+        alias: String,
+        name: String,
+    },
     LoadEnv(String),
     LoadKeyPath {
         base: String,
         keys: Vec<String>,
         is_const: bool,
     },
-    Call { name: String, arity: usize },
-    Inspect { name: String, is_const: bool },
+    Call {
+        name: String,
+        arity: usize,
+    },
+    Inspect {
+        name: String,
+        is_const: bool,
+    },
     Neg,
     Add,
     Sub,
@@ -659,12 +671,15 @@ pub enum LogicalOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Value),
-    Var(String),
-    /// Bare immutable read (`NAME`): a `CONST` binding visible here.
-    /// Parsed only for bare names that resolve to a `CONST`; `LET`
-    /// bindings never read bare (use `$name`). Evaluation mirrors
-    /// `Var` but consults the const gate for misuse diagnostics.
-    Const(String),
+    /// Bare binding read: `is_const=false` is `$name` (a `LET` binding);
+    /// `is_const=true` is bare `NAME` (a `CONST` binding visible here).
+    /// Parsed only for bare names that resolve to a `CONST` in the
+    /// const case; evaluation mirrors the `LET` path but consults the
+    /// const gate for misuse diagnostics.
+    Var {
+        name: String,
+        is_const: bool,
+    },
     /// Qualified immutable read (`ALIAS::NAME`): a `CONST` exported by
     /// the module imported under `ALIAS`. Parsed only for the bare
     /// qualified shape; `$ALIAS::NAME` is a hard error (use bare).
@@ -678,15 +693,12 @@ pub enum Expr {
     /// Environment read (`env:KEY`): resolves against the script
     /// environment at evaluation time.
     Env(String),
+    /// Key path traversal: `is_const=false` is `$base.key` (a `LET`
+    /// binding); `is_const=true` is bare `NAME.key` (a `CONST` binding).
     KeyPath {
         base: String,
         keys: Vec<String>,
-    },
-    /// Bare const key path (`NAME.key`): traversal over a `CONST`
-    /// binding, mirroring `KeyPath` for `LET`.
-    ConstKeyPath {
-        base: String,
-        keys: Vec<String>,
+        is_const: bool,
     },
     List(Vec<Expr>),
     Map(Vec<(String, Expr)>),
@@ -699,14 +711,16 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
-    /// Variable inspection (`INSPECT($var)`): carries the variable name
-    /// unevaluated so evaluation can snapshot the binding. Produced only by
-    /// the parser for the exact `INSPECT` name; evaluators match on this
-    /// variant and never on a function-name string.
-    Inspect(String),
-    /// Const inspection (`INSPECT(NAME)`): bare twin of `Inspect` for
-    /// `CONST` bindings.
-    InspectConst(String),
+    /// Variable inspection: `is_const=false` is `INSPECT($var)`;
+    /// `is_const=true` is `INSPECT(NAME)` for `CONST` bindings. Carries
+    /// the variable name unevaluated so evaluation can snapshot the
+    /// binding. Produced only by the parser for the exact `INSPECT`
+    /// name; evaluators match on this variant and never on a
+    /// function-name string.
+    Inspect {
+        name: String,
+        is_const: bool,
+    },
     Compare {
         op: CompareOp,
         left: Box<Expr>,
@@ -779,14 +793,11 @@ impl Expr {
         f(self);
         match self {
             Expr::Literal(_)
-            | Expr::Var(_)
-            | Expr::Const(_)
+            | Expr::Var { .. }
             | Expr::ConstRef { .. }
             | Expr::Env(_)
             | Expr::KeyPath { .. }
-            | Expr::ConstKeyPath { .. }
-            | Expr::Inspect(_)
-            | Expr::InspectConst(_)
+            | Expr::Inspect { .. }
             | Expr::FreshPipe
             | Expr::UnsignedIntBoundary(_) => {}
             Expr::Call { args, .. } => {
@@ -830,14 +841,11 @@ impl Expr {
         f(self);
         match self {
             Expr::Literal(_)
-            | Expr::Var(_)
-            | Expr::Const(_)
+            | Expr::Var { .. }
             | Expr::ConstRef { .. }
             | Expr::Env(_)
             | Expr::KeyPath { .. }
-            | Expr::ConstKeyPath { .. }
-            | Expr::Inspect(_)
-            | Expr::InspectConst(_)
+            | Expr::Inspect { .. }
             | Expr::FreshPipe
             | Expr::UnsignedIntBoundary(_) => {}
             Expr::Call { args, .. } => {
@@ -1300,21 +1308,27 @@ impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expr::Literal(v) => write!(f, "{}", v),
-            Expr::Var(name) => write!(f, "${}", name),
-            Expr::Const(name) => write!(f, "{}", name),
+            Expr::Var { name, is_const } => {
+                if *is_const {
+                    write!(f, "{}", name)
+                } else {
+                    write!(f, "${}", name)
+                }
+            }
             Expr::ConstRef { alias, name } => {
                 write!(f, "{alias}::{name}")
             }
             Expr::Env(key) => write!(f, "env:{}", key),
-            Expr::KeyPath { base, keys } => {
-                write!(f, "${}", base)?;
-                for key in keys {
-                    write!(f, ".{}", key)?;
+            Expr::KeyPath {
+                base,
+                keys,
+                is_const,
+            } => {
+                if *is_const {
+                    write!(f, "{}", base)?;
+                } else {
+                    write!(f, "${}", base)?;
                 }
-                Ok(())
-            }
-            Expr::ConstKeyPath { base, keys } => {
-                write!(f, "{}", base)?;
                 for key in keys {
                     write!(f, ".{}", key)?;
                 }
@@ -1330,8 +1344,13 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
-            Expr::Inspect(var) => write!(f, "INSPECT(${})", var),
-            Expr::InspectConst(var) => write!(f, "INSPECT({})", var),
+            Expr::Inspect { name, is_const } => {
+                if *is_const {
+                    write!(f, "INSPECT({})", name)
+                } else {
+                    write!(f, "INSPECT(${})", name)
+                }
+            }
             Expr::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
@@ -1438,7 +1457,11 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
             }
             MathOp::LoadConstRef { alias, name } => stack.push(format!("{alias}::{name}")),
             MathOp::LoadEnv(key) => stack.push(format!("env:{}", key)),
-            MathOp::LoadKeyPath { base, keys, is_const } => {
+            MathOp::LoadKeyPath {
+                base,
+                keys,
+                is_const,
+            } => {
                 let mut s = if *is_const {
                     base.clone()
                 } else {

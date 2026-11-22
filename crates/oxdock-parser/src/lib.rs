@@ -1218,7 +1218,13 @@ mod tests {
                 expr,
             } => {
                 assert_eq!(var, "x");
-                assert_eq!(expr, &Expr::Var("y".to_string()));
+                assert_eq!(
+                    expr,
+                    &Expr::Var {
+                        name: "y".to_string(),
+                        is_const: false
+                    }
+                );
             }
             other => panic!("expected Assign, got {:?}", other),
         }
@@ -1440,7 +1446,13 @@ mod tests {
             } => {
                 assert_eq!(key_var.as_deref(), Some("k"));
                 assert_eq!(var, "v");
-                assert_eq!(in_expr, &Expr::Var("map".to_string()));
+                assert_eq!(
+                    in_expr,
+                    &Expr::Var {
+                        name: "map".to_string(),
+                        is_const: false
+                    }
+                );
                 assert_eq!(body.len(), 1);
             }
             other => panic!("expected For, got {:?}", other),

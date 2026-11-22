@@ -1658,14 +1658,11 @@ fn expr_call_names(expr: &Expr, enter_funcdefs: bool, out: &mut Vec<String>) {
             expr_call_names(right, enter_funcdefs, out);
         }
         Expr::Not(inner) => expr_call_names(inner, enter_funcdefs, out),
-        Expr::Var(_)
-        | Expr::Const(_)
+        Expr::Var { .. }
         | Expr::ConstRef { .. }
         | Expr::Env(_)
         | Expr::KeyPath { .. }
-        | Expr::ConstKeyPath { .. }
-        | Expr::Inspect(_)
-        | Expr::InspectConst(_)
+        | Expr::Inspect { .. }
         | Expr::FreshPipe
         | Expr::UnsignedIntBoundary(_) => {}
     }
@@ -2368,7 +2365,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     if let Some((alias, name)) = base.split_once("::") {
                         bail!("CONST reads bare: use {alias}::{name}, not ${alias}::{name}");
                     } else {
-                        Expr::Var(base.clone())
+                        Expr::Var {
+                            name: base.clone(),
+                            is_const: false,
+                        }
                     }
                 } else if base.contains("::") {
                     bail!(
@@ -2378,6 +2378,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     Expr::KeyPath {
                         base: base.clone(),
                         keys: rest.to_vec(),
+                        is_const: false,
                     }
                 }
             }
@@ -2394,12 +2395,16 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     }
                 } else if let Some((base, tail)) = name.split_once('.') {
                     let keys = tail.split('.').map(|s| s.to_string()).collect::<Vec<_>>();
-                    Expr::ConstKeyPath {
+                    Expr::KeyPath {
                         base: base.to_string(),
                         keys,
+                        is_const: true,
                     }
                 } else {
-                    Expr::Const(name.clone())
+                    Expr::Var {
+                        name: name.clone(),
+                        is_const: true,
+                    }
                 }
             }
         };
@@ -2586,7 +2591,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     if let Some((alias, name)) = base.split_once("::") {
                         bail!("CONST reads bare: use {alias}::{name}, not ${alias}::{name}");
                     } else {
-                        Expr::Var(base.clone())
+                        Expr::Var {
+                            name: base.clone(),
+                            is_const: false,
+                        }
                     }
                 } else if base.contains("::") {
                     bail!(
@@ -2596,6 +2604,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     Expr::KeyPath {
                         base: base.clone(),
                         keys: segs.to_vec(),
+                        is_const: false,
                     }
                 };
                 self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
@@ -2642,9 +2651,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 {
                     let keys = tail.split('.').map(|s| s.to_string()).collect::<Vec<_>>();
-                    let expr = Expr::ConstKeyPath {
+                    let expr = Expr::KeyPath {
                         base: base.to_string(),
                         keys,
+                        is_const: true,
                     };
                     return self.infer_expr(&expr, env, scope, scope.idx, depth + 1);
                 }
@@ -2653,7 +2663,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '_')
                 {
-                    let expr = Expr::Const(trimmed.to_string());
+                    let expr = Expr::Var {
+                        name: trimmed.to_string(),
+                        is_const: true,
+                    };
                     return self.infer_expr(&expr, env, scope, scope.idx, depth + 1);
                 }
                 bail!("invalid placeholder call argument '{invalid}'")
@@ -5413,26 +5426,25 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(StaticTy::Ty(literal_tag(value)))
             }
-            Expr::Var(name) => {
+            Expr::Var { name, is_const } => {
                 let key = clean_var(name);
-                if env.is_const(&key, scope.site.as_ref()) {
-                    bail!(
-                        "{}CONST reads bare: use {key}, not ${key}",
-                        loc(Some(&at()))
-                    );
-                }
-                if !env.is_declared(&key) {
-                    bail!("{}undefined variable ${key}", loc(Some(&at())));
-                }
-                Ok(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?))
-            }
-            Expr::Const(name) => {
-                let key = clean_var(name);
-                if !env.is_declared(&key) {
-                    bail!("{}undefined CONST {key}", loc(Some(&at())));
-                }
-                if !env.is_const(&key, scope.site.as_ref()) {
-                    bail!("{}`{key}` is a LET binding; use ${key}", loc(Some(&at())));
+                if *is_const {
+                    if !env.is_declared(&key) {
+                        bail!("{}undefined CONST {key}", loc(Some(&at())));
+                    }
+                    if !env.is_const(&key, scope.site.as_ref()) {
+                        bail!("{}`{key}` is a LET binding; use ${key}", loc(Some(&at())));
+                    }
+                } else {
+                    if env.is_const(&key, scope.site.as_ref()) {
+                        bail!(
+                            "{}CONST reads bare: use {key}, not ${key}",
+                            loc(Some(&at()))
+                        );
+                    }
+                    if !env.is_declared(&key) {
+                        bail!("{}undefined variable ${key}", loc(Some(&at())));
+                    }
                 }
                 Ok(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?))
             }
@@ -5444,9 +5456,20 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.check_env_name(env, name, "env:", scope)?;
                 Ok(StaticTy::Ty(TypeTag::String))
             }
-            Expr::KeyPath { base, keys } => {
+            Expr::KeyPath {
+                base,
+                keys,
+                is_const,
+            } => {
                 let key = clean_var(base);
-                if !env.is_declared(&key) {
+                if *is_const {
+                    if !env.is_declared(&key) {
+                        bail!("{}undefined CONST {key}", loc(Some(&at())));
+                    }
+                    if !env.is_const(&key, scope.site.as_ref()) {
+                        bail!("{}`{key}` is a LET binding; use ${key}", loc(Some(&at())));
+                    }
+                } else if !env.is_declared(&key) {
                     bail!("{}undefined variable ${key}", loc(Some(&at())));
                 }
                 let mut current = env.read_guarded(&key, scope.site.as_ref())?;
@@ -5525,76 +5548,6 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(StaticTy::Ty(current))
             }
-            Expr::ConstKeyPath { base, keys } => {
-                let key = clean_var(base);
-                if !env.is_declared(&key) {
-                    bail!("{}undefined CONST {key}", loc(Some(&at())));
-                }
-                if !env.is_const(&key, scope.site.as_ref()) {
-                    bail!("{}`{key}` is a LET binding; use ${key}", loc(Some(&at())));
-                }
-                let mut current = env.read_guarded(&key, scope.site.as_ref())?;
-                for part in keys {
-                    match current {
-                        TypeTag::Record(fields) => {
-                            let Some(field) = fields
-                                .iter()
-                                .find(|field| field.name.as_str() == part.as_str())
-                            else {
-                                bail!(
-                                    "{}: unknown field '{part}'; expected fields: {}",
-                                    at(),
-                                    fields
-                                        .iter()
-                                        .map(|field| field.name.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                );
-                            };
-                            current = field.ty.clone();
-                        }
-                        TypeTag::ListOf(element) => {
-                            if part.parse::<usize>().is_err() {
-                                bail!("{}: Invalid array index '{part}'", at());
-                            }
-                            current = element.as_ref().clone();
-                        }
-                        TypeTag::MapOf(values) => {
-                            current = values.as_ref().clone();
-                        }
-                        TypeTag::Map | TypeTag::List | TypeTag::Any => {
-                            return Ok(StaticTy::Ty(TypeTag::Any));
-                        }
-                        TypeTag::Union(_, members) => {
-                            let traversable = |member: &TypeTag| {
-                                matches!(
-                                    member,
-                                    TypeTag::Record(_)
-                                        | TypeTag::MapOf(_)
-                                        | TypeTag::Map
-                                        | TypeTag::ListOf(_)
-                                        | TypeTag::List
-                                        | TypeTag::Any
-                                )
-                            };
-                            if members.iter().all(|member| !traversable(member)) {
-                                bail!(
-                                    "{}: Cannot traverse into scalar value at key '{part}'",
-                                    at()
-                                );
-                            }
-                            return Ok(StaticTy::Ty(TypeTag::Any));
-                        }
-                        _ => {
-                            bail!(
-                                "{}: Cannot traverse into scalar value at key '{part}'",
-                                at()
-                            );
-                        }
-                    }
-                }
-                Ok(StaticTy::Ty(current))
-            }
             Expr::List(items) => self.infer_list_literal(items, env, scope, idx, depth),
             Expr::Map(entries) => self.infer_map_literal(entries, env, scope, idx, depth),
             Expr::Block(steps) => {
@@ -5639,18 +5592,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 Ok(StaticTy::Ty(unified.expect("has_return implies a type")))
             }
             Expr::Call { name, args } => self.check_call(name, args, env, scope, idx, depth),
-            Expr::Inspect(name) => {
+            Expr::Inspect { name, is_const } => {
                 let key = clean_var(name);
                 if !env.is_declared(&key) {
+                    if *is_const {
+                        bail!("{}undefined CONST {key}", loc(Some(&at())));
+                    }
                     bail!("{}undefined variable ${key}", loc(Some(&at())));
-                }
-                env.read_guarded(&key, scope.site.as_ref())?;
-                Ok(StaticTy::Ty(TypeTag::Any))
-            }
-            Expr::InspectConst(name) => {
-                let key = clean_var(name);
-                if !env.is_declared(&key) {
-                    bail!("{}undefined CONST {key}", loc(Some(&at())));
                 }
                 env.read_guarded(&key, scope.site.as_ref())?;
                 Ok(StaticTy::Ty(TypeTag::Any))

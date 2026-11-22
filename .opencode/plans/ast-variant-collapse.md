@@ -70,6 +70,6 @@ each slice.
 
 ## Status
 - [x] Slice 1: MathOp loads (collapsed `Load{is_const}`, `LoadKeyPath{is_const}`, `Inspect{is_const}`; deps: ast, commands lowering, args eval, static_check typer, macros emitter, arithmetic tests; suites green)
-- [ ] Slice 2: Expr bindings
+- [x] Slice 2: Expr bindings (collapsed `Var{is_const}`, `KeyPath{is_const}`, `Inspect{is_const}`; deps: ast walk/Display, commands lowering + 3 var-extract sites, args eval, static_check typing + template/placeholder constructors, command check_arg, macros emitter, track, lib/exec/integration/fuzz tests; suites green)
 - [ ] Slice 3: StepKind assigns
 - [ ] Slice 4: ENTRY_UNIT-as-ModuleRecord

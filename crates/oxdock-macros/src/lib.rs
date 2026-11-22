@@ -842,16 +842,13 @@ fn emit_arg_part(
 fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2::TokenStream {
     match expr {
         Expr::Literal(v) => emit_value(v, interp),
-        Expr::Var(s) => {
+        Expr::Var { name: s, is_const } => {
             if let Some(idx) = is_placeholder(s) {
                 let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
-                quote! { Expr::Var(#ident.to_string()) }
+                quote! { Expr::Var { name: #ident.to_string(), is_const: #is_const } }
             } else {
-                quote! { Expr::Var(#s.to_string()) }
+                quote! { Expr::Var { name: #s.to_string(), is_const: #is_const } }
             }
-        }
-        Expr::Const(s) => {
-            quote! { Expr::Const(#s.to_string()) }
         }
         Expr::ConstRef { alias, name } => {
             quote! { Expr::ConstRef { alias: #alias.to_string(), name: #name.to_string() } }
@@ -859,7 +856,11 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
         Expr::Env(k) => {
             quote! { Expr::Env(#k.to_string()) }
         }
-        Expr::KeyPath { base, keys } => {
+        Expr::KeyPath {
+            base,
+            keys,
+            is_const,
+        } => {
             let base_stream = if let Some(idx) = is_placeholder(base) {
                 let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
                 quote! { #ident.to_string() }
@@ -877,10 +878,7 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
                     }
                 })
                 .collect();
-            quote! { Expr::KeyPath { base: #base_stream, keys: vec![#(#key_strs),*] } }
-        }
-        Expr::ConstKeyPath { base, keys } => {
-            quote! { Expr::ConstKeyPath { base: #base.to_string(), keys: vec![#(#keys.to_string()),*] } }
+            quote! { Expr::KeyPath { base: #base_stream, keys: vec![#(#key_strs),*], is_const: #is_const } }
         }
         Expr::List(items) => {
             let item_tokens: Vec<_> = items.iter().map(|e| emit_expr(e, interp)).collect();
@@ -904,11 +902,11 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             let arg_tokens: Vec<_> = args.iter().map(|e| emit_expr(e, interp)).collect();
             quote! { Expr::Call { name: #name.to_string(), args: vec![#(#arg_tokens),*] } }
         }
-        Expr::Inspect(var) => {
-            quote! { Expr::Inspect(#var.to_string()) }
-        }
-        Expr::InspectConst(var) => {
-            quote! { Expr::InspectConst(#var.to_string()) }
+        Expr::Inspect {
+            name: var,
+            is_const,
+        } => {
+            quote! { Expr::Inspect { name: #var.to_string(), is_const: #is_const } }
         }
         Expr::Compare { op, left, right } => {
             let op_token = match op {
@@ -992,7 +990,11 @@ fn emit_math_op(op: &oxdock_parser::ast::MathOp) -> proc_macro2::TokenStream {
             quote! { oxdock_parser::ast::MathOp::LoadConstRef { alias: #alias.to_string(), name: #name.to_string() } }
         }
         M::LoadEnv(k) => quote! { oxdock_parser::ast::MathOp::LoadEnv(#k.to_string()) },
-        M::LoadKeyPath { base, keys, is_const } => {
+        M::LoadKeyPath {
+            base,
+            keys,
+            is_const,
+        } => {
             quote! { oxdock_parser::ast::MathOp::LoadKeyPath { base: #base.to_string(), keys: vec![#(#keys.to_string()),*], is_const: #is_const } }
         }
         M::Call { name, arity } => {
