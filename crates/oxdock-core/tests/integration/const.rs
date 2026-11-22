@@ -681,6 +681,9 @@ fn const_forward_disjoint_guards_resolve() {
         IF $go {
             [os:linux] IMPORT ["c.oxdock" AS B]
         }
+        IF $go {
+            [os:windows] IMPORT ["c.oxdock" AS B]
+        }
         LET $n: INT = $B::N
         ASSERT_EQ $n @EXPECTED@
     "#}
@@ -2278,7 +2281,11 @@ fn run_bare_uppercase_stays_literal() {
         )
         .expect("bare uppercase in RUN stays literal");
     // And the const value itself never leaks through the raw spelling:
-    // only the `{{ }}` form reads it.
+    // only the `{{ }}` form reads it. `CONTAINS` (not exact `EQ`)
+    // because Windows shells terminate the line with CRLF while Unix
+    // uses LF: the literal survives verbatim on both, which is the
+    // property under test. (If the bare word evaluated the const,
+    // the output would be the secret value, which lacks `SECRET`.)
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     Engine::new()
@@ -2287,7 +2294,7 @@ fn run_bare_uppercase_stays_literal() {
             indoc! {r#"
                 CONST $SECRET: STRING = "s3cr3t-value"
                 LET $out: STRING = RUN echo SECRET
-                ASSERT_EQ $out "SECRET\n"
+                ASSERT_CONTAINS $out "SECRET"
             "#},
         )
         .expect("raw bare does not evaluate the const");
@@ -2316,7 +2323,7 @@ fn echo_spellings_read_distinct_stores() {
                 ECHO "{{ $BADGE }}"
                 ASSERT_CONTAINS stdout "const-hello"
                 LET $raw: STRING = RUN echo BADGE
-                ASSERT_EQ $raw "BADGE\n"
+                ASSERT_CONTAINS $raw "BADGE"
                 LET $cooked: STRING = RUN echo "{{ $BADGE }}"
                 ASSERT_CONTAINS $cooked "const-hello"
             "#},
