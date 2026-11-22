@@ -88,15 +88,25 @@ pub(super) fn inherit_env<P: ProcessManager>(
         envs.insert(key.clone(), value.clone());
     }
     if track_entry {
-        for key in &removals {
-            cx.state.entry_envs.remove(key);
-        }
-        for (key, value) in &inserts {
-            cx.state.entry_envs.insert(key.clone(), value.clone());
-        }
-        for key in keys {
-            if !cx.state.entry_inherit_names.contains(key) {
-                cx.state.entry_inherit_names.push(key.clone());
+        // Entry prelude capture: the entry record's init store holds
+        // the top-level names and values re-read from the engine on
+        // every entry call, mirroring module init capture.
+        if let Some(init) = cx
+            .state
+            .modules
+            .get_mut(super::import::ENTRY_UNIT)
+            .and_then(|record| record.init.as_mut())
+        {
+            for key in &removals {
+                init.envs.remove(key);
+            }
+            for (key, value) in &inserts {
+                init.envs.insert(key.clone(), value.clone());
+            }
+            for key in keys {
+                if !init.inherit_names.contains(key) {
+                    init.inherit_names.push(key.clone());
+                }
             }
         }
     }
@@ -151,12 +161,19 @@ pub(super) fn env<P: ProcessManager>(
     value: &str,
 ) -> Result<()> {
     Arc::make_mut(&mut cx.state.envs).insert(key.to_owned(), value.to_owned());
-    // Entry prelude capture: the entry file's own top-level `ENV`
-    // declarations seed every entry call. Tracked only at entry
-    // top level, never inside a call or module, so caller mutations
-    // can never flow into the callee prelude.
-    if cx.state.is_entry_top_level() {
-        cx.state.entry_envs.insert(key.to_owned(), value.to_owned());
+    // Entry prelude capture: the entry record's init store holds the
+    // entry file's own top-level `ENV` declarations seeding every
+    // entry call. Tracked only at entry top level, never inside a
+    // call or module, so caller mutations can never flow into the
+    // callee prelude.
+    if cx.state.is_entry_top_level()
+        && let Some(init) = cx
+            .state
+            .modules
+            .get_mut(super::import::ENTRY_UNIT)
+            .and_then(|record| record.init.as_mut())
+    {
+        init.envs.insert(key.to_owned(), value.to_owned());
     }
     Ok(())
 }
@@ -2573,10 +2590,13 @@ pub(crate) fn define_func<P: ProcessManager>(
         def_jail.clone(),
     )?;
     if let Some(jail) = def_jail {
-        let bucket = match owner.as_deref() {
-            Some(key) => cx.state.modules.get_mut(key).map(|r| &mut r.top_funcs),
-            None => Some(&mut cx.state.entry_tops),
-        };
+        // One unit lookup: the entry record lives under the sentinel
+        // like any module, so jail sealing shares the frame-walk view.
+        let bucket = cx
+            .state
+            .modules
+            .get_mut(super::import::unit_key(owner.as_deref()))
+            .map(|record| &mut record.top_funcs);
         if let Some(defs) = bucket.and_then(|tops| tops.get_mut(name))
             && let Some(raw) = defs.iter_mut().find(|r| {
                 r.jail.is_none()
@@ -2821,20 +2841,35 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             // entry prelude `CONST`s into a dedicated seed frame
             // beneath its params, so the body reads exactly the
             // top-level `CONST`s. `LET`s never cross; module callers
-            // seed nothing. Seeded from the dedicated prelude store,
-            // never caller frames, so body-local `CONST`s cannot leak
-            // into nested callees. Mirrors the static entry seeding.
+            // seed nothing. Seeded from the entry record's init
+            // store, never caller frames, so body-local `CONST`s
+            // cannot leak into nested callees. Mirrors the static
+            // entry seeding.
             let mut seeded_entry_consts = false;
+            let entry_prelude_empty = cx
+                .state
+                .modules
+                .get(super::import::ENTRY_UNIT)
+                .and_then(|record| record.init.as_ref())
+                .map(|init| init.vars.is_empty())
+                .unwrap_or(true);
             if module_key.is_none()
                 && matches!(cx.state.module_stack.last(), None | Some(None))
-                && !cx.state.entry_consts.is_empty()
+                && !entry_prelude_empty
             {
                 let prelude: Vec<(String, TypeTag, Value)> = cx
                     .state
-                    .entry_consts
-                    .iter()
-                    .map(|(k, (t, v))| (k.clone(), t.clone(), v.clone()))
-                    .collect();
+                    .modules
+                    .get(super::import::ENTRY_UNIT)
+                    .and_then(|record| record.init.as_ref())
+                    .map(|init| {
+                        init.vars
+                            .iter()
+                            .filter(|(k, _)| init.const_vars.contains(*k))
+                            .map(|(k, (t, v))| (k.clone(), t.clone(), v.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 for (name, tag, value) in prelude {
                     cx.state.declare_const(name, tag, value)?;
                     seeded_entry_consts = true;
@@ -2926,10 +2961,8 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
                 // runs on every path (the closure captures the outcome
                 // as a value first), matching the `push_scope` /
                 // `pop_scope` pattern with no unsafe.
-                let unit_key = def
-                    .module
-                    .clone()
-                    .unwrap_or_else(|| super::import::ENTRY_UNIT.to_string());
+                let unit_key =
+                    super::import::unit_key(def.module.as_deref()).to_string();
                 cx.state.call_alias_frames.push((unit_key, HashMap::new()));
                 // Frame floor for the nested walk (#322): scope frames
                 // at or above this index belong to the current call;

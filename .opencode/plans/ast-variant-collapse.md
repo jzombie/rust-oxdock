@@ -72,4 +72,4 @@ each slice.
 - [x] Slice 1: MathOp loads (collapsed `Load{is_const}`, `LoadKeyPath{is_const}`, `Inspect{is_const}`; deps: ast, commands lowering, args eval, static_check typer, macros emitter, arithmetic tests; suites green)
 - [x] Slice 2: Expr bindings (collapsed `Var{is_const}`, `KeyPath{is_const}`, `Inspect{is_const}`; deps: ast walk/Display, commands lowering + 3 var-extract sites, args eval, static_check typing + template/placeholder constructors, command check_arg, macros emitter, track, lib/exec/integration/fuzz tests; suites green)
 - [x] Slice 3: StepKind assigns (collapsed `Assign{is_const}`, `AssignCapture{is_const}`, `AssignAsync{is_const}`, `AwaitCapture{out is_const}`; existing `binding_kind` now flips the flag; merged twin dispatch wrappers in handlers/steps/lib/pipeline/mod; Display/metadata_name branch on flag with byte-identical output; fuzz + corpus + exec/integration/macro tests updated; suites green)
-- [ ] Slice 4: ENTRY_UNIT-as-ModuleRecord
+- [x] Slice 4: ENTRY_UNIT-as-ModuleRecord

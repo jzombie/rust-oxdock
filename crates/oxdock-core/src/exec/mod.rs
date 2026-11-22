@@ -436,7 +436,8 @@ pub(crate) fn new_state<P: ProcessManager>(
     // Run-scoped worker telemetry: the root hub adopts the staged
     // counter so every pump worker this run spawns attributes to it.
     let worker_counter = io.worker_counter();
-    let entry_envs = (*seed).clone();
+    let entry_seed_envs = (*seed).clone();
+    let entry_cwd = cwd.clone();
     let mut state = ExecState {
         fs,
         cargo_scratch,
@@ -469,11 +470,10 @@ pub(crate) fn new_state<P: ProcessManager>(
         call_alias_frames: Vec::new(),
         func_floors: Vec::new(),
         harvest_map: std::collections::HashMap::new(),
-        entry_tops: std::collections::HashMap::new(),
-        entry_envs,
-        entry_inherit_names: Vec::new(),
-        entry_consts: std::collections::HashMap::new(),
-        modules: std::collections::HashMap::new(),
+        modules: std::collections::HashMap::from([(
+            self::import::ENTRY_UNIT.to_string(),
+            self::state::ModuleRecord::entry_record(entry_seed_envs, entry_cwd),
+        )]),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
         module_table: self::native::std_module_table(),
@@ -563,8 +563,19 @@ pub fn validate_closure_for_run<P: ProcessManager>(
     // `FUNC`s once. Every execution path (Engine, MCP, dry run)
     // funnels through here with the steps it is about to run, so
     // one build covers them all and entry calls resolve their own
-    // file without scanning steps.
-    state.entry_tops = self::import::collect_top_funcs(steps);
+    // file without scanning steps. The entry is one `ModuleRecord`
+    // under the entry sentinel, so frame walks read entry and
+    // modules through the same `unit_top_funcs` lookup.
+    let top_funcs = self::import::collect_top_funcs(steps);
+    // In-place entry refresh: re-validation must keep the live
+    // prelude (`init`) and any sealed jails, updating only the
+    // freshly indexed steps and file frame.
+    let entry_record = state
+        .modules
+        .entry(self::import::ENTRY_UNIT.to_string())
+        .or_default();
+    entry_record.steps = steps.to_vec();
+    entry_record.top_funcs = top_funcs;
     let saved_aliases = state.type_aliases.clone();
     let closure = self::import::expand_import_closure(state, steps)?;
     static_check::validate_script_closure(steps, &closure, state)?;

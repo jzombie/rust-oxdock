@@ -2449,11 +2449,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 super::native::AliasResolution::Global => {
                     is_script_visible = self.funcs.contains_key(&qualified);
                     if module == oxdock_parser::SCRIPT_MODULE_NAME {
-                        let unit = env
-                            .module
-                            .as_ref()
-                            .map(|m| m.key.as_str())
-                            .unwrap_or(super::import::ENTRY_UNIT);
+                        let unit = super::import::unit_key(
+                            env.module.as_ref().map(|m| m.key.as_str()),
+                        );
                         if self.find_frame_hit(unit, name, &env.func_frames).is_some() {
                             is_script_visible = true;
                         }
@@ -3292,7 +3290,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // Function-local imports scope to this body (mirroring the
         // runtime dynamic extent): swap in the body's overlay,
         // restoring the unit sets afterward on every path.
-        let unit = info.module.as_deref().unwrap_or(super::import::ENTRY_UNIT);
+        let unit = super::import::unit_key(info.module.as_deref());
         let overlay = self
             .body_scopes
             .get(&(unit.to_string(), info.name.clone(), info.line, info.col))
@@ -4875,7 +4873,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             // owning file frame (entry included), then bare
             // harvests. Entry bodies resolve their own file; module
             // bodies resolve theirs. No flat cross-file reads.
-            let unit = env_module.unwrap_or(super::import::ENTRY_UNIT);
+            let unit = super::import::unit_key(env_module);
             if let Some((info, key)) = self.find_frame_hit(unit, base, nested) {
                 let ret = self.func_return_owned(&info, &key, depth)?;
                 let params = info.params;

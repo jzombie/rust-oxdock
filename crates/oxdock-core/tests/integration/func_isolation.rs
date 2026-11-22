@@ -1556,8 +1556,8 @@ fn entry_prelude_ignores_block_scoped_env() {
     // Blocks unwind: `ENV` / `INHERIT_ENV` inside `ISOLATED`, `IF`,
     // `FOR` and friends must never seed the entry prelude. Only
     // true top-level (and guard-gated top-level) declarations serve
-    // entry calls; block writes leak neither via `entry_envs` nor
-    // `entry_inherit_names`.
+    // entry calls; block writes leak neither into the entry record's
+    // init envs nor its inherit names.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let mut io = ExecIo::new();

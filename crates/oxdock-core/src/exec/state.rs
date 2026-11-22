@@ -251,26 +251,6 @@ pub struct ExecState<P: ProcessManager> {
     /// to defining file key. Harvests persist through this map past
     /// init pops, never through scope frames.
     pub(super) harvest_map: HashMap<(String, String), String>,
-    /// Entry file top-level `FUNC`s (#322): the entry unit's Frame-1
-    /// file scope, collected once per validation. `validate_closure_for_run`
-    /// is the single choke every execution path funnels through, so
-    /// one build here covers Engine, MCP, and dry runs alike.
-    pub(super) entry_tops: HashMap<String, Vec<RawFuncDef>>,
-    /// Entry call-time env (#322 follow-up): the session seed plus the
-    /// entry top-level's own `ENV` contributions, tracked as they
-    /// execute. Entry `FUNC` calls reset to this map (never caller
-    /// env), mirroring how module calls reset to `ModuleInit::envs`.
-    pub(super) entry_envs: HashMap<String, String>,
-    /// Entry top-level `INHERIT_ENV` names, re-read from the engine
-    /// on every entry call. `INHERIT_ENV` inherits from the engine,
-    /// never another script, ever: same per-call re-read rule as
-    /// `ModuleInit::inherit_names`.
-    pub(super) entry_inherit_names: Vec<String>,
-    /// Entry top-level `CONST` bindings, seeded into every entry
-    /// call. Single owner for the entry prelude: `declare_const`
-    /// captures here when `is_entry_top_level`, and `execute_call_entry`
-    /// seeds from here, never from caller frames.
-    pub(super) entry_consts: HashMap<String, (TypeTag, Value)>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -319,6 +299,44 @@ pub(super) struct ModuleRecord {
     /// Single owner for the defining-file view; the runtime walk and
     /// the static home index read the same shape.
     pub(super) top_funcs: HashMap<String, Vec<RawFuncDef>>,
+}
+
+impl ModuleInit {
+    /// Fresh entry-unit init store (#4): the session seed plus the
+    /// entry top-level's own `ENV` contributions, tracked as they
+    /// execute. Entry `FUNC` calls reset to this map (never caller
+    /// env), mirroring how module calls reset to `ModuleInit::envs`.
+    /// `vars`/`const_vars` hold the entry prelude `CONST`s seeded
+    /// into every entry call; `inherit_names` re-reads from the
+    /// engine per call. Single owner for the entry record shape, so
+    /// `new_state` and the test constructors can never drift.
+    pub(super) fn entry_seed(envs: HashMap<String, String>, cwd: GuardedPath) -> Self {
+        Self {
+            vars: HashMap::new(),
+            const_vars: HashSet::new(),
+            return_value: Value::string(String::new()),
+            envs,
+            inherit_names: Vec::new(),
+            selection: WorkspaceSelection::Snapshot,
+            cwd,
+        }
+    }
+}
+
+impl ModuleRecord {
+    /// Fresh entry-unit record (#4): empty steps/top-funcs plus the
+    /// seeded init store above. Single owner for the entry shape, so
+    /// every constructor seeds the same fields.
+    pub(super) fn entry_record(envs: HashMap<String, String>, cwd: GuardedPath) -> Self {
+        Self {
+            steps: Vec::new(),
+            func_exports: Vec::new(),
+            type_exports: Vec::new(),
+            const_exports: Vec::new(),
+            init: Some(ModuleInit::entry_seed(envs, cwd)),
+            top_funcs: HashMap::new(),
+        }
+    }
 }
 
 /// One top-level `FUNC` definition as parsed: the file frame of the
@@ -855,10 +873,6 @@ impl<P: ProcessManager> ExecState<P> {
             call_alias_frames: self.call_alias_frames.clone(),
             func_floors: self.func_floors.clone(),
             harvest_map: self.harvest_map.clone(),
-            entry_tops: self.entry_tops.clone(),
-            entry_envs: self.entry_envs.clone(),
-            entry_inherit_names: self.entry_inherit_names.clone(),
-            entry_consts: self.entry_consts.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
@@ -950,43 +964,34 @@ impl<P: ProcessManager> ExecState<P> {
     /// fallback applies (module init jail, entry snapshot default).
     /// Env always resolves file-level (module init delta, entry
     /// prelude) with `INHERIT_ENV` re-read from the engine, never
-    /// caller ambient. Callers branch on this one value, never
-    /// restating the lookup. Spelled once as [`FileCallCtx`].
+    /// caller ambient. One lookup for every file, entry included:
+    /// the entry record lives under the sentinel, so callers never
+    /// restate a `Some`/`None` branch. Spelled once as [`FileCallCtx`].
     pub(super) fn callee_file_ctx(
         &self,
         module_key: Option<&str>,
         def_jail: Option<(WorkspaceSelection, GuardedPath)>,
     ) -> Option<FileCallCtx> {
+        let unit = super::import::unit_key(module_key);
         if let Some((selection, cwd)) = def_jail {
-            let (envs, inherit_names) = match module_key {
-                Some(key) => self.modules.get(key).and_then(|record| {
-                    record
-                        .init
-                        .as_ref()
-                        .map(|init| (init.envs.clone(), init.inherit_names.clone()))
-                })?,
-                None => (self.entry_envs.clone(), self.entry_inherit_names.clone()),
-            };
+            let (envs, inherit_names) = self.modules.get(unit).and_then(|record| {
+                record
+                    .init
+                    .as_ref()
+                    .map(|init| (init.envs.clone(), init.inherit_names.clone()))
+            })?;
             return Some((envs, inherit_names, selection, cwd));
         }
-        match module_key {
-            Some(key) => self.modules.get(key).and_then(|record| {
-                record.init.as_ref().map(|init| {
-                    (
-                        init.envs.clone(),
-                        init.inherit_names.clone(),
-                        init.selection,
-                        init.cwd.clone(),
-                    )
-                })
-            }),
-            None => Some((
-                self.entry_envs.clone(),
-                self.entry_inherit_names.clone(),
-                WorkspaceSelection::Snapshot,
-                self.fs.root().clone(),
-            )),
-        }
+        self.modules.get(unit).and_then(|record| {
+            record.init.as_ref().map(|init| {
+                (
+                    init.envs.clone(),
+                    init.inherit_names.clone(),
+                    init.selection,
+                    init.cwd.clone(),
+                )
+            })
+        })
     }
 
     /// Enter a lexical scope: snapshot cwd/root/envs and open a fresh
@@ -1068,7 +1073,17 @@ impl<P: ProcessManager> ExecState<P> {
             frame.insert(key.clone());
         }
         if at_entry_top {
-            self.entry_consts.insert(key, (kind, frozen));
+            // Entry prelude capture: the entry record's init store
+            // holds the top-level `CONST`s seeded into every entry
+            // call, mirroring how module inits drain theirs.
+            if let Some(init) = self
+                .modules
+                .get_mut(super::import::ENTRY_UNIT)
+                .and_then(|record| record.init.as_mut())
+            {
+                init.vars.insert(key.clone(), (kind, frozen));
+                init.const_vars.insert(key);
+            }
         }
         Ok(())
     }
@@ -1255,6 +1270,17 @@ impl<P: ProcessManager> ExecState<P> {
             Some(Some(key)) => Some(key.clone()),
             _ => None,
         }
+    }
+
+    /// Frame-1 file scope for one unit: entry and modules share this
+    /// one lookup, so the runtime walk reads the same shape for both.
+    /// `None` only when the unit record is absent (never after
+    /// validation, which registers the entry record).
+    pub(super) fn unit_top_funcs(
+        &self,
+        unit: &str,
+    ) -> Option<&HashMap<String, Vec<RawFuncDef>>> {
+        self.modules.get(unit).map(|record| &record.top_funcs)
     }
 
     /// One lookup for the owning module's shared store (#115): the

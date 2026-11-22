@@ -1745,15 +1745,13 @@ pub(super) fn find_script_site<P: ProcessManager>(
     if let Some(entry) = state.functions.get_scoped(base, floor) {
         return Ok(Some(ScriptSite::Live(entry)));
     }
-    // Owning file frame: the module index, or the entry index.
+    // Owning file frame through the one unit lookup: entry reads
+    // its record under the entry sentinel like any module.
     // Guards evaluate against the live env, mirroring execution.
     // Entry hits carry no unit key so calls push no module context
     // (a `Some("entry")` key would trip the reentrant-init guard
     // and skip the snapshot reset).
-    let tops = match current.as_deref() {
-        Some(key) => state.modules.get(key).map(|r| &r.top_funcs),
-        None => Some(&state.entry_tops),
-    };
+    let tops = state.unit_top_funcs(unit_key(current.as_deref()));
     if let Some(defs) = tops.and_then(|t| t.get(base))
         && let Some(raw) = live_top_func(defs, &state.envs)
     {
@@ -1796,13 +1794,17 @@ pub(crate) fn missing_import_hint<P: ProcessManager>(state: &ExecState<P>, name:
     .unwrap_or_default()
 }
 
+/// Unit key for an owning file: the module key, or the entry
+/// sentinel when `None`. Single owner for the `unwrap_or(ENTRY_UNIT)`
+/// fallback, so runtime and static lookups can never restate it.
+pub(crate) fn unit_key(owner: Option<&str>) -> &str {
+    owner.unwrap_or(ENTRY_UNIT)
+}
+
 /// Active unit for runtime alias attribution: the innermost module
 /// on the context stack, else the entry.
 pub(crate) fn active_unit_key<P: ProcessManager>(state: &ExecState<P>) -> String {
-    if let Some(key) = state.current_module() {
-        return key;
-    }
-    ENTRY_UNIT.to_string()
+    unit_key(state.current_module().as_deref()).to_string()
 }
 
 /// Alias targets for one unit: executed top-level imports plus the
