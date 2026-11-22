@@ -3432,6 +3432,24 @@ LET $t: STRING = PATH_TYPE("x.txt")
 ASSERT_EQ $t "absent"
 ```
 
+**Example: run binding reads**
+
+```oxdock
+# The shell line expands templates and `$var` reads before
+# spawning: the shell sees values, never spellings.
+CONST $WHO: STRING = "world"
+LET $tpl: STRING = RUN echo "{{ $WHO }}"
+ASSERT_CONTAINS $tpl "world"
+
+# A bare `$var` outside a template reads the same way.
+LET $sigil: STRING = RUN echo $WHO
+ASSERT_CONTAINS $sigil "world"
+
+# Bare words pass through untouched and never resolve.
+LET $raw: STRING = RUN echo who
+ASSERT_CONTAINS $raw "who"
+```
+
 
 ### COPY
 
