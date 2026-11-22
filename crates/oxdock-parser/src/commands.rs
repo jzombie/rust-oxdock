@@ -6171,31 +6171,24 @@ pub(crate) fn validate_exports(
         }
     }
     for name in &exports.types {
-        // Local TYPE aliases export bare; qualified `ALIAS::TYPE`
-        // re-exports defer existence to import loading (same as func
-        // re-exports), requiring only a visible import alias here.
-        // Bare re-exports of imported types (whole-file types land
-        // bare) defer when the file has imports, so `EXPORT PERSON`
-        // after `IMPORT ["lib" AS LIB]` can promote the imported type.
-        let valid = match crate::constants::split_qualified(name) {
-            None => top_types.contains(name) || !top_imports.is_empty(),
-            Some((module, _base)) => {
-                if module == crate::constants::SCRIPT_MODULE_NAME {
-                    top_types.contains(_base)
-                } else {
-                    match modules.modules.get(module) {
-                        None => top_imports.iter().any(|m| m == module),
-                        // Host modules: types live in the global type
-                        // directory, not the func table. Parse cannot
-                        // know host type membership (descriptors register
-                        // at runtime), so a known module passes here and
-                        // import loading validates the member.
-                        Some(_) => true,
-                    }
-                }
-            }
-        };
-        if !valid {
+        // `EXPORT TYPE` names the alias bare. Qualified `ALIAS::TYPE`
+        // is rejected here instead of stranding a reader later: no
+        // downstream path serves it (MCP takes bare only, closure
+        // validation matches top-level TYPEs in the file, harvests
+        // address bare names). Bare re-exports of imported types
+        // (whole-file types land bare) defer when the file has
+        // imports, so `EXPORT PERSON` after `IMPORT ["lib" AS LIB]`
+        // can promote the imported type.
+        if crate::constants::split_qualified(name).is_some() {
+            return Err(ParseError::validation(
+                crate::constants::KEYWORD_EXPORT,
+                format!(
+                    "EXPORT TYPE `{name}` must be bare: qualified ALIAS::TYPE re-exports are not served; import the file and re-export the bare name"
+                ),
+                ctx,
+            ));
+        }
+        if !top_types.contains(name) && top_imports.is_empty() {
             return Err(ParseError::validation(
                 crate::constants::KEYWORD_EXPORT,
                 format!("EXPORT TYPE `{name}` does not match any top-level TYPE"),

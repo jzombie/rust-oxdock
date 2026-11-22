@@ -361,6 +361,71 @@ fn export_duplicate_fails() {
 }
 
 #[test]
+fn export_func_same_base_distinct_spelling_fails() {
+    // One base name rides exactly one export kind: a bare `EXPORT FOO`
+    // and a qualified `EXPORT LIB::FOO` name one servable tool, so the
+    // second spelling is the same duplicate, not a distinct serve.
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["./lib.oxdock" AS LIB]
+            FUNC FOO(): STRING {
+                RETURN "x"
+            }
+            EXPORT [FOO, LIB::FOO]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("same-base distinct-spelling func exports must fail");
+    assert!(err.to_string().contains("duplicate EXPORT"), "{err}");
+}
+
+#[test]
+fn export_type_same_base_distinct_spelling_fails() {
+    // Same base rule for types: `EXPORT TYPE A` and
+    // `EXPORT TYPE LIB::A` collide on base `A`.
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["./lib.oxdock" AS LIB]
+            TYPE A = STRING
+            EXPORT TYPE [A, LIB::A]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("same-base distinct-spelling type exports must fail");
+    assert!(err.to_string().contains("duplicate EXPORT"), "{err}");
+}
+
+#[test]
+fn export_distinct_bases_pass() {
+    // The base test only rejects shared bases: a local tool plus a
+    // re-export under another base parses and validates.
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["./lib.oxdock" AS LIB]
+            FUNC FOO(): STRING {
+                RETURN "x"
+            }
+            EXPORT [FOO, LIB::BAZ]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("distinct-base exports parse");
+    assert_eq!(
+        parsed.exports.funcs,
+        vec!["FOO".to_string(), "LIB::BAZ".to_string()]
+    );
+}
+
+#[test]
 fn export_type_single_and_list_forms() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let parsed = parse_script_with_modules_and_exports(
@@ -523,6 +588,26 @@ fn export_type_duplicate_across_kinds_fails() {
     )
     .expect_err("duplicate across kinds must fail");
     assert!(err.to_string().contains("duplicate EXPORT"), "{err}");
+}
+
+#[test]
+fn export_type_qualified_rejected_at_parse() {
+    // Qualified `ALIAS::TYPE` is unservable downstream (MCP takes
+    // bare only, closure validation matches top-level TYPEs in the
+    // file), so parse rejects it instead of stranding a reader.
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["./lib.oxdock" AS LIB]
+            TYPE A = STRING
+            EXPORT TYPE LIB::A
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("qualified TYPE export must fail at parse");
+    assert!(err.to_string().contains("must be bare"), "{err}");
 }
 
 #[test]

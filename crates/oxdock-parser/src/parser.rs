@@ -10021,31 +10021,18 @@ impl Exports {
         }
     }
 
-    /// Record one `EXPORT` name, enforcing the duplicate rule. Same-kind
-    /// func/type entries dedup by spelling (distinct qualified spellings
-    /// serve distinctly); anything sharing a base with a `CONST` export
-    /// is a cross-kind duplicate, since `CONST` reads are base-addressed.
+    /// Record one `EXPORT` name, enforcing the duplicate rule.
+    /// Uniqueness is by exported base name for every kind: `EXPORT FOO`
+    /// and `EXPORT LIB::FOO` name one servable tool, `EXPORT CONST N`
+    /// and `EXPORT CONST A::N` name one read, so the second spelling
+    /// shapes the same `duplicate EXPORT` instead of silently
+    /// shadowing. One base name rides exactly one export kind.
     /// `Err` carries the `duplicate EXPORT` message unchanged.
     pub fn insert(&mut self, kind: ExportKind, name: String) -> Result<(), String> {
         let base = crate::base_name(&name);
-        let clash = match kind {
-            ExportKind::Func | ExportKind::Type => {
-                self.names(kind).iter().any(|e| e == &name)
-                    || self.names(other_kind(kind)).iter().any(|e| e == &name)
-                    || self.consts.iter().any(|e| crate::base_name(e) == base)
-            }
-            ExportKind::Const => {
-                // Uniqueness is by exported base name, not raw spelling:
-                // `EXPORT CONST N` and `EXPORT CONST A::N` name the same
-                // read (`LIB::N`), so the second shapes the same duplicate
-                // instead of silently shadowing. The same base test covers
-                // func and type lists too: one base name rides exactly one
-                // export kind.
-                [&self.funcs, &self.types, &self.consts]
-                    .iter()
-                    .any(|list| list.iter().any(|e| crate::base_name(e) == base))
-            }
-        };
+        let clash = [&self.funcs, &self.types, &self.consts]
+            .iter()
+            .any(|list| list.iter().any(|e| crate::base_name(e) == base));
         if clash {
             return Err(format!("duplicate EXPORT `{name}`"));
         }
@@ -10055,17 +10042,6 @@ impl Exports {
             ExportKind::Const => self.consts.push(name),
         }
         Ok(())
-    }
-}
-
-/// The non-const export kind: func and type share one duplicate rule
-/// (same-kind spelling plus the const base test), so one helper serves
-/// both. Never restated at call sites.
-fn other_kind(kind: ExportKind) -> ExportKind {
-    match kind {
-        ExportKind::Func => ExportKind::Type,
-        ExportKind::Type => ExportKind::Func,
-        ExportKind::Const => ExportKind::Func,
     }
 }
 
