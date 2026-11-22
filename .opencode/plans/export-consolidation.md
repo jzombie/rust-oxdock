@@ -72,3 +72,4 @@ behavior change second (one rule flip inside the single owner).
 - [x] Slice 1: Exports struct
 - [x] Slice 2: uniform base rule
 - [x] Slice 3 (review follow-up): qualified `EXPORT TYPE ALIAS::NAME` rejected at parse (unservable downstream: MCP bare-only, closure validation bare-only, harvests bare-only); bare behavior unchanged
+- [x] Slice 4 (piecemeal elimination): `gate_harvested_name` in `import.rs` owns harvest validity (export gate then defined check, exact historical messages) for all 5 call sites — runtime `import_funcs` func/type, runtime own-harvest, static `merge_harvest`, static `collect_site` func/type (order unified to export-first); dead MCP qualified-`TYPE` arm deleted (parse owns it); order-pinning regression test

@@ -81,8 +81,8 @@ use oxdock_parser::template::{
     PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
 };
 use oxdock_parser::{
-    CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag, Value,
-    base_name, qualify, render_structural, split_qualified,
+    CompareOp, ExportKind, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag,
+    Value, base_name, qualify, render_structural, split_qualified,
 };
 use oxdock_process::ProcessManager;
 
@@ -674,9 +674,17 @@ fn merge_harvest<P: ProcessManager>(
     };
     let aliases = super::typing::collect_type_aliases(&file.steps, exec)?;
     for name in type_names {
-        if !file.exports.types.iter().any(|e| e == name) {
-            anyhow::bail!("IMPORT `{path}` does not export TYPE `{name}`");
-        }
+        // Harvest validity lives in `super::import::gate_harvested_name`
+        // (single owner, shared with the runtime): gate first, persist
+        // after. The fetch below cannot miss (gated), but keeps loud
+        // failure instead of restating the scan.
+        super::import::gate_harvested_name(
+            ExportKind::Type,
+            &file.steps,
+            &file.exports,
+            name,
+            path,
+        )?;
         let Some(target) = aliases.get(name) else {
             anyhow::bail!("IMPORT `{path}` has no such TYPE `{name}`");
         };
@@ -2971,13 +2979,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// means private: full imports skip unexported functions, and
     /// harvesting one fails upfront. Harvesting a state-touching
     /// function fails too: the body never runs, so there is no
-    /// initialized state for it to observe. Nested control-flow bodies
-    /// collect under the same owner. Shadowing follows the same
+    /// initialized state for it to observe. The harvest gate itself
+    /// (exported plus defined, both kinds) lives in
+    /// [`super::import::gate_harvested_name`], shared with the runtime,
+    /// so static and runtime fail identically. Shadowing follows the
     /// last-wins rule as [`collect_owned`](Self::collect_owned); the
     /// runtime registry remains the enforcer for true duplicates.
-    /// Type harvests gate against `EXPORT TYPE` the same way; types
-    /// persist bare globally for later `resolve_tag` calls, which read
-    /// the global alias map.
+    /// Types persist bare globally for later `resolve_tag` calls, which
+    /// read the global alias map.
     fn collect_site(&mut self, site: &ClosureSite, file: &ClosureFile) -> Result<()> {
         let module = file.key.as_str();
         let steps = file.steps.as_slice();
@@ -2985,44 +2994,36 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let func_names = site.func_names.as_deref();
         let type_names = site.type_names.as_deref();
         let func_exports = &file.exports.funcs;
-        let type_exports = &file.exports.types;
         let file_path = file.path.as_str();
         if !self.module_lets.contains_key(module) {
             let lets = module_lets(steps, self.exec)?;
             self.module_lets.insert(module.to_string(), lets);
         }
         if let Some(names) = func_names {
-            let defined: Vec<&str> = steps
-                .iter()
-                .filter_map(|step| match &step.kind {
-                    StepKind::FuncDef { name, .. } => Some(name.as_str()),
-                    _ => None,
-                })
-                .collect();
+            // Harvest validity lives in `super::import::gate_harvested_name`
+            // (single owner, shared with the runtime): export gate first,
+            // then the defined check, so static and runtime fail
+            // identically. This also fixes the old order here
+            // (defined-first) to match every other site.
             for name in names {
-                if !defined.iter().any(|d| d == name) {
-                    bail!("IMPORT `{file_path}` has no such function `{name}`");
-                }
-                if !func_exports.iter().any(|e| e == name) {
-                    bail!("IMPORT `{file_path}` does not export `{name}`");
-                }
+                super::import::gate_harvested_name(
+                    ExportKind::Func,
+                    steps,
+                    &file.exports,
+                    name,
+                    file_path,
+                )?;
             }
         }
         if let Some(type_names) = type_names {
-            let defined_types: Vec<&str> = steps
-                .iter()
-                .filter_map(|step| match &step.kind {
-                    StepKind::TypeAlias { name, .. } => Some(name.as_str()),
-                    _ => None,
-                })
-                .collect();
             for name in type_names {
-                if !defined_types.iter().any(|d| d == name) {
-                    bail!("IMPORT `{file_path}` has no such TYPE `{name}`");
-                }
-                if !type_exports.iter().any(|e| e == name) {
-                    bail!("IMPORT `{file_path}` does not export TYPE `{name}`");
-                }
+                super::import::gate_harvested_name(
+                    ExportKind::Type,
+                    steps,
+                    &file.exports,
+                    name,
+                    file_path,
+                )?;
             }
         }
         let func_exported: std::collections::HashSet<&str> =

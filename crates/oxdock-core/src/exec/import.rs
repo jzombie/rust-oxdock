@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use oxdock_fs::{GuardedPath, WorkspaceFs};
-use oxdock_parser::{Exports, MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value};
+use oxdock_parser::{ExportKind, Exports, MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value};
 use oxdock_process::ProcessManager;
 
 use super::resolve_script_params;
@@ -389,6 +389,56 @@ fn read_and_parse_import(
 /// harvested functions keep their helpers. Nothing else in the file
 /// runs: no top-level steps execute, so cherry-picking never triggers
 /// side effects.
+/// Single owner for harvest validity: every `IMPORT [NAME FROM ...]`
+/// request, static or runtime, gates here. Export gate first, then the
+/// defined check, with the exact historical messages, so all stages
+/// fail identically on the same input. A second copy of either scan
+/// anywhere else is piecemealing: route it here instead.
+pub(crate) fn gate_harvested_name(
+    kind: ExportKind,
+    steps: &[Step],
+    exports: &Exports,
+    name: &str,
+    path: &str,
+) -> Result<()> {
+    let (exported, kind_word, noun, defined) = match kind {
+        ExportKind::Func => (
+            &exports.funcs,
+            "",
+            "function",
+            steps.iter().any(|step| {
+                matches!(&step.kind, StepKind::FuncDef { name: def, .. } if def.as_str() == name)
+            }),
+        ),
+        ExportKind::Type => (
+            &exports.types,
+            "TYPE ",
+            "TYPE",
+            steps.iter().any(|step| {
+                matches!(&step.kind, StepKind::TypeAlias { name: alias, .. } if alias.as_str() == name)
+            }),
+        ),
+        // `CONST` harvests do not exist: reads arrive as `ALIAS::NAME`
+        // expressions through the forward chase, never as harvest
+        // requests. The arm exists so callers never restate the kind
+        // split; the export scan still applies if one ever arrives.
+        ExportKind::Const => (&exports.consts, "CONST ", "CONST", true),
+    };
+    if !exported.iter().any(|e| e == name) {
+        bail!("IMPORT `{path}` does not export {kind_word}`{name}`");
+    }
+    if !defined {
+        bail!("IMPORT `{path}` has no such {noun} `{name}`");
+    }
+    Ok(())
+}
+
+/// Execute `IMPORT [[F, G FROM "<path>" (AS <ALIAS>)?]]`: load the
+/// file, register only the named top-level `FUNC`s (bare, or under the
+/// alias), and execute the file's own top-level nested imports so the
+/// harvested functions keep their helpers. Nothing else in the file
+/// runs: no top-level steps execute, so cherry-picking never triggers
+/// side effects.
 pub(crate) fn import_funcs<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
@@ -465,12 +515,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             bail!("IMPORT `{path}` cannot harvest stateful function `{offender}`: import the file");
         }
         for name in func_names {
-            // EXPORT gate (#115): unexported means private. Harvesting a
-            // name the file does not export fails here, before anything
-            // registers or runs.
-            if !exports.funcs.iter().any(|e| e == name) {
-                bail!("IMPORT `{path}` does not export `{name}`");
-            }
+            // Harvest validity lives in `gate_harvested_name` (single
+            // owner): unexported means private, undefined means no such
+            // function. Both fail here, before anything registers.
+            gate_harvested_name(ExportKind::Func, &steps, &exports, name, path)?;
             let Some(def) = steps.iter().find_map(|step| match &step.kind {
                 StepKind::FuncDef {
                     name: def_name,
@@ -484,6 +532,8 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 }
                 _ => None,
             }) else {
+                // Gated above: the scan already proved the def exists.
+                // This preserves loud failure without restating it.
                 bail!("IMPORT `{path}` has no such function `{name}`");
             };
             let resolved_params = resolve_script_params(cx.state, name, &def.0)?;
@@ -541,9 +591,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         {
             let file_aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
             for name in type_names {
-                if !exports.types.iter().any(|e| e == name) {
-                    bail!("IMPORT `{path}` does not export TYPE `{name}`");
-                }
+                // Same single owner as funcs above: gate first, persist
+                // after. The alias fetch below cannot miss (gated), but
+                // keeps loud failure instead of restating the scan.
+                gate_harvested_name(ExportKind::Type, &steps, &exports, name, path)?;
                 let Some(target) = file_aliases.get(name) else {
                     bail!("IMPORT `{path}` has no such TYPE `{name}`");
                 };
@@ -735,9 +786,16 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
         let harvested = load_import(cx.state, harvest_path)?;
         let file_aliases = super::typing::collect_type_aliases(&harvested.steps, cx.state)?;
         for name in harvest_types {
-            if !harvested.exports.types.iter().any(|e| e == name) {
-                anyhow::bail!("IMPORT `{harvest_path}` does not export TYPE `{name}`");
-            }
+            // Same single owner as `import_funcs`: gate first, persist
+            // after. The fetch below cannot miss (gated), but keeps loud
+            // failure instead of restating the scan.
+            gate_harvested_name(
+                ExportKind::Type,
+                &harvested.steps,
+                &harvested.exports,
+                name,
+                harvest_path,
+            )?;
             let Some(target) = file_aliases.get(name) else {
                 anyhow::bail!("IMPORT `{harvest_path}` has no such TYPE `{name}`");
             };

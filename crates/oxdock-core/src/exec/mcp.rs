@@ -95,8 +95,9 @@ impl<P: ProcessManager> McpSession<P> {
 
         let closure_type_exports = super::validate_closure_for_run(&mut state, &parsed.steps)?;
         // Entry `EXPORT TYPE` names must be locally defined or re-exported
-        // from the closure (bare re-exports only in v1; qualified stays
-        // future). MCP skips types for tools, but typos still fail here.
+        // from the closure. Qualified `ALIAS::TYPE` never reaches here:
+        // `validate_exports` rejects it at parse. MCP skips types for
+        // tools, but typos still fail here.
         {
             let mut local = std::collections::HashSet::new();
             for step in &parsed.steps {
@@ -109,11 +110,6 @@ impl<P: ProcessManager> McpSession<P> {
                 exported_available.insert(name.clone());
             }
             for name in &parsed.exports.types {
-                if name.contains("::") {
-                    anyhow::bail!(
-                        "EXPORT TYPE `{name}` must be bare in v1 (qualified ALIAS::TYPE stays future work)"
-                    );
-                }
                 if !local.contains(name) && !exported_available.contains(name) {
                     anyhow::bail!(
                         "EXPORT TYPE `{name}` matches no local TYPE and no imported file exports it"

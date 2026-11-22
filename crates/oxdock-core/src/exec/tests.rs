@@ -7964,8 +7964,11 @@ fn file_import_from_missing_func_fails() {
     );
     let steps = parse_entry("IMPORT [[NOPE FROM \"lib.oxdock\"]]\n");
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    // Export gate fires first in every stage (`gate_harvested_name`),
+    // so a name that is neither defined nor exported reports the
+    // export fault, statically and at runtime alike.
     assert!(
-        format!("{err:#}").contains("has no such function `NOPE`"),
+        format!("{err:#}").contains("does not export `NOPE`"),
         "{err:#}"
     );
 }
@@ -10044,6 +10047,30 @@ fn file_import_unexported_fn_invisible_to_full_import() {
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(format!("{err:#}").contains("unknown function"), "{err:#}");
+}
+
+#[test]
+fn file_import_harvest_undefined_unexported_reports_export_gate() {
+    // A harvested name that is neither defined nor exported reports the
+    // export gate from every stage: `gate_harvested_name` checks export
+    // first, so static and runtime fail identically instead of each
+    // stage naming a different fault.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC SHOWN($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT SHOWN
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[MISSING FROM "lib.oxdock"]]
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(format!("{err:#}").contains("does not export"), "{err:#}");
 }
 
 #[test]
