@@ -41,7 +41,7 @@ pub struct McpCallOutput {
 pub struct McpSession<P: ProcessManager> {
     state: ExecState<P>,
     process: P,
-    func_exports: Vec<String>,
+    exports: oxdock_parser::Exports,
     stdout_buf: Arc<Mutex<TailRing>>,
     stderr_buf: Arc<Mutex<TailRing>>,
     /// Live-stream tap installed by the host per call. `None` outside a
@@ -108,7 +108,7 @@ impl<P: ProcessManager> McpSession<P> {
             for name in &closure_type_exports {
                 exported_available.insert(name.clone());
             }
-            for name in &parsed.type_exports {
+            for name in &parsed.exports.types {
                 if name.contains("::") {
                     anyhow::bail!(
                         "EXPORT TYPE `{name}` must be bare in v1 (qualified ALIAS::TYPE stays future work)"
@@ -162,7 +162,7 @@ impl<P: ProcessManager> McpSession<P> {
         }
 
         state.functions.exported_metas(
-            &parsed.func_exports,
+            &parsed.exports.funcs,
             &super::import::active_unit_alias_targets(&state),
         )?;
         drain_buf(&stdout_buf);
@@ -171,7 +171,7 @@ impl<P: ProcessManager> McpSession<P> {
         Ok(Self {
             state,
             process,
-            func_exports: parsed.func_exports.clone(),
+            exports: parsed.exports.clone(),
             stdout_buf,
             stderr_buf,
             stream_hook: None,
@@ -180,7 +180,7 @@ impl<P: ProcessManager> McpSession<P> {
 
     /// Func export list in source order.
     pub fn func_exports(&self) -> &[String] {
-        &self.func_exports
+        &self.exports.funcs
     }
 
     /// Install (or clear with `None`) the live-stream tap for the next
@@ -194,7 +194,7 @@ impl<P: ProcessManager> McpSession<P> {
     /// naming the first missing export.
     pub fn tool_metas(&self) -> Result<Vec<FuncMeta>> {
         self.state.functions.exported_metas(
-            &self.func_exports,
+            &self.exports.funcs,
             &super::import::active_unit_alias_targets(&self.state),
         )
     }
@@ -212,11 +212,12 @@ impl<P: ProcessManager> McpSession<P> {
     /// Qualified exports (`STD::INT`) answer under their base name;
     /// tool-name duplicates fail at table build, so the match is unique.
     pub fn call(&mut self, base: &str, args: Vec<Value>) -> Result<McpCallOutput> {
-        let qualified = if self.func_exports.iter().any(|e| e == base) {
+        let qualified = if self.exports.funcs.iter().any(|e| e == base) {
             oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, base)
         } else {
             match self
-                .func_exports
+                .exports
+                .funcs
                 .iter()
                 .find(|e| oxdock_parser::base_name(e) == base)
             {

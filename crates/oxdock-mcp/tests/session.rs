@@ -298,7 +298,8 @@ fn qualified_opaque_export_still_registers() {
         .expect("export must parse");
     assert!(
         parsed
-            .func_exports
+            .exports
+            .funcs
             .iter()
             .any(|name| name == "STD::TEXT_TRIM")
     );

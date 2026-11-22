@@ -1918,9 +1918,7 @@ fn dispatch_flow_step<P: ProcessManager>(
             decl_type,
             cmd,
             is_const,
-        } => handlers::assign_capture(
-            cx, generation, idx, var, decl_type.clone(), cmd, *is_const,
-        ),
+        } => handlers::assign_capture(cx, generation, idx, var, decl_type.clone(), cmd, *is_const),
         _ => {
             unreachable!("dispatch_flow_step handles only compound steps")
         }

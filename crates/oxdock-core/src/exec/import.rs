@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use oxdock_fs::{GuardedPath, WorkspaceFs};
-use oxdock_parser::{MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value};
+use oxdock_parser::{Exports, MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value};
 use oxdock_process::ProcessManager;
 
 use super::resolve_script_params;
@@ -428,9 +428,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
     let LoadedFile {
         resolved,
         steps,
-        func_exports,
-        type_exports,
-        const_exports: _,
+        exports,
     } = load_import(cx.state, path)?;
     let key = resolved.display();
     if let Some(alias) = alias {
@@ -470,7 +468,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             // EXPORT gate (#115): unexported means private. Harvesting a
             // name the file does not export fails here, before anything
             // registers or runs.
-            if !func_exports.iter().any(|e| e == name) {
+            if !exports.funcs.iter().any(|e| e == name) {
                 bail!("IMPORT `{path}` does not export `{name}`");
             }
             let Some(def) = steps.iter().find_map(|step| match &step.kind {
@@ -543,7 +541,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         {
             let file_aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
             for name in type_names {
-                if !type_exports.iter().any(|e| e == name) {
+                if !exports.types.iter().any(|e| e == name) {
                     bail!("IMPORT `{path}` does not export TYPE `{name}`");
                 }
                 let Some(target) = file_aliases.get(name) else {
@@ -737,7 +735,7 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
         let harvested = load_import(cx.state, harvest_path)?;
         let file_aliases = super::typing::collect_type_aliases(&harvested.steps, cx.state)?;
         for name in harvest_types {
-            if !harvested.type_exports.iter().any(|e| e == name) {
+            if !harvested.exports.types.iter().any(|e| e == name) {
                 anyhow::bail!("IMPORT `{harvest_path}` does not export TYPE `{name}`");
             }
             let Some(target) = file_aliases.get(name) else {
@@ -976,9 +974,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     let LoadedFile {
         resolved,
         steps,
-        func_exports,
-        type_exports,
-        const_exports: _,
+        exports,
     } = load_import(cx.state, path)?;
     let key = resolved.display();
     // Record under the importing unit for the runtime placeholder gate:
@@ -1015,7 +1011,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         // Owner-tagged with the module so calls share its state.
         // Skips names already present: re-imports only add new views.
         let func_exported: std::collections::HashSet<&str> =
-            func_exports.iter().map(|e| e.as_str()).collect();
+            exports.funcs.iter().map(|e| e.as_str()).collect();
         for step in &steps {
             if let StepKind::FuncDef {
                 name,
@@ -1051,7 +1047,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         // idempotent; differing targets fail.
         {
             let type_exported: std::collections::HashSet<&str> =
-                type_exports.iter().map(|e| e.as_str()).collect();
+                exports.types.iter().map(|e| e.as_str()).collect();
             for (name, target) in &aliases {
                 if !type_exported.contains(name.as_str()) {
                     continue;
@@ -1085,7 +1081,7 @@ pub(crate) fn import_file<P: ProcessManager>(
                 cx.state.register_alias(name.clone(), target.clone());
             }
             let type_exported: std::collections::HashSet<&str> =
-                type_exports.iter().map(|e| e.as_str()).collect();
+                exports.types.iter().map(|e| e.as_str()).collect();
             // Capture first to avoid borrow issues, then restore and
             // re-insert only exported.
             let mut to_persist: Vec<(String, String)> = Vec::new();
@@ -1144,9 +1140,7 @@ pub(super) struct ClosureFile {
     pub path: String,
     pub dir: GuardedPath,
     pub steps: Vec<Step>,
-    pub func_exports: Vec<String>,
-    pub type_exports: Vec<String>,
-    pub const_exports: Vec<String>,
+    pub exports: Exports,
     pub sites: Vec<ClosureSite>,
 }
 
@@ -1410,7 +1404,7 @@ pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
 }
 
 /// Record an import site, deduping identical sites (diamonds share one
-/// module record; each alias is a view onto it). `func_exports` rides
+/// module record; each alias is a view onto it). `exports` rides
 /// with the first site; every site loads the same parsed body.
 fn record_site(
     files: &mut Vec<ClosureFile>,
@@ -1434,22 +1428,18 @@ fn record_site(
             path,
             dir: target.nested.clone(),
             steps: target.body.clone(),
-            func_exports: target.func_exports.clone(),
-            type_exports: target.type_exports.clone(),
-            const_exports: target.const_exports.clone(),
+            exports: target.exports.clone(),
             sites: vec![site],
         }),
     }
 }
 /// One resolved import target during expansion: the file, its parsed
-/// body, its `EXPORT` lists (func plus type visibility gates), and the
-/// directory nested imports resolve against.
+/// body, its `EXPORT` metadata (func plus type visibility gates, const
+/// forwarding), and the directory nested imports resolve against.
 struct ExpandedImport {
     resolved: GuardedPath,
     body: Vec<Step>,
-    func_exports: Vec<String>,
-    type_exports: Vec<String>,
-    const_exports: Vec<String>,
+    exports: Exports,
     nested: GuardedPath,
 }
 
@@ -1490,17 +1480,13 @@ fn expand_load<P: ProcessManager>(
     let LoadedFile {
         resolved,
         steps: body,
-        func_exports,
-        type_exports,
-        const_exports,
+        exports,
     } = load_file(state, dir, stack, path)?;
     let nested = resolved.parent().unwrap_or_else(|| dir.clone());
     Ok(ExpandedImport {
         resolved,
         body,
-        func_exports,
-        type_exports,
-        const_exports,
+        exports,
         nested,
     })
 }
@@ -1516,13 +1502,11 @@ fn load_import<P: ProcessManager>(state: &mut ExecState<P>, path: &str) -> Resul
 }
 
 /// One resolved import target: the file, its parsed body, and its
-/// `EXPORT` / `EXPORT TYPE` visibility gates.
+/// `EXPORT` visibility gates.
 struct LoadedFile {
     resolved: GuardedPath,
     steps: Vec<Step>,
-    func_exports: Vec<String>,
-    type_exports: Vec<String>,
-    const_exports: Vec<String>,
+    exports: Exports,
 }
 
 /// Shared loader core: `stack` is the active chain for cycle/depth
@@ -1562,9 +1546,7 @@ fn load_file<P: ProcessManager>(
         return Ok(LoadedFile {
             resolved,
             steps: record.steps.clone(),
-            func_exports: record.func_exports.clone(),
-            type_exports: record.type_exports.clone(),
-            const_exports: record.const_exports.clone(),
+            exports: record.exports.clone(),
         });
     }
     let bytes = read_import_bytes(state.fs.as_ref(), &resolved)
@@ -1585,9 +1567,7 @@ fn load_file<P: ProcessManager>(
         key,
         super::state::ModuleRecord {
             steps: parsed.steps.clone(),
-            func_exports: parsed.func_exports.clone(),
-            type_exports: parsed.type_exports.clone(),
-            const_exports: parsed.const_exports.clone(),
+            exports: parsed.exports.clone(),
             init: None,
             top_funcs: collect_top_funcs(&parsed.steps),
         },
@@ -1595,9 +1575,7 @@ fn load_file<P: ProcessManager>(
     Ok(LoadedFile {
         resolved,
         steps: parsed.steps,
-        func_exports: parsed.func_exports,
-        type_exports: parsed.type_exports,
-        const_exports: parsed.const_exports,
+        exports: parsed.exports,
     })
 }
 
@@ -1787,7 +1765,7 @@ pub(crate) fn missing_import_hint<P: ProcessManager>(state: &ExecState<P>, name:
         state
             .modules
             .iter()
-            .map(|(file, record)| (file.as_str(), record.func_exports.as_slice())),
+            .map(|(file, record)| (file.as_str(), record.exports.funcs.as_slice())),
         &active_unit_alias_targets(state),
         name,
     )
@@ -1858,7 +1836,7 @@ impl<P: ProcessManager> super::native::ModuleGraphView for ExecState<P> {
     fn const_exports(&self, file: &str) -> Option<&[String]> {
         self.modules
             .get(file)
-            .map(|record| record.const_exports.as_slice())
+            .map(|record| record.exports.consts.as_slice())
     }
 
     fn alias_targets(&self, file: &str) -> super::native::AliasTargets {

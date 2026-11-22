@@ -5483,7 +5483,11 @@ impl fmt::Display for StepKind {
                 is_const,
             } => {
                 // Bare pipe declarations round-trip without an initializer.
-                let keyword = if *is_const { KEYWORD_CONST } else { KEYWORD_LET };
+                let keyword = if *is_const {
+                    KEYWORD_CONST
+                } else {
+                    KEYWORD_LET
+                };
                 let name = if *is_const {
                     var.clone()
                 } else {
@@ -5502,7 +5506,11 @@ impl fmt::Display for StepKind {
                 cmd,
                 is_const,
             } => {
-                let keyword = if *is_const { KEYWORD_CONST } else { KEYWORD_LET };
+                let keyword = if *is_const {
+                    KEYWORD_CONST
+                } else {
+                    KEYWORD_LET
+                };
                 let name = if *is_const {
                     var.clone()
                 } else {
@@ -5523,7 +5531,11 @@ impl fmt::Display for StepKind {
                 body,
                 is_const,
             } => {
-                let keyword = if *is_const { KEYWORD_CONST } else { KEYWORD_LET };
+                let keyword = if *is_const {
+                    KEYWORD_CONST
+                } else {
+                    KEYWORD_LET
+                };
                 let name = if *is_const {
                     var.clone()
                 } else {
@@ -5553,7 +5565,11 @@ impl fmt::Display for StepKind {
                 task_is_const,
                 is_const,
             } => {
-                let keyword = if *is_const { KEYWORD_CONST } else { KEYWORD_LET };
+                let keyword = if *is_const {
+                    KEYWORD_CONST
+                } else {
+                    KEYWORD_LET
+                };
                 let out = if *is_const {
                     out_var.clone()
                 } else {
@@ -6118,16 +6134,14 @@ pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> Parse
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_exports(
     ctx: &SpanContext,
-    func_exports: &[String],
-    type_exports: &[String],
-    const_exports: &[String],
+    exports: &super::parser::Exports,
     top: &HashSet<String>,
     top_types: &HashSet<String>,
     top_consts: &HashSet<String>,
     modules: &ModuleTable,
     top_imports: &[String],
 ) -> ParseResult<()> {
-    for name in func_exports {
+    for name in &exports.funcs {
         let valid = match crate::constants::split_qualified(name) {
             None => top.contains(name),
             Some((module, base)) if module == crate::constants::SCRIPT_MODULE_NAME => {
@@ -6156,7 +6170,7 @@ pub(crate) fn validate_exports(
             ));
         }
     }
-    for name in type_exports {
+    for name in &exports.types {
         // Local TYPE aliases export bare; qualified `ALIAS::TYPE`
         // re-exports defer existence to import loading (same as func
         // re-exports), requiring only a visible import alias here.
@@ -6189,7 +6203,7 @@ pub(crate) fn validate_exports(
             ));
         }
     }
-    for name in const_exports {
+    for name in &exports.consts {
         // `CONST` exports name the binding bare (no `$`): the binding
         // must be a top-level `CONST` in this file. `LET` bindings
         // never satisfy an export, even when the spelling matches.

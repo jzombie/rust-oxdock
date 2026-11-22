@@ -770,12 +770,12 @@ fn kind_covered(kind: &oxdock_parser::StepKind) -> bool {
         | StepKind::Sleep { .. }
         | StepKind::ListAppend { .. }
         | StepKind::Assign { .. }
-                | StepKind::Set { .. }
+        | StepKind::Set { .. }
         | StepKind::AssignCapture { .. }
-                | StepKind::AwaitCapture { .. }
-                | StepKind::AsyncBlock { .. }
+        | StepKind::AwaitCapture { .. }
+        | StepKind::AsyncBlock { .. }
         | StepKind::AssignAsync { .. }
-                | StepKind::Await { .. }
+        | StepKind::Await { .. }
         | StepKind::Cancel { .. }
         | StepKind::Timeout { .. }
         | StepKind::Fail { .. }

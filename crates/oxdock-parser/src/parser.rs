@@ -2626,17 +2626,10 @@ pub struct ParseCtx<'a> {
     /// never held across recursive parses.
     pub funcs: RefCell<Vec<HashSet<String>>>,
     pub imports: RefCell<Vec<Vec<String>>>,
-    /// `EXPORT` func names in source order, validated at end of parse
-    /// (forward references allowed).
-    pub func_exports: RefCell<Vec<String>>,
-    /// `EXPORT TYPE` names in source order, validated at end of parse
-    /// (forward references allowed). Separate from func exports so the
-    /// MCP server never confuses a type for a tool.
-    pub type_exports: RefCell<Vec<String>>,
-    /// `EXPORT CONST` names in source order, validated at end of parse
-    /// like the other export lists. Only `CONST` bindings (never `LET`)
-    /// satisfy these; reads arrive as `ALIAS::NAME`.
-    pub const_exports: RefCell<Vec<String>>,
+    /// Single-file `EXPORT` metadata in source order, validated at end
+    /// of parse (forward references allowed). One struct for all three
+    /// kinds so holders never thread parallel lists.
+    pub exports: RefCell<Exports>,
     /// Top-level `FUNC` names pre-declared before lowering, so forward
     /// references resolve regardless of order. Separate from `funcs`
     /// frames so duplicate detection in `declare_func` stays intact;
@@ -2669,9 +2662,7 @@ impl<'a> ParseCtx<'a> {
             reserved,
             funcs: RefCell::new(vec![HashSet::new()]),
             imports: RefCell::new(vec![Vec::new()]),
-            func_exports: RefCell::new(Vec::new()),
-            type_exports: RefCell::new(Vec::new()),
-            const_exports: RefCell::new(Vec::new()),
+            exports: RefCell::new(Exports::default()),
             forward: RefCell::new(vec![HashSet::new()]),
             bindings: RefCell::new(vec![HashMap::new()]),
             forward_consts: RefCell::new(vec![HashSet::new()]),
@@ -9153,23 +9144,17 @@ fn parse_element_at(
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
-                // Same-kind entries dedup by spelling (distinct
-                // qualified spellings serve distinctly); anything
-                // sharing a base with a `CONST` export is a
-                // cross-kind duplicate, since `CONST` reads are
-                // base-addressed.
-                let base = crate::base_name(name);
-                if ctx.func_exports.borrow().contains(name)
-                    || ctx.type_exports.borrow().contains(name)
-                    || ctx
-                        .const_exports
-                        .borrow()
-                        .iter()
-                        .any(|existing| crate::base_name(existing) == base)
+                // Recording and the duplicate rule live in
+                // `Exports::insert` (single owner); this loop only
+                // validates identifier shapes.
+                if let Err(msg) = ctx
+                    .exports
+                    .borrow_mut()
+                    .insert(ExportKind::Func, name.clone())
                 {
                     return Err(TokenError {
                         stmt,
-                        msg: format!("duplicate EXPORT `{name}`"),
+                        msg,
                         line: 0,
                         col: 0,
                         kind: Some(ParseErrorKind::Validation {
@@ -9177,28 +9162,20 @@ fn parse_element_at(
                         }),
                     });
                 }
-                ctx.func_exports.borrow_mut().push(name.clone());
             }
             for name in &type_names {
                 for part in name.split(MODULE_SEPARATOR) {
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
-                // Same spelling rule as funcs above: qualified type
-                // spellings serve distinctly, but a `CONST` base
-                // collision names two kinds for one read.
-                let base = crate::base_name(name);
-                if ctx.func_exports.borrow().contains(name)
-                    || ctx.type_exports.borrow().contains(name)
-                    || ctx
-                        .const_exports
-                        .borrow()
-                        .iter()
-                        .any(|existing| crate::base_name(existing) == base)
+                if let Err(msg) = ctx
+                    .exports
+                    .borrow_mut()
+                    .insert(ExportKind::Type, name.clone())
                 {
                     return Err(TokenError {
                         stmt,
-                        msg: format!("duplicate EXPORT `{name}`"),
+                        msg,
                         line: 0,
                         col: 0,
                         kind: Some(ParseErrorKind::Validation {
@@ -9206,39 +9183,20 @@ fn parse_element_at(
                         }),
                     });
                 }
-                ctx.type_exports.borrow_mut().push(name.clone());
             }
             for name in &const_names {
                 for part in name.split(MODULE_SEPARATOR) {
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
-                // Uniqueness is by exported base name, not raw
-                // spelling: `EXPORT CONST N` and `EXPORT CONST A::N`
-                // name the same read (`LIB::N`), so the second shapes
-                // the same duplicate instead of silently shadowing.
-                // The same base test covers func and type lists too:
-                // one base name rides exactly one export kind.
-                let base = crate::base_name(name);
-                if ctx
-                    .func_exports
-                    .borrow()
-                    .iter()
-                    .any(|existing| crate::base_name(existing) == base)
-                    || ctx
-                        .type_exports
-                        .borrow()
-                        .iter()
-                        .any(|existing| crate::base_name(existing) == base)
-                    || ctx
-                        .const_exports
-                        .borrow()
-                        .iter()
-                        .any(|existing| crate::base_name(existing) == base)
+                if let Err(msg) = ctx
+                    .exports
+                    .borrow_mut()
+                    .insert(ExportKind::Const, name.clone())
                 {
                     return Err(TokenError {
                         stmt,
-                        msg: format!("duplicate EXPORT `{name}`"),
+                        msg,
                         line: 0,
                         col: 0,
                         kind: Some(ParseErrorKind::Validation {
@@ -9246,7 +9204,6 @@ fn parse_element_at(
                         }),
                     });
                 }
-                ctx.const_exports.borrow_mut().push(name.clone());
             }
             return Ok((Vec::new(), used));
         }
@@ -9755,9 +9712,7 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
         }
         crate::commands::validate_exports(
             &lowering_ctx(out.len()),
-            &ctx.func_exports.borrow(),
-            &ctx.type_exports.borrow(),
-            &ctx.const_exports.borrow(),
+            &ctx.exports.borrow(),
             &top,
             &top_types,
             &top_consts,
@@ -9890,9 +9845,7 @@ fn parse_with_ctx(
     stamp_func_docs(input, &mut steps);
     Ok(ScriptWithExports {
         steps,
-        func_exports: ctx.func_exports.borrow().clone(),
-        type_exports: ctx.type_exports.borrow().clone(),
-        const_exports: ctx.const_exports.borrow().clone(),
+        exports: ctx.exports.borrow().clone(),
     })
 }
 
@@ -9900,9 +9853,7 @@ fn parse_with_ctx(
 /// Callers needing docs build a [`ParsedScript`] from this.
 struct ScriptWithExports {
     steps: Vec<Step>,
-    func_exports: Vec<String>,
-    type_exports: Vec<String>,
-    const_exports: Vec<String>,
+    exports: Exports,
 }
 
 /// Parse a script with an unknown host environment.
@@ -9965,12 +9916,7 @@ pub fn parse_script_with_modules_and_exports(
     reserved_names: HashSet<String>,
     modules: ModuleTable,
 ) -> ParseResult<ParsedScript> {
-    let ScriptWithExports {
-        steps,
-        func_exports,
-        type_exports,
-        const_exports,
-    } = parse_with_ctx(
+    let ScriptWithExports { steps, exports } = parse_with_ctx(
         input,
         lower,
         reserved_names,
@@ -9981,9 +9927,7 @@ pub fn parse_script_with_modules_and_exports(
     Ok(ParsedScript {
         func_docs: collect_func_docs(input, &steps),
         steps,
-        func_exports,
-        type_exports,
-        const_exports,
+        exports,
     })
 }
 
@@ -9993,12 +9937,7 @@ pub fn parse_script_with_exports(
     input: &str,
     lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
 ) -> ParseResult<ParsedScript> {
-    let ScriptWithExports {
-        steps,
-        func_exports,
-        type_exports,
-        const_exports,
-    } = parse_with_ctx(
+    let ScriptWithExports { steps, exports } = parse_with_ctx(
         input,
         lower,
         HashSet::new(),
@@ -10009,9 +9948,7 @@ pub fn parse_script_with_exports(
     Ok(ParsedScript {
         func_docs: collect_func_docs(input, &steps),
         steps,
-        func_exports,
-        type_exports,
-        const_exports,
+        exports,
     })
 }
 
@@ -10042,18 +9979,94 @@ pub fn parse_guard_expr_str(input: &str) -> ParseResult<GuardExpr> {
 }
 
 /// Parsed script with single-file `EXPORT` metadata. `steps` is the
-/// linear execution plan, `func_exports` the `EXPORT` func names in
-/// source order, `type_exports` the `EXPORT TYPE` names in source order,
-/// `const_exports` the `EXPORT CONST` names in source order,
-/// and `func_docs` maps top-level `FUNC` base names to (summary, docs)
-/// collected from the immediately preceding `#` comment block.
+/// linear execution plan, `exports` the `EXPORT` names in source order
+/// per kind, and `func_docs` maps top-level `FUNC` base names to
+/// (summary, docs) collected from the immediately preceding `#`
+/// comment block.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedScript {
     pub steps: Vec<Step>,
-    pub func_exports: Vec<String>,
-    pub type_exports: Vec<String>,
-    pub const_exports: Vec<String>,
+    pub exports: Exports,
     pub func_docs: std::collections::HashMap<String, (String, String)>,
+}
+
+/// One `EXPORT` list kind. Single owner for the func/type/const
+/// distinction, so the duplicate rule and every holder never restate
+/// the three-way split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportKind {
+    Func,
+    Type,
+    Const,
+}
+
+/// Single-file `EXPORT` metadata: per-kind names in source order.
+/// Separate lists (never one mixed vec) so the MCP server never
+/// confuses a type for a tool, and reads stay kind-addressed.
+#[derive(Debug, Clone, Default)]
+pub struct Exports {
+    pub funcs: Vec<String>,
+    pub types: Vec<String>,
+    pub consts: Vec<String>,
+}
+
+impl Exports {
+    /// Names of one kind in source order. Single accessor so holders
+    /// never match the kind themselves.
+    pub fn names(&self, kind: ExportKind) -> &[String] {
+        match kind {
+            ExportKind::Func => &self.funcs,
+            ExportKind::Type => &self.types,
+            ExportKind::Const => &self.consts,
+        }
+    }
+
+    /// Record one `EXPORT` name, enforcing the duplicate rule. Same-kind
+    /// func/type entries dedup by spelling (distinct qualified spellings
+    /// serve distinctly); anything sharing a base with a `CONST` export
+    /// is a cross-kind duplicate, since `CONST` reads are base-addressed.
+    /// `Err` carries the `duplicate EXPORT` message unchanged.
+    pub fn insert(&mut self, kind: ExportKind, name: String) -> Result<(), String> {
+        let base = crate::base_name(&name);
+        let clash = match kind {
+            ExportKind::Func | ExportKind::Type => {
+                self.names(kind).iter().any(|e| e == &name)
+                    || self.names(other_kind(kind)).iter().any(|e| e == &name)
+                    || self.consts.iter().any(|e| crate::base_name(e) == base)
+            }
+            ExportKind::Const => {
+                // Uniqueness is by exported base name, not raw spelling:
+                // `EXPORT CONST N` and `EXPORT CONST A::N` name the same
+                // read (`LIB::N`), so the second shapes the same duplicate
+                // instead of silently shadowing. The same base test covers
+                // func and type lists too: one base name rides exactly one
+                // export kind.
+                [&self.funcs, &self.types, &self.consts]
+                    .iter()
+                    .any(|list| list.iter().any(|e| crate::base_name(e) == base))
+            }
+        };
+        if clash {
+            return Err(format!("duplicate EXPORT `{name}`"));
+        }
+        match kind {
+            ExportKind::Func => self.funcs.push(name),
+            ExportKind::Type => self.types.push(name),
+            ExportKind::Const => self.consts.push(name),
+        }
+        Ok(())
+    }
+}
+
+/// The non-const export kind: func and type share one duplicate rule
+/// (same-kind spelling plus the const base test), so one helper serves
+/// both. Never restated at call sites.
+fn other_kind(kind: ExportKind) -> ExportKind {
+    match kind {
+        ExportKind::Func => ExportKind::Type,
+        ExportKind::Type => ExportKind::Func,
+        ExportKind::Const => ExportKind::Func,
+    }
 }
 
 fn collect_func_docs(

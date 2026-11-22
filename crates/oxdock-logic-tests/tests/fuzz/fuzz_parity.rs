@@ -1051,8 +1051,9 @@ fn zero_kind_markers(kind: &mut StepKind) {
                 zero_markers(body);
             }
         }
-        StepKind::AssignCapture { cmd, .. }
-        | StepKind::WithIo { cmd, .. } => zero_kind_markers(cmd),
+        StepKind::AssignCapture { cmd, .. } | StepKind::WithIo { cmd, .. } => {
+            zero_kind_markers(cmd)
+        }
         _ => {}
     }
 }
@@ -2747,12 +2748,12 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         // Expression bodies need Expr strategies (literals, math,
         // calls, keypaths) before generation is sound.
         StepKind::Assign { .. } => true,
-                StepKind::Set { .. } => true,
+        StepKind::Set { .. } => true,
         StepKind::AssignCapture { .. } => true,
-                StepKind::AwaitCapture { .. } => true,
-                StepKind::AsyncBlock { .. } => true,
+        StepKind::AwaitCapture { .. } => true,
+        StepKind::AsyncBlock { .. } => true,
         StepKind::AssignAsync { .. } => true,
-                StepKind::Await { .. } => true,
+        StepKind::Await { .. } => true,
         StepKind::Cancel { .. } => true,
         StepKind::Timeout { .. } => true,
         StepKind::Fail { .. } => true,

@@ -2961,8 +2961,7 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
                 // runs on every path (the closure captures the outcome
                 // as a value first), matching the `push_scope` /
                 // `pop_scope` pattern with no unsafe.
-                let unit_key =
-                    super::import::unit_key(def.module.as_deref()).to_string();
+                let unit_key = super::import::unit_key(def.module.as_deref()).to_string();
                 cx.state.call_alias_frames.push((unit_key, HashMap::new()));
                 // Frame floor for the nested walk (#322): scope frames
                 // at or above this index belong to the current call;

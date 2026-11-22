@@ -674,7 +674,7 @@ fn merge_harvest<P: ProcessManager>(
     };
     let aliases = super::typing::collect_type_aliases(&file.steps, exec)?;
     for name in type_names {
-        if !file.type_exports.iter().any(|e| e == name) {
+        if !file.exports.types.iter().any(|e| e == name) {
             anyhow::bail!("IMPORT `{path}` does not export TYPE `{name}`");
         }
         let Some(target) = aliases.get(name) else {
@@ -793,7 +793,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 local.insert(name.clone());
             }
         }
-        for name in &file.type_exports {
+        for name in &file.exports.types {
             if !local.contains(name) {
                 anyhow::bail!(
                     "IMPORT `{}` EXPORT TYPE `{name}` does not match any top-level TYPE in that file",
@@ -830,7 +830,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 if site.alias.is_none() || site.func_names.is_some() || site.type_names.is_some() {
                     continue;
                 }
-                for name in &file.type_exports {
+                for name in &file.exports.types {
                     if let Some(target) = defs.get(name) {
                         super::import::insert_imported_type(
                             exec,
@@ -966,7 +966,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 home_funcs.extend(checker.home_funcs);
                 harvest_first.extend(checker.harvest_first);
                 all_lets.insert(file.key.clone(), module_lets(&file.steps, exec)?);
-                all_const_exports.insert(file.key.clone(), file.const_exports.clone());
+                all_const_exports.insert(file.key.clone(), file.exports.consts.clone());
                 Ok(())
             })?;
         }
@@ -982,7 +982,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 lets: &all_lets,
             };
             for file in files {
-                for entry in &file.const_exports {
+                for entry in &file.exports.consts {
                     if let Some((_, base)) = split_qualified(entry) {
                         super::native::chase_const_forward(&view, &file.key, base, entry)
                             .map_err(|err| anyhow::anyhow!("{}: {err}", file.key))?;
@@ -1154,7 +1154,7 @@ pub fn validate_script_closure<P: ProcessManager>(
             checker.module_const_exports = const_exports.clone();
             checker.module_func_exports = files
                 .iter()
-                .map(|file| (file.key.clone(), file.func_exports.clone()))
+                .map(|file| (file.key.clone(), file.exports.funcs.clone()))
                 .collect();
             checker.entry_lets = entry_lets.to_vec();
             checker.entry_let_scopes = entry_let_scopes.clone();
@@ -2449,9 +2449,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 super::native::AliasResolution::Global => {
                     is_script_visible = self.funcs.contains_key(&qualified);
                     if module == oxdock_parser::SCRIPT_MODULE_NAME {
-                        let unit = super::import::unit_key(
-                            env.module.as_ref().map(|m| m.key.as_str()),
-                        );
+                        let unit =
+                            super::import::unit_key(env.module.as_ref().map(|m| m.key.as_str()));
                         if self.find_frame_hit(unit, name, &env.func_frames).is_some() {
                             is_script_visible = true;
                         }
@@ -2985,8 +2984,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let alias = site.alias.as_deref();
         let func_names = site.func_names.as_deref();
         let type_names = site.type_names.as_deref();
-        let func_exports = &file.func_exports;
-        let type_exports = &file.type_exports;
+        let func_exports = &file.exports.funcs;
+        let type_exports = &file.exports.types;
         let file_path = file.path.as_str();
         if !self.module_lets.contains_key(module) {
             let lets = module_lets(steps, self.exec)?;

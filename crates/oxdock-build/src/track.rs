@@ -446,8 +446,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     }
                 }
             }
-            StepKind::Assign { expr, .. }
-            | StepKind::Set { expr, .. } => {
+            StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => {
                 walk_expr(&mut keys, expr);
             }
             StepKind::AssignCapture { cmd, .. } => {

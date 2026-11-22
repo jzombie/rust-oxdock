@@ -378,10 +378,7 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         harvest_map: std::collections::HashMap::new(),
         modules: HashMap::from([(
             super::import::ENTRY_UNIT.to_string(),
-            super::state::ModuleRecord::entry_record(
-                HashMap::new(),
-                fs.root().clone(),
-            ),
+            super::state::ModuleRecord::entry_record(HashMap::new(), fs.root().clone()),
         )]),
         validated_modules: HashSet::new(),
         module_stack: Vec::new(),

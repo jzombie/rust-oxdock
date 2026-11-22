@@ -34,16 +34,16 @@ pub(crate) use self::handlers::{
     dispatch_append, dispatch_append_line, dispatch_archive, dispatch_assert_contains,
     dispatch_assert_eq, dispatch_assert_ne, dispatch_assign, dispatch_assign_async_step,
     dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
-    dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step,
-    dispatch_continue, dispatch_copy, dispatch_copy_git, dispatch_echo, dispatch_env,
-    dispatch_exit, dispatch_expand, dispatch_fail, dispatch_for_loop, dispatch_func_def,
-    dispatch_if_then, dispatch_import_file, dispatch_import_funcs, dispatch_inherit_env,
-    dispatch_install, dispatch_isolated_inherit_env, dispatch_isolated_step, dispatch_ls,
-    dispatch_mkdir, dispatch_prompt, dispatch_push_into_step, dispatch_read, dispatch_read_line,
-    dispatch_remote, dispatch_remove, dispatch_return, dispatch_run, dispatch_run_exec,
-    dispatch_set, dispatch_set_executable, dispatch_sleep_step, dispatch_switch, dispatch_symlink,
-    dispatch_timeout_step, dispatch_unarchive, dispatch_while_loop, dispatch_with_io,
-    dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
+    dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
+    dispatch_copy, dispatch_copy_git, dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand,
+    dispatch_fail, dispatch_for_loop, dispatch_func_def, dispatch_if_then, dispatch_import_file,
+    dispatch_import_funcs, dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env,
+    dispatch_isolated_step, dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step,
+    dispatch_read, dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return,
+    dispatch_run, dispatch_run_exec, dispatch_set, dispatch_set_executable, dispatch_sleep_step,
+    dispatch_switch, dispatch_symlink, dispatch_timeout_step, dispatch_unarchive,
+    dispatch_while_loop, dispatch_with_io, dispatch_with_io_block, dispatch_workdir,
+    dispatch_workspace, dispatch_write,
 };
 pub use self::import::{DryRunStep, dry_run_closure};
 pub use self::io::ExecIo;
@@ -582,7 +582,7 @@ pub fn validate_closure_for_run<P: ProcessManager>(
     state.restore_aliases(saved_aliases);
     let mut exported = Vec::new();
     for file in &closure {
-        exported.extend(file.type_exports.iter().cloned());
+        exported.extend(file.exports.types.iter().cloned());
     }
     Ok(exported)
 }

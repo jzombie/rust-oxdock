@@ -285,13 +285,12 @@ pub(super) struct ScopeSnapshot {
 #[derive(Clone, Default)]
 pub(super) struct ModuleRecord {
     pub(super) steps: Vec<Step>,
-    pub(super) func_exports: Vec<String>,
-    /// `EXPORT TYPE` names in source order. Separate from func exports
-    /// so the MCP server never confuses a type for a tool.
-    pub(super) type_exports: Vec<String>,
-    /// `EXPORT CONST` names in source order. Only these (never `LET`
-    /// bindings) are readable through `$ALIAS::NAME`.
-    pub(super) const_exports: Vec<String>,
+    /// Single-file `EXPORT` metadata: `EXPORT` func names, `EXPORT TYPE`
+    /// names, and `EXPORT CONST` names, each in source order. One struct
+    /// (never three parallel lists) so the MCP server never confuses a
+    /// type for a tool, and only `CONST` names are readable through
+    /// `$ALIAS::NAME`.
+    pub(super) exports: oxdock_parser::Exports,
     pub(super) init: Option<ModuleInit>,
     /// Frame-1 file scope (#322): every top-level `FUNC` of the file
     /// (exported, harvested, and private alike), indexed once at load
@@ -330,9 +329,7 @@ impl ModuleRecord {
     pub(super) fn entry_record(envs: HashMap<String, String>, cwd: GuardedPath) -> Self {
         Self {
             steps: Vec::new(),
-            func_exports: Vec::new(),
-            type_exports: Vec::new(),
-            const_exports: Vec::new(),
+            exports: oxdock_parser::Exports::default(),
             init: Some(ModuleInit::entry_seed(envs, cwd)),
             top_funcs: HashMap::new(),
         }
@@ -1276,10 +1273,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// one lookup, so the runtime walk reads the same shape for both.
     /// `None` only when the unit record is absent (never after
     /// validation, which registers the entry record).
-    pub(super) fn unit_top_funcs(
-        &self,
-        unit: &str,
-    ) -> Option<&HashMap<String, Vec<RawFuncDef>>> {
+    pub(super) fn unit_top_funcs(&self, unit: &str) -> Option<&HashMap<String, Vec<RawFuncDef>>> {
         self.modules.get(unit).map(|record| &record.top_funcs)
     }
 
