@@ -3654,6 +3654,70 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
+                    name: "const alias reads across modules",
+                    fence_meta: Some("roots:unified"),
+                    code: indoc! {r#"
+                # Exported CONSTs cross only as alias reads, never bare.
+                IMPORT [STD]
+                WRITE lib.oxfile """
+                    CONST $VERSION: STRING = "1.2.3"
+                    CONST $BUILD: INT = 4
+                    EXPORT CONST $VERSION
+                    EXPORT [CONST $BUILD]
+                    """
+
+                # The entry reads the exports at top level, in math, and in templates.
+                WRITE main.oxfile """
+                    IMPORT ["lib.oxfile" AS LIB]
+                    LET $v: STRING = $LIB::VERSION
+                    ASSERT_EQ $v "1.2.3"
+                    LET $e: INT = $LIB::BUILD * 2
+                    ASSERT_EQ $e 8
+                    LET $w: STRING = "v\{{ $LIB::VERSION }}"
+                    ASSERT_EQ $w "v1.2.3"
+                    ECHO "export-ok \{{ $LIB::VERSION }}"
+                    """
+
+                # A child run proves the import from a fresh interpreter.
+                LET $exe: STRING = INTERPRETER()
+                LET $out: STRING = RUN [$exe, "main.oxfile"]
+                ASSERT_CONTAINS $out "export-ok 1.2.3"
+            "#},
+                },
+                Example {
+                    name: "const alias reads inside func bodies",
+                    fence_meta: Some("roots:unified"),
+                    code: indoc! {r#"
+                # Alias reads work inside importer FUNC bodies exactly like at top level.
+                IMPORT [STD]
+                WRITE lib.oxfile """
+                    CONST $VERSION: STRING = "1.2.3"
+                    EXPORT CONST $VERSION
+                    """
+
+                # The importer FUNCs return alias reads from expressions and templates.
+                WRITE main.oxfile """
+                    IMPORT ["lib.oxfile" AS LIB]
+                    FUNC SHOW(): STRING {
+                        RETURN $LIB::VERSION
+                    }
+                    FUNC LABELED(): STRING {
+                        RETURN "v\{{ $LIB::VERSION }}"
+                    }
+                    LET $s: STRING = SHOW()
+                    ASSERT_EQ $s "1.2.3"
+                    LET $t: STRING = LABELED()
+                    ASSERT_EQ $t "v1.2.3"
+                    ECHO "body-ok \{{ $LIB::VERSION }}"
+                    """
+
+                # A child run proves body reads from a fresh interpreter.
+                LET $exe: STRING = INTERPRETER()
+                LET $out: STRING = RUN [$exe, "main.oxfile"]
+                ASSERT_CONTAINS $out "body-ok 1.2.3"
+            "#},
+                },
+                Example {
                     name: "const rejects mutation",
                     fence_meta: Some("expect_error:\"cannot mutate CONST\""),
                     code: indoc! {r#"
