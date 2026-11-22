@@ -627,15 +627,16 @@ pub enum ArithOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MathOp {
     PushConst(Value),
-    LoadVar(String),
-    LoadConst(String),
+    Load { name: String, is_const: bool },
     LoadConstRef { alias: String, name: String },
     LoadEnv(String),
-    LoadKeyPath { base: String, keys: Vec<String> },
-    LoadConstKeyPath { base: String, keys: Vec<String> },
+    LoadKeyPath {
+        base: String,
+        keys: Vec<String>,
+        is_const: bool,
+    },
     Call { name: String, arity: usize },
-    Inspect(String),
-    InspectConst(String),
+    Inspect { name: String, is_const: bool },
     Neg,
     Add,
     Sub,
@@ -1428,20 +1429,21 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
     for op in ops {
         match op {
             MathOp::PushConst(v) => stack.push(format!("{}", v)),
-            MathOp::LoadVar(name) => stack.push(format!("${}", name)),
-            MathOp::LoadConst(name) => stack.push(name.clone()),
+            MathOp::Load { name, is_const } => {
+                if *is_const {
+                    stack.push(name.clone());
+                } else {
+                    stack.push(format!("${}", name));
+                }
+            }
             MathOp::LoadConstRef { alias, name } => stack.push(format!("{alias}::{name}")),
             MathOp::LoadEnv(key) => stack.push(format!("env:{}", key)),
-            MathOp::LoadKeyPath { base, keys } => {
-                let mut s = format!("${}", base);
-                for key in keys {
-                    s.push('.');
-                    s.push_str(key);
-                }
-                stack.push(s);
-            }
-            MathOp::LoadConstKeyPath { base, keys } => {
-                let mut s = base.clone();
+            MathOp::LoadKeyPath { base, keys, is_const } => {
+                let mut s = if *is_const {
+                    base.clone()
+                } else {
+                    format!("${}", base)
+                };
                 for key in keys {
                     s.push('.');
                     s.push_str(key);
@@ -1456,8 +1458,13 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
                 args.reverse();
                 stack.push(format!("{}({})", name, args.join(", ")));
             }
-            MathOp::Inspect(name) => stack.push(format!("INSPECT(${})", name)),
-            MathOp::InspectConst(name) => stack.push(format!("INSPECT({})", name)),
+            MathOp::Inspect { name, is_const } => {
+                if *is_const {
+                    stack.push(format!("INSPECT({})", name));
+                } else {
+                    stack.push(format!("INSPECT(${})", name));
+                }
+            }
             MathOp::Neg => {
                 let inner = stack.pop().unwrap_or_else(|| "<underflow>".to_string());
                 stack.push(format!("(-{})", inner));

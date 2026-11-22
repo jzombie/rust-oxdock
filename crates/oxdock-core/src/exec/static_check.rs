@@ -5724,23 +5724,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     }
                     stack.push(StaticTy::Ty(literal_tag(value)))
                 }
-                MathOp::LoadVar(name) => {
+                MathOp::Load { name, is_const } => {
                     let key = clean_var(name);
-                    if env.is_const(&key, scope.site.as_ref()) {
-                        bail!("CONST reads bare: use {key}, not ${key}");
-                    }
-                    if !env.is_declared(&key) {
-                        bail!("undefined variable ${key}");
-                    }
-                    stack.push(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?));
-                }
-                MathOp::LoadConst(name) => {
-                    let key = clean_var(name);
-                    if !env.is_declared(&key) {
-                        bail!("undefined CONST {key}");
-                    }
-                    if !env.is_const(&key, scope.site.as_ref()) {
-                        bail!("`{key}` is a LET binding; use ${key}");
+                    if *is_const {
+                        if !env.is_declared(&key) {
+                            bail!("undefined CONST {key}");
+                        }
+                        if !env.is_const(&key, scope.site.as_ref()) {
+                            bail!("`{key}` is a LET binding; use ${key}");
+                        }
+                    } else {
+                        if env.is_const(&key, scope.site.as_ref()) {
+                            bail!("CONST reads bare: use {key}, not ${key}");
+                        }
+                        if !env.is_declared(&key) {
+                            bail!("undefined variable ${key}");
+                        }
                     }
                     stack.push(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?));
                 }
@@ -5752,9 +5751,20 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     self.check_env_name(env, name, "env:", scope)?;
                     stack.push(StaticTy::Ty(TypeTag::String))
                 }
-                MathOp::LoadKeyPath { base, keys } => {
+                MathOp::LoadKeyPath {
+                    base,
+                    keys,
+                    is_const,
+                } => {
                     let key = clean_var(base);
-                    if !env.is_declared(&key) {
+                    if *is_const {
+                        if !env.is_declared(&key) {
+                            bail!("undefined CONST {key}");
+                        }
+                        if !env.is_const(&key, scope.site.as_ref()) {
+                            bail!("`{key}` is a LET binding; use ${key}");
+                        }
+                    } else if !env.is_declared(&key) {
                         bail!("undefined variable ${key}");
                     }
                     let mut current = env.read_guarded(&key, scope.site.as_ref())?;
@@ -5815,69 +5825,6 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     }
                     stack.push(StaticTy::Ty(current));
                 }
-                MathOp::LoadConstKeyPath { base, keys } => {
-                    let key = clean_var(base);
-                    if !env.is_declared(&key) {
-                        bail!("undefined CONST {key}");
-                    }
-                    if !env.is_const(&key, scope.site.as_ref()) {
-                        bail!("`{key}` is a LET binding; use ${key}");
-                    }
-                    let mut current = env.read_guarded(&key, scope.site.as_ref())?;
-                    for part in keys {
-                        match current {
-                            TypeTag::Record(fields) => {
-                                let Some(field) = fields.iter().find(|field| field.name == *part)
-                                else {
-                                    bail!(
-                                        "unknown field '{part}'; expected fields: {}",
-                                        fields
-                                            .iter()
-                                            .map(|field| field.name.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    );
-                                };
-                                current = field.ty.clone();
-                            }
-                            TypeTag::ListOf(element) => {
-                                if part.parse::<usize>().is_err() {
-                                    bail!("Invalid array index '{part}'");
-                                }
-                                current = element.as_ref().clone();
-                            }
-                            TypeTag::MapOf(values) => {
-                                current = values.as_ref().clone();
-                            }
-                            TypeTag::Map | TypeTag::List | TypeTag::Any => {
-                                current = TypeTag::Any;
-                                break;
-                            }
-                            TypeTag::Union(_, members) => {
-                                let traversable = |member: &TypeTag| {
-                                    matches!(
-                                        member,
-                                        TypeTag::Record(_)
-                                            | TypeTag::ListOf(_)
-                                            | TypeTag::MapOf(_)
-                                            | TypeTag::Map
-                                            | TypeTag::List
-                                            | TypeTag::Any
-                                    )
-                                };
-                                if members.iter().all(|member| !traversable(member)) {
-                                    bail!("Cannot traverse into scalar value at key '{part}'");
-                                }
-                                current = TypeTag::Any;
-                                break;
-                            }
-                            _ => {
-                                bail!("Cannot traverse into scalar value at key '{part}'");
-                            }
-                        }
-                    }
-                    stack.push(StaticTy::Ty(current));
-                }
                 MathOp::Call { name, arity } => {
                     let before = stack.len();
                     if before < *arity {
@@ -5902,18 +5849,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     let ret = self.apply_checked(name, &callee, &taken, &blanks, None)?;
                     stack.push(ret);
                 }
-                MathOp::Inspect(name) => {
+                MathOp::Inspect { name, is_const } => {
                     let key = clean_var(name);
                     if !env.is_declared(&key) {
+                        if *is_const {
+                            bail!("undefined CONST {key}");
+                        }
                         bail!("undefined variable ${key}");
-                    }
-                    env.read_guarded(&key, scope.site.as_ref())?;
-                    stack.push(StaticTy::Ty(TypeTag::Any));
-                }
-                MathOp::InspectConst(name) => {
-                    let key = clean_var(name);
-                    if !env.is_declared(&key) {
-                        bail!("undefined CONST {key}");
                     }
                     env.read_guarded(&key, scope.site.as_ref())?;
                     stack.push(StaticTy::Ty(TypeTag::Any));

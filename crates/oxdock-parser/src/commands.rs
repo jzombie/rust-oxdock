@@ -6609,8 +6609,14 @@ pub(crate) fn make_compare(
 pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
     match expr {
         Expr::Literal(v) => Some(vec![MathOp::PushConst(v.clone())]),
-        Expr::Var(name) => Some(vec![MathOp::LoadVar(name.clone())]),
-        Expr::Const(name) => Some(vec![MathOp::LoadConst(name.clone())]),
+        Expr::Var(name) => Some(vec![MathOp::Load {
+            name: name.clone(),
+            is_const: false,
+        }]),
+        Expr::Const(name) => Some(vec![MathOp::Load {
+            name: name.clone(),
+            is_const: true,
+        }]),
         Expr::ConstRef { alias, name } => Some(vec![MathOp::LoadConstRef {
             alias: alias.clone(),
             name: name.clone(),
@@ -6619,10 +6625,12 @@ pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
         Expr::KeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
             base: base.clone(),
             keys: keys.clone(),
+            is_const: false,
         }]),
-        Expr::ConstKeyPath { base, keys } => Some(vec![MathOp::LoadConstKeyPath {
+        Expr::ConstKeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
             base: base.clone(),
             keys: keys.clone(),
+            is_const: true,
         }]),
         Expr::Call { name, args } => {
             let mut ops = Vec::new();
@@ -6635,8 +6643,14 @@ pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
             });
             Some(ops)
         }
-        Expr::Inspect(var) => Some(vec![MathOp::Inspect(var.clone())]),
-        Expr::InspectConst(var) => Some(vec![MathOp::InspectConst(var.clone())]),
+        Expr::Inspect(var) => Some(vec![MathOp::Inspect {
+            name: var.clone(),
+            is_const: false,
+        }]),
+        Expr::InspectConst(var) => Some(vec![MathOp::Inspect {
+            name: var.clone(),
+            is_const: true,
+        }]),
         Expr::Arithmetic { op, left, right } => {
             let mut ops = expr_to_rpn(left)?;
             ops.extend(expr_to_rpn(right)?);

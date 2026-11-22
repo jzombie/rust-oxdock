@@ -985,24 +985,21 @@ fn emit_math_op(op: &oxdock_parser::ast::MathOp) -> proc_macro2::TokenStream {
             let raw = emit_raw_value(v, &[]);
             quote! { oxdock_parser::ast::MathOp::PushConst(#raw) }
         }
-        M::LoadVar(s) => quote! { oxdock_parser::ast::MathOp::LoadVar(#s.to_string()) },
-        M::LoadConst(s) => quote! { oxdock_parser::ast::MathOp::LoadConst(#s.to_string()) },
+        M::Load { name, is_const } => {
+            quote! { oxdock_parser::ast::MathOp::Load { name: #name.to_string(), is_const: #is_const } }
+        }
         M::LoadConstRef { alias, name } => {
             quote! { oxdock_parser::ast::MathOp::LoadConstRef { alias: #alias.to_string(), name: #name.to_string() } }
         }
         M::LoadEnv(k) => quote! { oxdock_parser::ast::MathOp::LoadEnv(#k.to_string()) },
-        M::LoadKeyPath { base, keys } => {
-            quote! { oxdock_parser::ast::MathOp::LoadKeyPath { base: #base.to_string(), keys: vec![#(#keys.to_string()),*] } }
-        }
-        M::LoadConstKeyPath { base, keys } => {
-            quote! { oxdock_parser::ast::MathOp::LoadConstKeyPath { base: #base.to_string(), keys: vec![#(#keys.to_string()),*] } }
+        M::LoadKeyPath { base, keys, is_const } => {
+            quote! { oxdock_parser::ast::MathOp::LoadKeyPath { base: #base.to_string(), keys: vec![#(#keys.to_string()),*], is_const: #is_const } }
         }
         M::Call { name, arity } => {
             quote! { oxdock_parser::ast::MathOp::Call { name: #name.to_string(), arity: #arity } }
         }
-        M::Inspect(name) => quote! { oxdock_parser::ast::MathOp::Inspect(#name.to_string()) },
-        M::InspectConst(name) => {
-            quote! { oxdock_parser::ast::MathOp::InspectConst(#name.to_string()) }
+        M::Inspect { name, is_const } => {
+            quote! { oxdock_parser::ast::MathOp::Inspect { name: #name.to_string(), is_const: #is_const } }
         }
         M::Neg => quote! { oxdock_parser::ast::MathOp::Neg },
         M::Add => quote! { oxdock_parser::ast::MathOp::Add },

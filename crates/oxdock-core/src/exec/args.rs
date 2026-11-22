@@ -1458,22 +1458,23 @@ fn evaluate_compiled_math<P: ProcessManager>(
                     stack.push(v.clone());
                 }
             }
-            MathOp::LoadVar(name) => {
-                if cx.state.is_const_var(name) {
-                    bail!("CONST reads bare: use {name}, not ${name}");
+            MathOp::Load { name, is_const } => {
+                if *is_const {
+                    let val = cx
+                        .state
+                        .get_var(name)
+                        .ok_or_else(|| anyhow::anyhow!("undefined CONST {name}"))?;
+                    stack.push(val);
+                } else {
+                    if cx.state.is_const_var(name) {
+                        bail!("CONST reads bare: use {name}, not ${name}");
+                    }
+                    let val = cx
+                        .state
+                        .get_var(name)
+                        .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))?;
+                    stack.push(val);
                 }
-                let val = cx
-                    .state
-                    .get_var(name)
-                    .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))?;
-                stack.push(val);
-            }
-            MathOp::LoadConst(name) => {
-                let val = cx
-                    .state
-                    .get_var(name)
-                    .ok_or_else(|| anyhow::anyhow!("undefined CONST {name}"))?;
-                stack.push(val);
             }
             MathOp::LoadConstRef { alias, name } => {
                 stack.push(super::import::resolve_const_ref(cx.state, alias, name)?);
@@ -1483,13 +1484,14 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 // Same declared-absent rule as `Expr::Env` above.
                 None => stack.push(Value::string(String::new())),
             },
-            MathOp::LoadKeyPath { base, keys } => {
-                if cx.state.is_const_var(base) {
+            MathOp::LoadKeyPath {
+                base,
+                keys,
+                is_const,
+            } => {
+                if !is_const && cx.state.is_const_var(base) {
                     bail!("CONST reads bare: use {base}, not ${base}");
                 }
-                stack.push(resolve_key_path_value(cx.state, base, keys)?);
-            }
-            MathOp::LoadConstKeyPath { base, keys } => {
                 stack.push(resolve_key_path_value(cx.state, base, keys)?);
             }
             MathOp::Call { name, arity } => {
@@ -1530,10 +1532,7 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 };
                 stack.push(val);
             }
-            MathOp::Inspect(name) => {
-                stack.push(Value::map(super::handlers::inspect_var_map(cx, name)?));
-            }
-            MathOp::InspectConst(name) => {
+            MathOp::Inspect { name, .. } => {
                 stack.push(Value::map(super::handlers::inspect_var_map(cx, name)?));
             }
             MathOp::Neg => {
