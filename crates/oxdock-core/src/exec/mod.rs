@@ -467,6 +467,8 @@ pub(crate) fn new_state<P: ProcessManager>(
         import_stack: Vec::new(),
         executed_alias_targets: std::collections::HashMap::new(),
         call_alias_frames: Vec::new(),
+        scope_alias_frames: Vec::new(),
+        init_scope_depths: Vec::new(),
         func_floors: Vec::new(),
         harvest_map: std::collections::HashMap::new(),
         modules: std::collections::HashMap::from([(

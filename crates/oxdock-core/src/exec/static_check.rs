@@ -215,6 +215,14 @@ struct Env {
     /// globals for the rest of its block in both layers. Pushed and
     /// popped with every other frame below, never separately.
     func_frames: Vec<HashMap<String, FuncInfo>>,
+    /// Block-scoped `IMPORT` targets, one table per lexical frame:
+    /// an `IMPORT` inside a block resolves within that block only,
+    /// mirroring the runtime scope-frame unwind. Guards ride along
+    /// so platform branches resolve exactly like unit-top entries.
+    /// Pushed and popped with every other frame below, never
+    /// separately; reads merge outer-to-inner over the checker's
+    /// unit-top table.
+    import_frames: Vec<super::native::AliasTargets>,
 }
 
 /// Module-shared bindings plus a fork-shared touch flag. `Rc` (not
@@ -361,8 +369,17 @@ struct Checker<'a, P: ProcessManager> {
     /// Outbound alias targets for the checked unit: `ALIAS` to
     /// (defining file, import guard) pairs. `resolve_call` requires a
     /// unique resolvable target, so same-alias different-file imports
-    /// cannot cross-resolve.
+    /// cannot cross-resolve. Holds the unit top-level only: block
+    /// imports merge in from the walk's lexical frames (see
+    /// `effective_alias_targets`), unwinding with their block.
     alias_targets: super::native::AliasTargets,
+    /// Walk-time import resolution: the closure tables plus the unit
+    /// under check, so an `IMPORT` step records its defining file into
+    /// the walk's lexical frame as the walk visits it (mirroring
+    /// runtime execution order). `None` keeps single-file validation
+    /// lenient: imports record nothing and reads fall back to the
+    /// unit-top table.
+    import_ctx: Option<ImportResolveCtx<'a>>,
     /// `EXPORT CONST` names per module key, populated alongside
     /// `module_lets` for the closure pass. Qualified `$ALIAS::NAME`
     /// reads gate against these: only listed names resolve, and only
@@ -380,16 +397,28 @@ struct Checker<'a, P: ProcessManager> {
     /// these for the #319 missing-import hint: only listed
     /// (exported, never private) names can be suggested.
     module_func_exports: HashMap<String, Vec<String>>,
-    /// Per-function import overlays: file-top imports plus the
-    /// function's own subtree imports, keyed by (owner module key,
-    /// `"entry"` for entry functions, function name). Swapped in while
-    /// checking that body so function-local imports resolve without
-    /// leaking into sibling functions or the top level.
+    /// Per-function import overlays: the unit top-level, keyed by
+    /// (owner module key, `"entry"` for entry functions, function
+    /// name). Swapped in while checking that body; the walk appends
+    /// the body's own imports to its frame, so function-local imports
+    /// resolve without leaking into sibling functions or the top level.
     body_scopes: BodyScopes,
     /// Nesting depth inside `ISOLATED` bodies: the isolated allowlist node
     /// is legal only below an `ISOLATED` head, at any depth including
     /// through nested blocks and nested `ISOLATED` itself.
     isolated_depth: usize,
+}
+
+/// Closure tables plus the unit under check, so an `IMPORT` step
+/// resolves its defining file while the walk visits it. Single owner
+/// for walk-time resolution; the collection phase (`unit_imports`)
+/// shares the same `resolve_static_top_level` rule.
+#[derive(Clone, Copy)]
+struct ImportResolveCtx<'a> {
+    files: &'a [super::import::ClosureFile],
+    parent: Option<&'a GuardedPath>,
+    dir: &'a GuardedPath,
+    is_entry: bool,
 }
 
 /// Read-only [`ModuleGraphView`](super::native::ModuleGraphView) over
@@ -843,8 +872,10 @@ pub fn validate_script_closure<P: ProcessManager>(
         // for every bare harvest in the closure. Global like the
         // runtime harvest map: an explicit harvest names its file.
         let mut harvested: HashMap<(String, String), String> = HashMap::new();
-        // Per-unit file-import aliases: the entry's own outbound imports
-        // plus each file's own outbound imports (nested included).
+        // Per-unit file-import aliases: the entry's own top-level
+        // imports plus each file's own top-level imports. Block-nested
+        // imports scope to their block (resolved from the walk's
+        // lexical frames), never to the unit table.
         // Zero-function modules contribute no `ALIAS::` func keys, so
         // the alias set (not a func-key prefix scan) proves the
         // namespace known. Scoped per unit so sibling modules cannot
@@ -873,9 +904,6 @@ pub fn validate_script_closure<P: ProcessManager>(
         collect_body_scopes(
             entry,
             super::import::ENTRY_UNIT,
-            &entry_base,
-            files,
-            entry_parent.as_ref(),
             &entry_targets,
             &mut body_scopes,
         );
@@ -883,9 +911,6 @@ pub fn validate_script_closure<P: ProcessManager>(
             collect_body_scopes(
                 &file.steps,
                 &file.key,
-                &file.dir,
-                files,
-                None,
                 &file_targets.get(&file.key).cloned().unwrap_or_default(),
                 &mut body_scopes,
             );
@@ -1031,6 +1056,25 @@ pub fn validate_script_closure<P: ProcessManager>(
                 Some(module) => file_targets.get(module).cloned().unwrap_or_default(),
             };
             with_scope_aliases(exec, &defs, |exec| {
+                let import_ctx = match &owner {
+                    None => Some(ImportResolveCtx {
+                        files,
+                        parent: entry_parent.as_ref(),
+                        dir: &entry_base,
+                        is_entry: true,
+                    }),
+                    Some(module) => {
+                        files
+                            .iter()
+                            .find(|f| f.key == *module)
+                            .map(|file| ImportResolveCtx {
+                                files,
+                                parent: None,
+                                dir: &file.dir,
+                                is_entry: false,
+                            })
+                    }
+                };
                 let mut checker = seeded_checker(
                     exec,
                     &all_funcs,
@@ -1047,6 +1091,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &body_scopes,
                     &entry_let_scopes,
                     &file_targets,
+                    import_ctx,
                 );
                 let ty = checker.func_return(&key, 0)?;
                 inferred.insert(key.clone(), ty);
@@ -1083,6 +1128,24 @@ pub fn validate_script_closure<P: ProcessManager>(
             let owner_targets: super::native::AliasTargets =
                 file_targets.get(&module).cloned().unwrap_or_default();
             with_scope_aliases(exec, &defs, |exec| {
+                let import_ctx = if module == super::import::ENTRY_UNIT {
+                    Some(ImportResolveCtx {
+                        files,
+                        parent: entry_parent.as_ref(),
+                        dir: &entry_base,
+                        is_entry: true,
+                    })
+                } else {
+                    files
+                        .iter()
+                        .find(|f| f.key == module)
+                        .map(|file| ImportResolveCtx {
+                            files,
+                            parent: None,
+                            dir: &file.dir,
+                            is_entry: false,
+                        })
+                };
                 let mut checker = seeded_checker(
                     exec,
                     &all_funcs,
@@ -1099,6 +1162,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &body_scopes,
                     &entry_let_scopes,
                     &file_targets,
+                    import_ctx,
                 );
                 let ty = checker.func_return_owned(&info, &canonical, 0)?;
                 inferred.insert(canonical.clone(), ty);
@@ -1125,11 +1189,12 @@ pub fn validate_script_closure<P: ProcessManager>(
             entry_lets: &[GuardedLet],
             inferred: &HashMap<String, StaticTy>,
             entry: &[Step],
-            files: &[ClosureFile],
+            files: &'a [ClosureFile],
             alias_targets: &super::native::AliasTargets,
             body_scopes: &BodyScopes,
             entry_let_scopes: &HashMap<(String, usize, usize), Vec<GuardedLet>>,
             file_targets: &HashMap<String, super::native::AliasTargets>,
+            import_ctx: Option<ImportResolveCtx<'a>>,
         ) -> Checker<'a, P> {
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
@@ -1147,6 +1212,7 @@ pub fn validate_script_closure<P: ProcessManager>(
             checker.inferred = inferred.clone();
             checker.strict_qualified = true;
             checker.alias_targets = alias_targets.clone();
+            checker.import_ctx = import_ctx;
             checker.file_targets = file_targets.clone();
             checker.body_scopes = body_scopes.clone();
             checker.build_env_unions(entry, files);
@@ -1169,6 +1235,12 @@ pub fn validate_script_closure<P: ProcessManager>(
                 &body_scopes,
                 &entry_let_scopes,
                 &file_targets,
+                Some(ImportResolveCtx {
+                    files,
+                    parent: entry_parent.as_ref(),
+                    dir: &entry_base,
+                    is_entry: true,
+                }),
             )
             .check_top_level(entry)
         })?;
@@ -1195,6 +1267,12 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &body_scopes,
                     &entry_let_scopes,
                     &file_targets,
+                    Some(ImportResolveCtx {
+                        files,
+                        parent: None,
+                        dir: &file.dir,
+                        is_entry: false,
+                    }),
                 )
                 .check_import_body(&file.key, &file.steps, Some(&file.key))
             })?;
@@ -1593,14 +1671,18 @@ fn file_env_union(steps: &[Step]) -> HashSet<String> {
     union
 }
 
-/// Outbound imports of one step tree in a single walk: each visible
-/// `AS` alias mapped to its defining file keys. `entry_parent`
-/// enables entry-first key matching for the entry unit; file units
-/// pass `None`. Single owner for the closure's per-unit import view;
-/// dead steps register nowhere, `FUNC` bodies never leak into the
-/// enclosing scope (they own per-function overlays), bare harvests
-/// stay global. The target map's key set is the alias set: no
-/// parallel `HashSet` is kept.
+/// Outbound imports of one unit's top-level steps: each visible
+/// `AS` alias mapped to its defining file keys. Block-nested imports
+/// never land here: `StepKind` bodies scope lexically and bare guard
+/// blocks scope through `scope_enter`/`scope_exit` markers, so both
+/// resolve from the walk's lexical frames instead — a read past the
+/// block fails closed instead of seeing a binding whose step may
+/// never execute. `FUNC` bodies never land here either (their
+/// overlays in `collect_body_scopes` start from this same table).
+/// `entry_parent` enables entry-first key matching for the entry
+/// unit; file units pass `None`. Single owner for the closure's
+/// per-unit import view; dead steps register nowhere. The target
+/// map's key set is the alias set: no parallel `HashSet` is kept.
 fn unit_imports(
     steps: &[Step],
     dir: &GuardedPath,
@@ -1608,38 +1690,45 @@ fn unit_imports(
     entry_parent: Option<&GuardedPath>,
     targets: &mut super::native::AliasTargets,
 ) {
+    // Marker depth mirrors the runtime scope stack step for step:
+    // the walk pushes a frame per `scope_enter` and pops per
+    // `scope_exit`, so collection tracks the same nesting to decide
+    // what counts as top level. Bare guard blocks lower to flat
+    // steps carrying markers (no `StepKind` body to recurse into),
+    // and only depth zero is the unit top level.
+    let mut depth: usize = 0;
     for step in steps {
-        if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
-            continue;
-        }
-        // Function-local imports belong to the enclosing function's
-        // overlay, never the unit: skipping `FUNC` bodies here keeps
-        // sibling functions from cross-resolving each other's aliases.
-        if matches!(step.kind, StepKind::FuncDef { .. }) {
-            continue;
-        }
-        let (path, alias) = match &step.kind {
-            StepKind::ImportFile { path, alias } => (path.clone(), Some(alias.clone())),
-            StepKind::ImportFuncs {
-                path,
-                alias: Some(alias),
-                ..
-            } => (path.clone(), Some(alias.clone())),
-            _ => (String::new(), None),
+        depth = depth.saturating_add(step.scope_enter);
+        // Only depth zero counts, and only for live steps:
+        // marker-scoped and dead steps never seed the unit table,
+        // resolving from the walk frames instead (or nowhere).
+        let live_top_level =
+            depth == 0 && !matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead);
+        let import = if live_top_level && !matches!(step.kind, StepKind::FuncDef { .. }) {
+            match &step.kind {
+                StepKind::ImportFile { path, alias } => Some((path.clone(), alias.clone())),
+                StepKind::ImportFuncs {
+                    path,
+                    alias: Some(alias),
+                    ..
+                } => Some((path.clone(), alias.clone())),
+                _ => None,
+            }
+        } else {
+            None
         };
-        if let Some(alias) = alias {
-            let unit = targets.entry(alias).or_default();
-            let is_entry = entry_parent.is_some();
-            // Host harvests have no closure file: record an explicit
-            // host branch so disjoint file+host aliases never collapse
-            // to `Canonical` (see `classify_alias_call`).
-            let defining =
-                super::import::resolve_static_top_level(entry_parent, dir, files, &path, is_entry);
-            unit.push((defining, step.guard.clone()));
-        }
-        for body in super::import::child_bodies(&step.kind) {
-            unit_imports(body, dir, files, entry_parent, targets);
-        }
+        depth = depth.saturating_sub(step.scope_exit);
+        let Some((path, alias)) = import else {
+            continue;
+        };
+        let unit = targets.entry(alias).or_default();
+        let is_entry = entry_parent.is_some();
+        // Host harvests have no closure file: record an explicit
+        // host branch so disjoint file+host aliases never collapse
+        // to `Canonical` (see `classify_alias_call`).
+        let defining =
+            super::import::resolve_static_top_level(entry_parent, dir, files, &path, is_entry);
+        unit.push((defining, step.guard.clone()));
     }
 }
 
@@ -1858,30 +1947,31 @@ fn entry_let_scopes<P: ProcessManager>(
     }
     Ok(out)
 }
-/// Per-function import overlay: the enclosing unit's top-level imports
-/// plus the function's own direct imports. Nested function bodies get
-/// their own overlays isolated to the unit top-level (never the
-/// lexically enclosing function's locals), matching the runtime call
-/// frames where each invocation pushes a fresh frame. Keyed by (owner
-/// module key, function name, definition line, definition column) so
-/// same-named block-local functions in distinct blocks never
-/// overwrite each other's overlays. Single owner for function-local
-/// alias visibility; `check_function_body_probed` swaps it in while
-/// checking that body.
+/// Per-function import overlay: the enclosing unit's top-level imports.
+/// The walk appends the body's own imports to its lexical frame when
+/// the body is checked (block-nested imports land in deeper frames),
+/// so function-local imports resolve inside their function without
+/// leaking into sibling functions or the top level. Nested function
+/// definitions get their own overlays isolated to the unit top-level
+/// (never the lexically enclosing function's locals), matching the
+/// runtime call frames where each invocation pushes a fresh frame.
+/// Keyed by (owner module key, function name, definition line,
+/// definition column) so same-named block-local functions in distinct
+/// blocks never overwrite each other's overlays. Single owner for
+/// function-local alias visibility; `check_function_body_probed`
+/// swaps it in while checking that body.
 type BodyScopes = HashMap<(String, String, usize, usize), super::native::AliasTargets>;
 
-/// Collect one overlay per `FUNC` definition under `steps`: each
-/// overlay is the unit top-level plus that body's own direct imports.
-/// `unit_top` is the unit's own table (never an enclosing function's
-/// overlay), so nested definitions stay isolated exactly like the
-/// runtime frames. Dead steps contribute nothing, like the unit walk.
-#[allow(clippy::too_many_arguments)]
+/// Collect one overlay per `FUNC` definition under `steps`: the unit
+/// top-level, cloned. The walk records each body's own imports into
+/// its frame as it checks the body, so overlays stay order-free while
+/// reads observe execution order. `unit_top` is the unit's own table
+/// (never an enclosing function's overlay), so nested definitions stay
+/// isolated exactly like the runtime frames. Dead steps contribute
+/// nothing, like the unit walk.
 fn collect_body_scopes(
     steps: &[Step],
     module_key: &str,
-    dir: &GuardedPath,
-    files: &[ClosureFile],
-    entry_parent: Option<&GuardedPath>,
     unit_top: &super::native::AliasTargets,
     out: &mut BodyScopes,
 ) {
@@ -1890,19 +1980,17 @@ fn collect_body_scopes(
             continue;
         }
         if let StepKind::FuncDef { name, body, .. } = &step.kind {
-            let mut scope = unit_top.clone();
-            unit_imports(body, dir, files, entry_parent, &mut scope);
             out.insert(
                 (module_key.to_string(), name.clone(), step.line, step.col),
-                scope,
+                unit_top.clone(),
             );
             // Nested definitions isolate to the unit top-level too:
             // at runtime the nested body runs under its own fresh
             // frame, never the enclosing function's frame.
-            collect_body_scopes(body, module_key, dir, files, entry_parent, unit_top, out);
+            collect_body_scopes(body, module_key, unit_top, out);
         } else {
             for nested in super::import::child_bodies(&step.kind) {
-                collect_body_scopes(nested, module_key, dir, files, entry_parent, unit_top, out);
+                collect_body_scopes(nested, module_key, unit_top, out);
             }
         }
     }
@@ -1950,16 +2038,18 @@ impl Env {
             module: None,
             env_frames: vec![HashSet::new()],
             func_frames: vec![HashMap::new()],
+            import_frames: vec![HashMap::new()],
         }
     }
 
     /// Push one lexical frame across every stack (bindings, env
-    /// names, nested functions): single owner mirroring runtime
-    /// `push_scope`, so the three can never desync.
+    /// names, nested functions, block imports): single owner mirroring
+    /// runtime `push_scope`, so none of them can ever desync.
     fn push_frame(&mut self) {
         self.frames.push(HashMap::new());
         self.env_frames.push(HashSet::new());
         self.func_frames.push(HashMap::new());
+        self.import_frames.push(HashMap::new());
     }
 
     /// Fork for a scoped body: clone the stack and push a fresh frame,
@@ -1978,6 +2068,37 @@ impl Env {
         if let Some(frame) = self.env_frames.last_mut() {
             frame.insert(name);
         }
+    }
+
+    /// Append one executed `IMPORT` to the innermost lexical frame:
+    /// block imports resolve for the rest of their block (the frame
+    /// discards on exit), top-level imports for the rest of the unit.
+    /// Same alias from several files overlaps (ambiguous) unless the
+    /// guards are disjoint, exactly like the unit-top table.
+    fn append_import_target(
+        &mut self,
+        alias: String,
+        defining: Option<String>,
+        guard: Option<GuardExpr>,
+    ) {
+        if let Some(frame) = self.import_frames.last_mut() {
+            frame.entry(alias).or_default().push((defining, guard));
+        }
+    }
+
+    /// Block imports outer-to-inner, merged in walk order. The checker
+    /// layers these over its unit-top table, so reads see every live
+    /// scope exactly once.
+    fn visible_imports(&self) -> super::native::AliasTargets {
+        let mut out = super::native::AliasTargets::new();
+        for frame in &self.import_frames {
+            for (alias, targets) in frame {
+                out.entry(alias.clone())
+                    .or_default()
+                    .extend(targets.iter().cloned());
+            }
+        }
+        out
     }
 
     /// Whether `name` was declared in any live frame.
@@ -2256,6 +2377,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             harvested: HashMap::new(),
             entry_let_scopes: HashMap::new(),
             alias_targets: HashMap::new(),
+            import_ctx: None,
             module_const_exports: HashMap::new(),
             file_targets: HashMap::new(),
             module_func_exports: HashMap::new(),
@@ -2498,7 +2620,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             // miss wording below is a script, stateful, or known-alias
             // callee that can never run in `{{ }}`.
             let mut is_script_visible = false;
-            match super::native::classify_alias_call(&self.alias_targets, &qualified, &|key| {
+            let effective = self.effective_alias_targets(env);
+            match super::native::classify_alias_call(&effective, &qualified, &|key| {
                 self.funcs.contains_key(key)
             }) {
                 // Global spellings resolve as written; only `SCRIPT::`
@@ -2557,7 +2680,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 name,
                 is_script_visible,
                 self.hosts.contains_key(&qualified),
-                self.alias_targets.contains_key(module),
+                effective.contains_key(module),
             ) {
                 bail!("{text}");
             }
@@ -3299,6 +3422,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 env.frames.insert(0, seed_map(&seeds));
                 env.env_frames.insert(0, HashSet::new());
                 env.func_frames.insert(0, HashMap::new());
+                env.import_frames.insert(0, HashMap::new());
             }
             for name in &self.entry_env_union {
                 env.declare_env(name.clone());
@@ -3410,6 +3534,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let base_frames = env.frames.len();
         let base_env_frames = env.env_frames.len();
         let base_func_frames = env.func_frames.len();
+        let base_import_frames = env.import_frames.len();
         let mut out = WalkOut {
             falls_through: true,
             has_return: false,
@@ -3486,6 +3611,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 if env.func_frames.len() > base_func_frames {
                     env.func_frames.pop();
                 }
+                if env.import_frames.len() > base_import_frames {
+                    env.import_frames.pop();
+                }
             }
             // Early terminal returns above skip the pops and discard
             // the env, matching observable runtime behavior (restore
@@ -3544,19 +3672,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // capture_yield): without it a TIMEOUT-wrapped (or any
         // non-call) command sails through with an incompatible
         // declaration and fails only at runtime coercion.
-        if let Some(yield_tag) = self.capture_yield(
-            cmd,
-            env.module.as_ref().map(|m| m.key.as_str()),
-            &env.func_frames,
-            scope.site.as_ref(),
-            depth,
-        )? && self
-            .check_arg(
-                tag,
-                StaticTy::Ty(yield_tag.clone()),
-                &format!("step {}", idx + 1),
-            )
-            .is_err()
+        if let Some(yield_tag) = self.capture_yield(cmd, env, scope.site.as_ref(), depth)?
+            && self
+                .check_arg(
+                    tag,
+                    StaticTy::Ty(yield_tag.clone()),
+                    &format!("step {}", idx + 1),
+                )
+                .is_err()
         {
             let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
             bail!(
@@ -3710,6 +3833,53 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
         }
         Ok(())
+    }
+
+    /// Unit-top targets layered with the walk's block imports
+    /// (outer-to-inner): what every qualified read in this scope
+    /// resolves against. Single owner for the merge, so call
+    /// resolution, const reads, and template gates cannot disagree.
+    /// Exact duplicate pairs collapse (a top-level import also
+    /// appends when the walk visits it); overlapping guards stay
+    /// distinct so ambiguity still fires across files.
+    fn effective_alias_targets(&self, env: &Env) -> super::native::AliasTargets {
+        let mut out = self.alias_targets.clone();
+        for (alias, targets) in env.visible_imports() {
+            let entry = out.entry(alias).or_default();
+            for target in targets {
+                if !entry.contains(&target) {
+                    entry.push(target);
+                }
+            }
+        }
+        out
+    }
+
+    /// Record one `IMPORT` step into the walk's innermost lexical
+    /// frame: block imports resolve for the rest of their block, then
+    /// unwind with it. Top-level imports land in the unit frame and
+    /// persist for the unit. Resolution shares the collection phase's
+    /// `resolve_static_top_level` rule, so both agree file for file.
+    /// Without a resolution context (single-file validation) records
+    /// nothing: reads stay lenient instead of failing resolution.
+    fn record_walk_import(
+        &mut self,
+        alias: &str,
+        path: &str,
+        guard: Option<&GuardExpr>,
+        env: &mut Env,
+    ) {
+        let Some(rctx) = &self.import_ctx else {
+            return;
+        };
+        let defining = super::import::resolve_static_top_level(
+            rctx.parent,
+            rctx.dir,
+            rctx.files,
+            path,
+            rctx.is_entry,
+        );
+        env.append_import_target(alias.to_string(), defining, guard.cloned());
     }
 
     fn walk_step(
@@ -4017,7 +4187,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             StepKind::Timeout { body, .. } => {
                 // A dynamic duration evaluates before the body runs.
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
-                let inner = self.walk_body(body, env, scope, depth + 1)?;
+                // Scoped body: the runtime runs it under a pushed
+                // scope, so imports (and bindings) unwind on exit
+                // exactly like a braced block. Frames pop before `?`
+                // propagates, matching the restore discipline below.
+                env.frames.push(HashMap::new());
+                env.func_frames.push(HashMap::new());
+                env.import_frames.push(HashMap::new());
+                let inner = self.walk_body(body, env, scope, depth + 1);
+                env.frames.pop();
+                env.func_frames.pop();
+                env.import_frames.pop();
+                let inner = inner?;
                 let mut out = live;
                 // TIMEOUT bounds execution in place: a `RETURN`
                 // inside still returns from the enclosing function.
@@ -4032,7 +4213,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             StepKind::Fail { body, .. } => {
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
-                let inner = self.walk_body(body, env, scope, depth + 1)?;
+                // Scoped body like `TIMEOUT`: the runtime runs it
+                // under a pushed scope, so imports (and bindings)
+                // unwind on exit. Frames pop before `?` propagates.
+                env.frames.push(HashMap::new());
+                env.func_frames.push(HashMap::new());
+                env.import_frames.push(HashMap::new());
+                let inner = self.walk_body(body, env, scope, depth + 1);
+                env.frames.pop();
+                env.func_frames.pop();
+                env.import_frames.pop();
+                let inner = inner?;
                 let mut out = live;
                 // FAIL never yields a value (it exits or propagates
                 // control flow): unlike TIMEOUT, body types do not
@@ -4056,8 +4247,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // re-adds them. Saved and restored around the body so
                 // declarations inside never leak outward, exactly like
                 // the runtime scope pop. Types keep flowing in place.
+                // The body is scope-pushed like a braced block (the
+                // runtime runs it under `push_scope`), so bindings and
+                // imports unwind on exit too; only the scrubbed env
+                // declarations ride the save/restore above.
                 let saved = std::mem::replace(&mut env.env_frames, vec![HashSet::new()]);
+                env.frames.push(HashMap::new());
+                env.func_frames.push(HashMap::new());
+                env.import_frames.push(HashMap::new());
                 let inner = self.walk_body(body, env, scope, depth + 1);
+                env.frames.pop();
+                env.func_frames.pop();
+                env.import_frames.pop();
                 env.env_frames = saved;
                 let inner = inner?;
                 self.isolated_depth -= 1;
@@ -4191,6 +4392,23 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // becomes readable from here on in this scope.
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
                 env.declare_env(key.clone());
+                Ok(live)
+            }
+            StepKind::ImportFile { path, alias } => {
+                // Block-scoped linkage: the import resolves here (in
+                // execution order) and unwinds with the enclosing
+                // frame, instead of leaking into the unit table.
+                self.check_step_args(&step.kind, env, scope, idx, depth)?;
+                self.record_walk_import(alias, path, step.guard.as_ref(), env);
+                Ok(live)
+            }
+            StepKind::ImportFuncs { path, alias, .. } => {
+                // Aliased harvests scope like file imports; bare
+                // harvests stay global (see `harvested`), untouched.
+                self.check_step_args(&step.kind, env, scope, idx, depth)?;
+                if let Some(alias) = alias {
+                    self.record_walk_import(alias, path, step.guard.as_ref(), env);
+                }
                 Ok(live)
             }
             _ => {
@@ -4436,8 +4654,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     fn capture_yield(
         &mut self,
         cmd: &StepKind,
-        env_module: Option<&str>,
-        nested: &[HashMap<String, FuncInfo>],
+        env: &Env,
         site: Option<&GuardExpr>,
         depth: usize,
     ) -> Result<Option<TypeTag>> {
@@ -4449,7 +4666,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     current = &body[0].kind;
                 }
                 StepKind::Call { name, .. } => {
-                    let callee = self.resolve_call(name, env_module, nested, site, depth)?;
+                    let callee = self.resolve_call(name, env, site, depth)?;
                     return Ok(match callee.ret {
                         StaticTy::Ty(tag) => Some(tag),
                         // A VOID callee still binds something at
@@ -4652,12 +4869,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// when no closure file exports the base name. Single owner for
     /// the static exporter view; every `resolve_call` unknown
     /// failure appends this instead of restating the search.
-    fn missing_import_hint(&self, name: &str) -> String {
+    fn missing_import_hint(&self, targets: &super::native::AliasTargets, name: &str) -> String {
         super::native::missing_import_hint(
             self.module_func_exports
                 .iter()
                 .map(|(file, exports)| (file.as_str(), exports.as_slice())),
-            &self.alias_targets,
+            targets,
             name,
         )
         .unwrap_or_default()
@@ -4744,17 +4961,20 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     fn resolve_call(
         &mut self,
         name: &str,
-        env_module: Option<&str>,
-        nested: &[HashMap<String, FuncInfo>],
+        env: &Env,
         site: Option<&GuardExpr>,
         depth: usize,
     ) -> Result<Callee> {
+        let env_module = env.module.as_ref().map(|m| m.key.as_str());
+        let nested: &[_] = &env.func_frames;
         // Canonical lookup key through the single alias-target
         // matcher: file-aliased spellings map to the defining file,
-        // everything else resolves as spelled.
+        // everything else resolves as spelled. Block imports layer
+        // over the unit table, unwinding with their block.
+        let effective = self.effective_alias_targets(env);
         let mut lookup = name.to_string();
         {
-            match super::native::classify_alias_call(&self.alias_targets, name, &|key| {
+            match super::native::classify_alias_call(&effective, name, &|key| {
                 self.funcs.contains_key(key)
             }) {
                 super::native::AliasResolution::Global => {}
@@ -4762,7 +4982,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 super::native::AliasResolution::Unknown => {
                     bail!(
                         "unknown function `{name}`{}",
-                        self.missing_import_hint(name)
+                        self.missing_import_hint(&effective, name)
                     );
                 }
                 super::native::AliasResolution::Ambiguous { alias, base, files } => {
@@ -4786,7 +5006,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     if has_host {
                         bail!(
                             "unknown function `{name}`{}",
-                            self.missing_import_hint(name)
+                            self.missing_import_hint(&effective, name)
                         );
                     }
                     // Every disjoint target must export the name: a
@@ -4797,7 +5017,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         let Some(info) = self.funcs.get(&canonical) else {
                             bail!(
                                 "unknown function `{name}`{}",
-                                self.missing_import_hint(name)
+                                self.missing_import_hint(&effective, name)
                             );
                         };
                         canonicals.push((canonical, info.clone()));
@@ -4937,7 +5157,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         {
             bail!(
                 "unknown function `{name}`{}",
-                self.missing_import_hint(name)
+                self.missing_import_hint(&effective, name)
             );
         }
         Ok(Callee {
@@ -4954,7 +5174,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// lenient without the closure (single-file probes) and fail
     /// closed on it; a `LET` spelling with the same name names the
     /// real error (never exportable) instead of an unknown-name miss.
-    fn resolve_const_ref(&self, alias: &str, name: &str, scope: &Scope) -> Result<TypeTag> {
+    fn resolve_const_ref(
+        &self,
+        alias: &str,
+        name: &str,
+        env: &Env,
+        scope: &Scope,
+    ) -> Result<TypeTag> {
         use super::native::{
             ConstHolders, ambiguous_alias_message, chase_const_forward, const_holder_files,
             missing_const_hint,
@@ -4968,8 +5194,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         };
         // Holders through the shared walk: the static twin and the
         // runtime twin classify identically, so a read accepted here
-        // serves there.
-        let files = match const_holder_files(&view, &self.alias_targets, alias, name) {
+        // serves there. Block imports layer over the unit table here
+        // too, unwinding with their block.
+        let effective = self.effective_alias_targets(env);
+        let files = match const_holder_files(&view, &effective, alias, name) {
             ConstHolders::Found(files) => files,
             ConstHolders::NoAlias => {
                 if self.strict_qualified {
@@ -5024,7 +5252,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         match tags.into_iter().next() {
             Some(tag) => Ok(tag),
             None => {
-                let hint = missing_const_hint(&view, &self.alias_targets, alias, name);
+                let hint = missing_const_hint(&view, &effective, alias, name);
                 match hint {
                     Some(hint) => bail!("{}: unknown CONST `{qualified}`: {hint}", at()),
                     None => bail!(
@@ -5086,13 +5314,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // Order mirrors execution: the arity gate fires before any
         // argument evaluates, so undeclared names in extra arguments
         // never surface. (`native_arity_failure_...` pins this.)
-        let callee = self.resolve_call(
-            name,
-            env.module.as_ref().map(|m| m.key.as_str()),
-            &env.func_frames,
-            scope.site.as_ref(),
-            depth,
-        )?;
+        let callee = self.resolve_call(name, env, scope.site.as_ref(), depth)?;
         // Arity range comes from the full host metadata (which carries
         // the optional flags); script FUNCs and bare shape lists are
         // always exact. Missing lists (INSPECT-like) skip the check:
@@ -5395,7 +5617,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 )?))
             }
             Expr::ConstRef { alias, name } => {
-                let tag = self.resolve_const_ref(alias, name, scope)?;
+                let tag = self.resolve_const_ref(alias, name, env, scope)?;
                 Ok(StaticTy::Ty(tag))
             }
             Expr::Env(name) => {
@@ -5534,7 +5756,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     stack.push(StaticTy::Ty(tag));
                 }
                 MathOp::LoadConstRef { alias, name } => {
-                    let tag = self.resolve_const_ref(alias, name, scope)?;
+                    let tag = self.resolve_const_ref(alias, name, env, scope)?;
                     stack.push(StaticTy::Ty(tag));
                 }
                 MathOp::LoadEnv(name) => {
@@ -5562,13 +5784,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     // arity still are. (Math-position calls are
                     // numeric builtins in practice.)
                     let blanks = vec![None; taken.len()];
-                    let callee = self.resolve_call(
-                        name,
-                        env.module.as_ref().map(|m| m.key.as_str()),
-                        &env.func_frames,
-                        scope.site.as_ref(),
-                        depth,
-                    )?;
+                    let callee = self.resolve_call(name, env, scope.site.as_ref(), depth)?;
                     let ret = self.apply_checked(name, &callee, &taken, &blanks, None)?;
                     stack.push(ret);
                 }

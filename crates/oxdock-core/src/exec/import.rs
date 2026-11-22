@@ -21,7 +21,7 @@ use oxdock_parser::{
 use oxdock_process::ProcessManager;
 
 use super::resolve_script_params;
-use super::state::{ExecState, RawFuncDef};
+use super::state::{ExecState, RawFuncDef, ScopeAliasFrame};
 use super::steps::{Flow, StepCtx, execute_steps};
 
 /// Import-only read exemption (#310.1): the entry tree stays readable
@@ -875,6 +875,14 @@ fn ensure_module_init<P: ProcessManager>(
             cx.state.register_alias(name, target);
         }
         cx.state.import_stack.push(resolved.clone());
+        // Mark the isolation scope as a module top level (not a
+        // lexical block): the init body's own direct imports land on
+        // the unit-top map like the entry's, while nested blocks
+        // still unwind through scope frames. Removed with the scope
+        // below on every path.
+        cx.state
+            .init_scope_depths
+            .push(cx.state.scope_stack.len() + 1);
         cx.state.push_scope();
         // Frame floor for the nested walk (#322): the init body's
         // own frames start here. Popped with the scope below on
@@ -1014,6 +1022,10 @@ fn ensure_module_init<P: ProcessManager>(
     })();
     let pop_res = cx.state.pop_scope();
     let _ = cx.state.func_floors.pop();
+    let init_depth = cx.state.scope_stack.len() + 1;
+    cx.state
+        .init_scope_depths
+        .retain(|depth| *depth != init_depth);
     cx.state.var_scopes = saved_vars;
     cx.state.const_scopes = saved_consts;
     cx.state.isolated_stack = saved_isolated;
@@ -1870,10 +1882,14 @@ pub(crate) fn active_unit_key<P: ProcessManager>(state: &ExecState<P>) -> String
     unit_key(state.current_module().as_deref()).to_string()
 }
 
-/// Alias targets for one unit: executed top-level imports plus the
-/// innermost live call frame for that unit, if any. Single owner
-/// behind [`active_unit_alias_targets`], so forward-chasing reads the
-/// same tables the direct read does.
+/// Alias targets for one unit: executed unit-top imports, plus the
+/// live block-scope frames for that unit (outer-to-inner), plus the
+/// innermost call frame for that unit, if any. Scope frames merge
+/// only when deeper than the innermost live call frame's entry depth
+/// (a stale forked frame carries no floor), so a caller block's
+/// imports never leak into a same-unit callee. Single owner behind
+/// [`active_unit_alias_targets`], so forward-chasing reads the same
+/// tables the direct read does.
 pub(crate) fn unit_alias_targets<P: ProcessManager>(
     state: &ExecState<P>,
     unit: &str,
@@ -1883,17 +1899,49 @@ pub(crate) fn unit_alias_targets<P: ProcessManager>(
         .get(unit)
         .cloned()
         .unwrap_or_default();
-    if let Some((_, frame)) = state
-        .call_alias_frames
+    // Innermost frame for the unit, preferring a live one (entry
+    // depth at or below the current scope depth; a forked child
+    // restarts its stack, so deeper cloned frames are stale). A
+    // stale frame still merges its targets (inherited visibility),
+    // but carries no floor: only a live frame bounds the scope
+    // frames to its own invocation.
+    let live_floor = {
+        let mut floor = 0;
+        let mut inherited: Option<&super::native::AliasTargets> = None;
+        for frame in state.call_alias_frames.iter().rev() {
+            if frame.unit == unit {
+                if frame.depth <= state.scope_stack.len() {
+                    for (alias, targets) in &frame.targets {
+                        out.entry(alias.clone())
+                            .or_default()
+                            .extend(targets.iter().cloned());
+                    }
+                    floor = frame.depth;
+                    inherited = None;
+                    break;
+                }
+                inherited.get_or_insert(&frame.targets);
+            }
+        }
+        if let Some(targets) = inherited {
+            for (alias, alias_targets) in targets {
+                out.entry(alias.clone())
+                    .or_default()
+                    .extend(alias_targets.iter().cloned());
+            }
+        }
+        floor
+    };
+    for frame in state
+        .scope_alias_frames
         .iter()
-        .rev()
-        .find(|(key, _)| *key == unit)
+        .filter(|frame| frame.unit == unit && frame.depth > live_floor)
     {
-        // Append, never overwrite: the static overlay appends the
-        // body's own imports onto the unit top-level, so the same
+        // Append, never overwrite: the static walk layers block
+        // imports over the unit table the same way, so the same
         // alias in both layers overlaps (ambiguous) here too instead
         // of the frame silently shadowing the unit map.
-        for (alias, targets) in frame {
+        for (alias, targets) in &frame.targets {
             out.entry(alias.clone())
                 .or_default()
                 .extend(targets.iter().cloned());
@@ -1902,12 +1950,13 @@ pub(crate) fn unit_alias_targets<P: ProcessManager>(
     out
 }
 
-/// Alias targets for the active unit: executed top-level imports plus
-/// the innermost live call frame for this unit, if any. Mirrors the
-/// static per-function overlays (unit top-level plus the body's own
-/// imports, appended in the same order): a callee never sees its
-/// caller's function-local imports. Conditional imports that never
-/// execute stay absent and fall back to unknown.
+/// Alias targets for the active unit: executed unit-top imports,
+/// live block-scope frames, plus the innermost live call frame for
+/// this unit, if any. Mirrors the static per-function overlays (unit
+/// top-level plus the body's own imports, appended in the same order):
+/// a callee never sees its caller's function-local imports.
+/// Block imports unwind with their block: imports that never execute
+/// stay absent and fall back to unknown.
 pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
     state: &ExecState<P>,
 ) -> super::native::AliasTargets {
@@ -2036,26 +2085,61 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
 /// defining file key (`None` for host-only harvests, which keep the
 /// alias known with an explicit host branch, mirroring the static
 /// host fallback). Inside a function body the record lands on the
-/// innermost call frame for the active unit, never the shared
-/// unit-top map, so sibling and caller scopes stay isolated.
-/// Top-level imports land on the unit-top map. Runtime imports execute
-/// unconditionally once taken, so they record no guard.
+/// innermost call frame for the active unit when executing at the
+/// call's own top level (scope depth equals the frame's entry
+/// depth), never the shared unit-top map, so sibling and caller
+/// scopes stay isolated. Inside a lexical block (`IF`/`FOR`/`WHILE`/
+/// `SWITCH`/...) the record lands on the innermost scope frame for
+/// the active unit at the current scope depth, unwinding with the
+/// block on scope exit — including blocks nested in function bodies.
+/// A module init's own top level and the entry top level land on the
+/// unit-top map. Runtime imports execute unconditionally once taken,
+/// so they record no guard.
 pub(crate) fn record_executed_alias<P: ProcessManager>(
     state: &mut ExecState<P>,
     alias: &str,
     defining: Option<String>,
 ) {
     let unit = active_unit_key(state);
-    if let Some((_, frame)) = state
+    let depth = state.scope_stack.len();
+    if let Some(frame) = state
         .call_alias_frames
         .iter_mut()
         .rev()
-        .find(|(key, _)| *key == unit)
+        .find(|frame| frame.unit == unit)
+        && frame.depth == depth
     {
         frame
+            .targets
             .entry(alias.to_string())
             .or_default()
             .push((defining, None));
+        return;
+    }
+    if !state.scope_stack.is_empty() && !state.init_scope_depths.contains(&depth) {
+        if let Some(frame) = state
+            .scope_alias_frames
+            .iter_mut()
+            .rev()
+            .find(|frame| frame.depth == depth && frame.unit == unit)
+        {
+            frame
+                .targets
+                .entry(alias.to_string())
+                .or_default()
+                .push((defining, None));
+            return;
+        }
+        let mut targets = super::native::AliasTargets::new();
+        targets
+            .entry(alias.to_string())
+            .or_default()
+            .push((defining, None));
+        state.scope_alias_frames.push(ScopeAliasFrame {
+            depth,
+            unit,
+            targets,
+        });
         return;
     }
     let targets = state

@@ -987,6 +987,8 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         import_stack: Vec::new(),
         executed_alias_targets: std::collections::HashMap::new(),
         call_alias_frames: Vec::new(),
+        scope_alias_frames: Vec::new(),
+        init_scope_depths: Vec::new(),
         func_floors: Vec::new(),
         harvest_map: std::collections::HashMap::new(),
         modules: std::collections::HashMap::from([(
@@ -8810,11 +8812,9 @@ fn platform_conditional_imports_under_one_alias_are_not_ambiguous() {
         LET $go: BOOL = true
         IF $go {
          [os:macos] IMPORT ["mac.oxdock" AS LIB]
-        }
-        IF $go {
          [not(os:macos)] IMPORT ["lin.oxdock" AS LIB]
+         ECHO "{{ LIB::FOO() }}"
         }
-        ECHO "{{ LIB::FOO() }}"
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
@@ -8830,9 +8830,10 @@ fn platform_conditional_imports_under_one_alias_are_not_ambiguous() {
 
 #[test]
 fn block_scoped_import_resolves_inside_block() {
-    // Inline blocks run in the enclosing dynamic scope, so their
-    // imports belong to the enclosing unit: a top-level block's
-    // import resolves inside the block instead of reading unknown.
+    // Block imports scope to their block like `LET`/`ENV`: an import
+    // inside a block resolves for the rest of that block (not past
+    // its closing brace), so a top-level block's import reads inside
+    // the block instead of reading unknown.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -8856,7 +8857,7 @@ fn block_scoped_import_resolves_inside_block() {
         MockProcessManager::default(),
         ExecIo::new(),
     )
-    .expect("block import resolves in its enclosing scope");
+    .expect("block import resolves inside its block");
     assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("ok"));
 }
 
@@ -9058,7 +9059,9 @@ fn disjoint_host_harvest_branch_fails_unknown() {
     // A host-harvest branch holds no file functions: pairing a file
     // import with a disjoint host harvest under one alias must fail
     // unknown (the host platform has no `FOO`), never collapse to
-    // `Canonical` on the file branch.
+    // `Canonical` on the file branch. Both imports share one block
+    // so both branches are visible at the read; block exit would
+    // unwind them instead.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -9074,10 +9077,8 @@ fn disjoint_host_harvest_branch_fails_unknown() {
         LET $go: BOOL = true
         IF $go {
             [os:macos] IMPORT ["mac.oxdock" AS LIB]
+            [not(os:macos)] IMPORT [TYPE PIPE FROM STD AS LIB]
             LET $v: STRING = LIB::FOO()
-        }
-        IF $go {
-         [not(os:macos)] IMPORT [TYPE PIPE FROM STD AS LIB]
         }
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
@@ -9455,11 +9456,9 @@ fn template_disjoint_host_branch_does_not_suggest_let() {
         LET $go: BOOL = true
         IF $go {
             [os:macos] IMPORT ["mac.oxdock" AS LIB]
-        }
-        IF $go {
             [not(os:macos)] IMPORT [TYPE PIPE FROM STD AS LIB]
+            ECHO "{{ LIB::FOO() }}"
         }
-        ECHO "{{ LIB::FOO() }}"
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
@@ -10813,6 +10812,8 @@ fn workflow_inline_scripts_pass_static_gate() {
                 import_stack: Vec::new(),
                 executed_alias_targets: std::collections::HashMap::new(),
                 call_alias_frames: Vec::new(),
+                scope_alias_frames: Vec::new(),
+                init_scope_depths: Vec::new(),
                 func_floors: Vec::new(),
                 harvest_map: std::collections::HashMap::new(),
                 modules: std::collections::HashMap::from([(
@@ -11552,11 +11553,14 @@ fn function_scoped_import_survives_scope_exit_for_later_reimports() {
 
 #[test]
 fn expand_template_with_sequential_conditional_imports_fails_ambiguous() {
-    // Two sequential conditional imports under one alias in the same
-    // scope both execute at runtime: the file-backed `EXPAND` (which
-    // skips static validation) sees both targets and fails ambiguous
-    // exactly like the static gate, instead of suggesting a `LET`
-    // binding for a call that can never resolve.
+    // Two top-level guarded imports under one alias both execute at
+    // runtime (overlapping `[bool:true]` guards always run): the
+    // file-backed `EXPAND` (which skips static validation) sees both
+    // targets and fails ambiguous exactly like the static gate,
+    // instead of suggesting a `LET` binding for a call that can never
+    // resolve. Same-frame guarded duplicates parse (the static pass
+    // decides disjoint vs overlapping); unguarded duplicates still
+    // reject at parse as probable typos.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -11584,13 +11588,8 @@ fn expand_template_with_sequential_conditional_imports_fails_ambiguous() {
     )
     .expect("seed template file");
     let steps = parse_entry(indoc! {r#"
-        LET $go: BOOL = true
-        IF $go {
-         IMPORT ["a.oxdock" AS LIB]
-        }
-        IF $go {
-         IMPORT ["c.oxdock" AS LIB]
-        }
+        [bool:true] IMPORT ["a.oxdock" AS LIB]
+        [bool:true] IMPORT ["c.oxdock" AS LIB]
         LET $o: STRING = EXPAND "t.txt"
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());

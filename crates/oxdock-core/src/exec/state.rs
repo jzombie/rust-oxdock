@@ -222,23 +222,43 @@ pub struct ExecState<P: ProcessManager> {
     /// Executed file-import alias targets per unit (#115): alias to
     /// defining file keys for imports that actually ran, keyed by the
     /// importing unit (`"entry"` for entry steps, the file key for
-    /// module bodies). Unit-top layer only: top-level (non-`FUNC`-body)
-    /// imports land here; function-local imports land on the innermost
-    /// [`ExecState::call_alias_frames`] entry instead, so a caller
-    /// function's locals never leak into a callee. Mirrors the static
+    /// module bodies). Unit-top layer only: unit-top-level imports
+    /// land here (anything executed without a live lexical scope);
+    /// function-local imports land on the innermost
+    /// [`ExecState::call_alias_frames`] entry instead, and block
+    /// imports on the innermost [`ExecState::scope_alias_frames`]
+    /// entry, so neither leaks past its boundary. Mirrors the static
     /// per-unit `outbound_alias_targets` for the runtime placeholder
     /// gate, so file-backed `EXPAND` templates (invisible to static
     /// checking) classify known aliases identically: host harvests
     /// record an explicit host branch, and module bodies resolve
     /// against their own file's imports, never the importer's.
     pub(super) executed_alias_targets: HashMap<String, super::native::AliasTargets>,
+    /// Block-scoped import frames, innermost last: one entry per
+    /// live lexical scope that executed an `IMPORT`, tagged with the
+    /// scope-stack depth at creation and the importing unit. Reads
+    /// merge every live frame for their unit (outer-to-inner) over
+    /// the unit-top map, so an `IMPORT` inside `IF`/`FOR`/`WHILE`/
+    /// `SWITCH`/`ISOLATED` resolves within its block and unwinds on
+    /// exit. `pop_scope` drops frames deeper than the surviving
+    /// stack; `fork` flattens live frames into the child's unit-top
+    /// map (the child manages its own scopes). Function bodies keep
+    /// using [`ExecState::call_alias_frames`], checked first.
+    pub(super) scope_alias_frames: Vec<ScopeAliasFrame>,
     /// Active function-call import frames: one entry per live
     /// [`call_func_value`](super::handlers::call_func_value) invocation,
     /// holding that invocation's own local imports. The innermost frame
     /// for the active unit shadows the unit-top map exactly like the
     /// static per-function overlays shadow the unit imports; popping on
-    /// return (via an RAII guard) restores the caller's view.
-    pub(super) call_alias_frames: Vec<(String, super::native::AliasTargets)>,
+    /// return (via an RAII guard) restores the caller's view. Each
+    /// frame records the scope-stack depth at call entry: imports
+    /// execute into the call frame only at that depth (the body's own
+    /// top level), while deeper block scopes record into
+    /// [`ExecState::scope_alias_frames`] so they unwind on block exit;
+    /// reads merge only scope frames deeper than the innermost live
+    /// call frame, so a caller block's imports never leak into a
+    /// same-unit callee.
+    pub(super) call_alias_frames: Vec<CallAliasFrame>,
     /// Frame-2..N floor (#322): `functions.scopes` index at which the
     /// current module call (or init) body starts. Nested-frame lookup
     /// walks down to this floor and no further, so caller frames from
@@ -263,6 +283,14 @@ pub struct ExecState<P: ProcessManager> {
     /// `inherit_env` records keys as they actually execute under their
     /// guards instead of re-scanning steps against final envs.
     pub(super) init_inherit_stack: Vec<Vec<String>>,
+    /// Scope-stack depths that are module-init top levels, innermost
+    /// last: [`ensure_module_init`](super::import::ensure_module_init)
+    /// pushes its isolation scope here so [`record_executed_alias`]
+    /// can tell a module's own top level (unit-top, like the entry's)
+    /// from a lexical block (scope frame, unwinds on exit). Nested
+    /// inits nest strictly, so depths never repeat while live;
+    /// `fork` clears it (the child's scopes restart empty).
+    pub(super) init_scope_depths: Vec<usize>,
     /// Identity of the task this state executes (`0` = root flow).
     /// Stamped onto pipe handles minted here and compared by the promotion
     /// check: only the declaring task may promote its own pipes.
@@ -281,6 +309,35 @@ pub(super) struct ScopeSnapshot {
     pub(super) cwd: GuardedPath,
     pub(super) selection: WorkspaceSelection,
     pub(super) envs: Arc<HashMap<String, String>>,
+}
+
+/// One live block's imports: the scope-stack depth at creation plus
+/// the importing unit's alias targets. Single owner for the
+/// scope-frame shape; `record_executed_alias` writes it,
+/// `unit_alias_targets` merges it, `pop_scope` reaps it.
+#[derive(Clone, Default)]
+pub(super) struct ScopeAliasFrame {
+    pub(super) depth: usize,
+    pub(super) unit: String,
+    pub(super) targets: super::native::AliasTargets,
+}
+
+/// One live function call's imports: the importing unit, the
+/// scope-stack depth at call entry (right after the call scope
+/// pushes), and the call's own local imports. The depth tells
+/// `record_executed_alias` apart the body's own top level (records
+/// here) from nested blocks (record into [`ScopeAliasFrame`]), and
+/// tells `unit_alias_targets` which scope frames belong to this
+/// invocation (deeper ones) versus caller context. A forked child
+/// restarts its scope stack at zero, so a cloned frame whose depth
+/// exceeds the child's stack is stale: the child still merges its
+/// targets (inherited visibility) but applies no depth floor from
+/// it. Single owner for the call-frame shape.
+#[derive(Clone, Default)]
+pub(super) struct CallAliasFrame {
+    pub(super) unit: String,
+    pub(super) depth: usize,
+    pub(super) targets: super::native::AliasTargets,
 }
 
 /// One parsed file module (#115), keyed by resolved display path: parse
@@ -830,12 +887,26 @@ impl<P: ProcessManager> ExecState<P> {
     /// - A cloned filesystem handle (shared snapshot backing, independent root selection)
     /// - Cloned envs, cwd, cargo scratch name, var_scopes, const_scopes
     /// - Fresh bg_children, scope_stack (empty -- child manages its own)
+    /// - Block imports flattened into the cloned unit-top map (the live
+    ///   frames stay with the parent's scopes, so the child observes
+    ///   what the parent saw at spawn without inheriting unwindable frames)
     /// - Shared assert_windows, assert_windows_stderr, exact_stdout (Arc clones)
     /// - Cloned io configuration
     /// - Independent cancel_token, active_process (child manages its own)
     /// - Shared named_tasks and next_task_id (via Arc clone)
     #[allow(dead_code)]
     pub(super) fn fork(&self) -> Self {
+        let mut executed_alias_targets = self.executed_alias_targets.clone();
+        for frame in &self.scope_alias_frames {
+            for (alias, targets) in &frame.targets {
+                executed_alias_targets
+                    .entry(frame.unit.clone())
+                    .or_default()
+                    .entry(alias.clone())
+                    .or_default()
+                    .extend(targets.iter().cloned());
+            }
+        }
         Self {
             fs: self.fs.clone_box(),
             cargo_scratch: self.cargo_scratch.clone(),
@@ -871,8 +942,10 @@ impl<P: ProcessManager> ExecState<P> {
             modules: self.modules.clone(),
             validated_modules: self.validated_modules.clone(),
             module_stack: self.module_stack.clone(),
-            executed_alias_targets: self.executed_alias_targets.clone(),
+            executed_alias_targets,
             call_alias_frames: self.call_alias_frames.clone(),
+            scope_alias_frames: Vec::new(),
+            init_scope_depths: Vec::new(),
             func_floors: self.func_floors.clone(),
             harvest_map: self.harvest_map.clone(),
             module_table: self.module_table.clone(),
@@ -1011,7 +1084,9 @@ impl<P: ProcessManager> ExecState<P> {
         self.push_var_scope();
     }
 
-    /// Exit a lexical scope, restoring everything `push_scope` saved.
+    /// Exit a lexical scope, restoring everything `push_scope` saved
+    /// plus dropping block import frames deeper than the surviving
+    /// stack, so block imports unwind with their block.
     pub(super) fn pop_scope(&mut self) -> Result<()> {
         let snapshot = self
             .scope_stack
@@ -1022,6 +1097,8 @@ impl<P: ProcessManager> ExecState<P> {
         self.envs = snapshot.envs;
         self.functions.pop_scope();
         self.pop_var_scope();
+        let depth = self.scope_stack.len();
+        self.scope_alias_frames.retain(|frame| frame.depth <= depth);
         Ok(())
     }
     pub(super) fn declare_var(&mut self, key: String, kind: TypeTag, value: Value) -> Result<()> {

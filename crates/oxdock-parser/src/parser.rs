@@ -2515,7 +2515,7 @@ pub struct ParseCtx<'a> {
     /// braced body; short borrows only,
     /// never held across recursive parses.
     pub funcs: RefCell<Vec<HashSet<String>>>,
-    pub imports: RefCell<Vec<Vec<String>>>,
+    pub imports: RefCell<Vec<Vec<(String, bool)>>>,
     /// Single-file `EXPORT` metadata in source order, validated at end
     /// of parse (forward references allowed). One struct for all three
     /// kinds so holders never thread parallel lists.
@@ -2554,7 +2554,8 @@ impl<'a> ParseCtx<'a> {
 
     /// Snapshot of everything visible at this point: `FUNC` names
     /// unioned across frames plus imports flattened outer-to-inner
-    /// (unions `FUNC` names across frames, flattens imports outer-to-inner).
+    /// (unions `FUNC` names across frames, flattens imports outer-to-inner,
+    /// dropping guardedness: call resolution only needs names).
     fn visible_snapshot(&self) -> (HashSet<String>, Vec<String>) {
         let mut funcs = HashSet::new();
         for scope in self.funcs.borrow().iter() {
@@ -2568,7 +2569,7 @@ impl<'a> ParseCtx<'a> {
         );
         let mut imports = Vec::new();
         for frame in self.imports.borrow().iter() {
-            for module in frame {
+            for (module, _) in frame {
                 if !imports.contains(module) {
                     imports.push(module.clone());
                 }
@@ -2589,20 +2590,40 @@ impl<'a> ParseCtx<'a> {
 
     /// Record `IMPORT`ed modules in the innermost frame (deduped,
     /// (deduped; the unknown-module table check lives at the import site),
-    /// which lives at the import site).
-    fn import_into_frame(&self, modules: &[String]) {
+    /// which lives at the import site. `guarded` marks guard-gated
+    /// imports so the same-frame duplicate gate can tell a probable
+    /// typo (unguarded, always collides) from a platform branch
+    /// (guarded, disjointness decided by the static pass).
+    fn import_into_frame(&self, modules: &[String], guarded: bool) {
         match self.imports.borrow_mut().last_mut() {
             Some(frame) => {
                 for module in modules {
-                    if !frame.contains(module) {
-                        frame.push(module.clone());
+                    if !frame.iter().any(|(known, _)| known == module) {
+                        frame.push((module.clone(), guarded));
                     }
                 }
             }
             None => {
-                self.imports.borrow_mut().push(modules.to_vec());
+                self.imports
+                    .borrow_mut()
+                    .push(modules.iter().map(|m| (m.clone(), guarded)).collect());
             }
         }
+    }
+
+    /// Guardedness of every visible entry for `alias`, outer to inner.
+    /// Single owner for the duplicate-gate input, so the gate never
+    /// restates the frame walk.
+    fn import_guard_flags(&self, alias: &str) -> Vec<bool> {
+        let mut out = Vec::new();
+        for frame in self.imports.borrow().iter() {
+            for (known, guarded) in frame {
+                if known == alias {
+                    out.push(*guarded);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -5322,6 +5343,7 @@ fn parse_import_statement(
     pos: usize,
     stmt: usize,
     ctx: &ParseCtx,
+    guarded: bool,
 ) -> Result<Option<(ImportEntries, usize)>, TokenError> {
     let fail = |msg: String| TokenError {
         stmt,
@@ -5533,11 +5555,12 @@ fn parse_import_statement(
                         known.join(", ")
                     )));
                 }
-                ctx.import_into_frame(std::slice::from_ref(&module));
+                ctx.import_into_frame(std::slice::from_ref(&module), false);
                 modules.push(module);
             }
             RawEntry::File { path, alias } => {
-                let (path, alias) = validate_file_import(&path, &alias, ctx).map_err(fail)?;
+                let (path, alias) =
+                    validate_file_import(&path, &alias, ctx, guarded).map_err(fail)?;
                 steps.push(StepKind::ImportFile { path, alias });
             }
             RawEntry::From {
@@ -5551,8 +5574,15 @@ fn parse_import_statement(
                     type_names,
                     path,
                     alias,
-                } = validate_from_import(&func_names, &type_names, &path, alias.as_deref(), ctx)
-                    .map_err(fail)?;
+                } = validate_from_import(
+                    &func_names,
+                    &type_names,
+                    &path,
+                    alias.as_deref(),
+                    ctx,
+                    guarded,
+                )
+                .map_err(fail)?;
                 steps.push(StepKind::ImportFuncs {
                     path,
                     alias,
@@ -5575,7 +5605,8 @@ fn parse_single_file_import(
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<Option<(String, String, usize)>, TokenError> {
-    let Some(((modules, mut kinds), used)) = parse_import_statement(toks, pos, stmt, ctx)? else {
+    let Some(((modules, mut kinds), used)) = parse_import_statement(toks, pos, stmt, ctx, false)?
+    else {
         return Ok(None);
     };
     if !modules.is_empty() || !matches!(kinds.as_slice(), [StepKind::ImportFile { .. }]) {
@@ -5883,8 +5914,12 @@ fn is_prefixed_name(part: &[&Tok]) -> bool {
 }
 
 /// Validate an `IMPORT` alias: hard errors (never shape misses) plus
-/// registration into the innermost import frame.
-fn validate_import_alias(alias: &str, ctx: &ParseCtx) -> Result<String, String> {
+/// registration into the innermost import frame. Same-frame duplicates
+/// reject, unless the new import and every visible same-alias entry
+/// are guard-gated: an unguarded duplicate always collides at runtime
+/// (probable typo, fail fast), while guarded duplicates may be
+/// platform branches whose disjointness the static pass decides.
+fn validate_import_alias(alias: &str, ctx: &ParseCtx, guarded: bool) -> Result<String, String> {
     if !is_upper_ident(alias) {
         return Err(format!(
             "IMPORT alias must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{alias}`"
@@ -5895,11 +5930,11 @@ fn validate_import_alias(alias: &str, ctx: &ParseCtx) -> Result<String, String> 
             "IMPORT alias `{alias}` collides with module `{alias}`"
         ));
     }
-    let (_, imports) = ctx.visible_snapshot();
-    if imports.iter().any(|i| i == alias) {
+    let flags = ctx.import_guard_flags(alias);
+    if !flags.is_empty() && (!guarded || flags.iter().any(|g| !g)) {
         return Err(format!("duplicate IMPORT alias `{alias}`"));
     }
-    ctx.import_into_frame(std::slice::from_ref(&alias.to_string()));
+    ctx.import_into_frame(std::slice::from_ref(&alias.to_string()), guarded);
     Ok(alias.to_string())
 }
 
@@ -5921,12 +5956,15 @@ fn validate_import_path(path: &str) -> Result<String, String> {
 
 /// Validate a file-import path/alias pair: hard errors (never shape
 /// misses) plus alias registration into the innermost import frame.
+/// `guarded` marks a guard-gated statement, relaxing the same-frame
+/// duplicate gate for platform branches (see `validate_import_alias`).
 fn validate_file_import(
     path: &str,
     alias: &str,
     ctx: &ParseCtx,
+    guarded: bool,
 ) -> Result<(String, String), String> {
-    let alias = validate_import_alias(alias, ctx)?;
+    let alias = validate_import_alias(alias, ctx, guarded)?;
     let path = validate_import_path(path)?;
     Ok((path, alias))
 }
@@ -5944,6 +5982,7 @@ fn validate_from_import(
     path: &str,
     alias: Option<&str>,
     ctx: &ParseCtx,
+    guarded: bool,
 ) -> Result<HarvestImport, String> {
     let path = validate_import_path(path)?;
     let mut out_func_names = Vec::with_capacity(func_names.len());
@@ -5971,7 +6010,7 @@ fn validate_from_import(
         return Err("IMPORT harvest needs at least one function or type name".to_string());
     }
     if let Some(alias) = alias {
-        let alias = validate_import_alias(alias, ctx)?;
+        let alias = validate_import_alias(alias, ctx, guarded)?;
         Ok(HarvestImport {
             func_names: out_func_names,
             type_names: out_type_names,
@@ -8448,7 +8487,9 @@ fn parse_elements(
             // A top-level guard on a statement with module entries fails
             // like the historical directive; file-only statements consume
             // the guard like any other element.
-            if let Some(((modules, kinds), used)) = parse_import_statement(toks, pos, stmt, ctx)? {
+            if let Some(((modules, kinds), used)) =
+                parse_import_statement(toks, pos, stmt, ctx, pending_guard.is_some())?
+            {
                 if !modules.is_empty() && !in_block && pending_guard.is_some() {
                     return Err(TokenError {
                         stmt,
@@ -9250,7 +9291,15 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
     )?;
     {
         let top: HashSet<String> = ctx.funcs.borrow().first().cloned().unwrap_or_default();
-        let top_imports: Vec<String> = ctx.imports.borrow().first().cloned().unwrap_or_default();
+        let top_imports: Vec<String> = ctx
+            .imports
+            .borrow()
+            .first()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
         let mut top_types = HashSet::new();
         let mut top_consts = HashSet::new();
         for step in &out {
@@ -9393,7 +9442,7 @@ fn parse_with_ctx(
     // Snippet re-parses seed their base frames so lookup behaves
     // identically; snippets never define, only read.
     ctx.funcs.borrow_mut()[0].extend(preseed_funcs);
-    ctx.imports.borrow_mut()[0].extend(preseed_imports);
+    ctx.imports.borrow_mut()[0].extend(preseed_imports.into_iter().map(|name| (name, false)));
     let steps = parse_tokens_with_ctx(&toks, &ctx).map_err(|e| token_error(input, e))?;
     let mut steps = steps;
     stamp_func_docs(input, &mut steps);

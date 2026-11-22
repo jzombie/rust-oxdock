@@ -634,9 +634,12 @@ fn const_forward_local_and_forwarded_base_rejected_at_parse() {
 #[test]
 fn const_forward_disjoint_guards_resolve() {
     // Disjoint platform branches each forwarding their own chain
-    // resolve per platform: the shared walk chases every holder to
-    // its own terminal and unions same tags instead of failing as
-    // ambiguous.
+    // resolve per platform: same-frame guarded duplicates parse (an
+    // unguarded duplicate still rejects as a probable typo), and the
+    // shared walk chases every holder to its own terminal and unions
+    // same tags instead of failing as ambiguous. Guard-gated
+    // top-level imports persist without pushing a scope, so one read
+    // serves every platform.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     write_lib(
@@ -674,16 +677,9 @@ fn const_forward_disjoint_guards_resolve() {
     #[allow(clippy::disallowed_macros)]
     let expected = if cfg!(target_os = "macos") { 2 } else { 1 };
     let script = indoc! {r#"
-        LET $go: BOOL = true
-        IF $go {
-            [os:macos] IMPORT ["b.oxdock" AS B]
-        }
-        IF $go {
-            [os:linux] IMPORT ["c.oxdock" AS B]
-        }
-        IF $go {
-            [os:windows] IMPORT ["c.oxdock" AS B]
-        }
+        [os:macos] IMPORT ["b.oxdock" AS B]
+        [os:linux] IMPORT ["c.oxdock" AS B]
+        [os:windows] IMPORT ["c.oxdock" AS B]
         LET $n: INT = $B::N
         ASSERT_EQ $n @EXPECTED@
     "#}
@@ -1123,9 +1119,9 @@ fn const_ambiguous_alias_fails_loud() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     // One alias, two files, same exported `CONST`: no silent pick.
-    // (Separate blocks: same-frame duplicate aliases reject at
-    // parse, but block-scoped imports under one alias merge into
-    // overlapping targets, which resolve loud.)
+    // Same-block guarded duplicates parse (unguarded duplicates
+    // still reject as probable typos), and overlapping guards
+    // resolve loud on use.
     write_lib(
         &root,
         "a.oxdock",
@@ -1148,16 +1144,339 @@ fn const_ambiguous_alias_fails_loud() {
             indoc! {r#"
                 LET $go: BOOL = true
                 IF $go {
-                    IMPORT ["a.oxdock" AS LIB]
+                    [os:macos] IMPORT ["a.oxdock" AS LIB]
+                    [os:macos] IMPORT ["b.oxdock" AS LIB]
+                    LET $x: INT = $LIB::X
                 }
-                IF $go {
-                    IMPORT ["b.oxdock" AS LIB]
-                }
-                LET $x: INT = $LIB::X
             "#},
         )
         .expect_err("ambiguous CONST must fail");
     assert!(format!("{err:#}").contains("ambiguous"), "{err:#}");
+}
+
+#[test]
+fn block_import_unwinds_on_block_exit() {
+    // Block imports scope to their block like `LET`/`ENV`: readable
+    // inside the block (and nested blocks), unknown past the closing
+    // brace, while top-level imports persist for the whole unit. The
+    // file-backed `EXPAND` (which skips static validation) proves the
+    // runtime unwinds too, not just the static gate.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a.oxdock",
+        indoc! {r#"
+            CONST $X: INT = 1
+            EXPORT CONST $X
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            CONST $Y: INT = 2
+            EXPORT CONST $Y
+            FUNC WHO(): STRING {
+                RETURN "b"
+            }
+            EXPORT WHO
+        "#},
+    );
+    write_lib(&root, "t.txt", "{{ LIB::WHO() }}");
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["a.oxdock" AS A]
+                LET $go: BOOL = true
+                IF $go {
+                    IMPORT ["b.oxdock" AS LIB]
+                    LET $y: INT = $LIB::Y
+                    ASSERT_EQ $y 2
+                    IF $go {
+                        LET $z: INT = $LIB::Y
+                        ASSERT_EQ $z 2
+                    }
+                }
+                LET $x: INT = $A::X
+                ASSERT_EQ $x 1
+            "#},
+        )
+        .expect("block import reads inside, top-level persists");
+    // Static read past the block fails closed.
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                LET $go: BOOL = true
+                IF $go {
+                    IMPORT ["b.oxdock" AS B]
+                }
+                LET $y: INT = $B::Y
+            "#},
+        )
+        .expect_err("block import must not leak past its block");
+    assert!(
+        format!("{err:#}").contains("no import alias `B`"),
+        "{err:#}"
+    );
+    // Runtime read past the block (via file-backed `EXPAND`, which
+    // static validation never sees) fails the same way: the
+    // placeholder gate classifies against the live unit table, so an
+    // unwound alias reads unknown instead of resolving.
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                LET $go: BOOL = true
+                IF $go {
+                    IMPORT ["b.oxdock" AS LIB]
+                }
+                LET $o: STRING = EXPAND "t.txt"
+            "#},
+        )
+        .expect_err("runtime must unwind block imports too");
+    assert!(
+        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn func_block_imports_unwind_and_isolate_callees() {
+    // Block imports inside a `FUNC` body unwind on block exit in both
+    // layers (SEV-1a): the runtime used to route them into the call
+    // frame, leaking past the block the static gate already closed.
+    // A caller block's import never leaks into a same-unit sibling
+    // callee (SEV-1b): the callee resolves against the unit top-level
+    // plus its own imports only. Bare guarded blocks unwind too
+    // (SEV-2): the static walk used to keep their import frame past
+    // the closing brace while the runtime popped it.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            CONST $Y: INT = 2
+            EXPORT CONST $Y
+            FUNC WHO(): STRING {
+                RETURN "b"
+            }
+            EXPORT WHO
+        "#},
+    );
+    write_lib(&root, "t.txt", "{{ LIB::WHO() }}");
+    // SEV-1a, static: a read after the block inside the same function
+    // fails closed.
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                FUNC READER(): STRING {
+                    LET $go: BOOL = true
+                    IF $go {
+                        IMPORT ["b.oxdock" AS LIB]
+                    }
+                    LET $y: INT = $LIB::Y
+                    RETURN "unreachable"
+                }
+                LET $r: STRING = READER()
+            "#},
+        )
+        .expect_err("function block import must not leak past its block");
+    assert!(
+        format!("{err:#}").contains("no import alias `LIB`"),
+        "{err:#}"
+    );
+    // SEV-1a, runtime: the same shape read through file-backed
+    // `EXPAND` (invisible to static validation) fails the same way.
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                FUNC READER(): STRING {
+                    LET $go: BOOL = true
+                    IF $go {
+                        IMPORT ["b.oxdock" AS LIB]
+                    }
+                    LET $o: STRING = EXPAND "t.txt"
+                    RETURN $o
+                }
+                LET $r: STRING = READER()
+            "#},
+        )
+        .expect_err("runtime must unwind function block imports too");
+    assert!(
+        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        "{err:#}"
+    );
+    // SEV-1b, static: sibling callee `G` reads nothing from caller
+    // `F`'s block; `G` is checked standalone against the unit top
+    // level, so the read fails closed before anything runs.
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                FUNC G(): INT {
+                    LET $y: INT = $LIB::Y
+                    RETURN $y
+                }
+                FUNC F(): INT {
+                    LET $go: BOOL = true
+                    IF $go {
+                        IMPORT ["b.oxdock" AS LIB]
+                        LET $g: INT = G()
+                        RETURN $g
+                    }
+                    RETURN -1
+                }
+                LET $r: INT = F()
+            "#},
+        )
+        .expect_err("caller block import must not leak into sibling callee");
+    assert!(
+        format!("{err:#}").contains("no import alias `LIB`"),
+        "{err:#}"
+    );
+    // SEV-1b, runtime: `G` only `EXPAND`s (static-blind), so the
+    // runtime gate alone decides; the popped caller frame stays out.
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                FUNC G(): STRING {
+                    LET $o: STRING = EXPAND "t.txt"
+                    RETURN $o
+                }
+                FUNC F(): STRING {
+                    LET $go: BOOL = true
+                    IF $go {
+                        IMPORT ["b.oxdock" AS LIB]
+                        LET $g: STRING = G()
+                        RETURN $g
+                    }
+                    RETURN "unreachable"
+                }
+                LET $r: STRING = F()
+            "#},
+        )
+        .expect_err("runtime must not leak caller block imports into callees");
+    assert!(
+        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        "{err:#}"
+    );
+    // SEV-2: a bare guarded block unwinds its import past `}` in both
+    // layers. The single-name read below fails closed either way
+    // (the runtime drops the frame on scope exit); the overlapping
+    // pair pins the static side specifically: without collection
+    // scoping or the scope-exit pop, the walk would resolve the
+    // leaked entries as ambiguous instead of unknown.
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                [bool:true] {
+                    IMPORT ["b.oxdock" AS B]
+                    LET $y: INT = $B::Y
+                    ASSERT_EQ $y 2
+                }
+            "#},
+        )
+        .expect("bare guarded block import reads inside its block");
+    write_lib(
+        &root,
+        "a.oxdock",
+        indoc! {r#"
+            CONST $X: INT = 1
+            EXPORT CONST $X
+        "#},
+    );
+    write_lib(
+        &root,
+        "c.oxdock",
+        indoc! {r#"
+            CONST $X: INT = 2
+            EXPORT CONST $X
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                [bool:true] {
+                    [os:macos] IMPORT ["a.oxdock" AS LIB]
+                    [os:macos] IMPORT ["c.oxdock" AS LIB]
+                }
+                LET $x: INT = $LIB::X
+            "#},
+        )
+        .expect_err("bare guarded block imports must unwind past their brace");
+    assert!(format!("{err:#}").contains("unknown CONST"), "{err:#}");
+    assert!(!format!("{err:#}").contains("ambiguous"), "{err:#}");
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                [bool:true] {
+                    IMPORT ["b.oxdock" AS LIB]
+                }
+                LET $o: STRING = EXPAND "t.txt"
+            "#},
+        )
+        .expect_err("runtime must unwind bare guarded block imports too");
+    assert!(
+        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        "{err:#}"
+    );
+    // `ISOLATED` blocks scope the same way: the runtime runs the
+    // body under a pushed scope, so a static walk that merely
+    // scrubbed env declarations would leak the import past `}`.
+    // In-block reads resolve; the overlapping pair past the brace
+    // fails closed as unknown (never ambiguous), pinning the
+    // scope push/pop rather than just the collection gate.
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                ISOLATED {
+                    IMPORT ["b.oxdock" AS B]
+                    LET $y: INT = $B::Y
+                    ASSERT_EQ $y 2
+                }
+            "#},
+        )
+        .expect("ISOLATED block import reads inside its block");
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                ISOLATED {
+                    [os:macos] IMPORT ["a.oxdock" AS LIB]
+                    [os:macos] IMPORT ["c.oxdock" AS LIB]
+                }
+                LET $x: INT = $LIB::X
+            "#},
+        )
+        .expect_err("ISOLATED imports must unwind past their brace");
+    assert!(format!("{err:#}").contains("unknown CONST"), "{err:#}");
+    assert!(!format!("{err:#}").contains("ambiguous"), "{err:#}");
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                ISOLATED {
+                    IMPORT ["b.oxdock" AS LIB]
+                }
+                LET $o: STRING = EXPAND "t.txt"
+            "#},
+        )
+        .expect_err("runtime must unwind ISOLATED block imports too");
+    assert!(
+        format!("{err:#}").contains("unknown placeholder function 'LIB::WHO'"),
+        "{err:#}"
+    );
 }
 
 #[test]

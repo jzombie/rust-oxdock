@@ -2059,10 +2059,21 @@ Bare calls:
   parse errors, never runtime surprises.
 
 Scope:
-- `IMPORT` is a lowering directive, not a step. It
-  applies from its line to the enclosing block exit,
-  then reverts like `LET` scoping, with no runtime
-  footprint. Guards do not apply to it.
+- A file or harvest `IMPORT` applies from its line to
+  the enclosing block exit, then unwinds like `LET`
+  scoping: reads inside the block resolve, reads past
+  it fail closed. Top-level imports persist for the
+  unit. Module-only imports (`IMPORT [STD]`) register
+  names with no step and no scope.
+- An `IMPORT` that never executes leaves its alias
+  unknown: reads must follow the import in execution
+  order.
+- Guards gate execution: a guarded `IMPORT` runs only
+  where its guard holds. Same-frame duplicates reject
+  at parse unless every entry is guard-gated;
+  all-guarded duplicates resolve per platform when
+  their guards are disjoint, and fail ambiguous on
+  overlap.
 - Two imported modules exporting one name is an
   ambiguity error: qualify the call instead.
 

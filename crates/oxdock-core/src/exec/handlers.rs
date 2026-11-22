@@ -31,7 +31,7 @@ use super::args::parse_bool_str;
 use super::fs_ops::copy_entry;
 use super::io::{StreamHandle, TaskTee, TeeStream, write_stderr, write_stdout};
 use super::native::FuncBody;
-use super::state::{ExecState, MAX_CALL_DEPTH, RawFuncDef, TaskPhase};
+use super::state::{CallAliasFrame, ExecState, MAX_CALL_DEPTH, RawFuncDef, TaskPhase};
 use super::steps::{Flow, StepCtx, TtyRequest};
 use oxdock_pipe::{KeeperGuard, PipeHandle, PipeInner, SharedOutput};
 
@@ -2946,14 +2946,23 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             }
             let outcome: Result<Value> = (|| {
                 // Function-local imports scope to this invocation: push
-                // a fresh frame for this unit so the body's imports
-                // land here (never the shared unit-top map) and the
-                // callee never sees the caller's locals. The pop below
-                // runs on every path (the closure captures the outcome
-                // as a value first), matching the `push_scope` /
-                // `pop_scope` pattern with no unsafe.
+                // a fresh frame for this unit so the body's own top-level
+                // imports land here (never the shared unit-top map) and
+                // the callee never sees the caller's locals. The frame
+                // records the scope depth at entry (the call scope
+                // pushed above): deeper block scopes record into scope
+                // frames instead, so block imports unwind on block exit
+                // like everywhere else. The pop below runs on every
+                // path (the closure captures the outcome as a value
+                // first), matching the `push_scope` / `pop_scope`
+                // pattern with no unsafe.
                 let unit_key = super::import::unit_key(def.module.as_deref()).to_string();
-                cx.state.call_alias_frames.push((unit_key, HashMap::new()));
+                let call_depth = cx.state.scope_stack.len();
+                cx.state.call_alias_frames.push(CallAliasFrame {
+                    unit: unit_key,
+                    depth: call_depth,
+                    targets: HashMap::new(),
+                });
                 // Frame floor for the nested walk (#322): scope frames
                 // at or above this index belong to the current call;
                 // anything below is caller context and unreachable.
