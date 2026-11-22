@@ -419,6 +419,7 @@ mod tests {
                 var,
                 decl_type,
                 expr,
+                ..
             } => {
                 assert_eq!(var, "p");
                 assert_eq!(decl_type, "PIPE");
@@ -1076,6 +1077,7 @@ mod tests {
                 var,
                 decl_type: _,
                 expr,
+                ..
             } => {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Literal(Value::string("hello".to_string())));
@@ -1170,6 +1172,7 @@ mod tests {
                 var,
                 decl_type: _,
                 expr,
+                ..
             } => {
                 assert_eq!(var, "x");
                 assert_eq!(
@@ -1191,6 +1194,7 @@ mod tests {
                 var,
                 decl_type: _,
                 expr,
+                ..
             } => {
                 assert_eq!(var, "x");
                 assert_eq!(
@@ -1216,6 +1220,7 @@ mod tests {
                 var,
                 decl_type: _,
                 expr,
+                ..
             } => {
                 assert_eq!(var, "x");
                 assert_eq!(
@@ -1490,6 +1495,7 @@ mod tests {
                 var,
                 decl_type: _,
                 expr,
+                ..
             } => {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Not(Box::new(Expr::Literal(Value::bool(true)))));

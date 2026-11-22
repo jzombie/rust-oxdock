@@ -536,9 +536,24 @@ fn module_lets_indexed<P: ProcessManager>(
         // capture/async/readline initializers resolves exactly like
         // one using plain `LET`/`CONST`.
         match &step.kind {
-            StepKind::Assign { var, decl_type, .. }
-            | StepKind::AssignCapture { var, decl_type, .. }
-            | StepKind::AssignAsync { var, decl_type, .. } => {
+            StepKind::Assign {
+                var,
+                decl_type,
+                is_const,
+                ..
+            }
+            | StepKind::AssignCapture {
+                var,
+                decl_type,
+                is_const,
+                ..
+            }
+            | StepKind::AssignAsync {
+                var,
+                decl_type,
+                is_const,
+                ..
+            } => {
                 let tag = exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("variable `${var}`: {err:#}"))?;
@@ -547,29 +562,16 @@ fn module_lets_indexed<P: ProcessManager>(
                         name: clean_var(var),
                         tag,
                         guard: step.guard.clone(),
-                        is_const: false,
+                        is_const: *is_const,
                     },
                     idx,
                 ));
             }
-            StepKind::Const { var, decl_type, .. }
-            | StepKind::ConstCapture { var, decl_type, .. }
-            | StepKind::ConstAsync { var, decl_type, .. } => {
-                let tag = exec
-                    .resolve_tag(decl_type)
-                    .map_err(|err| anyhow::anyhow!("variable `${var}`: {err:#}"))?;
-                out.push((
-                    GuardedLet {
-                        name: clean_var(var),
-                        tag,
-                        guard: step.guard.clone(),
-                        is_const: true,
-                    },
-                    idx,
-                ));
-            }
-            StepKind::ConstAwaitCapture {
-                out_var, out_type, ..
+            StepKind::AwaitCapture {
+                out_var,
+                out_type,
+                is_const,
+                ..
             } => {
                 let tag = exec
                     .resolve_tag(out_type)
@@ -579,7 +581,7 @@ fn module_lets_indexed<P: ProcessManager>(
                         name: clean_var(out_var),
                         tag,
                         guard: step.guard.clone(),
-                        is_const: true,
+                        is_const: *is_const,
                     },
                     idx,
                 ));
@@ -3972,29 +3974,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 var,
                 decl_type,
                 expr,
+                is_const,
             } => self.check_plain_binding(
-                var, decl_type, expr, env, scope, step, idx, depth, false, live,
-            ),
-            StepKind::Const {
-                var,
-                decl_type,
-                expr,
-            } => self.check_plain_binding(
-                var, decl_type, expr, env, scope, step, idx, depth, true, live,
+                var, decl_type, expr, env, scope, step, idx, depth, *is_const, live,
             ),
             StepKind::AssignCapture {
                 var,
                 decl_type,
                 cmd,
+                is_const,
             } => self.check_capture_binding(
-                var, decl_type, cmd, env, scope, step, idx, depth, false, live,
-            ),
-            StepKind::ConstCapture {
-                var,
-                decl_type,
-                cmd,
-            } => self.check_capture_binding(
-                var, decl_type, cmd, env, scope, step, idx, depth, true, live,
+                var, decl_type, cmd, env, scope, step, idx, depth, *is_const, live,
             ),
             StepKind::Set { var, expr } => {
                 let key = clean_var(var);
@@ -4022,17 +4012,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 out_var,
                 out_type,
                 task_var,
+                is_const,
                 ..
             } => self.check_await_binding(
-                out_var, out_type, task_var, env, scope, step, idx, false, live,
-            ),
-            StepKind::ConstAwaitCapture {
-                out_var,
-                out_type,
-                task_var,
-                ..
-            } => self.check_await_binding(
-                out_var, out_type, task_var, env, scope, step, idx, true, live,
+                out_var, out_type, task_var, env, scope, step, idx, *is_const, live,
             ),
             StepKind::AsyncBlock { body } => {
                 // Bare tasks never publish a value: control never
@@ -4055,15 +4038,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 var,
                 decl_type,
                 body,
+                is_const,
             } => self.check_async_binding(
-                var, decl_type, body, env, scope, step, idx, depth, false, live,
-            ),
-            StepKind::ConstAsync {
-                var,
-                decl_type,
-                body,
-            } => self.check_async_binding(
-                var, decl_type, body, env, scope, step, idx, depth, true, live,
+                var, decl_type, body, env, scope, step, idx, depth, *is_const, live,
             ),
             StepKind::Timeout { body, .. } => {
                 // A dynamic duration evaluates before the body runs.

@@ -1477,19 +1477,11 @@ fn emit_stepkind(
             var,
             decl_type,
             expr,
+            is_const,
         } => {
             let e = emit_expr(expr, interp);
             let t = emit_typekind(decl_type);
-            quote! { StepKind::Assign { var: #var.to_string(), decl_type: #t, expr: #e } }
-        }
-        StepKind::Const {
-            var,
-            decl_type,
-            expr,
-        } => {
-            let e = emit_expr(expr, interp);
-            let t = emit_typekind(decl_type);
-            quote! { StepKind::Const { var: #var.to_string(), decl_type: #t, expr: #e } }
+            quote! { StepKind::Assign { var: #var.to_string(), decl_type: #t, expr: #e, is_const: #is_const } }
         }
         StepKind::Set { var, expr } => {
             let e = emit_expr(expr, interp);
@@ -1499,55 +1491,31 @@ fn emit_stepkind(
             var,
             decl_type,
             cmd,
+            is_const,
         } => {
             let c = emit_stepkind(cmd, interp);
             let t = emit_typekind(decl_type);
-            quote! { StepKind::AssignCapture { var: #var.to_string(), decl_type: #t, cmd: Box::new(#c) } }
-        }
-        StepKind::ConstCapture {
-            var,
-            decl_type,
-            cmd,
-        } => {
-            let c = emit_stepkind(cmd, interp);
-            let t = emit_typekind(decl_type);
-            quote! { StepKind::ConstCapture { var: #var.to_string(), decl_type: #t, cmd: Box::new(#c) } }
+            quote! { StepKind::AssignCapture { var: #var.to_string(), decl_type: #t, cmd: Box::new(#c), is_const: #is_const } }
         }
         StepKind::AwaitCapture {
             out_var,
             out_type,
             task_var,
             task_is_const,
+            is_const,
         } => {
             let t = emit_typekind(out_type);
-            quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string(), task_is_const: #task_is_const } }
-        }
-        StepKind::ConstAwaitCapture {
-            out_var,
-            out_type,
-            task_var,
-            task_is_const,
-        } => {
-            let t = emit_typekind(out_type);
-            quote! { StepKind::ConstAwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string(), task_is_const: #task_is_const } }
+            quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string(), task_is_const: #task_is_const, is_const: #is_const } }
         }
         StepKind::AssignAsync {
             var,
             decl_type,
             body,
+            is_const,
         } => {
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             let t = emit_typekind(decl_type);
-            quote! { StepKind::AssignAsync { var: #var.to_string(), decl_type: #t, body: vec![#(#steps),*] } }
-        }
-        StepKind::ConstAsync {
-            var,
-            decl_type,
-            body,
-        } => {
-            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
-            let t = emit_typekind(decl_type);
-            quote! { StepKind::ConstAsync { var: #var.to_string(), decl_type: #t, body: vec![#(#steps),*] } }
+            quote! { StepKind::AssignAsync { var: #var.to_string(), decl_type: #t, body: vec![#(#steps),*], is_const: #is_const } }
         }
         StepKind::Await { var, is_const } => {
             quote! { StepKind::Await { var: #var.to_string(), is_const: #is_const } }
@@ -2206,6 +2174,7 @@ mod tests {
         let task = StepKind::AssignAsync {
             var: "job".to_string(),
             decl_type: "HANDLE".to_string(),
+            is_const: false,
             body: vec![Step {
                 guard: None,
                 kind: StepKind::Echo(Arg::String("hi".to_string(), false)),

@@ -180,6 +180,7 @@ proptest! {
             Outcome::Failed(_) => true,
             Outcome::Staged(StepKind::Assign {
                 expr: Expr::Literal(v),
+                is_const: false,
                 ..
             }) => v.as_str().is_some(),
             _ => false,

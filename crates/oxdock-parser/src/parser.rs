@@ -7695,6 +7695,7 @@ fn parse_binding_body(
                 var: var.clone(),
                 decl_type: crate::TypeTag::Pipe.name().to_string(),
                 expr: Expr::FreshPipe,
+                is_const: false,
             };
             ctx.declare_binding(&var, BindingKind::Let);
             return Ok(Some((kind, type_start + 1)));
@@ -7758,10 +7759,11 @@ fn parse_const_binding_body(
             body.get(type_start).map(|t| &t.kind),
             Some(TokKind::Word(w)) if w == crate::TypeTag::Pipe.name()
         ) {
-            let kind = StepKind::Const {
+            let kind = StepKind::Assign {
                 var: var.clone(),
                 decl_type: crate::TypeTag::Pipe.name().to_string(),
                 expr: Expr::FreshPipe,
+                is_const: true,
             };
             ctx.declare_binding(&var, BindingKind::Const);
             return Ok(Some((kind, type_start + 1)));
@@ -7830,9 +7832,9 @@ fn could_be_const_name(name: &str) -> bool {
 }
 
 /// Map an `Assign`-family kind to the `kw` binding family: `LET`
-/// passes through, `CONST` converts each variant once. Single owner
-/// for the binding-form mapping, so a new RHS form gains its `CONST`
-/// twin here instead of at every return site.
+/// passes through, `CONST` flips each `is_const` flag once. Single
+/// owner for the binding-form mapping, so a new RHS form gains its
+/// `CONST` spelling here instead of at every return site.
 fn binding_kind(kind: StepKind, kw: &'static str) -> StepKind {
     if kw != KEYWORD_CONST {
         return kind;
@@ -7842,39 +7844,47 @@ fn binding_kind(kind: StepKind, kw: &'static str) -> StepKind {
             var,
             decl_type,
             expr,
-        } => StepKind::Const {
+            ..
+        } => StepKind::Assign {
             var,
             decl_type,
             expr,
+            is_const: true,
         },
         StepKind::AssignCapture {
             var,
             decl_type,
             cmd,
-        } => StepKind::ConstCapture {
+            ..
+        } => StepKind::AssignCapture {
             var,
             decl_type,
             cmd,
+            is_const: true,
         },
         StepKind::AssignAsync {
             var,
             decl_type,
             body,
-        } => StepKind::ConstAsync {
+            ..
+        } => StepKind::AssignAsync {
             var,
             decl_type,
             body,
+            is_const: true,
         },
         StepKind::AwaitCapture {
             out_var,
             out_type,
             task_var,
             task_is_const,
-        } => StepKind::ConstAwaitCapture {
+            ..
+        } => StepKind::AwaitCapture {
             out_var,
             out_type,
             task_var,
             task_is_const,
+            is_const: true,
         },
         other => other,
     }
@@ -7951,6 +7961,7 @@ fn parse_let_rhs(
                 var,
                 decl_type,
                 cmd: Box::new(kind),
+                is_const: false,
             },
             skipped + used,
         ));
@@ -7982,6 +7993,7 @@ fn parse_let_rhs(
                 out_type: decl_type,
                 task_var: task_var.clone(),
                 task_is_const: false,
+                is_const: false,
             },
             skipped + 3,
         ));
@@ -7999,6 +8011,7 @@ fn parse_let_rhs(
                 out_type: decl_type,
                 task_var: task_var.clone(),
                 task_is_const: true,
+                is_const: false,
             },
             skipped + 2,
         ));
@@ -8034,6 +8047,7 @@ fn parse_let_rhs(
                     var,
                     decl_type,
                     cmd: Box::new(kind),
+                    is_const: false,
                 },
                 skipped + 2,
             ));
@@ -8052,6 +8066,7 @@ fn parse_let_rhs(
                 var,
                 decl_type,
                 cmd: Box::new(StepKind::ImportFile { path, alias }),
+                is_const: false,
             },
             skipped + used,
         ));
@@ -8094,6 +8109,7 @@ fn parse_let_rhs(
                     var,
                     decl_type,
                     cmd: Box::new(cmd),
+                    is_const: false,
                 },
                 skipped + used,
             ));
@@ -8108,6 +8124,7 @@ fn parse_let_rhs(
             var,
             decl_type,
             expr,
+            is_const: false,
         },
         used,
     ))
@@ -8236,6 +8253,7 @@ fn try_let_with_io_rhs(
                     var,
                     decl_type,
                     body: vec![wrapped],
+                    is_const: false,
                 },
                 2 + 2,
             )));
@@ -8273,6 +8291,7 @@ fn try_let_with_io_rhs(
             var,
             decl_type,
             body: vec![wrapped],
+            is_const: false,
         };
         let span = lowering_ctx(stmt);
         crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
@@ -8329,6 +8348,7 @@ fn try_let_with_io_rhs(
                 bindings,
                 cmd: Box::new(cmd),
             }),
+            is_const: false,
         },
         2 + used,
     )))
@@ -8372,6 +8392,7 @@ fn parse_let_async_rhs(
             var,
             decl_type,
             body,
+            is_const: false,
         };
         let span = lowering_ctx(stmt);
         crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
@@ -8413,6 +8434,7 @@ fn parse_let_async_rhs(
             line: 0,
             col: 0,
         }],
+        is_const: false,
     };
     let span = lowering_ctx(stmt);
     crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
@@ -9714,12 +9736,18 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
                 top_types.insert(name.clone());
             }
             match &step.kind {
-                StepKind::Const { var, .. }
-                | StepKind::ConstCapture { var, .. }
-                | StepKind::ConstAsync { var, .. } => {
+                StepKind::Assign { var, is_const, .. } if *is_const => {
                     top_consts.insert(var.clone());
                 }
-                StepKind::ConstAwaitCapture { out_var, .. } => {
+                StepKind::AssignCapture { var, is_const, .. } if *is_const => {
+                    top_consts.insert(var.clone());
+                }
+                StepKind::AssignAsync { var, is_const, .. } if *is_const => {
+                    top_consts.insert(var.clone());
+                }
+                StepKind::AwaitCapture {
+                    out_var, is_const, ..
+                } if *is_const => {
                     top_consts.insert(out_var.clone());
                 }
                 _ => {}

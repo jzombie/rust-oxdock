@@ -20,6 +20,7 @@ fn bare_let_pipe_shape_and_round_trip() {
             var,
             decl_type,
             expr,
+            ..
         } => {
             assert_eq!(var, "p");
             assert_eq!(decl_type, "PIPE");

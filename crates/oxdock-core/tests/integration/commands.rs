@@ -28,6 +28,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
                 var: var.clone(),
                 decl_type: "PIPE".to_string(),
                 expr: oxdock_parser::Expr::FreshPipe,
+                is_const: false,
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -2976,15 +2977,11 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::If { .. } => {}
         StepKind::Switch { .. } => {}
         StepKind::Assign { .. } => {}
-        StepKind::Const { .. } => {}
         StepKind::Set { .. } => {}
         StepKind::AssignCapture { .. } => {}
-        StepKind::ConstCapture { .. } => {}
         StepKind::AssignAsync { .. } => {}
-        StepKind::ConstAsync { .. } => {}
         StepKind::Await { .. } => {}
         StepKind::AwaitCapture { .. } => {}
-        StepKind::ConstAwaitCapture { .. } => {}
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
         StepKind::Isolated { .. } => {}
@@ -4421,6 +4418,7 @@ fn read_large_file_streams_without_oom() {
                 var: pipe_var.clone(),
                 decl_type: "PIPE".to_string(),
                 expr: oxdock_parser::Expr::FreshPipe,
+                is_const: false,
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -4494,6 +4492,7 @@ fn read_stdin_streaming_via_pipe() {
                 var: "pipe_read".into(),
                 decl_type: "PIPE".to_string(),
                 expr: oxdock_parser::Expr::FreshPipe,
+                is_const: false,
             },
             scope_enter: 0,
             scope_exit: 0,

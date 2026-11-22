@@ -4575,26 +4575,16 @@ pub(crate) fn dispatch_assign<P: ProcessManager>(
         var,
         decl_type,
         expr,
+        is_const,
     } = step
     else {
         unreachable!()
     };
-    assign(cx, var, decl_type.clone(), expr)
-}
-
-pub(crate) fn dispatch_const<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::Const {
-        var,
-        decl_type,
-        expr,
-    } = step
-    else {
-        unreachable!()
-    };
-    assign_const(cx, var, decl_type.clone(), expr)
+    if *is_const {
+        assign_const(cx, var, decl_type.clone(), expr)
+    } else {
+        assign(cx, var, decl_type.clone(), expr)
+    }
 }
 
 pub(crate) fn dispatch_set<P: ProcessManager>(
@@ -5245,27 +5235,12 @@ pub(crate) fn dispatch_assign_async_step<P: ProcessManager>(
         var,
         decl_type,
         body,
+        is_const,
     } = step
     else {
         unreachable!()
     };
-    dispatch_assign_async(var, decl_type.clone(), body, cx, false)
-}
-
-/// Pipeline dispatch wrapper for `ConstAsync`
-pub(crate) fn dispatch_const_async_step<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::ConstAsync {
-        var,
-        decl_type,
-        body,
-    } = step
-    else {
-        unreachable!()
-    };
-    dispatch_assign_async(var, decl_type.clone(), body, cx, true)
+    dispatch_assign_async(var, decl_type.clone(), body, cx, *is_const)
 }
 
 /// Pipeline dispatch wrapper for `Await`
@@ -5288,6 +5263,7 @@ pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
         var,
         decl_type,
         cmd,
+        is_const,
     } = step
     else {
         unreachable!()
@@ -5299,31 +5275,7 @@ pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
         var,
         decl_type.clone(),
         cmd,
-        false,
-    )?)
-}
-
-/// Pipeline dispatch wrapper for `ConstCapture`
-pub(crate) fn dispatch_const_capture_step<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::ConstCapture {
-        var,
-        decl_type,
-        cmd,
-    } = step
-    else {
-        unreachable!()
-    };
-    top_level_flow(assign_capture(
-        cx,
-        super::steps::allocate_assert_generation(),
-        0,
-        var,
-        decl_type.clone(),
-        cmd,
-        true,
+        *is_const,
     )?)
 }
 
@@ -5336,29 +5288,13 @@ pub(crate) fn dispatch_await_capture_step<P: ProcessManager>(
         out_var,
         out_type,
         task_var,
+        is_const,
         ..
     } = step
     else {
         unreachable!()
     };
-    dispatch_await_capture(out_var, out_type.clone(), task_var, cx, false)
-}
-
-/// Pipeline dispatch wrapper for `ConstAwaitCapture`
-pub(crate) fn dispatch_const_await_capture_step<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::ConstAwaitCapture {
-        out_var,
-        out_type,
-        task_var,
-        ..
-    } = step
-    else {
-        unreachable!()
-    };
-    dispatch_await_capture(out_var, out_type.clone(), task_var, cx, true)
+    dispatch_await_capture(out_var, out_type.clone(), task_var, cx, *is_const)
 }
 
 /// Pipeline dispatch wrapper for `Cancel`

@@ -790,8 +790,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         | StepKind::Fail { .. }
         | StepKind::Isolated { .. }
         | StepKind::WithIo { .. }
-        | StepKind::AssignCapture { .. }
-        | StepKind::ConstCapture { .. } => {
+        | StepKind::AssignCapture { .. } => {
             return dispatch_flow_step(cmd, &mut cx, generation, idx);
         }
         _ => {}
@@ -1023,36 +1022,35 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             var,
             decl_type,
             expr,
-        } => handlers::assign(&mut cx, var, decl_type.clone(), expr),
-        StepKind::Const {
-            var,
-            decl_type,
-            expr,
-        } => handlers::assign_const(&mut cx, var, decl_type.clone(), expr),
+            is_const,
+        } => {
+            if *is_const {
+                handlers::assign_const(&mut cx, var, decl_type.clone(), expr)
+            } else {
+                handlers::assign(&mut cx, var, decl_type.clone(), expr)
+            }
+        }
         StepKind::Set { var, expr } => handlers::set_var_value(&mut cx, var, expr),
         StepKind::AssignAsync {
             var,
             decl_type,
             body,
-        } => handlers::dispatch_assign_async(var, decl_type.clone(), body, &mut cx, false),
-        StepKind::ConstAsync {
-            var,
-            decl_type,
-            body,
-        } => handlers::dispatch_assign_async(var, decl_type.clone(), body, &mut cx, true),
+            is_const,
+        } => handlers::dispatch_assign_async(var, decl_type.clone(), body, &mut cx, *is_const),
         StepKind::Await { var, .. } => handlers::dispatch_await(var, &mut cx),
         StepKind::AwaitCapture {
             out_var,
             out_type,
             task_var,
+            is_const,
             ..
-        } => handlers::dispatch_await_capture(out_var, out_type.clone(), task_var, &mut cx, false),
-        StepKind::ConstAwaitCapture {
+        } => handlers::dispatch_await_capture(
             out_var,
-            out_type,
+            out_type.clone(),
             task_var,
-            ..
-        } => handlers::dispatch_await_capture(out_var, out_type.clone(), task_var, &mut cx, true),
+            &mut cx,
+            *is_const,
+        ),
         StepKind::Cancel { var, .. } => handlers::dispatch_cancel(var, &mut cx),
         StepKind::Sleep { duration } => {
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
@@ -1078,8 +1076,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         | StepKind::Fail { .. }
         | StepKind::Isolated { .. }
         | StepKind::WithIo { .. }
-        | StepKind::AssignCapture { .. }
-        | StepKind::ConstCapture { .. } => {
+        | StepKind::AssignCapture { .. } => {
             unreachable!("compound steps dispatch before this match")
         }
     }?;
@@ -1185,8 +1182,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                     | StepKind::Fail { .. }
                     | StepKind::Isolated { .. }
                     | StepKind::WithIo { .. }
-                    | StepKind::AssignCapture { .. }
-                    | StepKind::ConstCapture { .. } => {
+                    | StepKind::AssignCapture { .. } => {
                         dispatch_flow_step(&step.kind, &mut cx, generation, idx)
                     }
                     _ => {
@@ -1432,12 +1428,14 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 var,
                                 decl_type,
                                 expr,
-                            } => handlers::assign(&mut cx, var, decl_type.clone(), expr),
-                            StepKind::Const {
-                                var,
-                                decl_type,
-                                expr,
-                            } => handlers::assign_const(&mut cx, var, decl_type.clone(), expr),
+                                is_const,
+                            } => {
+                                if *is_const {
+                                    handlers::assign_const(&mut cx, var, decl_type.clone(), expr)
+                                } else {
+                                    handlers::assign(&mut cx, var, decl_type.clone(), expr)
+                                }
+                            }
                             StepKind::Set { var, expr } => {
                                 handlers::set_var_value(&mut cx, var, expr)
                             }
@@ -1445,48 +1443,27 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                                 var,
                                 decl_type,
                                 body,
+                                is_const,
                             } => handlers::dispatch_assign_async(
                                 var,
                                 decl_type.clone(),
                                 body,
                                 &mut cx,
-                                false,
-                            ),
-                            StepKind::ConstAsync {
-                                var,
-                                decl_type,
-                                body,
-                            } => handlers::dispatch_assign_async(
-                                var,
-                                decl_type.clone(),
-                                body,
-                                &mut cx,
-                                true,
+                                *is_const,
                             ),
                             StepKind::Await { var, .. } => handlers::dispatch_await(var, &mut cx),
                             StepKind::AwaitCapture {
                                 out_var,
                                 out_type,
                                 task_var,
+                                is_const,
                                 ..
                             } => handlers::dispatch_await_capture(
                                 out_var,
                                 out_type.clone(),
                                 task_var,
                                 &mut cx,
-                                false,
-                            ),
-                            StepKind::ConstAwaitCapture {
-                                out_var,
-                                out_type,
-                                task_var,
-                                ..
-                            } => handlers::dispatch_await_capture(
-                                out_var,
-                                out_type.clone(),
-                                task_var,
-                                &mut cx,
-                                true,
+                                *is_const,
                             ),
                             StepKind::Cancel { var, .. } => handlers::dispatch_cancel(var, &mut cx),
                             StepKind::Sleep { duration } => {
@@ -1514,8 +1491,7 @@ fn execute_steps_inner<P: ProcessManager>(args: InnerArgs<'_, P>) -> Result<Flow
                             | StepKind::Fail { .. }
                             | StepKind::Isolated { .. }
                             | StepKind::WithIo { .. }
-                            | StepKind::AssignCapture { .. }
-                            | StepKind::ConstCapture { .. } => {
+                            | StepKind::AssignCapture { .. } => {
                                 unreachable!("compound steps dispatch in the outer match")
                             }
                         }?;
@@ -1941,12 +1917,10 @@ fn dispatch_flow_step<P: ProcessManager>(
             var,
             decl_type,
             cmd,
-        } => handlers::assign_capture(cx, generation, idx, var, decl_type.clone(), cmd, false),
-        StepKind::ConstCapture {
-            var,
-            decl_type,
-            cmd,
-        } => handlers::assign_capture(cx, generation, idx, var, decl_type.clone(), cmd, true),
+            is_const,
+        } => handlers::assign_capture(
+            cx, generation, idx, var, decl_type.clone(), cmd, *is_const,
+        ),
         _ => {
             unreachable!("dispatch_flow_step handles only compound steps")
         }

@@ -447,15 +447,14 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 }
             }
             StepKind::Assign { expr, .. }
-            | StepKind::Const { expr, .. }
             | StepKind::Set { expr, .. } => {
                 walk_expr(&mut keys, expr);
             }
-            StepKind::AssignCapture { cmd, .. } | StepKind::ConstCapture { cmd, .. } => {
+            StepKind::AssignCapture { cmd, .. } => {
                 collect_env_references_inner(&mut keys, cmd);
             }
-            StepKind::AwaitCapture { .. } | StepKind::ConstAwaitCapture { .. } => {}
-            StepKind::AssignAsync { body, .. } | StepKind::ConstAsync { body, .. } => {
+            StepKind::AwaitCapture { .. } => {}
+            StepKind::AssignAsync { body, .. } => {
                 for k in collect_env_references(body) {
                     keys.insert(k);
                 }

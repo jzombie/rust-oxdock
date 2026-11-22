@@ -388,11 +388,13 @@ fn flat_body_image_eq(a: &Step, b: &Step) -> bool {
                 var: vx,
                 decl_type: tx,
                 expr: ex,
+                is_const: false,
             },
             StepKind::Assign {
                 var: vy,
                 decl_type: ty,
                 expr: ey,
+                is_const: false,
             },
         ) => vx == vy && tx == ty && expr_image_eq(ex, ey),
         (
@@ -755,13 +757,15 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                     var,
                     decl_type: "STRING".to_string(),
                     expr: Expr::Literal(Value::string(s)),
+                    is_const: false,
                 }
             }),
             ("[A-Z][A-Z0-9_]*", safe_string()).prop_map(|(var, s)| {
-                StepKind::Const {
+                StepKind::Assign {
                     var,
                     decl_type: "STRING".to_string(),
                     expr: Expr::Literal(Value::string(s)),
+                    is_const: true,
                 }
             }),
             ("[a-z][a-zA-Z0-9_]*", 0u32..999_999).prop_map(|(var, i)| {
@@ -769,6 +773,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                     var,
                     decl_type: "INT".to_string(),
                     expr: Expr::Literal(Value::int(i as i64)),
+                    is_const: false,
                 }
             }),
             ("[a-z][a-zA-Z0-9_]*", any::<bool>()).prop_map(|(var, b)| {
@@ -776,6 +781,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                     var,
                     decl_type: "BOOL".to_string(),
                     expr: Expr::Literal(Value::bool(b)),
+                    is_const: false,
                 }
             }),
             (
@@ -792,11 +798,13 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                             .map(Expr::Literal)
                             .collect(),
                     ),
+                    is_const: false,
                 },),
             "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Assign {
                 var,
                 decl_type: "PIPE".to_string(),
                 expr: Expr::FreshPipe,
+                is_const: false,
             }),
             ("[a-z][a-zA-Z0-9_]*", arb_expr()).prop_map(|(var, expr)| {
                 let decl_type = match &expr {
@@ -811,6 +819,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                     var,
                     decl_type,
                     expr,
+                    is_const: false,
                 }
             }),
         ],
@@ -902,11 +911,13 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             var,
             decl_type: "HANDLE".to_string(),
             body,
+            is_const: false,
         }),
-        ("[A-Z][A-Z0-9_]*", arb_body()).prop_map(|(var, body)| StepKind::ConstAsync {
+        ("[A-Z][A-Z0-9_]*", arb_body()).prop_map(|(var, body)| StepKind::AssignAsync {
             var,
             decl_type: "HANDLE".to_string(),
             body,
+            is_const: true,
         }),
         arb_body().prop_map(|body| StepKind::RemoteBlock {
             target: "coveragetarget".to_string(),
@@ -918,24 +929,28 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             var,
             decl_type: "STRING".to_string(),
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
+            is_const: false,
         }),
-        ("[A-Z][A-Z0-9_]*",).prop_map(|(var,)| StepKind::ConstCapture {
+        ("[A-Z][A-Z0-9_]*",).prop_map(|(var,)| StepKind::AssignCapture {
             var,
             decl_type: "STRING".to_string(),
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
+            is_const: true,
         }),
         ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::AwaitCapture {
             out_var: var.clone(),
             out_type: "STRING".to_string(),
             task_var: var,
             task_is_const: false,
+            is_const: false,
         }),
         ("[A-Z][A-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(out_var, task_var)| {
-            StepKind::ConstAwaitCapture {
+            StepKind::AwaitCapture {
                 out_var,
                 out_type: "STRING".to_string(),
                 task_var,
                 task_is_const: false,
+                is_const: true,
             }
         }),
         ("[a-z][a-zA-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(var, item)| {
@@ -1023,7 +1038,6 @@ fn zero_kind_markers(kind: &mut StepKind) {
         | StepKind::Isolated { body, .. }
         | StepKind::AsyncBlock { body, .. }
         | StepKind::AssignAsync { body, .. }
-        | StepKind::ConstAsync { body, .. }
         | StepKind::RemoteBlock { body, .. } => zero_markers(body),
         StepKind::Switch {
             cases,
@@ -1038,7 +1052,6 @@ fn zero_kind_markers(kind: &mut StepKind) {
             }
         }
         StepKind::AssignCapture { cmd, .. }
-        | StepKind::ConstCapture { cmd, .. }
         | StepKind::WithIo { cmd, .. } => zero_kind_markers(cmd),
         _ => {}
     }
@@ -1174,6 +1187,7 @@ fn arb_body_step_kind() -> impl Strategy<Value = StepKind> {
             var: "coverage".to_string(),
             decl_type: "STRING".to_string(),
             expr: Expr::Literal(Value::string("covered".to_string())),
+            is_const: false,
         }),
         Just(StepKind::AssertEq {
             hash: None,
@@ -1569,11 +1583,13 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 var: lv,
                 decl_type: lt,
                 expr: le,
+                is_const: false,
             },
             StepKind::Assign {
                 var: rv,
                 decl_type: rt,
                 expr: re,
+                is_const: false,
             },
         ) => {
             assert_eq!(lv, rv, "Assign var mismatch: {}", msg);
@@ -1772,11 +1788,13 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 var: lv,
                 decl_type: lt,
                 body: lb,
+                is_const: false,
             },
             StepKind::AssignAsync {
                 var: rv,
                 decl_type: rt,
                 body: rb,
+                is_const: false,
             },
         ) => {
             assert_eq!(lv, rv, "AssignAsync var mismatch: {}", msg);
@@ -1784,15 +1802,17 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_bodies_eq(lb, rb, msg);
         }
         (
-            StepKind::ConstAsync {
+            StepKind::AssignAsync {
                 var: lv,
                 decl_type: lt,
                 body: lb,
+                is_const: true,
             },
-            StepKind::ConstAsync {
+            StepKind::AssignAsync {
                 var: rv,
                 decl_type: rt,
                 body: rb,
+                is_const: true,
             },
         ) => {
             assert_eq!(lv, rv, "ConstAsync var mismatch: {}", msg);
@@ -1823,11 +1843,13 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 var: lv,
                 decl_type: lt,
                 cmd: lc,
+                is_const: false,
             },
             StepKind::AssignCapture {
                 var: rv,
                 decl_type: rt,
                 cmd: rc,
+                is_const: false,
             },
         ) => {
             assert_eq!(lv, rv, "AssignCapture var mismatch: {}", msg);
@@ -1835,15 +1857,17 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_bodies_eq(&[shell_of_kind(lc)], &[shell_of_kind(rc)], msg);
         }
         (
-            StepKind::ConstCapture {
+            StepKind::AssignCapture {
                 var: lv,
                 decl_type: lt,
                 cmd: lc,
+                is_const: true,
             },
-            StepKind::ConstCapture {
+            StepKind::AssignCapture {
                 var: rv,
                 decl_type: rt,
                 cmd: rc,
+                is_const: true,
             },
         ) => {
             assert_eq!(lv, rv, "ConstCapture var mismatch: {}", msg);
@@ -1856,12 +1880,14 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 out_type: lt,
                 task_var: lv,
                 task_is_const: lc,
+                is_const: false,
             },
             StepKind::AwaitCapture {
                 out_var: ro,
                 out_type: rt,
                 task_var: rv,
                 task_is_const: rc,
+                is_const: false,
             },
         ) => {
             assert_eq!(lo, ro, "AwaitCapture out mismatch: {}", msg);
@@ -1870,17 +1896,19 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_eq!(lc, rc, "AwaitCapture sigil mismatch: {}", msg);
         }
         (
-            StepKind::ConstAwaitCapture {
+            StepKind::AwaitCapture {
                 out_var: lo,
                 out_type: lt,
                 task_var: lv,
                 task_is_const: lc,
+                is_const: true,
             },
-            StepKind::ConstAwaitCapture {
+            StepKind::AwaitCapture {
                 out_var: ro,
                 out_type: rt,
                 task_var: rv,
                 task_is_const: rc,
+                is_const: true,
             },
         ) => {
             assert_eq!(lo, ro, "ConstAwaitCapture out mismatch: {}", msg);
@@ -2339,11 +2367,13 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             var: "coverage".to_string(),
             decl_type: "STRING".to_string(),
             expr: Expr::Literal(Value::string("covered".to_string())),
+            is_const: false,
         },
-        StepKind::Const {
+        StepKind::Assign {
             var: "COVERAGE".to_string(),
             decl_type: "STRING".to_string(),
             expr: Expr::Literal(Value::string("covered".to_string())),
+            is_const: true,
         },
         StepKind::Set {
             var: "coverage".to_string(),
@@ -2411,6 +2441,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                     is_const: false,
                 }),
             },
+            is_const: false,
         },
         StepKind::Assign {
             var: "coverage".to_string(),
@@ -2423,6 +2454,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 }),
                 right: Box::new(Expr::Literal(Value::int(7))),
             },
+            is_const: false,
         },
         StepKind::Assign {
             var: "coverage".to_string(),
@@ -2431,6 +2463,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 name: "coverage".to_string(),
                 is_const: false,
             })),
+            is_const: false,
         },
         StepKind::Assign {
             var: "coverage".to_string(),
@@ -2446,6 +2479,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                     is_const: false,
                 }),
             },
+            is_const: false,
         },
         StepKind::Assign {
             var: "coverage".to_string(),
@@ -2454,6 +2488,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 name: "STD::LEN".to_string(),
                 args: vec![Expr::Literal(Value::string("coverage".to_string()))],
             },
+            is_const: false,
         },
         StepKind::Assign {
             var: "coverage".to_string(),
@@ -2469,6 +2504,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 line: 0,
                 col: 0,
             }]),
+            is_const: false,
         },
         StepKind::If {
             cond: Box::new(Expr::Literal(Value::bool(true))),
@@ -2580,8 +2616,9 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 line: 0,
                 col: 0,
             }],
+            is_const: false,
         },
-        StepKind::ConstAsync {
+        StepKind::AssignAsync {
             var: "COVERAGE".to_string(),
             decl_type: "HANDLE".to_string(),
             body: vec![Step {
@@ -2592,6 +2629,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 line: 0,
                 col: 0,
             }],
+            is_const: true,
         },
         StepKind::RemoteBlock {
             target: "coveragetarget".to_string(),
@@ -2610,23 +2648,27 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             var: "coverage".to_string(),
             decl_type: "STRING".to_string(),
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
+            is_const: false,
         },
-        StepKind::ConstCapture {
+        StepKind::AssignCapture {
             var: "COVERAGE".to_string(),
             decl_type: "STRING".to_string(),
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
+            is_const: true,
         },
         StepKind::AwaitCapture {
             out_var: "coverage".to_string(),
             out_type: "STRING".to_string(),
             task_var: "coverage".to_string(),
             task_is_const: false,
+            is_const: false,
         },
-        StepKind::ConstAwaitCapture {
+        StepKind::AwaitCapture {
             out_var: "COVERAGE".to_string(),
             out_type: "STRING".to_string(),
             task_var: "coverage".to_string(),
             task_is_const: false,
+            is_const: true,
         },
         StepKind::For {
             key_var: None,
@@ -2705,16 +2747,12 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         // Expression bodies need Expr strategies (literals, math,
         // calls, keypaths) before generation is sound.
         StepKind::Assign { .. } => true,
-        StepKind::Const { .. } => true,
-        StepKind::Set { .. } => true,
+                StepKind::Set { .. } => true,
         StepKind::AssignCapture { .. } => true,
-        StepKind::ConstCapture { .. } => true,
-        StepKind::AwaitCapture { .. } => true,
-        StepKind::ConstAwaitCapture { .. } => true,
-        StepKind::AsyncBlock { .. } => true,
+                StepKind::AwaitCapture { .. } => true,
+                StepKind::AsyncBlock { .. } => true,
         StepKind::AssignAsync { .. } => true,
-        StepKind::ConstAsync { .. } => true,
-        StepKind::Await { .. } => true,
+                StepKind::Await { .. } => true,
         StepKind::Cancel { .. } => true,
         StepKind::Timeout { .. } => true,
         StepKind::Fail { .. } => true,
