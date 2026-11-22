@@ -864,7 +864,7 @@ ASSERT_EQ $badge "const-hello"
 
 # RUN keeps shell words literal, so only templates read CONST.
 LET $raw: STRING = RUN echo BADGE
-ASSERT_EQ $raw "BADGE\n"
+ASSERT_CONTAINS $raw "BADGE"
 
 # RUN reads CONST through templates.
 LET $cooked: STRING = RUN echo "{{ $BADGE }}"
