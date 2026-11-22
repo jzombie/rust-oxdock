@@ -54,8 +54,8 @@ impl Drop for TaskSlotGuard {
 /// foreground capture scale: the same never-grows guarantee.
 const TASK_TAIL_CAP: usize = 64 * 1024;
 
-/// Single message shape for every refused `CONST` write: `SET`,
-/// `LIST_APPEND`, `MAP_SET`/`MERGE_MAPS`, and frozen-buffer writes all
+/// Single message shape for every refused `CONST` write: `$var = <expr>`
+/// reassignment, `LIST_APPEND`, `MAP_SET`/`MERGE_MAPS`, and frozen-buffer
 /// render this prefix, so tests and diagnostics match one string.
 /// Free function (not a method) so host-function extractors and
 /// macro-generated wrappers share it without a state handle.
@@ -109,8 +109,8 @@ pub struct ExecState<P: ProcessManager> {
     /// Each entry carries its declared type name alongside the value.
     pub(super) var_scopes: Vec<HashMap<String, (TypeTag, Value)>>,
     /// `CONST` names per variable scope frame, pushed and popped in
-    /// lockstep with `var_scopes`. A name present here refuses `SET`,
-    /// `LIST_APPEND`, and rebinding; the value-level frozen flag
+    /// lockstep with `var_scopes`. A name present here refuses `$var = <expr>`
+    /// reassignment, `LIST_APPEND`, and rebinding; the value-level frozen flag
     /// additionally refuses writes through `LET`-bound aliases.
     pub(super) const_scopes: Vec<HashSet<String>>,
     /// Name directory for type resolution: startup descriptors plus the
@@ -372,7 +372,7 @@ pub(super) struct RawFuncDef {
 pub(super) struct ModuleInit {
     pub(super) vars: HashMap<String, (TypeTag, Value)>,
     /// Top-level `CONST` names drained with `vars`: rebinding,
-    /// `SET`, and `LIST_APPEND` against these fail; functional
+    /// `$var = <expr>` reassignment, and `LIST_APPEND` against these fail;
     /// rebuilds fail on the value-level frozen flag.
     pub(super) const_vars: HashSet<String>,
     pub(super) return_value: Value,
@@ -1091,13 +1091,6 @@ impl<P: ProcessManager> ExecState<P> {
         Ok(())
     }
 
-    /// Whether `key` names a `CONST` binding visible here: the
-    /// innermost lexical frame holding the name decides (a local
-    /// `LET` shadowing a module-level `CONST` stays mutable), exactly
-    /// mirroring [`mutate_var`](Self::mutate_var)'s resolution; only
-    /// when no lexical frame declares the name does the owning
-    /// module's shared store answer. Single owner for the const check
-    /// behind `SET`, `LIST_APPEND`, and redeclaration diagnostics.
     /// Whether the entry-`CONST` fallback applies here: entry context
     /// (no owning module) whose caller is also entry (or top level).
     /// Entry callees called from module code stay params-only, so a
@@ -1130,6 +1123,13 @@ impl<P: ProcessManager> ExecState<P> {
         self.modules.get(super::import::ENTRY_UNIT)?.init.as_ref()
     }
 
+    /// Whether `key` names a `CONST` binding visible here: the
+    /// innermost lexical frame holding the name decides (a local
+    /// `LET` shadowing a module-level `CONST` stays mutable), exactly
+    /// mirroring [`mutate_var`](Self::mutate_var)'s resolution; only
+    /// when no lexical frame declares the name does the owning
+    /// module's shared store answer. Single owner for the const check
+    /// behind `$var = <expr>` reassignment and `LIST_APPEND`.
     pub(super) fn is_const_var(&self, key: &str) -> bool {
         for idx in (0..self.var_scopes.len()).rev() {
             if self.var_scopes[idx].contains_key(key) {

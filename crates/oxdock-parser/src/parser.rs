@@ -14,8 +14,8 @@
 //!
 //! Coverage: generic commands (head word plus gap-split args with
 //! quote-accurate joins), guards (leading `[..]` groups; in-body
-//! brackets splice to raw text), `LET`/`SET`/`RETURN` with the full
-//! expression tiers, static calls and RUN-exec with instruction
+//! brackets splice to raw text), `LET`/reassignment (`$var = <expr>`)/`RETURN`
+//! with the full expression tiers, static calls and RUN-exec with instruction
 //! exactness, single-command wrappers (`WITH_IO`/`TIMEOUT`/`ISOLATED`/
 //! `ASYNC`), io-blocks, `AWAIT`/`CANCEL`, multi-element statements,
 //! block statements (`IF`/`FOR`/`WHILE`/`FUNC`/`REMOTE`/`TYPE`/
@@ -7299,7 +7299,8 @@ fn expect_dollar_var(cur: &mut Cursor, msg: &str) -> Result<String, TokenError> 
 /// target stands: bindings declare plain locals, and module `CONST`s
 /// are immutable (reads use `$ALIAS::NAME` in expressions).
 /// Single owner for the qualified-target gate, shared by the binding
-/// and `SET` heads so both fail with one message shape.
+/// (`LET`/`CONST`) and reassignment (`$var = <expr>`) heads so all fail
+/// with one message shape.
 fn reject_qualified_target(cur: &Cursor, base: &str) -> Result<(), TokenError> {
     let first = matches!(
         cur.toks.get(cur.pos).map(|t| &t.kind),

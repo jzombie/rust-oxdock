@@ -1,6 +1,6 @@
 //! `CONST` bindings: deeply immutable values that read exactly like
-//! `LET` but refuse every write. `SET`, `LIST_APPEND`, `MAP_SET`,
-//! and `MERGE_MAPS` on a `CONST` (or an alias of one) fail with one
+//! `LET` but refuse every write. `$var = <expr>` reassignment, `LIST_APPEND`,
+//! `MAP_SET`, and `MERGE_MAPS` on a `CONST` (or an alias of one) fail with one
 //! message shape; redeclaring across `LET`/`CONST` fails in the
 //! shared namespace. Only `CONST` crosses the module boundary, read
 //! as `ALIAS::NAME`.
@@ -1463,7 +1463,7 @@ fn const_qualified_targets_never_bind() {
         "#},
     );
     // `ALIAS::NAME` is a read-only expression: it never serves as
-    // a `SET`, `LIST_APPEND`, or `READ_LINE` target.
+    // a reassignment (`$var = <expr>`), `LIST_APPEND`, or `READ_LINE` target.
     for (script, fragment) in [
         (
             indoc! {r#"

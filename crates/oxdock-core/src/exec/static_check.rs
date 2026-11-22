@@ -39,7 +39,8 @@
 //!   satisfy completeness (zero-trip); a `RETURN` solely inside a loop
 //!   needs an unconditional fallback after it.
 //! - Environments are flow-sensitive and sequential: `LET` declares,
-//!   `SET` keeps the declared type (runtime coerces), branches fork
+//!   `$var = <expr>` reassignment keeps the declared type (runtime coerces),
+//!   branches fork
 //!   and discard (arm declarations are scope-local at runtime, so no
 //!   merge is needed — discarding is exact, not conservative).
 //! - `ANY` widens unidirectionally only. An `ANY`-typed argument into
@@ -142,8 +143,8 @@ struct FuncInfo {
 /// One top-level binding with its guard and constness. Guards ride along
 /// so platform-specific `LET`s/`CONST`s enforce coverage instead of
 /// reading as unconditional. `is_const` distinguishes the binding
-/// family: `SET`, `LIST_APPEND`, and redeclaration diagnostics consult
-/// it, and only `is_const` bindings satisfy `EXPORT CONST`.
+/// family: `$var = <expr>` reassignment, `LIST_APPEND`, and redeclaration
+/// diagnostics consult it, and only `is_const` bindings satisfy `EXPORT CONST`.
 #[derive(Clone, Debug)]
 struct GuardedLet {
     name: String,
@@ -177,8 +178,8 @@ fn seed_map(bindings: &[GuardedLet]) -> HashMap<String, Vec<Binding>> {
 /// discarded with a fork. `LET` declares in the top frame only (a
 /// duplicate there mirrors the runtime redeclaration error);
 /// shadowing an outer frame is legal exactly where the runtime
-/// pushes a scope. `SET` and reads walk outward; types never change
-/// on mutation (runtime coerces).
+/// pushes a scope. `$var = <expr>` reassignment and reads walk outward; types
+/// never change on mutation (runtime coerces).
 /// One live declaration: its tag, the guard it was declared under,
 /// and whether it is a `CONST`. Same-scope duplicates with disjoint
 /// guards coexist (only one path ever binds); reads unify across
@@ -2123,8 +2124,8 @@ impl Env {
     /// overlaps the active step's site count, mirroring
     /// [`declare_inner`](Self::declare_inner): a platform-conditional
     /// `LET` never reads as `CONST` through a disjoint `CONST` entry.
-    /// Single owner for the static const gate behind `SET` and
-    /// `LIST_APPEND` rejection.
+    /// Single owner for the static const gate behind `$var = <expr>`
+    /// reassignment and `LIST_APPEND` rejection.
     fn is_const(&self, key: &str, site: Option<&GuardExpr>) -> bool {
         for frame in self.frames.iter().rev() {
             if let Some(entries) = frame.get(key) {
@@ -3393,8 +3394,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// its returns and types but never terminates the walk: the path
     /// passes through it. Branches and loops fork the environment and
     /// discard it (arm and loop declarations are scope-local at
-    /// runtime); `SET` cannot change types (runtime coerces), so no
-    /// merge is needed — discarding is exact.
+    /// runtime); `$var = <expr>` reassignment cannot change types (runtime
+    /// coerces), so no merge is needed — discarding is exact.
     #[allow(clippy::too_many_lines)]
     fn walk_body(
         &mut self,
