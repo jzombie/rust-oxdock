@@ -98,7 +98,8 @@ use crate::constants::{
     KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FROM,
     KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT,
     KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH,
-    KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
+    KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR, qualify,
+    sigil_qualified, sigil_var,
 };
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 
@@ -1325,7 +1326,7 @@ fn try_lone_value_expr(
                 }
                 return Err(TokenError {
                     stmt,
-                    msg: format!("unexpected text after ${base}::{name}"),
+                    msg: format!("unexpected text after {}", sigil_qualified(&base, &name)),
                     line: 0,
                     col: 0,
                     kind: None,
@@ -6947,9 +6948,7 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
                 && let Some(name) = match_joint_qualified(cur.toks, cur.pos + 1)
             {
                 let base = base.clone();
-                return Err(cur.err(crate::template::bare_sigil_error(&format!(
-                    "{base}::{name}"
-                ))));
+                return Err(cur.err(crate::template::bare_sigil_error(&qualify(&base, &name))));
             }
             parse_bare_atom(cur, ctx, false)
         }
@@ -8012,7 +8011,7 @@ fn parse_set_body(
             cur.toks.get(cur.pos).map(|t| &t.kind),
             Some(TokKind::Punct('.'))
         ) {
-            let mut target = format!("${var}");
+            let mut target = sigil_var(&var);
             let mut p = cur.pos;
             loop {
                 let dot = matches!(cur.toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('.')));
@@ -8028,7 +8027,8 @@ fn parse_set_body(
                 p += 2;
             }
             return Err(cur.err(format!(
-                "cannot assign to {target}: key paths read in expressions but are never mutation targets; rebind the variable instead (e.g. ${var} = MAP_SET(${var}, \"a\", 2))"
+                "cannot assign to {target}: key paths read in expressions but are never mutation targets; rebind the variable instead (e.g. {example} = MAP_SET({example}, \"a\", 2))",
+                example = sigil_var(&var),
             )));
         }
         let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);

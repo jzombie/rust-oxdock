@@ -14,7 +14,7 @@ use crate::constants::{
     KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN,
     KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT,
     KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WHILE, KEYWORD_WITH_IO, KEYWORD_WORKDIR,
-    KEYWORD_WORKSPACE, KEYWORD_WRITE,
+    KEYWORD_WORKSPACE, KEYWORD_WRITE, VAR_SIGIL, sigil_qualified,
 };
 
 /// One module's function surface for parse-time call resolution: the base
@@ -1286,14 +1286,14 @@ impl fmt::Display for Expr {
         match self {
             Expr::Literal(v) => write!(f, "{}", v),
             Expr::Var { name } => {
-                write!(f, "${}", name)
+                write!(f, "{VAR_SIGIL}{}", name)
             }
             Expr::ConstRef { alias, name } => {
-                write!(f, "${alias}::{name}")
+                write!(f, "{}", sigil_qualified(alias, name))
             }
             Expr::Env(key) => write!(f, "env:{}", key),
             Expr::KeyPath { base, keys } => {
-                write!(f, "${}", base)?;
+                write!(f, "{VAR_SIGIL}{}", base)?;
                 for key in keys {
                     write!(f, ".{}", key)?;
                 }
@@ -1410,12 +1410,12 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
         match op {
             MathOp::PushConst(v) => stack.push(format!("{}", v)),
             MathOp::Load { name } => {
-                stack.push(format!("${}", name));
+                stack.push(format!("{VAR_SIGIL}{}", name));
             }
-            MathOp::LoadConstRef { alias, name } => stack.push(format!("${alias}::{name}")),
+            MathOp::LoadConstRef { alias, name } => stack.push(sigil_qualified(alias, name)),
             MathOp::LoadEnv(key) => stack.push(format!("env:{}", key)),
             MathOp::LoadKeyPath { base, keys } => {
-                let mut s = format!("${}", base);
+                let mut s = format!("{VAR_SIGIL}{}", base);
                 for key in keys {
                     s.push('.');
                     s.push_str(key);
@@ -1431,7 +1431,7 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
                 stack.push(format!("{}({})", name, args.join(", ")));
             }
             MathOp::Inspect { name } => {
-                stack.push(format!("INSPECT(${})", name));
+                stack.push(format!("INSPECT({VAR_SIGIL}{})", name));
             }
             MathOp::Neg => {
                 let inner = stack.pop().unwrap_or_else(|| "<underflow>".to_string());

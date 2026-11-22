@@ -10,6 +10,12 @@
 /// Separator between module and function name (`STD::GLOB`).
 pub const MODULE_SEPARATOR: &str = "::";
 
+/// Variable sigil (`$NAME`, `$ALIAS::NAME`): the `$` prefix marking
+/// a variable read, binding head, or mutation target. Single owner
+/// for the sigil spelling, so diagnostics and renderers never
+/// restate it.
+pub const VAR_SIGIL: &str = "$";
+
 /// Module holding the compiled-in builtins.
 pub const STD_MODULE_NAME: &str = "STD";
 
@@ -124,4 +130,14 @@ pub fn base_name(qualified: &str) -> &str {
     split_qualified(qualified)
         .map(|(_, base)| base)
         .unwrap_or(qualified)
+}
+
+/// `$NAME` rendering for diagnostics and `Display` impls.
+pub fn sigil_var(name: &str) -> String {
+    format!("{VAR_SIGIL}{name}")
+}
+
+/// `$ALIAS::NAME` rendering for diagnostics and `Display` impls.
+pub fn sigil_qualified(alias: &str, name: &str) -> String {
+    format!("{VAR_SIGIL}{alias}{MODULE_SEPARATOR}{name}")
 }

@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use anyhow::Result;
 use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs, WorkspaceSelection};
 use oxdock_parser::constants::KEYWORD_CONST;
-use oxdock_parser::{Field, GuardExpr, Step, TypeDescriptor, TypeTag, Value};
+use oxdock_parser::{Field, GuardExpr, Step, TypeDescriptor, TypeTag, Value, sigil_var};
 use oxdock_process::{BackgroundHandle, CancelHub, CommandContext, ProcessManager};
 
 use super::exit::exit_code_of;
@@ -1240,7 +1240,7 @@ impl<P: ProcessManager> ExecState<P> {
                     oxdock_parser::check_value_at(
                         &expected,
                         &item,
-                        &format!("${key}[{}]", list.len()),
+                        &format!("{}[{}]", sigil_var(key), list.len()),
                     )?;
                 }
                 list.push(item);
@@ -1261,7 +1261,7 @@ impl<P: ProcessManager> ExecState<P> {
                 oxdock_parser::check_value_at(
                     &expected,
                     &item,
-                    &format!("${key}[{}]", list.len()),
+                    &format!("{}[{}]", sigil_var(key), list.len()),
                 )?;
             }
             list.push(item);

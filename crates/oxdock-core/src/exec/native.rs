@@ -7,8 +7,9 @@ use oxdock_fs::{GuardedPath, WorkspaceSelection};
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
-    Field, GuardExpr, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step,
-    TypeTag, Value, base_name, guards_overlap, qualify, render_structural, split_qualified,
+    Field, GuardExpr, KEYWORD_INSPECT, MODULE_SEPARATOR, SCRIPT_MODULE_NAME, STD_MODULE_NAME,
+    SemaphoreState, Step, TypeTag, Value, base_name, guards_overlap, qualify, render_structural,
+    split_qualified,
 };
 use oxdock_pipe::PipeHandle;
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
@@ -120,7 +121,7 @@ pub(super) fn classify_alias_call(
     name: &str,
     exists: &dyn Fn(&str) -> bool,
 ) -> AliasResolution {
-    let Some((alias, base)) = name.split_once("::") else {
+    let Some((alias, base)) = split_qualified(name) else {
         return AliasResolution::Global;
     };
     if alias == SCRIPT_MODULE_NAME {
@@ -373,6 +374,14 @@ pub(super) enum ConstHolders {
     },
 }
 
+/// Suffix probe for the matcher's canonical keys (`file::base`):
+/// the base is ours, so stripping it recovers the file exactly,
+/// and only a covering file counts as a holder. Single owner for
+/// the suffix shape, so call sites never restate the separator.
+fn const_canonical_suffix(name: &str) -> String {
+    format!("{MODULE_SEPARATOR}{name}")
+}
+
 /// Classify one qualified-`CONST` read to its holder files.
 pub(super) fn const_holder_files<S: ModuleGraphView>(
     view: &S,
@@ -381,7 +390,7 @@ pub(super) fn const_holder_files<S: ModuleGraphView>(
     name: &str,
 ) -> ConstHolders {
     let qualified = qualify(alias, name);
-    let suffix = format!("::{name}");
+    let suffix = const_canonical_suffix(name);
     // Suffix probe for the matcher's canonical keys
     // (`file::base`): the base is ours, so stripping it recovers the
     // file exactly, and only a covering file counts as a holder.
@@ -526,7 +535,7 @@ fn chase_from<S: ModuleGraphView>(
     chain: &mut Vec<String>,
     terminals: &mut Vec<String>,
 ) -> Result<(), ForwardError> {
-    let suffix = format!("::{name}");
+    let suffix = const_canonical_suffix(name);
     let covering = |canonical: &str| {
         canonical
             .strip_suffix(suffix.as_str())

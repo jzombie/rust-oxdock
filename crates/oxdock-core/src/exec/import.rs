@@ -15,7 +15,9 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use oxdock_fs::{GuardedPath, WorkspaceFs};
-use oxdock_parser::{ExportKind, Exports, MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value};
+use oxdock_parser::{
+    ExportKind, Exports, MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value, qualify,
+};
 use oxdock_process::ProcessManager;
 
 use super::resolve_script_params;
@@ -704,7 +706,7 @@ pub(crate) fn insert_imported_type<P: ProcessManager>(
     path: &str,
 ) -> Result<()> {
     let key = match alias {
-        Some(alias) => format!("{alias}::{name}"),
+        Some(alias) => qualify(alias, name),
         None => name.to_string(),
     };
     if let Some(existing) = state.type_aliases.get(&key) {

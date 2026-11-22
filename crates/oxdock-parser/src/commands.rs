@@ -33,7 +33,7 @@ use crate::constants::{
     KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE,
     KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP,
     KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE,
-    KEYWORD_WHILE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE,
+    KEYWORD_WHILE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE, sigil_var,
 };
 use crate::error::{ParseError, ParseResult, SpanContext};
 use indoc::indoc;
@@ -5625,7 +5625,7 @@ impl fmt::Display for StepKind {
                 } else {
                     KEYWORD_LET
                 };
-                let name = format!("${var}");
+                let name = sigil_var(var);
                 match rhs {
                     BindRhs::Expr(expr) => {
                         // Bare pipe declarations round-trip without an initializer.
@@ -5710,7 +5710,7 @@ impl fmt::Display for StepKind {
                 env,
                 body,
             } => {
-                let mut entries: Vec<String> = vars.iter().map(|v| format!("${v}")).collect();
+                let mut entries: Vec<String> = vars.iter().map(|v| sigil_var(v)).collect();
                 entries.extend(env.iter().map(|e| format!("env:{e}")));
                 if entries.is_empty() {
                     write!(f, "{} {target} {{", KEYWORD_REMOTE)?;
@@ -5741,7 +5741,12 @@ impl fmt::Display for StepKind {
                 let ps: Vec<String> = params
                     .iter()
                     .map(|(p, t, optional)| {
-                        format!("${}{}: {}", p, if *optional { "?" } else { "" }, t)
+                        format!(
+                            "{}{}: {}",
+                            sigil_var(p),
+                            if *optional { "?" } else { "" },
+                            t
+                        )
                     })
                     .collect();
                 if *is_async {

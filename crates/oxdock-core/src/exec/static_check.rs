@@ -86,7 +86,7 @@ use oxdock_parser::template::{
 };
 use oxdock_parser::{
     CompareOp, ExportKind, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag,
-    Value, base_name, qualify, render_structural, split_qualified,
+    Value, base_name, qualify, render_structural, sigil_var, split_qualified,
 };
 use oxdock_process::ProcessManager;
 
@@ -1734,7 +1734,7 @@ fn expr_call_names(expr: &Expr, enter_funcdefs: bool, out: &mut Vec<String>) {
 /// One call spelling snapped to entry-namespace names: bare heads and
 /// `SCRIPT::` heads; file aliases and hosts belong to other units.
 fn push_entry_call_name(name: &str, out: &mut Vec<String>) {
-    if let Some((module, base)) = name.split_once("::") {
+    if let Some((module, base)) = split_qualified(name) {
         if module == oxdock_parser::SCRIPT_MODULE_NAME {
             out.push(base.to_string());
         }
@@ -2041,7 +2041,7 @@ impl Env {
                         Some(acc) => unify(
                             acc,
                             entry.tag.clone(),
-                            &format!("${key} across platform guards"),
+                            &format!("{} across platform guards", sigil_var(key)),
                         )?,
                     });
                     union = match (union, entry.guard.clone()) {
@@ -2094,7 +2094,7 @@ impl Env {
                         Some(acc) => unify(
                             acc,
                             entry.tag.clone(),
-                            &format!("${key} across platform guards"),
+                            &format!("{} across platform guards", sigil_var(key)),
                         )?,
                     });
                 }
@@ -2456,9 +2456,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
             }
             TemplateVar::ConstRef { alias, name } => {
-                return Err(anyhow::anyhow!(bare_sigil_error(&format!(
-                    "{alias}::{name}"
-                ))));
+                return Err(anyhow::anyhow!(bare_sigil_error(&qualify(alias, name))));
             }
             TemplateVar::KeyPath { base, keys } => {
                 return Err(anyhow::anyhow!(bare_sigil_error(&format!(
@@ -2949,7 +2947,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             } => {
                 self.define_collected(
                     name,
-                    vec![name.clone(), format!("SCRIPT::{name}")],
+                    vec![
+                        name.clone(),
+                        oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, name),
+                    ],
                     params,
                     return_type,
                     *is_async,
@@ -3092,7 +3093,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     None => {
                         self.define_collected(
                             name,
-                            vec![name.clone(), format!("SCRIPT::{name}")],
+                            vec![
+                                name.clone(),
+                                oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, name),
+                            ],
                             params,
                             return_type,
                             *is_async,

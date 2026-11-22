@@ -88,31 +88,34 @@ pub fn parse_placeholder_call(key: &str) -> Option<PlaceholderCall<'_>> {
         Bare(&'a str),
         Qualified { name: &'a str, start: usize },
     }
-    let head_parsed = if let Some((left, right)) = head.split_once("::") {
-        if left.is_empty() || !left.chars().all(is_module_char) {
-            return None;
-        }
-        let name = right.trim();
-        if name.is_empty() || !name.chars().all(is_module_char) {
-            return None;
-        }
-        // Qualified heads stay permissive here (runtime spellings
-        // allow `alnum _ -`); resolution validates case later, so an
-        // unknown-case head still fails naming the culprit.
-        // `head` opens `trimmed`, so the name offset inside `head`
-        // is its offset inside `trimmed` too.
-        let colon = head.find("::").expect("split found ::");
-        let leading = head[colon + 2..].len() - head[colon + 2..].trim_start().len();
-        Head::Qualified {
-            name,
-            start: colon + 2 + leading,
-        }
-    } else {
-        if !is_bare_head(head) {
-            return None;
-        }
-        Head::Bare(head)
-    };
+    let head_parsed =
+        if let Some((left, right)) = head.split_once(crate::constants::MODULE_SEPARATOR) {
+            if left.is_empty() || !left.chars().all(is_module_char) {
+                return None;
+            }
+            let name = right.trim();
+            if name.is_empty() || !name.chars().all(is_module_char) {
+                return None;
+            }
+            // Qualified heads stay permissive here (runtime spellings
+            // allow `alnum _ -`); resolution validates case later, so an
+            // unknown-case head still fails naming the culprit.
+            // `head` opens `trimmed`, so the name offset inside `head`
+            // is its offset inside `trimmed` too.
+            let colon = head
+                .find(crate::constants::MODULE_SEPARATOR)
+                .expect("split found ::");
+            let leading = head[colon + 2..].len() - head[colon + 2..].trim_start().len();
+            Head::Qualified {
+                name,
+                start: colon + 2 + leading,
+            }
+        } else {
+            if !is_bare_head(head) {
+                return None;
+            }
+            Head::Bare(head)
+        };
     // The shared atom scan drives depth: quoted runs (including
     // `"""` blocks) arrive whole as Text, so parens inside strings
     // never count. Only structural opens and closes move depth.
@@ -155,7 +158,11 @@ pub fn parse_placeholder_call(key: &str) -> Option<PlaceholderCall<'_>> {
         Head::Qualified { name, start } => {
             let abs = base + start;
             Some(PlaceholderCall {
-                module: Some(&head[..head.find("::").expect("split found ::")]),
+                module: Some(
+                    &head[..head
+                        .find(crate::constants::MODULE_SEPARATOR)
+                        .expect("split found ::")],
+                ),
                 name,
                 name_span: abs..abs + name.len(),
                 args_raw,
@@ -527,7 +534,8 @@ pub enum PlaceholderKey<'a> {
     /// [`PlaceholderKey::DollarQualified`].
     Dollar(&'a str),
     /// `$ALIAS::NAME` with optional `.key` tail. Single owner for
-    /// the split, so no call site restates `split_once("::")`.
+    /// the split (see [`parse_dollar_qualified`]), so no call site
+    /// restates [`crate::constants::split_qualified`].
     /// The empty-tail shape resolves; a `.key` tail fails with
     /// [`qualified_keypath_error`].
     DollarQualified {
@@ -569,7 +577,7 @@ pub fn is_bare_ident(src: &str) -> bool {
 /// not that shape: the caller keeps its own invalid-syntax error.
 /// Single owner for qualified-CONST syntax; every phase routes here.
 pub fn parse_qualified_const(src: &str) -> Option<(&str, &str)> {
-    let (alias, rest) = src.split_once("::")?;
+    let (alias, rest) = crate::constants::split_qualified(src)?;
     if !is_bare_ident(alias) || !is_bare_ident(rest) {
         return None;
     }
@@ -604,7 +612,10 @@ pub fn parse_bare_key_path(src: &str) -> Option<(&str, Vec<String>)> {
 /// resolve bare words. Single owner for the wording, so the static
 /// gate and runtime expansion agree word for word.
 pub fn bare_sigil_error(src: &str) -> String {
-    format!("bare `{src}` never reads a binding here; use `${src}`")
+    format!(
+        "bare `{src}` never reads a binding here; use `{}{src}`",
+        crate::constants::VAR_SIGIL
+    )
 }
 
 /// Error text for a key path on `$ALIAS::NAME`. Qualified reads
@@ -617,14 +628,14 @@ pub fn qualified_keypath_error() -> String {
 
 /// One `$ALIAS::NAME[.key...]` shape from post-`$` rest. Returns the
 /// alias, the name, and the dot tail (possibly empty). `None` means
-/// not that shape. Single owner for the `$`-qualified split, so no
-/// call site restates `split_once("::")`.
+/// not that shape. Single owner for the `$`-qualified split (see
+/// [`crate::constants::split_qualified`]), so no call site restates it.
 pub fn parse_dollar_qualified(rest: &str) -> Option<(&str, &str, Vec<String>)> {
     let (head, tail) = match rest.split_once('.') {
         Some((h, t)) => (h, Some(t)),
         None => (rest, None),
     };
-    let (alias, name) = head.split_once("::")?;
+    let (alias, name) = crate::constants::split_qualified(head)?;
     if !is_bare_ident(alias) || !is_bare_ident(name) {
         return None;
     }
@@ -737,8 +748,8 @@ pub enum TemplateArg<'a> {
     Dollar(&'a str),
     /// `$ALIAS::NAME` with optional `.key` tail: the empty tail
     /// resolves, a `.key` tail fails with [`qualified_keypath_error`].
-    /// Single owner for the split, so no call site restates
-    /// `split_once("::")`.
+    /// Single owner for the split (see [`parse_dollar_qualified`]),
+    /// so no call site restates [`crate::constants::split_qualified`].
     DollarQualified {
         alias: &'a str,
         name: &'a str,

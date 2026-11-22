@@ -28,7 +28,7 @@ use std::sync::{
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::PreRunCheck;
-use oxdock_parser::{Expr, Step, StepKind};
+use oxdock_parser::{Expr, Step, StepKind, split_qualified};
 use oxdock_pipe::ScriptPipe;
 
 use crate::validate::{EndpointKey, VirtualEndpoint};
@@ -562,7 +562,7 @@ fn inspect_call(module: &str, name: &str, args: &[Expr]) -> Option<(&'static str
 /// enforcement test pins this map against every registered function;
 /// the map itself stays single-sourced here.
 pub fn classify_service_call(module: &str, name: &str) -> Option<&'static str> {
-    let (mod_part, base) = match name.split_once("::") {
+    let (mod_part, base) = match split_qualified(name) {
         Some((module, base)) => (Some(module), base),
         None => (None, name),
     };

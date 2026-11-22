@@ -16,7 +16,7 @@ use oxdock_parser::constants::KEYWORD_RUN;
 use oxdock_parser::constants::{KEYWORD_CONST, KEYWORD_LET};
 use oxdock_parser::{
     Arg, Command, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value,
-    WorkspaceTarget, render_structural,
+    WorkspaceTarget, render_structural, sigil_var,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
@@ -4929,7 +4929,7 @@ fn resolve_task_entry<P: ProcessManager>(
     let Some(task_id) = val.as_handle() else {
         bail!("variable '${var}' is not a task handle");
     };
-    resolve_task_entry_by_id(task_id, &format!("${var}"), cx)
+    resolve_task_entry_by_id(task_id, &sigil_var(var), cx)
 }
 
 /// Resolve a task id to its shared registry entry. Backs single-handle
@@ -5100,7 +5100,7 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
             // function's own `'{label}'` messages. Splitting the two
             // keeps every rendering at exactly one `$`.
             let member = format!("{var}[{idx}]");
-            let label = format!("${member}");
+            let label = sigil_var(&member);
             let Some(task_id) = item.as_handle() else {
                 bail!(
                     "AWAIT '{label}' is not a task handle, got {}",
