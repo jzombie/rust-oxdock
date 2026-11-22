@@ -110,6 +110,21 @@ pub(super) fn inherit_env<P: ProcessManager>(
             }
         }
     }
+    // Module init capture: executed top-level `INHERIT_ENV` keys belong
+    // to the live init body, recorded as they run under their guards.
+    // The init record does not exist yet, so accumulate on the init
+    // stack drained into `ModuleInit::inherit_names` after execution.
+    // Gated on `call_depth == 0` so a nested callee re-inherit (a call
+    // into another module during init) never leaks into this init.
+    if cx.state.call_depth == 0
+        && let Some(top) = cx.state.init_inherit_stack.last_mut()
+    {
+        for key in keys {
+            if !top.contains(key) {
+                top.push(key.clone());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2574,7 +2589,9 @@ pub(crate) fn define_func<P: ProcessManager>(
     // scope: entry top-level runs at depth one with no floor, module
     // init top-level runs one above its floor, and any nested block
     // or call body runs deeper. Block-scoped `FUNC`s never capture
-    // unwound workspace state.
+    // unwound workspace state. Module init resets `call_depth` to
+    // zero across its body, so a module first imported inside a
+    // `FUNC` still seals its top-level jails.
     // Sealed into the registry entry for direct hits and into the
     // owning file frame for frame-walk hits, so both lookup paths
     // serve the same site. Harvest registration and call-time

@@ -482,6 +482,7 @@ pub(crate) fn new_state<P: ProcessManager>(
         type_aliases: std::collections::HashMap::new(),
         type_env_digest: 0,
         call_depth: 0,
+        init_inherit_stack: Vec::new(),
         // Root flow is task 0; worker ids start at 1 (see next_task_id).
         task_id: 0,
         push_manifest: Vec::new(),

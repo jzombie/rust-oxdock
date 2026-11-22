@@ -812,37 +812,24 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
 }
 
 /// Whether a module top-level establishes its own jail (#322): a
-/// top-level `WORKSPACE` or `WORKDIR` step, including inside nested
-/// control-flow blocks (a conditional `IF ... { WORKSPACE LOCAL }`
-/// still reroutes the init-final jail on its path, so harvests must
-/// observe it). Conservative by construction: any path that may set
-/// the jail triggers init. Nested `FUNC` bodies never count: they
-/// run in their own call jail, never the init flow. Single owner for
-/// the harvest init-requirement gate, so the classifier can never
-/// disagree with the init it triggers. The block walk reuses
-/// `walk_child_kinds`, the shared child-step owner, instead of
-/// restating per-variant bodies.
+/// direct top-level `WORKSPACE` or `WORKDIR` step, whether or not
+/// guard-gated. Block scopes (`IF`, `FOR`, `WHILE`, `SWITCH`,
+/// `ISOLATED`, `TIMEOUT`) unwind `WORKSPACE` and `WORKDIR` on exit
+/// and can never establish a module jail, so nested bodies never
+/// count. Nested `FUNC` bodies never count: they run in their own
+/// call jail, never the init flow. Single owner for the harvest
+/// init-requirement gate, so the classifier can never disagree with
+/// the init it triggers.
 fn module_top_level_sets_jail(steps: &[Step]) -> bool {
     steps.iter().any(|step| step_sets_jail(&step.kind))
 }
 
-/// One step's contribution to [`module_top_level_sets_jail`]: direct
-/// jail setters count; nested function definitions never do; every
-/// other block shape defers to the shared child walk.
+/// One step's contribution to [`module_top_level_sets_jail`]: only
+/// direct top-level jail setters count. Block-nested setters unwind
+/// on block exit and nested `FUNC` bodies run in their own call
+/// jail, so neither can establish the module jail.
 fn step_sets_jail(kind: &StepKind) -> bool {
-    match kind {
-        StepKind::Workspace(_) | StepKind::Workdir(_) => true,
-        StepKind::FuncDef { .. } => false,
-        _ => {
-            let mut found = false;
-            kind.walk_child_kinds(&mut |child| {
-                if step_sets_jail(child) {
-                    found = true;
-                }
-            });
-            found
-        }
-    }
+    matches!(kind, StepKind::Workspace(_) | StepKind::Workdir(_))
 }
 
 /// Run a module top-level init body once per file (#322): the jail
@@ -893,6 +880,18 @@ fn ensure_module_init<P: ProcessManager>(
         cx.state
             .func_floors
             .push(cx.state.functions.scope_depth().saturating_sub(1));
+        // Definition-site jails seal only at file top-level
+        // (`call_depth == 0`): a module first imported inside a `FUNC`
+        // body would otherwise run its init with `call_depth >= 1`
+        // and silently drop every `def_jail`. Reset across init so
+        // top-level `FUNC`s seal their site no matter the importer.
+        // Balanced calls inside the body increment from zero and
+        // restore to zero before the outer depth returns.
+        let saved_call_depth = cx.state.call_depth;
+        cx.state.call_depth = 0;
+        // Executed `INHERIT_ENV` keys accumulate here as they run,
+        // drained into `ModuleInit::inherit_names` after execution.
+        cx.state.init_inherit_stack.push(Vec::new());
         // Fixed default jail for the module top-level (#322): the
         // snapshot root with the seed env. Caller workspace, cwd,
         // env, and isolated scrubs never flow into init. The init
@@ -923,8 +922,13 @@ fn ensure_module_init<P: ProcessManager>(
             false,
         );
         // Unwind the module context on every path: nested definitions
-        // below already owner-tagged while it was up.
+        // below already owner-tagged while it was up. Restore the
+        // caller call depth and drain executed `INHERIT_ENV` keys
+        // before propagating errors, so failures never leak init
+        // state into the importer.
         let _ = cx.state.module_stack.pop();
+        let inherit_names = cx.state.init_inherit_stack.pop().unwrap_or_default();
+        cx.state.call_depth = saved_call_depth;
         let flow = flow?;
         // Drain the init frame's top-level bindings into the shared
         // store before the scope pops: this is the module's global
@@ -991,14 +995,10 @@ fn ensure_module_init<P: ProcessManager>(
                 module_env.remove(name);
             }
         }
-        let mut inherit_names = Vec::new();
-        for step in steps {
-            if let StepKind::InheritEnv { keys } = &step.kind
-                && oxdock_parser::guard_option_allows(step.guard.as_ref(), &cx.state.envs)
-            {
-                inherit_names.extend(keys.iter().cloned());
-            }
-        }
+        // `inherit_names` were recorded as `INHERIT_ENV` steps actually
+        // executed (see `handlers::inherit_env`); no post-hoc guard
+        // re-evaluation against final envs, so later `ENV` mutations
+        // cannot rewrite which names ran.
         record.init = Some(super::state::ModuleInit {
             vars: drained,
             const_vars: drained_consts,

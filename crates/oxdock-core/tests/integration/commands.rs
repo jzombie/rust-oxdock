@@ -852,8 +852,7 @@ fn copy_git_includes_dirty_file() {
     // Modify the tracked file without committing.
     write_text(&hello, "dirty hello");
 
-    // Bare `HEAD` would read as a `CONST` ref; quote the git ref
-    // so it stays a literal string.
+    // Quote the git ref so it stays a literal string.
     let script = "COPY_GIT --include-dirty \"HEAD\" hello.txt out_hello.txt";
     let steps = oxdock_core::parse_script(script).unwrap();
     run_steps_with_context(&snapshot, &repo, &steps).unwrap();

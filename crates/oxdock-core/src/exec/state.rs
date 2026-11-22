@@ -258,6 +258,11 @@ pub struct ExecState<P: ProcessManager> {
     /// `MAX_CALL_DEPTH`; cloned (not reset) by `fork()` so async children
     /// inherit the caller's depth budget.
     pub(super) call_depth: usize,
+    /// Executed `INHERIT_ENV` keys per live module init, innermost last.
+    /// Pushed empty before the init body runs and popped after, so
+    /// `inherit_env` records keys as they actually execute under their
+    /// guards instead of re-scanning steps against final envs.
+    pub(super) init_inherit_stack: Vec<Vec<String>>,
     /// Identity of the task this state executes (`0` = root flow).
     /// Stamped onto pipe handles minted here and compared by the promotion
     /// check: only the declaring task may promote its own pipes.
@@ -877,6 +882,7 @@ impl<P: ProcessManager> ExecState<P> {
             type_aliases: self.type_aliases.clone(),
             type_env_digest: self.type_env_digest,
             call_depth: self.call_depth,
+            init_inherit_stack: self.init_inherit_stack.clone(),
             task_id: self.task_id,
             // Forks start with an empty manifest: async children record
             // their own executions; the guest packs the root manifest.

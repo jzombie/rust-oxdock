@@ -972,13 +972,11 @@ fn harvested_func_observes_guarded_top_level_jail() {
 
 #[test]
 fn harvested_func_runs_init_for_conditional_top_level_jail() {
-    // The classifier walks control-flow blocks: a conditional
-    // `IF ... { WORKSPACE LOCAL }` at the module top-level still
-    // triggers init on harvest. Block scoping unwinds the selection
-    // on IF exit (like every block), so the restored callee jail is
-    // the snapshot default; the proof that init ran is its surviving
-    // filesystem effect, visible from an explicit `WORKSPACE LOCAL`
-    // in the entry.
+    // Block scopes unwind on exit and can never establish a module
+    // jail: a conditional `IF ... { WORKSPACE LOCAL }` at the module
+    // top-level must not trigger init on harvest. The proof that init
+    // did not run is the absent filesystem effect, visible from an
+    // explicit `WORKSPACE LOCAL` in the entry.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     write_lib(
@@ -1009,13 +1007,70 @@ fn harvested_func_runs_init_for_conditional_top_level_jail() {
     let bindings = Engine::new().run_steps(&root, &steps).unwrap().bindings;
     assert_eq!(
         bindings.get("n").and_then(|v| v.as_i64()),
-        Some(1),
-        "conditional top-level jail must trigger init on harvest"
+        Some(0),
+        "conditional block-scoped jail must not trigger init on harvest"
     );
     assert_eq!(
         bindings.get("callee").and_then(|v| v.as_str()),
         Some(SNAPSHOT_PENDING_DISPLAY),
         "block-scoped WORKSPACE unwinds on IF exit, so the callee keeps the snapshot default"
+    );
+}
+
+#[test]
+fn function_local_import_seals_definition_site_jails() {
+    // A module first imported inside a `FUNC` body still seals each
+    // top-level `FUNC` definition-site jail: init runs with a reset
+    // call depth, so `WORKDIR`-separated definitions serve their own
+    // site instead of falling back to the init-final cwd.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            WORKSPACE LOCAL
+            MKDIR a
+            MKDIR b
+            WORKDIR a
+            EXPORT [FUNC F_A, FUNC F_B]
+            FUNC F_A(): STRING {
+                LET $c: STRING = CWD()
+                RETURN $c
+            }
+            WORKDIR ../b
+            FUNC F_B(): STRING {
+                LET $c: STRING = CWD()
+                RETURN $c
+            }
+        "#},
+    );
+    let steps = parse_script(indoc! {r#"
+        IMPORT [STD]
+        FUNC TRIGGER(): STRING {
+            IMPORT ["lib.oxfile" AS LIB]
+            LET $a: STRING = LIB::F_A()
+            LET $b: STRING = LIB::F_B()
+            RETURN "{{ $a }}|{{ $b }}"
+        }
+        LET $got: STRING = TRIGGER()
+    "#})
+    .unwrap();
+    let bindings = Engine::new().run_steps(&root, &steps).unwrap().bindings;
+    let got = bindings.get("got").and_then(|v| v.as_str()).unwrap();
+    let (a, b) = got.split_once('|').expect("TRIGGER joins two jails");
+    assert!(
+        a.ends_with('a'),
+        "F_A must restore its definition-site WORKDIR, got {a}"
+    );
+    assert!(
+        b.ends_with('b'),
+        "F_B must restore its definition-site WORKDIR, got {b}"
+    );
+    assert_ne!(
+        a, b,
+        "separated definitions must not collapse to init-final cwd"
     );
 }
 
@@ -1545,6 +1600,90 @@ fn cross_module_inherit_env_stays_independent() {
             "#},
         )
         .expect_err("A must not see B's inherit");
+    assert!(
+        format!("{err:#}").contains("env:MOD_B_TOKEN"),
+        "fails closed naming the uninherited name, got: {err:#}"
+    );
+}
+
+#[test]
+fn module_init_call_does_not_leak_callee_inherit() {
+    // Init-time calls must not leak callee `INHERIT_ENV` into the
+    // caller init: A warms B at top level during its own init, so B
+    // re-inherits `MOD_B_TOKEN` at `call_depth == 1`. That re-read
+    // must not land in A's `init_inherit_stack`, so A functions still
+    // fail closed on `env:MOD_B_TOKEN` while A's own inherit works.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "b.oxfile",
+        indoc! {r#"
+            IMPORT [STD]
+            INHERIT_ENV [MOD_B_TOKEN]
+            EXPORT [FUNC GET_VALUE]
+            FUNC GET_VALUE(): STRING {
+                RETURN "{{ env:MOD_B_TOKEN }}"
+            }
+        "#},
+    );
+    write_lib(
+        &root,
+        "a.oxfile",
+        indoc! {r#"
+            INHERIT_ENV [MOD_A_TOKEN]
+            IMPORT [STD, "b.oxfile" AS B]
+            LET $warm: STRING = B::GET_VALUE()
+            EXPORT [FUNC GET_OWN]
+            FUNC GET_OWN(): STRING {
+                RETURN "{{ env:MOD_A_TOKEN }}"
+            }
+        "#},
+    );
+    let mut io = ExecIo::new();
+    io.insert_inherit_env("MOD_A_TOKEN", "aye-value");
+    io.insert_inherit_env("MOD_B_TOKEN", "bee-value");
+    let out = Engine::new()
+        .with_io(io.clone())
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "a.oxfile" AS A]
+                LET $own: STRING = A::GET_OWN()
+            "#},
+        )
+        .expect("A serves its own inherit despite warming B during init");
+    assert_eq!(
+        out.bindings.get("own").and_then(|v| v.as_str()),
+        Some("aye-value"),
+        "A's top-level INHERIT_ENV still captured at call_depth 0"
+    );
+    // Negative direction in a separate file revision so the positive
+    // closure above validates clean: A reading B's name directly fails
+    // closed even though A's init warmed B.
+    write_lib(
+        &root,
+        "a.oxfile",
+        indoc! {r#"
+            INHERIT_ENV [MOD_A_TOKEN]
+            IMPORT [STD, "b.oxfile" AS B]
+            LET $warm: STRING = B::GET_VALUE()
+            EXPORT [FUNC TRY_READ_B]
+            FUNC TRY_READ_B(): STRING {
+                RETURN "{{ env:MOD_B_TOKEN }}"
+            }
+        "#},
+    );
+    let err = Engine::new()
+        .with_io(io)
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, "a.oxfile" AS A]
+                LET $got: STRING = A::TRY_READ_B()
+            "#},
+        )
+        .expect_err("A must not acquire B's inherit via init-time call");
     assert!(
         format!("{err:#}").contains("env:MOD_B_TOKEN"),
         "fails closed naming the uninherited name, got: {err:#}"

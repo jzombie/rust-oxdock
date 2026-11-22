@@ -2831,7 +2831,9 @@ bodies restore the workspace selection and cwd their
 own top-level left behind, so a lib declaring
 WORKSPACE at the top serves its FUNCs from there no
 matter which workspace the caller sits in; entry
-bodies reset to the snapshot jail instead. A FUNC-level
+bodies restore the workspace selection and cwd sealed
+at their definition site (defaulting to the snapshot
+jail when none was set before definition). A FUNC-level
 WORKSPACE or WORKDIR statement overrides the file
 default for that call, and the caller context returns
 on every exit path. Conditional top-level configuration

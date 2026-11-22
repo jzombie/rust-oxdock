@@ -7,8 +7,8 @@
 # 3. Three containers run off that image with stdio streamed
 #    through DSL pipes, transformed by the DSL itself.
 #
-# Run: `oxdock oxdock/examples/docker-pipeline.oxdock`
-# Without docker the script skips cleanly instead of failing.
+# Run: `oxdock oxdock/examples/docker-pipeline.oxfile`
+# Without docker the script fails naming the missing dependency.
 
 IMPORT [STD]
 

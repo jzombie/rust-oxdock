@@ -1283,7 +1283,8 @@ fn try_squote_value(region: &[Tok]) -> Option<String> {
 }
 
 /// Lone assignable shapes (`assign_expr` without continuation): `$var`,
-/// key paths, `env:KEY`, bare `CONST`, and full-region calls
+/// key paths, `env:KEY`, `$`-sigiled `CONST` reads (`$NAME`,
+/// `$ALIAS::NAME`), and full-region calls
 /// (resolved). Anything longer renders raw; the caller decides
 /// strictness.
 fn try_lone_value_expr(
@@ -2807,8 +2808,8 @@ fn parse_call_args(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Vec<Exp
 }
 
 /// Lower a call-shape to `Expr`: `INSPECT` keeps its variable
-/// unevaluated (`INSPECT($var)` for `LET`, `INSPECT(NAME)` for
-/// `CONST`); everything else resolves statically through the shared
+/// unevaluated (`INSPECT($var)` for `LET` and `$`-sigiled `CONST`
+/// reads); everything else resolves statically through the shared
 /// resolver.
 fn parse_expr_call(
     name: String,
@@ -3143,10 +3144,10 @@ fn parse_io_bindings(
     Ok(Some(out))
 }
 
-/// One `stream[=$var]` / `stream[=NAME]` / `rows|cols=int` binding.
+/// One `stream[=$var]` / `rows|cols=int` binding.
 /// Gaps ride free around `=`/`,`/names like `ws?`; only `$`+name
-/// stays gapless (atomic `dollar_ident`), while bare `NAME` reads a
-/// `CONST` pipe. Streams and size names outside the grammar's words
+/// stays gapless (atomic `dollar_ident`), covering `LET` and
+/// `$`-sigiled `CONST` pipes alike. Streams and size names outside the grammar's words
 /// miss the shape; a valued `tty` and out-of-range geometry fail
 /// loudly with exact messages.
 fn parse_io_binding_part(
@@ -3251,8 +3252,8 @@ fn io_stream_of(name: &str) -> IoStream {
     }
 }
 
-/// `AWAIT`/`CANCEL $var` shape at `pos`, plus bare `AWAIT NAME`
-/// for `CONST` handles. A head without `$` or bare const misses
+/// `AWAIT`/`CANCEL $var` shape at `pos` (`$`-sigiled, covering `LET`
+/// and `CONST` handles alike). A head without `$` misses
 /// (`None`: generic fails it in lowering); once `$` commits, the
 /// name must follow and parse errors stay loud. `var_joint`
 /// enforces atomic adjacency inside compound parents.
@@ -6160,7 +6161,7 @@ fn parse_export_at(
     // Bare name (greedy `::` prefix; trailing loops outside). Bare
     // stays func for back-compat; `TYPE`/`FUNC` prefix selects above.
     // Func names never take `$`: `EXPORT $X` errors inside
-    // `parse_export_name`, exactly like a bare `CONST` read elsewhere.
+    // `parse_export_name`, exactly like a `$`-less read elsewhere.
     match parse_export_name(toks, pos + 1, false, stmt)? {
         Some((name, used)) => Ok(Some((
             ExportNames {

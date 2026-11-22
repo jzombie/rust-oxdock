@@ -389,6 +389,7 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
         type_aliases: HashMap::new(),
         type_env_digest: 0,
         call_depth: 0,
+        init_inherit_stack: Vec::new(),
         task_id: 0,
         push_manifest: Vec::new(),
         _marker: std::marker::PhantomData,
