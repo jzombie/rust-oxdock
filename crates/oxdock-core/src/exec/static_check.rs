@@ -72,6 +72,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// Home-scope function index: (defining file, base) to all guarded
+/// overloads. Single alias so the complex type appears once.
+type HomeFuncs = HashMap<(String, String), Vec<(Option<GuardExpr>, FuncInfo)>>;
+
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::constants::{
@@ -336,12 +340,12 @@ struct Checker<'a, P: ProcessManager> {
     strict_qualified: bool,
     /// Home-scope function index (#319): every top-level `FUNC` per
     /// closure file, exported or private, keyed by (defining file,
-    /// base name). Lets module bodies validate against unharvested
-    /// and private siblings without making them externally
-    /// resolvable (unlike `funcs`, which only holds collected names).
-    /// Entry top-level `FUNC`s index under (`"entry"`, base) the same
-    /// way, so entry bodies resolve their own file frame (#322).
-    home_funcs: HashMap<(String, String), FuncInfo>,
+    /// base name) to all guarded overloads. Disjoint guarded defs
+    /// coexist like runtime `top_funcs`; resolution filters by the
+    /// active site guard instead of last-wins. Entry top-level
+    /// `FUNC`s index under (`"entry"`, base) the same way, so entry
+    /// bodies resolve their own file frame (#322).
+    home_funcs: HomeFuncs,
     /// First textual top-level `FUNC` per file, keyed like
     /// `home_funcs` (#322): harvests bind the first matching
     /// definition (mirroring `import_funcs`' first-match lookup),
@@ -532,23 +536,11 @@ fn module_lets_indexed<P: ProcessManager>(
         if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
             continue;
         }
-        // Every top-level binding form counts, so a file using
-        // capture/async/readline initializers resolves exactly like
-        // one using plain `LET`/`CONST`.
+        // Every top-level binding counts, whatever its right-hand
+        // side, so capture/async/readline initializers resolve
+        // exactly like plain `LET`/`CONST`.
         match &step.kind {
-            StepKind::Assign {
-                var,
-                decl_type,
-                is_const,
-                ..
-            }
-            | StepKind::AssignCapture {
-                var,
-                decl_type,
-                is_const,
-                ..
-            }
-            | StepKind::AssignAsync {
+            StepKind::Bind {
                 var,
                 decl_type,
                 is_const,
@@ -560,25 +552,6 @@ fn module_lets_indexed<P: ProcessManager>(
                 out.push((
                     GuardedLet {
                         name: clean_var(var),
-                        tag,
-                        guard: step.guard.clone(),
-                        is_const: *is_const,
-                    },
-                    idx,
-                ));
-            }
-            StepKind::AwaitCapture {
-                out_var,
-                out_type,
-                is_const,
-                ..
-            } => {
-                let tag = exec
-                    .resolve_tag(out_type)
-                    .map_err(|err| anyhow::anyhow!("variable `${out_var}`: {err:#}"))?;
-                out.push((
-                    GuardedLet {
-                        name: clean_var(out_var),
                         tag,
                         guard: step.guard.clone(),
                         is_const: *is_const,
@@ -860,7 +833,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         // Home-scope index (#319): every top-level `FUNC` per file,
         // exported or private, for sibling validation. Built
         // alongside `all_funcs` so both see identical definitions.
-        let mut home_funcs: HashMap<(String, String), FuncInfo> = HashMap::new();
+        let mut home_funcs: HomeFuncs = HashMap::new();
         // First textual def per file for harvest binding (#322):
         // mirrors `import_funcs` first-match. Extended alongside
         // `home_funcs` so both indexes see identical definitions.
@@ -951,7 +924,9 @@ pub fn validate_script_closure<P: ProcessManager>(
                     )?;
                     checker
                         .home_funcs
-                        .insert((super::import::ENTRY_UNIT.to_string(), name.clone()), info);
+                        .entry((super::import::ENTRY_UNIT.to_string(), name.clone()))
+                        .or_default()
+                        .push((step.guard.clone(), info));
                 }
             }
             extend_funcs_checked(&mut all_funcs, checker.funcs, "entry")?;
@@ -1089,10 +1064,12 @@ pub fn validate_script_closure<P: ProcessManager>(
             if inferred.contains_key(&canonical) {
                 continue;
             }
-            let Some(info) = home_funcs.get(&(module.clone(), base.clone())) else {
+            let Some(overloads) = home_funcs.get(&(module.clone(), base.clone())) else {
                 continue;
             };
-            let info = info.clone();
+            let Some((_, info)) = overloads.last().cloned() else {
+                continue;
+            };
             let defs: Vec<(String, String)> = files
                 .iter()
                 .find(|f| f.key == module)
@@ -1139,7 +1116,7 @@ pub fn validate_script_closure<P: ProcessManager>(
         fn seeded_checker<'a, P: ProcessManager>(
             exec: &'a mut ExecState<P>,
             funcs: &HashMap<String, FuncInfo>,
-            home_funcs: &HashMap<(String, String), FuncInfo>,
+            home_funcs: &HomeFuncs,
             harvest_first: &HashMap<(String, String), FuncInfo>,
             harvested: &HashMap<(String, String), String>,
             lets: &ModuleLets,
@@ -1490,6 +1467,96 @@ fn classify_guard(guard: Option<&GuardExpr>) -> GuardClass {
 /// regardless of spelling.
 fn clean_var(name: &str) -> String {
     name.trim_start_matches('$').to_string()
+}
+
+/// Single owner for `$` vs bare binding access in static checking:
+/// every `Var`, `KeyPath` base, and `Inspect` read gates here, so AST
+/// and RPN agree by construction. `is_const` true reads CONST only;
+/// false reads LET only (a CONST under `$` names the bare form).
+/// `prefix` carries the step attribution (`""` in RPN contexts whose
+/// runtime errors carry no step number).
+fn check_var_binding_access(
+    env: &Env,
+    key: &str,
+    is_const: bool,
+    site: Option<&GuardExpr>,
+    prefix: &str,
+) -> Result<TypeTag> {
+    if is_const {
+        if !env.is_declared(key) {
+            bail!("{prefix}undefined CONST {key}");
+        }
+        if !env.is_const(key, site) {
+            bail!("{prefix}`{key}` is a LET binding; use ${key}");
+        }
+    } else {
+        if env.is_const(key, site) {
+            bail!("{prefix}CONST reads bare: use {key}, not ${key}");
+        }
+        if !env.is_declared(key) {
+            bail!("{prefix}undefined variable ${key}");
+        }
+    }
+    env.read_guarded(key, site)
+}
+
+/// Single owner for static key-path traversal: every `KeyPath` and
+/// `LoadKeyPath` (AST and RPN) walks here, so shape errors agree by
+/// construction. `prefix` carries step attribution (`"at: "` in AST,
+/// `""` in RPN); the empty-prefix RPN wording matches the historical
+/// runtime errors. `Map`/`List`/`Any` and traversable unions defer to
+/// `Any`, mirroring the evaluator's value-resolved misses.
+fn traverse_static_keypath(mut current: TypeTag, keys: &[String], prefix: &str) -> Result<TypeTag> {
+    for part in keys {
+        match current {
+            TypeTag::Record(fields) => {
+                let Some(field) = fields.iter().find(|field| field.name == *part) else {
+                    bail!(
+                        "{prefix}unknown field '{part}'; expected fields: {}",
+                        fields
+                            .iter()
+                            .map(|field| field.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                };
+                current = field.ty.clone();
+            }
+            TypeTag::ListOf(element) => {
+                if part.parse::<usize>().is_err() {
+                    bail!("{prefix}Invalid array index '{part}'");
+                }
+                current = element.as_ref().clone();
+            }
+            TypeTag::MapOf(values) => {
+                current = values.as_ref().clone();
+            }
+            TypeTag::Map | TypeTag::List | TypeTag::Any => {
+                return Ok(TypeTag::Any);
+            }
+            TypeTag::Union(_, members) => {
+                let traversable = |member: &TypeTag| {
+                    matches!(
+                        member,
+                        TypeTag::Record(_)
+                            | TypeTag::ListOf(_)
+                            | TypeTag::MapOf(_)
+                            | TypeTag::Map
+                            | TypeTag::List
+                            | TypeTag::Any
+                    )
+                };
+                if members.iter().all(|member| !traversable(member)) {
+                    bail!("{prefix}Cannot traverse into scalar value at key '{part}'");
+                }
+                return Ok(TypeTag::Any);
+            }
+            _ => {
+                bail!("{prefix}Cannot traverse into scalar value at key '{part}'");
+            }
+        }
+    }
+    Ok(current)
 }
 
 /// Step prefix, or empty for RPN contexts whose runtime errors carry
@@ -2326,6 +2393,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // runtime (undefined script variable), qualified heads
                 // resolve like expression calls (unknown `ALIAS::TYPO`
                 // fails here, never at runtime).
+                PlaceholderKey::DollarQualified { alias, name, keys } => {
+                    return Err(anyhow::anyhow!(
+                        oxdock_parser::template::dollar_qualified_error(alias, name, &keys)
+                    ));
+                }
                 PlaceholderKey::Dollar(rest) => {
                     if oxdock_parser::template::parse_var_path(rest).is_none() {
                         bail!("invalid placeholder variable: empty variable reference");
@@ -2334,7 +2406,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         self.check_template_var(&var, env, scope, depth)?;
                     }
                 }
-                PlaceholderKey::Bare(_) => {
+                PlaceholderKey::ConstRef { .. }
+                | PlaceholderKey::KeyPath { .. }
+                | PlaceholderKey::Var(_)
+                | PlaceholderKey::Bare(_) => {
                     for var in placeholder_vars(key) {
                         self.check_template_var(&var, env, scope, depth)?;
                     }
@@ -2372,18 +2447,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .split_first()
                     .expect("placeholder_vars never emits empty paths");
                 if rest.is_empty() {
-                    if let Some((alias, name)) = base.split_once("::") {
-                        bail!("CONST reads bare: use {alias}::{name}, not ${alias}::{name}");
-                    } else {
-                        Expr::Var {
-                            name: base.clone(),
-                            is_const: false,
-                        }
+                    Expr::Var {
+                        name: base.clone(),
+                        is_const: false,
                     }
-                } else if base.contains("::") {
-                    bail!(
-                        "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
-                    );
                 } else {
                     Expr::KeyPath {
                         base: base.clone(),
@@ -2392,31 +2459,23 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     }
                 }
             }
-            TemplateVar::Bare(name) => {
-                if let Some((alias, rest)) = name.split_once("::") {
-                    if rest.contains('.') {
-                        bail!(
-                            "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
-                        );
-                    }
-                    Expr::ConstRef {
-                        alias: alias.to_string(),
-                        name: rest.to_string(),
-                    }
-                } else if let Some((base, tail)) = name.split_once('.') {
-                    let keys = tail.split('.').map(|s| s.to_string()).collect::<Vec<_>>();
-                    Expr::KeyPath {
-                        base: base.to_string(),
-                        keys,
-                        is_const: true,
-                    }
-                } else {
-                    Expr::Var {
-                        name: name.clone(),
-                        is_const: true,
-                    }
-                }
-            }
+            TemplateVar::ConstRef { alias, name } => Expr::ConstRef {
+                alias: alias.clone(),
+                name: name.clone(),
+            },
+            TemplateVar::KeyPath { base, keys } => Expr::KeyPath {
+                base: base.clone(),
+                keys: keys.clone(),
+                is_const: true,
+            },
+            TemplateVar::Var(name) => Expr::Var {
+                name: name.clone(),
+                is_const: true,
+            },
+            TemplateVar::Bare(name) => Expr::Var {
+                name: name.clone(),
+                is_const: true,
+            },
         };
         let idx = scope.idx;
         let _ = self.infer_expr(&expr, env, scope, idx, depth + 1)?;
@@ -2459,7 +2518,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     if module == oxdock_parser::SCRIPT_MODULE_NAME {
                         let unit =
                             super::import::unit_key(env.module.as_ref().map(|m| m.key.as_str()));
-                        if self.find_frame_hit(unit, name, &env.func_frames).is_some() {
+                        if self
+                            .find_frame_hit(unit, name, &env.func_frames, scope.site.as_ref())
+                            .is_some()
+                        {
                             is_script_visible = true;
                         }
                     }
@@ -2583,30 +2645,25 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     ) -> Result<StaticTy> {
         use oxdock_parser::template::{
             MAX_TEMPLATE_ARG_DEPTH, ScalarLit, TemplateArg, classify_template_arg,
-            parse_string_literal, parse_var_path,
+            dollar_qualified_error, parse_string_literal, parse_var_path,
         };
         if literal_depth > MAX_TEMPLATE_ARG_DEPTH {
             bail!("placeholder call argument nests too deep (limit {MAX_TEMPLATE_ARG_DEPTH})");
         }
         match classify_template_arg(src) {
+            TemplateArg::DollarQualified { alias, name, keys } => {
+                Err(anyhow::anyhow!(dollar_qualified_error(alias, name, &keys)))
+            }
             TemplateArg::Dollar(rest) => {
                 let Some(parts) = parse_var_path(rest) else {
                     bail!("invalid placeholder call argument: empty variable reference");
                 };
                 let (base, segs) = parts.split_first().expect("split always yields one");
                 let expr = if segs.is_empty() {
-                    if let Some((alias, name)) = base.split_once("::") {
-                        bail!("CONST reads bare: use {alias}::{name}, not ${alias}::{name}");
-                    } else {
-                        Expr::Var {
-                            name: base.clone(),
-                            is_const: false,
-                        }
+                    Expr::Var {
+                        name: base.clone(),
+                        is_const: false,
                     }
-                } else if base.contains("::") {
-                    bail!(
-                        "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
-                    );
                 } else {
                     Expr::KeyPath {
                         base: base.clone(),
@@ -2638,44 +2695,29 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     ScalarLit::Float(_) => TypeTag::Float,
                 }))
             }
+            TemplateArg::ConstRef { alias, name } => {
+                let expr = Expr::ConstRef {
+                    alias: alias.to_string(),
+                    name: name.to_string(),
+                };
+                self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
+            }
+            TemplateArg::KeyPath { base, keys } => {
+                let expr = Expr::KeyPath {
+                    base: base.to_string(),
+                    keys,
+                    is_const: true,
+                };
+                self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
+            }
+            TemplateArg::Var(name) => {
+                let expr = Expr::Var {
+                    name: name.to_string(),
+                    is_const: true,
+                };
+                self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
+            }
             TemplateArg::Invalid(invalid) => {
-                let trimmed = invalid.trim();
-                if let Some((alias, rest)) = trimmed.split_once("::")
-                    && !alias.is_empty()
-                    && !rest.is_empty()
-                    && !rest.contains('.')
-                    && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
-                    let expr = Expr::ConstRef {
-                        alias: alias.to_string(),
-                        name: rest.to_string(),
-                    };
-                    return self.infer_expr(&expr, env, scope, scope.idx, depth + 1);
-                }
-                if let Some((base, tail)) = trimmed.split_once('.')
-                    && !base.is_empty()
-                    && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
-                    let keys = tail.split('.').map(|s| s.to_string()).collect::<Vec<_>>();
-                    let expr = Expr::KeyPath {
-                        base: base.to_string(),
-                        keys,
-                        is_const: true,
-                    };
-                    return self.infer_expr(&expr, env, scope, scope.idx, depth + 1);
-                }
-                if !trimmed.is_empty()
-                    && trimmed
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
-                    let expr = Expr::Var {
-                        name: trimmed.to_string(),
-                        is_const: true,
-                    };
-                    return self.infer_expr(&expr, env, scope, scope.idx, depth + 1);
-                }
                 bail!("invalid placeholder call argument '{invalid}'")
             }
         }
@@ -2909,7 +2951,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     step.col,
                 )?;
                 self.home_funcs
-                    .insert((file.key.clone(), name.clone()), info);
+                    .entry((file.key.clone(), name.clone()))
+                    .or_default()
+                    .push((step.guard.clone(), info));
             }
         }
         Ok(())
@@ -3474,19 +3518,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// via `declare_const`). Everything but the declaration is
     /// family-independent, so the two arms cannot drift.
     #[allow(clippy::too_many_arguments)]
-    fn check_plain_binding(
+    fn check_plain_rhs(
         &mut self,
-        var: &str,
-        decl_type: &str,
         expr: &Expr,
         env: &mut Env,
         scope: &Scope,
-        step: &Step,
         idx: usize,
         depth: usize,
-        is_const: bool,
-        live: WalkOut,
-    ) -> Result<WalkOut> {
+        var: &str,
+    ) -> Result<()> {
         let rhs = self.infer_expr(expr, env, scope, idx, depth + 1)?;
         if matches!(rhs, StaticTy::Void) {
             bail!(
@@ -3494,30 +3534,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 idx + 1
             );
         }
-        let tag = self
-            .exec
-            .resolve_tag(decl_type)
-            .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-        self.exec
-            .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
-        let key = clean_var(var);
-        if is_const {
-            env.declare_const(key, tag, step.guard.as_ref(), idx)?;
-        } else {
-            env.declare(key, tag, step.guard.as_ref(), idx)?;
-        }
-        Ok(live)
+        Ok(())
     }
 
     /// Shared capture check (`LET`/`CONST $var: TYPE = <command>`):
     /// the captured command checks first, the yield must coerce to
-    /// the declared tag, then declare. `is_const` selects the
-    /// declaration and the diagnostic word.
+    /// the pre-resolved tag. The caller owns tag resolution and the
+    /// final declaration. `is_const` selects the diagnostic word.
     #[allow(clippy::too_many_arguments)]
-    fn check_capture_binding(
+    fn check_capture_rhs(
         &mut self,
         var: &str,
-        decl_type: &str,
+        tag: &TypeTag,
         cmd: &StepKind,
         env: &mut Env,
         scope: &Scope,
@@ -3525,17 +3553,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         idx: usize,
         depth: usize,
         is_const: bool,
-        live: WalkOut,
-    ) -> Result<WalkOut> {
+    ) -> Result<()> {
         // The captured command runs first at runtime, so its
         // expressions check before the declaration lands.
         self.walk_wrapped(step, cmd, env, scope, idx, depth + 1)?;
-        let tag = self
-            .exec
-            .resolve_tag(decl_type)
-            .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-        self.exec
-            .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
         // Yield check mirroring runtime assign_capture (see
         // capture_yield): without it a TIMEOUT-wrapped (or any
         // non-call) command sails through with an incompatible
@@ -3544,10 +3565,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             cmd,
             env.module.as_ref().map(|m| m.key.as_str()),
             &env.func_frames,
+            scope.site.as_ref(),
             depth,
         )? && self
             .check_arg(
-                &tag,
+                tag,
                 StaticTy::Ty(yield_tag.clone()),
                 &format!("step {}", idx + 1),
             )
@@ -3559,42 +3581,32 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 idx + 1,
                 clean_var(var),
                 render_structural(&yield_tag),
-                render_structural(&tag)
+                render_structural(tag)
             );
         }
-        let key = clean_var(var);
-        if is_const {
-            env.declare_const(key, tag, step.guard.as_ref(), idx)?;
-        } else {
-            env.declare(key, tag, step.guard.as_ref(), idx)?;
-        }
-        Ok(live)
+        Ok(())
     }
 
     /// Shared `AWAIT` capture check: the handle resolves before the
-    /// output declares, the payload must fit the declared tag, then
-    /// declare (`CONST` via `declare_const`).
+    /// output declares and the payload must fit the pre-resolved tag.
+    /// The caller owns tag resolution and the final declaration.
     #[allow(clippy::too_many_arguments)]
-    fn check_await_binding(
+    fn check_await_rhs(
         &mut self,
         out_var: &str,
-        out_type: &str,
+        tag: &TypeTag,
         task_var: &str,
+        task_is_const: bool,
         env: &mut Env,
         scope: &Scope,
-        step: &Step,
         idx: usize,
-        is_const: bool,
-        live: WalkOut,
-    ) -> Result<WalkOut> {
-        // The handle resolves before the output declares.
-        let handle_tag = Self::check_name_read(env, task_var, scope, idx)?;
-        let tag = self
-            .exec
-            .resolve_tag(out_type)
-            .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-        self.exec
-            .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
+    ) -> Result<()> {
+        // The handle resolves before the output declares, through
+        // the single `$` vs bare owner so bare `CONST` handles pass.
+        let key = clean_var(task_var);
+        let prefix = format!("step {}: ", idx + 1);
+        let handle_tag =
+            check_var_binding_access(env, &key, task_is_const, scope.site.as_ref(), &prefix)?;
         let payload = match handle_tag {
             TypeTag::Handle => TypeTag::Any,
             TypeTag::HandleOf(inner) => (*inner).clone(),
@@ -3613,12 +3625,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 clean_var(out_var)
             );
         }
-        if !is_compatible(&payload, &tag) && !is_compatible(&tag, &payload) {
+        if !is_compatible(&payload, tag) && !is_compatible(tag, &payload) {
             // Top-down: capture type must accept the task payload.
             // Allow coercible pairs via check_arg shape.
             if self
                 .check_arg(
-                    &tag,
+                    tag,
                     StaticTy::Ty(payload.clone()),
                     &format!("step {}", idx + 1),
                 )
@@ -3630,38 +3642,28 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     clean_var(task_var),
                     render_structural(&payload),
                     clean_var(out_var),
-                    render_structural(&tag)
+                    render_structural(tag)
                 );
             }
         }
-        let key = clean_var(out_var);
-        if is_const {
-            env.declare_const(key, tag, step.guard.as_ref(), idx)?;
-        } else {
-            env.declare(key, tag, step.guard.as_ref(), idx)?;
-        }
-        Ok(live)
+        Ok(())
     }
 
     /// Shared `ASYNC` binding check: the body walks in a forked task
-    /// scope, the declared tag must be `HANDLE`-headed and fit the
-    /// task's returns, then declare. `is_const` selects the
-    /// declaration; both families overlap-check, mirroring the
-    /// runtime redeclare error.
+    /// scope and the pre-resolved tag must be `HANDLE`-headed and fit
+    /// the task's returns. The caller owns tag resolution and the
+    /// final declaration.
     #[allow(clippy::too_many_arguments)]
-    fn check_async_binding(
+    fn check_async_rhs(
         &mut self,
         var: &str,
-        decl_type: &str,
+        tag: &TypeTag,
         body: &[Step],
         env: &mut Env,
         scope: &Scope,
-        step: &Step,
         idx: usize,
         depth: usize,
-        is_const: bool,
-        live: WalkOut,
-    ) -> Result<WalkOut> {
+    ) -> Result<()> {
         // Bodies publish through `AWAIT`; returns belong to the task,
         // never the enclosing function. Every ASYNC position is HANDLE-headed.
         let mut fork = env.fork();
@@ -3676,10 +3678,6 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             idx: scope.idx,
         };
         let inner = self.walk_body(body, &mut fork, &task, depth + 1)?;
-        let tag = self
-            .exec
-            .resolve_tag(decl_type)
-            .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
         // HANDLE-headed first (the async rule owns that
         // message), then the shared position rule for nested
         // VOID (HANDLE<LIST<VOID>> and friends).
@@ -3690,18 +3688,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 "step {}: ASYNC `${}` declares {}, not HANDLE; every ASYNC position is HANDLE-headed",
                 idx + 1,
                 clean_var(var),
-                render_structural(&tag)
+                render_structural(tag)
             ),
         };
-        self.exec
-            .check_declaration_tag(&format!("step {}", idx + 1), &tag)
-            .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
         if inner.bare_return && !matches!(payload, TypeTag::Void) {
             bail!(
                 "step {}: ASYNC `${}` declares {} but task has a bare RETURN; bare RETURN is only a void exit",
                 idx + 1,
                 clean_var(var),
-                render_structural(&tag)
+                render_structural(tag)
             );
         }
         if matches!(payload, TypeTag::Void) {
@@ -3718,7 +3713,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     "step {}: ASYNC `${}` declares {} but task has no value RETURN",
                     idx + 1,
                     clean_var(var),
-                    render_structural(&tag)
+                    render_structural(tag)
                 );
             }
         } else {
@@ -3728,25 +3723,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         "step {}: ASYNC `${}` declares {} but task RETURN at line {line} yields {}",
                         idx + 1,
                         clean_var(var),
-                        render_structural(&tag),
+                        render_structural(tag),
                         render_structural(ty)
                     );
                 }
             }
         }
-        let key = clean_var(var);
-        if is_const {
-            env.declare_const(key, tag, step.guard.as_ref(), idx)?;
-        } else {
-            // Overlap-checked like every other declaration: the
-            // runtime `declare_var` fails the same duplicate, so the
-            // static pass must not silently overwrite it (a `LET`
-            // following a same-scope `CONST` would otherwise erase
-            // the const entry and admit mutations that crash at
-            // runtime).
-            env.declare(key, tag, step.guard.as_ref(), idx)?;
-        }
-        Ok(live)
+        Ok(())
     }
 
     fn walk_step(
@@ -3968,22 +3951,53 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.check_call(name, args, env, scope, idx, depth + 1)?;
                 Ok(live)
             }
-            StepKind::Assign {
+            StepKind::Bind {
                 var,
                 decl_type,
-                expr,
                 is_const,
-            } => self.check_plain_binding(
-                var, decl_type, expr, env, scope, step, idx, depth, *is_const, live,
-            ),
-            StepKind::AssignCapture {
-                var,
-                decl_type,
-                cmd,
-                is_const,
-            } => self.check_capture_binding(
-                var, decl_type, cmd, env, scope, step, idx, depth, *is_const, live,
-            ),
+                rhs,
+            } => {
+                // Single declaration owner: resolve the declared tag
+                // once, validate the right-hand side per `BindRhs`
+                // variant, then validate the position rule and declare
+                // once. RHS validation runs before the position rule so
+                // `ASYNC` reports HANDLE-headed before VOID position,
+                // matching the historical per-form order. No per-form
+                // restatement of the tag gate or the const branch.
+                let tag = self
+                    .exec
+                    .resolve_tag(decl_type)
+                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+                match rhs {
+                    oxdock_parser::BindRhs::Expr(expr) => {
+                        self.check_plain_rhs(expr, env, scope, idx, depth, var)?;
+                    }
+                    oxdock_parser::BindRhs::Capture(cmd) => {
+                        self.check_capture_rhs(
+                            var, &tag, cmd, env, scope, step, idx, depth, *is_const,
+                        )?;
+                    }
+                    oxdock_parser::BindRhs::Async(body) => {
+                        self.check_async_rhs(var, &tag, body, env, scope, idx, depth)?;
+                    }
+                    oxdock_parser::BindRhs::Await {
+                        task_var,
+                        task_is_const,
+                    } => {
+                        self.check_await_rhs(var, &tag, task_var, *task_is_const, env, scope, idx)?;
+                    }
+                }
+                self.exec
+                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)
+                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
+                let key = clean_var(var);
+                if *is_const {
+                    env.declare_const(key, tag, step.guard.as_ref(), idx)?;
+                } else {
+                    env.declare(key, tag, step.guard.as_ref(), idx)?;
+                }
+                Ok(live)
+            }
             StepKind::Set { var, expr } => {
                 let key = clean_var(var);
                 if !env.is_declared(&key) {
@@ -4006,15 +4020,6 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.infer_expr(expr, env, scope, idx, depth + 1)?;
                 Ok(live)
             }
-            StepKind::AwaitCapture {
-                out_var,
-                out_type,
-                task_var,
-                is_const,
-                ..
-            } => self.check_await_binding(
-                out_var, out_type, task_var, env, scope, step, idx, *is_const, live,
-            ),
             StepKind::AsyncBlock { body } => {
                 // Bare tasks never publish a value: control never
                 // crosses the thread boundary at runtime.
@@ -4032,14 +4037,6 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.walk_body(body, &mut fork, &task, depth + 1)?;
                 Ok(live)
             }
-            StepKind::AssignAsync {
-                var,
-                decl_type,
-                body,
-                is_const,
-            } => self.check_async_binding(
-                var, decl_type, body, env, scope, step, idx, depth, *is_const, live,
-            ),
             StepKind::Timeout { body, .. } => {
                 // A dynamic duration evaluates before the body runs.
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
@@ -4228,8 +4225,16 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // arms above, so nothing here double-checks.
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
                 match &step.kind {
-                    StepKind::Await { var, .. } | StepKind::Cancel { var, .. } => {
-                        Self::check_name_read(env, var, scope, idx)?;
+                    StepKind::Await { var, is_const } | StepKind::Cancel { var, is_const } => {
+                        let key = clean_var(var);
+                        let prefix = format!("step {}: ", idx + 1);
+                        check_var_binding_access(
+                            env,
+                            &key,
+                            *is_const,
+                            scope.site.as_ref(),
+                            &prefix,
+                        )?;
                     }
                     StepKind::WithIoBlock { bindings } => {
                         Self::check_pipe_bindings(env, bindings, scope, idx)?;
@@ -4352,16 +4357,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// step's path, mirroring the `undefined variable` failure one
     /// for one.
     fn check_name_read(env: &Env, name: &str, scope: &Scope, idx: usize) -> Result<TypeTag> {
+        // `$` reads gate through the single owner so `$CONST` fails
+        // here (deferred from the parser), not at runtime.
         let key = clean_var(name);
-        if !env.is_declared(&key) {
-            bail!("step {}: undefined variable ${key}", idx + 1);
-        }
-        env.read_guarded(&key, scope.site.as_ref())
+        let prefix = format!("step {}: ", idx + 1);
+        check_var_binding_access(env, &key, false, scope.site.as_ref(), &prefix)
     }
 
-    /// Static counterpart of `resolve_pipe_handle`: a `$var` pipe
-    /// endpoint must be a live `PIPE` binding, mirroring the runtime
-    /// `TypeMismatch` one for one.
+    /// Static counterpart of `resolve_pipe_handle`: a pipe endpoint
+    /// must be a live `PIPE` binding, mirroring the runtime
+    /// `TypeMismatch` one for one. The `is_const` spelling rides in
+    /// [`PipeTarget`], so `$CONST` fails through the single owner
+    /// exactly like every other read.
     fn check_pipe_bindings(
         env: &Env,
         bindings: &[IoBinding],
@@ -4369,8 +4376,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         idx: usize,
     ) -> Result<()> {
         for binding in bindings {
-            if let Some(PipeTarget::Var(name)) = &binding.pipe {
-                let tag = Self::check_name_read(env, name, scope, idx)?;
+            if let Some(PipeTarget::Var { name, is_const }) = &binding.pipe {
+                let key = clean_var(name);
+                let prefix = format!("step {}: ", idx + 1);
+                let tag =
+                    check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), &prefix)?;
                 if !tags_equal(&tag, &TypeTag::Pipe) {
                     bail!(
                         "step {}: TypeMismatch: expected PIPE, got {}",
@@ -4462,6 +4472,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         cmd: &StepKind,
         env_module: Option<&str>,
         nested: &[HashMap<String, FuncInfo>],
+        site: Option<&GuardExpr>,
         depth: usize,
     ) -> Result<Option<TypeTag>> {
         let mut current = cmd;
@@ -4472,7 +4483,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     current = &body[0].kind;
                 }
                 StepKind::Call { name, .. } => {
-                    let callee = self.resolve_call(name, env_module, nested, depth)?;
+                    let callee = self.resolve_call(name, env_module, nested, site, depth)?;
                     return Ok(match callee.ret {
                         StaticTy::Ty(tag) => Some(tag),
                         // A VOID callee still binds something at
@@ -4687,41 +4698,72 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     }
 
     /// Frame walk shared by call resolution and the template gate
-    /// (#322): innermost nested frame outward, then the owning file
-    /// frame (entry included via its unit key), then bare harvests.
-    /// Single owner for the precedence both consumers enforce, so
-    /// static checking can never disagree with itself, and the
-    /// runtime walk mirrors it arm for arm. Returns the defining
-    /// info plus the memoization key; hosts and canonical file views
-    /// stay with their existing checks.
+    /// (#322): precedence lives in [`FuncFrameView::walk`], shared
+    /// with the runtime walk; this is the static store adapter.
+    /// Returns the defining info plus the memoization key; hosts and
+    /// canonical file views stay with their existing checks.
     fn find_frame_hit(
         &self,
         unit: &str,
         base: &str,
         nested: &[HashMap<String, FuncInfo>],
+        site: Option<&GuardExpr>,
     ) -> Option<(FuncInfo, String)> {
-        for frame in nested.iter().rev() {
-            if let Some(info) = frame.get(base) {
-                let info = info.clone();
-                let key = format!("nested:{unit}:{base}:{}:{}", info.line, info.col);
-                return Some((info, key));
+        use super::native::FuncFrameView;
+        struct StaticView<'a> {
+            unit: &'a str,
+            nested: &'a [HashMap<String, FuncInfo>],
+            home: &'a HomeFuncs,
+            harvested: &'a HashMap<(String, String), String>,
+            first: &'a HashMap<(String, String), FuncInfo>,
+            site: Option<&'a GuardExpr>,
+        }
+        impl FuncFrameView for StaticView<'_> {
+            type Hit = (FuncInfo, String);
+            fn find_nested(&self, base: &str) -> Option<Self::Hit> {
+                for frame in self.nested.iter().rev() {
+                    if let Some(info) = frame.get(base) {
+                        let info = info.clone();
+                        let key = format!("nested:{}:{base}:{}:{}", self.unit, info.line, info.col);
+                        return Some((info, key));
+                    }
+                }
+                None
+            }
+            fn find_home(&self, unit: &str, base: &str) -> Option<Self::Hit> {
+                let overloads = self.home.get(&(unit.to_string(), base.to_string()))?;
+                // Site-aware pick among disjoint guarded overloads,
+                // mirroring runtime live-guard filtering; last live
+                // wins to preserve the unguarded last-wins rule.
+                let mut pick: Option<FuncInfo> = None;
+                for (guard, info) in overloads {
+                    if oxdock_parser::guards_overlap(guard.as_ref(), self.site) {
+                        pick = Some(info.clone());
+                    }
+                }
+                let info = pick?;
+                let key = super::native::file_func_key(unit, base);
+                Some((info, key))
+            }
+            fn find_harvest(&self, unit: &str, base: &str) -> Option<Self::Hit> {
+                let defining = self.harvested.get(&(unit.to_string(), base.to_string()))?;
+                let info = self
+                    .first
+                    .get(&(defining.clone(), base.to_string()))?
+                    .clone();
+                let key = super::native::file_func_key(defining, base);
+                Some((info, key))
             }
         }
-        if let Some(info) = self.home_funcs.get(&(unit.to_string(), base.to_string())) {
-            let info = info.clone();
-            let key = super::native::file_func_key(unit, base);
-            return Some((info, key));
+        StaticView {
+            unit,
+            nested,
+            home: &self.home_funcs,
+            harvested: &self.harvested,
+            first: &self.harvest_first,
+            site,
         }
-        if let Some(defining) = self.harvested.get(&(unit.to_string(), base.to_string()))
-            && let Some(info) = self
-                .harvest_first
-                .get(&(defining.clone(), base.to_string()))
-        {
-            let info = info.clone();
-            let key = super::native::file_func_key(defining, base);
-            return Some((info, key));
-        }
-        None
+        .walk(unit, base)
     }
 
     /// Resolve a callee through the shared alias-target matcher;
@@ -4738,6 +4780,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         name: &str,
         env_module: Option<&str>,
         nested: &[HashMap<String, FuncInfo>],
+        site: Option<&GuardExpr>,
         depth: usize,
     ) -> Result<Callee> {
         // Canonical lookup key through the single alias-target
@@ -4874,7 +4917,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             // harvests. Entry bodies resolve their own file; module
             // bodies resolve theirs. No flat cross-file reads.
             let unit = super::import::unit_key(env_module);
-            if let Some((info, key)) = self.find_frame_hit(unit, base, nested) {
+            if let Some((info, key)) = self.find_frame_hit(unit, base, nested, site) {
                 let ret = self.func_return_owned(&info, &key, depth)?;
                 let params = info.params;
                 return Ok(Callee {
@@ -4948,6 +4991,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     fn resolve_const_ref(&self, alias: &str, name: &str, scope: &Scope) -> Result<TypeTag> {
         use super::native::{
             ConstHolders, ambiguous_alias_message, chase_const_forward, const_holder_files,
+            missing_const_hint,
         };
         let at = || step_pos(scope.line, scope.col, scope.idx);
         let qualified = oxdock_parser::qualify(alias, name);
@@ -4964,7 +5008,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             ConstHolders::NoAlias => {
                 if self.strict_qualified {
                     bail!(
-                        "{}: unknown CONST `${qualified}`: no import alias `{alias}` exports that name",
+                        "{}: unknown CONST `{qualified}`: no import alias `{alias}` exports that name",
                         at()
                     );
                 }
@@ -4998,7 +5042,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 };
                 if !binding.is_const {
                     bail!(
-                        "{}: `${qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary",
+                        "{}: `{qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary",
                         at()
                     );
                 }
@@ -5014,39 +5058,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         match tags.into_iter().next() {
             Some(tag) => Ok(tag),
             None => {
-                // Hint only from the queried alias's own files: an
-                // unexported CONST or private LET in an unrelated
-                // module must not supply misleading text on a typo
-                // under a different alias.
-                let hint = self
-                    .alias_targets
-                    .get(alias)
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .filter_map(|(file, _)| file.as_deref())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|file| self.module_lets.get(*file))
-                    .flat_map(|lets| lets.iter().find(|entry| entry.name == name))
-                    .map(|entry| {
-                        if entry.is_const {
-                            format!(
-                                "module holds `{name}` as CONST but does not export it: add `EXPORT CONST {name}`"
-                            )
-                        } else {
-                            format!(
-                                "`{name}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
-                            )
-                        }
-                    })
-                    .next();
+                let hint = missing_const_hint(&view, &self.alias_targets, alias, name);
                 match hint {
-                    Some(hint) => bail!("{}: unknown CONST `${qualified}`: {hint}", at()),
+                    Some(hint) => bail!("{}: unknown CONST `{qualified}`: {hint}", at()),
                     None => bail!(
-                        "{}: unknown CONST `${qualified}`: no import alias `{alias}` exports that name",
+                        "{}: unknown CONST `{qualified}`: no import alias `{alias}` exports that name",
                         at()
                     ),
                 }
@@ -5108,6 +5124,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             name,
             env.module.as_ref().map(|m| m.key.as_str()),
             &env.func_frames,
+            scope.site.as_ref(),
             depth,
         )?;
         // Arity range comes from the full host metadata (which carries
@@ -5403,25 +5420,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             Expr::Var { name, is_const } => {
                 let key = clean_var(name);
-                if *is_const {
-                    if !env.is_declared(&key) {
-                        bail!("{}undefined CONST {key}", loc(Some(&at())));
-                    }
-                    if !env.is_const(&key, scope.site.as_ref()) {
-                        bail!("{}`{key}` is a LET binding; use ${key}", loc(Some(&at())));
-                    }
-                } else {
-                    if env.is_const(&key, scope.site.as_ref()) {
-                        bail!(
-                            "{}CONST reads bare: use {key}, not ${key}",
-                            loc(Some(&at()))
-                        );
-                    }
-                    if !env.is_declared(&key) {
-                        bail!("{}undefined variable ${key}", loc(Some(&at())));
-                    }
-                }
-                Ok(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?))
+                let prefix = loc(Some(&at()));
+                Ok(StaticTy::Ty(check_var_binding_access(
+                    env,
+                    &key,
+                    *is_const,
+                    scope.site.as_ref(),
+                    &prefix,
+                )?))
             }
             Expr::ConstRef { alias, name } => {
                 let tag = self.resolve_const_ref(alias, name, scope)?;
@@ -5437,91 +5443,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 is_const,
             } => {
                 let key = clean_var(base);
-                if *is_const {
-                    if !env.is_declared(&key) {
-                        bail!("{}undefined CONST {key}", loc(Some(&at())));
-                    }
-                    if !env.is_const(&key, scope.site.as_ref()) {
-                        bail!("{}`{key}` is a LET binding; use ${key}", loc(Some(&at())));
-                    }
-                } else if !env.is_declared(&key) {
-                    bail!("{}undefined variable ${key}", loc(Some(&at())));
-                }
-                let mut current = env.read_guarded(&key, scope.site.as_ref())?;
-                for part in keys {
-                    match current {
-                        TypeTag::Record(fields) => {
-                            let Some(field) = fields
-                                .iter()
-                                .find(|field| field.name.as_str() == part.as_str())
-                            else {
-                                bail!(
-                                    "{}: unknown field '{part}'; expected fields: {}",
-                                    at(),
-                                    fields
-                                        .iter()
-                                        .map(|field| field.name.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                );
-                            };
-                            current = field.ty.clone();
-                        }
-                        TypeTag::ListOf(element) => {
-                            // Shaped lists step into the element type on
-                            // numeric segments (bounds stay runtime);
-                            // anything else mirrors the evaluator's
-                            // invalid-index failure statically.
-                            if part.parse::<usize>().is_err() {
-                                bail!("{}: Invalid array index '{part}'", at());
-                            }
-                            current = element.as_ref().clone();
-                        }
-                        TypeTag::MapOf(values) => {
-                            // Unknown maps step into their value shape;
-                            // keys resolve by value at runtime.
-                            current = values.as_ref().clone();
-                        }
-                        // MAP keys and LIST indices resolve by value at
-                        // runtime (missing keys, bounds); the shape
-                        // stays unknown here.
-                        TypeTag::Map | TypeTag::List | TypeTag::Any => {
-                            return Ok(StaticTy::Ty(TypeTag::Any));
-                        }
-                        // Unions defer when some member traverses (the
-                        // runtime value holds one member; static cannot
-                        // know which) and fail only when no member can:
-                        // an all-scalar set definitely fails, exactly
-                        // like a scalar below.
-                        TypeTag::Union(_, members) => {
-                            let traversable = |member: &TypeTag| {
-                                matches!(
-                                    member,
-                                    TypeTag::Record(_)
-                                        | TypeTag::ListOf(_)
-                                        | TypeTag::MapOf(_)
-                                        | TypeTag::Map
-                                        | TypeTag::List
-                                        | TypeTag::Any
-                                )
-                            };
-                            if members.iter().all(|member| !traversable(member)) {
-                                bail!(
-                                    "{}: Cannot traverse into scalar value at key '{part}'",
-                                    at()
-                                );
-                            }
-                            return Ok(StaticTy::Ty(TypeTag::Any));
-                        }
-                        _ => {
-                            bail!(
-                                "{}: Cannot traverse into scalar value at key '{part}'",
-                                at()
-                            );
-                        }
-                    }
-                }
-                Ok(StaticTy::Ty(current))
+                let prefix = loc(Some(&at()));
+                let current =
+                    check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), &prefix)?;
+                let traversed = traverse_static_keypath(current, keys, &format!("{}: ", at()))?;
+                Ok(StaticTy::Ty(traversed))
             }
             Expr::List(items) => self.infer_list_literal(items, env, scope, idx, depth),
             Expr::Map(entries) => self.infer_map_literal(entries, env, scope, idx, depth),
@@ -5569,13 +5495,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             Expr::Call { name, args } => self.check_call(name, args, env, scope, idx, depth),
             Expr::Inspect { name, is_const } => {
                 let key = clean_var(name);
-                if !env.is_declared(&key) {
-                    if *is_const {
-                        bail!("{}undefined CONST {key}", loc(Some(&at())));
-                    }
-                    bail!("{}undefined variable ${key}", loc(Some(&at())));
-                }
-                env.read_guarded(&key, scope.site.as_ref())?;
+                let prefix = loc(Some(&at()));
+                check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), &prefix)?;
                 Ok(StaticTy::Ty(TypeTag::Any))
             }
             Expr::Compare { op, left, right } => {
@@ -5649,22 +5570,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 MathOp::Load { name, is_const } => {
                     let key = clean_var(name);
-                    if *is_const {
-                        if !env.is_declared(&key) {
-                            bail!("undefined CONST {key}");
-                        }
-                        if !env.is_const(&key, scope.site.as_ref()) {
-                            bail!("`{key}` is a LET binding; use ${key}");
-                        }
-                    } else {
-                        if env.is_const(&key, scope.site.as_ref()) {
-                            bail!("CONST reads bare: use {key}, not ${key}");
-                        }
-                        if !env.is_declared(&key) {
-                            bail!("undefined variable ${key}");
-                        }
-                    }
-                    stack.push(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?));
+                    let tag =
+                        check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), "")?;
+                    stack.push(StaticTy::Ty(tag));
                 }
                 MathOp::LoadConstRef { alias, name } => {
                     let tag = self.resolve_const_ref(alias, name, scope)?;
@@ -5680,73 +5588,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     is_const,
                 } => {
                     let key = clean_var(base);
-                    if *is_const {
-                        if !env.is_declared(&key) {
-                            bail!("undefined CONST {key}");
-                        }
-                        if !env.is_const(&key, scope.site.as_ref()) {
-                            bail!("`{key}` is a LET binding; use ${key}");
-                        }
-                    } else if !env.is_declared(&key) {
-                        bail!("undefined variable ${key}");
-                    }
-                    let mut current = env.read_guarded(&key, scope.site.as_ref())?;
-                    for part in keys {
-                        match current {
-                            TypeTag::Record(fields) => {
-                                let Some(field) = fields.iter().find(|field| field.name == *part)
-                                else {
-                                    bail!(
-                                        "unknown field '{part}'; expected fields: {}",
-                                        fields
-                                            .iter()
-                                            .map(|field| field.name.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    );
-                                };
-                                current = field.ty.clone();
-                            }
-                            TypeTag::ListOf(element) => {
-                                if part.parse::<usize>().is_err() {
-                                    bail!("Invalid array index '{part}'");
-                                }
-                                current = element.as_ref().clone();
-                            }
-                            TypeTag::MapOf(values) => {
-                                current = values.as_ref().clone();
-                            }
-                            TypeTag::Map | TypeTag::List | TypeTag::Any => {
-                                current = TypeTag::Any;
-                                break;
-                            }
-                            // Unions mirror the AST path: defer when
-                            // some member traverses, fail only when no
-                            // member can.
-                            TypeTag::Union(_, members) => {
-                                let traversable = |member: &TypeTag| {
-                                    matches!(
-                                        member,
-                                        TypeTag::Record(_)
-                                            | TypeTag::ListOf(_)
-                                            | TypeTag::MapOf(_)
-                                            | TypeTag::Map
-                                            | TypeTag::List
-                                            | TypeTag::Any
-                                    )
-                                };
-                                if members.iter().all(|member| !traversable(member)) {
-                                    bail!("Cannot traverse into scalar value at key '{part}'");
-                                }
-                                current = TypeTag::Any;
-                                break;
-                            }
-                            _ => {
-                                bail!("Cannot traverse into scalar value at key '{part}'");
-                            }
-                        }
-                    }
-                    stack.push(StaticTy::Ty(current));
+                    let current =
+                        check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), "")?;
+                    let traversed = traverse_static_keypath(current, keys, "")?;
+                    stack.push(StaticTy::Ty(traversed));
                 }
                 MathOp::Call { name, arity } => {
                     let before = stack.len();
@@ -5767,6 +5612,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         name,
                         env.module.as_ref().map(|m| m.key.as_str()),
                         &env.func_frames,
+                        scope.site.as_ref(),
                         depth,
                     )?;
                     let ret = self.apply_checked(name, &callee, &taken, &blanks, None)?;
@@ -5774,13 +5620,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 MathOp::Inspect { name, is_const } => {
                     let key = clean_var(name);
-                    if !env.is_declared(&key) {
-                        if *is_const {
-                            bail!("undefined CONST {key}");
-                        }
-                        bail!("undefined variable ${key}");
-                    }
-                    env.read_guarded(&key, scope.site.as_ref())?;
+                    check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), "")?;
                     stack.push(StaticTy::Ty(TypeTag::Any));
                 }
                 MathOp::Neg => {

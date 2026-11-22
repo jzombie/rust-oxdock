@@ -2221,3 +2221,86 @@ fn pipe_talks_across_module_boundary() {
         )
         .expect("exported CONST PIPE talks across the boundary");
 }
+
+#[test]
+fn run_uses_const_via_template() {
+    // `RUN` reads `CONST` only through `{{ }}` templates: the shell
+    // line stays literal text otherwise, so `{{ GREETING }}` expands
+    // while bare words never do.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                CONST GREETING: STRING = "hello-const"
+                LET $out: STRING = RUN echo "{{ GREETING }}"
+                ASSERT_CONTAINS $out "hello-const"
+            "#},
+        )
+        .expect("RUN expands CONST through {{ }}");
+}
+
+#[test]
+fn run_bare_uppercase_stays_literal() {
+    // Bare uppercase in `RUN` is shell text, never a const ref: raw
+    // `SECRET` survives verbatim instead of resolving (or failing
+    // as undefined `CONST`).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                CONST SECRET: STRING = "s3cr3t-value"
+                LET $out: STRING = RUN echo SECRET
+                ASSERT_CONTAINS $out "SECRET"
+            "#},
+        )
+        .expect("bare uppercase in RUN stays literal");
+    // And the const value itself never leaks through the raw spelling:
+    // only the `{{ }}` form reads it.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                CONST SECRET: STRING = "s3cr3t-value"
+                LET $out: STRING = RUN echo SECRET
+                ASSERT_EQ $out "SECRET\n"
+            "#},
+        )
+        .expect("raw bare does not evaluate the const");
+}
+
+#[test]
+fn echo_spellings_read_distinct_stores() {
+    // `$var`, `env:KEY`, bare `WORD`, and `{{ NAME }}` are four
+    // distinct reads: LET binding, script env, literal text, and
+    // CONST binding. Bare never touches the CONST store.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                LET $note: STRING = "let-hello"
+                ENV DOC_MOOD = "env-hello"
+                CONST BADGE: STRING = "const-hello"
+                ECHO $note
+                ASSERT_CONTAINS stdout "let-hello"
+                ECHO env:DOC_MOOD
+                ASSERT_CONTAINS stdout "env-hello"
+                ECHO BADGE
+                ASSERT_CONTAINS stdout "const-hello"
+                ECHO "{{ BADGE }}"
+                ASSERT_CONTAINS stdout "const-hello"
+                LET $raw: STRING = RUN echo BADGE
+                ASSERT_EQ $raw "BADGE\n"
+                LET $cooked: STRING = RUN echo "{{ BADGE }}"
+                ASSERT_CONTAINS $cooked "const-hello"
+            "#},
+        )
+        .expect("ECHO spellings read distinct stores");
+}

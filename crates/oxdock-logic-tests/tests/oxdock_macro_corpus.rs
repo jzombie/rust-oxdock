@@ -769,12 +769,9 @@ fn kind_covered(kind: &oxdock_parser::StepKind) -> bool {
         | StepKind::AssertContains { .. }
         | StepKind::Sleep { .. }
         | StepKind::ListAppend { .. }
-        | StepKind::Assign { .. }
+        | StepKind::Bind { .. }
         | StepKind::Set { .. }
-        | StepKind::AssignCapture { .. }
-        | StepKind::AwaitCapture { .. }
         | StepKind::AsyncBlock { .. }
-        | StepKind::AssignAsync { .. }
         | StepKind::Await { .. }
         | StepKind::Cancel { .. }
         | StepKind::Timeout { .. }
@@ -978,67 +975,73 @@ fn step_content_eq(a: &oxdock_parser::Step, b: &oxdock_parser::Step) -> bool {
             StepKind::ListAppend { list: ly, item: iy },
         ) => lx == ly && arg_content_eq(ix, iy),
         (
-            StepKind::Assign {
+            StepKind::Bind {
                 var: vx,
                 decl_type: tx,
-                expr: ex,
                 is_const: ix,
+                rhs: oxdock_parser::BindRhs::Expr(ex),
             },
-            StepKind::Assign {
+            StepKind::Bind {
                 var: vy,
                 decl_type: ty,
-                expr: ey,
                 is_const: iy,
+                rhs: oxdock_parser::BindRhs::Expr(ey),
             },
         ) => vx == vy && tx == ty && ex == ey && ix == iy,
         (StepKind::Set { var: vx, expr: ex }, StepKind::Set { var: vy, expr: ey }) => {
             vx == vy && ex == ey
         }
         (
-            StepKind::AssignCapture {
+            StepKind::Bind {
                 var: vx,
                 decl_type: tx,
-                cmd: cx,
                 is_const: ix,
+                rhs: oxdock_parser::BindRhs::Capture(cx),
             },
-            StepKind::AssignCapture {
+            StepKind::Bind {
                 var: vy,
                 decl_type: ty,
-                cmd: cy,
                 is_const: iy,
+                rhs: oxdock_parser::BindRhs::Capture(cy),
             },
         ) => vx == vy && tx == ty && ix == iy && step_content_eq(&step_shell(cx), &step_shell(cy)),
         (
-            StepKind::AwaitCapture {
-                out_var: ox,
-                out_type: tx,
-                task_var: vx,
-                task_is_const: cx,
-                is_const: ix,
+            StepKind::Bind {
+                var: ox,
+                decl_type: tx,
+                is_const: cx,
+                rhs:
+                    oxdock_parser::BindRhs::Await {
+                        task_var: vx,
+                        task_is_const: tcx,
+                    },
             },
-            StepKind::AwaitCapture {
-                out_var: oy,
-                out_type: ty,
-                task_var: vy,
-                task_is_const: cy,
-                is_const: iy,
+            StepKind::Bind {
+                var: oy,
+                decl_type: ty,
+                is_const: cy,
+                rhs:
+                    oxdock_parser::BindRhs::Await {
+                        task_var: vy,
+                        task_is_const: tcy,
+                    },
             },
-        ) => ox == oy && tx == ty && vx == vy && cx == cy && ix == iy,
+        ) => ox == oy && tx == ty && vx == vy && cx == cy && tcx == tcy,
         (StepKind::AsyncBlock { body: x }, StepKind::AsyncBlock { body: y }) => {
             steps_content_eq(x, y)
         }
         (
-            StepKind::AssignAsync {
+            StepKind::Bind {
                 var: vx,
                 decl_type: tx,
-                body: bx,
                 is_const: ix,
+                rhs: oxdock_parser::BindRhs::Async(bx),
             },
-            StepKind::AssignAsync {
+            StepKind::Bind {
                 var: vy,
                 decl_type: ty,
-                body: by,
                 is_const: iy,
+                rhs: oxdock_parser::BindRhs::Async(by),
             },
         ) => vx == vy && tx == ty && ix == iy && steps_content_eq(bx, by),
         (

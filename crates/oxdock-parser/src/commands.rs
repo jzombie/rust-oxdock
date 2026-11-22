@@ -380,7 +380,8 @@ fn fmt_io(b: &IoBinding) -> String {
         IoStream::Cols(cols) => format!("cols={cols}"),
     };
     match &b.pipe {
-        Some(PipeTarget::Var(v)) => format!("{}=${}", s, v),
+        Some(PipeTarget::Var { name, is_const }) if !is_const => format!("{}=${}", s, name),
+        Some(PipeTarget::Var { name, .. }) => format!("{}={}", s, name),
         None => s,
     }
 }
@@ -877,7 +878,7 @@ macro_rules! define_expr_walkers {
 
 impl StepKind {
     define_expr_walkers!(f, walk_arg, walk_opt, walk_target, {
-            StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => f(expr),
+            StepKind::Bind { rhs: BindRhs::Expr(expr), .. } | StepKind::Set { expr, .. } => f(expr),
             StepKind::Return { expr, .. } => f(expr),
             StepKind::Call { args, .. } => {
                 for arg in args {
@@ -993,10 +994,8 @@ impl StepKind {
             | StepKind::Isolated { .. }
             | StepKind::IsolatedInheritEnv { .. }
             | StepKind::ReadLine { .. }
-            | StepKind::AssignCapture { .. }
-            | StepKind::AwaitCapture { .. }
+            | StepKind::Bind { .. }
             | StepKind::AsyncBlock { .. }
-            | StepKind::AssignAsync { .. }
             | StepKind::Await { .. }
             | StepKind::Cancel { .. }
             | StepKind::RemoteBlock { .. }
@@ -1006,8 +1005,7 @@ impl StepKind {
     });
 
     define_raw_string_walkers!(f, walk_arg, walk_opt, walk_target, {
-        StepKind::Assign { .. }
-                | StepKind::Set { .. }
+        StepKind::Set { .. }
                 | StepKind::Call { .. }
                 | StepKind::Return { .. }
                 | StepKind::For { .. }
@@ -1102,10 +1100,8 @@ impl StepKind {
                 | StepKind::Isolated { .. }
                 | StepKind::IsolatedInheritEnv { .. }
                 | StepKind::ReadLine { .. }
-                | StepKind::AssignCapture { .. }
-                | StepKind::AwaitCapture { .. }
+                | StepKind::Bind { .. }
                 | StepKind::AsyncBlock { .. }
-                | StepKind::AssignAsync { .. }
                 | StepKind::Await { .. }
                 | StepKind::Cancel { .. }
                 | StepKind::RemoteBlock { .. }
@@ -1125,14 +1121,17 @@ impl StepKind {
         }
         match self {
             StepKind::WithIo { cmd, .. } => f(cmd),
-            StepKind::AssignCapture { cmd, .. } => f(cmd),
+            StepKind::Bind { rhs, .. } => match rhs {
+                BindRhs::Capture(cmd) => f(cmd),
+                BindRhs::Async(body) => walk_body(body, f),
+                BindRhs::Expr(_) | BindRhs::Await { .. } => {}
+            },
             StepKind::For { body, .. }
             | StepKind::While { body, .. }
             | StepKind::FuncDef { body, .. }
             | StepKind::Timeout { body, .. }
             | StepKind::Fail { body, .. }
             | StepKind::Isolated { body }
-            | StepKind::AssignAsync { body, .. }
             | StepKind::AsyncBlock { body }
             | StepKind::RemoteBlock { body, .. } => walk_body(body, f),
             StepKind::If {
@@ -1192,9 +1191,7 @@ impl StepKind {
             | StepKind::AssertContains { .. }
             | StepKind::Exit(_)
             | StepKind::WithIoBlock { .. }
-            | StepKind::Assign { .. }
             | StepKind::Set { .. }
-            | StepKind::AwaitCapture { .. }
             | StepKind::Await { .. }
             | StepKind::Cancel { .. }
             | StepKind::Sleep { .. }
@@ -1344,6 +1341,24 @@ fn lower_equality_args(
     Ok((hash, actual, expected))
 }
 
+/// Right-hand side of one [`StepKind::Bind`]: the single owner for
+/// the four binding forms, so parsing, `Display`, static checking,
+/// and dispatch never restate the `LET`/`CONST` split per form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BindRhs {
+    /// `LET $v: T = <expr>` / `CONST N: T = <expr>`.
+    Expr(Expr),
+    /// `LET $v: T = <cmd>` capture (single command or wrapper).
+    Capture(Box<StepKind>),
+    /// `LET $v: T = ASYNC { ... }` task body.
+    Async(Vec<crate::ast::Step>),
+    /// `LET $v: T = AWAIT $t` / `AWAIT T` join-and-bind.
+    Await {
+        task_var: String,
+        task_is_const: bool,
+    },
+}
+
 declare_commands! {
     structural [
         WithIo { bindings: Vec<IoBinding>, cmd: Box<StepKind> },
@@ -1352,12 +1367,9 @@ declare_commands! {
         For { key_var: Option<String>, key_type: Option<String>, var: String, var_type: String, in_expr: Expr, body: Vec<Step> },
         If { cond: Box<Expr>, then_body: Vec<Step>, else_ifs: Vec<(Box<Expr>, Vec<Step>)>, else_body: Option<Vec<Step>> },
         Switch { discriminant: Option<Box<Expr>>, cases: Vec<(Vec<Expr>, Vec<Step>)>, default_body: Option<Vec<Step>> },
-        Assign { var: String, decl_type: String, expr: Expr, is_const: bool },
+        Bind { var: String, decl_type: String, is_const: bool, rhs: BindRhs },
         Set { var: String, expr: Expr },
-        AssignCapture { var: String, decl_type: String, cmd: Box<StepKind>, is_const: bool },
-        AwaitCapture { out_var: String, out_type: String, task_var: String, task_is_const: bool, is_const: bool },
         AsyncBlock { body: Vec<Step> },
-        AssignAsync { var: String, decl_type: String, body: Vec<Step>, is_const: bool },
         Await { var: String, is_const: bool },
         Cancel { var: String, is_const: bool },
         Timeout { duration: Arg, body: Vec<Step> },
@@ -1771,7 +1783,7 @@ declare_commands! {
         ],
         flags: &[ FlagSpec { name: "dirty", long: "--include-dirty", value_type: FlagValueType::Flag, required: false, description: "Include dirty" } ],
         default_output: None,
-        examples: &[ Example { name: "git copy missing source errors", fence_meta: Some("expect_error:\"COPY source missing\""), code: indoc! {r#"COPY_GIT HEAD src.txt dst.txt"#} } ],
+        examples: &[ Example { name: "git copy missing source errors", fence_meta: Some("expect_error:\"COPY source missing\""), code: indoc! {r#"COPY_GIT "HEAD" src.txt dst.txt"#} } ],
         lower: |flags, args| {
             let include_dirty = flags.iter().any(|(k, _)| k == "dirty");
             let mut it = args.into_iter();
@@ -5476,13 +5488,12 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, " }}")
             }
-            StepKind::Assign {
+            StepKind::Bind {
                 var,
                 decl_type,
-                expr,
                 is_const,
+                rhs,
             } => {
-                // Bare pipe declarations round-trip without an initializer.
                 let keyword = if *is_const {
                     KEYWORD_CONST
                 } else {
@@ -5493,59 +5504,52 @@ impl fmt::Display for StepKind {
                 } else {
                     format!("${var}")
                 };
-                if matches!(expr, Expr::FreshPipe) {
-                    write!(f, "{} {}: {}", keyword, name, decl_type)
-                } else {
-                    write!(f, "{} {}: {} = {}", keyword, name, decl_type, expr)
+                match rhs {
+                    BindRhs::Expr(expr) => {
+                        // Bare pipe declarations round-trip without an initializer.
+                        if matches!(expr, Expr::FreshPipe) {
+                            write!(f, "{} {}: {}", keyword, name, decl_type)
+                        } else {
+                            write!(f, "{} {}: {} = {}", keyword, name, decl_type, expr)
+                        }
+                    }
+                    BindRhs::Capture(cmd) => {
+                        write!(f, "{} {}: {} = {}", keyword, name, decl_type, cmd)
+                    }
+                    BindRhs::Async(body) => {
+                        write!(
+                            f,
+                            "{} {}: {} = {} {{",
+                            keyword, name, decl_type, KEYWORD_ASYNC
+                        )?;
+                        for s in body {
+                            write!(f, "\n    {}", s)?;
+                        }
+                        write!(f, "\n}}")
+                    }
+                    BindRhs::Await {
+                        task_var,
+                        task_is_const,
+                    } => {
+                        if *task_is_const {
+                            write!(
+                                f,
+                                "{} {}: {} = {} {}",
+                                keyword, name, decl_type, KEYWORD_AWAIT, task_var
+                            )
+                        } else {
+                            write!(
+                                f,
+                                "{} {}: {} = {} ${}",
+                                keyword, name, decl_type, KEYWORD_AWAIT, task_var
+                            )
+                        }
+                    }
                 }
             }
             StepKind::Set { var, expr } => write!(f, "${} = {}", var, expr),
-            StepKind::AssignCapture {
-                var,
-                decl_type,
-                cmd,
-                is_const,
-            } => {
-                let keyword = if *is_const {
-                    KEYWORD_CONST
-                } else {
-                    KEYWORD_LET
-                };
-                let name = if *is_const {
-                    var.clone()
-                } else {
-                    format!("${var}")
-                };
-                write!(f, "{} {}: {} = {}", keyword, name, decl_type, cmd)
-            }
             StepKind::AsyncBlock { body } => {
                 write!(f, "{} {{", KEYWORD_ASYNC)?;
-                for s in body {
-                    write!(f, "\n    {}", s)?;
-                }
-                write!(f, "\n}}")
-            }
-            StepKind::AssignAsync {
-                var,
-                decl_type,
-                body,
-                is_const,
-            } => {
-                let keyword = if *is_const {
-                    KEYWORD_CONST
-                } else {
-                    KEYWORD_LET
-                };
-                let name = if *is_const {
-                    var.clone()
-                } else {
-                    format!("${var}")
-                };
-                write!(
-                    f,
-                    "{} {}: {} = {} {{",
-                    keyword, name, decl_type, KEYWORD_ASYNC
-                )?;
                 for s in body {
                     write!(f, "\n    {}", s)?;
                 }
@@ -5556,37 +5560,6 @@ impl fmt::Display for StepKind {
                     write!(f, "{} {}", KEYWORD_AWAIT, var)
                 } else {
                     write!(f, "{} ${}", KEYWORD_AWAIT, var)
-                }
-            }
-            StepKind::AwaitCapture {
-                out_var,
-                out_type,
-                task_var,
-                task_is_const,
-                is_const,
-            } => {
-                let keyword = if *is_const {
-                    KEYWORD_CONST
-                } else {
-                    KEYWORD_LET
-                };
-                let out = if *is_const {
-                    out_var.clone()
-                } else {
-                    format!("${out_var}")
-                };
-                if *task_is_const {
-                    write!(
-                        f,
-                        "{} {}: {} = {} {}",
-                        keyword, out, out_type, KEYWORD_AWAIT, task_var
-                    )
-                } else {
-                    write!(
-                        f,
-                        "{} {}: {} = {} ${}",
-                        keyword, out, out_type, KEYWORD_AWAIT, task_var
-                    )
                 }
             }
             StepKind::Cancel { var, is_const } => {
@@ -5947,9 +5920,11 @@ pub(crate) fn has_stdout_pipe(bindings: &[IoBinding]) -> bool {
 pub(crate) fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
     let bad = match kind {
         StepKind::AsyncBlock { .. }
-        | StepKind::AssignAsync { .. }
+        | StepKind::Bind {
+            rhs: BindRhs::Async(_) | BindRhs::Await { .. },
+            ..
+        }
         | StepKind::Await { .. }
-        | StepKind::AwaitCapture { .. }
         | StepKind::Cancel { .. } => true,
         _ => {
             let mut bad = false;
@@ -6009,8 +5984,11 @@ pub(crate) fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
         | StepKind::Timeout { body, .. }
         | StepKind::Fail { body, .. }
         | StepKind::Isolated { body }
-        | StepKind::AssignAsync { body, .. }
         | StepKind::AsyncBlock { body } => rewrite_isolated_inherit(body),
+        StepKind::Bind {
+            rhs: BindRhs::Async(body),
+            ..
+        } => rewrite_isolated_inherit(body),
         StepKind::If {
             then_body,
             else_ifs,
@@ -6037,7 +6015,13 @@ pub(crate) fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
                 rewrite_isolated_inherit(default_body);
             }
         }
-        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
+        StepKind::WithIo { cmd, .. } => {
+            rewrite_isolated_inherit_kind(cmd);
+        }
+        StepKind::Bind {
+            rhs: BindRhs::Capture(cmd),
+            ..
+        } => {
             rewrite_isolated_inherit_kind(cmd);
         }
         _ => {}
@@ -7083,8 +7067,13 @@ mod tests {
         // against the descriptor table at runtime, so host types need no
         // grammar change (see the custom_types core tests).
         let steps = parse_script("LET $x: FOO = 1\n", lower_command).expect("custom tag parses");
-        let StepKind::Assign { decl_type, .. } = &steps[0].kind else {
-            panic!("expected Assign, got {:?}", steps[0].kind);
+        let StepKind::Bind {
+            decl_type,
+            rhs: BindRhs::Expr(_),
+            ..
+        } = &steps[0].kind
+        else {
+            panic!("expected Bind, got {:?}", steps[0].kind);
         };
         assert_eq!(decl_type, "FOO");
     }
@@ -7414,8 +7403,13 @@ mod tests {
             lower_command,
         )
         .expect("capture call parses");
-        let StepKind::Assign { var, expr, .. } = &steps[1].kind else {
-            panic!("expected Assign, got {:?}", steps[1].kind);
+        let StepKind::Bind {
+            var,
+            rhs: BindRhs::Expr(expr),
+            ..
+        } = &steps[1].kind
+        else {
+            panic!("expected Bind, got {:?}", steps[1].kind);
         };
         assert_eq!(var, "r");
         assert!(
@@ -7428,7 +7422,13 @@ mod tests {
         )
         .expect("async call parses");
         assert!(
-            matches!(&steps[1].kind, StepKind::AssignAsync { .. }),
+            matches!(
+                &steps[1].kind,
+                StepKind::Bind {
+                    rhs: BindRhs::Async(_),
+                    ..
+                }
+            ),
             "{:?}",
             steps[1].kind
         );
@@ -7444,8 +7444,12 @@ mod tests {
             lower_command,
         )
         .expect("multiline call parses");
-        let StepKind::Assign { expr, .. } = &steps[1].kind else {
-            panic!("expected Assign, got {:?}", steps[1].kind);
+        let StepKind::Bind {
+            rhs: BindRhs::Expr(expr),
+            ..
+        } = &steps[1].kind
+        else {
+            panic!("expected Bind, got {:?}", steps[1].kind);
         };
         let Expr::Call { name, args } = expr else {
             panic!("expected Call expr, got {expr:?}");
@@ -7490,8 +7494,12 @@ mod tests {
             lower_command,
         )
         .expect("multiline list parses");
-        let StepKind::Assign { expr, .. } = &steps[0].kind else {
-            panic!("expected Assign, got {:?}", steps[0].kind);
+        let StepKind::Bind {
+            rhs: BindRhs::Expr(expr),
+            ..
+        } = &steps[0].kind
+        else {
+            panic!("expected Bind, got {:?}", steps[0].kind);
         };
         assert!(
             matches!(expr, Expr::List(items) if items.len() == 2),
@@ -7683,43 +7691,56 @@ mod tests {
         // commands map to None; they are covered by declare_commands!.
         fn metadata_name(kind: &StepKind) -> Option<&'static str> {
             match kind {
-                StepKind::WithIo { .. } | StepKind::WithIoBlock { .. } => Some("WITH_IO"),
-                StepKind::For { .. } => Some("FOR"),
-                StepKind::If { .. } => Some("IF"),
-                StepKind::Switch { .. } => Some("SWITCH"),
-                StepKind::Assign { is_const, .. } => Some(if *is_const { "CONST" } else { "LET" }),
+                StepKind::WithIo { .. } | StepKind::WithIoBlock { .. } => Some(KEYWORD_WITH_IO),
+                StepKind::For { .. } => Some(KEYWORD_FOR),
+                StepKind::If { .. } => Some(KEYWORD_IF),
+                StepKind::Switch { .. } => Some(KEYWORD_SWITCH),
+                StepKind::Bind { is_const, rhs, .. } => Some(match rhs {
+                    BindRhs::Await { .. } => {
+                        if *is_const {
+                            KEYWORD_CONST
+                        } else {
+                            KEYWORD_AWAIT
+                        }
+                    }
+                    BindRhs::Async(_) => {
+                        if *is_const {
+                            KEYWORD_CONST
+                        } else {
+                            KEYWORD_ASYNC
+                        }
+                    }
+                    _ => {
+                        if *is_const {
+                            KEYWORD_CONST
+                        } else {
+                            KEYWORD_LET
+                        }
+                    }
+                }),
                 StepKind::Set { .. } => Some("MUTATION"),
-                StepKind::AssignCapture { is_const, .. } => {
-                    Some(if *is_const { "CONST" } else { "LET" })
-                }
-                StepKind::AwaitCapture { is_const, .. } => {
-                    Some(if *is_const { "CONST" } else { "AWAIT" })
-                }
-                StepKind::AsyncBlock { .. } => Some("ASYNC"),
-                StepKind::AssignAsync { is_const, .. } => {
-                    Some(if *is_const { "CONST" } else { "ASYNC" })
-                }
-                StepKind::Await { .. } => Some("AWAIT"),
-                StepKind::Cancel { .. } => Some("CANCEL"),
-                StepKind::Timeout { .. } => Some("TIMEOUT"),
-                StepKind::Fail { .. } => Some("FAIL"),
-                StepKind::Isolated { .. } => Some("ISOLATED"),
-                StepKind::IsolatedInheritEnv { .. } => Some("ISOLATED"),
-                StepKind::RemoteBlock { .. } => Some("REMOTE"),
-                StepKind::FuncDef { .. } => Some("FUNC"),
+                StepKind::AsyncBlock { .. } => Some(KEYWORD_ASYNC),
+                StepKind::Await { .. } => Some(KEYWORD_AWAIT),
+                StepKind::Cancel { .. } => Some(KEYWORD_CANCEL),
+                StepKind::Timeout { .. } => Some(KEYWORD_TIMEOUT),
+                StepKind::Fail { .. } => Some(KEYWORD_FAIL),
+                StepKind::Isolated { .. } => Some(KEYWORD_ISOLATED),
+                StepKind::IsolatedInheritEnv { .. } => Some(KEYWORD_ISOLATED),
+                StepKind::RemoteBlock { .. } => Some(KEYWORD_REMOTE),
+                StepKind::FuncDef { .. } => Some(KEYWORD_FUNC),
                 // Bare `NAME(...)` calls share the `FUNC` reference page;
                 // there is no call keyword to document on its own.
                 StepKind::Call { .. } => None,
                 // Both import forms are documented on the `IMPORT` page.
-                StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => Some("IMPORT"),
-                StepKind::Return { .. } => Some("RETURN"),
-                StepKind::While { .. } => Some("WHILE"),
-                StepKind::Break => Some("BREAK"),
-                StepKind::Continue => Some("CONTINUE"),
+                StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => Some(KEYWORD_IMPORT),
+                StepKind::Return { .. } => Some(KEYWORD_RETURN),
+                StepKind::While { .. } => Some(KEYWORD_WHILE),
+                StepKind::Break => Some(KEYWORD_BREAK),
+                StepKind::Continue => Some(KEYWORD_CONTINUE),
                 // Aliases are declared by `TYPE` but documented with the
                 // type-word prose on the `LET` page (define-once,
                 // use-everywhere); no dedicated reference page.
-                StepKind::TypeAlias { .. } => Some("LET"),
+                StepKind::TypeAlias { .. } => Some(KEYWORD_LET),
                 StepKind::RunExec { .. } => None,
                 StepKind::Workdir(_)
                 | StepKind::Workspace(_)
@@ -7782,66 +7803,46 @@ mod tests {
                 cases: Vec::new(),
                 default_body: None,
             },
-            StepKind::Assign {
+            StepKind::Bind {
                 var: "v".to_string(),
                 decl_type: "BOOL".to_string(),
-                expr: Expr::Literal(Value::bool(true)),
                 is_const: false,
+                rhs: BindRhs::Expr(Expr::Literal(Value::bool(true))),
             },
-            StepKind::Assign {
+            StepKind::Bind {
                 var: "v".to_string(),
                 decl_type: "BOOL".to_string(),
-                expr: Expr::Literal(Value::bool(true)),
                 is_const: true,
+                rhs: BindRhs::Expr(Expr::Literal(Value::bool(true))),
             },
             StepKind::Set {
                 var: "v".to_string(),
                 expr: Expr::Literal(Value::bool(true)),
             },
-            StepKind::AssignCapture {
+            StepKind::Bind {
                 var: "v".to_string(),
                 decl_type: "STRING".to_string(),
-                cmd: Box::new(StepKind::Echo(crate::ast::Arg::String(
+                is_const: false,
+                rhs: BindRhs::Capture(Box::new(StepKind::Echo(crate::ast::Arg::String(
                     "x".to_string(),
                     false,
-                ))),
-                is_const: false,
+                )))),
             },
-            StepKind::AssignCapture {
-                var: "v".to_string(),
+            StepKind::Bind {
+                var: "o".to_string(),
                 decl_type: "STRING".to_string(),
-                cmd: Box::new(StepKind::Echo(crate::ast::Arg::String(
-                    "x".to_string(),
-                    false,
-                ))),
-                is_const: true,
-            },
-            StepKind::AwaitCapture {
-                out_var: "o".to_string(),
-                out_type: "STRING".to_string(),
-                task_var: "t".to_string(),
-                task_is_const: false,
                 is_const: false,
-            },
-            StepKind::AwaitCapture {
-                out_var: "o".to_string(),
-                out_type: "STRING".to_string(),
-                task_var: "t".to_string(),
-                task_is_const: false,
-                is_const: true,
+                rhs: BindRhs::Await {
+                    task_var: "t".to_string(),
+                    task_is_const: false,
+                },
             },
             StepKind::AsyncBlock { body: Vec::new() },
-            StepKind::AssignAsync {
+            StepKind::Bind {
                 var: "t".to_string(),
                 decl_type: "HANDLE".to_string(),
-                body: Vec::new(),
                 is_const: false,
-            },
-            StepKind::AssignAsync {
-                var: "t".to_string(),
-                decl_type: "HANDLE".to_string(),
-                body: Vec::new(),
-                is_const: true,
+                rhs: BindRhs::Async(Vec::new()),
             },
             StepKind::Await {
                 var: "t".to_string(),

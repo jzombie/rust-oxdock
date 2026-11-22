@@ -1092,6 +1092,38 @@ impl<P: ProcessManager> ExecState<P> {
     /// when no lexical frame declares the name does the owning
     /// module's shared store answer. Single owner for the const check
     /// behind `SET`, `LIST_APPEND`, and redeclaration diagnostics.
+    /// Whether the entry-`CONST` fallback applies here: entry context
+    /// (no owning module) whose caller is also entry (or top level).
+    /// Entry callees called from module code stay params-only, so a
+    /// module caller never observes entry file state. Single owner
+    /// for the caller check every entry fallback reads.
+    fn entry_fallback_allowed(&self) -> bool {
+        if self.current_module().is_some() {
+            return false;
+        }
+        match self.module_stack.len() {
+            0 => true,
+            1 => true,
+            _ => matches!(
+                self.module_stack.get(self.module_stack.len() - 2),
+                None | Some(None)
+            ),
+        }
+    }
+
+    /// Entry-`CONST` fallback init: the entry record's init when the
+    /// fallback is allowed (entry context whose caller is also entry).
+    /// Single owner for the caller check plus the init borrow, so
+    /// every entry fallback reads hashes `ENTRY_UNIT` and checks the
+    /// caller once. Call sites filter to `const_vars`, so `LET`s never
+    /// cross.
+    fn entry_const_init(&self) -> Option<&ModuleInit> {
+        if !self.entry_fallback_allowed() {
+            return None;
+        }
+        self.modules.get(super::import::ENTRY_UNIT)?.init.as_ref()
+    }
+
     pub(super) fn is_const_var(&self, key: &str) -> bool {
         for idx in (0..self.var_scopes.len()).rev() {
             if self.var_scopes[idx].contains_key(key) {
@@ -1108,7 +1140,10 @@ impl<P: ProcessManager> ExecState<P> {
         {
             return init.const_vars.contains(key);
         }
-        false
+        // Entry `CONST`s are visible by fallback (#318): no synthetic
+        // seed frame, just the init store filtered to consts.
+        self.entry_const_init()
+            .is_some_and(|init| init.vars.contains_key(key) && init.const_vars.contains(key))
     }
 
     /// Shared declaration switch behind `LET` and `CONST` capture,
@@ -1238,8 +1273,15 @@ impl<P: ProcessManager> ExecState<P> {
         }
         // Module-owned code falls back to the owning module's shared
         // store (#115): one file's functions share one global state.
-        // Entry code never sees it (its boundary pushes `None`).
         if let Some((_, value)) = self.module_var(key) {
+            return Some(value.clone());
+        }
+        // Entry `CONST` fallback (#318): same init-store read the seed
+        // frame copied, filtered to consts so `LET`s never cross.
+        if let Some(init) = self.entry_const_init()
+            && let Some((_, value)) = init.vars.get(key)
+            && init.const_vars.contains(key)
+        {
             return Some(value.clone());
         }
         None
@@ -1252,6 +1294,12 @@ impl<P: ProcessManager> ExecState<P> {
             }
         }
         if let Some(entry) = self.module_var(key) {
+            return Some(entry.clone());
+        }
+        if let Some(init) = self.entry_const_init()
+            && let Some(entry) = init.vars.get(key)
+            && init.const_vars.contains(key)
+        {
             return Some(entry.clone());
         }
         None
@@ -1295,7 +1343,8 @@ impl<P: ProcessManager> ExecState<P> {
     /// Get a flattened view of all variables across all scopes.
     /// Inner scopes take precedence over outer scopes. Module-owned
     /// code additionally sees the owning module's shared store beneath
-    /// every lexical frame; entry code never does.
+    /// every lexical frame; entry code sees the entry `CONST` fallback
+    /// (filtered to consts) instead of a seed frame.
     pub(super) fn all_vars(&self) -> HashMap<String, Value> {
         let mut result = HashMap::new();
         for scope in self.var_scopes.iter().rev() {
@@ -1306,6 +1355,13 @@ impl<P: ProcessManager> ExecState<P> {
         if let Some(store) = self.module_store() {
             for (k, (_, v)) in store {
                 result.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        if let Some(init) = self.entry_const_init() {
+            for (k, (_, v)) in &init.vars {
+                if init.const_vars.contains(k) {
+                    result.entry(k.clone()).or_insert_with(|| v.clone());
+                }
             }
         }
         result

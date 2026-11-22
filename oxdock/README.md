@@ -90,6 +90,37 @@ LET $v: STRING = READ env.txt
 ASSERT_EQ $v "bar"
 ```
 
+Four spellings read distinct stores. `$var` reads a `LET` binding, `env:KEY` reads script env, bare `WORD` reads `CONST` in normal commands, and `{{ NAME }}` reads `CONST` everywhere. `RUN` shell words stay literal text, so only templates read `CONST` there.
+
+```oxdock
+# LET bindings read through the dollar sigil.
+LET $note: STRING = "let-hello"
+ECHO $note
+ASSERT_CONTAINS stdout "let-hello"
+
+# Script env reads through the env prefix.
+ENV DOC_MOOD="env-hello"
+ECHO env:DOC_MOOD
+ASSERT_CONTAINS stdout "env-hello"
+
+# Bare words read CONST in normal commands.
+CONST BADGE: STRING = "const-hello"
+ECHO BADGE
+ASSERT_CONTAINS stdout "const-hello"
+
+# CONST reads through templates as well.
+ECHO "{{ BADGE }}"
+ASSERT_CONTAINS stdout "const-hello"
+
+# RUN keeps shell words literal, so only templates read CONST.
+LET $raw: STRING = RUN echo BADGE
+ASSERT_EQ $raw "BADGE\n"
+
+# RUN reads CONST through templates.
+LET $cooked: STRING = RUN echo "{{ BADGE }}"
+ASSERT_CONTAINS $cooked "const-hello"
+```
+
 ### Functions and commands
 
 Parentheses mark the boundary between computing a value and running a pipeline step. Builtin functions (`INSPECT`, `LOAD_TOML`, `LOAD_JSON`, `GLOB`, `INT`, `FLOAT`, `PATH_TYPE`) evaluate to an in-memory value and never write to standard output. They compute or query (`Value::Map`, `Value::String`, `Value::Int`, `Value::Float`, `Value::List`) with zero stream side effects, so they appear only where values are expected: on the right-hand side of `LET`, inside `IF` conditions, or nested in other calls. Commands (`READ`, `ECHO`, `RUN`, `WRITE`, `ASSERT_EQ`) are line-starting statements with space-separated arguments. They drive the I/O pipeline, streaming bytes to stdout or mutating state, which makes their output available to pipes and `LET` capture. When a function evaluates, process stdout stays completely untouched. When a command runs, streaming bytes is the payload:

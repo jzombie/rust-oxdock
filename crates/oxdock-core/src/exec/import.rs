@@ -1391,15 +1391,20 @@ fn expand_walk_kind<P: ProcessManager>(
 /// here. Only direct child expressions are inspected; blocks nested
 /// deeper inside collection literals never contain imports.
 pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
+    use oxdock_parser::BindRhs;
     let mut out: Vec<&[Step]> = match kind {
-        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => child_bodies(cmd),
+        StepKind::WithIo { cmd, .. } => child_bodies(cmd),
+        StepKind::Bind { rhs, .. } => match rhs {
+            BindRhs::Capture(cmd) => child_bodies(cmd),
+            BindRhs::Async(body) => vec![body],
+            BindRhs::Expr(_) | BindRhs::Await { .. } => Vec::new(),
+        },
         StepKind::For { body, .. }
         | StepKind::While { body, .. }
         | StepKind::FuncDef { body, .. }
         | StepKind::Timeout { body, .. }
         | StepKind::Fail { body, .. }
         | StepKind::Isolated { body, .. }
-        | StepKind::AssignAsync { body, .. }
         | StepKind::AsyncBlock { body, .. }
         | StepKind::RemoteBlock { body, .. } => vec![body],
         StepKind::If {
@@ -1439,7 +1444,11 @@ pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
     // blocks nested deeper inside collection literals never contain
     // imports. (`Return` boxes its expression; the rest do not.)
     match kind {
-        StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => {
+        StepKind::Bind {
+            rhs: oxdock_parser::BindRhs::Expr(expr),
+            ..
+        }
+        | StepKind::Set { expr, .. } => {
             if let oxdock_parser::Expr::Block(body) = expr {
                 out.push(body);
             }
@@ -1755,6 +1764,53 @@ pub(super) enum ScriptSite<P: ProcessManager> {
     },
 }
 
+/// Runtime frame-walk adapter: the [`FuncFrameView`] implementation
+/// over live [`ExecState`] stores, so static and runtime share the
+/// nested, home, harvest precedence through [`FuncFrameView::walk`].
+struct RuntimeFrame<'a, P: ProcessManager> {
+    state: &'a ExecState<P>,
+    current: Option<String>,
+}
+
+impl<P: ProcessManager> super::native::FuncFrameView for RuntimeFrame<'_, P> {
+    type Hit = ScriptSite<P>;
+    fn find_nested(&self, base: &str) -> Option<Self::Hit> {
+        // Uniform floor: the innermost call/init boundary, or 0 at
+        // the top level.
+        let floor = self.state.func_floors.last().copied().unwrap_or(0);
+        self.state
+            .functions
+            .get_scoped(base, floor)
+            .map(ScriptSite::Live)
+    }
+    fn find_home(&self, unit: &str, base: &str) -> Option<Self::Hit> {
+        // Owning file frame through the one unit lookup. Entry hits
+        // carry no unit key so calls push no module context.
+        let tops = self.state.unit_top_funcs(unit)?;
+        let defs = tops.get(base)?;
+        let raw = live_top_func(defs, &self.state.envs)?;
+        let unit = self.current.clone();
+        Some(ScriptSite::File { raw, unit })
+    }
+    fn find_harvest(&self, unit: &str, base: &str) -> Option<Self::Hit> {
+        // Per-unit harvests: first textual definition wins.
+        let defining = self
+            .state
+            .harvest_map
+            .get(&(unit.to_string(), base.to_string()))?;
+        let raw = self
+            .state
+            .modules
+            .get(defining)
+            .and_then(|r| r.top_funcs.get(base))
+            .and_then(|defs| defs.first().cloned())?;
+        Some(ScriptSite::File {
+            raw,
+            unit: Some(defining.clone()),
+        })
+    }
+}
+
 /// Single frame walk for bare and `SCRIPT::` call spellings (#322):
 /// nested frames down to the call/init floor, then the owning file
 /// frame (entry included via its precomputed index), then the
@@ -1768,49 +1824,18 @@ pub(super) fn find_script_site<P: ProcessManager>(
     state: &ExecState<P>,
     name: &str,
 ) -> Result<Option<ScriptSite<P>>> {
+    use super::native::FuncFrameView;
     let base = match name.split_once(MODULE_SEPARATOR) {
         Some((module, base)) if module == oxdock_parser::SCRIPT_MODULE_NAME => base,
         Some(_) => return Ok(None),
         None => name,
     };
     let current = state.current_module();
-    // Uniform floor: the innermost call/init boundary, or 0 at the
-    // top level. Entry and module calls use the same rule; entry
-    // top-level defs resolve through the entry file frame below.
-    let floor = state.func_floors.last().copied().unwrap_or(0);
-    if let Some(entry) = state.functions.get_scoped(base, floor) {
-        return Ok(Some(ScriptSite::Live(entry)));
-    }
-    // Owning file frame through the one unit lookup: entry reads
-    // its record under the entry sentinel like any module.
-    // Guards evaluate against the live env, mirroring execution.
-    // Entry hits carry no unit key so calls push no module context
-    // (a `Some("entry")` key would trip the reentrant-init guard
-    // and skip the snapshot reset).
-    let tops = state.unit_top_funcs(unit_key(current.as_deref()));
-    if let Some(defs) = tops.and_then(|t| t.get(base))
-        && let Some(raw) = live_top_func(defs, &state.envs)
-    {
-        let unit = current.clone();
-        return Ok(Some(ScriptSite::File { raw, unit }));
-    }
-    // Per-unit harvests: explicit global names, served from the
-    // defining file like the registry slot they replace. First
-    // textual definition wins, mirroring harvest registration.
-    let unit = active_unit_key(state);
-    if let Some(defining) = state.harvest_map.get(&(unit, base.to_string()))
-        && let Some(raw) = state
-            .modules
-            .get(defining)
-            .and_then(|r| r.top_funcs.get(base))
-            .and_then(|defs| defs.first().cloned())
-    {
-        return Ok(Some(ScriptSite::File {
-            raw,
-            unit: Some(defining.clone()),
-        }));
-    }
-    Ok(None)
+    let view = RuntimeFrame {
+        state,
+        current: current.clone(),
+    };
+    Ok(view.walk(unit_key(current.as_deref()), base))
 }
 
 /// Runtime #319 missing-import suffix for an unknown function:
@@ -1934,6 +1959,7 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
 ) -> Result<Value> {
     use super::native::{
         ConstHolders, ambiguous_alias_message, chase_const_forward, const_holder_files,
+        missing_const_hint,
     };
     let qualified = oxdock_parser::qualify(alias, name);
     let targets = active_unit_alias_targets(state);
@@ -1942,7 +1968,7 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
     let holders = match const_holder_files(state, &targets, alias, name) {
         ConstHolders::Found(holders) => holders,
         ConstHolders::NoAlias => {
-            bail!("unknown CONST `${qualified}`: no import alias `{alias}` exports that name");
+            bail!("unknown CONST `{qualified}`: no import alias `{alias}` exports that name");
         }
         ConstHolders::Ambiguous { alias, base, files } => {
             bail!(
@@ -1959,34 +1985,13 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
         );
     }
     let Some(file) = holders.into_iter().next() else {
-        // Hint only from the queried alias's own files: an unexported
-        // CONST or private LET in an unrelated module must not supply
-        // misleading text on a typo under a different alias.
-        let hint = targets
-            .get(alias)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|(file, _)| file.as_ref())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|file| state.modules.get(*file))
-            .filter_map(|record| record.init.as_ref())
-            .find_map(|init| {
-                init.vars.get(name).map(|_| {
-                    if init.const_vars.contains(name) {
-                        format!("module holds `{name}` as CONST but does not export it: add `EXPORT CONST {name}`")
-                    } else {
-                        format!("`{name}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary")
-                    }
-                })
-            });
+        // Hint owned by `missing_const_hint`: unexported CONST or
+        // private LET under the queried alias only.
+        let hint = missing_const_hint(state, &targets, alias, name);
         match hint {
-            Some(hint) => bail!("unknown CONST `${qualified}`: {hint}"),
+            Some(hint) => bail!("unknown CONST `{qualified}`: {hint}"),
             None => {
-                bail!("unknown CONST `${qualified}`: no import alias `{alias}` exports that name")
+                bail!("unknown CONST `{qualified}`: no import alias `{alias}` exports that name")
             }
         }
     };
@@ -2004,25 +2009,25 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
         );
     }
     let Some(terminal) = terminals.into_iter().next() else {
-        bail!("unknown CONST `${qualified}`");
+        bail!("unknown CONST `{qualified}`");
     };
     let Some(record) = state.modules.get(&terminal) else {
-        bail!("unknown CONST `${qualified}`");
+        bail!("unknown CONST `{qualified}`");
     };
     let Some(init) = record.init.as_ref() else {
         bail!(
-            "`${qualified}` cannot be read: the module was harvested but never initialized; import the file"
+            "`{qualified}` cannot be read: the module was harvested but never initialized; import the file"
         );
     };
     if !init.const_vars.contains(name) {
         bail!(
-            "`${qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+            "`{qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
         );
     }
     init.vars
         .get(name)
         .map(|(_, value)| value.clone())
-        .ok_or_else(|| anyhow::anyhow!("unknown CONST `${qualified}`"))
+        .ok_or_else(|| anyhow::anyhow!("unknown CONST `{qualified}`"))
 }
 
 /// Record one executed import under the importing unit: alias to its

@@ -88,6 +88,28 @@ pub(super) enum AliasResolution {
 /// once taken).
 pub(super) type AliasTargets = HashMap<String, Vec<(Option<String>, Option<GuardExpr>)>>;
 
+/// Shared frame-walk precedence for script resolution (#322):
+/// innermost nested frames, then the owning file top-level, then
+/// per-unit harvests. Static checking and runtime dispatch implement
+/// this trait over their own stores and share [`FuncFrameView::walk`],
+/// so precedence lives once and the twins cannot drift.
+pub(super) trait FuncFrameView {
+    /// Resolution hit for this layer (entry, info+key, etc.).
+    type Hit;
+    /// Innermost nested frames outward.
+    fn find_nested(&self, base: &str) -> Option<Self::Hit>;
+    /// Owning file top-level (entry included via its unit key).
+    fn find_home(&self, unit: &str, base: &str) -> Option<Self::Hit>;
+    /// Per-unit bare harvests.
+    fn find_harvest(&self, unit: &str, base: &str) -> Option<Self::Hit>;
+    /// Precedence owner: nested, home, harvest.
+    fn walk(&self, unit: &str, base: &str) -> Option<Self::Hit> {
+        self.find_nested(base)
+            .or_else(|| self.find_home(unit, base))
+            .or_else(|| self.find_harvest(unit, base))
+    }
+}
+
 /// Classify one call spelling under a unit's alias targets. Single
 /// entry point for alias-target matching: splits the spelling,
 /// resolves `SCRIPT::` and bare names globally, and maps file aliases
@@ -280,6 +302,39 @@ pub(super) enum BindingPresence {
     Const,
     Let,
     Absent,
+}
+
+/// Missing-`CONST` hint from the queried alias's own files: an
+/// unexported `CONST` or a private `LET` with the same base names the
+/// real fault instead of a bare unknown-name miss. Single owner for
+/// the hint every qualified-`CONST` miss renders, so static and
+/// runtime agree word for word. Reads only `view.binding`, never a
+/// twin-local store scan.
+pub(super) fn missing_const_hint<S: ModuleGraphView>(
+    view: &S,
+    targets: &AliasTargets,
+    alias: &str,
+    name: &str,
+) -> Option<String> {
+    targets
+        .get(alias)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(file, _)| file.as_ref())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+        .iter()
+        .find_map(|file| match view.binding(file, name) {
+            BindingPresence::Const => Some(format!(
+                "module holds `{name}` as CONST but does not export it: add `EXPORT CONST {name}`"
+            )),
+            BindingPresence::Let => Some(format!(
+                "`{name}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+            )),
+            BindingPresence::Absent => None,
+        })
 }
 
 /// Read-only view of the module graph one qualified-`CONST`
@@ -1745,17 +1800,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         }
     }
 
-    /// True when `name` is an interpreted script definition (needing call
-    /// scoping and depth budgeting through `call_func_value` rather than
-    /// inline evaluation). Callers resolve file-aliased spellings to
-    /// the canonical key first (see `resolve_file_call_key`).
-    pub(super) fn contains_script(&self, name: &str) -> bool {
-        matches!(
-            self.entries.get(name).map(|entry| &entry.body),
-            Some(FuncBody::Script(_))
-        )
-    }
-
     /// Registry lookup key for a runtime call-site spelling, through
     /// the shared alias-target matcher.
     pub(super) fn resolve_file_call_key(
@@ -1775,17 +1819,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         }
     }
 
-    /// Clone the pure fn for `name` (ending the registry borrow) so callers
-    /// can invoke it without holding `&self` across a `&mut StepCtx` use.
-    /// Dual entries answer with their template arm.
-    fn clone_pure_fn(&self, name: &str) -> Option<PureFn> {
-        match self.entries.get(name)?.body {
-            FuncBody::Pure(ref func) => Some(Arc::clone(func)),
-            FuncBody::Both { ref pure, .. } => Some(Arc::clone(pure)),
-            _ => None,
-        }
-    }
-
     /// Shared snapshot of every pure entry, nested by module and base
     /// name. Cloning the `Arc` is refcount-only: placeholder dispatch
     /// borrows this per expansion with no map copies.
@@ -1797,18 +1830,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// run-start type tag validation.
     pub(super) fn all_metas(&self) -> Vec<FuncMeta> {
         self.entries_metas()
-    }
-
-    /// Clone the ctx fn for `name` (ending the registry borrow) so callers
-    /// can invoke it with `&mut StepCtx` without double-borrowing state.
-    /// Dual entries answer with their stateful arm, which is the full
-    /// behavior wherever step IO exists.
-    fn clone_ctx_fn(&self, name: &str) -> Option<NativeFn<P>> {
-        match self.entries.get(name)?.body {
-            FuncBody::Ctx(ref func) => Some(Arc::clone(func)),
-            FuncBody::Both { ref ctx, .. } => Some(Arc::clone(ctx)),
-            _ => None,
-        }
     }
 
     fn meta(&self, name: &str) -> Option<FuncMeta> {
@@ -5795,24 +5816,12 @@ impl<P: ProcessManager> ExecState<P> {
         None
     }
 
-    pub(super) fn clone_native_pure(&self, name: &str) -> Option<PureFn> {
-        self.functions.clone_pure_fn(name)
-    }
-
     /// Shared snapshot of every registered pure function for
     /// placeholder and host driven expansion. Public so host crates
     /// resolve calls through the live registry instead of hardcoding
     /// module or function names. Cloning the `Arc` never copies the map.
     pub fn pure_function_table(&self) -> Arc<PureTable> {
         self.functions.pure_shared()
-    }
-
-    pub(super) fn clone_native_ctx(&self, name: &str) -> Option<NativeFn<P>> {
-        self.functions.clone_ctx_fn(name)
-    }
-
-    pub(super) fn native_meta(&self, name: &str) -> Option<FuncMeta> {
-        self.functions.meta(name)
     }
 }
 

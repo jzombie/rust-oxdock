@@ -16,10 +16,10 @@ fn bare_let_pipe_shape_and_round_trip() {
     let steps = parse_script(script, mock_lower).expect("bare LET plus variable binding parses");
     assert_eq!(steps.len(), 2);
     match &steps[0].kind {
-        StepKind::Assign {
+        StepKind::Bind {
             var,
             decl_type,
-            expr,
+            rhs: oxdock_parser::BindRhs::Expr(expr),
             ..
         } => {
             assert_eq!(var, "p");

@@ -2061,9 +2061,13 @@ fn is_single_run(cmd: &StepKind) -> bool {
 /// exactly one `RUN`, guarded or not.
 fn async_single_run_body(cmd: &StepKind) -> bool {
     match cmd {
-        StepKind::AsyncBlock { body } | StepKind::AssignAsync { body, .. } => {
+        StepKind::AsyncBlock { body } => {
             matches!(body.as_slice(), [step] if is_single_run(&step.kind))
         }
+        StepKind::Bind {
+            rhs: oxdock_parser::BindRhs::Async(body),
+            ..
+        } => matches!(body.as_slice(), [step] if is_single_run(&step.kind)),
         _ => false,
     }
 }
@@ -2294,7 +2298,13 @@ fn resolve_pipe_handle<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     target: &PipeTarget,
 ) -> Result<PipeHandle> {
-    let PipeTarget::Var(var) = target;
+    let PipeTarget::Var {
+        name: var,
+        is_const,
+    } = target;
+    // Gate through the single `$` vs bare owner so `$CONST` fails
+    // here exactly like every other read (static gate mirrors it).
+    let _ = super::args::load_var_binding(cx.state, var, *is_const)?;
     match cx.state.get_var_typed(var) {
         Some((kind, value)) if matches!(kind, TypeTag::Pipe) => {
             let Some(handle) = value.as_pipe_handle() else {
@@ -2790,20 +2800,26 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     for arg in args {
         arg_vals.push(super::args::evaluate_expr(arg, cx)?);
     }
-    execute_call_entry(cx, name, entry, arg_vals)
+    execute_call_entry(cx, name, entry, arg_vals, false)
 }
 
 /// Execute a resolved entry with evaluated arguments. Single owner
 /// for the call body; every routed call (statement, expression, RPN
-/// math) ends here.
+/// math) ends here. `rpn_only` restricts stateful bodies to RPN-opted
+/// entries: `Ctx` without `rpn` fails unknown (AST-only natives like
+/// `PATH_TYPE` never run in math), and `Both` picks `ctx` only when
+/// `rpn` else `pure`.
 pub(crate) fn execute_call_entry<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     name: &str,
     entry: super::native::FuncEntry<P>,
     mut arg_vals: Vec<Value>,
+    rpn_only: bool,
 ) -> Result<Value> {
-    // 5. Execution by body kind.
-    match entry.body {
+    // 5. Execution by body kind. Script returns early (no host
+    // return gate); host arms share one context wrap and one
+    // return-type check below.
+    let value = match entry.body {
         FuncBody::Script(def) => {
             // Hard isolation (#322): the only thing crossing a FUNC
             // boundary is explicit arguments. Every script call resets
@@ -2836,48 +2852,11 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             // env resets below, so inherited scrubs must not leak in.
             let saved_isolated = std::mem::take(&mut cx.state.isolated_stack);
             cx.state.push_scope();
-            // Entry file `CONST`s are visible by scope (#318): an
-            // entry-owned callee called from entry code restores the
-            // entry prelude `CONST`s into a dedicated seed frame
-            // beneath its params, so the body reads exactly the
-            // top-level `CONST`s. `LET`s never cross; module callers
-            // seed nothing. Seeded from the entry record's init
-            // store, never caller frames, so body-local `CONST`s
-            // cannot leak into nested callees. Mirrors the static
-            // entry seeding.
-            let mut seeded_entry_consts = false;
-            let entry_prelude_empty = cx
-                .state
-                .modules
-                .get(super::import::ENTRY_UNIT)
-                .and_then(|record| record.init.as_ref())
-                .map(|init| init.vars.is_empty())
-                .unwrap_or(true);
-            if module_key.is_none()
-                && matches!(cx.state.module_stack.last(), None | Some(None))
-                && !entry_prelude_empty
-            {
-                let prelude: Vec<(String, TypeTag, Value)> = cx
-                    .state
-                    .modules
-                    .get(super::import::ENTRY_UNIT)
-                    .and_then(|record| record.init.as_ref())
-                    .map(|init| {
-                        init.vars
-                            .iter()
-                            .filter(|(k, _)| init.const_vars.contains(*k))
-                            .map(|(k, (t, v))| (k.clone(), t.clone(), v.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                for (name, tag, value) in prelude {
-                    cx.state.declare_const(name, tag, value)?;
-                    seeded_entry_consts = true;
-                }
-                if seeded_entry_consts {
-                    cx.state.push_var_scope();
-                }
-            }
+            // Entry file `CONST`s are visible by fallback (#318):
+            // `ExecState::entry_const_store` serves the entry init
+            // filtered to consts when the caller is entry, so no
+            // synthetic seed frame is needed. `LET`s never cross;
+            // module callers observe nothing (fallback disallows).
             // Callee jail (#322): every call restores the workspace
             // selection and cwd sealed at the definition site, so a
             // file that establishes its jail before its `FUNC`s serves
@@ -3012,12 +2991,6 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
                     }
                 }
             })();
-            // Drop the entry `CONST` seed frame first, so `pop_scope`
-            // removes the call frame it pushed; the wholesale restores
-            // below discard both either way.
-            if seeded_entry_consts {
-                cx.state.pop_var_scope();
-            }
             let pop_res = cx.state.pop_scope();
             if let Some(saved) = saved_vars {
                 cx.state.var_scopes = saved;
@@ -3029,34 +3002,40 @@ pub(crate) fn execute_call_entry<P: ProcessManager>(
             cx.state.call_depth -= 1;
             let _ = cx.state.module_stack.pop();
             cx.state.restore_aliases(saved_type_aliases);
-            match (outcome, pop_res) {
+            return match (outcome, pop_res) {
                 (Ok(value), Ok(())) => {
                     let _ = (&def.return_type, &def.return_spelling, def.is_async);
                     Ok(value)
                 }
                 (Err(e), _) => Err(e),
                 (Ok(_), Err(e)) => Err(e),
+            };
+        }
+        FuncBody::Pure(func) => func(arg_vals),
+        FuncBody::Ctx(func) => {
+            if rpn_only && !entry.meta.rpn {
+                anyhow::bail!(
+                    "unknown function {name}{}",
+                    super::import::missing_import_hint(cx.state, name)
+                );
+            }
+            func(cx, arg_vals)
+        }
+        FuncBody::Both { pure, ctx } => {
+            if !rpn_only || entry.meta.rpn {
+                ctx(cx, arg_vals)
+            } else {
+                pure(arg_vals)
             }
         }
-        FuncBody::Pure(func) => {
-            let value = func(arg_vals).with_context(|| format!("function `{name}` failed"))?;
-            super::args::check_host_return_value(
-                &format!("function `{}` returned", super::base_name(name)),
-                &entry.meta.returns,
-                &value,
-            )?;
-            Ok(value)
-        }
-        FuncBody::Ctx(func) | FuncBody::Both { ctx: func, .. } => {
-            let value = func(cx, arg_vals).with_context(|| format!("function `{name}` failed"))?;
-            super::args::check_host_return_value(
-                &format!("function `{}` returned", super::base_name(name)),
-                &entry.meta.returns,
-                &value,
-            )?;
-            Ok(value)
-        }
     }
+    .with_context(|| format!("function `{name}` failed"))?;
+    super::args::check_host_return_value(
+        &format!("function `{}` returned", super::base_name(name)),
+        &entry.meta.returns,
+        &value,
+    )?;
+    Ok(value)
 }
 
 /// Evaluate an inline block to a value (`LET $a: STRING = { ... }`): the
@@ -3168,27 +3147,21 @@ pub(crate) fn assign<P: ProcessManager>(
     var: &str,
     decl_type: String,
     expr: &Expr,
+    is_const: bool,
 ) -> Result<()> {
     let value = super::args::evaluate_expr(expr, cx)?;
     let clean_var = var.trim_start_matches('$').to_string();
     let tag = cx.state.resolve_tag(&decl_type)?;
-    cx.state.declare_var(clean_var, tag, value)?;
+    cx.state.declare_binding(clean_var, tag, value, is_const)?;
     Ok(())
 }
 
-pub(crate) fn assign_const<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    var: &str,
-    decl_type: String,
-    expr: &Expr,
-) -> Result<()> {
-    let value = super::args::evaluate_expr(expr, cx)?;
-    let clean_var = var.trim_start_matches('$').to_string();
-    let tag = cx.state.resolve_tag(&decl_type)?;
-    cx.state.declare_const(clean_var, tag, value)?;
-    Ok(())
-}
-
+/// Single owner for pipeline `Bind` dispatch: expression, capture,
+/// async task, and await-join all route through [`dispatch_bind_step`],
+/// while the step-level loop routes `Bind` captures through the flow
+/// path and every other rhs through the leaf path sharing these
+/// helpers, so parsing, `Display`, static checking, and dispatch never
+/// restate the `LET`/`CONST` split per form.
 pub(crate) fn set_var_value<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     var: &str,
@@ -3518,7 +3491,7 @@ fn binding_handle<P: ProcessManager>(
     state: &ExecState<P>,
     target: &PipeTarget,
 ) -> Option<PipeHandle> {
-    let PipeTarget::Var(var) = target;
+    let PipeTarget::Var { name: var, .. } = target;
     match state.get_var_typed(var) {
         Some((TypeTag::Pipe, value)) => value.as_pipe_handle(),
         _ => None,
@@ -3613,7 +3586,7 @@ fn collect_body_bindings<P: ProcessManager>(
         StepKind::FuncDef { .. }
         | StepKind::Call { .. }
         | StepKind::AsyncBlock { .. }
-        | StepKind::AssignAsync { .. } => {}
+        | StepKind::Bind { .. } => {}
         _ => {}
     }
 }
@@ -4599,26 +4572,6 @@ pub(crate) fn dispatch_switch<P: ProcessManager>(
     top_level_flow(switch_run(cx, discriminant, cases, default_body)?)
 }
 
-pub(crate) fn dispatch_assign<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::Assign {
-        var,
-        decl_type,
-        expr,
-        is_const,
-    } = step
-    else {
-        unreachable!()
-    };
-    if *is_const {
-        assign_const(cx, var, decl_type.clone(), expr)
-    } else {
-        assign(cx, var, decl_type.clone(), expr)
-    }
-}
-
 pub(crate) fn dispatch_set<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -4790,9 +4743,7 @@ fn step_returns_value(kind: &StepKind) -> bool {
                     .as_ref()
                     .is_some_and(|body| body_returns_value(body))
         }
-        StepKind::FuncDef { .. } | StepKind::AsyncBlock { .. } | StepKind::AssignAsync { .. } => {
-            false
-        }
+        StepKind::FuncDef { .. } | StepKind::AsyncBlock { .. } | StepKind::Bind { .. } => false,
         _ => false,
     }
 }
@@ -5258,21 +5209,38 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
     Ok(())
 }
 
-/// Pipeline dispatch wrapper for `AssignAsync`
-pub(crate) fn dispatch_assign_async_step<P: ProcessManager>(
+/// Pipeline dispatch wrapper for every `Bind` right-hand side.
+/// Single owner, shared with the step-level `dispatch_bind`.
+pub(crate) fn dispatch_bind_step<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::AssignAsync {
+    let StepKind::Bind {
         var,
         decl_type,
-        body,
         is_const,
+        rhs,
     } = step
     else {
         unreachable!()
     };
-    dispatch_assign_async(var, decl_type.clone(), body, cx, *is_const)
+    use oxdock_parser::BindRhs;
+    match rhs {
+        BindRhs::Expr(expr) => assign(cx, var, decl_type.clone(), expr, *is_const),
+        BindRhs::Capture(cmd) => top_level_flow(assign_capture(
+            cx,
+            super::steps::allocate_assert_generation(),
+            0,
+            var,
+            decl_type.clone(),
+            cmd,
+            *is_const,
+        )?),
+        BindRhs::Async(body) => dispatch_assign_async(var, decl_type.clone(), body, cx, *is_const),
+        BindRhs::Await { task_var, .. } => {
+            dispatch_await_capture(var, decl_type.clone(), task_var, cx, *is_const)
+        }
+    }
 }
 
 /// Pipeline dispatch wrapper for `Await`
@@ -5284,49 +5252,6 @@ pub(crate) fn dispatch_await_step<P: ProcessManager>(
         unreachable!()
     };
     dispatch_await(var, cx)
-}
-
-/// Pipeline dispatch wrapper for `AssignCapture`
-pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::AssignCapture {
-        var,
-        decl_type,
-        cmd,
-        is_const,
-    } = step
-    else {
-        unreachable!()
-    };
-    top_level_flow(assign_capture(
-        cx,
-        super::steps::allocate_assert_generation(),
-        0,
-        var,
-        decl_type.clone(),
-        cmd,
-        *is_const,
-    )?)
-}
-
-/// Pipeline dispatch wrapper for `AwaitCapture`
-pub(crate) fn dispatch_await_capture_step<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::AwaitCapture {
-        out_var,
-        out_type,
-        task_var,
-        is_const,
-        ..
-    } = step
-    else {
-        unreachable!()
-    };
-    dispatch_await_capture(out_var, out_type.clone(), task_var, cx, *is_const)
 }
 
 /// Pipeline dispatch wrapper for `Cancel`

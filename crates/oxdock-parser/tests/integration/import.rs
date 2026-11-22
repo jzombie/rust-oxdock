@@ -79,7 +79,11 @@ fn import_in_let_rhs_resolves() {
     "#})
     .expect("import parses");
     assert_eq!(steps.len(), 1, "{steps:?}");
-    let StepKind::Assign { expr, .. } = &steps[0].kind else {
+    let StepKind::Bind {
+        rhs: oxdock_parser::BindRhs::Expr(expr),
+        ..
+    } = &steps[0].kind
+    else {
         panic!("expected Assign, got {:?}", steps[0].kind);
     };
     assert!(
@@ -908,7 +912,11 @@ fn file_import_in_let_captures_return() {
     "#})
     .expect("LET IMPORT parses");
     assert_eq!(steps.len(), 2, "{steps:?}");
-    let StepKind::AssignCapture { cmd, .. } = &steps[1].kind else {
+    let StepKind::Bind {
+        rhs: oxdock_parser::BindRhs::Capture(cmd),
+        ..
+    } = &steps[1].kind
+    else {
         panic!("expected AssignCapture, got {:?}", steps[1].kind);
     };
     assert!(
@@ -925,7 +933,11 @@ fn file_import_in_let_async_spawns_task() {
     "#})
     .expect("LET ASYNC IMPORT parses");
     assert_eq!(steps.len(), 2, "{steps:?}");
-    let StepKind::AssignAsync { body, .. } = &steps[1].kind else {
+    let StepKind::Bind {
+        rhs: oxdock_parser::BindRhs::Async(body),
+        ..
+    } = &steps[1].kind
+    else {
         panic!("expected AssignAsync, got {:?}", steps[1].kind);
     };
     assert_eq!(body.len(), 1, "{body:?}");

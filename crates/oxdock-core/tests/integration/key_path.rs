@@ -118,10 +118,13 @@ fn parser_single_dollar_is_variable_not_key_path() {
     let step = &steps[0];
     // Should be a Var, not a KeyPath
     match &step.kind {
-        oxdock_parser::StepKind::Assign { expr, .. } => {
+        oxdock_parser::StepKind::Bind {
+            rhs: oxdock_parser::BindRhs::Expr(expr),
+            ..
+        } => {
             assert!(matches!(expr, oxdock_parser::Expr::Var { .. }));
         }
-        _ => panic!("expected Assign"),
+        _ => panic!("expected Bind"),
     }
 }
 

@@ -30,7 +30,11 @@ fn with_io_tty_full_binding_shape() {
         StepKind::WithIo { bindings, cmd } => {
             assert_eq!(bindings.len(), 4);
             assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin)
-                && b.pipe == Some(PipeTarget::Var("answer".to_string()))));
+                && b.pipe
+                    == Some(PipeTarget::Var {
+                        name: "answer".to_string(),
+                        is_const: false
+                    })));
             assert!(
                 bindings
                     .iter()

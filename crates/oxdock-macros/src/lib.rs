@@ -1473,49 +1473,38 @@ fn emit_stepkind(
                 }
             }
         }
-        StepKind::Assign {
+        StepKind::Bind {
             var,
             decl_type,
-            expr,
             is_const,
+            rhs,
         } => {
-            let e = emit_expr(expr, interp);
+            use oxdock_parser::BindRhs;
             let t = emit_typekind(decl_type);
-            quote! { StepKind::Assign { var: #var.to_string(), decl_type: #t, expr: #e, is_const: #is_const } }
+            match rhs {
+                BindRhs::Expr(expr) => {
+                    let e = emit_expr(expr, interp);
+                    quote! { StepKind::Bind { var: #var.to_string(), decl_type: #t, is_const: #is_const, rhs: oxdock_parser::BindRhs::Expr(#e) } }
+                }
+                BindRhs::Capture(cmd) => {
+                    let c = emit_stepkind(cmd, interp);
+                    quote! { StepKind::Bind { var: #var.to_string(), decl_type: #t, is_const: #is_const, rhs: oxdock_parser::BindRhs::Capture(Box::new(#c)) } }
+                }
+                BindRhs::Await {
+                    task_var,
+                    task_is_const,
+                } => {
+                    quote! { StepKind::Bind { var: #var.to_string(), decl_type: #t, is_const: #is_const, rhs: oxdock_parser::BindRhs::Await { task_var: #task_var.to_string(), task_is_const: #task_is_const } } }
+                }
+                BindRhs::Async(body) => {
+                    let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+                    quote! { StepKind::Bind { var: #var.to_string(), decl_type: #t, is_const: #is_const, rhs: oxdock_parser::BindRhs::Async(vec![#(#steps),*]) } }
+                }
+            }
         }
         StepKind::Set { var, expr } => {
             let e = emit_expr(expr, interp);
             quote! { StepKind::Set { var: #var.to_string(), expr: #e } }
-        }
-        StepKind::AssignCapture {
-            var,
-            decl_type,
-            cmd,
-            is_const,
-        } => {
-            let c = emit_stepkind(cmd, interp);
-            let t = emit_typekind(decl_type);
-            quote! { StepKind::AssignCapture { var: #var.to_string(), decl_type: #t, cmd: Box::new(#c), is_const: #is_const } }
-        }
-        StepKind::AwaitCapture {
-            out_var,
-            out_type,
-            task_var,
-            task_is_const,
-            is_const,
-        } => {
-            let t = emit_typekind(out_type);
-            quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string(), task_is_const: #task_is_const, is_const: #is_const } }
-        }
-        StepKind::AssignAsync {
-            var,
-            decl_type,
-            body,
-            is_const,
-        } => {
-            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
-            let t = emit_typekind(decl_type);
-            quote! { StepKind::AssignAsync { var: #var.to_string(), decl_type: #t, body: vec![#(#steps),*], is_const: #is_const } }
         }
         StepKind::Await { var, is_const } => {
             quote! { StepKind::Await { var: #var.to_string(), is_const: #is_const } }
@@ -1646,8 +1635,8 @@ fn emit_io_bindings(bindings: &[oxdock_parser::IoBinding]) -> proc_macro2::Token
             };
             let pipe = match &b.pipe {
                 None => quote! { None },
-                Some(oxdock_parser::PipeTarget::Var(v)) => {
-                    quote! { Some(oxdock_parser::PipeTarget::Var(#v.to_string())) }
+                Some(oxdock_parser::PipeTarget::Var { name: v, is_const }) => {
+                    quote! { Some(oxdock_parser::PipeTarget::Var { name: #v.to_string(), is_const: #is_const }) }
                 }
             };
             quote! { oxdock_parser::IoBinding { stream: oxdock_parser::IoStream::#stream, pipe: #pipe } }
@@ -2171,21 +2160,22 @@ mod tests {
 
     #[test]
     fn emit_async_await_round_trip() {
-        let task = StepKind::AssignAsync {
+        let task = StepKind::Bind {
             var: "job".to_string(),
             decl_type: "HANDLE".to_string(),
             is_const: false,
-            body: vec![Step {
+            rhs: oxdock_parser::BindRhs::Async(vec![Step {
                 guard: None,
                 kind: StepKind::Echo(Arg::String("hi".to_string(), false)),
                 scope_enter: 0,
                 scope_exit: 0,
                 line: 0,
                 col: 0,
-            }],
+            }]),
         };
         let rendered = emit_stepkind(&task, &[]).to_string();
-        assert!(rendered.contains("AssignAsync"), "shape: {rendered}");
+        assert!(rendered.contains("Bind"), "shape: {rendered}");
+        assert!(rendered.contains("BindRhs :: Async"), "rhs: {rendered}");
         assert!(rendered.contains("job"), "var name: {rendered}");
 
         let awaited = StepKind::Await {

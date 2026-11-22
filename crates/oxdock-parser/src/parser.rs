@@ -88,9 +88,9 @@ use crate::ast::{
 };
 use crate::command::ArgType;
 use crate::commands::{
-    InsToken, apply_unary_neg, canonical_assignment_arg, check_tty_wrapping, classify_numeric_text,
-    is_known_command, lower_env_tokens, lower_expand_tokens, make_arith, make_compare,
-    reject_boundary,
+    BindRhs, InsToken, apply_unary_neg, canonical_assignment_arg, check_tty_wrapping,
+    classify_numeric_text, is_known_command, lower_env_tokens, lower_expand_tokens, make_arith,
+    make_compare, reject_boundary,
 };
 use crate::constants::{
     INJECT_PREFIX, INJECT_SUFFIX, KEYWORD_AS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
@@ -105,7 +105,7 @@ use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 use crate::resolve::resolve_call_name;
 use crate::tok::{GroupDelim, LexError, Tok, TokKind, lex_str};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 
 /// Backend error. Carries the statement index and message; the string
@@ -1332,15 +1332,6 @@ fn try_lone_value_expr(
                 kind: None,
             });
         }
-        if ctx.is_const_visible(&base) {
-            return Err(TokenError {
-                stmt,
-                msg: format!("CONST reads bare: use {base}, not ${base}"),
-                line: 0,
-                col: 0,
-                kind: None,
-            });
-        }
         let mut keys = Vec::new();
         loop {
             let dot = matches!(
@@ -1453,14 +1444,15 @@ fn try_lone_call_expr(
     Ok(None)
 }
 
-/// Bare `CONST` shape over one argument run: `NAME`, `ALIAS::NAME`,
-/// or `NAME.key` chains, all joint. `ALIAS::NAME` always parses as a
-/// qualified const ref; bare `NAME` parses only when a `CONST` is
-/// visible here. Single owner for arg-position bare resolution,
-/// shared by assignment values and positional args.
+/// Bare `CONST` shapes over one argument run: `NAME`, `ALIAS::NAME`,
+/// or `NAME.key` chains, all joint. Single owner for arg-position
+/// bare resolution, shared by assignment values and positional args.
+/// `RUN` shell text stays literal through a post-pass in the generic
+/// lowering (bare words never misread as const refs there); every
+/// other command resolves here.
 fn try_bare_const_region(
     region: &[Tok],
-    ctx: &ParseCtx,
+    _ctx: &ParseCtx,
     stmt: usize,
 ) -> Result<Option<Arg>, TokenError> {
     if region.is_empty() {
@@ -1471,7 +1463,7 @@ fn try_bare_const_region(
         _ => return Ok(None),
     };
     if region.len() == 1 {
-        if ctx.is_const_visible(&base) {
+        if could_be_const_name(&base) {
             return Ok(Some(Arg::Expr(Expr::Var {
                 name: base,
                 is_const: true,
@@ -1503,7 +1495,7 @@ fn try_bare_const_region(
             kind: None,
         });
     }
-    if !ctx.is_const_visible(&base) {
+    if !could_be_const_name(&base) {
         return Ok(None);
     }
     let mut keys = Vec::new();
@@ -1881,12 +1873,46 @@ fn is_slash_run(run: &[Tok]) -> bool {
 /// Lower generic args through the shared cores: `ENV`/`EXPAND` bypass
 /// the injected dispatcher; everything else
 /// canonicalizes assignments and calls it.
+/// `RUN` shell text stays literal: bare `CONST` shapes that survive
+/// as `Arg::Expr` (`NAME`, `ALIAS::NAME`, `NAME.key`) render back to
+/// source text here, so shell words never resolve. Templates keep
+/// working because `{{ NAME }}` arrives as `Arg::String`, never as
+/// these variants. Single owner for the shell exemption.
+fn downgrade_run_bare_const(arg: Arg) -> Arg {
+    match arg {
+        Arg::Expr(Expr::Var {
+            name,
+            is_const: true,
+        }) => Arg::String(name, false),
+        Arg::Expr(Expr::ConstRef { alias, name }) => Arg::String(format!("{alias}::{name}"), false),
+        Arg::Expr(Expr::KeyPath {
+            base,
+            keys,
+            is_const: true,
+        }) => Arg::String(format!("{base}.{}", keys.join(".")), false),
+        other => other,
+    }
+}
+
 fn lower_generic_args(
     name: &str,
     tokens: Vec<InsToken>,
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<StepKind, TokenError> {
+    let tokens = if name == KEYWORD_RUN {
+        tokens
+            .into_iter()
+            .map(|token| match token {
+                InsToken::Pos(arg) => InsToken::Pos(downgrade_run_bare_const(arg)),
+                InsToken::Assign(key, value) => {
+                    InsToken::Assign(key, downgrade_run_bare_const(value))
+                }
+            })
+            .collect()
+    } else {
+        tokens
+    };
     if name == KEYWORD_ENV {
         return lower_env_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
             stmt,
@@ -2607,13 +2633,6 @@ fn parse_guard_groups(guard: &[Tok], stmt: usize) -> Result<Option<GuardExpr>, T
 // cores instead of the injected dispatcher.
 
 /// Parse context: shared lowering dispatcher plus module table for
-/// Binding family for `LET`/`CONST` names tracked per scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindingKind {
-    Let,
-    Const,
-}
-
 /// static call resolution, with `FUNC`/import frames per braced body.
 pub struct ParseCtx<'a> {
     pub lower: &'a dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
@@ -2635,12 +2654,6 @@ pub struct ParseCtx<'a> {
     /// frames so duplicate detection in `declare_func` stays intact;
     /// `visible_snapshot` unions this set.
     pub forward: RefCell<Vec<HashSet<String>>>,
-    /// `LET`/`CONST` bindings defined so far per scope (innermost last),
-    /// plus pre-declared `CONST` names per scope for bare resolution
-    /// ahead of definition order. Bare `NAME` reads resolve through
-    /// these; `$NAME` misuse checks consult them too.
-    pub bindings: RefCell<Vec<HashMap<String, BindingKind>>>,
-    pub forward_consts: RefCell<Vec<HashSet<String>>>,
     /// 1-based source line of the statement currently lowering (the
     /// innermost split statement; updated per statement by the body
     /// loops, read as the base for nested splits). Lets every error
@@ -2664,8 +2677,6 @@ impl<'a> ParseCtx<'a> {
             imports: RefCell::new(vec![Vec::new()]),
             exports: RefCell::new(Exports::default()),
             forward: RefCell::new(vec![HashSet::new()]),
-            bindings: RefCell::new(vec![HashMap::new()]),
-            forward_consts: RefCell::new(vec![HashSet::new()]),
             current_line: RefCell::new(0),
         }
     }
@@ -2720,36 +2731,6 @@ impl<'a> ParseCtx<'a> {
             None => {
                 self.imports.borrow_mut().push(modules.to_vec());
             }
-        }
-    }
-
-    /// Innermost binding kind for `name`, if any: defined entries win
-    /// over pre-declared `CONST` names in the same frame, then outer
-    /// frames decide. Single owner for the bare versus sigil gate.
-    fn binding_kind_visible(&self, name: &str) -> Option<BindingKind> {
-        let bindings = self.bindings.borrow();
-        let forward = self.forward_consts.borrow();
-        for idx in (0..bindings.len()).rev() {
-            if let Some(kind) = bindings[idx].get(name) {
-                return Some(*kind);
-            }
-            if forward.get(idx).is_some_and(|set| set.contains(name)) {
-                return Some(BindingKind::Const);
-            }
-        }
-        None
-    }
-
-    /// Whether `name` reads as a `CONST` here: the innermost frame
-    /// holding the name holds a `CONST` (defined or pre-declared).
-    fn is_const_visible(&self, name: &str) -> bool {
-        self.binding_kind_visible(name) == Some(BindingKind::Const)
-    }
-
-    /// Record a `LET`/`CONST` binding in the innermost scope.
-    fn declare_binding(&self, name: &str, kind: BindingKind) {
-        if let Some(frame) = self.bindings.borrow_mut().last_mut() {
-            frame.insert(name.to_string(), kind);
         }
     }
 }
@@ -2812,38 +2793,6 @@ fn predeclare_forward_funcs(stmts: &[Stmt], ctx: &ParseCtx) {
         }
         if let Some(frame) = ctx.forward.borrow_mut().last_mut() {
             frame.insert(header.name.clone());
-        }
-    }
-}
-
-/// Pre-declare bare `CONST` names before lowering, so bare reads
-/// resolve regardless of definition order (use-before-def still fails
-/// in the static gate, which checks declaration order). Only bare
-/// `CONST NAME` heads hoist; `CONST $NAME` never hoists (it is a hard
-/// error in the main pass). Runs per scope like func hoisting.
-fn predeclare_forward_consts(stmts: &[Stmt], ctx: &ParseCtx) {
-    for stmt in stmts {
-        let body = &stmt.body;
-        if !matches!(body.first().map(|t| &t.kind), Some(TokKind::Word(w)) if w == KEYWORD_CONST) {
-            continue;
-        }
-        let mut idx = 1;
-        while idx < body.len() && matches!(&body[idx].kind, TokKind::Comment(_) | TokKind::Newline)
-        {
-            idx += 1;
-        }
-        let Some(tok) = body.get(idx) else {
-            continue;
-        };
-        if matches!(&tok.kind, TokKind::Punct('$')) {
-            continue;
-        }
-        if let TokKind::Word(w) = &tok.kind
-            && is_ident_word(w)
-            && crate::constants::is_const_name(w)
-            && let Some(frame) = ctx.forward_consts.borrow_mut().last_mut()
-        {
-            frame.insert(w.clone());
         }
     }
 }
@@ -3341,7 +3290,7 @@ fn parse_io_bindings(
 fn parse_io_binding_part(
     part: &[&Tok],
     stmt: usize,
-    ctx: &ParseCtx,
+    _ctx: &ParseCtx,
 ) -> Result<Option<IoBinding>, TokenError> {
     let fail = |msg: String| TokenError {
         stmt,
@@ -3422,18 +3371,18 @@ fn parse_io_binding_part(
                     .to_string(),
             ));
         }
-        if ctx.is_const_visible(var) {
-            return Err(fail(format!("CONST reads bare: use {var}, not ${var}")));
-        }
         return Ok(Some(IoBinding {
             stream: io_stream_of(stream),
-            pipe: Some(crate::ast::PipeTarget::Var(var.clone())),
+            pipe: Some(crate::ast::PipeTarget::Var {
+                name: var.clone(),
+                is_const: false,
+            }),
         }));
     }
     if value.len() == 1
         && let TokKind::Word(var) = &value[0].kind
         && is_ident_word(var)
-        && ctx.is_const_visible(var)
+        && could_be_const_name(var)
     {
         if stream == "tty" {
             return Err(fail(
@@ -3443,7 +3392,10 @@ fn parse_io_binding_part(
         }
         return Ok(Some(IoBinding {
             stream: io_stream_of(stream),
-            pipe: Some(crate::ast::PipeTarget::Var(var.clone())),
+            pipe: Some(crate::ast::PipeTarget::Var {
+                name: var.clone(),
+                is_const: true,
+            }),
         }));
     }
     Ok(None)
@@ -3470,7 +3422,7 @@ fn parse_await_cancel_at(
     pos: usize,
     stmt: usize,
     var_joint: bool,
-    ctx: &ParseCtx,
+    _ctx: &ParseCtx,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
     let head = match toks.get(pos).map(|t| &t.kind) {
         Some(TokKind::Word(w)) if w == KEYWORD_AWAIT || w == KEYWORD_CANCEL => w.clone(),
@@ -3500,15 +3452,6 @@ fn parse_await_cancel_at(
                 });
             }
         };
-        if ctx.is_const_visible(&var) {
-            return Err(TokenError {
-                stmt,
-                msg: format!("CONST reads bare: use {head} {var}, not {head} ${var}"),
-                line: 0,
-                col: 0,
-                kind: None,
-            });
-        }
         return Ok(Some((
             if head == KEYWORD_AWAIT {
                 StepKind::Await {
@@ -3527,7 +3470,7 @@ fn parse_await_cancel_at(
     if let Some(t) = toks.get(pos + 1)
         && let TokKind::Word(w) = &t.kind
         && is_ident_word(w)
-        && ctx.is_const_visible(w)
+        && could_be_const_name(w)
     {
         return Ok(Some((
             if head == KEYWORD_AWAIT {
@@ -3981,21 +3924,6 @@ fn parse_body_steps(
     ctx: &ParseCtx,
     mark: bool,
 ) -> Result<Vec<Step>, TokenError> {
-    parse_body_steps_with_lets(inner, stmt, ctx, mark, &[])
-}
-
-/// Brace body with pre-declared `LET` names (function parameters,
-/// `FOR` loop variables): they shadow outer `CONST`s for bare
-/// versus sigil resolution, mirroring runtime scoping. Single owner
-/// for scoped `LET` seeding so new binders gain it without
-/// duplicating frame plumbing.
-fn parse_body_steps_with_lets(
-    inner: &[Tok],
-    stmt: usize,
-    ctx: &ParseCtx,
-    mark: bool,
-    extra_lets: &[String],
-) -> Result<Vec<Step>, TokenError> {
     // One function/import scope per braced body (mirroring the
     // runtime push/pop boundary): same-block
     // `FUNC` redefinition errors, nested shadowing stays allowed.
@@ -4004,11 +3932,6 @@ fn parse_body_steps_with_lets(
     ctx.funcs.borrow_mut().push(HashSet::new());
     ctx.imports.borrow_mut().push(Vec::new());
     ctx.forward.borrow_mut().push(HashSet::new());
-    ctx.bindings.borrow_mut().push(HashMap::new());
-    ctx.forward_consts.borrow_mut().push(HashSet::new());
-    for name in extra_lets {
-        ctx.declare_binding(name, BindingKind::Let);
-    }
     // Nested splits count lines from the enclosing statement's line
     // (headers are single-line, so the brace shares it). Save and
     // restore the discipline around the loop: sibling bodies after
@@ -4018,7 +3941,7 @@ fn parse_body_steps_with_lets(
     let mut out = Vec::new();
     let stmts = split_statements(inner, saved)?;
     predeclare_forward_funcs(&stmts, ctx);
-    predeclare_forward_consts(&stmts, ctx);
+
     for s in &stmts {
         // The innermost statement owns error positions: record it for
         // nested splits and stamp failures that have none yet (deeper
@@ -4032,8 +3955,6 @@ fn parse_body_steps_with_lets(
     ctx.funcs.borrow_mut().pop();
     ctx.imports.borrow_mut().pop();
     ctx.forward.borrow_mut().pop();
-    ctx.bindings.borrow_mut().pop();
-    ctx.forward_consts.borrow_mut().pop();
     Ok(out)
 }
 
@@ -5126,7 +5047,7 @@ fn parse_for_at(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let body = parse_body_steps_with_lets(&inner, stmt, ctx, false, &idents)?;
+    let body = parse_body_steps(&inner, stmt, ctx, false)?;
     p += 1;
     if idents.len() != types.len() {
         return Err(TokenError {
@@ -5476,8 +5397,7 @@ fn parse_func_at(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let param_names: Vec<String> = params.iter().map(|(n, _, _)| n.clone()).collect();
-    let body = parse_body_steps_with_lets(&inner, stmt, ctx, false, &param_names)?;
+    let body = parse_body_steps(&inner, stmt, ctx, false)?;
     let kind = StepKind::FuncDef {
         name: def_name,
         params,
@@ -5499,7 +5419,7 @@ fn parse_func_at(
 fn parse_remote_bindings(
     inner: &[Tok],
     stmt: usize,
-    ctx: &ParseCtx,
+    _ctx: &ParseCtx,
 ) -> Result<Option<(Vec<String>, Vec<String>)>, TokenError> {
     let _ = stmt;
     let mut parts: Vec<&[Tok]> = Vec::new();
@@ -5550,7 +5470,7 @@ fn parse_remote_bindings(
         if part.len() == 1
             && let TokKind::Word(w) = &part[0].kind
             && is_ident_word(w)
-            && (ctx.is_const_visible(w) || crate::constants::is_const_name(w))
+            && could_be_const_name(w)
         {
             vars.push(w.clone());
             continue;
@@ -6568,7 +6488,7 @@ fn parse_remote_single(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let body = parse_body_steps_with_lets(&inner, stmt, ctx, false, &vars)?;
+    let body = parse_body_steps(&inner, stmt, ctx, false)?;
     p += 1;
     if body.is_empty() {
         return Err(fail("REMOTE requires a non-empty braced block".to_string()));
@@ -7061,9 +6981,6 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
                 return Err(cur.err(format!(
                     "CONST reads bare: use {base}::{name}, not ${base}::{name}"
                 )));
-            }
-            if ctx.is_const_visible(&base) {
-                return Err(cur.err(format!("CONST reads bare: use {base}, not ${base}")));
             }
             loop {
                 // Key-path dots are gapless too (`~` without `gap`).
@@ -7634,35 +7551,60 @@ fn parse_const_body(
 /// Shared `LET`/`CONST` body: the head keyword is already matched.
 /// `kw` must be `KEYWORD_LET` or `KEYWORD_CONST`. `LET` keeps the
 /// `$var` head; `CONST` takes a bare `NAME` head and rejects `$`.
+/// Single owner for the binding header: the `is_const` flag rides
+/// straight into [`StepKind::Bind`], so no post-pass flips per form.
 fn parse_binding_body(
     body: &[Tok],
     stmt: usize,
     ctx: &ParseCtx,
     kw: &'static str,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
+    use crate::commands::BindRhs;
+    let is_const = kw == KEYWORD_CONST;
     let mut cur = Cursor::expr(body, stmt);
     match cur.next() {
         Some(t) if matches!(&t.kind, TokKind::Word(w) if w == kw) => {}
         _ => return Err(cur.err("unreachable")),
     }
-    if kw == KEYWORD_CONST {
-        return parse_const_binding_body(body, &mut cur, stmt, ctx);
-    }
-    // No `$var`: no binding form can match (miss, never a hard fail).
-    let var = match expect_dollar_var(&mut cur, &format!("{kw} requires a variable")) {
-        Ok(var) => var,
-        Err(_) => return Ok(None),
+    // Head: `$var` for `LET` (miss, never hard fail), bare `NAME`
+    // for `CONST` (`$` is a hard error, never a miss).
+    let var = if is_const {
+        cur.skip_gap();
+        if matches!(
+            cur.toks.get(cur.pos).map(|t| &t.kind),
+            Some(TokKind::Punct('$'))
+        ) {
+            return Err(cur.err("CONST rejects `$`: write CONST NAME: TYPE = ... (bare, no sigil)"));
+        }
+        let var = match cur.next() {
+            Some(t) if matches!(&t.kind, TokKind::Word(w) if is_ident_word(w)) => match &t.kind {
+                TokKind::Word(w) => w.clone(),
+                _ => unreachable!(),
+            },
+            _ => return Ok(None),
+        };
+        reject_qualified_target_bare(&cur, &var)?;
+        validate_const_name(ctx, &cur, &var)?;
+        var
+    } else {
+        // No `$var`: no binding form can match (miss, never a hard fail).
+        let var = match expect_dollar_var(&mut cur, &format!("{kw} requires a variable")) {
+            Ok(var) => var,
+            Err(_) => return Ok(None),
+        };
+        reject_qualified_target(&cur, &var)?;
+        var
     };
-    reject_qualified_target(&cur, &var)?;
     // The header allows gaps (comments, never newlines).
     cur.skip_gap();
     // No `:`: untyped bindings are rejected outright. Every binding is
     // typed; the old miss-to-generic path only hid that behind a
     // rambling "invalid syntax" message. (FOR already does this.)
+    let head_example = if is_const { "NAME" } else { "$var" };
     if !cur.eat_punct(':') {
         return Err(TokenError {
             stmt,
-            msg: format!("{kw} requires explicit types: {kw} $var: TYPE = <expr>"),
+            msg: format!("{kw} requires explicit types: {kw} {head_example}: TYPE = <expr>"),
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::InvalidSyntax {
@@ -7682,94 +7624,20 @@ fn parse_binding_body(
             body.get(type_start).map(|t| &t.kind),
             Some(TokKind::Word(w)) if w == crate::TypeTag::Pipe.name()
         ) {
-            let kind = StepKind::Assign {
+            let kind = StepKind::Bind {
                 var: var.clone(),
                 decl_type: crate::TypeTag::Pipe.name().to_string(),
-                expr: Expr::FreshPipe,
-                is_const: false,
+                is_const,
+                rhs: BindRhs::Expr(Expr::FreshPipe),
             };
-            ctx.declare_binding(&var, BindingKind::Let);
-            return Ok(Some((kind, type_start + 1)));
-        }
-        return Err(cur.err(
-            format!("{kw} requires an expression: {kw} $var: TYPE = <expr> (only {kw} $p: PIPE omits the initializer)"),
-        ));
-    };
-    let decl_type = render_type_region(&body[type_start..eq], stmt)?;
-    let var_for_rhs = var.clone();
-    let (kind, rhs_used) = parse_let_rhs(&body[eq + 1..], var, decl_type, stmt, ctx, kw)?;
-    let kind = binding_kind(kind, kw);
-    ctx.declare_binding(&var_for_rhs, BindingKind::Let);
-    Ok(Some((kind, eq + 1 + rhs_used)))
-}
-
-/// Bare `CONST NAME: TYPE` body. `CONST $NAME` is a hard error, never
-/// a miss. Bare `NAME` colliding with a keyword or a same-scope
-/// `LET`/`CONST` fails here.
-fn parse_const_binding_body(
-    body: &[Tok],
-    cur: &mut Cursor,
-    stmt: usize,
-    ctx: &ParseCtx,
-) -> Result<Option<(StepKind, usize)>, TokenError> {
-    cur.skip_gap();
-    if matches!(
-        cur.toks.get(cur.pos).map(|t| &t.kind),
-        Some(TokKind::Punct('$'))
-    ) {
-        return Err(cur.err("CONST rejects `$`: write CONST NAME: TYPE = ... (bare, no sigil)"));
-    }
-    let var = match cur.next() {
-        Some(t) if matches!(&t.kind, TokKind::Word(w) if is_ident_word(w)) => match &t.kind {
-            TokKind::Word(w) => w.clone(),
-            _ => unreachable!(),
-        },
-        _ => return Ok(None),
-    };
-    reject_qualified_target_bare(cur, &var)?;
-    validate_const_name(ctx, cur, &var)?;
-    cur.skip_gap();
-    if !cur.eat_punct(':') {
-        return Err(TokenError {
-            stmt,
-            msg: format!(
-                "{kw} requires explicit types: {kw} NAME: TYPE = <expr>",
-                kw = KEYWORD_CONST
-            ),
-            line: 0,
-            col: 0,
-            kind: Some(ParseErrorKind::InvalidSyntax {
-                command: KEYWORD_CONST.to_string(),
-            }),
-        });
-    }
-    let type_start = cur.pos;
-    let assign = find_assign_eq(&body[type_start..]).map(|i| i + type_start);
-    let Some(eq) = assign else {
-        if matches!(
-            body.get(type_start).map(|t| &t.kind),
-            Some(TokKind::Word(w)) if w == crate::TypeTag::Pipe.name()
-        ) {
-            let kind = StepKind::Assign {
-                var: var.clone(),
-                decl_type: crate::TypeTag::Pipe.name().to_string(),
-                expr: Expr::FreshPipe,
-                is_const: true,
-            };
-            ctx.declare_binding(&var, BindingKind::Const);
             return Ok(Some((kind, type_start + 1)));
         }
         return Err(cur.err(format!(
-            "{kw} requires an expression: {kw} NAME: TYPE = <expr> (only {kw} NAME: PIPE omits the initializer)",
-            kw = KEYWORD_CONST
+            "{kw} requires an expression: {kw} {head_example}: TYPE = <expr> (only {kw} {head_example}: PIPE omits the initializer)"
         )));
     };
     let decl_type = render_type_region(&body[type_start..eq], stmt)?;
-    let var_for_rhs = var.clone();
-    let (kind, rhs_used) =
-        parse_let_rhs(&body[eq + 1..], var, decl_type, stmt, ctx, KEYWORD_CONST)?;
-    let kind = binding_kind(kind, KEYWORD_CONST);
-    ctx.declare_binding(&var_for_rhs, BindingKind::Const);
+    let (kind, rhs_used) = parse_let_rhs(&body[eq + 1..], var, decl_type, stmt, ctx, is_const)?;
     Ok(Some((kind, eq + 1 + rhs_used)))
 }
 
@@ -7822,65 +7690,6 @@ fn could_be_const_name(name: &str) -> bool {
     crate::constants::is_const_name(name) && !crate::commands::is_reserved_const_name(name)
 }
 
-/// Map an `Assign`-family kind to the `kw` binding family: `LET`
-/// passes through, `CONST` flips each `is_const` flag once. Single
-/// owner for the binding-form mapping, so a new RHS form gains its
-/// `CONST` spelling here instead of at every return site.
-fn binding_kind(kind: StepKind, kw: &'static str) -> StepKind {
-    if kw != KEYWORD_CONST {
-        return kind;
-    }
-    match kind {
-        StepKind::Assign {
-            var,
-            decl_type,
-            expr,
-            ..
-        } => StepKind::Assign {
-            var,
-            decl_type,
-            expr,
-            is_const: true,
-        },
-        StepKind::AssignCapture {
-            var,
-            decl_type,
-            cmd,
-            ..
-        } => StepKind::AssignCapture {
-            var,
-            decl_type,
-            cmd,
-            is_const: true,
-        },
-        StepKind::AssignAsync {
-            var,
-            decl_type,
-            body,
-            ..
-        } => StepKind::AssignAsync {
-            var,
-            decl_type,
-            body,
-            is_const: true,
-        },
-        StepKind::AwaitCapture {
-            out_var,
-            out_type,
-            task_var,
-            task_is_const,
-            ..
-        } => StepKind::AwaitCapture {
-            out_var,
-            out_type,
-            task_var,
-            task_is_const,
-            is_const: true,
-        },
-        other => other,
-    }
-}
-
 /// LET right-hand side dispatch, mirroring the grammar order
 /// (`let_async`, then `let_capture`, then `let_statement`):
 /// `WITH_IO`-led lines branch async/sync like
@@ -7898,7 +7707,7 @@ fn parse_let_rhs(
     decl_type: String,
     stmt: usize,
     ctx: &ParseCtx,
-    kw: &'static str,
+    is_const: bool,
 ) -> Result<(StepKind, usize), TokenError> {
     // Leading gap comments vanish like the `=` gap (but a `//`/`#`
     // to end of input leaves no expression, failing).
@@ -7914,7 +7723,7 @@ fn parse_let_rhs(
     // there); shape misses fall through to generic below.
     if head_word.as_deref() == Some(KEYWORD_WITH_IO)
         && let Some(found) =
-            try_let_with_io_rhs(rhs, var.clone(), decl_type.clone(), stmt, ctx, kw)?
+            try_let_with_io_rhs(rhs, var.clone(), decl_type.clone(), stmt, ctx, is_const)?
     {
         let (kind, used) = found;
         return Ok((kind, skipped + used));
@@ -7924,7 +7733,7 @@ fn parse_let_rhs(
     // background tasks. No `WITH_IO` scan here (probed: the LET
     // path accepts what statement `ASYNC` rejects).
     if head_word.as_deref() == Some(KEYWORD_ASYNC) && rhs.len() > 1 {
-        let (kind, used) = parse_let_async_rhs(&rhs[1..], var, decl_type, stmt, ctx, kw)?;
+        let (kind, used) = parse_let_async_rhs(&rhs[1..], var, decl_type, stmt, ctx, is_const)?;
         return Ok((kind, skipped + 1 + used));
     }
     // `TIMEOUT`-led lines capture through the wrapper (shape misses
@@ -7948,11 +7757,11 @@ fn parse_let_rhs(
             kind: None,
         })?;
         return Ok((
-            StepKind::AssignCapture {
+            StepKind::Bind {
                 var,
                 decl_type,
-                cmd: Box::new(kind),
-                is_const: false,
+                is_const,
+                rhs: BindRhs::Capture(Box::new(kind)),
             },
             skipped + used,
         ));
@@ -7969,22 +7778,15 @@ fn parse_let_rhs(
         && let TokKind::Word(task_var) = &task.kind
         && is_ident_word(task_var)
     {
-        if ctx.is_const_visible(task_var) {
-            return Err(TokenError {
-                stmt,
-                msg: format!("CONST reads bare: use AWAIT {task_var}, not AWAIT ${task_var}"),
-                line: 0,
-                col: 0,
-                kind: None,
-            });
-        }
         return Ok((
-            StepKind::AwaitCapture {
-                out_var: var,
-                out_type: decl_type,
-                task_var: task_var.clone(),
-                task_is_const: false,
-                is_const: false,
+            StepKind::Bind {
+                var,
+                decl_type,
+                is_const,
+                rhs: BindRhs::Await {
+                    task_var: task_var.clone(),
+                    task_is_const: false,
+                },
             },
             skipped + 3,
         ));
@@ -7994,15 +7796,17 @@ fn parse_let_rhs(
         && let Some(task) = rhs.get(1)
         && let TokKind::Word(task_var) = &task.kind
         && is_ident_word(task_var)
-        && ctx.is_const_visible(task_var)
+        && could_be_const_name(task_var)
     {
         return Ok((
-            StepKind::AwaitCapture {
-                out_var: var,
-                out_type: decl_type,
-                task_var: task_var.clone(),
-                task_is_const: true,
-                is_const: false,
+            StepKind::Bind {
+                var,
+                decl_type,
+                is_const,
+                rhs: BindRhs::Await {
+                    task_var: task_var.clone(),
+                    task_is_const: true,
+                },
             },
             skipped + 2,
         ));
@@ -8034,11 +7838,11 @@ fn parse_let_rhs(
             let kind =
                 (ctx.lower)(KEYWORD_RUN, vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
             return Ok((
-                StepKind::AssignCapture {
+                StepKind::Bind {
                     var,
                     decl_type,
-                    cmd: Box::new(kind),
-                    is_const: false,
+                    is_const,
+                    rhs: BindRhs::Capture(Box::new(kind)),
                 },
                 skipped + 2,
             ));
@@ -8053,11 +7857,11 @@ fn parse_let_rhs(
         && let Some((path, alias, used)) = parse_single_file_import(rhs, 0, stmt, ctx)?
     {
         return Ok((
-            StepKind::AssignCapture {
+            StepKind::Bind {
                 var,
                 decl_type,
-                cmd: Box::new(StepKind::ImportFile { path, alias }),
-                is_const: false,
+                is_const,
+                rhs: BindRhs::Capture(Box::new(StepKind::ImportFile { path, alias })),
             },
             skipped + used,
         ));
@@ -8096,11 +7900,11 @@ fn parse_let_rhs(
                 kind: None,
             })?;
             return Ok((
-                StepKind::AssignCapture {
+                StepKind::Bind {
                     var,
                     decl_type,
-                    cmd: Box::new(cmd),
-                    is_const: false,
+                    is_const,
+                    rhs: BindRhs::Capture(Box::new(cmd)),
                 },
                 skipped + used,
             ));
@@ -8111,11 +7915,11 @@ fn parse_let_rhs(
     let expr = parse_expr_checked(&mut cur, ctx)?;
     let used = skipped + cur.pos;
     Ok((
-        StepKind::Assign {
+        StepKind::Bind {
             var,
             decl_type,
-            expr,
-            is_const: false,
+            is_const,
+            rhs: BindRhs::Expr(expr),
         },
         used,
     ))
@@ -8134,8 +7938,9 @@ fn try_let_with_io_rhs(
     decl_type: String,
     stmt: usize,
     ctx: &ParseCtx,
-    kw: &'static str,
+    is_const: bool,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
     let bracket = match rhs.get(1) {
         Some(t)
             if !t.joint
@@ -8240,11 +8045,11 @@ fn try_let_with_io_rhs(
                 col: 0,
             };
             return Ok(Some((
-                StepKind::AssignAsync {
+                StepKind::Bind {
                     var,
                     decl_type,
-                    body: vec![wrapped],
-                    is_const: false,
+                    is_const,
+                    rhs: BindRhs::Async(vec![wrapped]),
                 },
                 2 + 2,
             )));
@@ -8278,11 +8083,11 @@ fn try_let_with_io_rhs(
             line: 0,
             col: 0,
         };
-        let kind = StepKind::AssignAsync {
+        let kind = StepKind::Bind {
             var,
             decl_type,
-            body: vec![wrapped],
-            is_const: false,
+            is_const,
+            rhs: BindRhs::Async(vec![wrapped]),
         };
         let span = lowering_ctx(stmt);
         crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
@@ -8332,14 +8137,14 @@ fn try_let_with_io_rhs(
         kind: None,
     })?;
     Ok(Some((
-        StepKind::AssignCapture {
+        StepKind::Bind {
             var,
             decl_type,
-            cmd: Box::new(StepKind::WithIo {
+            is_const,
+            rhs: BindRhs::Capture(Box::new(StepKind::WithIo {
                 bindings,
                 cmd: Box::new(cmd),
-            }),
-            is_const: false,
+            })),
         },
         2 + used,
     )))
@@ -8355,12 +8160,12 @@ fn parse_let_async_rhs(
     decl_type: String,
     stmt: usize,
     ctx: &ParseCtx,
-    kw: &'static str,
+    is_const: bool,
 ) -> Result<(StepKind, usize), TokenError> {
     let Some(first) = rest.first() else {
         return Err(TokenError {
             stmt,
-            msg: format!("{kw} $var: HANDLE<T> = ASYNC requires a body"),
+            msg: "binding $var: HANDLE<T> = ASYNC requires a body".to_string(),
             line: 0,
             col: 0,
             kind: None,
@@ -8379,11 +8184,11 @@ fn parse_let_async_rhs(
             _ => unreachable!(),
         };
         let body = parse_body_steps(&inner, stmt, ctx, false)?;
-        let kind = StepKind::AssignAsync {
+        let kind = StepKind::Bind {
             var,
             decl_type,
-            body,
-            is_const: false,
+            is_const,
+            rhs: BindRhs::Async(body),
         };
         let span = lowering_ctx(stmt);
         crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
@@ -8398,7 +8203,7 @@ fn parse_let_async_rhs(
     if first.joint {
         return Err(TokenError {
             stmt,
-            msg: format!("{kw} $var: HANDLE<T> = ASYNC requires a body"),
+            msg: "binding $var: HANDLE<T> = ASYNC requires a body".to_string(),
             line: 0,
             col: 0,
             kind: None,
@@ -8414,18 +8219,18 @@ fn parse_let_async_rhs(
             allow_with_io: false,
         },
     )?;
-    let kind = StepKind::AssignAsync {
+    let kind = StepKind::Bind {
         var,
         decl_type,
-        body: vec![Step {
+        is_const,
+        rhs: BindRhs::Async(vec![Step {
             guard: None,
             kind: cmd,
             scope_enter: 0,
             scope_exit: 0,
             line: 0,
             col: 0,
-        }],
-        is_const: false,
+        }]),
     };
     let span = lowering_ctx(stmt);
     crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
@@ -8469,17 +8274,22 @@ fn parse_set_body(
         },
         _ => return Err(cur.err("mutation requires a variable: $var = <expr>")),
     };
-    if ctx.is_const_visible(&base) {
+    if could_be_const_name(&base) {
         reject_qualified_target_bare(&cur, &base)?;
         cur.skip_gap();
-        let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);
-        let eq = match assign {
-            Some(eq) => eq,
-            None => {
-                return Err(cur.err("mutation requires a variable: $var = <expr>"));
-            }
-        };
-        cur.pos = eq + 1;
+        // Bare `NAME = <expr>` requires `=` immediately after the name
+        // (gaps only): a forward search would misread `SET $y = 2` as a
+        // mutation of `SET`, hiding the `SET`-is-not-a-keyword error.
+        // Lexical bare recognition stays permissive; the `=` position
+        // stays strict, so undefined names still reach the static gate.
+        let is_eq = matches!(
+            cur.toks.get(cur.pos).map(|t| &t.kind),
+            Some(TokKind::Punct('=')) if !matches!(cur.toks.get(cur.pos + 1).map(|t| &t.kind), Some(TokKind::Punct('=')))
+        );
+        if !is_eq {
+            return Err(cur.err("mutation requires a variable: $var = <expr>"));
+        }
+        cur.pos += 1;
         cur.skip_gap();
         let expr = parse_expr_checked(&mut cur, ctx)?;
         return Ok((StepKind::Set { var: base, expr }, cur.pos));
@@ -8639,7 +8449,13 @@ fn qualify_kind_templates(
     // Boxed single commands share the outer scope frame (no recursive
     // statement pass built them): qualify the inner kind directly.
     match kind {
-        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
+        StepKind::WithIo { cmd, .. } => {
+            qualify_kind_templates(cmd, ctx, stmt, failed);
+        }
+        StepKind::Bind {
+            rhs: BindRhs::Capture(cmd),
+            ..
+        } => {
             qualify_kind_templates(cmd, ctx, stmt, failed);
         }
         _ => {}
@@ -8661,8 +8477,7 @@ fn qualify_kind_templates(
     match kind {
         StepKind::Timeout { body, .. }
         | StepKind::Isolated { body }
-        | StepKind::AsyncBlock { body }
-        | StepKind::AssignAsync { body, .. } => {
+        | StepKind::AsyncBlock { body } => {
             for step in body.iter_mut() {
                 if failed.is_some() {
                     return;
@@ -8670,6 +8485,17 @@ fn qualify_kind_templates(
                 qualify_step_templates(step, ctx, stmt, failed);
             }
         }
+        StepKind::Bind { rhs, .. } => match rhs {
+            BindRhs::Async(body) => {
+                for step in body.iter_mut() {
+                    if failed.is_some() {
+                        return;
+                    }
+                    qualify_step_templates(step, ctx, stmt, failed);
+                }
+            }
+            BindRhs::Capture(_) | BindRhs::Expr(_) | BindRhs::Await { .. } => {}
+        },
         _ => {}
     }
 }
@@ -8975,7 +8801,7 @@ fn parse_element_at(
     }
     if let Some(TokKind::Word(w)) = toks.get(pos).map(|t| &t.kind)
         && is_ident_word(w)
-        && ctx.is_const_visible(w)
+        && could_be_const_name(w)
         && let Ok((kind, used)) = parse_set_body(&toks[pos..], stmt, ctx)
     {
         return Ok((vec![step(kind)], used));
@@ -9693,19 +9519,8 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
                 top_types.insert(name.clone());
             }
             match &step.kind {
-                StepKind::Assign { var, is_const, .. } if *is_const => {
+                StepKind::Bind { var, is_const, .. } if *is_const => {
                     top_consts.insert(var.clone());
-                }
-                StepKind::AssignCapture { var, is_const, .. } if *is_const => {
-                    top_consts.insert(var.clone());
-                }
-                StepKind::AssignAsync { var, is_const, .. } if *is_const => {
-                    top_consts.insert(var.clone());
-                }
-                StepKind::AwaitCapture {
-                    out_var, is_const, ..
-                } if *is_const => {
-                    top_consts.insert(out_var.clone());
                 }
                 _ => {}
             }
@@ -10011,16 +9826,6 @@ pub struct Exports {
 }
 
 impl Exports {
-    /// Names of one kind in source order. Single accessor so holders
-    /// never match the kind themselves.
-    pub fn names(&self, kind: ExportKind) -> &[String] {
-        match kind {
-            ExportKind::Func => &self.funcs,
-            ExportKind::Type => &self.types,
-            ExportKind::Const => &self.consts,
-        }
-    }
-
     /// Record one `EXPORT` name, enforcing the duplicate rule.
     /// Uniqueness is by exported base name for every kind: `EXPORT FOO`
     /// and `EXPORT LIB::FOO` name one servable tool, `EXPORT CONST N`
@@ -11040,7 +10845,10 @@ mod tests {
         )
         .expect("LET template parses");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => match expr {
+            StepKind::Bind {
+                rhs: BindRhs::Expr(expr),
+                ..
+            } => match expr {
                 Expr::Literal(value) => assert_eq!(
                     value.as_str().unwrap_or_default(),
                     "n: {{ STD::LEN($x) }}",
@@ -11048,7 +10856,7 @@ mod tests {
                 ),
                 other => panic!("expected literal, got {other:?}"),
             },
-            other => panic!("expected Assign, got {other:?}"),
+            other => panic!("expected Bind, got {other:?}"),
         }
         // RETURN string literal qualifies.
         let steps = parse(

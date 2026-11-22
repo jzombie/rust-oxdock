@@ -32,9 +32,8 @@ pub use self::engine::{Engine, EngineOutput};
 pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
     dispatch_append, dispatch_append_line, dispatch_archive, dispatch_assert_contains,
-    dispatch_assert_eq, dispatch_assert_ne, dispatch_assign, dispatch_assign_async_step,
-    dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
-    dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
+    dispatch_assert_eq, dispatch_assert_ne, dispatch_async_block, dispatch_await_step,
+    dispatch_bind_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
     dispatch_copy, dispatch_copy_git, dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand,
     dispatch_fail, dispatch_for_loop, dispatch_func_def, dispatch_if_then, dispatch_import_file,
     dispatch_import_funcs, dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env,

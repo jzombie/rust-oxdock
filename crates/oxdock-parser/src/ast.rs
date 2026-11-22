@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-pub use crate::commands::{AssertTarget, StepKind};
+pub use crate::commands::{AssertTarget, BindRhs, StepKind};
 use crate::constants::{
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS,
     KEYWORD_ASSERT_EQ, KEYWORD_ASSERT_NE, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
@@ -581,11 +581,12 @@ pub struct IoBinding {
     pub pipe: Option<PipeTarget>,
 }
 
-/// A pipe endpoint for a `WITH_IO` binding: a `$var` holding a `PIPE`
-/// value, resolved against the live variable scope when the step runs.
+/// A pipe endpoint for a `WITH_IO` binding: a `$var` (`is_const`
+/// false) or bare `NAME` (`is_const` true) holding a `PIPE` value,
+/// resolved against the live variable scope when the step runs.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PipeTarget {
-    Var(String),
+    Var { name: String, is_const: bool },
 }
 
 /// Value-model re-exports: the word, its payload, type descriptors, and the

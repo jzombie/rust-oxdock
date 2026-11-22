@@ -246,7 +246,11 @@ fn run_exec_let_capture_binds_run_exec() {
     let steps = parse_prod("LET $cargo: STRING = RUN [\"cargo\", \"--version\"]");
     assert_eq!(steps.len(), 1);
     match &steps[0].kind {
-        StepKind::AssignCapture { var, cmd, .. } => {
+        StepKind::Bind {
+            var,
+            rhs: oxdock_parser::BindRhs::Capture(cmd),
+            ..
+        } => {
             assert_eq!(var, "cargo");
             match cmd.as_ref() {
                 StepKind::RunExec { argv } => assert_eq!(argv.len(), 2),

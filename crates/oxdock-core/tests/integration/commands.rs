@@ -24,11 +24,11 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
     vec![
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: var.clone(),
                 decl_type: "PIPE".to_string(),
-                expr: oxdock_parser::Expr::FreshPipe,
                 is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(oxdock_parser::Expr::FreshPipe),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -40,7 +40,10 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var(var.clone())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: var.clone(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(cmd),
             },
@@ -54,7 +57,10 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var(var)),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: var.clone(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: path.into(),
@@ -852,7 +858,9 @@ fn copy_git_includes_dirty_file() {
     // Modify the tracked file without committing.
     write_text(&hello, "dirty hello");
 
-    let script = "COPY_GIT --include-dirty HEAD hello.txt out_hello.txt";
+    // Bare `HEAD` would read as a `CONST` ref; quote the git ref
+    // so it stays a literal string.
+    let script = "COPY_GIT --include-dirty \"HEAD\" hello.txt out_hello.txt";
     let steps = oxdock_core::parse_script(script).unwrap();
     run_steps_with_context(&snapshot, &repo, &steps).unwrap();
 
@@ -2976,12 +2984,9 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
         StepKind::Switch { .. } => {}
-        StepKind::Assign { .. } => {}
+        StepKind::Bind { .. } => {}
         StepKind::Set { .. } => {}
-        StepKind::AssignCapture { .. } => {}
-        StepKind::AssignAsync { .. } => {}
         StepKind::Await { .. } => {}
-        StepKind::AwaitCapture { .. } => {}
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
         StepKind::Isolated { .. } => {}
@@ -4414,11 +4419,11 @@ fn read_large_file_streams_without_oom() {
     let io_steps = vec![
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: pipe_var.clone(),
                 decl_type: "PIPE".to_string(),
-                expr: oxdock_parser::Expr::FreshPipe,
                 is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(oxdock_parser::Expr::FreshPipe),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -4430,7 +4435,10 @@ fn read_large_file_streams_without_oom() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var(pipe_var.clone())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: pipe_var.clone(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(read_steps[0].kind.clone()),
             },
@@ -4444,7 +4452,10 @@ fn read_large_file_streams_without_oom() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var(pipe_var)),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: pipe_var.clone(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "output.txt".into(),
@@ -4488,11 +4499,11 @@ fn read_stdin_streaming_via_pipe() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "pipe_read".into(),
                 decl_type: "PIPE".to_string(),
-                expr: oxdock_parser::Expr::FreshPipe,
                 is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(oxdock_parser::Expr::FreshPipe),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -4504,7 +4515,10 @@ fn read_stdin_streaming_via_pipe() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("pipe_read".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "pipe_read".to_string(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::Read(Some("source.txt".into()))),
             },
@@ -4518,7 +4532,10 @@ fn read_stdin_streaming_via_pipe() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("pipe_read".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "pipe_read".to_string(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "dest.txt".into(),

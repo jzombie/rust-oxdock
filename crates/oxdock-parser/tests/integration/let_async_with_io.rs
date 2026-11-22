@@ -13,7 +13,11 @@ fn let_async_with_io_single_command_binds_task() {
     let steps = parse_script(script, mock_lower).expect("parse LET WITH_IO ASYNC");
     assert_eq!(steps.len(), 1, "expected a single AssignAsync step");
     match &steps[0].kind {
-        StepKind::AssignAsync { var, body, .. } => {
+        StepKind::Bind {
+            var,
+            rhs: oxdock_parser::BindRhs::Async(body),
+            ..
+        } => {
             assert_eq!(var, "task");
             assert_eq!(body.len(), 1, "expected a single WITH_IO step in the body");
             match &body[0].kind {
@@ -22,7 +26,10 @@ fn let_async_with_io_single_command_binds_task() {
                     assert_eq!(bindings[0].stream, IoStream::Stdin);
                     assert_eq!(
                         bindings[0].pipe,
-                        Some(PipeTarget::Var("in_chan".to_string()))
+                        Some(PipeTarget::Var {
+                            name: "in_chan".to_string(),
+                            is_const: false
+                        })
                     );
                     assert!(
                         matches!(cmd.as_ref(), StepKind::Write { .. }),
@@ -47,7 +54,11 @@ fn let_with_io_sync_command_captures() {
     let steps = parse_script(script, mock_lower).expect("sync LET WITH_IO captures");
     assert_eq!(steps.len(), 1, "expected a single AssignCapture step");
     match &steps[0].kind {
-        StepKind::AssignCapture { var, cmd, .. } => {
+        StepKind::Bind {
+            var,
+            rhs: oxdock_parser::BindRhs::Capture(cmd),
+            ..
+        } => {
             assert_eq!(var, "task");
             match cmd.as_ref() {
                 StepKind::WithIo { bindings, cmd } => {
@@ -55,7 +66,10 @@ fn let_with_io_sync_command_captures() {
                     assert_eq!(bindings[0].stream, IoStream::Stdin);
                     assert_eq!(
                         bindings[0].pipe,
-                        Some(PipeTarget::Var("in_chan".to_string()))
+                        Some(PipeTarget::Var {
+                            name: "in_chan".to_string(),
+                            is_const: false
+                        })
                     );
                     assert!(
                         matches!(cmd.as_ref(), StepKind::Run(_)),

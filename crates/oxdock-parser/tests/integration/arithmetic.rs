@@ -6,7 +6,10 @@ fn parse_assign_expr(script: &str) -> Expr {
     let steps = parse_with_math(script, mock_lower).expect("parse arithmetic");
     assert_eq!(steps.len(), 1, "expected one step, got {steps:?}");
     match steps.into_iter().next().unwrap().kind {
-        StepKind::Assign { expr, .. } => expr,
+        StepKind::Bind {
+            rhs: oxdock_parser::BindRhs::Expr(expr),
+            ..
+        } => expr,
         other => panic!("expected Assign, got {other:?}"),
     }
 }

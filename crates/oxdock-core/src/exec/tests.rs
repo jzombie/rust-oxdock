@@ -136,11 +136,13 @@ fn run_shell_routes_dollar_forms_to_dsl_or_shell() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "who".into(),
                 decl_type: "STRING".to_string(),
-                expr: Expr::Literal(Value::string("world".to_string())),
                 is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string(
+                    "world".to_string(),
+                ))),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -189,14 +191,14 @@ fn run_exec_resolves_and_flattens_argv() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "args".into(),
                 decl_type: "LIST<STRING>".to_string(),
-                expr: Expr::List(vec![
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::List(vec![
                     Expr::Literal(Value::string("-v".to_string())),
                     Expr::Literal(Value::string("--all".to_string())),
-                ]),
-                is_const: false,
+                ])),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -297,11 +299,13 @@ fn run_exec_resolves_every_variable_type() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "who".into(),
                 decl_type: "STRING".to_string(),
-                expr: Expr::Literal(Value::string("world".to_string())),
                 is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string(
+                    "world".to_string(),
+                ))),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -310,14 +314,14 @@ fn run_exec_resolves_every_variable_type() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "m".into(),
                 decl_type: "MAP<k: STRING>".to_string(),
-                expr: Expr::Map(vec![(
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::Map(vec![(
                     "k".to_string(),
                     Expr::Literal(Value::string("keyval".to_string())),
-                )]),
-                is_const: false,
+                )])),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -466,11 +470,13 @@ fn run_exec_treats_variable_values_as_opaque() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "data".into(),
                 decl_type: "STRING".to_string(),
-                expr: Expr::Literal(Value::string("\\{{ env:SECRET }}".to_string())),
                 is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string(
+                    "\\{{ env:SECRET }}".to_string(),
+                ))),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -695,18 +701,21 @@ fn guard_groups_allow_any_matching_branch() {
 #[test]
 fn with_io_pipe_routes_stdout_to_run_stdin() {
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "shared".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
             is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("shared".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "shared".into(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::Echo("hello".into())),
             },
@@ -720,7 +729,10 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("shared".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "shared".into(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::Run("cat".into())),
             },
@@ -763,18 +775,21 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
 #[test]
 fn async_echo_pipe_write_preserves_exact_bytes() {
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "async_out".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
             is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("async_out".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "async_out".into(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
                     body: vec![step(StepKind::Echo("hello".into()))],
@@ -790,7 +805,10 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("async_out".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "async_out".into(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "async_out.txt".into(),
@@ -821,23 +839,27 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
 #[test]
 fn async_stdin_pipe_unblocks_background_write() {
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "in_chan".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
             is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
-            kind: StepKind::AssignAsync {
+            kind: StepKind::Bind {
                 var: "writer".into(),
                 decl_type: "HANDLE<VOID>".to_string(),
-                body: vec![Step {
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Async(vec![Step {
                     guard: None,
                     kind: StepKind::WithIo {
                         bindings: vec![IoBinding {
                             stream: IoStream::Stdin,
-                            pipe: Some(oxdock_parser::PipeTarget::Var("in_chan".into())),
+                            pipe: Some(oxdock_parser::PipeTarget::Var {
+                                name: "in_chan".into(),
+                                is_const: false,
+                            }),
                         }],
                         cmd: Box::new(StepKind::Write {
                             path: "inline_direct.txt".into(),
@@ -848,8 +870,7 @@ fn async_stdin_pipe_unblocks_background_write() {
                     scope_exit: 0,
                     line: 0,
                     col: 0,
-                }],
-                is_const: false,
+                }]),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -861,7 +882,10 @@ fn async_stdin_pipe_unblocks_background_write() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("in_chan".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "in_chan".into(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::Echo("unblock_inline_payload".into())),
             },
@@ -1523,11 +1547,11 @@ fn cat_and_capture_expand_env_paths() {
     let temp = GuardedPath::tempdir().expect("tempdir");
     let root = temp.as_guarded_path().clone();
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "cap_cat".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
             is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
@@ -1567,7 +1591,10 @@ fn cat_and_capture_expand_env_paths() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("cap_cat".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "cap_cat".to_string(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::Read(Some("{{ env:SNIPPET }}".into()))),
             },
@@ -1581,7 +1608,10 @@ fn cat_and_capture_expand_env_paths() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("cap_cat".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "cap_cat".to_string(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "{{ env:OUT_FILE }}".into(),
@@ -2035,11 +2065,11 @@ fn failing_foreground_run_aborts_with_step_context() {
 #[test]
 fn with_io_rejects_duplicate_stdout_binding() {
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "p".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
             is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
@@ -2047,11 +2077,17 @@ fn with_io_rejects_duplicate_stdout_binding() {
                 bindings: vec![
                     IoBinding {
                         stream: IoStream::Stdout,
-                        pipe: Some(oxdock_parser::PipeTarget::Var("p".into())),
+                        pipe: Some(oxdock_parser::PipeTarget::Var {
+                            name: "p".into(),
+                            is_const: false,
+                        }),
                     },
                     IoBinding {
                         stream: IoStream::Stdout,
-                        pipe: Some(oxdock_parser::PipeTarget::Var("p".into())),
+                        pipe: Some(oxdock_parser::PipeTarget::Var {
+                            name: "p".into(),
+                            is_const: false,
+                        }),
                     },
                 ],
                 cmd: Box::new(StepKind::Echo("x".into())),
@@ -2096,11 +2132,11 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
             (IoStream::Stderr, IoStream::Stderr)
         };
         let steps = vec![
-            step(StepKind::Assign {
+            step(StepKind::Bind {
                 var: "p".into(),
                 decl_type: "PIPE".to_string(),
-                expr: Expr::FreshPipe,
                 is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
             }),
             Step {
                 guard: None,
@@ -2108,11 +2144,17 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
                     bindings: vec![
                         IoBinding {
                             stream: stream_a,
-                            pipe: Some(oxdock_parser::PipeTarget::Var("p".into())),
+                            pipe: Some(oxdock_parser::PipeTarget::Var {
+                                name: "p".into(),
+                                is_const: false,
+                            }),
                         },
                         IoBinding {
                             stream: stream_b,
-                            pipe: Some(oxdock_parser::PipeTarget::Var("p".into())),
+                            pipe: Some(oxdock_parser::PipeTarget::Var {
+                                name: "p".into(),
+                                is_const: false,
+                            }),
                         },
                     ],
                     cmd: Box::new(StepKind::Echo("x".into())),
@@ -2154,18 +2196,21 @@ fn with_io_async_outer_pipe_stays_script() {
     // itself. `$live` is main-declared and shared into the task, so it
     // stays a script pipe even though the task body is a single RUN.
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "live".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
             is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("live".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "live".into(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
                     body: vec![Step {
@@ -2274,18 +2319,21 @@ fn with_io_async_guarded_and_exec_form_outer_pipe_stays_script() {
 #[test]
 fn with_io_async_dsl_body_stays_script_pipe() {
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "plain".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
             is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("plain".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "plain".into(),
+                        is_const: false,
+                    }),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
                     body: vec![Step {
@@ -3807,11 +3855,11 @@ fn timeout_scope_does_not_join_prior_background_work() {
     let steps = vec![
         Step {
             guard: None,
-            kind: StepKind::AssignAsync {
+            kind: StepKind::Bind {
                 var: "srv".into(),
                 decl_type: "HANDLE<VOID>".to_string(),
-                body: vec![step(StepKind::Run("server".into()))],
                 is_const: false,
+                rhs: oxdock_parser::BindRhs::Async(vec![step(StepKind::Run("server".into()))]),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -4137,11 +4185,14 @@ mod escape_props {
             let reparsed = crate::parse_script(&format!("LET $v: STRING = {literal}\n"))
                 .expect("rendered literal parses");
             let payload = match &reparsed[0].kind {
-                StepKind::Assign { expr, .. } => match expr {
+                StepKind::Bind {
+                    rhs: oxdock_parser::BindRhs::Expr(expr),
+                    ..
+                } => match expr {
                     Expr::Literal(value) => value.as_str().expect("string payload").to_string(),
                     other => panic!("expected literal, got {other:?}"),
                 },
-                other => panic!("expected Assign, got {other:?}"),
+                other => panic!("expected Bind, got {other:?}"),
             };
             prop_assert_eq!(expand_string(&payload, &state.envs, &state).expect("expand"), raw);
         }

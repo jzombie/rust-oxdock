@@ -445,8 +445,19 @@ fn lookup(
 
         // 5. Unprefixed key: could be a missing step override or invalid
         // syntax. `script_env:` has no meaning in this context: it reads
-        // as invalid exactly like any other non-shape.
-        PlaceholderKey::Bare(name) => {
+        // as invalid exactly like any other non-shape. Qualified CONST
+        // shapes never resolve here (no CONST store) and fall through
+        // to the invalid-format error below. Bare idents (`Var` and
+        // `Bare`) name missing overrides, exactly as before.
+        // `$ALIAS::NAME` is invalid here like everywhere: the split
+        // lives in the template owner.
+        PlaceholderKey::DollarQualified { .. } => {
+            bail!(
+                "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
+            );
+        }
+        PlaceholderKey::ConstRef { .. } | PlaceholderKey::KeyPath { .. } => {}
+        PlaceholderKey::Var(name) | PlaceholderKey::Bare(name) => {
             if !name.is_empty()
                 && name
                     .chars()
@@ -558,6 +569,12 @@ fn resolve_call_value(
             Some(ScalarLit::Float(value)) => return Ok(oxdock_parser::Value::float(value)),
             None => {}
         },
+        // CONST shapes never resolve in override expansion (no CONST
+        // store here); fall through to the invalid-argument error
+        // below like any other unresolvable shape. `$ALIAS::NAME`
+        // is invalid here like everywhere.
+        TemplateArg::DollarQualified { .. } => {}
+        TemplateArg::ConstRef { .. } | TemplateArg::KeyPath { .. } | TemplateArg::Var(_) => {}
         TemplateArg::Invalid(_) => {}
     }
     bail!(
