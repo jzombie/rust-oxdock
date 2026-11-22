@@ -2868,8 +2868,9 @@ ASSERT_CONTAINS $out "base modsub"
 
 ```oxdock
 # Blocks unwind on exit: the WORKDIR inside IF reverts,
-# so it never becomes a module jail. Guards only skip,
-# never push a scope, so a guard-gated step persists.
+# so it never becomes a module jail. Bare guarded blocks
+# unwind the same way. Guards only skip, never push a
+# scope, so a guard-gated step persists.
 IMPORT [STD]
 WORKSPACE LOCAL
 LET $root: STRING = CWD()
@@ -2883,6 +2884,12 @@ ASSERT_EQ $root $after_if
 [bool:true] WORKDIR inner
 LET $after_guard: STRING = CWD()
 ASSERT_NE $root $after_guard
+MKDIR bare
+[bool:true] {
+    WORKDIR bare
+}
+LET $after_bare: STRING = CWD()
+ASSERT_EQ $after_guard $after_bare
 ```
 
 **Example: import missing file fails upfront**
@@ -3505,7 +3512,7 @@ Checkout and copy.
 **Example: git copy missing source errors**
 
 ```oxdock expect_error:"COPY source missing"
-COPY_GIT "HEAD" src.txt dst.txt
+COPY_GIT HEAD src.txt dst.txt
 ```
 
 **Expected error:** `COPY source missing`

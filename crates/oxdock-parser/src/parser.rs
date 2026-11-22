@@ -98,8 +98,8 @@ use crate::constants::{
     KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FROM,
     KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT,
     KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH,
-    KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR, qualify,
-    sigil_qualified, sigil_var,
+    KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
+    VAR_SIGIL_CHAR, qualify, sigil_qualified, sigil_var,
 };
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 
@@ -235,7 +235,7 @@ fn open_generic_depth(body: &[Tok], next: Option<&Tok>) -> usize {
             && body.get(idx - 1).is_some_and(|t| t.joint)
             && matches!(
                 body.get(idx - 2).map(|t| &t.kind),
-                Some(TokKind::Punct('$'))
+                Some(TokKind::Punct(VAR_SIGIL_CHAR))
             )
         {
             continue;
@@ -265,7 +265,7 @@ fn boundary_ends_statement(body: &[Tok]) -> Result<bool, String> {
         Some(t) => t,
     };
     match &head.kind {
-        TokKind::Word(_) | TokKind::Punct('$') => Ok(true),
+        TokKind::Word(_) | TokKind::Punct(VAR_SIGIL_CHAR) => Ok(true),
         // A lone leading `{...}` ends here too: the splitter merges
         // it into pending waits (`WITH_IO`, `IF`/`ELSE` chains) or
         // emits it for block-statement lowering, never splitting
@@ -1067,7 +1067,7 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
         match &tok.kind {
             TokKind::Word(w) => out.push_str(w),
             TokKind::Punct(c) => {
-                if *c == '$' {
+                if *c == VAR_SIGIL_CHAR {
                     // Lone-`$` runs never reach here (expression
                     // extension claims them first and fails loudly).
                     // Elsewhere `$` renders literally (probed `a$(x)`
@@ -1092,7 +1092,7 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
                             kind: None,
                         });
                     }
-                    out.push('$');
+                    out.push(VAR_SIGIL_CHAR);
                 } else {
                     out.push(*c);
                 }
@@ -1295,7 +1295,10 @@ fn try_lone_value_expr(
 ) -> Result<Option<Arg>, TokenError> {
     // `$` shapes: exactly Punct+Word or dotted runs, all joint past
     // the first (the region starts at an argument start by construction).
-    if matches!(region.first().map(|t| &t.kind), Some(TokKind::Punct('$'))) {
+    if matches!(
+        region.first().map(|t| &t.kind),
+        Some(TokKind::Punct(VAR_SIGIL_CHAR))
+    ) {
         let mut cur = Cursor::expr(region, stmt);
         cur.pos += 1;
         let base = match cur.next() {
@@ -1441,8 +1444,10 @@ fn try_expr_arg(
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<Option<(Arg, usize)>, TokenError> {
-    let extend = matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Punct('$')))
-        || matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == "env");
+    let extend = matches!(
+        toks.get(pos).map(|t| &t.kind),
+        Some(TokKind::Punct(VAR_SIGIL_CHAR))
+    ) || matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == "env");
     if !extend {
         return Ok(None);
     }
@@ -2071,7 +2076,10 @@ fn split_top_commas(toks: &[Tok]) -> Vec<&[Tok]> {
 /// the terminators the parser enforces separately. `;` arrives as its
 /// own token kind; the key charset admits it, so runs accept it literally.
 fn key_char(c: char) -> bool {
-    !matches!(c, ':' | '=' | '!' | ',' | '|' | '(' | ')' | ']' | '$')
+    !matches!(
+        c,
+        ':' | '=' | '!' | ',' | '|' | '(' | ')' | ']' | VAR_SIGIL_CHAR
+    )
 }
 
 /// Consume a joint run of words/punctuation as one bare key or value.
@@ -2294,7 +2302,7 @@ fn value_run(arg: &mut Cursor) -> Result<String, TokenError> {
             | TokKind::Punct('|')
             | TokKind::Punct(']')
             | TokKind::Punct(')') => break,
-            TokKind::Punct('$') => break,
+            TokKind::Punct(VAR_SIGIL_CHAR) => break,
             TokKind::Punct('/') if is_comment_open(arg.toks, arg.pos) => break,
             TokKind::Group { .. } => break,
             _ => {}
@@ -3085,7 +3093,7 @@ fn parse_timeout_duration_at(
     }
     let arg = match &head.kind {
         TokKind::Word(w) if is_timeout_literal(w) => Arg::String(w.clone(), false),
-        TokKind::Punct('$') => match toks.get(pos + 1) {
+        TokKind::Punct(VAR_SIGIL_CHAR) => match toks.get(pos + 1) {
             Some(var) if var.joint && matches!(&var.kind, TokKind::Word(w) if is_ident_word(w)) => {
                 match &var.kind {
                     TokKind::Word(w) => Arg::Expr(Expr::Var { name: w.clone() }),
@@ -3108,7 +3116,7 @@ fn parse_timeout_duration_at(
         _ => return Ok(None),
     };
     let used = match &head.kind {
-        TokKind::Punct('$') => 2,
+        TokKind::Punct(VAR_SIGIL_CHAR) => 2,
         _ => 1,
     };
     ArgType::Duration.check_arg(&arg).map_err(|e| TokenError {
@@ -3244,7 +3252,7 @@ fn parse_io_binding_part(
     }
     // Stream pipe: `= $var` with a gapless name.
     if value.len() == 2
-        && matches!(&value[0].kind, TokKind::Punct('$'))
+        && matches!(&value[0].kind, TokKind::Punct(VAR_SIGIL_CHAR))
         && let TokKind::Word(var) = &value[1].kind
         && value[1].joint
         && is_ident_word(var)
@@ -3292,7 +3300,7 @@ fn parse_await_cancel_at(
     };
     if matches!(
         toks.get(pos + 1).map(|t| &t.kind),
-        Some(TokKind::Punct('$'))
+        Some(TokKind::Punct(VAR_SIGIL_CHAR))
     ) {
         let var = match toks.get(pos + 2) {
             Some(t)
@@ -3698,10 +3706,12 @@ fn render_inherit_key(part: &[Tok], stmt: usize) -> Result<Option<String>, Token
     if out.contains("//") || out.contains("/*") {
         return Ok(None);
     }
-    if out
-        .chars()
-        .any(|c| matches!(c, ':' | '=' | '!' | ',' | '|' | '(' | ')' | ']' | '$'))
-    {
+    if out.chars().any(|c| {
+        matches!(
+            c,
+            ':' | '=' | '!' | ',' | '|' | '(' | ')' | ']' | VAR_SIGIL_CHAR
+        )
+    }) {
         return Ok(None);
     }
     Ok(Some(out))
@@ -4281,7 +4291,7 @@ fn is_lower_ident(w: &str) -> bool {
 fn peek_dollar_var(toks: &[Tok], pos: usize) -> Option<(String, usize)> {
     match (toks.get(pos), toks.get(pos + 1)) {
         (Some(dollar), Some(name))
-            if matches!(&dollar.kind, TokKind::Punct('$'))
+            if matches!(&dollar.kind, TokKind::Punct(VAR_SIGIL_CHAR))
                 && name.joint
                 && matches!(&name.kind, TokKind::Word(w) if is_ident_word(w)) =>
         {
@@ -5294,7 +5304,11 @@ fn parse_remote_bindings(
         }
         // `$var` entries only: bare words are literal text, never
         // bindings.
-        if matches!(part.first().map(|t| &t.kind), Some(TokKind::Punct('$'))) && part.len() == 2 {
+        if matches!(
+            part.first().map(|t| &t.kind),
+            Some(TokKind::Punct(VAR_SIGIL_CHAR))
+        ) && part.len() == 2
+        {
             if part[1].joint
                 && let TokKind::Word(w) = &part[1].kind
                 && is_ident_word(w)
@@ -5659,8 +5673,8 @@ fn parse_export_name(
         msg,
     };
     let offset = match toks.get(pos).map(|t| &t.kind) {
-        Some(TokKind::Punct('$')) if toks.get(pos + 1).is_some_and(|t| t.joint) => 1,
-        Some(TokKind::Punct('$')) => return Ok(None),
+        Some(TokKind::Punct(VAR_SIGIL_CHAR)) if toks.get(pos + 1).is_some_and(|t| t.joint) => 1,
+        Some(TokKind::Punct(VAR_SIGIL_CHAR)) => return Ok(None),
         _ => 0,
     };
     if require_sigil != (offset == 1) {
@@ -6866,7 +6880,7 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
             cur.pos = paren + 1;
             parse_expr_call(name, &inner, cur.stmt, ctx)
         }
-        Some(TokKind::Punct('$')) => {
+        Some(TokKind::Punct(VAR_SIGIL_CHAR)) => {
             cur.pos += 1;
             // Atomic `variable`: `$` and the name ride gapless (the
             // enclosing rules are compound-atomic).
@@ -7320,7 +7334,7 @@ fn expect_dollar_var(cur: &mut Cursor, msg: &str) -> Result<String, TokenError> 
     // enclosing statements are compound-atomic, so implicit spacing is
     // off and only explicit `gap`s admit whitespace).
     match cur.next() {
-        Some(t) if matches!(&t.kind, TokKind::Punct('$')) => {}
+        Some(t) if matches!(&t.kind, TokKind::Punct(VAR_SIGIL_CHAR)) => {}
         _ => return Err(cur.err(msg)),
     }
     match cur.next() {
@@ -7407,7 +7421,7 @@ fn parse_binding_body(
     let var = if is_const {
         cur.skip_gap();
         match cur.toks.get(cur.pos).map(|t| &t.kind) {
-            Some(TokKind::Punct('$')) => {
+            Some(TokKind::Punct(VAR_SIGIL_CHAR)) => {
                 let var = expect_dollar_var(
                     &mut cur,
                     "CONST requires a `$NAME` head: CONST $NAME: TYPE = ...",
@@ -7581,7 +7595,7 @@ fn parse_let_rhs(
     if head_word.as_deref() == Some(KEYWORD_AWAIT)
         && rhs.len() == 3
         && let (Some(dollar), Some(task)) = (rhs.get(1), rhs.get(2))
-        && matches!(&dollar.kind, TokKind::Punct('$'))
+        && matches!(&dollar.kind, TokKind::Punct(VAR_SIGIL_CHAR))
         && task.joint
         && let TokKind::Word(task_var) = &task.kind
         && is_ident_word(task_var)
@@ -8038,7 +8052,7 @@ fn parse_set_body(
     let mut cur = Cursor::expr(body, stmt);
     if matches!(
         cur.toks.get(cur.pos).map(|t| &t.kind),
-        Some(TokKind::Punct('$'))
+        Some(TokKind::Punct(VAR_SIGIL_CHAR))
     ) {
         let var = expect_dollar_var(&mut cur, "mutation requires a variable: $var = <expr>")?;
         reject_qualified_target(&cur, &var)?;
@@ -8588,7 +8602,10 @@ fn parse_element_at(
     {
         return Ok((vec![step(kind)], used));
     }
-    if matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Punct('$'))) {
+    if matches!(
+        toks.get(pos).map(|t| &t.kind),
+        Some(TokKind::Punct(VAR_SIGIL_CHAR))
+    ) {
         let (kind, used) = parse_set_body(&toks[pos..], stmt, ctx)?;
         return Ok((vec![step(kind)], used));
     }

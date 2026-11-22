@@ -1643,10 +1643,30 @@ fn const_inner_const_shadows_outer_let() {
             "#},
         )
         .expect_err("inner CONST mutation must fail");
+    // The `$X = 11` targets the inner `CONST`, not the outer `LET`:
+    // shadowing resolves the name inward, and the failure is
+    // CONST-ness (mutation of an immutable binding), not a
+    // cross-binding collision. The control below proves the
+    // resolution half: the same shape with an inner `LET` shadow
+    // mutates fine and leaves the outer `CONST` intact.
     assert!(
         format!("{err:#}").contains("cannot mutate CONST X"),
         "{err:#}"
     );
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                CONST $Y: INT = 1
+                [bool:true] {
+                    LET $Y: INT = 10
+                    $Y = 11
+                    ASSERT_EQ $Y 11
+                }
+                ASSERT_EQ $Y 1
+            "#},
+        )
+        .expect("inner LET shadow of outer CONST mutates fine");
 }
 
 #[test]
@@ -2617,6 +2637,33 @@ fn run_bare_uppercase_stays_literal() {
             "#},
         )
         .expect("raw bare does not evaluate the const");
+}
+
+#[test]
+fn const_sigil_reads_in_echo_assert_and_run() {
+    // Sigil-prefixed `CONST` reads work in every command position a
+    // `LET` read does: `ECHO` args, all three `ASSERT_*` forms, and
+    // `RUN` templates (bare words in `RUN` stay literal shell text).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                CONST $WORD: STRING = "const-word"
+                CONST $N: INT = 7
+                ECHO $WORD
+                ASSERT_CONTAINS stdout "const-word"
+                ECHO "{{ $WORD }}"
+                ASSERT_CONTAINS stdout "const-word"
+                ASSERT_EQ $N 7
+                ASSERT_NE $N 8
+                ASSERT_CONTAINS $WORD "const"
+                LET $out: STRING = RUN echo "{{ $WORD }}-{{ $N }}"
+                ASSERT_CONTAINS $out "const-word-7"
+            "#},
+        )
+        .expect("sigiled CONST reads in ECHO, ASSERT_*, and RUN");
 }
 
 #[test]

@@ -1774,7 +1774,7 @@ declare_commands! {
         ],
         flags: &[ FlagSpec { name: "dirty", long: "--include-dirty", value_type: FlagValueType::Flag, required: false, description: "Include dirty" } ],
         default_output: None,
-        examples: &[ Example { name: "git copy missing source errors", fence_meta: Some("expect_error:\"COPY source missing\""), code: indoc! {r#"COPY_GIT "HEAD" src.txt dst.txt"#} } ],
+        examples: &[ Example { name: "git copy missing source errors", fence_meta: Some("expect_error:\"COPY source missing\""), code: indoc! {r#"COPY_GIT HEAD src.txt dst.txt"#} } ],
         lower: |flags, args| {
             let include_dirty = flags.iter().any(|(k, _)| k == "dirty");
             let mut it = args.into_iter();
@@ -5042,8 +5042,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                 # Blocks unwind on exit: the WORKDIR inside IF reverts,
-                # so it never becomes a module jail. Guards only skip,
-                # never push a scope, so a guard-gated step persists.
+                # so it never becomes a module jail. Bare guarded blocks
+                # unwind the same way. Guards only skip, never push a
+                # scope, so a guard-gated step persists.
                 IMPORT [STD]
                 WORKSPACE LOCAL
                 LET $root: STRING = CWD()
@@ -5057,6 +5058,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 [bool:true] WORKDIR inner
                 LET $after_guard: STRING = CWD()
                 ASSERT_NE $root $after_guard
+                MKDIR bare
+                [bool:true] {
+                    WORKDIR bare
+                }
+                LET $after_bare: STRING = CWD()
+                ASSERT_EQ $after_guard $after_bare
             "#},
                 },
                 Example {
@@ -5548,7 +5555,7 @@ impl fmt::Display for StepKind {
             } => {
                 match key_var {
                     Some(k) => {
-                        let kt = key_type.as_deref().unwrap_or("STRING");
+                        let kt = key_type.as_deref().unwrap_or(crate::tag::STRING_TYPE_NAME);
                         write!(
                             f,
                             "{} ${}: {}, ${}: {} IN {} {{",
@@ -7920,7 +7927,7 @@ mod tests {
                 key_var: None,
                 key_type: None,
                 var: "i".to_string(),
-                var_type: "STRING".to_string(),
+                var_type: crate::tag::STRING_TYPE_NAME.to_string(),
                 in_expr: Expr::Literal(Value::bool(true)),
                 body: Vec::new(),
             },
@@ -7937,13 +7944,13 @@ mod tests {
             },
             StepKind::Bind {
                 var: "v".to_string(),
-                decl_type: "BOOL".to_string(),
+                decl_type: crate::tag::BOOL_TYPE_NAME.to_string(),
                 is_const: false,
                 rhs: BindRhs::Expr(Expr::Literal(Value::bool(true))),
             },
             StepKind::Bind {
                 var: "v".to_string(),
-                decl_type: "BOOL".to_string(),
+                decl_type: crate::tag::BOOL_TYPE_NAME.to_string(),
                 is_const: true,
                 rhs: BindRhs::Expr(Expr::Literal(Value::bool(true))),
             },
@@ -7953,7 +7960,7 @@ mod tests {
             },
             StepKind::Bind {
                 var: "v".to_string(),
-                decl_type: "STRING".to_string(),
+                decl_type: crate::tag::STRING_TYPE_NAME.to_string(),
                 is_const: false,
                 rhs: BindRhs::Capture(Box::new(StepKind::Echo(crate::ast::Arg::String(
                     "x".to_string(),
@@ -7962,7 +7969,7 @@ mod tests {
             },
             StepKind::Bind {
                 var: "o".to_string(),
-                decl_type: "STRING".to_string(),
+                decl_type: crate::tag::STRING_TYPE_NAME.to_string(),
                 is_const: false,
                 rhs: BindRhs::Await {
                     task_var: "t".to_string(),
@@ -7971,7 +7978,7 @@ mod tests {
             StepKind::AsyncBlock { body: Vec::new() },
             StepKind::Bind {
                 var: "t".to_string(),
-                decl_type: "HANDLE".to_string(),
+                decl_type: crate::tag::HANDLE_TYPE_NAME.to_string(),
                 is_const: false,
                 rhs: BindRhs::Async(Vec::new()),
             },

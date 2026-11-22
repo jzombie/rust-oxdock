@@ -16,6 +16,15 @@ pub const MODULE_SEPARATOR: &str = "::";
 /// restate it.
 pub const VAR_SIGIL: &str = "$";
 
+/// [`VAR_SIGIL`] as a `char`: the pattern form for tokenizer output
+/// (`TokKind::Punct`) and `char` classifiers. Always identical to
+/// [`VAR_SIGIL`]; the assertion below locks the two together so the
+/// spelling still lives exactly once.
+pub const VAR_SIGIL_CHAR: char = '$';
+
+/// The sigil is one ASCII char: the `&str` and `char` views agree.
+const _: () = assert!(VAR_SIGIL.len() == 1 && VAR_SIGIL.as_bytes()[0] == VAR_SIGIL_CHAR as u8);
+
 /// Module holding the compiled-in builtins.
 pub const STD_MODULE_NAME: &str = "STD";
 
