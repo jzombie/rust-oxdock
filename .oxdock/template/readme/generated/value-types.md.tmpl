@@ -20,16 +20,21 @@ Boolean `true` or `false`.
 ### Value type: LIST
 
 Ordered list of values. Shared heap: cloning bumps a refcount.
-The `frozen` flag marks `CONST`-owned buffers: every in-place
-mutation choke point (`as_list_mut`) refuses a frozen buffer, so
-freezing is deep and permanent. Only [`Value::deep_freeze`]
-sets it, on a freshly detached tree.
+A `CONST`-owned list is deeply immutable: `LIST_APPEND` on it,
+or on any alias of it, fails with `cannot mutate CONST`,
+including for lists nested inside it. The `CONST` copy is
+detached, so mutating the `LET` source it was built from leaves
+the `CONST` unchanged. Equality ignores `CONST`-ness, so
+`ASSERT_EQ` never observes it.
 
 ### Value type: MAP
 
 String-keyed map of values. Shared heap: cloning bumps a refcount.
-Freezing mirrors `ListValue`: `as_map_mut` refuses frozen
-buffers and only [`Value::deep_freeze`] sets the flag.
+Freezing mirrors `LIST`: a `CONST`-owned map is deeply immutable,
+so `MAP_SET` and `MERGE_MAPS` on it (or any alias of it) fail
+with `cannot mutate CONST`, including for maps nested inside it.
+The `CONST` copy is detached from the `LET` source it was built
+from.
 
 ### Value type: PATH
 

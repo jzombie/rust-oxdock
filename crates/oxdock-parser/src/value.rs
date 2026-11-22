@@ -124,10 +124,12 @@ struct StringValue(pub String);
 struct BoolValue(pub bool);
 
 /// Ordered list of values. Shared heap: cloning bumps a refcount.
-/// The `frozen` flag marks `CONST`-owned buffers: every in-place
-/// mutation choke point (`as_list_mut`) refuses a frozen buffer, so
-/// freezing is deep and permanent. Only [`Value::deep_freeze`]
-/// sets it, on a freshly detached tree.
+/// A `CONST`-owned list is deeply immutable: `LIST_APPEND` on it,
+/// or on any alias of it, fails with `cannot mutate CONST`,
+/// including for lists nested inside it. The `CONST` copy is
+/// detached, so mutating the `LET` source it was built from leaves
+/// the `CONST` unchanged. Equality ignores `CONST`-ness, so
+/// `ASSERT_EQ` never observes it.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "LIST", shared)]
 #[derive(Debug, Clone)]
 struct ListValue(pub Vec<Value>, pub bool);
@@ -141,8 +143,11 @@ impl PartialEq for ListValue {
 }
 
 /// String-keyed map of values. Shared heap: cloning bumps a refcount.
-/// Freezing mirrors `ListValue`: `as_map_mut` refuses frozen
-/// buffers and only [`Value::deep_freeze`] sets the flag.
+/// Freezing mirrors `LIST`: a `CONST`-owned map is deeply immutable,
+/// so `MAP_SET` and `MERGE_MAPS` on it (or any alias of it) fail
+/// with `cannot mutate CONST`, including for maps nested inside it.
+/// The `CONST` copy is detached from the `LET` source it was built
+/// from.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "MAP", shared)]
 #[derive(Debug, Clone)]
 struct MapValue(pub BTreeMap<String, Value>, pub bool);

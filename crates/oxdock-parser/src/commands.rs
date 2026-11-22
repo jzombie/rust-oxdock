@@ -3735,6 +3735,61 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LIST_APPEND $ITEMS "b"
             "#},
                 },
+                Example {
+                    name: "const freeze detaches from its source",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Freezing detaches: the LET source stays mutable.
+                LET $inner: LIST<STRING> = ["a"]
+                CONST $C: LIST<ANY> = [$inner]
+                LIST_APPEND $inner "b"
+                ASSERT_CONTAINS $inner "b"
+
+                # Equality ignores CONST-ness: the frozen copy equals an unfrozen twin.
+                LET $twin: LIST<ANY> = [["a"]]
+                ASSERT_EQ $C $twin
+            "#},
+                },
+                Example {
+                    name: "const nested freeze",
+                    fence_meta: Some("expect_error:\"cannot mutate CONST\""),
+                    code: indoc! {r#"
+                # Nested containers freeze with the binding.
+                CONST $C: LIST<ANY> = [["a"]]
+                LET $nested: LIST<STRING> = $C.0
+                LIST_APPEND $nested "b"
+            "#},
+                },
+                Example {
+                    name: "const alias shares frozenness",
+                    fence_meta: Some("expect_error:\"cannot mutate CONST\""),
+                    code: indoc! {r#"
+                # Aliases share frozenness: copying a CONST never thaws it.
+                CONST $C: LIST<STRING> = ["a"]
+                LET $alias: LIST<STRING> = $C
+                LIST_APPEND $alias "b"
+            "#},
+                },
+                Example {
+                    name: "const map set fails",
+                    fence_meta: Some("expect_error:\"cannot mutate CONST\""),
+                    code: indoc! {r#"
+                # MAP_SET on a CONST fails instead of deriving.
+                IMPORT [STD]
+                CONST $M: MAP<ANY> = {a: 1}
+                LET $z: MAP<ANY> = MAP_SET($M, "x", 1)
+            "#},
+                },
+                Example {
+                    name: "const merge maps fails",
+                    fence_meta: Some("expect_error:\"cannot mutate CONST\""),
+                    code: indoc! {r#"
+                # MERGE_MAPS over a CONST fails instead of merging.
+                IMPORT [STD]
+                CONST $M: MAP<ANY> = {a: 1}
+                LET $n: MAP<ANY> = MERGE_MAPS([$M], "overwrite")
+            "#},
+                },
             ],
         },
         CommandMeta {
@@ -3820,6 +3875,15 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $frac_str: STRING = ECHO 2.5
                 LET $f: FLOAT = FLOAT($frac_str) + 0.25
                 ASSERT_EQ $f 2.75
+            "#},
+                },
+                Example {
+                    name: "reject keypath target",
+                    fence_meta: Some("expect_error:\"cannot assign to $M.a\""),
+                    code: indoc! {r#"
+                # Key paths read in expressions but are never mutation targets.
+                LET $M: MAP<ANY> = {a: 1}
+                $M.a = 2
             "#},
                 },
             ],
@@ -7112,6 +7176,17 @@ mod tests {
     fn mutate_statement_parses_without_keyword() {
         let steps = parse_script("$y = 2\n", lower_command).expect("mutation parses");
         assert!(matches!(steps[0].kind, StepKind::Set { .. }));
+    }
+
+    #[test]
+    fn keypath_mutation_target_is_rejected() {
+        // `$M.a = ...` must fail instead of dropping `.a` and
+        // silently rebinding the whole `$M`.
+        for script in ["$M.a = 2\n", "$C.0 = 2\n"] {
+            let err = parse_err(script);
+            assert!(err.contains("cannot assign to"), "{script}: {err}");
+            assert!(err.contains("never mutation targets"), "{script}: {err}");
+        }
     }
 
     #[test]

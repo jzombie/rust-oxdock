@@ -8003,6 +8003,34 @@ fn parse_set_body(
     ) {
         let var = expect_dollar_var(&mut cur, "mutation requires a variable: $var = <expr>")?;
         reject_qualified_target(&cur, &var)?;
+        // Key paths never serve as mutation targets: without this,
+        // `$M.a = ...` would drop `.a` when the head jumps to `=`
+        // below and silently rebind the whole `$M`. Reads use key
+        // paths in expressions; writes rebind the variable
+        // (e.g. `$M = MAP_SET($M, "a", 2)`).
+        if matches!(
+            cur.toks.get(cur.pos).map(|t| &t.kind),
+            Some(TokKind::Punct('.'))
+        ) {
+            let mut target = format!("${var}");
+            let mut p = cur.pos;
+            loop {
+                let dot = matches!(cur.toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('.')));
+                let word = match cur.toks.get(p + 1).map(|t| &t.kind) {
+                    Some(TokKind::Word(w)) if is_key_segment(w) => w.clone(),
+                    _ => break,
+                };
+                if !dot {
+                    break;
+                }
+                target.push('.');
+                target.push_str(&word);
+                p += 2;
+            }
+            return Err(cur.err(format!(
+                "cannot assign to {target}: key paths read in expressions but are never mutation targets; rebind the variable instead (e.g. ${var} = MAP_SET(${var}, \"a\", 2))"
+            )));
+        }
         let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);
         let eq = match assign {
             Some(eq) => eq,

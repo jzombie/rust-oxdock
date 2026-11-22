@@ -3972,6 +3972,45 @@ fn mutation_converts_to_declared_type() {
 }
 
 #[test]
+fn keypath_mutation_target_is_rejected_end_to_end() {
+    // `$M.a = ...` must fail instead of dropping `.a` and silently
+    // rebinding the whole `$M`: key paths read in expressions but
+    // are never mutation targets.
+    // Parse-time rejection: the key path never reaches execution,
+    // so assert on `parse_script` directly (`run_script` unwraps
+    // parse errors instead of returning them).
+    for (script, what) in [
+        (
+            indoc! {r#"
+                LET $M: MAP<ANY> = {a: 1}
+                $M.a = 2
+            "#},
+            "map key target",
+        ),
+        (
+            indoc! {r#"
+                LET $C: LIST<ANY> = [["a"]]
+                $C.0 = ["b"]
+            "#},
+            "list index target",
+        ),
+        (
+            indoc! {r#"
+                CONST $M: MAP<ANY> = {a: 1}
+                $M.a = 2
+            "#},
+            "const map key target",
+        ),
+    ] {
+        let err = oxdock_core::parse_script(script).expect_err("{what} must fail");
+        assert!(
+            format!("{err:#}").contains("cannot assign to"),
+            "{what}: {err:#}"
+        );
+    }
+}
+
+#[test]
 fn for_loop_body_mutations_do_not_leak() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

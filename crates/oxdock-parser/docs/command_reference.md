@@ -1059,6 +1059,64 @@ LIST_APPEND $ITEMS "b"
 
 **Expected error:** `cannot mutate CONST`
 
+**Example: const freeze detaches from its source**
+
+```oxdock
+# Freezing detaches: the LET source stays mutable.
+LET $inner: LIST<STRING> = ["a"]
+CONST $C: LIST<ANY> = [$inner]
+LIST_APPEND $inner "b"
+ASSERT_CONTAINS $inner "b"
+
+# Equality ignores CONST-ness: the frozen copy equals an unfrozen twin.
+LET $twin: LIST<ANY> = [["a"]]
+ASSERT_EQ $C $twin
+```
+
+**Example: const nested freeze**
+
+```oxdock expect_error:"cannot mutate CONST"
+# Nested containers freeze with the binding.
+CONST $C: LIST<ANY> = [["a"]]
+LET $nested: LIST<STRING> = $C.0
+LIST_APPEND $nested "b"
+```
+
+**Expected error:** `cannot mutate CONST`
+
+**Example: const alias shares frozenness**
+
+```oxdock expect_error:"cannot mutate CONST"
+# Aliases share frozenness: copying a CONST never thaws it.
+CONST $C: LIST<STRING> = ["a"]
+LET $alias: LIST<STRING> = $C
+LIST_APPEND $alias "b"
+```
+
+**Expected error:** `cannot mutate CONST`
+
+**Example: const map set fails**
+
+```oxdock expect_error:"cannot mutate CONST"
+# MAP_SET on a CONST fails instead of deriving.
+IMPORT [STD]
+CONST $M: MAP<ANY> = {a: 1}
+LET $z: MAP<ANY> = MAP_SET($M, "x", 1)
+```
+
+**Expected error:** `cannot mutate CONST`
+
+**Example: const merge maps fails**
+
+```oxdock expect_error:"cannot mutate CONST"
+# MERGE_MAPS over a CONST fails instead of merging.
+IMPORT [STD]
+CONST $M: MAP<ANY> = {a: 1}
+LET $n: MAP<ANY> = MERGE_MAPS([$M], "overwrite")
+```
+
+**Expected error:** `cannot mutate CONST`
+
 
 ### MUTATION
 
@@ -1139,6 +1197,16 @@ LET $frac_str: STRING = ECHO 2.5
 LET $f: FLOAT = FLOAT($frac_str) + 0.25
 ASSERT_EQ $f 2.75
 ```
+
+**Example: reject keypath target**
+
+```oxdock expect_error:"cannot assign to $M.a"
+# Key paths read in expressions but are never mutation targets.
+LET $M: MAP<ANY> = {a: 1}
+$M.a = 2
+```
+
+**Expected error:** `cannot assign to $M.a`
 
 
 ### ASYNC
@@ -3864,16 +3932,21 @@ Boolean `true` or `false`.
 ### Value type: LIST
 
 Ordered list of values. Shared heap: cloning bumps a refcount.
-The `frozen` flag marks `CONST`-owned buffers: every in-place
-mutation choke point (`as_list_mut`) refuses a frozen buffer, so
-freezing is deep and permanent. Only [`Value::deep_freeze`]
-sets it, on a freshly detached tree.
+A `CONST`-owned list is deeply immutable: `LIST_APPEND` on it,
+or on any alias of it, fails with `cannot mutate CONST`,
+including for lists nested inside it. The `CONST` copy is
+detached, so mutating the `LET` source it was built from leaves
+the `CONST` unchanged. Equality ignores `CONST`-ness, so
+`ASSERT_EQ` never observes it.
 
 ### Value type: MAP
 
 String-keyed map of values. Shared heap: cloning bumps a refcount.
-Freezing mirrors `ListValue`: `as_map_mut` refuses frozen
-buffers and only [`Value::deep_freeze`] sets the flag.
+Freezing mirrors `LIST`: a `CONST`-owned map is deeply immutable,
+so `MAP_SET` and `MERGE_MAPS` on it (or any alias of it) fail
+with `cannot mutate CONST`, including for maps nested inside it.
+The `CONST` copy is detached from the `LET` source it was built
+from.
 
 ### Value type: PATH
 
