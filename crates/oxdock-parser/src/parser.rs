@@ -9100,9 +9100,19 @@ fn parse_element_at(
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
+                // Same-kind entries dedup by spelling (distinct
+                // qualified spellings serve distinctly); anything
+                // sharing a base with a `CONST` export is a
+                // cross-kind duplicate, since `CONST` reads are
+                // base-addressed.
+                let base = crate::base_name(name);
                 if ctx.func_exports.borrow().contains(name)
                     || ctx.type_exports.borrow().contains(name)
-                    || ctx.const_exports.borrow().contains(name)
+                    || ctx
+                        .const_exports
+                        .borrow()
+                        .iter()
+                        .any(|existing| crate::base_name(existing) == base)
                 {
                     return Err(TokenError {
                         stmt,
@@ -9121,9 +9131,17 @@ fn parse_element_at(
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
+                // Same spelling rule as funcs above: qualified type
+                // spellings serve distinctly, but a `CONST` base
+                // collision names two kinds for one read.
+                let base = crate::base_name(name);
                 if ctx.func_exports.borrow().contains(name)
                     || ctx.type_exports.borrow().contains(name)
-                    || ctx.const_exports.borrow().contains(name)
+                    || ctx
+                        .const_exports
+                        .borrow()
+                        .iter()
+                        .any(|existing| crate::base_name(existing) == base)
                 {
                     return Err(TokenError {
                         stmt,
@@ -9142,9 +9160,28 @@ fn parse_element_at(
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
-                if ctx.func_exports.borrow().contains(name)
-                    || ctx.type_exports.borrow().contains(name)
-                    || ctx.const_exports.borrow().contains(name)
+                // Uniqueness is by exported base name, not raw
+                // spelling: `EXPORT CONST N` and `EXPORT CONST A::N`
+                // name the same read (`LIB::N`), so the second shapes
+                // the same duplicate instead of silently shadowing.
+                // The same base test covers func and type lists too:
+                // one base name rides exactly one export kind.
+                let base = crate::base_name(name);
+                if ctx
+                    .func_exports
+                    .borrow()
+                    .iter()
+                    .any(|existing| crate::base_name(existing) == base)
+                    || ctx
+                        .type_exports
+                        .borrow()
+                        .iter()
+                        .any(|existing| crate::base_name(existing) == base)
+                    || ctx
+                        .const_exports
+                        .borrow()
+                        .iter()
+                        .any(|existing| crate::base_name(existing) == base)
                 {
                     return Err(TokenError {
                         stmt,

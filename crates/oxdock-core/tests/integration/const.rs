@@ -535,10 +535,7 @@ fn const_forward_to_let_fails_loud() {
             "#},
         )
         .expect_err("forward to a LET must fail");
-    assert!(
-        format!("{err:#}").contains("cannot be exported"),
-        "{err:#}"
-    );
+    assert!(format!("{err:#}").contains("cannot be exported"), "{err:#}");
 }
 
 #[test]
@@ -679,6 +676,98 @@ fn const_forward_disjoint_guards_resolve() {
     Engine::new()
         .run_script(&root, &script)
         .expect("forward over disjoint guards resolves per platform");
+}
+
+#[test]
+fn const_forward_script_qualified_rejected_at_parse() {
+    // `SCRIPT::` is not a CONST namespace: local CONSTs read bare,
+    // so a qualified export spelling names nothing servable.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "lib.oxdock",
+        indoc! {r#"
+            CONST N: INT = 1
+            EXPORT CONST SCRIPT::N
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["lib.oxdock" AS LIB]
+                ECHO hi
+            "#},
+        )
+        .expect_err("SCRIPT-qualified CONST export must fail");
+    assert!(err.to_string().contains("SCRIPT"), "{err}");
+}
+
+#[test]
+fn const_forward_cross_kind_base_rejected_at_parse() {
+    // One base name rides exactly one export kind: a forwarded
+    // CONST base colliding with a FUNC or TYPE export (either
+    // order) is the same duplicate as two bare names.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for (order, lib) in [
+        (
+            "func first",
+            indoc! {r#"
+                IMPORT ["a.oxdock" AS A]
+                FUNC FOO(): INT {
+                    RETURN 1
+                }
+                EXPORT FOO
+                EXPORT CONST A::FOO
+            "#},
+        ),
+        (
+            "forward first",
+            indoc! {r#"
+                IMPORT ["a.oxdock" AS A]
+                FUNC FOO(): INT {
+                    RETURN 1
+                }
+                EXPORT CONST A::FOO
+                EXPORT FOO
+            "#},
+        ),
+        (
+            "type first",
+            indoc! {r#"
+                IMPORT ["a.oxdock" AS A]
+                TYPE FOO = INT
+                EXPORT TYPE FOO
+                EXPORT CONST A::FOO
+            "#},
+        ),
+        (
+            "forward before type",
+            indoc! {r#"
+                IMPORT ["a.oxdock" AS A]
+                TYPE FOO = INT
+                EXPORT CONST A::FOO
+                EXPORT TYPE FOO
+            "#},
+        ),
+    ] {
+        write_lib(&root, "b.oxdock", lib);
+        let err = Engine::new()
+            .run_script(
+                &root,
+                indoc! {r#"
+                    IMPORT ["b.oxdock" AS B]
+                    ECHO hi
+                "#},
+            )
+            .expect_err("cross-kind base collision must fail at parse");
+        assert!(
+            format!("{err:#}").contains("duplicate EXPORT"),
+            "{order}: {err:#}"
+        );
+    }
 }
 
 #[test]

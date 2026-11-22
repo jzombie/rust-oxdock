@@ -6156,8 +6156,11 @@ pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> Parse
 /// a top-level `FUNC`; qualified `MOD::NAME` names must match a known
 /// module member (opaque modules skip the member check; the runtime
 /// registry resolves them or fails serving). `EXPORT CONST` names must
-/// match a top-level `CONST` binding; `LET` bindings never satisfy an
-/// export. Duplicates are rejected at the EXPORT site. Promoted
+/// match a top-level `CONST` binding, or forward one with a qualified
+/// `ALIAS::NAME` naming a visible import (same gate as func
+/// re-exports; existence resolves where the import loads, since parse
+/// performs no IO). `LET` bindings never satisfy an export.
+/// Duplicates are rejected at the EXPORT site. Promoted
 /// verbatim (the pest finish pass delegates).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_exports(
@@ -6172,7 +6175,7 @@ pub(crate) fn validate_exports(
     top_imports: &[String],
 ) -> ParseResult<()> {
     for name in func_exports {
-        let valid = match name.split_once(crate::constants::MODULE_SEPARATOR) {
+        let valid = match crate::constants::split_qualified(name) {
             None => top.contains(name),
             Some((module, base)) if module == crate::constants::SCRIPT_MODULE_NAME => {
                 top.contains(base)
@@ -6207,7 +6210,7 @@ pub(crate) fn validate_exports(
         // Bare re-exports of imported types (whole-file types land
         // bare) defer when the file has imports, so `EXPORT PERSON`
         // after `IMPORT ["lib" AS LIB]` can promote the imported type.
-        let valid = match name.split_once(crate::constants::MODULE_SEPARATOR) {
+        let valid = match crate::constants::split_qualified(name) {
             None => top_types.contains(name) || !top_imports.is_empty(),
             Some((module, _base)) => {
                 if module == crate::constants::SCRIPT_MODULE_NAME {
@@ -6237,27 +6240,34 @@ pub(crate) fn validate_exports(
         // `CONST` exports name the binding bare (no `$`): the binding
         // must be a top-level `CONST` in this file. `LET` bindings
         // never satisfy an export, even when the spelling matches.
-        // Qualified re-exports are rejected here: a stored
-        // `ALIAS::NAME` could never resolve (reads spell a single
-        // `$ALIAS::NAME`, and resolvers match bare names), so
-        // accepting it would strand the script at static check or
-        // runtime instead of failing at the `EXPORT` site.
-        if name.contains(crate::constants::MODULE_SEPARATOR) {
-            return Err(ParseError::validation(
-                crate::constants::KEYWORD_EXPORT,
-                format!(
-                    "EXPORT CONST `{name}` must name a bare top-level CONST; qualified re-exports are not supported"
-                ),
-                ctx,
-            ));
-        }
-        let valid = top_consts.contains(name);
+        // Qualified `ALIAS::NAME` forwards re-export an imported
+        // file's `CONST` under this file's alias (same gate as func
+        // re-exports): the alias must be a visible import here, and
+        // whether the target file exports the name is checked where
+        // the import loads (closure validation, then serving), since
+        // parse performs no IO. `SCRIPT::` is not a `CONST`
+        // namespace (local `CONST`s always read bare), so it is
+        // rejected here instead of stranding a reader later.
+        let valid = match crate::constants::split_qualified(name) {
+            None => top_consts.contains(name),
+            Some((module, _)) if module == crate::constants::SCRIPT_MODULE_NAME => false,
+            Some((module, _base)) => top_imports.iter().any(|m| m == module),
+        };
         if !valid {
-            return Err(ParseError::validation(
-                crate::constants::KEYWORD_EXPORT,
-                format!(
+            let msg = match crate::constants::split_qualified(name) {
+                Some((module, _)) if module == crate::constants::SCRIPT_MODULE_NAME => format!(
+                    "EXPORT CONST `{name}` must name a bare top-level CONST or ALIAS::NAME for a visible import: `SCRIPT::` is not a CONST namespace"
+                ),
+                Some((module, _)) => format!(
+                    "EXPORT CONST `{name}` names unknown import alias `{module}`: import a file as `{module}` to re-export its CONSTs"
+                ),
+                None => format!(
                     "EXPORT CONST `{name}` does not match any top-level CONST (LET bindings are never exportable)"
                 ),
+            };
+            return Err(ParseError::validation(
+                crate::constants::KEYWORD_EXPORT,
+                msg,
                 ctx,
             ));
         }

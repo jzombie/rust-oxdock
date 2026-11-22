@@ -1805,19 +1805,17 @@ pub(crate) fn active_unit_key<P: ProcessManager>(state: &ExecState<P>) -> String
     ENTRY_UNIT.to_string()
 }
 
-/// Alias targets for the active unit: executed top-level imports plus
-/// the innermost live call frame for this unit, if any. Mirrors the
-/// static per-function overlays (unit top-level plus the body's own
-/// imports, appended in the same order): a callee never sees its
-/// caller's function-local imports. Conditional imports that never
-/// execute stay absent and fall back to unknown.
-pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
+/// Alias targets for one unit: executed top-level imports plus the
+/// innermost live call frame for that unit, if any. Single owner
+/// behind [`active_unit_alias_targets`], so forward-chasing reads the
+/// same tables the direct read does.
+pub(crate) fn unit_alias_targets<P: ProcessManager>(
     state: &ExecState<P>,
+    unit: &str,
 ) -> super::native::AliasTargets {
-    let unit = active_unit_key(state);
     let mut out = state
         .executed_alias_targets
-        .get(&unit)
+        .get(unit)
         .cloned()
         .unwrap_or_default();
     if let Some((_, frame)) = state
@@ -1839,68 +1837,83 @@ pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
     out
 }
 
+/// Alias targets for the active unit: executed top-level imports plus
+/// the innermost live call frame for this unit, if any. Mirrors the
+/// static per-function overlays (unit top-level plus the body's own
+/// imports, appended in the same order): a callee never sees its
+/// caller's function-local imports. Conditional imports that never
+/// execute stay absent and fall back to unknown.
+pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
+    state: &ExecState<P>,
+) -> super::native::AliasTargets {
+    unit_alias_targets(state, &active_unit_key(state))
+}
+
+/// Live [`ModuleGraphView`](super::native::ModuleGraphView): raw export
+/// lists, per-file unit targets, and store bindings straight off the
+/// executed modules.
+impl<P: ProcessManager> super::native::ModuleGraphView for ExecState<P> {
+    fn const_exports(&self, file: &str) -> Option<&[String]> {
+        self.modules
+            .get(file)
+            .map(|record| record.const_exports.as_slice())
+    }
+
+    fn alias_targets(&self, file: &str) -> super::native::AliasTargets {
+        unit_alias_targets(self, file)
+    }
+
+    fn binding(&self, file: &str, name: &str) -> super::native::BindingPresence {
+        use super::native::BindingPresence;
+        match self
+            .modules
+            .get(file)
+            .and_then(|record| record.init.as_ref())
+        {
+            Some(init) => match init.vars.get(name) {
+                Some(_) if init.const_vars.contains(name) => BindingPresence::Const,
+                Some(_) => BindingPresence::Let,
+                None => BindingPresence::Absent,
+            },
+            None => BindingPresence::Absent,
+        }
+    }
+}
+
 /// Resolve one `$ALIAS::NAME` read against the active unit's alias
 /// targets: the single runtime owner for qualified `CONST` reads
 /// (expression, math, and template positions all route here, so the
 /// three can never disagree). Only `EXPORT`ed `CONST` bindings
 /// resolve: `LET` bindings never cross the boundary, and an alias
 /// with several live files exporting the name fails loud instead of
-/// picking one.
+/// picking one. Holders and forwards resolve through the shared
+/// [`native`](super::native) graph walk, so a re-export reads exactly
+/// the value a direct read would.
 pub(crate) fn resolve_const_ref<P: ProcessManager>(
     state: &ExecState<P>,
     alias: &str,
     name: &str,
 ) -> Result<Value> {
-    use super::native::{AliasResolution, ambiguous_alias_message, classify_alias_call};
+    use super::native::{
+        ConstHolders, ambiguous_alias_message, chase_const_forward, const_holder_files,
+    };
     let qualified = oxdock_parser::qualify(alias, name);
     let targets = active_unit_alias_targets(state);
-    // Suffix probe for the matcher's canonical keys
-    // (`file::base`): the base is ours, so stripping it recovers the
-    // file exactly, and only an exporting file counts as a holder.
-    let suffix = format!("::{name}");
-    let exports = |canonical: &str| {
-        canonical
-            .strip_suffix(suffix.as_str())
-            .and_then(|file| state.modules.get(file))
-            .is_some_and(|record| record.const_exports.iter().any(|n| n == name))
-    };
-    let files = match classify_alias_call(&targets, &qualified, &exports) {
-        AliasResolution::Global | AliasResolution::Unknown => {
+    // Holder files only: exactly one live holder reads; several fail
+    // loud instead of picking.
+    let holders = match const_holder_files(state, &targets, alias, name) {
+        ConstHolders::Found(holders) => holders,
+        ConstHolders::NoAlias => {
             bail!("unknown CONST `${qualified}`: no import alias `{alias}` exports that name");
         }
-        AliasResolution::Canonical(canonical) => {
-            let Some(file) = canonical.strip_suffix(suffix.as_str()) else {
-                bail!("unknown CONST `${qualified}`");
-            };
-            vec![file.to_string()]
-        }
-        AliasResolution::Ambiguous { alias, base, files } => {
+        ConstHolders::Ambiguous { alias, base, files } => {
             bail!(
                 "{}",
                 ambiguous_alias_message(&alias, &base, &files).replacen("function", "CONST", 1)
             );
         }
-        AliasResolution::Any { mut files, .. } => {
-            let mut files: Vec<String> = files.drain().collect();
-            files.sort();
-            files
-        }
     };
-    // Exporting files only (the matcher already gated on exports, but
-    // `Any` carries every disjoint file): exactly one live holder
-    // reads; several fail loud instead of picking.
-    let mut holders = Vec::new();
-    for file in files {
-        let Some(record) = state.modules.get(&file) else {
-            continue;
-        };
-        if !record.const_exports.iter().any(|n| n == name) {
-            continue;
-        }
-        holders.push(file);
-    }
     if holders.len() > 1 {
-        holders.sort();
         let files: std::collections::HashSet<String> = holders.into_iter().collect();
         bail!(
             "{}",
@@ -1939,7 +1952,23 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
             }
         }
     };
-    let Some(record) = state.modules.get(&file) else {
+    // Follow qualified forwards to the defining files: a re-export
+    // reads exactly the value a direct read would, frozen flag
+    // included (the clone below shares the frozen buffer). Runtime
+    // targets carry no guards, so disjoint branches cannot co-exist
+    // here: several terminals fail loud like several holders.
+    let mut terminals = chase_const_forward(state, &file, name, &qualified)?;
+    if terminals.len() > 1 {
+        let files: std::collections::HashSet<String> = terminals.drain(..).collect();
+        bail!(
+            "{}",
+            ambiguous_alias_message(alias, name, &files).replacen("function", "CONST", 1)
+        );
+    }
+    let Some(terminal) = terminals.into_iter().next() else {
+        bail!("unknown CONST `${qualified}`");
+    };
+    let Some(record) = state.modules.get(&terminal) else {
         bail!("unknown CONST `${qualified}`");
     };
     let Some(init) = record.init.as_ref() else {

@@ -218,7 +218,7 @@ impl<P: ProcessManager> McpSession<P> {
             match self
                 .func_exports
                 .iter()
-                .find(|e| e.rsplit("::").next() == Some(base))
+                .find(|e| oxdock_parser::base_name(e) == base)
             {
                 Some(export) => export.clone(),
                 None => anyhow::bail!("unknown MCP tool `{base}`"),

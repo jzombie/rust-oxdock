@@ -82,7 +82,7 @@ use oxdock_parser::template::{
 };
 use oxdock_parser::{
     CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag, Value,
-    qualify, render_structural,
+    base_name, qualify, render_structural, split_qualified,
 };
 use oxdock_process::ProcessManager;
 
@@ -363,6 +363,13 @@ struct Checker<'a, P: ProcessManager> {
     /// reads gate against these: only listed names resolve, and only
     /// to `CONST` bindings.
     module_const_exports: HashMap<String, Vec<String>>,
+    /// Outbound alias targets per closure file, keyed by module key:
+    /// the unit scope each file's own qualified reads resolve under.
+    /// [`resolve_const_ref`](Checker::resolve_const_ref) chases
+    /// qualified `EXPORT CONST` forwards through these, so a hop
+    /// always resolves in its exporting file's namespace, never the
+    /// reader's.
+    file_targets: HashMap<String, super::native::AliasTargets>,
     /// `EXPORT FUNC` names per module key, built from the closure
     /// files alongside `module_const_exports`. `resolve_call` reads
     /// these for the #319 missing-import hint: only listed
@@ -378,6 +385,39 @@ struct Checker<'a, P: ProcessManager> {
     /// is legal only below an `ISOLATED` head, at any depth including
     /// through nested blocks and nested `ISOLATED` itself.
     isolated_depth: usize,
+}
+
+/// Read-only [`ModuleGraphView`](super::native::ModuleGraphView) over
+/// borrowed closure tables. One struct serves the static twin and the
+/// eager closure check, so both read the same tables through the same
+/// code.
+struct CheckerConstView<'a> {
+    exports: &'a HashMap<String, Vec<String>>,
+    targets: &'a HashMap<String, super::native::AliasTargets>,
+    lets: &'a ModuleLets,
+}
+
+impl super::native::ModuleGraphView for CheckerConstView<'_> {
+    fn const_exports(&self, file: &str) -> Option<&[String]> {
+        self.exports.get(file).map(Vec::as_slice)
+    }
+
+    fn alias_targets(&self, file: &str) -> super::native::AliasTargets {
+        self.targets.get(file).cloned().unwrap_or_default()
+    }
+
+    fn binding(&self, file: &str, name: &str) -> super::native::BindingPresence {
+        use super::native::BindingPresence;
+        match self
+            .lets
+            .get(file)
+            .and_then(|lets| lets.iter().find(|entry| entry.name == name))
+        {
+            Some(entry) if entry.is_const => BindingPresence::Const,
+            Some(_) => BindingPresence::Let,
+            None => BindingPresence::Absent,
+        }
+    }
 }
 
 /// Run the static pass over an imported file's body (#115). The
@@ -928,6 +968,26 @@ pub fn validate_script_closure<P: ProcessManager>(
                 Ok(())
             })?;
         }
+        // Eager forward check: every qualified `EXPORT CONST
+        // ALIAS::NAME` must resolve through the shared walk now, even
+        // when no expression reads it yet. An unread dangling
+        // re-export is still a broken export list, so it fails here
+        // instead of waiting for a first read that never comes.
+        {
+            let view = CheckerConstView {
+                exports: &all_const_exports,
+                targets: &file_targets,
+                lets: &all_lets,
+            };
+            for file in files {
+                for entry in &file.const_exports {
+                    if let Some((_, base)) = split_qualified(entry) {
+                        super::native::chase_const_forward(&view, &file.key, base, entry)
+                            .map_err(|err| anyhow::anyhow!("{}: {err}", file.key))?;
+                    }
+                }
+            }
+        }
         // Bare-harvest edges (#322): walk the entry and every file for
         // unaliased harvests, attributed to the file holding the step.
         // Entry imports key under the entry unit.
@@ -1000,6 +1060,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &owner_targets,
                     &body_scopes,
                     &entry_let_scopes,
+                    &file_targets,
                 );
                 let ty = checker.func_return(&key, 0)?;
                 inferred.insert(key.clone(), ty);
@@ -1049,6 +1110,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &owner_targets,
                     &body_scopes,
                     &entry_let_scopes,
+                    &file_targets,
                 );
                 let ty = checker.func_return_owned(&info, &canonical, 0)?;
                 inferred.insert(canonical.clone(), ty);
@@ -1079,6 +1141,7 @@ pub fn validate_script_closure<P: ProcessManager>(
             alias_targets: &super::native::AliasTargets,
             body_scopes: &BodyScopes,
             entry_let_scopes: &HashMap<(String, usize, usize), Vec<GuardedLet>>,
+            file_targets: &HashMap<String, super::native::AliasTargets>,
         ) -> Checker<'a, P> {
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
@@ -1096,6 +1159,7 @@ pub fn validate_script_closure<P: ProcessManager>(
             checker.inferred = inferred.clone();
             checker.strict_qualified = true;
             checker.alias_targets = alias_targets.clone();
+            checker.file_targets = file_targets.clone();
             checker.body_scopes = body_scopes.clone();
             checker.build_env_unions(entry, files);
             checker
@@ -1116,6 +1180,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 &entry_targets,
                 &body_scopes,
                 &entry_let_scopes,
+                &file_targets,
             )
             .check_top_level(entry)
         })?;
@@ -1141,6 +1206,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &targets,
                     &body_scopes,
                     &entry_let_scopes,
+                    &file_targets,
                 )
                 .check_import_body(&file.key, &file.steps, Some(&file.key))
             })?;
@@ -1414,12 +1480,6 @@ fn classify_guard(guard: Option<&GuardExpr>) -> GuardClass {
 /// regardless of spelling.
 fn clean_var(name: &str) -> String {
     name.trim_start_matches('$').to_string()
-}
-
-/// Display form of a callee name: the runtime boundary messages use
-/// the bare name (`INT()`), never the qualified registry key.
-fn base_name(name: &str) -> &str {
-    name.rsplit("::").next().unwrap_or(name)
 }
 
 /// Step prefix, or empty for RPN contexts whose runtime errors carry
@@ -2136,6 +2196,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             entry_let_scopes: HashMap::new(),
             alias_targets: HashMap::new(),
             module_const_exports: HashMap::new(),
+            file_targets: HashMap::new(),
             module_func_exports: HashMap::new(),
             body_scopes: HashMap::new(),
             isolated_depth: 0,
@@ -4897,18 +4958,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// closed on it; a `LET` spelling with the same name names the
     /// real error (never exportable) instead of an unknown-name miss.
     fn resolve_const_ref(&self, alias: &str, name: &str, scope: &Scope) -> Result<TypeTag> {
-        use super::native::{AliasResolution, ambiguous_alias_message, classify_alias_call};
+        use super::native::{
+            ConstHolders, ambiguous_alias_message, chase_const_forward, const_holder_files,
+        };
         let at = || step_pos(scope.line, scope.col, scope.idx);
         let qualified = oxdock_parser::qualify(alias, name);
-        let suffix = format!("::{name}");
-        let exports = |canonical: &str| {
-            canonical
-                .strip_suffix(suffix.as_str())
-                .and_then(|file| self.module_const_exports.get(file))
-                .is_some_and(|names| names.iter().any(|n| n == name))
+        let view = CheckerConstView {
+            exports: &self.module_const_exports,
+            targets: &self.file_targets,
+            lets: &self.module_lets,
         };
-        let files = match classify_alias_call(&self.alias_targets, &qualified, &exports) {
-            AliasResolution::Global | AliasResolution::Unknown => {
+        // Holders through the shared walk: the static twin and the
+        // runtime twin classify identically, so a read accepted here
+        // serves there.
+        let files = match const_holder_files(&view, &self.alias_targets, alias, name) {
+            ConstHolders::Found(files) => files,
+            ConstHolders::NoAlias => {
                 if self.strict_qualified {
                     bail!(
                         "{}: unknown CONST `${qualified}`: no import alias `{alias}` exports that name",
@@ -4917,48 +4982,40 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 return Ok(TypeTag::Any);
             }
-            AliasResolution::Canonical(canonical) => {
-                let Some(file) = canonical.strip_suffix(suffix.as_str()) else {
-                    bail!("{}: unknown CONST `${qualified}`", at());
-                };
-                vec![file.to_string()]
-            }
-            AliasResolution::Ambiguous { alias, base, files } => {
+            ConstHolders::Ambiguous { alias, base, files } => {
                 bail!(
                     "{}: {}",
                     at(),
                     ambiguous_alias_message(&alias, &base, &files).replacen("function", "CONST", 1)
                 );
             }
-            AliasResolution::Any { mut files, .. } => {
-                let mut files: Vec<String> = files.drain().collect();
-                files.sort();
-                files
-            }
         };
-        // Tag lookup over exporting files only: exactly one holder
-        // tags the read; several live holders fail loud (runtime
-        // would too), and differing disjoint tags fall back to `ANY`
-        // since only the live branch initializes.
+        // Tag lookup over exporting files, following qualified
+        // forwards to the defining files first so the tag and the LET
+        // check read terminal bindings, never forwards. Disjoint
+        // terminals union like disjoint holders: same tags read, and
+        // differing tags fall back to `ANY` since only the live branch
+        // initializes.
         let mut tags: Vec<TypeTag> = Vec::new();
         for file in &files {
-            if !exports(&oxdock_parser::qualify(file, name)) {
-                continue;
+            let terminals = chase_const_forward(&view, file, name, &qualified)
+                .map_err(|err| anyhow::anyhow!("{}: {err}", at()))?;
+            for terminal in &terminals {
+                let Some(binding) = self
+                    .module_lets
+                    .get(terminal)
+                    .and_then(|lets| lets.iter().find(|entry| entry.name == name))
+                else {
+                    continue;
+                };
+                if !binding.is_const {
+                    bail!(
+                        "{}: `${qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary",
+                        at()
+                    );
+                }
+                tags.push(binding.tag.clone());
             }
-            let Some(binding) = self
-                .module_lets
-                .get(file)
-                .and_then(|lets| lets.iter().find(|entry| entry.name == name))
-            else {
-                continue;
-            };
-            if !binding.is_const {
-                bail!(
-                    "{}: `${qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary",
-                    at()
-                );
-            }
-            tags.push(binding.tag.clone());
         }
         if tags.len() > 1 {
             let first = tags[0].clone();

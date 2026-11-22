@@ -266,6 +266,333 @@ pub(super) fn missing_import_hint<'a>(
     ))
 }
 
+/// Whether one `EXPORT CONST` entry serves reads of bare `name`:
+/// the entry itself, or a qualified `ALIAS::NAME` forward of the same
+/// base. Single owner for the cover rule every qualified-`CONST`
+/// path matches on.
+pub(super) fn const_export_covers(entry: &str, name: &str) -> bool {
+    base_name(entry) == name
+}
+
+/// How a module holds a top-level binding, for broken-forward
+/// diagnostics: a `CONST`, a never-exportable `LET`, or nothing.
+pub(super) enum BindingPresence {
+    Const,
+    Let,
+    Absent,
+}
+
+/// Read-only view of the module graph one qualified-`CONST`
+/// resolution needs. Implemented once for live runtime stores and
+/// once for static closure tables, so the walk below runs
+/// identically on both and the twins cannot drift: static
+/// validation, eager closure checks, and serving all chase through
+/// this one owner.
+pub(super) trait ModuleGraphView {
+    /// Raw `EXPORT CONST` entries (bare names and qualified forwards).
+    fn const_exports(&self, file: &str) -> Option<&[String]>;
+    /// Outbound alias targets for `file`'s own unit: the namespace
+    /// each forward hop resolves in.
+    fn alias_targets(&self, file: &str) -> AliasTargets;
+    /// How `file` holds top-level `name`, for broken-link detail.
+    fn binding(&self, file: &str, name: &str) -> BindingPresence;
+}
+
+/// One `ALIAS::NAME` read's holder files: the unit's alias targets
+/// classified through the shared matcher, kept only when the file
+/// covers the base. Single owner for the holder half of
+/// qualified-`CONST` resolution; the chase half is
+/// [`chase_const_forward`].
+#[derive(Debug)]
+pub(super) enum ConstHolders {
+    /// Covering files, sorted, possibly empty (callers run their
+    /// own missing-name hints then).
+    Found(Vec<String>),
+    /// The alias is unknown to this unit.
+    NoAlias,
+    /// Several overlapping files hold the base: fail loud.
+    Ambiguous {
+        alias: String,
+        base: String,
+        files: HashSet<String>,
+    },
+}
+
+/// Classify one qualified-`CONST` read to its holder files.
+pub(super) fn const_holder_files<S: ModuleGraphView>(
+    view: &S,
+    unit_targets: &AliasTargets,
+    alias: &str,
+    name: &str,
+) -> ConstHolders {
+    let qualified = qualify(alias, name);
+    let suffix = format!("::{name}");
+    // Suffix probe for the matcher's canonical keys
+    // (`file::base`): the base is ours, so stripping it recovers the
+    // file exactly, and only a covering file counts as a holder.
+    let exports = |canonical: &str| {
+        canonical
+            .strip_suffix(suffix.as_str())
+            .and_then(|file| view.const_exports(file))
+            .is_some_and(|names| names.iter().any(|entry| const_export_covers(entry, name)))
+    };
+    let mut holders = match classify_alias_call(unit_targets, &qualified, &exports) {
+        AliasResolution::Global | AliasResolution::Unknown => return ConstHolders::NoAlias,
+        AliasResolution::Ambiguous { alias, base, files } => {
+            return ConstHolders::Ambiguous { alias, base, files };
+        }
+        AliasResolution::Canonical(canonical) => {
+            let Some(file) = canonical.strip_suffix(suffix.as_str()) else {
+                return ConstHolders::NoAlias;
+            };
+            vec![file.to_string()]
+        }
+        AliasResolution::Any { mut files, .. } => {
+            let mut files: Vec<String> = files.drain().collect();
+            files.sort();
+            files
+        }
+    };
+    holders.retain(|file| {
+        view.const_exports(file)
+            .is_some_and(|names| names.iter().any(|entry| const_export_covers(entry, name)))
+    });
+    ConstHolders::Found(holders)
+}
+
+/// Failure modes of [`chase_const_forward`], rendered by each caller
+/// with its own position context (static line/col, runtime none,
+/// eager file attribution). Wording lives here once, on [`Display`],
+/// so diagnostics cannot drift between the twins.
+#[derive(Debug)]
+pub(super) enum ForwardError {
+    /// The holder file itself is gone from the view.
+    Unknown { original: String },
+    /// A forward hop lands where the base is missing.
+    Broken {
+        original: String,
+        hop: String,
+        detail: BrokenDetail,
+    },
+    /// One file forwards the same base from several aliases.
+    Split { original: String, hops: Vec<String> },
+    /// Hops revisit a spelling. Import cycles are rejected before
+    /// resolution, so this is defense in depth.
+    Cycle { chain: Vec<String> },
+    /// One hop resolves to several overlapping files.
+    HopAmbiguous {
+        alias: String,
+        base: String,
+        files: HashSet<String>,
+    },
+}
+
+/// Why a forward hop lands nowhere.
+#[derive(Debug)]
+pub(super) enum BrokenDetail {
+    /// The terminal file holds the base as an unexported `CONST`.
+    UnexportedConst,
+    /// The terminal file holds the base as a `LET`.
+    Let,
+    /// Nothing there answers to the base.
+    Absent,
+}
+
+impl std::fmt::Display for ForwardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ForwardError::Unknown { original } => write!(f, "unknown CONST `{original}`"),
+            ForwardError::Broken {
+                original,
+                hop,
+                detail,
+            } => {
+                let base = base_name(hop);
+                let detail = match detail {
+                    BrokenDetail::UnexportedConst => format!(
+                        "module holds `{base}` as CONST but does not export it: add `EXPORT CONST {base}`"
+                    ),
+                    BrokenDetail::Let => format!(
+                        "`{base}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+                    ),
+                    BrokenDetail::Absent => {
+                        let (forward, _) = split_qualified(hop).unwrap_or(("", base));
+                        format!("no import alias `{forward}` exports `{base}`")
+                    }
+                };
+                write!(
+                    f,
+                    "unknown CONST `{original}`: re-export `{hop}` does not resolve: {detail}"
+                )
+            }
+            ForwardError::Split { original, hops } => write!(
+                f,
+                "ambiguous CONST `{original}`: re-exported from {}; export exactly one source",
+                hops.join(" and ")
+            ),
+            ForwardError::Cycle { chain } => {
+                write!(f, "CONST re-export cycle detected: {}", chain.join(" -> "))
+            }
+            ForwardError::HopAmbiguous { alias, base, files } => write!(
+                f,
+                "{}",
+                ambiguous_alias_message(alias, base, files).replacen("function", "CONST", 1)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ForwardError {}
+
+/// Follow qualified `EXPORT CONST ALIAS::NAME` forwards from `file`
+/// to the files holding the bare binding, resolving each hop in the
+/// exporting file's own unit. A local bare definition shadows
+/// forwards; disjoint-guard branches each chase to their own
+/// terminal, so all terminals return (callers apply their own
+/// multi-holder policy). Each hop preserves the base name.
+pub(super) fn chase_const_forward<S: ModuleGraphView>(
+    view: &S,
+    file: &str,
+    name: &str,
+    original: &str,
+) -> Result<Vec<String>, ForwardError> {
+    let mut terminals: Vec<String> = Vec::new();
+    chase_from(view, file, name, original, &mut Vec::new(), &mut terminals)?;
+    terminals.sort();
+    terminals.dedup();
+    Ok(terminals)
+}
+
+fn chase_from<S: ModuleGraphView>(
+    view: &S,
+    current: &str,
+    name: &str,
+    original: &str,
+    chain: &mut Vec<String>,
+    terminals: &mut Vec<String>,
+) -> Result<(), ForwardError> {
+    let suffix = format!("::{name}");
+    let covering = |canonical: &str| {
+        canonical
+            .strip_suffix(suffix.as_str())
+            .and_then(|file| view.const_exports(file))
+            .is_some_and(|names| names.iter().any(|entry| const_export_covers(entry, name)))
+    };
+    let mut current = current.to_string();
+    loop {
+        let Some(names) = view.const_exports(current.as_str()) else {
+            return Err(ForwardError::Unknown {
+                original: original.to_string(),
+            });
+        };
+        if names.iter().any(|entry| entry == name) {
+            terminals.push(current);
+            return Ok(());
+        }
+        let mut aliases: Vec<&str> = Vec::new();
+        for entry in names {
+            if let Some((alias, base)) = split_qualified(entry)
+                && base == name
+                && !aliases.contains(&alias)
+            {
+                aliases.push(alias);
+            }
+        }
+        if aliases.is_empty() {
+            if chain.is_empty() {
+                return Err(ForwardError::Unknown {
+                    original: original.to_string(),
+                });
+            }
+            let hop = chain.last().expect("chain never empty").clone();
+            let detail = match view.binding(current.as_str(), name) {
+                BindingPresence::Const => BrokenDetail::UnexportedConst,
+                BindingPresence::Let => BrokenDetail::Let,
+                BindingPresence::Absent => BrokenDetail::Absent,
+            };
+            return Err(ForwardError::Broken {
+                original: original.to_string(),
+                hop,
+                detail,
+            });
+        }
+        if aliases.len() > 1 {
+            let mut hops: Vec<String> = aliases.iter().map(|alias| qualify(alias, name)).collect();
+            hops.sort();
+            return Err(ForwardError::Split {
+                original: original.to_string(),
+                hops,
+            });
+        }
+        let forward = aliases[0];
+        let hop = qualify(forward, name);
+        if chain.contains(&hop) {
+            chain.push(hop);
+            return Err(ForwardError::Cycle {
+                chain: chain.clone(),
+            });
+        }
+        chain.push(hop.clone());
+        let targets = view.alias_targets(current.as_str());
+        match classify_alias_call(&targets, &hop, &covering) {
+            AliasResolution::Global | AliasResolution::Unknown => {
+                return Err(ForwardError::Broken {
+                    original: original.to_string(),
+                    hop,
+                    detail: BrokenDetail::Absent,
+                });
+            }
+            AliasResolution::Ambiguous { alias, base, files } => {
+                return Err(ForwardError::HopAmbiguous { alias, base, files });
+            }
+            AliasResolution::Canonical(canonical) => {
+                let Some(next) = canonical.strip_suffix(suffix.as_str()) else {
+                    return Err(ForwardError::Unknown {
+                        original: original.to_string(),
+                    });
+                };
+                current = next.to_string();
+            }
+            AliasResolution::Any { mut files, .. } => {
+                let mut covering: Vec<String> = files
+                    .drain()
+                    .filter(|file| {
+                        view.const_exports(file).is_some_and(|names| {
+                            names.iter().any(|entry| const_export_covers(entry, name))
+                        })
+                    })
+                    .collect();
+                covering.sort();
+                match covering.len() {
+                    0 => {
+                        return Err(ForwardError::Broken {
+                            original: original.to_string(),
+                            hop,
+                            detail: BrokenDetail::Absent,
+                        });
+                    }
+                    1 => {
+                        current = covering.into_iter().next().expect("len checked");
+                    }
+                    _ => {
+                        for branch in covering {
+                            let mut branch_chain = chain.clone();
+                            chase_from(
+                                view,
+                                branch.as_str(),
+                                name,
+                                original,
+                                &mut branch_chain,
+                                terminals,
+                            )?;
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+}
 /// Whether a disjoint-alias template call names a script function,
 /// owned here so every placeholder path agrees with `resolve_call`:
 /// visible only when no host-harvest branch competes (`!has_host`)
@@ -5773,5 +6100,241 @@ mod tests {
         let back = shell_words::split(&joined).expect("join output must parse");
         assert_eq!(back, words);
         assert!(shell_words::split("unbalanced \"quote").is_err());
+    }
+
+    /// Fake module graph for the shared forward walk: export lists,
+    /// per-file alias targets, and per-file bindings set directly,
+    /// so every chase branch pins without files or execution.
+    struct FakeView {
+        exports: HashMap<String, Vec<String>>,
+        targets: HashMap<String, AliasTargets>,
+        bindings: HashMap<String, HashMap<String, bool>>,
+    }
+
+    impl ModuleGraphView for FakeView {
+        fn const_exports(&self, file: &str) -> Option<&[String]> {
+            self.exports.get(file).map(Vec::as_slice)
+        }
+
+        fn alias_targets(&self, file: &str) -> AliasTargets {
+            self.targets.get(file).cloned().unwrap_or_default()
+        }
+
+        fn binding(&self, file: &str, name: &str) -> BindingPresence {
+            match self.bindings.get(file).and_then(|names| names.get(name)) {
+                Some(true) => BindingPresence::Const,
+                Some(false) => BindingPresence::Let,
+                None => BindingPresence::Absent,
+            }
+        }
+    }
+
+    fn fake_targets(pairs: &[(&str, &str)]) -> AliasTargets {
+        let mut targets = AliasTargets::new();
+        for (alias, file) in pairs {
+            targets
+                .entry((*alias).to_string())
+                .or_default()
+                .push((Some((*file).to_string()), None));
+        }
+        targets
+    }
+
+    fn os_guard(os: &str) -> GuardExpr {
+        GuardExpr::Predicate(oxdock_parser::Guard::Attr {
+            ns: oxdock_parser::Ns::Os,
+            key: None,
+            val: Some(os.to_string()),
+        })
+    }
+
+    #[test]
+    fn chase_resolves_bare_and_single_forward() {
+        // Bare entries terminate in place; one forward hop lands on
+        // the defining file; chains compose hop by hop.
+        let mut view = FakeView {
+            exports: HashMap::from([
+                ("a".to_string(), vec!["N".to_string()]),
+                ("b".to_string(), vec!["A::N".to_string()]),
+                ("c".to_string(), vec!["B::N".to_string()]),
+            ]),
+            targets: HashMap::from([
+                ("u".to_string(), fake_targets(&[("B", "b")])),
+                ("b".to_string(), fake_targets(&[("A", "a")])),
+                ("c".to_string(), fake_targets(&[("B", "b")])),
+            ]),
+            bindings: HashMap::new(),
+        };
+        assert_eq!(
+            chase_const_forward(&view, "a", "N", "U::N").expect("bare"),
+            vec!["a".to_string()]
+        );
+        assert_eq!(
+            chase_const_forward(&view, "b", "N", "U::N").expect("forward"),
+            vec!["a".to_string()]
+        );
+        view.targets
+            .insert("u".to_string(), fake_targets(&[("C", "c")]));
+        assert_eq!(
+            chase_const_forward(&view, "c", "N", "U::N").expect("chain"),
+            vec!["a".to_string()]
+        );
+    }
+
+    #[test]
+    fn chase_prefers_bare_over_forwards() {
+        // A local bare definition shadows forwards of the same base:
+        // the file answers for its own binding.
+        let view = FakeView {
+            exports: HashMap::from([("b".to_string(), vec!["N".to_string(), "A::N".to_string()])]),
+            targets: HashMap::from([("b".to_string(), fake_targets(&[("A", "a")]))]),
+            bindings: HashMap::new(),
+        };
+        assert_eq!(
+            chase_const_forward(&view, "b", "N", "U::N").expect("bare wins"),
+            vec!["b".to_string()]
+        );
+    }
+
+    #[test]
+    fn chase_rejects_split_forwards() {
+        // Two forwards of one base in one file fail instead of
+        // picking one.
+        let view = FakeView {
+            exports: HashMap::from([(
+                "b".to_string(),
+                vec!["A::N".to_string(), "C::N".to_string()],
+            )]),
+            targets: HashMap::new(),
+            bindings: HashMap::new(),
+        };
+        let err = format!(
+            "{}",
+            chase_const_forward(&view, "b", "N", "U::N").expect_err("split must fail")
+        );
+        assert!(err.contains("ambiguous CONST `U::N`"), "{err}");
+        assert!(err.contains("A::N") && err.contains("C::N"), "{err}");
+    }
+
+    #[test]
+    fn chase_names_broken_link_detail() {
+        // A hop landing nowhere names the break: missing binding,
+        // unexported CONST, or LET terminal each render distinctly.
+        let view = FakeView {
+            exports: HashMap::from([
+                ("b".to_string(), vec!["A::M".to_string()]),
+                ("c".to_string(), vec!["A::P".to_string()]),
+                ("d".to_string(), vec!["A::Q".to_string()]),
+                ("a".to_string(), Vec::new()),
+            ]),
+            targets: HashMap::from([
+                ("b".to_string(), fake_targets(&[("A", "a")])),
+                ("c".to_string(), fake_targets(&[("A", "a")])),
+                ("d".to_string(), fake_targets(&[("A", "a")])),
+            ]),
+            bindings: HashMap::from([(
+                "a".to_string(),
+                HashMap::from([("P".to_string(), true), ("Q".to_string(), false)]),
+            )]),
+        };
+        let err = format!(
+            "{}",
+            chase_const_forward(&view, "b", "M", "U::M").expect_err("missing must fail")
+        );
+        assert!(err.contains("does not resolve"), "{err}");
+        assert!(err.contains("no import alias `A` exports `M`"), "{err}");
+        let err = format!(
+            "{}",
+            chase_const_forward(&view, "c", "P", "U::P").expect_err("unexported must fail")
+        );
+        assert!(
+            err.contains("holds `P` as CONST but does not export it"),
+            "{err}"
+        );
+        let err = format!(
+            "{}",
+            chase_const_forward(&view, "d", "Q", "U::Q").expect_err("LET must fail")
+        );
+        assert!(
+            err.contains("is a LET binding and cannot be exported"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn chase_rejects_cycles() {
+        // Mutual forwards never resolve: the walk names the chain
+        // instead of recursing forever.
+        let view = FakeView {
+            exports: HashMap::from([
+                ("a".to_string(), vec!["B::N".to_string()]),
+                ("b".to_string(), vec!["A::N".to_string()]),
+            ]),
+            targets: HashMap::from([
+                ("a".to_string(), fake_targets(&[("B", "b")])),
+                ("b".to_string(), fake_targets(&[("A", "a")])),
+            ]),
+            bindings: HashMap::new(),
+        };
+        let err = format!(
+            "{}",
+            chase_const_forward(&view, "a", "N", "U::N").expect_err("cycle must fail")
+        );
+        assert!(err.contains("re-export cycle"), "{err}");
+    }
+
+    #[test]
+    fn chase_unions_disjoint_guard_branches() {
+        // One forward over disjoint platform imports chases each live
+        // branch to its own terminal instead of failing ambiguous.
+        let mut guarded = AliasTargets::new();
+        guarded.insert(
+            "A".to_string(),
+            vec![
+                (Some("lin".to_string()), Some(os_guard("linux"))),
+                (Some("mac".to_string()), Some(os_guard("macos"))),
+            ],
+        );
+        let view = FakeView {
+            exports: HashMap::from([
+                ("b".to_string(), vec!["A::N".to_string()]),
+                ("lin".to_string(), vec!["N".to_string()]),
+                ("mac".to_string(), vec!["N".to_string()]),
+            ]),
+            targets: HashMap::from([("b".to_string(), guarded)]),
+            bindings: HashMap::new(),
+        };
+        assert_eq!(
+            chase_const_forward(&view, "b", "N", "U::N").expect("disjoint branches"),
+            vec!["lin".to_string(), "mac".to_string()]
+        );
+    }
+
+    #[test]
+    fn holder_classification_sorts_and_rejects() {
+        // Holders come back sorted; unknown aliases and overlapping
+        // files report through their own variants.
+        let view = FakeView {
+            exports: HashMap::from([
+                ("b".to_string(), vec!["N".to_string()]),
+                ("c".to_string(), vec!["N".to_string()]),
+            ]),
+            targets: HashMap::new(),
+            bindings: HashMap::new(),
+        };
+        let unit = fake_targets(&[("B", "b"), ("B", "c")]);
+        match const_holder_files(&view, &unit, "B", "N") {
+            ConstHolders::Ambiguous { .. } => {}
+            other => panic!("overlapping holders must be ambiguous, got {other:?}"),
+        }
+        match const_holder_files(&view, &unit, "Z", "N") {
+            ConstHolders::NoAlias => {}
+            other => panic!("unknown alias must report NoAlias, got {other:?}"),
+        }
+        let unit = fake_targets(&[("B", "b")]);
+        match const_holder_files(&view, &unit, "B", "N") {
+            ConstHolders::Found(files) => assert_eq!(files, vec!["b".to_string()]),
+            other => panic!("single holder must be found, got {other:?}"),
+        }
     }
 }
