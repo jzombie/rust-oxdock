@@ -72,4 +72,7 @@ each slice.
 - [x] Slice 1: MathOp loads (collapsed `Load{is_const}`, `LoadKeyPath{is_const}`, `Inspect{is_const}`; deps: ast, commands lowering, args eval, static_check typer, macros emitter, arithmetic tests; suites green)
 - [x] Slice 2: Expr bindings (collapsed `Var{is_const}`, `KeyPath{is_const}`, `Inspect{is_const}`; deps: ast walk/Display, commands lowering + 3 var-extract sites, args eval, static_check typing + template/placeholder constructors, command check_arg, macros emitter, track, lib/exec/integration/fuzz tests; suites green)
 - [x] Slice 3: StepKind assigns (collapsed `Assign{is_const}`, `AssignCapture{is_const}`, `AssignAsync{is_const}`, `AwaitCapture{out is_const}`; existing `binding_kind` now flips the flag; merged twin dispatch wrappers in handlers/steps/lib/pipeline/mod; Display/metadata_name branch on flag with byte-identical output; fuzz + corpus + exec/integration/macro tests updated; suites green)
-- [x] Slice 4: ENTRY_UNIT-as-ModuleRecord
+- [x] Slice 4: ENTRY_UNIT-as-ModuleRecord (entry is one `ModuleRecord` under `ENTRY_UNIT`; `unit_key` owns the fallback; `unit_top_funcs` owns frame reads; `callee_file_ctx` is one lookup)
+  - [x] Amend: `validate_closure_for_run` mutates the entry record in place (keeps live `init` + sealed jails)
+  - [x] Amend: entry prelude (`envs`, `inherit_names`, `consts`) consolidated into `ENTRY_UNIT` `ModuleInit` via `entry_record`/`entry_seed` single owners; `entry_*` fields deleted
+  - [x] Coverage: `coverage.toml` twins removed (`Const`, `ConstCapture`, `ConstAsync`, `ConstAwaitCapture`); const cases folded into surviving variants (`Assign`, `AssignCapture`, `AssignAsync`, `AwaitCapture`)
