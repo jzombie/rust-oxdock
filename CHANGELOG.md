@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Fixed
 
 - Script `FUNC` calls resolve inside RPN arithmetic: `LET $t: INT = DOUBLE() * 2` and `RETURN DOUBLE() * 2` route through the same resolution and execution as statement calls instead of failing with `unknown function SCRIPT::DOUBLE`. Resolution, the recursion depth budget, and the arity gate are single-sourced behind the statement-call path, so math calls guard identically; AST-only natives keep their existing rejection.
+- Key-path mutation targets fail at parse time: `$M.a = 2` no longer drops `.a` and silently rebinds the whole `$M` (succeeding with the wrong value when the type happened to line up, else failing later with a confusing coercion error). It now fails naming the target (`cannot assign to $M.a`) with the rebind-the-variable fix (`$M = MAP_SET($M, "a", 2)`). Key paths keep reading in expressions exactly as before; only mutation targets are rejected. `CONST` maps get the same parse-time diagnostic instead of the runtime `cannot mutate CONST`.
 
 ## [0.43.0-alpha] - 2026-11-19
 

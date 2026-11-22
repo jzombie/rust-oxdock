@@ -3881,9 +3881,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "reject keypath target",
                     fence_meta: Some("expect_error:\"cannot assign to $M.a\""),
                     code: indoc! {r#"
-                # Key paths read in expressions but are never mutation targets.
+                # Rebind the whole variable to update one entry.
+                IMPORT [STD]
                 LET $M: MAP<ANY> = {a: 1}
-                $M.a = 2
+                $M = MAP_SET($M, "a", 2)
+                ASSERT_EQ $M.a 2
+
+                # Key paths read in expressions but are never mutation targets.
+                $M.a = 3
             "#},
                 },
             ],

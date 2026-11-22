@@ -1145,9 +1145,14 @@ ASSERT_EQ $f 2.75
 **Example: reject keypath target**
 
 ```oxdock expect_error:"cannot assign to $M.a"
-# Key paths read in expressions but are never mutation targets.
+# Rebind the whole variable to update one entry.
+IMPORT [STD]
 LET $M: MAP<ANY> = {a: 1}
-$M.a = 2
+$M = MAP_SET($M, "a", 2)
+ASSERT_EQ $M.a 2
+
+# Key paths read in expressions but are never mutation targets.
+$M.a = 3
 ```
 
 **Expected error:** `cannot assign to $M.a`
