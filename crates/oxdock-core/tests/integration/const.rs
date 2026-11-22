@@ -293,7 +293,7 @@ fn const_export_of_let_fails_at_parse() {
 }
 
 #[test]
-fn const_qualified_reexport_fails_at_parse() {
+fn const_qualified_reexport_unknown_alias_fails_at_parse() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     write_lib(
@@ -312,11 +312,407 @@ fn const_qualified_reexport_fails_at_parse() {
                 ECHO hi
             "#},
         )
-        .expect_err("qualified CONST re-exports are not supported");
+        .expect_err("qualified CONST re-export of an unknown alias must fail");
     assert!(
-        err.to_string().contains("must name a bare top-level CONST"),
+        err.to_string().contains("names unknown import alias `LIB`"),
         "{err}"
     );
+}
+
+#[test]
+fn const_forwarded_reexport_reads() {
+    // A qualified `EXPORT CONST ALIAS::NAME` forwards the imported
+    // file's binding: readers observe the defining file's value with
+    // the frozen flag intact, exactly like a direct read.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a.oxdock",
+        indoc! {r#"
+            CONST N: INT = 4
+            CONST LIMITS: MAP<ANY> = {max: 10, nested: {x: 1}}
+            CONST ITEMS: LIST<STRING> = ["a"]
+            EXPORT CONST N
+            EXPORT [CONST LIMITS, CONST ITEMS]
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            IMPORT ["a.oxdock" AS A]
+            EXPORT CONST A::N
+            EXPORT [CONST A::LIMITS, CONST A::ITEMS]
+        "#},
+    );
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["b.oxdock" AS B]
+                IMPORT [STD]
+                LET $n: INT = B::N
+                ASSERT_EQ $n 4
+                LET $lim: MAP<ANY> = B::LIMITS
+                ASSERT_EQ $lim.max 10
+                LET $items: LIST<STRING> = B::ITEMS
+                ASSERT_CONTAINS $items "a"
+            "#},
+        )
+        .expect("forwarded CONSTs read through the re-export");
+    // Freezing rides the forward: copies refuse every write shape.
+    for script in [
+        indoc! {r#"
+            IMPORT ["b.oxdock" AS B]
+            IMPORT [STD]
+            LET $lim: MAP<ANY> = B::LIMITS
+            LET $z: MAP<ANY> = MAP_SET($lim, "x", 1)
+        "#},
+        indoc! {r#"
+            IMPORT [STD]
+            IMPORT ["b.oxdock" AS B]
+            LET $z: MAP<ANY> = MAP_SET(B::LIMITS, "x", 1)
+        "#},
+        indoc! {r#"
+            IMPORT ["b.oxdock" AS B]
+            LET $items: LIST<STRING> = B::ITEMS
+            LIST_APPEND $items "b"
+        "#},
+    ] {
+        let err = Engine::new()
+            .run_script(&root, script)
+            .expect_err("forwarded CONST contents must refuse mutation");
+        assert!(
+            format!("{err:#}").contains("cannot mutate CONST"),
+            "{err:#}"
+        );
+    }
+}
+
+#[test]
+fn const_forward_chain_resolves() {
+    // Forwards compose: a two-hop chain reads the origin value.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a.oxdock",
+        indoc! {r#"
+            CONST N: INT = 7
+            EXPORT CONST N
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            IMPORT ["a.oxdock" AS A]
+            EXPORT CONST A::N
+        "#},
+    );
+    write_lib(
+        &root,
+        "c.oxdock",
+        indoc! {r#"
+            IMPORT ["b.oxdock" AS B]
+            EXPORT CONST B::N
+        "#},
+    );
+    Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["c.oxdock" AS C]
+                LET $n: INT = C::N
+                ASSERT_EQ $n 7
+            "#},
+        )
+        .expect("chained CONST forwards resolve to the origin");
+}
+
+#[test]
+fn const_forward_mutual_imports_rejected_as_cycle() {
+    // A forward cycle cannot form: it would need a mutual import,
+    // and the import cycle gate fires first. The chase cycle guard
+    // stays as defense in depth for paths that never execute files.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a.oxdock",
+        indoc! {r#"
+            IMPORT ["b.oxdock" AS B]
+            EXPORT CONST B::N
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            IMPORT ["a.oxdock" AS A]
+            EXPORT CONST A::N
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["a.oxdock" AS A]
+                LET $n: INT = A::N
+            "#},
+        )
+        .expect_err("mutual imports must fail");
+    assert!(
+        format!("{err:#}").contains("IMPORT cycle detected"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn const_forward_missing_fails_loud() {
+    // A forward names a real export: a dangling target fails at the
+    // read naming the broken link.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a.oxdock",
+        indoc! {r#"
+            CONST N: INT = 1
+            EXPORT CONST N
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            IMPORT ["a.oxdock" AS A]
+            EXPORT CONST A::MISSING
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["b.oxdock" AS B]
+                LET $n: INT = B::MISSING
+            "#},
+        )
+        .expect_err("dangling CONST forward must fail");
+    assert!(format!("{err:#}").contains("does not resolve"), "{err:#}");
+}
+
+#[test]
+fn const_forward_to_let_fails_loud() {
+    // Only `CONST` crosses: a forward landing on a `LET` names the
+    // real error instead of an unknown-name miss.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a.oxdock",
+        indoc! {r#"
+            LET $PRIV: STRING = "shh"
+            CONST N: INT = 1
+            EXPORT CONST N
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            IMPORT ["a.oxdock" AS A]
+            EXPORT CONST A::PRIV
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["b.oxdock" AS B]
+                LET $x: STRING = B::PRIV
+            "#},
+        )
+        .expect_err("forward to a LET must fail");
+    assert!(
+        format!("{err:#}").contains("cannot be exported"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn const_forward_same_base_rejected_at_parse() {
+    // One name, one source: two forwards of the same base in one
+    // file are one duplicate export, rejected at the `EXPORT` site
+    // instead of waiting for a first read.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a.oxdock",
+        indoc! {r#"
+            CONST N: INT = 1
+            EXPORT CONST N
+        "#},
+    );
+    write_lib(
+        &root,
+        "c.oxdock",
+        indoc! {r#"
+            CONST N: INT = 2
+            EXPORT CONST N
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            IMPORT ["a.oxdock" AS A]
+            IMPORT ["c.oxdock" AS C]
+            EXPORT CONST A::N
+            EXPORT CONST C::N
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["b.oxdock" AS B]
+                ECHO hi
+            "#},
+        )
+        .expect_err("split CONST forwards must fail at parse");
+    assert!(format!("{err:#}").contains("duplicate EXPORT"), "{err:#}");
+}
+
+#[test]
+fn const_forward_bare_and_forwarded_base_rejected_at_parse() {
+    // A bare export and a forward of the same base collide the same
+    // way: the second `EXPORT` fails instead of shadowing.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a.oxdock",
+        indoc! {r#"
+            CONST N: INT = 1
+            EXPORT CONST N
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            IMPORT ["a.oxdock" AS A]
+            CONST N: INT = 2
+            EXPORT CONST N
+            EXPORT CONST A::N
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["b.oxdock" AS B]
+                ECHO hi
+            "#},
+        )
+        .expect_err("bare plus forwarded base must fail at parse");
+    assert!(format!("{err:#}").contains("duplicate EXPORT"), "{err:#}");
+}
+
+#[test]
+fn const_forward_disjoint_guards_resolve() {
+    // Disjoint platform branches each forwarding their own chain
+    // resolve per platform: the shared walk chases every holder to
+    // its own terminal and unions same tags instead of failing as
+    // ambiguous.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a-macos.oxdock",
+        indoc! {r#"
+            CONST N: INT = 2
+            EXPORT CONST N
+        "#},
+    );
+    write_lib(
+        &root,
+        "a-linux.oxdock",
+        indoc! {r#"
+            CONST N: INT = 1
+            EXPORT CONST N
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            IMPORT ["a-macos.oxdock" AS A]
+            EXPORT CONST A::N
+        "#},
+    );
+    write_lib(
+        &root,
+        "c.oxdock",
+        indoc! {r#"
+            IMPORT ["a-linux.oxdock" AS D]
+            EXPORT CONST D::N
+        "#},
+    );
+    #[allow(clippy::disallowed_macros)]
+    let expected = if cfg!(target_os = "macos") { 2 } else { 1 };
+    let script = indoc! {r#"
+        LET $go: BOOL = true
+        IF $go {
+            [os:macos] IMPORT ["b.oxdock" AS B]
+        }
+        IF $go {
+            [os:linux] IMPORT ["c.oxdock" AS B]
+        }
+        LET $n: INT = B::N
+        ASSERT_EQ $n @EXPECTED@
+    "#}
+    .replace("@EXPECTED@", &expected.to_string());
+    Engine::new()
+        .run_script(&root, &script)
+        .expect("forward over disjoint guards resolves per platform");
+}
+
+#[test]
+fn const_forward_unread_broken_fails_at_load() {
+    // Eager closure validation: a dangling forward fails when its
+    // module loads, even when no expression reads it yet.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    write_lib(
+        &root,
+        "a.oxdock",
+        indoc! {r#"
+            CONST N: INT = 1
+            EXPORT CONST N
+        "#},
+    );
+    write_lib(
+        &root,
+        "b.oxdock",
+        indoc! {r#"
+            IMPORT ["a.oxdock" AS A]
+            EXPORT CONST A::MISSING
+        "#},
+    );
+    let err = Engine::new()
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT ["b.oxdock" AS B]
+                ECHO hi
+            "#},
+        )
+        .expect_err("unread broken forward must fail at load");
+    assert!(format!("{err:#}").contains("does not resolve"), "{err:#}");
 }
 
 #[test]
