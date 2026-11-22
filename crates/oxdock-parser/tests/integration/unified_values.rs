@@ -98,8 +98,7 @@ fn env_bare_variable_stays_typed() {
             assert_eq!(
                 value,
                 Arg::Expr(Expr::Var {
-                    name: "x".to_string(),
-                    is_const: false
+                    name: "x".to_string()
                 })
             );
         }
@@ -107,13 +106,7 @@ fn env_bare_variable_stays_typed() {
     }
     match parse_one("ENV K=$a.b") {
         StepKind::Env { value, .. } => {
-            assert!(matches!(
-                value,
-                Arg::Expr(Expr::KeyPath {
-                    is_const: false,
-                    ..
-                })
-            ));
+            assert!(matches!(value, Arg::Expr(Expr::KeyPath { .. })));
         }
         other => panic!("expected Env, saw {other:?}"),
     }
@@ -182,8 +175,7 @@ fn expand_bare_variable_forms() {
             assert_eq!(
                 overrides[0].1,
                 Arg::Expr(Expr::Var {
-                    name: "x".to_string(),
-                    is_const: false
+                    name: "x".to_string()
                 })
             );
         }
@@ -195,8 +187,7 @@ fn expand_bare_variable_forms() {
             assert_eq!(
                 path,
                 Some(Arg::Expr(Expr::Var {
-                    name: "x".to_string(),
-                    is_const: false
+                    name: "x".to_string()
                 }))
             );
         }
@@ -241,16 +232,14 @@ fn expand_multi_assignment_splits_uniformly() {
             assert_eq!(
                 overrides[0].1,
                 Arg::Expr(Expr::Var {
-                    name: "x".to_string(),
-                    is_const: false
+                    name: "x".to_string()
                 })
             );
             assert_eq!(overrides[1].0, "K2");
             assert_eq!(
                 overrides[1].1,
                 Arg::Expr(Expr::Var {
-                    name: "y".to_string(),
-                    is_const: false
+                    name: "y".to_string()
                 })
             );
         }
@@ -293,8 +282,7 @@ fn echo_mixed_variable_keeps_expression() {
                 parts,
                 vec![
                     ArgPart::Expr(Expr::Var {
-                        name: "x".to_string(),
-                        is_const: false
+                        name: "x".to_string()
                     }),
                     ArgPart::Text(" ".to_string(), false),
                     ArgPart::Text("hello".to_string(), false),

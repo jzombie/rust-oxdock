@@ -518,21 +518,21 @@ jobs:
           WORKDIR {{ env:GITHUB_WORKSPACE }}
 
           # Extensions to gate. New extensions get one entry here.
-          CONST PATTERNS: LIST<STRING> = ["**/*.oxfile", "**/*.oxdock"]
+          CONST $PATTERNS: LIST<STRING> = ["**/*.oxfile", "**/*.oxdock"]
           # Path markers owned elsewhere: build output, fixture
           # scripts (logic-tests harness), render pipeline (render suite).
-          CONST EXCLUDE_MARKERS: LIST<STRING> = ["target/", "fixtures/", "oxdock-render/src/"]
+          CONST $EXCLUDE_MARKERS: LIST<STRING> = ["target/", "fixtures/", "oxdock-render/src/"]
 
           FUNC KEEP($f: STRING): BOOL {
             IF IS_DIR($f) { RETURN false }
-            FOR $e: STRING IN EXCLUDE_MARKERS {
+            FOR $e: STRING IN $EXCLUDE_MARKERS {
               IF CONTAINS($f, $e) { RETURN false }
             }
             RETURN true
           }
 
           LET $files: LIST<STRING> = []
-          FOR $pat: STRING IN PATTERNS {
+          FOR $pat: STRING IN $PATTERNS {
             FOR $f: STRING IN GLOB($pat) {
               IF KEEP($f) { LIST_APPEND $files $f }
             }

@@ -649,7 +649,6 @@ mod tests {
     fn var(name: &str) -> Arg {
         Arg::Expr(Expr::Var {
             name: name.to_string(),
-            is_const: false,
         })
     }
 

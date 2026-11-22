@@ -55,7 +55,7 @@ LET $v: STRING = READ env.txt
 ASSERT_EQ $v "bar"
 ```
 
-Four spellings read distinct stores. `$var` reads a `LET` binding, `env:KEY` reads script env, bare `WORD` reads `CONST` in normal commands, and `\{{ NAME }}` reads `CONST` everywhere. `RUN` shell words stay literal text, so only templates read `CONST` there.
+Three spellings read distinct stores. `$name` reads a binding, whether `LET` or `CONST`; `env:KEY` reads script env; bare words never read a binding. Bare words stay literal text in command arguments (and fail elsewhere, naming the `$` form to use). `RUN` shell words stay literal too, so only `\{{ $name }}` templates read bindings there.
 
 ```oxdock
 # LET bindings read through the dollar sigil.
@@ -68,21 +68,29 @@ ENV DOC_MOOD="env-hello"
 ECHO env:DOC_MOOD
 ASSERT_CONTAINS stdout "env-hello"
 
-# Bare words read CONST in normal commands.
-CONST BADGE: STRING = "const-hello"
+# Bare words stay literal in command arguments.
+CONST $BADGE: STRING = "const-hello"
 ECHO BADGE
+ASSERT_CONTAINS stdout "BADGE"
+
+# CONST reads sigiled, like LET.
+ECHO $BADGE
 ASSERT_CONTAINS stdout "const-hello"
 
-# CONST reads through templates as well.
-ECHO "\{{ BADGE }}"
+# CONST reads through templates.
+ECHO "\{{ $BADGE }}"
 ASSERT_CONTAINS stdout "const-hello"
+
+# CONST reads sigiled in expression positions.
+LET $badge: STRING = $BADGE
+ASSERT_EQ $badge "const-hello"
 
 # RUN keeps shell words literal, so only templates read CONST.
 LET $raw: STRING = RUN echo BADGE
 ASSERT_EQ $raw "BADGE\n"
 
 # RUN reads CONST through templates.
-LET $cooked: STRING = RUN echo "\{{ BADGE }}"
+LET $cooked: STRING = RUN echo "\{{ $BADGE }}"
 ASSERT_CONTAINS $cooked "const-hello"
 ```
 

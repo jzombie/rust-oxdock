@@ -288,10 +288,10 @@ pub(super) fn missing_import_hint<'a>(
     ))
 }
 
-/// Whether one `EXPORT CONST` entry serves reads of bare `name`:
-/// the entry itself, or a qualified `ALIAS::NAME` forward of the same
-/// base. Single owner for the cover rule every qualified-`CONST`
-/// path matches on.
+/// Whether one `EXPORT CONST` entry serves reads of stored `name`
+/// (the sigil-stripped binding key): the entry itself, or a
+/// qualified `ALIAS::NAME` forward of the same base. Single owner
+/// for the cover rule every qualified-`CONST` path matches on.
 pub(super) fn const_export_covers(entry: &str, name: &str) -> bool {
     base_name(entry) == name
 }
@@ -328,7 +328,7 @@ pub(super) fn missing_const_hint<S: ModuleGraphView>(
         .iter()
         .find_map(|file| match view.binding(file, name) {
             BindingPresence::Const => Some(format!(
-                "module holds `{name}` as CONST but does not export it: add `EXPORT CONST {name}`"
+                "module holds `{name}` as CONST but does not export it: add `EXPORT CONST ${name}`"
             )),
             BindingPresence::Let => Some(format!(
                 "`{name}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
@@ -344,7 +344,7 @@ pub(super) fn missing_const_hint<S: ModuleGraphView>(
 /// validation, eager closure checks, and serving all chase through
 /// this one owner.
 pub(super) trait ModuleGraphView {
-    /// Raw `EXPORT CONST` entries (bare names and qualified forwards).
+    /// Raw `EXPORT CONST` entries (stored bare names and qualified forwards).
     fn const_exports(&self, file: &str) -> Option<&[String]>;
     /// Outbound alias targets for `file`'s own unit: the namespace
     /// each forward hop resolves in.
@@ -417,7 +417,7 @@ pub(super) fn const_holder_files<S: ModuleGraphView>(
 
 /// Failure modes of [`chase_const_forward`], rendered by each caller
 /// with its own position context (static line/col, runtime none,
-/// eager file attribution). Wording lives here once, on [`Display`],
+/// eager file attribution). Wording lives here once, on [`std::fmt::Display`],
 /// so diagnostics cannot drift between the twins.
 #[derive(Debug)]
 pub(super) enum ForwardError {
@@ -465,7 +465,7 @@ impl std::fmt::Display for ForwardError {
                 let base = base_name(hop);
                 let detail = match detail {
                     BrokenDetail::UnexportedConst => format!(
-                        "module holds `{base}` as CONST but does not export it: add `EXPORT CONST {base}`"
+                        "module holds `{base}` as CONST but does not export it: add `EXPORT CONST ${base}`"
                     ),
                     BrokenDetail::Let => format!(
                         "`{base}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
@@ -499,9 +499,9 @@ impl std::fmt::Display for ForwardError {
 
 impl std::error::Error for ForwardError {}
 
-/// Follow qualified `EXPORT CONST ALIAS::NAME` forwards from `file`
-/// to the files holding the bare binding, resolving each hop in the
-/// exporting file's own unit. A local bare definition shadows
+/// Follow qualified `EXPORT CONST $ALIAS::NAME` forwards from `file`
+/// to the files holding the stored bare binding, resolving each hop
+/// in the exporting file's own unit. A local bare definition shadows
 /// forwards; disjoint-guard branches each chase to their own
 /// terminal, so all terminals return (callers apply their own
 /// multi-holder policy). Each hop preserves the base name.

@@ -444,59 +444,19 @@ pub(crate) fn resolve_arg_as_duration<P: ProcessManager>(
     oxdock_parser::command::parse_duration(&resolved)
 }
 
-/// Typed outcome of a `CONST`-gated read: lets `expand_string`
-/// match on the failure without re-probing state or matching on
-/// message text. Single owner behind both `load_var_binding` and
-/// the template arms, so diagnostics cannot drift.
-enum ConstMiss {
-    Undefined,
-    IsLet,
-}
-
-fn try_load_const_binding<P: ProcessManager>(
-    state: &ExecState<P>,
-    name: &str,
-) -> Result<Value, ConstMiss> {
-    match state.get_var(name) {
-        None => Err(ConstMiss::Undefined),
-        Some(value) => {
-            if state.is_const_var(name) {
-                Ok(value)
-            } else {
-                Err(ConstMiss::IsLet)
-            }
-        }
-    }
-}
-
-fn const_miss_error(name: &str, miss: ConstMiss) -> anyhow::Error {
-    match miss {
-        ConstMiss::Undefined => anyhow::anyhow!("undefined CONST {name}"),
-        ConstMiss::IsLet => anyhow::anyhow!("`{name}` is a LET binding; use ${name}"),
-    }
-}
-
 /// Evaluate an [`Expr`] to a [`Value`].
-/// Single owner for `$` vs bare binding access at runtime: every
-/// `Var`, `KeyPath` base, and `Inspect` read gates here, so AST and RPN
-/// agree by construction. `is_const` true reads CONST bindings only;
-/// false reads LET bindings only (a CONST under `$` names the bare
-/// form instead of serving).
+/// Single owner for binding reads at runtime: every `Var`,
+/// `KeyPath` base, and `Inspect` read gates here, so AST and RPN
+/// agree by construction. `$` reads whichever family the name was
+/// declared in; constness is a declaration property enforced at
+/// declare/mutate sites, never at reads.
 pub(crate) fn load_var_binding<P: ProcessManager>(
     state: &ExecState<P>,
     name: &str,
-    is_const: bool,
 ) -> Result<Value> {
-    if is_const {
-        try_load_const_binding(state, name).map_err(|miss| const_miss_error(name, miss))
-    } else {
-        if state.is_const_var(name) {
-            bail!("CONST reads bare: use {name}, not ${name}");
-        }
-        state
-            .get_var(name)
-            .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))
-    }
+    state
+        .get_var(name)
+        .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))
 }
 
 pub(crate) fn evaluate_expr<P: ProcessManager>(
@@ -511,7 +471,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             }
             Ok(v.clone())
         }
-        Expr::Var { name, is_const } => load_var_binding(cx.state, name, *is_const),
+        Expr::Var { name } => load_var_binding(cx.state, name),
         Expr::ConstRef { alias, name } => super::import::resolve_const_ref(cx.state, alias, name),
         Expr::Env(key) => match cx.state.get_env(key) {
             Some(v) => Ok(Value::string(v.to_string())),
@@ -520,12 +480,8 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             // the static gate rejects them before any step runs.
             None => Ok(Value::string(String::new())),
         },
-        Expr::KeyPath {
-            base,
-            keys,
-            is_const,
-        } => {
-            let base_value = load_var_binding(cx.state, base, *is_const)?;
+        Expr::KeyPath { base, keys } => {
+            let base_value = load_var_binding(cx.state, base)?;
             descend_value(base_value, keys)
         }
         Expr::List(items) => {
@@ -550,10 +506,10 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         Expr::Call { name, args } => super::handlers::call_func_value(cx, name, args),
         // Variable inspection carries the binding name unevaluated (see
         // `Expr::Inspect`): no function-name matching happens here.
-        // Gates through the single owner so `$CONST` and bare `LET`
-        // fail exactly like ordinary reads.
-        Expr::Inspect { name, is_const } => {
-            let _ = load_var_binding(cx.state, name, *is_const)?;
+        // Gates through the single owner so reads fail exactly like
+        // ordinary reads.
+        Expr::Inspect { name } => {
+            let _ = load_var_binding(cx.state, name)?;
             evaluate_inspect_var(name, cx)
         }
         // Bare `LET $p: PIPE`: mint a fresh unbound handle tagged with
@@ -1302,20 +1258,21 @@ fn resolve_const_call_arg<P: ProcessManager>(
     state: &ExecState<P>,
     src: &str,
 ) -> Result<Option<Value>> {
-    use oxdock_parser::template::{TemplateArg, classify_template_arg, dollar_qualified_error};
+    use oxdock_parser::template::{
+        TemplateArg, bare_sigil_error, classify_template_arg, qualified_keypath_error,
+    };
     match classify_template_arg(src) {
         TemplateArg::DollarQualified { alias, name, keys } => {
-            Err(anyhow::anyhow!(dollar_qualified_error(alias, name, &keys)))
+            if keys.is_empty() {
+                super::import::resolve_const_ref(state, alias, name).map(Some)
+            } else {
+                Err(anyhow::anyhow!(qualified_keypath_error()))
+            }
         }
         TemplateArg::Dollar(_) => Ok(None),
-        TemplateArg::ConstRef { alias, name } => {
-            super::import::resolve_const_ref(state, alias, name).map(Some)
+        TemplateArg::ConstRef { .. } | TemplateArg::KeyPath { .. } | TemplateArg::Var(_) => {
+            Err(anyhow::anyhow!(bare_sigil_error(src.trim())))
         }
-        TemplateArg::KeyPath { base, keys } => {
-            let base_value = load_var_binding(state, base, true)?;
-            descend_value(base_value, &keys).map(Some)
-        }
-        TemplateArg::Var(name) => load_var_binding(state, name, true).map(Some),
         _ => Ok(None),
     }
 }
@@ -1324,7 +1281,7 @@ fn resolve_const_call_arg<P: ProcessManager>(
 /// traversal behind every key-path read (AST, RPN, and templates),
 /// so all report the same hard errors on missing keys instead of
 /// rendering empty. Callers fetch the base through
-/// [`load_var_binding`], so the `$` vs bare gate lives once.
+/// [`load_var_binding`], the single read owner.
 fn descend_value(current: Value, keys: &[String]) -> Result<Value> {
     let mut current = current;
     for key in keys {
@@ -1365,8 +1322,8 @@ fn evaluate_compiled_math<P: ProcessManager>(
                     stack.push(v.clone());
                 }
             }
-            MathOp::Load { name, is_const } => {
-                stack.push(load_var_binding(cx.state, name, *is_const)?);
+            MathOp::Load { name } => {
+                stack.push(load_var_binding(cx.state, name)?);
             }
             MathOp::LoadConstRef { alias, name } => {
                 stack.push(super::import::resolve_const_ref(cx.state, alias, name)?);
@@ -1376,12 +1333,8 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 // Same declared-absent rule as `Expr::Env` above.
                 None => stack.push(Value::string(String::new())),
             },
-            MathOp::LoadKeyPath {
-                base,
-                keys,
-                is_const,
-            } => {
-                let base_value = load_var_binding(cx.state, base, *is_const)?;
+            MathOp::LoadKeyPath { base, keys } => {
+                let base_value = load_var_binding(cx.state, base)?;
                 stack.push(descend_value(base_value, keys)?);
             }
             MathOp::Call { name, arity } => {
@@ -1401,8 +1354,8 @@ fn evaluate_compiled_math<P: ProcessManager>(
                     super::handlers::execute_call_entry(cx, name.as_str(), entry, args, true)?;
                 stack.push(val);
             }
-            MathOp::Inspect { name, is_const } => {
-                let _ = load_var_binding(cx.state, name, *is_const)?;
+            MathOp::Inspect { name } => {
+                let _ = load_var_binding(cx.state, name)?;
                 stack.push(Value::map(super::handlers::inspect_var_map(cx, name)?));
             }
             MathOp::Neg => {
@@ -1831,7 +1784,8 @@ pub(crate) fn expand_string<P: ProcessManager>(
     state: &ExecState<P>,
 ) -> Result<String> {
     use oxdock_parser::template::{
-        PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
+        PlaceholderKey, TemplateSegment, TemplateSegments, bare_sigil_error,
+        classify_placeholder_key, qualified_keypath_error,
     };
     let mut output = String::with_capacity(input.len());
     // One diagnostic for every unresolvable bare key: missing keys
@@ -1857,21 +1811,23 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     bail!("empty template placeholder");
                 }
                 PlaceholderKey::DollarQualified { alias, name, keys } => {
-                    return Err(anyhow::anyhow!(
-                        oxdock_parser::template::dollar_qualified_error(alias, name, &keys)
-                    ));
+                    if keys.is_empty() {
+                        let value = super::import::resolve_const_ref(state, alias, name)?;
+                        output.push_str(&format_value_for_string(&value)?);
+                    } else {
+                        return Err(anyhow::anyhow!(qualified_keypath_error()));
+                    }
                 }
                 PlaceholderKey::Dollar(rest) => {
                     // {{ $var }} or {{ $var.path.0 }} : same hard
                     // resolution as expression-position key paths, so
                     // templates and code agree on every error. Bare
                     // $var never reads the environment; use {{ env:KEY }}.
-                    // Base gates through the single `$` vs bare owner.
                     let Some(parts) = oxdock_parser::template::parse_var_path(rest) else {
                         bail!("invalid placeholder key: '${rest}'");
                     };
                     let (base, segs) = parts.split_first().expect("split always yields one");
-                    let base_value = load_var_binding(state, base, false)?;
+                    let base_value = load_var_binding(state, base)?;
                     let value = descend_value(base_value, segs)?;
                     output.push_str(&format_value_for_string(&value)?);
                 }
@@ -1915,38 +1871,13 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         output.push_str(v);
                     }
                 }
-                // `{{ NAME }}`, `{{ ALIAS::NAME }}`, `{{ NAME.key }}` read
-                // CONST bindings only, never env and never LET (use
-                // `{{ $var }}` for LET). Shapes arrive classified from
-                // the parser; resolution only reads state.
-                PlaceholderKey::ConstRef { alias, name } => {
-                    let value = super::import::resolve_const_ref(state, alias, name)?;
-                    output.push_str(&format_value_for_string(&value)?);
+                // `{{ $NAME }}` reads either binding family; bare
+                // shapes never resolve (use the `$` form).
+                PlaceholderKey::ConstRef { .. }
+                | PlaceholderKey::KeyPath { .. }
+                | PlaceholderKey::Var(_) => {
+                    return Err(anyhow::anyhow!(bare_sigil_error(key.trim())));
                 }
-                PlaceholderKey::KeyPath { base, keys } => {
-                    match try_load_const_binding(state, base) {
-                        Ok(base_value) => {
-                            let value = descend_value(base_value, &keys)?;
-                            output.push_str(&format_value_for_string(&value)?);
-                        }
-                        Err(ConstMiss::IsLet) => {
-                            return Err(const_miss_error(base, ConstMiss::IsLet));
-                        }
-                        Err(ConstMiss::Undefined) => {
-                            let key = format!("{base}.{}", keys.join("."));
-                            bail!("undefined CONST '{key}'; did you mean '${base}'?");
-                        }
-                    }
-                }
-                PlaceholderKey::Var(name) => match try_load_const_binding(state, name) {
-                    Ok(value) => output.push_str(&format_value_for_string(&value)?),
-                    Err(ConstMiss::IsLet) => {
-                        return Err(const_miss_error(name, ConstMiss::IsLet));
-                    }
-                    Err(ConstMiss::Undefined) => {
-                        return Err(missing_key(name));
-                    }
-                },
                 PlaceholderKey::Bare(key) => {
                     return Err(missing_key(key));
                 }

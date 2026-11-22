@@ -1469,33 +1469,19 @@ fn clean_var(name: &str) -> String {
     name.trim_start_matches('$').to_string()
 }
 
-/// Single owner for `$` vs bare binding access in static checking:
-/// every `Var`, `KeyPath` base, and `Inspect` read gates here, so AST
-/// and RPN agree by construction. `is_const` true reads CONST only;
-/// false reads LET only (a CONST under `$` names the bare form).
-/// `prefix` carries the step attribution (`""` in RPN contexts whose
-/// runtime errors carry no step number).
+/// Single owner for binding reads in static checking: every `Var`,
+/// `KeyPath` base, and `Inspect` read gates here, so AST and RPN
+/// agree by construction. `$` reads whichever family the name was
+/// declared in; `prefix` carries the step attribution (`""` in RPN
+/// contexts whose runtime errors carry no step number).
 fn check_var_binding_access(
     env: &Env,
     key: &str,
-    is_const: bool,
     site: Option<&GuardExpr>,
     prefix: &str,
 ) -> Result<TypeTag> {
-    if is_const {
-        if !env.is_declared(key) {
-            bail!("{prefix}undefined CONST {key}");
-        }
-        if !env.is_const(key, site) {
-            bail!("{prefix}`{key}` is a LET binding; use ${key}");
-        }
-    } else {
-        if env.is_const(key, site) {
-            bail!("{prefix}CONST reads bare: use {key}, not ${key}");
-        }
-        if !env.is_declared(key) {
-            bail!("{prefix}undefined variable ${key}");
-        }
+    if !env.is_declared(key) {
+        bail!("{prefix}undefined variable ${key}");
     }
     env.read_guarded(key, site)
 }
@@ -2383,7 +2369,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     let name = name.trim();
                     self.check_env_name(env, name, "script_env:", scope)?;
                 }
-                // `$` and bare reads flow through the single var
+                // `$` and template reads flow through the single var
                 // extractor plus expression inference, so templates and
                 // code agree on every error. Malformed `$` paths (empty
                 // segments like `{{ $ }}`) fail here like they do in
@@ -2394,9 +2380,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // resolve like expression calls (unknown `ALIAS::TYPO`
                 // fails here, never at runtime).
                 PlaceholderKey::DollarQualified { alias, name, keys } => {
-                    return Err(anyhow::anyhow!(
-                        oxdock_parser::template::dollar_qualified_error(alias, name, &keys)
-                    ));
+                    if !keys.is_empty() {
+                        return Err(anyhow::anyhow!(
+                            oxdock_parser::template::qualified_keypath_error()
+                        ));
+                    }
+                    let expr = Expr::ConstRef {
+                        alias: alias.to_string(),
+                        name: name.to_string(),
+                    };
+                    let idx = scope.idx;
+                    let _ = self.infer_expr(&expr, env, scope, idx, depth + 1)?;
                 }
                 PlaceholderKey::Dollar(rest) => {
                     if oxdock_parser::template::parse_var_path(rest).is_none() {
@@ -2408,8 +2402,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 PlaceholderKey::ConstRef { .. }
                 | PlaceholderKey::KeyPath { .. }
-                | PlaceholderKey::Var(_)
-                | PlaceholderKey::Bare(_) => {
+                | PlaceholderKey::Var(_) => {
+                    return Err(anyhow::anyhow!(oxdock_parser::template::bare_sigil_error(
+                        key.trim()
+                    )));
+                }
+                PlaceholderKey::Bare(_) => {
                     for var in placeholder_vars(key) {
                         self.check_template_var(&var, env, scope, depth)?;
                     }
@@ -2430,9 +2428,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// One template variable read through expression inference, so
     /// templates and code agree on every error. `$a.b` traverses like
-    /// `KeyPath`; bare keys read like `Const`; `ALIAS::NAME` reads like
-    /// `ConstRef`. Key paths never ride qualified names: copy to a
-    /// local binding first, mirroring the expression parser.
+    /// `KeyPath`. Bare shapes (`ConstRef`, `KeyPath`, `Var`) never
+    /// resolve: only call-arg nesting reaches them here (top-level
+    /// bare keys fail in `check_template_env`), and they fail with
+    /// the same `$` hint as everywhere else. Non-identifier keys
+    /// (`Bare`) read as plain undeclared variable reads.
     fn check_template_var(
         &mut self,
         var: &oxdock_parser::template::TemplateVar,
@@ -2440,42 +2440,36 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         depth: usize,
     ) -> Result<()> {
-        use oxdock_parser::template::TemplateVar;
+        use oxdock_parser::template::{TemplateVar, bare_sigil_error};
         let expr = match var {
             TemplateVar::Path(parts) => {
                 let (base, rest) = parts
                     .split_first()
                     .expect("placeholder_vars never emits empty paths");
                 if rest.is_empty() {
-                    Expr::Var {
-                        name: base.clone(),
-                        is_const: false,
-                    }
+                    Expr::Var { name: base.clone() }
                 } else {
                     Expr::KeyPath {
                         base: base.clone(),
                         keys: rest.to_vec(),
-                        is_const: false,
                     }
                 }
             }
-            TemplateVar::ConstRef { alias, name } => Expr::ConstRef {
-                alias: alias.clone(),
-                name: name.clone(),
-            },
-            TemplateVar::KeyPath { base, keys } => Expr::KeyPath {
-                base: base.clone(),
-                keys: keys.clone(),
-                is_const: true,
-            },
-            TemplateVar::Var(name) => Expr::Var {
-                name: name.clone(),
-                is_const: true,
-            },
-            TemplateVar::Bare(name) => Expr::Var {
-                name: name.clone(),
-                is_const: true,
-            },
+            TemplateVar::ConstRef { alias, name } => {
+                return Err(anyhow::anyhow!(bare_sigil_error(&format!(
+                    "{alias}::{name}"
+                ))));
+            }
+            TemplateVar::KeyPath { base, keys } => {
+                return Err(anyhow::anyhow!(bare_sigil_error(&format!(
+                    "{base}.{}",
+                    keys.join(".")
+                ))));
+            }
+            TemplateVar::Var(name) => {
+                return Err(anyhow::anyhow!(bare_sigil_error(name)));
+            }
+            TemplateVar::Bare(name) => Expr::Var { name: name.clone() },
         };
         let idx = scope.idx;
         let _ = self.infer_expr(&expr, env, scope, idx, depth + 1)?;
@@ -2644,15 +2638,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         literal_depth: usize,
     ) -> Result<StaticTy> {
         use oxdock_parser::template::{
-            MAX_TEMPLATE_ARG_DEPTH, ScalarLit, TemplateArg, classify_template_arg,
-            dollar_qualified_error, parse_string_literal, parse_var_path,
+            MAX_TEMPLATE_ARG_DEPTH, ScalarLit, TemplateArg, bare_sigil_error,
+            classify_template_arg, parse_string_literal, parse_var_path, qualified_keypath_error,
         };
         if literal_depth > MAX_TEMPLATE_ARG_DEPTH {
             bail!("placeholder call argument nests too deep (limit {MAX_TEMPLATE_ARG_DEPTH})");
         }
         match classify_template_arg(src) {
             TemplateArg::DollarQualified { alias, name, keys } => {
-                Err(anyhow::anyhow!(dollar_qualified_error(alias, name, &keys)))
+                if !keys.is_empty() {
+                    return Err(anyhow::anyhow!(qualified_keypath_error()));
+                }
+                let expr = Expr::ConstRef {
+                    alias: alias.to_string(),
+                    name: name.to_string(),
+                };
+                self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
             }
             TemplateArg::Dollar(rest) => {
                 let Some(parts) = parse_var_path(rest) else {
@@ -2660,15 +2661,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 };
                 let (base, segs) = parts.split_first().expect("split always yields one");
                 let expr = if segs.is_empty() {
-                    Expr::Var {
-                        name: base.clone(),
-                        is_const: false,
-                    }
+                    Expr::Var { name: base.clone() }
                 } else {
                     Expr::KeyPath {
                         base: base.clone(),
                         keys: segs.to_vec(),
-                        is_const: false,
                     }
                 };
                 self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
@@ -2695,27 +2692,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     ScalarLit::Float(_) => TypeTag::Float,
                 }))
             }
-            TemplateArg::ConstRef { alias, name } => {
-                let expr = Expr::ConstRef {
-                    alias: alias.to_string(),
-                    name: name.to_string(),
-                };
-                self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
-            }
-            TemplateArg::KeyPath { base, keys } => {
-                let expr = Expr::KeyPath {
-                    base: base.to_string(),
-                    keys,
-                    is_const: true,
-                };
-                self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
-            }
-            TemplateArg::Var(name) => {
-                let expr = Expr::Var {
-                    name: name.to_string(),
-                    is_const: true,
-                };
-                self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
+            TemplateArg::ConstRef { .. } | TemplateArg::KeyPath { .. } | TemplateArg::Var(_) => {
+                Err(anyhow::anyhow!(bare_sigil_error(src.trim())))
             }
             TemplateArg::Invalid(invalid) => {
                 bail!("invalid placeholder call argument '{invalid}'")
@@ -3596,17 +3574,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         out_var: &str,
         tag: &TypeTag,
         task_var: &str,
-        task_is_const: bool,
         env: &mut Env,
         scope: &Scope,
         idx: usize,
     ) -> Result<()> {
-        // The handle resolves before the output declares, through
-        // the single `$` vs bare owner so bare `CONST` handles pass.
+        // The handle resolves before the output declares.
         let key = clean_var(task_var);
         let prefix = format!("step {}: ", idx + 1);
-        let handle_tag =
-            check_var_binding_access(env, &key, task_is_const, scope.site.as_ref(), &prefix)?;
+        let handle_tag = check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)?;
         let payload = match handle_tag {
             TypeTag::Handle => TypeTag::Any,
             TypeTag::HandleOf(inner) => (*inner).clone(),
@@ -3980,11 +3955,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     oxdock_parser::BindRhs::Async(body) => {
                         self.check_async_rhs(var, &tag, body, env, scope, idx, depth)?;
                     }
-                    oxdock_parser::BindRhs::Await {
-                        task_var,
-                        task_is_const,
-                    } => {
-                        self.check_await_rhs(var, &tag, task_var, *task_is_const, env, scope, idx)?;
+                    oxdock_parser::BindRhs::Await { task_var } => {
+                        self.check_await_rhs(var, &tag, task_var, env, scope, idx)?;
                     }
                 }
                 self.exec
@@ -4225,16 +4197,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // arms above, so nothing here double-checks.
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
                 match &step.kind {
-                    StepKind::Await { var, is_const } | StepKind::Cancel { var, is_const } => {
+                    StepKind::Await { var } | StepKind::Cancel { var } => {
                         let key = clean_var(var);
                         let prefix = format!("step {}: ", idx + 1);
-                        check_var_binding_access(
-                            env,
-                            &key,
-                            *is_const,
-                            scope.site.as_ref(),
-                            &prefix,
-                        )?;
+                        check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)?;
                     }
                     StepKind::WithIoBlock { bindings } => {
                         Self::check_pipe_bindings(env, bindings, scope, idx)?;
@@ -4357,18 +4323,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// step's path, mirroring the `undefined variable` failure one
     /// for one.
     fn check_name_read(env: &Env, name: &str, scope: &Scope, idx: usize) -> Result<TypeTag> {
-        // `$` reads gate through the single owner so `$CONST` fails
-        // here (deferred from the parser), not at runtime.
         let key = clean_var(name);
         let prefix = format!("step {}: ", idx + 1);
-        check_var_binding_access(env, &key, false, scope.site.as_ref(), &prefix)
+        check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)
     }
 
     /// Static counterpart of `resolve_pipe_handle`: a pipe endpoint
     /// must be a live `PIPE` binding, mirroring the runtime
-    /// `TypeMismatch` one for one. The `is_const` spelling rides in
-    /// [`PipeTarget`], so `$CONST` fails through the single owner
-    /// exactly like every other read.
+    /// `TypeMismatch` one for one.
     fn check_pipe_bindings(
         env: &Env,
         bindings: &[IoBinding],
@@ -4376,11 +4338,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         idx: usize,
     ) -> Result<()> {
         for binding in bindings {
-            if let Some(PipeTarget::Var { name, is_const }) = &binding.pipe {
+            if let Some(PipeTarget::Var { name }) = &binding.pipe {
                 let key = clean_var(name);
                 let prefix = format!("step {}: ", idx + 1);
-                let tag =
-                    check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), &prefix)?;
+                let tag = check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)?;
                 if !tags_equal(&tag, &TypeTag::Pipe) {
                     bail!(
                         "step {}: TypeMismatch: expected PIPE, got {}",
@@ -4698,7 +4659,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     }
 
     /// Frame walk shared by call resolution and the template gate
-    /// (#322): precedence lives in [`FuncFrameView::walk`], shared
+    /// (#322): precedence lives in [`super::native::FuncFrameView::walk`], shared
     /// with the runtime walk; this is the static store adapter.
     /// Returns the defining info plus the memoization key; hosts and
     /// canonical file views stay with their existing checks.
@@ -5418,13 +5379,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(StaticTy::Ty(literal_tag(value)))
             }
-            Expr::Var { name, is_const } => {
+            Expr::Var { name } => {
                 let key = clean_var(name);
                 let prefix = loc(Some(&at()));
                 Ok(StaticTy::Ty(check_var_binding_access(
                     env,
                     &key,
-                    *is_const,
                     scope.site.as_ref(),
                     &prefix,
                 )?))
@@ -5437,15 +5397,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.check_env_name(env, name, "env:", scope)?;
                 Ok(StaticTy::Ty(TypeTag::String))
             }
-            Expr::KeyPath {
-                base,
-                keys,
-                is_const,
-            } => {
+            Expr::KeyPath { base, keys } => {
                 let key = clean_var(base);
                 let prefix = loc(Some(&at()));
-                let current =
-                    check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), &prefix)?;
+                let current = check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)?;
                 let traversed = traverse_static_keypath(current, keys, &format!("{}: ", at()))?;
                 Ok(StaticTy::Ty(traversed))
             }
@@ -5493,10 +5448,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 Ok(StaticTy::Ty(unified.expect("has_return implies a type")))
             }
             Expr::Call { name, args } => self.check_call(name, args, env, scope, idx, depth),
-            Expr::Inspect { name, is_const } => {
+            Expr::Inspect { name } => {
                 let key = clean_var(name);
                 let prefix = loc(Some(&at()));
-                check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), &prefix)?;
+                check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)?;
                 Ok(StaticTy::Ty(TypeTag::Any))
             }
             Expr::Compare { op, left, right } => {
@@ -5568,10 +5523,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     }
                     stack.push(StaticTy::Ty(literal_tag(value)))
                 }
-                MathOp::Load { name, is_const } => {
+                MathOp::Load { name } => {
                     let key = clean_var(name);
-                    let tag =
-                        check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), "")?;
+                    let tag = check_var_binding_access(env, &key, scope.site.as_ref(), "")?;
                     stack.push(StaticTy::Ty(tag));
                 }
                 MathOp::LoadConstRef { alias, name } => {
@@ -5582,14 +5536,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     self.check_env_name(env, name, "env:", scope)?;
                     stack.push(StaticTy::Ty(TypeTag::String))
                 }
-                MathOp::LoadKeyPath {
-                    base,
-                    keys,
-                    is_const,
-                } => {
+                MathOp::LoadKeyPath { base, keys } => {
                     let key = clean_var(base);
-                    let current =
-                        check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), "")?;
+                    let current = check_var_binding_access(env, &key, scope.site.as_ref(), "")?;
                     let traversed = traverse_static_keypath(current, keys, "")?;
                     stack.push(StaticTy::Ty(traversed));
                 }
@@ -5618,9 +5567,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     let ret = self.apply_checked(name, &callee, &taken, &blanks, None)?;
                     stack.push(ret);
                 }
-                MathOp::Inspect { name, is_const } => {
+                MathOp::Inspect { name } => {
                     let key = clean_var(name);
-                    check_var_binding_access(env, &key, *is_const, scope.site.as_ref(), "")?;
+                    check_var_binding_access(env, &key, scope.site.as_ref(), "")?;
                     stack.push(StaticTy::Ty(TypeTag::Any));
                 }
                 MathOp::Neg => {

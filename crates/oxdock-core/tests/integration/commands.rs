@@ -40,10 +40,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var {
-                        name: var.clone(),
-                        is_const: false,
-                    }),
+                    pipe: Some(oxdock_parser::PipeTarget::Var { name: var.clone() }),
                 }],
                 cmd: Box::new(cmd),
             },
@@ -57,10 +54,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var {
-                        name: var.clone(),
-                        is_const: false,
-                    }),
+                    pipe: Some(oxdock_parser::PipeTarget::Var { name: var.clone() }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: path.into(),
@@ -4437,7 +4431,6 @@ fn read_large_file_streams_without_oom() {
                     stream: IoStream::Stdout,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: pipe_var.clone(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(read_steps[0].kind.clone()),
@@ -4454,7 +4447,6 @@ fn read_large_file_streams_without_oom() {
                     stream: IoStream::Stdin,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: pipe_var.clone(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::Write {
@@ -4517,7 +4509,6 @@ fn read_stdin_streaming_via_pipe() {
                     stream: IoStream::Stdout,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "pipe_read".to_string(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::Read(Some("source.txt".into()))),
@@ -4534,7 +4525,6 @@ fn read_stdin_streaming_via_pipe() {
                     stream: IoStream::Stdin,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "pipe_read".to_string(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::Write {

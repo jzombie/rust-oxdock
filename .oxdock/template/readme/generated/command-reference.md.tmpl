@@ -39,7 +39,7 @@ See the [changelog]({{ $global.changelog_url }}) for what changed in each releas
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`SWITCH`](#switch) | `SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
-| [`CONST`](#const) | `CONST NAME: TYPE = <expr> \| CONST NAME: PIPE \| CONST NAME: TYPE = ASYNC { <commands> } \| CONST NAME: TYPE = <command> \| CONST NAME: TYPE = AWAIT TASK \| CONST NAME: TYPE = { <commands> }` |
+| [`CONST`](#const) | `CONST $NAME: TYPE = <expr> \| CONST $NAME: PIPE \| CONST $NAME: TYPE = ASYNC { <commands> } \| CONST $NAME: TYPE = <command> \| CONST $NAME: TYPE = AWAIT $TASK \| CONST $NAME: TYPE = { <commands> }` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE<T> = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |

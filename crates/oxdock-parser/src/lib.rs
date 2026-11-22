@@ -352,13 +352,11 @@ mod tests {
                     && b.pipe
                         == Some(PipeTarget::Var {
                             name: "p".to_string(),
-                            is_const: false
                         })));
                 assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin)
                     && b.pipe
                         == Some(PipeTarget::Var {
                             name: "q".to_string(),
-                            is_const: false
                         })));
                 assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
             }
@@ -1259,7 +1257,6 @@ mod tests {
                     expr,
                     &Expr::Var {
                         name: "y".to_string(),
-                        is_const: false
                     }
                 );
             }
@@ -1513,7 +1510,6 @@ mod tests {
                     in_expr,
                     &Expr::Var {
                         name: "map".to_string(),
-                        is_const: false
                     }
                 );
                 assert_eq!(body.len(), 1);
@@ -1755,7 +1751,6 @@ mod tests {
                     bindings[0].pipe,
                     Some(PipeTarget::Var {
                         name: "out".to_string(),
-                        is_const: false
                     })
                 );
                 match cmd.as_ref() {

@@ -581,12 +581,11 @@ pub struct IoBinding {
     pub pipe: Option<PipeTarget>,
 }
 
-/// A pipe endpoint for a `WITH_IO` binding: a `$var` (`is_const`
-/// false) or bare `NAME` (`is_const` true) holding a `PIPE` value,
-/// resolved against the live variable scope when the step runs.
+/// A pipe endpoint for a `WITH_IO` binding: a `$var` holding a `PIPE`
+/// value, resolved against the live variable scope when the step runs.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PipeTarget {
-    Var { name: String, is_const: bool },
+    Var { name: String },
 }
 
 /// Value-model re-exports: the word, its payload, type descriptors, and the
@@ -628,28 +627,12 @@ pub enum ArithOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MathOp {
     PushConst(Value),
-    Load {
-        name: String,
-        is_const: bool,
-    },
-    LoadConstRef {
-        alias: String,
-        name: String,
-    },
+    Load { name: String },
+    LoadConstRef { alias: String, name: String },
     LoadEnv(String),
-    LoadKeyPath {
-        base: String,
-        keys: Vec<String>,
-        is_const: bool,
-    },
-    Call {
-        name: String,
-        arity: usize,
-    },
-    Inspect {
-        name: String,
-        is_const: bool,
-    },
+    LoadKeyPath { base: String, keys: Vec<String> },
+    Call { name: String, arity: usize },
+    Inspect { name: String },
     Neg,
     Add,
     Sub,
@@ -672,21 +655,18 @@ pub enum LogicalOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Value),
-    /// Bare binding read: `is_const=false` is `$name` (a `LET` binding);
-    /// `is_const=true` is bare `NAME` (a `CONST` binding visible here).
-    /// Parsed only for bare names that resolve to a `CONST` in the
-    /// const case; evaluation mirrors the `LET` path but consults the
-    /// const gate for misuse diagnostics.
+    /// Binding read (`$name`): `LET` and `CONST` bindings share one
+    /// namespace and one read syntax. Whether the name is immutable
+    /// is a declaration property, enforced at declare/mutate sites,
+    /// never at the read.
     Var {
         name: String,
-        is_const: bool,
     },
-    /// Qualified immutable read (`ALIAS::NAME`): a `CONST` exported by
-    /// the module imported under `ALIAS`. Parsed only for the bare
-    /// qualified shape; `$ALIAS::NAME` is a hard error (use bare).
-    /// Evaluation resolves through the active unit's
-    /// alias targets and fails closed on unknown aliases, non-exported
-    /// names, and `LET` bindings (never exportable).
+    /// Qualified immutable read (`$ALIAS::NAME`): a `CONST` exported by
+    /// the module imported under `ALIAS`. Evaluation resolves through
+    /// the active unit's alias targets and fails closed on unknown
+    /// aliases, non-exported names, and `LET` bindings (never
+    /// exportable).
     ConstRef {
         alias: String,
         name: String,
@@ -694,12 +674,10 @@ pub enum Expr {
     /// Environment read (`env:KEY`): resolves against the script
     /// environment at evaluation time.
     Env(String),
-    /// Key path traversal: `is_const=false` is `$base.key` (a `LET`
-    /// binding); `is_const=true` is bare `NAME.key` (a `CONST` binding).
+    /// Key path traversal (`$base.key`) over either binding family.
     KeyPath {
         base: String,
         keys: Vec<String>,
-        is_const: bool,
     },
     List(Vec<Expr>),
     Map(Vec<(String, Expr)>),
@@ -712,15 +690,13 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
-    /// Variable inspection: `is_const=false` is `INSPECT($var)`;
-    /// `is_const=true` is `INSPECT(NAME)` for `CONST` bindings. Carries
-    /// the variable name unevaluated so evaluation can snapshot the
-    /// binding. Produced only by the parser for the exact `INSPECT`
+    /// Variable inspection (`INSPECT($var)`): carries the variable
+    /// name unevaluated so evaluation can snapshot the binding.
+    /// Produced only by the parser for the exact `INSPECT`
     /// name; evaluators match on this variant and never on a
     /// function-name string.
     Inspect {
         name: String,
-        is_const: bool,
     },
     Compare {
         op: CompareOp,
@@ -1309,27 +1285,15 @@ impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expr::Literal(v) => write!(f, "{}", v),
-            Expr::Var { name, is_const } => {
-                if *is_const {
-                    write!(f, "{}", name)
-                } else {
-                    write!(f, "${}", name)
-                }
+            Expr::Var { name } => {
+                write!(f, "${}", name)
             }
             Expr::ConstRef { alias, name } => {
-                write!(f, "{alias}::{name}")
+                write!(f, "${alias}::{name}")
             }
             Expr::Env(key) => write!(f, "env:{}", key),
-            Expr::KeyPath {
-                base,
-                keys,
-                is_const,
-            } => {
-                if *is_const {
-                    write!(f, "{}", base)?;
-                } else {
-                    write!(f, "${}", base)?;
-                }
+            Expr::KeyPath { base, keys } => {
+                write!(f, "${}", base)?;
                 for key in keys {
                     write!(f, ".{}", key)?;
                 }
@@ -1345,12 +1309,8 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
-            Expr::Inspect { name, is_const } => {
-                if *is_const {
-                    write!(f, "INSPECT({})", name)
-                } else {
-                    write!(f, "INSPECT(${})", name)
-                }
+            Expr::Inspect { name } => {
+                write!(f, "INSPECT(${})", name)
             }
             Expr::List(items) => {
                 write!(f, "[")?;
@@ -1449,25 +1409,13 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
     for op in ops {
         match op {
             MathOp::PushConst(v) => stack.push(format!("{}", v)),
-            MathOp::Load { name, is_const } => {
-                if *is_const {
-                    stack.push(name.clone());
-                } else {
-                    stack.push(format!("${}", name));
-                }
+            MathOp::Load { name } => {
+                stack.push(format!("${}", name));
             }
-            MathOp::LoadConstRef { alias, name } => stack.push(format!("{alias}::{name}")),
+            MathOp::LoadConstRef { alias, name } => stack.push(format!("${alias}::{name}")),
             MathOp::LoadEnv(key) => stack.push(format!("env:{}", key)),
-            MathOp::LoadKeyPath {
-                base,
-                keys,
-                is_const,
-            } => {
-                let mut s = if *is_const {
-                    base.clone()
-                } else {
-                    format!("${}", base)
-                };
+            MathOp::LoadKeyPath { base, keys } => {
+                let mut s = format!("${}", base);
                 for key in keys {
                     s.push('.');
                     s.push_str(key);
@@ -1482,12 +1430,8 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
                 args.reverse();
                 stack.push(format!("{}({})", name, args.join(", ")));
             }
-            MathOp::Inspect { name, is_const } => {
-                if *is_const {
-                    stack.push(format!("INSPECT({})", name));
-                } else {
-                    stack.push(format!("INSPECT(${})", name));
-                }
+            MathOp::Inspect { name } => {
+                stack.push(format!("INSPECT(${})", name));
             }
             MathOp::Neg => {
                 let inner = stack.pop().unwrap_or_else(|| "<underflow>".to_string());

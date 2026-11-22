@@ -1,4 +1,4 @@
 # CONST CAPTURE: the command runs to completion and its exact stdout
 # bytes bind into the immutable variable (no newline stripping).
-CONST OUT: STRING = ECHO captured
-WRITE result.txt "{{ OUT }}"
+CONST $OUT: STRING = ECHO captured
+WRITE result.txt "{{ $OUT }}"

@@ -210,7 +210,7 @@ fn unary_minus_folds_literals() {
             assert!(matches!(
                 ops.as_slice(),
                 [
-                    oxdock_parser::ast::MathOp::Load { name, is_const: false },
+                    oxdock_parser::ast::MathOp::Load { name},
                     oxdock_parser::ast::MathOp::Neg
                 ] if name == "v"
             ));
@@ -300,8 +300,8 @@ fn call_arg_order_pushes_left_to_right() {
             assert!(matches!(
                 ops.as_slice(),
                 [
-                    oxdock_parser::ast::MathOp::Load { name: a, is_const: false },
-                    oxdock_parser::ast::MathOp::Load { name: b, is_const: false },
+                    oxdock_parser::ast::MathOp::Load { name: a},
+                    oxdock_parser::ast::MathOp::Load { name: b},
                     oxdock_parser::ast::MathOp::Call { name, arity: 2 }
                 ] if a == "a" && b == "b" && name == "MATH::FOO"
             ));
@@ -323,8 +323,8 @@ fn inspect_compiles_to_name_preserving_op() {
             assert!(matches!(
                 ops.as_slice(),
                 [
-                    oxdock_parser::ast::MathOp::Inspect { name: a, is_const: false },
-                    oxdock_parser::ast::MathOp::Inspect { name: b, is_const: false },
+                    oxdock_parser::ast::MathOp::Inspect { name: a},
+                    oxdock_parser::ast::MathOp::Inspect { name: b},
                     oxdock_parser::ast::MathOp::Eq
                 ] if a == "p" && b == "p"
             ));

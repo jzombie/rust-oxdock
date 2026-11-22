@@ -2298,13 +2298,8 @@ fn resolve_pipe_handle<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     target: &PipeTarget,
 ) -> Result<PipeHandle> {
-    let PipeTarget::Var {
-        name: var,
-        is_const,
-    } = target;
-    // Gate through the single `$` vs bare owner so `$CONST` fails
-    // here exactly like every other read (static gate mirrors it).
-    let _ = super::args::load_var_binding(cx.state, var, *is_const)?;
+    let PipeTarget::Var { name: var } = target;
+    let _ = super::args::load_var_binding(cx.state, var)?;
     match cx.state.get_var_typed(var) {
         Some((kind, value)) if matches!(kind, TypeTag::Pipe) => {
             let Some(handle) = value.as_pipe_handle() else {

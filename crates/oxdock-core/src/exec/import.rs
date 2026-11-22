@@ -1764,9 +1764,9 @@ pub(super) enum ScriptSite<P: ProcessManager> {
     },
 }
 
-/// Runtime frame-walk adapter: the [`FuncFrameView`] implementation
+/// Runtime frame-walk adapter: the [`super::native::FuncFrameView`] implementation
 /// over live [`ExecState`] stores, so static and runtime share the
-/// nested, home, harvest precedence through [`FuncFrameView::walk`].
+/// nested, home, harvest precedence through [`super::native::FuncFrameView::walk`].
 struct RuntimeFrame<'a, P: ProcessManager> {
     state: &'a ExecState<P>,
     current: Option<String>,

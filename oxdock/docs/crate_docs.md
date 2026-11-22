@@ -832,7 +832,7 @@ LET $v: STRING = READ env.txt
 ASSERT_EQ $v "bar"
 ```
 
-Four spellings read distinct stores. `$var` reads a `LET` binding, `env:KEY` reads script env, bare `WORD` reads `CONST` in normal commands, and `{{ NAME }}` reads `CONST` everywhere. `RUN` shell words stay literal text, so only templates read `CONST` there.
+Three spellings read distinct stores. `$name` reads a binding, whether `LET` or `CONST`; `env:KEY` reads script env; bare words never read a binding. Bare words stay literal text in command arguments (and fail elsewhere, naming the `$` form to use). `RUN` shell words stay literal too, so only `{{ $name }}` templates read bindings there.
 
 ```oxdock
 # LET bindings read through the dollar sigil.
@@ -845,21 +845,29 @@ ENV DOC_MOOD="env-hello"
 ECHO env:DOC_MOOD
 ASSERT_CONTAINS stdout "env-hello"
 
-# Bare words read CONST in normal commands.
-CONST BADGE: STRING = "const-hello"
+# Bare words stay literal in command arguments.
+CONST $BADGE: STRING = "const-hello"
 ECHO BADGE
+ASSERT_CONTAINS stdout "BADGE"
+
+# CONST reads sigiled, like LET.
+ECHO $BADGE
 ASSERT_CONTAINS stdout "const-hello"
 
-# CONST reads through templates as well.
-ECHO "{{ BADGE }}"
+# CONST reads through templates.
+ECHO "{{ $BADGE }}"
 ASSERT_CONTAINS stdout "const-hello"
+
+# CONST reads sigiled in expression positions.
+LET $badge: STRING = $BADGE
+ASSERT_EQ $badge "const-hello"
 
 # RUN keeps shell words literal, so only templates read CONST.
 LET $raw: STRING = RUN echo BADGE
 ASSERT_EQ $raw "BADGE\n"
 
 # RUN reads CONST through templates.
-LET $cooked: STRING = RUN echo "{{ BADGE }}"
+LET $cooked: STRING = RUN echo "{{ $BADGE }}"
 ASSERT_CONTAINS $cooked "const-hello"
 ```
 
@@ -1220,7 +1228,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`SWITCH`](#switch) | `SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
-| [`CONST`](#const) | `CONST NAME: TYPE = <expr> \| CONST NAME: PIPE \| CONST NAME: TYPE = ASYNC { <commands> } \| CONST NAME: TYPE = <command> \| CONST NAME: TYPE = AWAIT TASK \| CONST NAME: TYPE = { <commands> }` |
+| [`CONST`](#const) | `CONST $NAME: TYPE = <expr> \| CONST $NAME: PIPE \| CONST $NAME: TYPE = ASYNC { <commands> } \| CONST $NAME: TYPE = <command> \| CONST $NAME: TYPE = AWAIT $TASK \| CONST $NAME: TYPE = { <commands> }` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE<T> = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
@@ -2096,18 +2104,18 @@ ASSERT_EQ $t "absent"
 
 Bind deeply immutable script-local values.
 
-**Syntax:** `CONST NAME: TYPE = <expr> | CONST NAME: PIPE | CONST NAME: TYPE = ASYNC { <commands> } | CONST NAME: TYPE = <command> | CONST NAME: TYPE = AWAIT TASK | CONST NAME: TYPE = { <commands> }`
+**Syntax:** `CONST $NAME: TYPE = <expr> | CONST $NAME: PIPE | CONST $NAME: TYPE = ASYNC { <commands> } | CONST $NAME: TYPE = <command> | CONST $NAME: TYPE = AWAIT $TASK | CONST $NAME: TYPE = { <commands> }`
 
 Declares a script-local constant with an explicit type. The
 right-hand side accepts every `LET` form (expression,
 capture, `ASYNC`, `AWAIT`, inline block, bare `PIPE`).
 
-Immutability is deep and total: reassignment (`$var = ...`,
-`NAME = ...`), `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS`
+Immutability is deep and total: reassignment (`$var = ...`),
+`LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS`
 on a `CONST` value all fail. Nested containers freeze with
 the binding, so reaching a list or map through a `CONST`
-never exposes a mutable handle. Reads use the bare name
-(never `$NAME`).
+never exposes a mutable handle. Reads use `$NAME`,
+exactly like `LET` reads.
 
 `CONST` and `LET` share one namespace: declaring either
 twice in the same scope frame is a redeclaration error.
@@ -2124,15 +2132,15 @@ own `FUNC` bodies: immutable file state is visible by
 scope, while mutable state crosses only as explicit
 arguments. Visibility is declaration-ordered: a call
 landing before the `CONST` executes fails instead of
-reading uninitialized memory. `ALIAS::NAME` reads work
+reading uninitialized memory. `$ALIAS::NAME` reads work
 in bodies exactly like at top level. Writes stay
 forbidden everywhere: a body mutating a file `CONST`
 fails with the same message as a top-level write.
 
 `CONST` is the only variable binding an `EXPORT` can name
-(`EXPORT CONST_NAME`, `EXPORT [CONST A, B]`): `LET`
+(`EXPORT CONST $NAME`, `EXPORT [CONST $A, $B]`): `LET`
 bindings never cross the module boundary. Importers read
-the value as `ALIAS::NAME` (see IMPORT).
+the value as `$ALIAS::NAME` (see IMPORT).
 
 
 **Examples:**
@@ -2140,19 +2148,19 @@ the value as `ALIAS::NAME` (see IMPORT).
 **Example: const**
 
 ```oxdock
-# CONST reads bare, LET reads sigiled.
-CONST NAME: STRING = "world"
-ECHO "hello, {{ NAME }}"
+# CONST reads through `$`, like LET.
+CONST $NAME: STRING = "world"
+ECHO "hello, {{ $NAME }}"
 ASSERT_CONTAINS stdout "hello, world"
 
 # Containers freeze with the binding.
-CONST ITEMS: LIST<STRING> = ["a", "b"]
-ASSERT_CONTAINS ITEMS "a"
+CONST $ITEMS: LIST<STRING> = ["a", "b"]
+ASSERT_CONTAINS {{ $ITEMS }} "a"
 
 # File CONSTs read inside the file's own FUNCs.
-CONST GREETING: STRING = "hi"
+CONST $GREETING: STRING = "hi"
 FUNC SHOUT(): STRING {
-    RETURN GREETING
+    RETURN $GREETING
 }
 LET $s: STRING = SHOUT()
 ASSERT_EQ $s "hi"
@@ -2162,8 +2170,8 @@ ASSERT_EQ $s "hi"
 
 ```oxdock expect_error:"cannot mutate CONST"
 # SET on a CONST fails instead of rebinding.
-CONST N: INT = 1
-N = 2
+CONST $N: INT = 1
+$N = 2
 ```
 
 **Expected error:** `cannot mutate CONST`
@@ -2172,8 +2180,8 @@ N = 2
 
 ```oxdock expect_error:"cannot mutate CONST"
 # LIST_APPEND on a CONST fails instead of pushing.
-CONST ITEMS: LIST<STRING> = ["a"]
-LIST_APPEND ITEMS "b"
+CONST $ITEMS: LIST<STRING> = ["a"]
+LIST_APPEND $ITEMS "b"
 ```
 
 **Expected error:** `cannot mutate CONST`
@@ -3827,15 +3835,15 @@ ASSERT_EQ stdout "braced:World\nWorld\n"
 **Example: interpolation**
 
 ```oxdock
-# `{{ env:KEY }}` reads the script environment; a bare name
-# resolves a CONST, `$name` resolves a LET. Spelling rules:
+# `{{ env:KEY }}` reads the script environment; `$NAME`
+# reads either binding. Spelling rules:
 # `script_env:` is always case-sensitive; `env:` is
 # case-sensitive too, except on Windows where it matches
 # case-insensitively. Every read must be declared first:
 # KEY here comes from the ENV below.
 ENV USER=OxDock
-CONST WHO: STRING = "Ada"
-ECHO "Hello {{ env:USER }}! Hi {{ WHO }}! Again {{ script_env:USER }}!"
+CONST $WHO: STRING = "Ada"
+ECHO "Hello {{ env:USER }}! Hi {{ $WHO }}! Again {{ script_env:USER }}!"
 ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada! Again OxDock!"
 ```
 

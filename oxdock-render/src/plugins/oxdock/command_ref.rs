@@ -53,42 +53,22 @@ const CONTEXTS: &[ContextDef] = &[
 fn render_math_op(op: &MathOp) -> String {
     match op {
         MathOp::PushConst(value) => format!("PushConst({value})"),
-        MathOp::Load { name, is_const } => {
-            if *is_const {
-                format!("LoadConst({name})")
-            } else {
-                format!("LoadVar(${name})")
-            }
+        MathOp::Load { name } => {
+            format!("LoadVar(${name})")
         }
-        MathOp::LoadConstRef { alias, name } => format!("LoadConstRef({alias}::{name})"),
+        MathOp::LoadConstRef { alias, name } => format!("LoadConstRef(${alias}::{name})"),
         MathOp::LoadEnv(key) => format!("LoadEnv(env:{key})"),
-        MathOp::LoadKeyPath {
-            base,
-            keys,
-            is_const,
-        } => {
-            let mut rendered = if *is_const {
-                base.clone()
-            } else {
-                format!("${base}")
-            };
+        MathOp::LoadKeyPath { base, keys } => {
+            let mut rendered = format!("${base}");
             for key in keys {
                 rendered.push('.');
                 rendered.push_str(key);
             }
-            if *is_const {
-                format!("LoadConstKeyPath({rendered})")
-            } else {
-                format!("LoadKeyPath({rendered})")
-            }
+            format!("LoadKeyPath({rendered})")
         }
         MathOp::Call { name, arity } => format!("Call({name}/{arity})"),
-        MathOp::Inspect { name, is_const } => {
-            if *is_const {
-                format!("Inspect({name})")
-            } else {
-                format!("Inspect(${name})")
-            }
+        MathOp::Inspect { name } => {
+            format!("Inspect(${name})")
         }
         MathOp::Neg => "Neg".to_string(),
         MathOp::Add => "Add".to_string(),
@@ -1043,16 +1023,14 @@ mod tests {
             (
                 MathOp::Load {
                     name: "a".to_string(),
-                    is_const: false,
                 },
                 "LoadVar($a)",
             ),
             (
                 MathOp::Load {
                     name: "C".to_string(),
-                    is_const: true,
                 },
-                "LoadConst(C)",
+                "LoadVar($C)",
             ),
             (
                 MathOp::LoadEnv(oxdock_fs::env::os::unix::HOME.to_string()),
@@ -1062,7 +1040,6 @@ mod tests {
                 MathOp::LoadKeyPath {
                     base: "m".to_string(),
                     keys: vec!["key".to_string(), "0".to_string()],
-                    is_const: false,
                 },
                 "LoadKeyPath($m.key.0)",
             ),
@@ -1070,9 +1047,8 @@ mod tests {
                 MathOp::LoadKeyPath {
                     base: "C".to_string(),
                     keys: vec!["key".to_string()],
-                    is_const: true,
                 },
-                "LoadConstKeyPath(C.key)",
+                "LoadKeyPath($C.key)",
             ),
             (
                 MathOp::Call {
@@ -1084,16 +1060,14 @@ mod tests {
             (
                 MathOp::Inspect {
                     name: "x".to_string(),
-                    is_const: false,
                 },
                 "Inspect($x)",
             ),
             (
                 MathOp::Inspect {
                     name: "C".to_string(),
-                    is_const: true,
                 },
-                "Inspect(C)",
+                "Inspect($C)",
             ),
             (MathOp::Neg, "Neg"),
             (MathOp::Add, "Add"),

@@ -28,8 +28,7 @@ fn with_io_block_wraps_commands() {
             assert_eq!(
                 bindings[0].pipe,
                 Some(PipeTarget::Var {
-                    name: "setup".to_string(),
-                    is_const: false
+                    name: "setup".to_string()
                 })
             );
             match cmd.as_ref() {
@@ -50,16 +49,14 @@ fn with_io_block_wraps_commands() {
             assert_eq!(
                 bindings[0].pipe,
                 Some(PipeTarget::Var {
-                    name: "setup".to_string(),
-                    is_const: false
+                    name: "setup".to_string()
                 })
             );
             assert_eq!(bindings[1].stream, IoStream::Stderr);
             assert_eq!(
                 bindings[1].pipe,
                 Some(PipeTarget::Var {
-                    name: "setup".to_string(),
-                    is_const: false
+                    name: "setup".to_string()
                 })
             );
             match cmd.as_ref() {

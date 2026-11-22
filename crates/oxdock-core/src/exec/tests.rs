@@ -212,7 +212,6 @@ fn run_exec_resolves_and_flattens_argv() {
                     Arg::Expr(Expr::Literal(Value::string("cargo".to_string()))),
                     Arg::Expr(Expr::Var {
                         name: "args".to_string(),
-                        is_const: false,
                     }),
                     Arg::Expr(Expr::Literal(Value::int(3))),
                     Arg::Expr(Expr::Literal(Value::bool(true))),
@@ -336,10 +335,8 @@ fn run_exec_resolves_every_variable_type() {
                     // Whole-element `$var` and `$map.key` references.
                     Arg::Expr(Expr::Var {
                         name: "who".to_string(),
-                        is_const: false,
                     }),
                     Arg::Expr(Expr::KeyPath {
-                        is_const: false,
                         base: "m".to_string(),
                         keys: vec!["k".to_string()],
                     }),
@@ -490,7 +487,6 @@ fn run_exec_treats_variable_values_as_opaque() {
                     Arg::Expr(Expr::Literal(Value::string("echo".to_string()))),
                     Arg::Expr(Expr::Var {
                         name: "data".to_string(),
-                        is_const: false,
                     }),
                 ],
             },
@@ -714,7 +710,6 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
                     stream: IoStream::Stdout,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "shared".into(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::Echo("hello".into())),
@@ -731,7 +726,6 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
                     stream: IoStream::Stdin,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "shared".into(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::Run("cat".into())),
@@ -788,7 +782,6 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
                     stream: IoStream::Stdout,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "async_out".into(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
@@ -807,7 +800,6 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
                     stream: IoStream::Stdin,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "async_out".into(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::Write {
@@ -858,7 +850,6 @@ fn async_stdin_pipe_unblocks_background_write() {
                             stream: IoStream::Stdin,
                             pipe: Some(oxdock_parser::PipeTarget::Var {
                                 name: "in_chan".into(),
-                                is_const: false,
                             }),
                         }],
                         cmd: Box::new(StepKind::Write {
@@ -884,7 +875,6 @@ fn async_stdin_pipe_unblocks_background_write() {
                     stream: IoStream::Stdout,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "in_chan".into(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::Echo("unblock_inline_payload".into())),
@@ -896,7 +886,6 @@ fn async_stdin_pipe_unblocks_background_write() {
         },
         step(StepKind::Await {
             var: "writer".into(),
-            is_const: false,
         }),
     ];
     let (_cwd, files) = run_with_mock_fs(&steps);
@@ -1593,7 +1582,6 @@ fn cat_and_capture_expand_env_paths() {
                     stream: IoStream::Stdout,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "cap_cat".to_string(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::Read(Some("{{ env:SNIPPET }}".into()))),
@@ -1610,7 +1598,6 @@ fn cat_and_capture_expand_env_paths() {
                     stream: IoStream::Stdin,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "cap_cat".to_string(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::Write {
@@ -2077,17 +2064,11 @@ fn with_io_rejects_duplicate_stdout_binding() {
                 bindings: vec![
                     IoBinding {
                         stream: IoStream::Stdout,
-                        pipe: Some(oxdock_parser::PipeTarget::Var {
-                            name: "p".into(),
-                            is_const: false,
-                        }),
+                        pipe: Some(oxdock_parser::PipeTarget::Var { name: "p".into() }),
                     },
                     IoBinding {
                         stream: IoStream::Stdout,
-                        pipe: Some(oxdock_parser::PipeTarget::Var {
-                            name: "p".into(),
-                            is_const: false,
-                        }),
+                        pipe: Some(oxdock_parser::PipeTarget::Var { name: "p".into() }),
                     },
                 ],
                 cmd: Box::new(StepKind::Echo("x".into())),
@@ -2144,17 +2125,11 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
                     bindings: vec![
                         IoBinding {
                             stream: stream_a,
-                            pipe: Some(oxdock_parser::PipeTarget::Var {
-                                name: "p".into(),
-                                is_const: false,
-                            }),
+                            pipe: Some(oxdock_parser::PipeTarget::Var { name: "p".into() }),
                         },
                         IoBinding {
                             stream: stream_b,
-                            pipe: Some(oxdock_parser::PipeTarget::Var {
-                                name: "p".into(),
-                                is_const: false,
-                            }),
+                            pipe: Some(oxdock_parser::PipeTarget::Var { name: "p".into() }),
                         },
                     ],
                     cmd: Box::new(StepKind::Echo("x".into())),
@@ -2209,7 +2184,6 @@ fn with_io_async_outer_pipe_stays_script() {
                     stream: IoStream::Stdout,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "live".into(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
@@ -2332,7 +2306,6 @@ fn with_io_async_dsl_body_stays_script_pipe() {
                     stream: IoStream::Stdout,
                     pipe: Some(oxdock_parser::PipeTarget::Var {
                         name: "plain".into(),
-                        is_const: false,
                     }),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
@@ -3867,10 +3840,7 @@ fn timeout_scope_does_not_join_prior_background_work() {
             col: 0,
         },
         timeout_step("30s", vec![step(StepKind::Run("echo quick".into()))]),
-        step(StepKind::Cancel {
-            var: "srv".into(),
-            is_const: false,
-        }),
+        step(StepKind::Cancel { var: "srv".into() }),
     ];
     let mock = MockProcessManager::default();
     // Two never-ready plans, not one: the ASYNC worker thread and the
@@ -4764,7 +4734,8 @@ fn host_round_trip_through_adapters() {
 
 #[test]
 fn expand_placeholders_reject_missing_names() {
-    // Runtime half of the missing-key contract: `$var`, bare keys,
+    // Runtime half of the missing-key contract: `$var` reads fail
+    // undeclared, bare keys fail with the `$` hint (they never read),
     // and empty placeholders have no static coverage (the gate checks
     // only `env:` names), so direct expansion must fail loudly.
     // Absent env reads empty here by design: declaration is enforced
@@ -4778,9 +4749,10 @@ fn expand_placeholders_reject_missing_names() {
     let err = expand_string("{{ bare_nope }}", &state.envs.clone(), &state)
         .expect_err("missing bare key must fail");
     assert!(
-        format!("{err:#}").contains("undefined script variable"),
+        format!("{err:#}").contains("never reads a binding"),
         "{err:#}"
     );
+    assert!(format!("{err:#}").contains("$bare_nope"), "{err:#}");
     let err = expand_string("{{ }}", &state.envs.clone(), &state)
         .expect_err("empty placeholder must fail");
     assert!(
@@ -4794,14 +4766,14 @@ fn expand_placeholders_reject_missing_names() {
     )
     .expect("runtime env miss reads empty; the static gate owns declaration");
     assert_eq!(out, "");
-    // A bare key shadowing a present env name still fails: bare keys
-    // never read the environment, so the error points at `env:`.
+    // A bare uppercase key never reads, even when the env name exists:
+    // the error points at the `$` form.
     Arc::make_mut(&mut state.envs)
         .insert("OXDOCK_TEST_PRESENT".to_string(), "host-value".to_string());
     let err = expand_string("{{ OXDOCK_TEST_PRESENT }}", &state.envs.clone(), &state)
         .expect_err("bare key must fail even when the env name exists");
     assert!(
-        format!("{err:#}").contains("env:OXDOCK_TEST_PRESENT"),
+        format!("{err:#}").contains("$OXDOCK_TEST_PRESENT"),
         "unexpected error: {err:#}"
     );
 }

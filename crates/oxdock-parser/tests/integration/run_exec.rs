@@ -59,7 +59,7 @@ fn run_exec_form_supports_typed_elements() {
             assert_eq!(argv.len(), 5);
             assert!(matches!(
                 &argv[1],
-                Arg::Expr(Expr::Var { name, is_const: false }) if name == "name"
+                Arg::Expr(Expr::Var { name}) if name == "name"
             ));
             assert_eq!(argv[2], Arg::Expr(Expr::Literal(Value::int(3))));
             assert_eq!(argv[3], Arg::Expr(Expr::Literal(Value::bool(true))));
@@ -78,7 +78,7 @@ fn run_exec_form_supports_keypath_and_call_elements() {
         StepKind::RunExec { argv } => {
             assert_eq!(argv.len(), 3);
             assert!(
-                matches!(&argv[1], Arg::Expr(Expr::KeyPath { base, keys, is_const: false }) if base == "a" && keys == &["b".to_string()])
+                matches!(&argv[1], Arg::Expr(Expr::KeyPath { base, keys}) if base == "a" && keys == &["b".to_string()])
             );
             assert!(matches!(&argv[2], Arg::Expr(Expr::Call { name, .. }) if name == "MATH::GLOB"));
         }

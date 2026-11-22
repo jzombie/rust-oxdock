@@ -49,8 +49,7 @@ fn timeout_dynamic_forms() {
     assert_eq!(
         duration,
         Arg::Expr(Expr::Var {
-            name: "d".to_string(),
-            is_const: false
+            name: "d".to_string()
         })
     );
     let (duration, _) = timeout_case("TIMEOUT \"10s\" ECHO x");

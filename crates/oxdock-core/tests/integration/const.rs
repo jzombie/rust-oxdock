@@ -26,20 +26,28 @@ fn const_reads_every_value_type() {
     let script = indoc! {r#"
         # Every declaration shape LET accepts, CONST accepts too.
         IMPORT [STD]
-        CONST S: STRING = "hi"
-        CONST I: INT = 7
-        CONST F: FLOAT = 2.5
-        CONST B: BOOL = true
-        CONST L: LIST<STRING> = ["a", "b"]
-        CONST M: MAP<ANY> = {x: 1, nested: {y: [1, 2]}}
-        CONST D: DURATION = 10s
-        ASSERT_EQ S "hi"
-        ASSERT_EQ I 7
-        ASSERT_EQ F 2.5
-        ASSERT_EQ B true
-        ASSERT_CONTAINS L "a"
-        ASSERT_EQ M.x 1
-        ASSERT_EQ M.nested.y.1 2
+        CONST $S: STRING = "hi"
+        CONST $I: INT = 7
+        CONST $F: FLOAT = 2.5
+        CONST $B: BOOL = true
+        CONST $L: LIST<STRING> = ["a", "b"]
+        CONST $M: MAP<ANY> = {x: 1, nested: {y: [1, 2]}}
+        CONST $D: DURATION = 10s
+        ASSERT_EQ {{ $S }} "hi"
+        LET $i: INT = $I
+        ASSERT_EQ $i 7
+        LET $f: FLOAT = $F
+        ASSERT_EQ $f 2.5
+        LET $b: BOOL = $B
+        ASSERT_EQ $b true
+        ASSERT_CONTAINS {{ $L }} "a"
+        LET $x: INT = $M.x
+        ASSERT_EQ $x 1
+        LET $y: INT = $M.nested.y.1
+        ASSERT_EQ $y 2
+        LET $d: DURATION = $D
+        LET $e: DURATION = 10s
+        ASSERT_EQ $d $e
     "#};
     Engine::new()
         .run_script(&root, script)
@@ -54,8 +62,8 @@ fn const_set_fails_with_one_message() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST N: INT = 1
-                N = 2
+                CONST $N: INT = 1
+                $N = 2
             "#},
         )
         .expect_err("SET on a CONST must fail");
@@ -66,12 +74,14 @@ fn const_set_fails_with_one_message() {
 fn const_list_append_fails_with_one_message() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    // `LIST_APPEND` takes `$var` targets; naming a `CONST` list
+    // fails at the mutation gate with one message.
     let err = Engine::new()
         .run_script(
             &root,
             indoc! {r#"
-                CONST ITEMS: LIST<STRING> = ["a"]
-                LIST_APPEND ITEMS "b"
+                CONST $ITEMS: LIST<STRING> = ["a"]
+                LIST_APPEND $ITEMS "b"
             "#},
         )
         .expect_err("LIST_APPEND on a CONST must fail");
@@ -90,8 +100,8 @@ fn const_functional_rebuilds_fail_with_one_message() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
-                CONST M: MAP<ANY> = {a: 1}
-                LET $n: MAP<ANY> = MAP_SET(M, "b", 2)
+                CONST $M: MAP<ANY> = {a: 1}
+                LET $n: MAP<ANY> = MAP_SET($M, "b", 2)
             "#},
         )
         .expect_err("MAP_SET on a CONST must fail");
@@ -104,8 +114,8 @@ fn const_functional_rebuilds_fail_with_one_message() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
-                CONST M: MAP<ANY> = {a: 1}
-                LET $n: MAP<ANY> = MERGE_MAPS([M], "overwrite")
+                CONST $M: MAP<ANY> = {a: 1}
+                LET $n: MAP<ANY> = MERGE_MAPS([$M], "overwrite")
             "#},
         )
         .expect_err("MERGE_MAPS on a CONST must fail");
@@ -124,10 +134,10 @@ fn const_freeze_is_deep_and_detached() {
         # CONST copy and everything reachable through it freezes.
         IMPORT [STD]
         LET $inner: LIST<STRING> = ["a"]
-        CONST C: LIST<ANY> = [$inner]
+        CONST $C: LIST<ANY> = [$inner]
         LIST_APPEND $inner "b"
         ASSERT_CONTAINS $inner "b"
-        ASSERT_EQ C.0.0 "a"
+        ASSERT_EQ {{ $C.0.0 }} "a"
     "#};
     Engine::new()
         .run_script(&root, script)
@@ -136,8 +146,8 @@ fn const_freeze_is_deep_and_detached() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST C: LIST<STRING> = ["a"]
-                LET $alias: LIST<STRING> = C
+                CONST $C: LIST<STRING> = ["a"]
+                LET $alias: LIST<STRING> = $C
                 LIST_APPEND $alias "b"
             "#},
         )
@@ -153,9 +163,9 @@ fn const_and_let_share_one_namespace() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     for (first, second) in [
-        ("CONST A: INT = 1", "CONST A: INT = 2"),
-        ("LET $A: INT = 1", "CONST A: INT = 2"),
-        ("CONST A: INT = 1", "LET $A: INT = 2"),
+        ("CONST $A: INT = 1", "CONST $A: INT = 2"),
+        ("LET $A: INT = 1", "CONST $A: INT = 2"),
+        ("CONST $A: INT = 1", "LET $A: INT = 2"),
     ] {
         let err = Engine::new()
             .run_script(&root, &format!("{first}\n{second}\n"))
@@ -172,7 +182,7 @@ fn const_inner_let_shadow_stays_mutable() {
     let script = indoc! {r#"
         # Shadowing is lexical: an inner LET with the same name
         # mutates the inner binding, and the outer CONST survives.
-        CONST X: INT = 1
+        CONST $X: INT = 1
         [bool:true] {
             LET $X: INT = 2
             $X = 3
@@ -180,7 +190,8 @@ fn const_inner_let_shadow_stays_mutable() {
         }
         LET $back: STRING = READ inner.txt
         ASSERT_EQ $back "3"
-        ASSERT_EQ X 1
+        LET $held: INT = $X
+        ASSERT_EQ $held 1
     "#};
     Engine::new()
         .run_script(&root, script)
@@ -193,15 +204,16 @@ fn const_capture_async_and_await_forms_bind() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         # Every LET right-hand side has a CONST twin.
-        CONST OUT: STRING = ECHO hi
-        ASSERT_EQ OUT "hi\n"
-        CONST T: HANDLE<INT> = ASYNC { RETURN 41 }
-        CONST N: INT = AWAIT T
-        ASSERT_EQ N 41
-        CONST BLK: STRING = {
+        CONST $OUT: STRING = ECHO hi
+        ASSERT_EQ {{ $OUT }} "hi\n"
+        CONST $T: HANDLE<INT> = ASYNC { RETURN 41 }
+        CONST $N: INT = AWAIT $T
+        LET $n: INT = $N
+        ASSERT_EQ $n 41
+        CONST $BLK: STRING = {
             RETURN "made"
         }
-        ASSERT_EQ BLK "made"
+        ASSERT_EQ {{ $BLK }} "made"
     "#};
     Engine::new()
         .run_script(&root, script)
@@ -216,25 +228,25 @@ fn const_exports_read_through_alias() {
         &root,
         "lib.oxdock",
         indoc! {r#"
-            CONST VERSION: STRING = "1.2.3"
-            CONST LIMITS: MAP<ANY> = {max: 10}
+            CONST $VERSION: STRING = "1.2.3"
+            CONST $LIMITS: MAP<ANY> = {max: 10}
             LET $secret: STRING = "nope"
-            EXPORT CONST VERSION
-            EXPORT [CONST LIMITS]
+            EXPORT CONST $VERSION
+            EXPORT [CONST $LIMITS]
         "#},
     );
     let script = indoc! {r#"
-        # Exported CONSTs read as ALIAS::NAME: bare, in math,
+        # Exported CONSTs read as $ALIAS::NAME: in math
         # and inside templates. Nested access copies to a local
         # first (key paths never ride qualified names).
         IMPORT ["lib.oxdock" AS LIB]
-        LET $v: STRING = LIB::VERSION
+        LET $v: STRING = $LIB::VERSION
         ASSERT_EQ $v "1.2.3"
-        LET $lim: MAP<ANY> = LIB::LIMITS
+        LET $lim: MAP<ANY> = $LIB::LIMITS
         ASSERT_EQ $lim.max 10
-        LET $w: STRING = "v{{ LIB::VERSION }}"
+        LET $w: STRING = "v{{ $LIB::VERSION }}"
         ASSERT_EQ $w "v1.2.3"
-        ECHO "export-ok {{ LIB::VERSION }}"
+        ECHO "export-ok {{ $LIB::VERSION }}"
     "#};
     Engine::new()
         .run_script(&root, script)
@@ -257,7 +269,7 @@ fn const_let_never_exports() {
             &root,
             indoc! {r#"
                 IMPORT ["lib.oxdock" AS LIB]
-                LET $s: STRING = LIB::secret
+                LET $s: STRING = $LIB::secret
             "#},
         )
         .expect_err("LET bindings never export");
@@ -273,7 +285,7 @@ fn const_export_of_let_fails_at_parse() {
         "lib.oxdock",
         indoc! {r#"
             LET $NAME: STRING = "x"
-            EXPORT CONST NAME
+            EXPORT CONST $NAME
         "#},
     );
     let err = Engine::new()
@@ -300,8 +312,8 @@ fn const_qualified_reexport_unknown_alias_fails_at_parse() {
         &root,
         "lib.oxdock",
         indoc! {r#"
-            CONST A: INT = 1
-            EXPORT CONST LIB::A
+            CONST $A: INT = 1
+            EXPORT CONST $LIB::A
         "#},
     );
     let err = Engine::new()
@@ -321,7 +333,7 @@ fn const_qualified_reexport_unknown_alias_fails_at_parse() {
 
 #[test]
 fn const_forwarded_reexport_reads() {
-    // A qualified `EXPORT CONST ALIAS::NAME` forwards the imported
+    // A qualified `EXPORT CONST $ALIAS::NAME` forwards the imported
     // file's binding: readers observe the defining file's value with
     // the frozen flag intact, exactly like a direct read.
     let temp = GuardedPath::tempdir().unwrap();
@@ -330,11 +342,11 @@ fn const_forwarded_reexport_reads() {
         &root,
         "a.oxdock",
         indoc! {r#"
-            CONST N: INT = 4
-            CONST LIMITS: MAP<ANY> = {max: 10, nested: {x: 1}}
-            CONST ITEMS: LIST<STRING> = ["a"]
-            EXPORT CONST N
-            EXPORT [CONST LIMITS, CONST ITEMS]
+            CONST $N: INT = 4
+            CONST $LIMITS: MAP<ANY> = {max: 10, nested: {x: 1}}
+            CONST $ITEMS: LIST<STRING> = ["a"]
+            EXPORT CONST $N
+            EXPORT [CONST $LIMITS, CONST $ITEMS]
         "#},
     );
     write_lib(
@@ -342,8 +354,8 @@ fn const_forwarded_reexport_reads() {
         "b.oxdock",
         indoc! {r#"
             IMPORT ["a.oxdock" AS A]
-            EXPORT CONST A::N
-            EXPORT [CONST A::LIMITS, CONST A::ITEMS]
+            EXPORT CONST $A::N
+            EXPORT [CONST $A::LIMITS, CONST $A::ITEMS]
         "#},
     );
     Engine::new()
@@ -352,11 +364,11 @@ fn const_forwarded_reexport_reads() {
             indoc! {r#"
                 IMPORT ["b.oxdock" AS B]
                 IMPORT [STD]
-                LET $n: INT = B::N
+                LET $n: INT = $B::N
                 ASSERT_EQ $n 4
-                LET $lim: MAP<ANY> = B::LIMITS
+                LET $lim: MAP<ANY> = $B::LIMITS
                 ASSERT_EQ $lim.max 10
-                LET $items: LIST<STRING> = B::ITEMS
+                LET $items: LIST<STRING> = $B::ITEMS
                 ASSERT_CONTAINS $items "a"
             "#},
         )
@@ -366,17 +378,17 @@ fn const_forwarded_reexport_reads() {
         indoc! {r#"
             IMPORT ["b.oxdock" AS B]
             IMPORT [STD]
-            LET $lim: MAP<ANY> = B::LIMITS
+            LET $lim: MAP<ANY> = $B::LIMITS
             LET $z: MAP<ANY> = MAP_SET($lim, "x", 1)
         "#},
         indoc! {r#"
             IMPORT [STD]
             IMPORT ["b.oxdock" AS B]
-            LET $z: MAP<ANY> = MAP_SET(B::LIMITS, "x", 1)
+            LET $z: MAP<ANY> = MAP_SET($B::LIMITS, "x", 1)
         "#},
         indoc! {r#"
             IMPORT ["b.oxdock" AS B]
-            LET $items: LIST<STRING> = B::ITEMS
+            LET $items: LIST<STRING> = $B::ITEMS
             LIST_APPEND $items "b"
         "#},
     ] {
@@ -399,8 +411,8 @@ fn const_forward_chain_resolves() {
         &root,
         "a.oxdock",
         indoc! {r#"
-            CONST N: INT = 7
-            EXPORT CONST N
+            CONST $N: INT = 7
+            EXPORT CONST $N
         "#},
     );
     write_lib(
@@ -408,7 +420,7 @@ fn const_forward_chain_resolves() {
         "b.oxdock",
         indoc! {r#"
             IMPORT ["a.oxdock" AS A]
-            EXPORT CONST A::N
+            EXPORT CONST $A::N
         "#},
     );
     write_lib(
@@ -416,7 +428,7 @@ fn const_forward_chain_resolves() {
         "c.oxdock",
         indoc! {r#"
             IMPORT ["b.oxdock" AS B]
-            EXPORT CONST B::N
+            EXPORT CONST $B::N
         "#},
     );
     Engine::new()
@@ -424,7 +436,7 @@ fn const_forward_chain_resolves() {
             &root,
             indoc! {r#"
                 IMPORT ["c.oxdock" AS C]
-                LET $n: INT = C::N
+                LET $n: INT = $C::N
                 ASSERT_EQ $n 7
             "#},
         )
@@ -443,7 +455,7 @@ fn const_forward_mutual_imports_rejected_as_cycle() {
         "a.oxdock",
         indoc! {r#"
             IMPORT ["b.oxdock" AS B]
-            EXPORT CONST B::N
+            EXPORT CONST $B::N
         "#},
     );
     write_lib(
@@ -451,7 +463,7 @@ fn const_forward_mutual_imports_rejected_as_cycle() {
         "b.oxdock",
         indoc! {r#"
             IMPORT ["a.oxdock" AS A]
-            EXPORT CONST A::N
+            EXPORT CONST $A::N
         "#},
     );
     let err = Engine::new()
@@ -459,7 +471,7 @@ fn const_forward_mutual_imports_rejected_as_cycle() {
             &root,
             indoc! {r#"
                 IMPORT ["a.oxdock" AS A]
-                LET $n: INT = A::N
+                LET $n: INT = $A::N
             "#},
         )
         .expect_err("mutual imports must fail");
@@ -479,8 +491,8 @@ fn const_forward_missing_fails_loud() {
         &root,
         "a.oxdock",
         indoc! {r#"
-            CONST N: INT = 1
-            EXPORT CONST N
+            CONST $N: INT = 1
+            EXPORT CONST $N
         "#},
     );
     write_lib(
@@ -488,7 +500,7 @@ fn const_forward_missing_fails_loud() {
         "b.oxdock",
         indoc! {r#"
             IMPORT ["a.oxdock" AS A]
-            EXPORT CONST A::MISSING
+            EXPORT CONST $A::MISSING
         "#},
     );
     let err = Engine::new()
@@ -496,7 +508,7 @@ fn const_forward_missing_fails_loud() {
             &root,
             indoc! {r#"
                 IMPORT ["b.oxdock" AS B]
-                LET $n: INT = B::MISSING
+                LET $n: INT = $B::MISSING
             "#},
         )
         .expect_err("dangling CONST forward must fail");
@@ -514,8 +526,8 @@ fn const_forward_to_let_fails_loud() {
         "a.oxdock",
         indoc! {r#"
             LET $PRIV: STRING = "shh"
-            CONST N: INT = 1
-            EXPORT CONST N
+            CONST $N: INT = 1
+            EXPORT CONST $N
         "#},
     );
     write_lib(
@@ -523,7 +535,7 @@ fn const_forward_to_let_fails_loud() {
         "b.oxdock",
         indoc! {r#"
             IMPORT ["a.oxdock" AS A]
-            EXPORT CONST A::PRIV
+            EXPORT CONST $A::PRIV
         "#},
     );
     let err = Engine::new()
@@ -531,7 +543,7 @@ fn const_forward_to_let_fails_loud() {
             &root,
             indoc! {r#"
                 IMPORT ["b.oxdock" AS B]
-                LET $x: STRING = B::PRIV
+                LET $x: STRING = $B::PRIV
             "#},
         )
         .expect_err("forward to a LET must fail");
@@ -549,16 +561,16 @@ fn const_forward_same_base_rejected_at_parse() {
         &root,
         "a.oxdock",
         indoc! {r#"
-            CONST N: INT = 1
-            EXPORT CONST N
+            CONST $N: INT = 1
+            EXPORT CONST $N
         "#},
     );
     write_lib(
         &root,
         "c.oxdock",
         indoc! {r#"
-            CONST N: INT = 2
-            EXPORT CONST N
+            CONST $N: INT = 2
+            EXPORT CONST $N
         "#},
     );
     write_lib(
@@ -567,8 +579,8 @@ fn const_forward_same_base_rejected_at_parse() {
         indoc! {r#"
             IMPORT ["a.oxdock" AS A]
             IMPORT ["c.oxdock" AS C]
-            EXPORT CONST A::N
-            EXPORT CONST C::N
+            EXPORT CONST $A::N
+            EXPORT CONST $C::N
         "#},
     );
     let err = Engine::new()
@@ -584,8 +596,8 @@ fn const_forward_same_base_rejected_at_parse() {
 }
 
 #[test]
-fn const_forward_bare_and_forwarded_base_rejected_at_parse() {
-    // A bare export and a forward of the same base collide the same
+fn const_forward_local_and_forwarded_base_rejected_at_parse() {
+    // A local export and a forward of the same base collide the same
     // way: the second `EXPORT` fails instead of shadowing.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -593,8 +605,8 @@ fn const_forward_bare_and_forwarded_base_rejected_at_parse() {
         &root,
         "a.oxdock",
         indoc! {r#"
-            CONST N: INT = 1
-            EXPORT CONST N
+            CONST $N: INT = 1
+            EXPORT CONST $N
         "#},
     );
     write_lib(
@@ -602,9 +614,9 @@ fn const_forward_bare_and_forwarded_base_rejected_at_parse() {
         "b.oxdock",
         indoc! {r#"
             IMPORT ["a.oxdock" AS A]
-            CONST N: INT = 2
-            EXPORT CONST N
-            EXPORT CONST A::N
+            CONST $N: INT = 2
+            EXPORT CONST $N
+            EXPORT CONST $A::N
         "#},
     );
     let err = Engine::new()
@@ -615,7 +627,7 @@ fn const_forward_bare_and_forwarded_base_rejected_at_parse() {
                 ECHO hi
             "#},
         )
-        .expect_err("bare plus forwarded base must fail at parse");
+        .expect_err("local plus forwarded base must fail at parse");
     assert!(format!("{err:#}").contains("duplicate EXPORT"), "{err:#}");
 }
 
@@ -631,16 +643,16 @@ fn const_forward_disjoint_guards_resolve() {
         &root,
         "a-macos.oxdock",
         indoc! {r#"
-            CONST N: INT = 2
-            EXPORT CONST N
+            CONST $N: INT = 2
+            EXPORT CONST $N
         "#},
     );
     write_lib(
         &root,
         "a-linux.oxdock",
         indoc! {r#"
-            CONST N: INT = 1
-            EXPORT CONST N
+            CONST $N: INT = 1
+            EXPORT CONST $N
         "#},
     );
     write_lib(
@@ -648,7 +660,7 @@ fn const_forward_disjoint_guards_resolve() {
         "b.oxdock",
         indoc! {r#"
             IMPORT ["a-macos.oxdock" AS A]
-            EXPORT CONST A::N
+            EXPORT CONST $A::N
         "#},
     );
     write_lib(
@@ -656,7 +668,7 @@ fn const_forward_disjoint_guards_resolve() {
         "c.oxdock",
         indoc! {r#"
             IMPORT ["a-linux.oxdock" AS D]
-            EXPORT CONST D::N
+            EXPORT CONST $D::N
         "#},
     );
     #[allow(clippy::disallowed_macros)]
@@ -669,7 +681,7 @@ fn const_forward_disjoint_guards_resolve() {
         IF $go {
             [os:linux] IMPORT ["c.oxdock" AS B]
         }
-        LET $n: INT = B::N
+        LET $n: INT = $B::N
         ASSERT_EQ $n @EXPECTED@
     "#}
     .replace("@EXPECTED@", &expected.to_string());
@@ -680,16 +692,16 @@ fn const_forward_disjoint_guards_resolve() {
 
 #[test]
 fn const_forward_script_qualified_rejected_at_parse() {
-    // `SCRIPT::` is not a CONST namespace: local CONSTs read bare,
-    // so a qualified export spelling names nothing servable.
+    // `SCRIPT::` is not a CONST namespace: local CONSTs read as
+    // `$NAME`, so a qualified export spelling names nothing servable.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     write_lib(
         &root,
         "lib.oxdock",
         indoc! {r#"
-            CONST N: INT = 1
-            EXPORT CONST SCRIPT::N
+            CONST $N: INT = 1
+            EXPORT CONST $SCRIPT::N
         "#},
     );
     let err = Engine::new()
@@ -708,7 +720,7 @@ fn const_forward_script_qualified_rejected_at_parse() {
 fn const_forward_cross_kind_base_rejected_at_parse() {
     // One base name rides exactly one export kind: a forwarded
     // CONST base colliding with a FUNC or TYPE export (either
-    // order) is the same duplicate as two bare names.
+    // order) is the same duplicate as two identical names.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     for (order, lib) in [
@@ -720,7 +732,7 @@ fn const_forward_cross_kind_base_rejected_at_parse() {
                     RETURN 1
                 }
                 EXPORT FOO
-                EXPORT CONST A::FOO
+                EXPORT CONST $A::FOO
             "#},
         ),
         (
@@ -730,7 +742,7 @@ fn const_forward_cross_kind_base_rejected_at_parse() {
                 FUNC FOO(): INT {
                     RETURN 1
                 }
-                EXPORT CONST A::FOO
+                EXPORT CONST $A::FOO
                 EXPORT FOO
             "#},
         ),
@@ -740,7 +752,7 @@ fn const_forward_cross_kind_base_rejected_at_parse() {
                 IMPORT ["a.oxdock" AS A]
                 TYPE FOO = INT
                 EXPORT TYPE FOO
-                EXPORT CONST A::FOO
+                EXPORT CONST $A::FOO
             "#},
         ),
         (
@@ -748,7 +760,7 @@ fn const_forward_cross_kind_base_rejected_at_parse() {
             indoc! {r#"
                 IMPORT ["a.oxdock" AS A]
                 TYPE FOO = INT
-                EXPORT CONST A::FOO
+                EXPORT CONST $A::FOO
                 EXPORT TYPE FOO
             "#},
         ),
@@ -780,8 +792,8 @@ fn const_forward_unread_broken_fails_at_load() {
         &root,
         "a.oxdock",
         indoc! {r#"
-            CONST N: INT = 1
-            EXPORT CONST N
+            CONST $N: INT = 1
+            EXPORT CONST $N
         "#},
     );
     write_lib(
@@ -789,7 +801,7 @@ fn const_forward_unread_broken_fails_at_load() {
         "b.oxdock",
         indoc! {r#"
             IMPORT ["a.oxdock" AS A]
-            EXPORT CONST A::MISSING
+            EXPORT CONST $A::MISSING
         "#},
     );
     let err = Engine::new()
@@ -812,8 +824,8 @@ fn const_keypath_on_alias_fails_with_copy_hint() {
         &root,
         "lib.oxdock",
         indoc! {r#"
-            CONST LIMITS: MAP<ANY> = {max: 10}
-            EXPORT CONST LIMITS
+            CONST $LIMITS: MAP<ANY> = {max: 10}
+            EXPORT CONST $LIMITS
         "#},
     );
     let err = Engine::new()
@@ -821,7 +833,7 @@ fn const_keypath_on_alias_fails_with_copy_hint() {
             &root,
             indoc! {r#"
                 IMPORT ["lib.oxdock" AS LIB]
-                ASSERT_EQ LIB::LIMITS.max 10
+                LET $v: INT = $LIB::LIMITS.max
             "#},
         )
         .expect_err("key paths on ALIAS::NAME must fail");
@@ -837,20 +849,20 @@ fn const_nested_freeze_refuses_inner_mutation() {
     for script in [
         indoc! {r#"
             IMPORT [STD]
-            CONST M: MAP<ANY> = {nested: {x: 1}}
-            LET $inner: MAP<ANY> = M.nested
+            CONST $M: MAP<ANY> = {nested: {x: 1}}
+            LET $inner: MAP<ANY> = $M.nested
             LET $z: MAP<ANY> = MAP_SET($inner, "y", 2)
         "#},
         indoc! {r#"
             IMPORT [STD]
-            CONST M: MAP<ANY> = {items: ["a"]}
-            LET $items: LIST<STRING> = M.items
+            CONST $M: MAP<ANY> = {items: ["a"]}
+            LET $items: LIST<STRING> = $M.items
             LIST_APPEND $items "b"
         "#},
         indoc! {r#"
             IMPORT [STD]
-            CONST C: LIST<ANY> = [{x: 1}]
-            LET $first: MAP<ANY> = C.0
+            CONST $C: LIST<ANY> = [{x: 1}]
+            LET $first: MAP<ANY> = $C.0
             LET $z: MAP<ANY> = MERGE_MAPS([$first], "overwrite")
         "#},
     ] {
@@ -872,11 +884,11 @@ fn const_imported_value_stays_immutable() {
         &root,
         "lib.oxdock",
         indoc! {r#"
-            CONST VERSION: STRING = "1.2.3"
-            CONST LIMITS: MAP<ANY> = {max: 10}
-            CONST ITEMS: LIST<STRING> = ["a"]
-            EXPORT CONST VERSION
-            EXPORT [CONST LIMITS, CONST ITEMS]
+            CONST $VERSION: STRING = "1.2.3"
+            CONST $LIMITS: MAP<ANY> = {max: 10}
+            CONST $ITEMS: LIST<STRING> = ["a"]
+            EXPORT CONST $VERSION
+            EXPORT [CONST $LIMITS, CONST $ITEMS]
         "#},
     );
     // Scalar copies rebind like any LET; frozen-ness only guards
@@ -886,7 +898,7 @@ fn const_imported_value_stays_immutable() {
             &root,
             indoc! {r#"
                 IMPORT ["lib.oxdock" AS LIB]
-                LET $v: STRING = LIB::VERSION
+                LET $v: STRING = $LIB::VERSION
                 $v = "other"
                 ASSERT_EQ $v "other"
             "#},
@@ -898,12 +910,12 @@ fn const_imported_value_stays_immutable() {
         indoc! {r#"
             IMPORT ["lib.oxdock" AS LIB]
             IMPORT [STD]
-            LET $lim: MAP<ANY> = LIB::LIMITS
+            LET $lim: MAP<ANY> = $LIB::LIMITS
             LET $z: MAP<ANY> = MAP_SET($lim, "x", 1)
         "#},
         indoc! {r#"
             IMPORT ["lib.oxdock" AS LIB]
-            LET $items: LIST<STRING> = LIB::ITEMS
+            LET $items: LIST<STRING> = $LIB::ITEMS
             LIST_APPEND $items "b"
         "#},
     ] {
@@ -928,15 +940,15 @@ fn const_export_names_share_one_registry() {
             FUNC FOO(): INT {
                 RETURN 1
             }
-            CONST FOO: INT = 2
+            CONST $FOO: INT = 2
             EXPORT FOO
-            EXPORT CONST FOO
+            EXPORT CONST $FOO
         "#},
         indoc! {r#"
             TYPE FOO = MAP<x: INT>
-            CONST FOO: INT = 2
+            CONST $FOO: INT = 2
             EXPORT TYPE FOO
-            EXPORT CONST FOO
+            EXPORT CONST $FOO
         "#},
     ] {
         write_lib(&root, "lib.oxdock", lib);
@@ -960,8 +972,8 @@ fn const_export_names_share_one_registry() {
             FUNC FOO(): INT {
                 RETURN 1
             }
-            CONST FOO: INT = 2
-            EXPORT CONST FOO
+            CONST $FOO: INT = 2
+            EXPORT CONST $FOO
         "#},
     );
     Engine::new()
@@ -969,7 +981,7 @@ fn const_export_names_share_one_registry() {
             &root,
             indoc! {r#"
                 IMPORT ["lib.oxdock" AS LIB]
-                LET $x: INT = LIB::FOO
+                LET $x: INT = $LIB::FOO
                 ASSERT_EQ $x 2
             "#},
         )
@@ -982,15 +994,17 @@ fn const_readline_and_prompt_refuse_const() {
     let root = guard_root(&temp);
     // `READ_LINE`/`PROMPT` declare when absent but mutate when
     // present: onto a `CONST` both must refuse, statically (new
-    // `is_const` gates) and at runtime (`mutate_var`).
+    // `READ_LINE`/`PROMPT` only bind `$var`: a bare word never
+    // names a target, so `$CONST` is the only way to attempt a
+    // CONST write through them — and the gate refuses it.
     for script in [
         indoc! {r#"
-            CONST X: STRING = "a"
-            READ_LINE X
+            CONST $X: STRING = "a"
+            READ_LINE $X
         "#},
         indoc! {r#"
-            CONST X: STRING = "a"
-            PROMPT X "name?"
+            CONST $X: STRING = "a"
+            PROMPT $X "name?"
         "#},
     ] {
         let err = Engine::new()
@@ -1012,16 +1026,16 @@ fn const_async_redeclare_fails() {
     // mirrors the runtime redeclare error.
     for (first, second) in [
         (
-            "CONST T: HANDLE<INT> = ASYNC { RETURN 1 }",
+            "CONST $T: HANDLE<INT> = ASYNC { RETURN 1 }",
             "LET $T: HANDLE<INT> = ASYNC { RETURN 2 }",
         ),
         (
             "LET $T: HANDLE<INT> = ASYNC { RETURN 1 }",
-            "CONST T: HANDLE<INT> = ASYNC { RETURN 2 }",
+            "CONST $T: HANDLE<INT> = ASYNC { RETURN 2 }",
         ),
         (
-            "CONST T: HANDLE<INT> = ASYNC { RETURN 1 }",
-            "CONST T: HANDLE<INT> = ASYNC { RETURN 2 }",
+            "CONST $T: HANDLE<INT> = ASYNC { RETURN 1 }",
+            "CONST $T: HANDLE<INT> = ASYNC { RETURN 2 }",
         ),
     ] {
         let err = Engine::new()
@@ -1044,7 +1058,7 @@ fn const_guards_are_site_aware() {
         .run_script(
             &root,
             indoc! {r#"
-                [family:unix] CONST X: INT = 1
+                [family:unix] CONST $X: INT = 1
                 [family:windows] LET $X: INT = 2
                 [family:windows] $X = 3
             "#},
@@ -1055,7 +1069,7 @@ fn const_guards_are_site_aware() {
         .run_script(
             &root,
             indoc! {r#"
-                [family:unix] CONST X: INT = 1
+                [family:unix] CONST $X: INT = 1
                 [family:windows] LET $X: INT = 2
                 [family:unix] $X = 3
             "#},
@@ -1075,26 +1089,26 @@ fn const_qualified_reads_in_math_call_args_and_templates() {
         &root,
         "lib.oxdock",
         indoc! {r#"
-            CONST N: INT = 4
+            CONST $N: INT = 4
             FUNC DOUBLE($x: INT): INT {
                 RETURN $x * 2
             }
             EXPORT DOUBLE
-            EXPORT CONST N
+            EXPORT CONST $N
         "#},
     );
-    // `ALIAS::NAME` rides every expression position a bare
-    // variable does: math operands, call arguments, templates.
+    // `$ALIAS::NAME` rides every expression position a `$var`
+    // does: math operands, call arguments, templates.
     Engine::new()
         .run_script(
             &root,
             indoc! {r#"
                 IMPORT ["lib.oxdock" AS LIB]
-                LET $e: INT = LIB::N * 2
+                LET $e: INT = $LIB::N * 2
                 ASSERT_EQ $e 8
-                LET $d: INT = LIB::DOUBLE(LIB::N)
+                LET $d: INT = LIB::DOUBLE($LIB::N)
                 ASSERT_EQ $d 8
-                LET $t: STRING = "n={{ LIB::N }}"
+                LET $t: STRING = "n={{ $LIB::N }}"
                 ASSERT_EQ $t "n=4"
             "#},
         )
@@ -1113,16 +1127,16 @@ fn const_ambiguous_alias_fails_loud() {
         &root,
         "a.oxdock",
         indoc! {r#"
-            CONST X: INT = 1
-            EXPORT CONST X
+            CONST $X: INT = 1
+            EXPORT CONST $X
         "#},
     );
     write_lib(
         &root,
         "b.oxdock",
         indoc! {r#"
-            CONST X: INT = 2
-            EXPORT CONST X
+            CONST $X: INT = 2
+            EXPORT CONST $X
         "#},
     );
     let err = Engine::new()
@@ -1136,7 +1150,7 @@ fn const_ambiguous_alias_fails_loud() {
                 IF $go {
                     IMPORT ["b.oxdock" AS LIB]
                 }
-                LET $x: INT = LIB::X
+                LET $x: INT = $LIB::X
             "#},
         )
         .expect_err("ambiguous CONST must fail");
@@ -1151,7 +1165,7 @@ fn const_missing_hints_stay_alias_scoped() {
         &root,
         "a.oxdock",
         indoc! {r#"
-            CONST SHARED: INT = 1
+            CONST $SHARED: INT = 1
             LET $priv: STRING = "shh"
         "#},
     );
@@ -1163,7 +1177,7 @@ fn const_missing_hints_stay_alias_scoped() {
             indoc! {r#"
                 IMPORT ["a.oxdock" AS A]
                 IMPORT ["b.oxdock" AS B]
-                LET $x: INT = B::SHARED
+                LET $x: INT = $B::SHARED
             "#},
         )
         .expect_err("cross-alias typo must stay generic");
@@ -1178,7 +1192,7 @@ fn const_missing_hints_stay_alias_scoped() {
             &root,
             indoc! {r#"
                 IMPORT ["a.oxdock" AS A]
-                LET $x: INT = A::SHARED
+                LET $x: INT = $A::SHARED
             "#},
         )
         .expect_err("same-alias CONST typo must hint EXPORT");
@@ -1191,7 +1205,7 @@ fn const_missing_hints_stay_alias_scoped() {
             &root,
             indoc! {r#"
                 IMPORT ["a.oxdock" AS A]
-                LET $x: STRING = A::priv
+                LET $x: STRING = $A::priv
             "#},
         )
         .expect_err("same-alias LET typo must hint non-exportability");
@@ -1211,8 +1225,8 @@ fn const_inside_func_body_refuses_mutation() {
             &root,
             indoc! {r#"
                 FUNC MAKE(): INT {
-                    CONST C: INT = 5
-                    RETURN C
+                    CONST $C: INT = 5
+                    RETURN $C
                 }
                 LET $r: INT = MAKE()
                 ASSERT_EQ $r 5
@@ -1225,9 +1239,9 @@ fn const_inside_func_body_refuses_mutation() {
             &root,
             indoc! {r#"
                 FUNC BAD(): INT {
-                    CONST C: INT = 5
-                    C = 6
-                    RETURN C
+                    CONST $C: INT = 5
+                    $C = 6
+                    RETURN $C
                 }
                 LET $r: INT = BAD()
             "#},
@@ -1249,11 +1263,12 @@ fn const_loop_var_shadows_and_iterates() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST I: INT = 99
+                CONST $I: INT = 99
                 FOR $I: INT IN [1, 2, 3] {
                     ECHO $I
                 }
-                ASSERT_EQ I 99
+                LET $held: INT = $I
+                ASSERT_EQ $held 99
             "#},
         )
         .expect("loop var shadows outer CONST");
@@ -1262,8 +1277,8 @@ fn const_loop_var_shadows_and_iterates() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST ITEMS: LIST<STRING> = ["a", "b"]
-                FOR $s: STRING IN ITEMS {
+                CONST $ITEMS: LIST<STRING> = ["a", "b"]
+                FOR $s: STRING IN $ITEMS {
                     APPEND seen.txt $s
                 }
                 LET $got: STRING = READ seen.txt
@@ -1286,8 +1301,9 @@ fn const_inner_const_shadows_outer_let() {
             indoc! {r#"
                 LET $X: INT = 1
                 [bool:true] {
-                    CONST X: INT = 10
-                    ASSERT_EQ X 10
+                    CONST $X: INT = 10
+                    LET $t: INT = $X
+                    ASSERT_EQ $t 10
                 }
                 ASSERT_EQ $X 1
             "#},
@@ -1299,8 +1315,8 @@ fn const_inner_const_shadows_outer_let() {
             indoc! {r#"
                 LET $X: INT = 1
                 [bool:true] {
-                    CONST X: INT = 10
-                    X = 11
+                    CONST $X: INT = 10
+                    $X = 11
                 }
             "#},
         )
@@ -1312,33 +1328,33 @@ fn const_inner_const_shadows_outer_let() {
 }
 
 #[test]
-fn const_bare_pipe_and_control_flow_reads() {
+fn const_sigiled_pipe_and_control_flow_reads() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    // Bare `CONST P: PIPE` mints a pipe like `LET`, and `CONST`
+    // A sigiled `CONST $P: PIPE` mints a pipe like `LET`, and `CONST`
     // values read in every condition position.
     Engine::new()
         .run_script(
             &root,
             indoc! {r#"
-                CONST P: PIPE
-                WITH_IO [stdout=P] {
+                CONST $P: PIPE
+                WITH_IO [stdout=$P] {
                     ECHO hi
                 }
-                WITH_IO [stdin=P] READ_LINE $line
+                WITH_IO [stdin=$P] READ_LINE $line
                 ASSERT_EQ $line "hi"
-                CONST MODE: STRING = "go"
-                CONST LIMIT: INT = 2
+                CONST $MODE: STRING = "go"
+                CONST $LIMIT: INT = 2
                 LET $n: INT = 0
-                IF MODE == "go" {
+                IF $MODE == "go" {
                     WRITE marker.txt "branched"
                 }
-                SWITCH MODE {
+                SWITCH $MODE {
                     CASE "go" {
                         APPEND marker.txt "switched"
                     }
                 }
-                WHILE $n < LIMIT {
+                WHILE $n < $LIMIT {
                     $n = $n + 1
                 }
                 ASSERT_EQ $n 2
@@ -1363,7 +1379,7 @@ fn const_func_export_with_private_const_coexists() {
             FUNC FOO(): INT {
                 RETURN 1
             }
-            CONST FOO: INT = 2
+            CONST $FOO: INT = 2
             EXPORT FOO
         "#},
     );
@@ -1387,7 +1403,7 @@ fn const_module_local_shadow_stays_mutable() {
         &root,
         "lib.oxdock",
         indoc! {r#"
-            CONST X: INT = 1
+            CONST $X: INT = 1
             FUNC SHADOWED(): INT {
                 LET $X: INT = 2
                 $X = 3
@@ -1419,11 +1435,11 @@ fn const_local_scalar_alias_rebinds() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST S: STRING = "a"
-                LET $copy: STRING = S
+                CONST $S: STRING = "a"
+                LET $copy: STRING = $S
                 $copy = "b"
                 ASSERT_EQ $copy "b"
-                ASSERT_EQ S "a"
+                ASSERT_EQ {{ $S }} "a"
             "#},
         )
         .expect("scalar CONST alias rebinds, original holds");
@@ -1437,10 +1453,10 @@ fn const_qualified_targets_never_bind() {
         &root,
         "lib.oxdock",
         indoc! {r#"
-            CONST N: INT = 4
-            CONST ITEMS: LIST<STRING> = ["a"]
-            EXPORT CONST N
-            EXPORT [CONST ITEMS]
+            CONST $N: INT = 4
+            CONST $ITEMS: LIST<STRING> = ["a"]
+            EXPORT CONST $N
+            EXPORT [CONST $ITEMS]
         "#},
     );
     // `ALIAS::NAME` is a read-only expression: it never serves as
@@ -1449,21 +1465,21 @@ fn const_qualified_targets_never_bind() {
         (
             indoc! {r#"
                 IMPORT ["lib.oxdock" AS LIB]
-                LIB::N = 5
+                $LIB::N = 5
             "#},
             "never binding targets",
         ),
         (
             indoc! {r#"
                 IMPORT ["lib.oxdock" AS LIB]
-                LIST_APPEND LIB::ITEMS "b"
+                LIST_APPEND $LIB::ITEMS "b"
             "#},
-            "got expression LIB::ITEMS",
+            "expected $var",
         ),
         (
             indoc! {r#"
                 IMPORT ["lib.oxdock" AS LIB]
-                READ_LINE LIB::N
+                READ_LINE $LIB::N
             "#},
             "requires a $variable",
         ),
@@ -1483,8 +1499,8 @@ fn const_direct_qualified_functional_rebuild_fails() {
         &root,
         "lib.oxdock",
         indoc! {r#"
-            CONST LIMITS: MAP<ANY> = {max: 10}
-            EXPORT CONST LIMITS
+            CONST $LIMITS: MAP<ANY> = {max: 10}
+            EXPORT CONST $LIMITS
         "#},
     );
     // No local copy needed: the qualified value itself carries the
@@ -1495,7 +1511,7 @@ fn const_direct_qualified_functional_rebuild_fails() {
             indoc! {r#"
                 IMPORT [STD]
                 IMPORT ["lib.oxdock" AS LIB]
-                LET $z: MAP<ANY> = MAP_SET(LIB::LIMITS, "x", 1)
+                LET $z: MAP<ANY> = MAP_SET($LIB::LIMITS, "x", 1)
             "#},
         )
         .expect_err("direct MAP_SET on qualified CONST must fail");
@@ -1515,13 +1531,14 @@ fn const_func_param_shadows_outer_const() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST X: INT = 1
+                CONST $X: INT = 1
                 FUNC F($X: INT): INT {
                     RETURN $X
                 }
                 LET $r: INT = F(7)
                 ASSERT_EQ $r 7
-                ASSERT_EQ X 1
+                LET $held: INT = $X
+                ASSERT_EQ $held 1
             "#},
         )
         .expect("func param shadows outer CONST");
@@ -1538,8 +1555,8 @@ fn const_declares_inside_loop_bodies() {
             &root,
             indoc! {r#"
                 FOR $i: INT IN [1, 2] {
-                    CONST C: INT = 5
-                    ECHO C
+                    CONST $C: INT = 5
+                    ECHO $C
                 }
                 ECHO loop-ok
             "#},
@@ -1559,13 +1576,13 @@ fn const_local_reads_in_templates_math_and_calls() {
                 FUNC D($x: INT): INT {
                     RETURN $x * 2
                 }
-                CONST S: STRING = "hi"
-                CONST A: INT = 3
-                LET $t: STRING = "{{ S }}!"
+                CONST $S: STRING = "hi"
+                CONST $A: INT = 3
+                LET $t: STRING = "{{ $S }}!"
                 ASSERT_EQ $t "hi!"
-                LET $m: INT = A * 2
+                LET $m: INT = $A * 2
                 ASSERT_EQ $m 6
-                LET $d: INT = D(A)
+                LET $d: INT = D($A)
                 ASSERT_EQ $d 6
             "#},
         )
@@ -1582,17 +1599,17 @@ fn const_switch_case_and_kv_iteration_read_const() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST GO: STRING = "go"
+                CONST $GO: STRING = "go"
                 LET $mode: STRING = "go"
                 SWITCH $mode {
-                    CASE GO {
+                    CASE $GO {
                         WRITE hit.txt "matched"
                     }
                 }
                 LET $h: STRING = READ hit.txt
                 ASSERT_EQ $h "matched"
-                CONST M: MAP<ANY> = {a: "x", b: "y"}
-                FOR $k: STRING, $v: STRING IN M {
+                CONST $M: MAP<ANY> = {a: "x", b: "y"}
+                FOR $k: STRING, $v: STRING IN $M {
                     APPEND seen.txt "{{ $k }}={{ $v }}"
                 }
                 LET $g: STRING = READ seen.txt
@@ -1604,17 +1621,17 @@ fn const_switch_case_and_kv_iteration_read_const() {
 }
 
 #[test]
-fn const_await_cancel_display_round_trips_bare() {
-    // Bare `CONST` handles must survive `Display` without gaining a
-    // `$` sigil: `AWAIT TASK`, `CANCEL TASK`, and both await-capture
-    // forms re-parse from their rendered spelling.
+fn const_await_cancel_display_round_trips_sigiled() {
+    // Sigiled `$CONST` handles survive `Display` verbatim:
+    // `AWAIT $TASK`, `CANCEL $TASK`, and both await-capture forms
+    // re-parse from their rendered spelling.
     for script in [
-        "CONST TASK: HANDLE<INT> = ASYNC { RETURN 1 }\nAWAIT TASK\n",
-        "CONST TASK: HANDLE<VOID> = ASYNC { RETURN }\nCANCEL TASK\n",
-        "CONST TASK: HANDLE<INT> = ASYNC { RETURN 7 }\nLET $v: INT = AWAIT TASK\n",
-        "CONST TASK: HANDLE<INT> = ASYNC { RETURN 7 }\nCONST OUT: INT = AWAIT TASK\n",
+        "CONST $TASK: HANDLE<INT> = ASYNC { RETURN 1 }\nAWAIT $TASK\n",
+        "CONST $TASK: HANDLE<VOID> = ASYNC { RETURN }\nCANCEL $TASK\n",
+        "CONST $TASK: HANDLE<INT> = ASYNC { RETURN 7 }\nLET $v: INT = AWAIT $TASK\n",
+        "CONST $TASK: HANDLE<INT> = ASYNC { RETURN 7 }\nCONST $OUT: INT = AWAIT $TASK\n",
     ] {
-        let steps = oxdock_core::parse_script(script).expect("parse bare CONST handle");
+        let steps = oxdock_core::parse_script(script).expect("parse sigiled CONST handle");
         let rendered = steps
             .iter()
             .map(|s| s.kind.to_string())
@@ -1623,14 +1640,13 @@ fn const_await_cancel_display_round_trips_bare() {
             + "\n";
         oxdock_core::parse_script(&rendered).expect("re-parse rendered CONST handle");
     }
-    // Sigiled `$TASK` on a `CONST` pipe fails in `WITH_IO` like every
-    // other expression position.
+    // A `CONST` pipe wires like any other binding: using the handle
+    // never rebinds it, so `WITH_IO` accepts `$P` either way.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = Engine::new()
-        .run_script(&root, "CONST P: PIPE\nWITH_IO [stdout=$P] ECHO hi\n")
-        .expect_err("WITH_IO must reject $CONST pipe");
-    assert!(err.to_string().contains("CONST reads bare"), "{err}");
+    Engine::new()
+        .run_script(&root, "CONST $P: PIPE\nWITH_IO [stdout=$P] ECHO hi\n")
+        .expect("WITH_IO accepts a CONST pipe handle");
 }
 
 #[test]
@@ -1645,13 +1661,13 @@ fn entry_const_visible_in_entry_func() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
-                CONST WORDS: LIST<STRING> = ["alpha", "bravo", "charlie"]
+                CONST $WORDS: LIST<STRING> = ["alpha", "bravo", "charlie"]
                 FUNC COUNT(): INT {
-                    RETURN LEN(WORDS)
+                    RETURN LEN($WORDS)
                 }
                 FUNC FIRST(): STRING {
                     LET $first: STRING = ""
-                    FOR $i: INT, $w: STRING IN WORDS {
+                    FOR $i: INT, $w: STRING IN $WORDS {
                         IF $i == 0 {
                             $first = $w
                         }
@@ -1680,15 +1696,15 @@ fn entry_const_call_before_declare_fails() {
             indoc! {r#"
                 IMPORT [STD]
                 FUNC EARLY(): STRING {
-                    RETURN MARKER
+                    RETURN $MARKER
                 }
                 LET $r: STRING = EARLY()
-                CONST MARKER: STRING = "late"
+                CONST $MARKER: STRING = "late"
             "#},
         )
         .expect_err("call before CONST declaration must fail");
     assert!(
-        format!("{err:#}").contains("undefined CONST MARKER"),
+        format!("{err:#}").contains("undefined variable $MARKER"),
         "{err:#}"
     );
 }
@@ -1704,9 +1720,9 @@ fn entry_const_visible_across_nested_entry_calls() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
-                CONST BASE: INT = 21
+                CONST $BASE: INT = 21
                 FUNC DOUBLE(): INT {
-                    RETURN BASE * 2
+                    RETURN $BASE * 2
                 }
                 FUNC QUAD(): INT {
                     LET $d: INT = DOUBLE()
@@ -1728,17 +1744,17 @@ fn entry_const_mutation_from_func_fails() {
     for script in [
         indoc! {r#"
             IMPORT [STD]
-            CONST GREETING: STRING = "hi"
+            CONST $GREETING: STRING = "hi"
             FUNC REASSIGN(): VOID {
-                GREETING = "bye"
+                $GREETING = "bye"
             }
             REASSIGN()
         "#},
         indoc! {r#"
             IMPORT [STD]
-            CONST ITEMS: LIST<STRING> = ["a"]
+            CONST $ITEMS: LIST<STRING> = ["a"]
             FUNC TAMPER(): VOID {
-                LIST_APPEND ITEMS "b"
+                $ITEMS = ["b"]
             }
             TAMPER()
         "#},
@@ -1764,10 +1780,10 @@ fn entry_let_stays_invisible_while_const_shows() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
-                CONST C: STRING = "const-val"
+                CONST $C: STRING = "const-val"
                 LET $v: STRING = "let-val"
                 FUNC MIXED(): STRING {
-                    RETURN C
+                    RETURN $C
                 }
                 LET $c: STRING = MIXED()
                 ASSERT_EQ $c "const-val"
@@ -1779,7 +1795,7 @@ fn entry_let_stays_invisible_while_const_shows() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
-                CONST C: STRING = "const-val"
+                CONST $C: STRING = "const-val"
                 LET $v: STRING = "let-val"
                 FUNC LEAK(): STRING {
                     RETURN $v
@@ -1801,10 +1817,10 @@ fn module_const_visible_in_module_func() {
         &root,
         "lib.oxfile",
         indoc! {r#"
-            CONST TAG: STRING = "lib-tag"
-            EXPORT [CONST TAG, FUNC TAGOF]
+            CONST $TAG: STRING = "lib-tag"
+            EXPORT [CONST $TAG, FUNC TAGOF]
             FUNC TAGOF(): STRING {
-                RETURN TAG
+                RETURN $TAG
             }
         "#},
     );
@@ -1832,8 +1848,8 @@ fn qualified_const_readable_in_func_bodies() {
         &root,
         "a.oxfile",
         indoc! {r#"
-            CONST FLAG: STRING = "a-flag"
-            EXPORT [CONST FLAG]
+            CONST $FLAG: STRING = "a-flag"
+            EXPORT [CONST $FLAG]
         "#},
     );
     write_lib(
@@ -1843,7 +1859,7 @@ fn qualified_const_readable_in_func_bodies() {
             IMPORT ["a.oxfile" AS A]
             EXPORT [FUNC SHOW]
             FUNC SHOW(): STRING {
-                RETURN A::FLAG
+                RETURN $A::FLAG
             }
         "#},
     );
@@ -1853,7 +1869,7 @@ fn qualified_const_readable_in_func_bodies() {
             indoc! {r#"
                 IMPORT [STD, "a.oxfile" AS A, "b.oxfile" AS B]
                 FUNC READQ(): STRING {
-                    RETURN A::FLAG
+                    RETURN $A::FLAG
                 }
                 LET $q: STRING = READQ()
                 ASSERT_EQ $q "a-flag"
@@ -1877,7 +1893,7 @@ fn entry_param_and_local_shadow_const_stays_mutable() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
-                CONST X: INT = 1
+                CONST $X: INT = 1
                 FUNC SHADOW($X: INT): INT {
                     $X = $X + 10
                     RETURN $X
@@ -1889,10 +1905,12 @@ fn entry_param_and_local_shadow_const_stays_mutable() {
                 }
                 LET $s: INT = SHADOW(5)
                 ASSERT_EQ $s 15
-                ASSERT_EQ X 1
+                LET $hx: INT = $X
+                ASSERT_EQ $hx 1
                 LET $l: INT = LOCALSHADOW()
                 ASSERT_EQ $l 12
-                ASSERT_EQ X 1
+                LET $hx2: INT = $X
+                ASSERT_EQ $hx2 1
             "#},
         )
         .expect("shadowing param and local stay mutable");
@@ -1910,9 +1928,9 @@ fn entry_nested_callee_sees_file_const_not_caller_param() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
-                CONST BASE: INT = 21
+                CONST $BASE: INT = 21
                 FUNC INNER(): INT {
-                    RETURN BASE
+                    RETURN $BASE
                 }
                 FUNC SHADOW($BASE: INT): INT {
                     LET $inner: INT = INNER()
@@ -1937,14 +1955,14 @@ fn entry_body_local_const_does_not_leak_to_nested_callee() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
-                CONST V: INT = 1
+                CONST $V: INT = 1
                 FUNC INNER(): INT {
-                    RETURN V
+                    RETURN $V
                 }
                 FUNC OUTER(): INT {
-                    CONST V: INT = 2
+                    CONST $V: INT = 2
                     LET $inner: INT = INNER()
-                    RETURN $inner + V
+                    RETURN $inner + $V
                 }
                 LET $r: INT = OUTER()
                 ASSERT_EQ $r 3
@@ -1957,18 +1975,18 @@ fn entry_body_local_const_does_not_leak_to_nested_callee() {
             indoc! {r#"
                 IMPORT [STD]
                 FUNC OUTER(): INT {
-                    CONST ONLY_LOCAL: INT = 5
+                    CONST $ONLY_LOCAL: INT = 5
                     RETURN INNER()
                 }
                 FUNC INNER(): INT {
-                    RETURN ONLY_LOCAL
+                    RETURN $ONLY_LOCAL
                 }
                 LET $r: INT = OUTER()
             "#},
         )
         .expect_err("body-local CONST must stay invisible to nested callees");
     assert!(
-        format!("{err:#}").contains("undefined CONST ONLY_LOCAL"),
+        format!("{err:#}").contains("undefined variable $ONLY_LOCAL"),
         "{err:#}"
     );
 }
@@ -1983,21 +2001,21 @@ fn entry_body_local_const_in_seeded_func_stays_immutable() {
     for script in [
         indoc! {r#"
             IMPORT [STD]
-            CONST A: INT = 1
+            CONST $A: INT = 1
             FUNC F(): INT {
-                CONST B: INT = 2
-                B = 3
-                RETURN B
+                CONST $B: INT = 2
+                $B = 3
+                RETURN $B
             }
             LET $r: INT = F()
         "#},
         indoc! {r#"
             IMPORT [STD]
-            CONST A: INT = 1
+            CONST $A: INT = 1
             FUNC F(): LIST<STRING> {
-                CONST C: LIST<STRING> = ["x"]
-                LIST_APPEND C "y"
-                RETURN C
+                CONST $C: LIST<STRING> = ["x"]
+                $C = ["y"]
+                RETURN $C
             }
             LET $r: LIST<STRING> = F()
         "#},
@@ -2014,8 +2032,8 @@ fn entry_body_local_const_in_seeded_func_stays_immutable() {
 
 #[test]
 fn template_call_reads_local_const_and_key_path() {
-    // Runtime/static agreement: `{{ STD::LEN(ITEMS) }}` and
-    // `{{ STD::LEN(CFG.items) }}` resolve bare local `CONST`s and
+    // Runtime/static agreement: `{{ STD::LEN($ITEMS) }}` and
+    // `{{ STD::LEN($CFG.items) }}` resolve `$`-prefixed local `CONST`s and
     // `CONST` key paths at runtime exactly as the static gate admits.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -2024,11 +2042,11 @@ fn template_call_reads_local_const_and_key_path() {
             &root,
             indoc! {r#"
                 IMPORT [STD]
-                CONST ITEMS: LIST<STRING> = ["a", "b"]
-                LET $t: STRING = "n={{ STD::LEN(ITEMS) }}"
+                CONST $ITEMS: LIST<STRING> = ["a", "b"]
+                LET $t: STRING = "n={{ STD::LEN($ITEMS) }}"
                 ASSERT_EQ $t "n=2"
-                CONST CFG: MAP<items:LIST<STRING>> = {items: ["a", "b", "c"]}
-                LET $u: STRING = "n={{ STD::LEN(CFG.items) }}"
+                CONST $CFG: MAP<items:LIST<STRING>> = {items: ["a", "b", "c"]}
+                LET $u: STRING = "n={{ STD::LEN($CFG.items) }}"
                 ASSERT_EQ $u "n=3"
             "#},
         )
@@ -2068,14 +2086,15 @@ fn func_body_same_frame_const_redeclare_fails() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST X: INT = 99
+                CONST $X: INT = 99
                 FUNC F(): INT {
-                    CONST X: INT = 1
-                    RETURN X
+                    CONST $X: INT = 1
+                    RETURN $X
                 }
                 LET $r: INT = F()
                 ASSERT_EQ $r 1
-                ASSERT_EQ X 99
+                LET $held: INT = $X
+                ASSERT_EQ $held 99
             "#},
         )
         .expect("single body-local CONST shadows file CONST");
@@ -2083,11 +2102,11 @@ fn func_body_same_frame_const_redeclare_fails() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST X: INT = 99
+                CONST $X: INT = 99
                 FUNC F(): INT {
-                    CONST X: INT = 1
-                    CONST X: INT = 2
-                    RETURN X
+                    CONST $X: INT = 1
+                    CONST $X: INT = 2
+                    RETURN $X
                 }
                 LET $r: INT = F()
             "#},
@@ -2114,29 +2133,30 @@ fn func_body_nested_block_const_shadows_cleanly() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST X: INT = 100
+                CONST $X: INT = 100
                 FUNC F(): INT {
-                    CONST X: INT = 1
+                    CONST $X: INT = 1
                     LET $r: INT = 0
                     FOR $i: INT IN [7] {
-                        CONST X: INT = 10
-                        $r = X
+                        CONST $X: INT = 10
+                        $r = $X
                     }
-                    RETURN $r + X
+                    RETURN $r + $X
                 }
                 LET $r: INT = F()
                 ASSERT_EQ $r 11
-                ASSERT_EQ X 100
+                LET $held: INT = $X
+                ASSERT_EQ $held 100
             "#},
         )
         .expect("nested-block CONST shadows function-body CONST");
 }
 
 #[test]
-fn local_bare_const_coexists_with_alias_const() {
-    // Namespace split: imported `CONST`s read only as `ALIAS::NAME`
+fn local_sigiled_const_coexists_with_alias_const() {
+    // Namespace split: imported `CONST`s read only as `$ALIAS::NAME`
     // and never occupy the importer `var_scopes`, so a file
-    // top-level bare `CONST VERSION` coexists with `LIB::VERSION`
+    // top-level `$CONST VERSION` coexists with `$LIB::VERSION`
     // at top level and inside a seeded `FUNC` body, which observes
     // both the seeded file binding and the qualified import.
     let temp = GuardedPath::tempdir().unwrap();
@@ -2145,8 +2165,8 @@ fn local_bare_const_coexists_with_alias_const() {
         &root,
         "lib.oxdock",
         indoc! {r#"
-            CONST VERSION: STRING = "1.2.3"
-            EXPORT CONST VERSION
+            CONST $VERSION: STRING = "1.2.3"
+            EXPORT CONST $VERSION
         "#},
     );
     Engine::new()
@@ -2154,25 +2174,25 @@ fn local_bare_const_coexists_with_alias_const() {
             &root,
             indoc! {r#"
                 IMPORT ["lib.oxdock" AS LIB]
-                CONST VERSION: STRING = "local"
+                CONST $VERSION: STRING = "local"
                 FUNC GETBOTH(): STRING {
-                    RETURN "{{ VERSION }}|{{ LIB::VERSION }}"
+                    RETURN "{{ $VERSION }}|{{ $LIB::VERSION }}"
                 }
-                LET $q: STRING = LIB::VERSION
+                LET $q: STRING = $LIB::VERSION
                 ASSERT_EQ $q "1.2.3"
-                ASSERT_EQ VERSION "local"
+                ASSERT_EQ {{ $VERSION }} "local"
                 LET $b: STRING = GETBOTH()
                 ASSERT_EQ $b "local|1.2.3"
             "#},
         )
-        .expect("local bare CONST coexists with alias CONST");
+        .expect("local sigiled CONST coexists with alias CONST");
 }
 
 #[test]
 fn pipe_talks_across_module_boundary() {
     // Pipes share their backend cell on clone, so a pipe crosses
     // the module boundary by value: as a FUNC argument or as a
-    // copied `EXPORT CONST PIPE`. `WITH_IO` bindings take a local
+    // copied `EXPORT CONST $PIPE`. `WITH_IO` bindings take a local
     // `$var`, so a qualified `LIB::P` must be copied first.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -2185,9 +2205,9 @@ fn pipe_talks_across_module_boundary() {
                     ECHO hello-from-lib
                 }
             }
-            CONST P: PIPE
+            CONST $P: PIPE
             EXPORT EMIT
-            EXPORT CONST P
+            EXPORT CONST $P
         "#},
     );
     // Entry mints the pipe and hands it to the module: the module
@@ -2211,7 +2231,7 @@ fn pipe_talks_across_module_boundary() {
             &root,
             indoc! {r#"
                 IMPORT ["lib.oxdock" AS LIB]
-                LET $q: PIPE = LIB::P
+                LET $q: PIPE = $LIB::P
                 WITH_IO [stdout=$q] {
                     ECHO hi-via-const-pipe
                 }
@@ -2225,7 +2245,7 @@ fn pipe_talks_across_module_boundary() {
 #[test]
 fn run_uses_const_via_template() {
     // `RUN` reads `CONST` only through `{{ }}` templates: the shell
-    // line stays literal text otherwise, so `{{ GREETING }}` expands
+    // line stays literal text otherwise, so `{{ $GREETING }}` expands
     // while bare words never do.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -2233,8 +2253,8 @@ fn run_uses_const_via_template() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST GREETING: STRING = "hello-const"
-                LET $out: STRING = RUN echo "{{ GREETING }}"
+                CONST $GREETING: STRING = "hello-const"
+                LET $out: STRING = RUN echo "{{ $GREETING }}"
                 ASSERT_CONTAINS $out "hello-const"
             "#},
         )
@@ -2243,16 +2263,15 @@ fn run_uses_const_via_template() {
 
 #[test]
 fn run_bare_uppercase_stays_literal() {
-    // Bare uppercase in `RUN` is shell text, never a const ref: raw
-    // `SECRET` survives verbatim instead of resolving (or failing
-    // as undefined `CONST`).
+    // Bare uppercase in `RUN` is shell text, never a binding read:
+    // raw `SECRET` survives verbatim instead of resolving.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     Engine::new()
         .run_script(
             &root,
             indoc! {r#"
-                CONST SECRET: STRING = "s3cr3t-value"
+                CONST $SECRET: STRING = "s3cr3t-value"
                 LET $out: STRING = RUN echo SECRET
                 ASSERT_CONTAINS $out "SECRET"
             "#},
@@ -2266,7 +2285,7 @@ fn run_bare_uppercase_stays_literal() {
         .run_script(
             &root,
             indoc! {r#"
-                CONST SECRET: STRING = "s3cr3t-value"
+                CONST $SECRET: STRING = "s3cr3t-value"
                 LET $out: STRING = RUN echo SECRET
                 ASSERT_EQ $out "SECRET\n"
             "#},
@@ -2276,9 +2295,9 @@ fn run_bare_uppercase_stays_literal() {
 
 #[test]
 fn echo_spellings_read_distinct_stores() {
-    // `$var`, `env:KEY`, bare `WORD`, and `{{ NAME }}` are four
-    // distinct reads: LET binding, script env, literal text, and
-    // CONST binding. Bare never touches the CONST store.
+    // `$var`, `env:KEY`, bare words, and `{{ $NAME }}` are four
+    // distinct reads: LET or CONST binding, script env, literal
+    // text, and CONST binding. Bare never touches any binding.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     Engine::new()
@@ -2287,18 +2306,18 @@ fn echo_spellings_read_distinct_stores() {
             indoc! {r#"
                 LET $note: STRING = "let-hello"
                 ENV DOC_MOOD = "env-hello"
-                CONST BADGE: STRING = "const-hello"
+                CONST $BADGE: STRING = "const-hello"
                 ECHO $note
                 ASSERT_CONTAINS stdout "let-hello"
                 ECHO env:DOC_MOOD
                 ASSERT_CONTAINS stdout "env-hello"
                 ECHO BADGE
-                ASSERT_CONTAINS stdout "const-hello"
-                ECHO "{{ BADGE }}"
+                ASSERT_CONTAINS stdout "BADGE"
+                ECHO "{{ $BADGE }}"
                 ASSERT_CONTAINS stdout "const-hello"
                 LET $raw: STRING = RUN echo BADGE
                 ASSERT_EQ $raw "BADGE\n"
-                LET $cooked: STRING = RUN echo "{{ BADGE }}"
+                LET $cooked: STRING = RUN echo "{{ $BADGE }}"
                 ASSERT_CONTAINS $cooked "const-hello"
             "#},
         )

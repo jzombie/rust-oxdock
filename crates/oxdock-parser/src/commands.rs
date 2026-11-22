@@ -286,19 +286,15 @@ pub(crate) fn is_reserved_const_name(name: &str) -> bool {
     REMOTE_RESERVED_WORDS.contains(&name)
 }
 
-/// Whether `s` reads as a bare `CONST` word: uppercase spelling
-/// without a reserved collision. Single owner for display quoting
-/// so rendered string literals that look like consts quote instead
-/// of misparsing on re-parse.
-fn is_bare_const_word(s: &str) -> bool {
-    crate::constants::is_const_name(s) && !is_reserved_const_name(s)
-}
-
+/// Render one literal so it re-parses to itself: bare-safe words
+/// stay bare, everything else quotes. Statement keywords always
+/// quote: a bare keyword would parse as the statement, not the
+/// value. Bare uppercase words are literal text, never `CONST`
+/// refs, so they render bare like any other literal.
 fn quote_arg(s: &str) -> String {
     let is_safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '/' || c == '.')
-        && !crate::Command::is_statement_keyword(s)
-        && !is_bare_const_word(s);
+        && !crate::Command::is_statement_keyword(s);
     if is_safe && !s.is_empty() {
         s.to_string()
     } else {
@@ -309,8 +305,7 @@ fn quote_arg(s: &str) -> String {
 fn quote_msg(s: &str) -> String {
     let safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.starts_with(|c: char| c.is_ascii_digit())
-        && !crate::Command::is_statement_keyword(s)
-        && !is_bare_const_word(s);
+        && !crate::Command::is_statement_keyword(s);
     if safe && !s.is_empty() {
         s.to_string()
     } else {
@@ -380,8 +375,7 @@ fn fmt_io(b: &IoBinding) -> String {
         IoStream::Cols(cols) => format!("cols={cols}"),
     };
     match &b.pipe {
-        Some(PipeTarget::Var { name, is_const }) if !is_const => format!("{}=${}", s, name),
-        Some(PipeTarget::Var { name, .. }) => format!("{}={}", s, name),
+        Some(PipeTarget::Var { name }) => format!("{}=${}", s, name),
         None => s,
     }
 }
@@ -1346,17 +1340,14 @@ fn lower_equality_args(
 /// and dispatch never restate the `LET`/`CONST` split per form.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BindRhs {
-    /// `LET $v: T = <expr>` / `CONST N: T = <expr>`.
+    /// `LET $v: T = <expr>` / `CONST $N: T = <expr>`.
     Expr(Expr),
     /// `LET $v: T = <cmd>` capture (single command or wrapper).
     Capture(Box<StepKind>),
     /// `LET $v: T = ASYNC { ... }` task body.
     Async(Vec<crate::ast::Step>),
-    /// `LET $v: T = AWAIT $t` / `AWAIT T` join-and-bind.
-    Await {
-        task_var: String,
-        task_is_const: bool,
-    },
+    /// `LET $v: T = AWAIT $t` join-and-bind.
+    Await { task_var: String },
 }
 
 declare_commands! {
@@ -1370,8 +1361,8 @@ declare_commands! {
         Bind { var: String, decl_type: String, is_const: bool, rhs: BindRhs },
         Set { var: String, expr: Expr },
         AsyncBlock { body: Vec<Step> },
-        Await { var: String, is_const: bool },
-        Cancel { var: String, is_const: bool },
+        Await { var: String },
+        Cancel { var: String },
         Timeout { duration: Arg, body: Vec<Step> },
         Fail { code: Option<Arg>, message: Option<Arg>, body: Vec<Step> },
         Isolated { body: Vec<Step> },
@@ -1638,15 +1629,15 @@ declare_commands! {
                 ASSERT_EQ stdout "braced:World\nWorld\n"
             "#} },
             Example { name: "interpolation", fence_meta: None, code: indoc! {r#"
-                # `{{ env:KEY }}` reads the script environment; a bare name
-                # resolves a CONST, `$name` resolves a LET. Spelling rules:
+                # `{{ env:KEY }}` reads the script environment; `$NAME`
+                # reads either binding. Spelling rules:
                 # `script_env:` is always case-sensitive; `env:` is
                 # case-sensitive too, except on Windows where it matches
                 # case-insensitively. Every read must be declared first:
                 # KEY here comes from the ENV below.
                 ENV USER=OxDock
-                CONST WHO: STRING = "Ada"
-                ECHO "Hello {{ env:USER }}! Hi {{ WHO }}! Again {{ script_env:USER }}!"
+                CONST $WHO: STRING = "Ada"
+                ECHO "Hello {{ env:USER }}! Hi {{ $WHO }}! Again {{ script_env:USER }}!"
                 ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada! Again OxDock!"
             "#} },
             Example { name: "undeclared env read fails", fence_meta: Some("expect_error:\"env:OXDOCK_DOC_NO_SUCH_KEY\""), code: indoc! {r#"
@@ -3597,19 +3588,19 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         CommandMeta {
             in_index: true,
             name: KEYWORD_CONST,
-            syntax: "CONST NAME: TYPE = <expr> | CONST NAME: PIPE | CONST NAME: TYPE = ASYNC { <commands> } | CONST NAME: TYPE = <command> | CONST NAME: TYPE = AWAIT TASK | CONST NAME: TYPE = { <commands> }",
+            syntax: "CONST $NAME: TYPE = <expr> | CONST $NAME: PIPE | CONST $NAME: TYPE = ASYNC { <commands> } | CONST $NAME: TYPE = <command> | CONST $NAME: TYPE = AWAIT $TASK | CONST $NAME: TYPE = { <commands> }",
             summary: "Bind deeply immutable script-local values.",
             description: indoc! {r#"
                 Declares a script-local constant with an explicit type. The
                 right-hand side accepts every `LET` form (expression,
                 capture, `ASYNC`, `AWAIT`, inline block, bare `PIPE`).
 
-                Immutability is deep and total: reassignment (`$var = ...`,
-                `NAME = ...`), `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS`
+                Immutability is deep and total: reassignment (`$var = ...`),
+                `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS`
                 on a `CONST` value all fail. Nested containers freeze with
                 the binding, so reaching a list or map through a `CONST`
-                never exposes a mutable handle. Reads use the bare name
-                (never `$NAME`).
+                never exposes a mutable handle. Reads use `$NAME`,
+                exactly like `LET` reads.
 
                 `CONST` and `LET` share one namespace: declaring either
                 twice in the same scope frame is a redeclaration error.
@@ -3626,15 +3617,15 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 scope, while mutable state crosses only as explicit
                 arguments. Visibility is declaration-ordered: a call
                 landing before the `CONST` executes fails instead of
-                reading uninitialized memory. `ALIAS::NAME` reads work
+                reading uninitialized memory. `$ALIAS::NAME` reads work
                 in bodies exactly like at top level. Writes stay
                 forbidden everywhere: a body mutating a file `CONST`
                 fails with the same message as a top-level write.
 
                 `CONST` is the only variable binding an `EXPORT` can name
-                (`EXPORT CONST_NAME`, `EXPORT [CONST A, B]`): `LET`
+                (`EXPORT CONST $NAME`, `EXPORT [CONST $A, $B]`): `LET`
                 bindings never cross the module boundary. Importers read
-                the value as `ALIAS::NAME` (see IMPORT).
+                the value as `$ALIAS::NAME` (see IMPORT).
             "#},
             args: &[],
             flags: &[],
@@ -3644,19 +3635,19 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "const",
                     fence_meta: None,
                     code: indoc! {r#"
-                # CONST reads bare, LET reads sigiled.
-                CONST NAME: STRING = "world"
-                ECHO "hello, {{ NAME }}"
+                # CONST reads through `$`, like LET.
+                CONST $NAME: STRING = "world"
+                ECHO "hello, {{ $NAME }}"
                 ASSERT_CONTAINS stdout "hello, world"
 
                 # Containers freeze with the binding.
-                CONST ITEMS: LIST<STRING> = ["a", "b"]
-                ASSERT_CONTAINS ITEMS "a"
+                CONST $ITEMS: LIST<STRING> = ["a", "b"]
+                ASSERT_CONTAINS {{ $ITEMS }} "a"
 
                 # File CONSTs read inside the file's own FUNCs.
-                CONST GREETING: STRING = "hi"
+                CONST $GREETING: STRING = "hi"
                 FUNC SHOUT(): STRING {
-                    RETURN GREETING
+                    RETURN $GREETING
                 }
                 LET $s: STRING = SHOUT()
                 ASSERT_EQ $s "hi"
@@ -3667,8 +3658,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: Some("expect_error:\"cannot mutate CONST\""),
                     code: indoc! {r#"
                 # SET on a CONST fails instead of rebinding.
-                CONST N: INT = 1
-                N = 2
+                CONST $N: INT = 1
+                $N = 2
             "#},
                 },
                 Example {
@@ -3676,8 +3667,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: Some("expect_error:\"cannot mutate CONST\""),
                     code: indoc! {r#"
                 # LIST_APPEND on a CONST fails instead of pushing.
-                CONST ITEMS: LIST<STRING> = ["a"]
-                LIST_APPEND ITEMS "b"
+                CONST $ITEMS: LIST<STRING> = ["a"]
+                LIST_APPEND $ITEMS "b"
             "#},
                 },
             ],
@@ -5499,11 +5490,7 @@ impl fmt::Display for StepKind {
                 } else {
                     KEYWORD_LET
                 };
-                let name = if *is_const {
-                    var.clone()
-                } else {
-                    format!("${var}")
-                };
+                let name = format!("${var}");
                 match rhs {
                     BindRhs::Expr(expr) => {
                         // Bare pipe declarations round-trip without an initializer.
@@ -5527,23 +5514,12 @@ impl fmt::Display for StepKind {
                         }
                         write!(f, "\n}}")
                     }
-                    BindRhs::Await {
-                        task_var,
-                        task_is_const,
-                    } => {
-                        if *task_is_const {
-                            write!(
-                                f,
-                                "{} {}: {} = {} {}",
-                                keyword, name, decl_type, KEYWORD_AWAIT, task_var
-                            )
-                        } else {
-                            write!(
-                                f,
-                                "{} {}: {} = {} ${}",
-                                keyword, name, decl_type, KEYWORD_AWAIT, task_var
-                            )
-                        }
+                    BindRhs::Await { task_var } => {
+                        write!(
+                            f,
+                            "{} {}: {} = {} ${}",
+                            keyword, name, decl_type, KEYWORD_AWAIT, task_var
+                        )
                     }
                 }
             }
@@ -5555,19 +5531,11 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
-            StepKind::Await { var, is_const } => {
-                if *is_const {
-                    write!(f, "{} {}", KEYWORD_AWAIT, var)
-                } else {
-                    write!(f, "{} ${}", KEYWORD_AWAIT, var)
-                }
+            StepKind::Await { var } => {
+                write!(f, "{} ${}", KEYWORD_AWAIT, var)
             }
-            StepKind::Cancel { var, is_const } => {
-                if *is_const {
-                    write!(f, "{} {}", KEYWORD_CANCEL, var)
-                } else {
-                    write!(f, "{} ${}", KEYWORD_CANCEL, var)
-                }
+            StepKind::Cancel { var } => {
+                write!(f, "{} ${}", KEYWORD_CANCEL, var)
             }
             StepKind::Timeout { duration, body } => {
                 let budget = fmt_raw_arg(duration);
@@ -6110,7 +6078,7 @@ pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> Parse
 /// module member (opaque modules skip the member check; the runtime
 /// registry resolves them or fails serving). `EXPORT CONST` names must
 /// match a top-level `CONST` binding, or forward one with a qualified
-/// `ALIAS::NAME` naming a visible import (same gate as func
+/// `$ALIAS::NAME` naming a visible import (same gate as func
 /// re-exports; existence resolves where the import loads, since parse
 /// performs no IO). `LET` bindings never satisfy an export.
 /// Duplicates are rejected at the EXPORT site. Promoted
@@ -6181,16 +6149,17 @@ pub(crate) fn validate_exports(
         }
     }
     for name in &exports.consts {
-        // `CONST` exports name the binding bare (no `$`): the binding
-        // must be a top-level `CONST` in this file. `LET` bindings
-        // never satisfy an export, even when the spelling matches.
-        // Qualified `ALIAS::NAME` forwards re-export an imported
+        // `CONST` exports name the binding with `$`, exactly like a
+        // read (`EXPORT CONST $N`): the binding must be a top-level
+        // `CONST` in this file. `LET` bindings never satisfy an export,
+        // even when the spelling matches.
+        // Qualified `$ALIAS::NAME` forwards re-export an imported
         // file's `CONST` under this file's alias (same gate as func
         // re-exports): the alias must be a visible import here, and
         // whether the target file exports the name is checked where
         // the import loads (closure validation, then serving), since
         // parse performs no IO. `SCRIPT::` is not a `CONST`
-        // namespace (local `CONST`s always read bare), so it is
+        // namespace (local `CONST`s always read through `$`), so it is
         // rejected here instead of stranding a reader later.
         let valid = match crate::constants::split_qualified(name) {
             None => top_consts.contains(name),
@@ -6200,7 +6169,7 @@ pub(crate) fn validate_exports(
         if !valid {
             let msg = match crate::constants::split_qualified(name) {
                 Some((module, _)) if module == crate::constants::SCRIPT_MODULE_NAME => format!(
-                    "EXPORT CONST `{name}` must name a bare top-level CONST or ALIAS::NAME for a visible import: `SCRIPT::` is not a CONST namespace"
+                    "EXPORT CONST `{name}` must name a top-level CONST (`$NAME`) or `$ALIAS::NAME` for a visible import: `SCRIPT::` is not a CONST namespace"
                 ),
                 Some((module, _)) => format!(
                     "EXPORT CONST `{name}` names unknown import alias `{module}`: import a file as `{module}` to re-export its CONSTs"
@@ -6553,23 +6522,15 @@ pub(crate) fn make_compare(
 pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
     match expr {
         Expr::Literal(v) => Some(vec![MathOp::PushConst(v.clone())]),
-        Expr::Var { name, is_const } => Some(vec![MathOp::Load {
-            name: name.clone(),
-            is_const: *is_const,
-        }]),
+        Expr::Var { name } => Some(vec![MathOp::Load { name: name.clone() }]),
         Expr::ConstRef { alias, name } => Some(vec![MathOp::LoadConstRef {
             alias: alias.clone(),
             name: name.clone(),
         }]),
         Expr::Env(key) => Some(vec![MathOp::LoadEnv(key.clone())]),
-        Expr::KeyPath {
-            base,
-            keys,
-            is_const,
-        } => Some(vec![MathOp::LoadKeyPath {
+        Expr::KeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
             base: base.clone(),
             keys: keys.clone(),
-            is_const: *is_const,
         }]),
         Expr::Call { name, args } => {
             let mut ops = Vec::new();
@@ -6582,10 +6543,7 @@ pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
             });
             Some(ops)
         }
-        Expr::Inspect { name, is_const } => Some(vec![MathOp::Inspect {
-            name: name.clone(),
-            is_const: *is_const,
-        }]),
+        Expr::Inspect { name } => Some(vec![MathOp::Inspect { name: name.clone() }]),
         Expr::Arithmetic { op, left, right } => {
             let mut ops = expr_to_rpn(left)?;
             ops.extend(expr_to_rpn(right)?);
@@ -7220,14 +7178,26 @@ mod tests {
             "{err}"
         );
         assert!(!err.contains("unknown command"), "{err}");
+        // Bare uppercase words are literal text, never variable
+        // targets: a `CONST` list cannot be named here at all.
+        let err = parse_err("LIST_APPEND ITEMS \"a\"\n");
+        assert!(
+            err.contains("invalid syntax for command LIST_APPEND"),
+            "{err}"
+        );
+        assert!(!err.contains("unknown command"), "{err}");
     }
 
     #[test]
     fn read_line_rejects_bare_word_target() {
         // The `$var` shape lives in the lower function now that the
         // central vocabulary holds value types only: a missing sigil
-        // fails lowering with the command-specific error.
+        // fails lowering with the command-specific error. Bare
+        // uppercase is literal text, never a variable target.
         let err = parse_err("READ_LINE reply\n");
+        assert!(err.contains("READ_LINE requires a $variable"), "{err}");
+        assert!(!err.contains("unknown command"), "{err}");
+        let err = parse_err("READ_LINE X\n");
         assert!(err.contains("READ_LINE requires a $variable"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
     }
@@ -7834,7 +7804,6 @@ mod tests {
                 is_const: false,
                 rhs: BindRhs::Await {
                     task_var: "t".to_string(),
-                    task_is_const: false,
                 },
             },
             StepKind::AsyncBlock { body: Vec::new() },
@@ -7846,11 +7815,9 @@ mod tests {
             },
             StepKind::Await {
                 var: "t".to_string(),
-                is_const: false,
             },
             StepKind::Cancel {
                 var: "t".to_string(),
-                is_const: false,
             },
             StepKind::Timeout {
                 duration: Arg::String("1s".to_string(), false),

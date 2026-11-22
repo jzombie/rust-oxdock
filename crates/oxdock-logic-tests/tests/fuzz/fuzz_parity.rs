@@ -140,10 +140,7 @@ fn arb_scalar_literal() -> impl Strategy<Value = Expr> {
 /// Variable operand pool for math/logic generation: short names both
 /// pathways spell identically, with no quoting or module involvement.
 fn arb_math_var() -> impl Strategy<Value = Expr> {
-    "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Var {
-        name,
-        is_const: false,
-    })
+    "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Var { name })
 }
 
 /// Numeric leaves for arithmetic: vars plus non-negative ints and
@@ -451,43 +448,23 @@ fn flat_body_image_eq(a: &Step, b: &Step) -> bool {
 fn arb_leaf_expr() -> impl Strategy<Value = Expr> {
     prop_oneof![
         arb_scalar_literal(),
-        "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Var {
-            name,
-            is_const: false
-        }),
-        "[A-Z][A-Z0-9_]*".prop_map(|name| Expr::Var {
-            name,
-            is_const: true
-        }),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Var { name }),
+        "[A-Z][A-Z0-9_]*".prop_map(|name| Expr::Var { name }),
         ("[A-Z][A-Z0-9_]*", "[A-Z][A-Z0-9_]*")
             .prop_map(|(alias, name)| Expr::ConstRef { alias, name }),
         "[A-Z][A-Z0-9_]*".prop_map(Expr::Env),
-        "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Inspect {
-            name,
-            is_const: false
-        }),
-        "[A-Z][A-Z0-9_]*".prop_map(|name| Expr::Inspect {
-            name,
-            is_const: true
-        }),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Inspect { name }),
+        "[A-Z][A-Z0-9_]*".prop_map(|name| Expr::Inspect { name }),
         (
             "[a-z][a-zA-Z0-9_]*",
             prop::collection::vec("[a-z][a-zA-Z0-9_]*", 1..=2),
         )
-            .prop_map(|(base, keys)| Expr::KeyPath {
-                base,
-                keys,
-                is_const: false
-            }),
+            .prop_map(|(base, keys)| Expr::KeyPath { base, keys }),
         (
             "[A-Z][A-Z0-9_]*",
             prop::collection::vec("[a-z][a-zA-Z0-9_]*", 1..=2),
         )
-            .prop_map(|(base, keys)| Expr::KeyPath {
-                base,
-                keys,
-                is_const: true
-            }),
+            .prop_map(|(base, keys)| Expr::KeyPath { base, keys }),
         prop::collection::vec(safe_string(), 0..=3).prop_map(|items| {
             Expr::List(
                 items
@@ -844,14 +821,8 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                 item: Arg::String(item, false),
             }
         }),
-        "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Await {
-            var: var.clone(),
-            is_const: false
-        }),
-        "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Cancel {
-            var: var.clone(),
-            is_const: false
-        }),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Await { var: var.clone() }),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Cancel { var: var.clone() }),
         (safe_string(), any_msg()).prop_map(|(path, contents)| StepKind::Append {
             path: path.into(),
             contents: Some(contents.into()),
@@ -941,20 +912,14 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             var: var.clone(),
             decl_type: "STRING".to_string(),
             is_const: false,
-            rhs: oxdock_parser::BindRhs::Await {
-                task_var: var,
-                task_is_const: false
-            }
+            rhs: oxdock_parser::BindRhs::Await { task_var: var }
         }),
         ("[A-Z][A-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(out_var, task_var)| {
             StepKind::Bind {
                 var: out_var,
                 decl_type: "STRING".to_string(),
                 is_const: true,
-                rhs: oxdock_parser::BindRhs::Await {
-                    task_var,
-                    task_is_const: false,
-                },
+                rhs: oxdock_parser::BindRhs::Await { task_var },
             }
         }),
         ("[a-z][a-zA-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(var, item)| {
@@ -971,8 +936,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             bindings: vec![IoBinding {
                 stream: IoStream::Stdout,
                 pipe: Some(PipeTarget::Var {
-                    name: "coverage".to_string(),
-                    is_const: false
+                    name: "coverage".to_string()
                 }),
             }],
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
@@ -1114,27 +1078,15 @@ fn arb_command_body_kind() -> impl Strategy<Value = StepKind> {
 fn arb_bool_expr() -> impl Strategy<Value = Expr> {
     prop_oneof![
         any::<bool>().prop_map(|b| Expr::Literal(Value::bool(b))),
-        "[a-z][a-zA-Z0-9_]*".prop_map(|v| Expr::Not(Box::new(Expr::Var {
-            name: v,
-            is_const: false
-        }))),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|v| Expr::Not(Box::new(Expr::Var { name: v }))),
         ("[a-z][a-zA-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(l, r)| Expr::Logical {
             op: LogicalOp::And,
-            left: Box::new(Expr::Var {
-                name: l,
-                is_const: false
-            }),
-            right: Box::new(Expr::Var {
-                name: r,
-                is_const: false
-            }),
+            left: Box::new(Expr::Var { name: l }),
+            right: Box::new(Expr::Var { name: r }),
         }),
         ("[a-z][a-zA-Z0-9_]*", 0u32..999).prop_map(|(v, i)| Expr::Compare {
             op: CompareOp::Eq,
-            left: Box::new(Expr::Var {
-                name: v,
-                is_const: false
-            }),
+            left: Box::new(Expr::Var { name: v }),
             right: Box::new(Expr::Literal(Value::int(i as i64))),
         }),
     ]
@@ -1638,31 +1590,11 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_eq!(ll, rl, "ListAppend list mismatch: {}", msg);
             assert!(arg_content_eq(li, ri), "ListAppend item mismatch: {}", msg);
         }
-        (
-            StepKind::Await {
-                var: l,
-                is_const: lc,
-            },
-            StepKind::Await {
-                var: r,
-                is_const: rc,
-            },
-        ) => {
+        (StepKind::Await { var: l }, StepKind::Await { var: r }) => {
             assert_eq!(l, r, "Await var mismatch: {}", msg);
-            assert_eq!(lc, rc, "Await sigil mismatch: {}", msg);
         }
-        (
-            StepKind::Cancel {
-                var: l,
-                is_const: lc,
-            },
-            StepKind::Cancel {
-                var: r,
-                is_const: rc,
-            },
-        ) => {
+        (StepKind::Cancel { var: l }, StepKind::Cancel { var: r }) => {
             assert_eq!(l, r, "Cancel var mismatch: {}", msg);
-            assert_eq!(lc, rc, "Cancel sigil mismatch: {}", msg);
         }
         (
             StepKind::If {
@@ -1892,54 +1824,36 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
                 var: lo,
                 decl_type: lt,
                 is_const: false,
-                rhs:
-                    oxdock_parser::BindRhs::Await {
-                        task_var: lv,
-                        task_is_const: ltc,
-                    },
+                rhs: oxdock_parser::BindRhs::Await { task_var: lv },
             },
             StepKind::Bind {
                 var: ro,
                 decl_type: rt,
                 is_const: false,
-                rhs:
-                    oxdock_parser::BindRhs::Await {
-                        task_var: rv,
-                        task_is_const: rtc,
-                    },
+                rhs: oxdock_parser::BindRhs::Await { task_var: rv },
             },
         ) => {
             assert_eq!(lo, ro, "AwaitCapture out mismatch: {}", msg);
             assert_eq!(lt, rt, "AwaitCapture type mismatch: {}", msg);
             assert_eq!(lv, rv, "AwaitCapture task mismatch: {}", msg);
-            assert_eq!(ltc, rtc, "AwaitCapture sigil mismatch: {}", msg);
         }
         (
             StepKind::Bind {
                 var: lo,
                 decl_type: lt,
                 is_const: true,
-                rhs:
-                    oxdock_parser::BindRhs::Await {
-                        task_var: lv,
-                        task_is_const: ltc,
-                    },
+                rhs: oxdock_parser::BindRhs::Await { task_var: lv },
             },
             StepKind::Bind {
                 var: ro,
                 decl_type: rt,
                 is_const: true,
-                rhs:
-                    oxdock_parser::BindRhs::Await {
-                        task_var: rv,
-                        task_is_const: rtc,
-                    },
+                rhs: oxdock_parser::BindRhs::Await { task_var: rv },
             },
         ) => {
             assert_eq!(lo, ro, "ConstAwaitCapture out mismatch: {}", msg);
             assert_eq!(lt, rt, "ConstAwaitCapture type mismatch: {}", msg);
             assert_eq!(lv, rv, "ConstAwaitCapture task mismatch: {}", msg);
-            assert_eq!(ltc, rtc, "ConstAwaitCapture sigil mismatch: {}", msg);
         }
         (
             StepKind::WithIo {
@@ -2429,11 +2343,9 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         },
         StepKind::Await {
             var: "coverage".to_string(),
-            is_const: false,
         },
         StepKind::Cancel {
             var: "coverage".to_string(),
-            is_const: false,
         },
         StepKind::Append {
             path: "coverage.txt".into(),
@@ -2460,11 +2372,9 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 op: ArithOp::Add,
                 left: Box::new(Expr::Var {
                     name: "coverage".to_string(),
-                    is_const: false,
                 }),
                 right: Box::new(Expr::Var {
                     name: "coverage".to_string(),
-                    is_const: false,
                 }),
             }),
         },
@@ -2476,7 +2386,6 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 op: CompareOp::Eq,
                 left: Box::new(Expr::Var {
                     name: "coverage".to_string(),
-                    is_const: false,
                 }),
                 right: Box::new(Expr::Literal(Value::int(7))),
             }),
@@ -2487,7 +2396,6 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             is_const: false,
             rhs: oxdock_parser::BindRhs::Expr(Expr::Not(Box::new(Expr::Var {
                 name: "coverage".to_string(),
-                is_const: false,
             }))),
         },
         StepKind::Bind {
@@ -2498,11 +2406,9 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 op: LogicalOp::And,
                 left: Box::new(Expr::Var {
                     name: "coverage".to_string(),
-                    is_const: false,
                 }),
                 right: Box::new(Expr::Var {
                     name: "coverage".to_string(),
-                    is_const: false,
                 }),
             }),
         },
@@ -2687,7 +2593,6 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             is_const: false,
             rhs: oxdock_parser::BindRhs::Await {
                 task_var: "coverage".to_string(),
-                task_is_const: false,
             },
         },
         StepKind::Bind {
@@ -2696,7 +2601,6 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             is_const: true,
             rhs: oxdock_parser::BindRhs::Await {
                 task_var: "coverage".to_string(),
-                task_is_const: false,
             },
         },
         StepKind::For {
@@ -2719,7 +2623,6 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 stream: IoStream::Stdout,
                 pipe: Some(PipeTarget::Var {
                     name: "coverage".to_string(),
-                    is_const: false,
                 }),
             }],
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
@@ -2922,11 +2825,9 @@ fn sample_covered_exprs() -> Vec<Expr> {
         Expr::Literal(Value::bool(true)),
         Expr::Var {
             name: "coverage".to_string(),
-            is_const: false,
         },
         Expr::Var {
             name: "COVERAGE".to_string(),
-            is_const: true,
         },
         Expr::ConstRef {
             alias: "COVERAGE".to_string(),
@@ -2936,12 +2837,10 @@ fn sample_covered_exprs() -> Vec<Expr> {
         Expr::KeyPath {
             base: "coverage".to_string(),
             keys: vec!["key".to_string()],
-            is_const: false,
         },
         Expr::KeyPath {
             base: "COVERAGE".to_string(),
             keys: vec!["key".to_string()],
-            is_const: true,
         },
         Expr::List(vec![Expr::Literal(Value::string("covered".to_string()))]),
         Expr::Map(vec![(
@@ -2950,11 +2849,9 @@ fn sample_covered_exprs() -> Vec<Expr> {
         )]),
         Expr::Inspect {
             name: "coverage".to_string(),
-            is_const: false,
         },
         Expr::Inspect {
             name: "COVERAGE".to_string(),
-            is_const: true,
         },
         Expr::FreshPipe,
         Expr::Block(vec![Step {
@@ -2976,7 +2873,6 @@ fn sample_covered_exprs() -> Vec<Expr> {
             op: CompareOp::Eq,
             left: Box::new(Expr::Var {
                 name: "coverage".to_string(),
-                is_const: false,
             }),
             right: Box::new(Expr::Literal(Value::int(7))),
         },
@@ -2984,26 +2880,21 @@ fn sample_covered_exprs() -> Vec<Expr> {
             op: ArithOp::Add,
             left: Box::new(Expr::Var {
                 name: "coverage".to_string(),
-                is_const: false,
             }),
             right: Box::new(Expr::Var {
                 name: "coverage".to_string(),
-                is_const: false,
             }),
         },
         Expr::Not(Box::new(Expr::Var {
             name: "coverage".to_string(),
-            is_const: false,
         })),
         Expr::Logical {
             op: LogicalOp::And,
             left: Box::new(Expr::Var {
                 name: "coverage".to_string(),
-                is_const: false,
             }),
             right: Box::new(Expr::Var {
                 name: "coverage".to_string(),
-                is_const: false,
             }),
         },
     ]
@@ -3172,7 +3063,6 @@ fn sample_excluded_kinds() -> Vec<StepKind> {
             stream: IoStream::Stdout,
             pipe: Some(PipeTarget::Var {
                 name: "coverage".to_string(),
-                is_const: false,
             }),
         }],
     }]

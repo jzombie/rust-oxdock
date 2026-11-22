@@ -497,8 +497,9 @@ pub fn strip_wrapped_delimiters(src: &str, open: char, close: char) -> Option<&s
 /// One variable read inside a `{{ ... }}` key: a `$a.b` path as its
 /// dotted parts, or a bare `key` as one literal lookup. Call args
 /// contribute their nested `$` refs; env keys contribute nothing.
-/// Structured CONST shapes (`ConstRef`, `KeyPath`, `Var`) are parsed
-/// once here so templates and code agree on every shape.
+/// Bare `CONST` shapes (`ConstRef`, `KeyPath`, `Var`) still classify
+/// here so phases can name them in the `$`-sigil error; only `$`
+/// paths ever resolve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateVar {
     Path(Vec<String>),
@@ -527,6 +528,8 @@ pub enum PlaceholderKey<'a> {
     Dollar(&'a str),
     /// `$ALIAS::NAME` with optional `.key` tail. Single owner for
     /// the split, so no call site restates `split_once("::")`.
+    /// The empty-tail shape resolves; a `.key` tail fails with
+    /// [`qualified_keypath_error`].
     DollarQualified {
         alias: &'a str,
         name: &'a str,
@@ -539,12 +542,15 @@ pub enum PlaceholderKey<'a> {
     /// One `[MODULE::]FUNC(args)` body, through the shared
     /// [`parse_placeholder_call`] grammar.
     Call(PlaceholderCall<'a>),
-    /// `ALIAS::NAME` CONST reference shape.
+    /// Bare `ALIAS::NAME` shape. Never resolves: phases reject it
+    /// with [`bare_sigil_error`] (use `$ALIAS::NAME`).
     ConstRef { alias: &'a str, name: &'a str },
-    /// `NAME.key...` key-path shape (keys validated non-empty, no
-    /// spaces or commas; base is a bare identifier).
+    /// Bare `NAME.key...` shape (keys validated non-empty, no
+    /// spaces or commas; base is a bare identifier). Never resolves:
+    /// phases reject it with [`bare_sigil_error`].
     KeyPath { base: &'a str, keys: Vec<String> },
-    /// Bare identifier shape (`NAME`).
+    /// Bare identifier shape (`NAME`). Never resolves: phases reject
+    /// it with [`bare_sigil_error`] (use `$NAME`).
     Var(&'a str),
     /// Anything else, verbatim: script-var lookup, step-override
     /// lookup, or a hard error, per the caller's contract.
@@ -593,15 +599,20 @@ pub fn parse_bare_key_path(src: &str) -> Option<(&str, Vec<String>)> {
     Some((base, segs))
 }
 
-/// Error text for one `$ALIAS::NAME[.key...]` shape. Single owner
-/// for the wording, so runtime and static phases agree word for word.
-pub fn dollar_qualified_error(alias: &str, name: &str, keys: &[String]) -> String {
-    if keys.is_empty() {
-        format!("CONST reads bare: use {alias}::{name}, not ${alias}::{name}")
-    } else {
-        "key paths on ALIAS::NAME are not supported; copy to a local with LET or CONST first"
-            .to_string()
-    }
+/// Error text for a bare word where only `$` reads a binding:
+/// command arguments, `{{ }}` keys, and placeholder call args never
+/// resolve bare words. Single owner for the wording, so the static
+/// gate and runtime expansion agree word for word.
+pub fn bare_sigil_error(src: &str) -> String {
+    format!("bare `{src}` never reads a binding here; use `${src}`")
+}
+
+/// Error text for a key path on `$ALIAS::NAME`. Qualified reads
+/// never traverse: copy to a local binding first. Single owner for
+/// the wording, so every phase agrees word for word.
+pub fn qualified_keypath_error() -> String {
+    "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+        .to_string()
 }
 
 /// One `$ALIAS::NAME[.key...]` shape from post-`$` rest. Returns the
@@ -724,8 +735,10 @@ pub enum TemplateArg<'a> {
     /// [`parse_var_path`]). Never holds `ALIAS::NAME`: those classify
     /// as [`TemplateArg::DollarQualified`].
     Dollar(&'a str),
-    /// `$ALIAS::NAME` with optional `.key` tail. Single owner for the
-    /// split, so no call site restates `split_once("::")`.
+    /// `$ALIAS::NAME` with optional `.key` tail: the empty tail
+    /// resolves, a `.key` tail fails with [`qualified_keypath_error`].
+    /// Single owner for the split, so no call site restates
+    /// `split_once("::")`.
     DollarQualified {
         alias: &'a str,
         name: &'a str,
@@ -741,11 +754,14 @@ pub enum TemplateArg<'a> {
     /// Bare scalar source (`true`, `false`, numbers; see
     /// [`parse_scalar_literal`]).
     Scalar(&'a str),
-    /// `ALIAS::NAME` CONST reference.
+    /// Bare `ALIAS::NAME` shape. Never resolves: phases reject it
+    /// with [`bare_sigil_error`].
     ConstRef { alias: &'a str, name: &'a str },
-    /// `NAME.key...` path (validated by [`parse_bare_key_path`]).
+    /// Bare `NAME.key...` path (validated by [`parse_bare_key_path`]).
+    /// Never resolves: phases reject it with [`bare_sigil_error`].
     KeyPath { base: &'a str, keys: Vec<String> },
-    /// Bare `NAME` identifier.
+    /// Bare `NAME` identifier. Never resolves: phases reject it with
+    /// [`bare_sigil_error`] (use `$NAME`).
     Var(&'a str),
     /// Anything else: the caller owns the invalid-syntax error.
     Invalid(&'a str),

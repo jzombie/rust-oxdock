@@ -27,8 +27,7 @@ fn let_async_with_io_single_command_binds_task() {
                     assert_eq!(
                         bindings[0].pipe,
                         Some(PipeTarget::Var {
-                            name: "in_chan".to_string(),
-                            is_const: false
+                            name: "in_chan".to_string()
                         })
                     );
                     assert!(
@@ -67,8 +66,7 @@ fn let_with_io_sync_command_captures() {
                     assert_eq!(
                         bindings[0].pipe,
                         Some(PipeTarget::Var {
-                            name: "in_chan".to_string(),
-                            is_const: false
+                            name: "in_chan".to_string()
                         })
                     );
                     assert!(

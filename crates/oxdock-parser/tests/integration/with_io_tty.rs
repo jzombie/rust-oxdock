@@ -32,8 +32,7 @@ fn with_io_tty_full_binding_shape() {
             assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin)
                 && b.pipe
                     == Some(PipeTarget::Var {
-                        name: "answer".to_string(),
-                        is_const: false
+                        name: "answer".to_string()
                     })));
             assert!(
                 bindings
