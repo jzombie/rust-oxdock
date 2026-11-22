@@ -284,12 +284,12 @@ pub struct ExecState<P: ProcessManager> {
     /// guards instead of re-scanning steps against final envs.
     pub(super) init_inherit_stack: Vec<Vec<String>>,
     /// Scope-stack depths that are module-init top levels, innermost
-    /// last: [`ensure_module_init`](super::import::ensure_module_init)
-    /// pushes its isolation scope here so [`record_executed_alias`]
-    /// can tell a module's own top level (unit-top, like the entry's)
-    /// from a lexical block (scope frame, unwinds on exit). Nested
-    /// inits nest strictly, so depths never repeat while live;
-    /// `fork` clears it (the child's scopes restart empty).
+    /// last: `ensure_module_init` (`super::import`) pushes its isolation
+    /// scope here so `record_executed_alias` can tell a module's own
+    /// top level (unit-top, like the entry's) from a lexical block
+    /// (scope frame, unwinds on exit). Nested inits nest strictly,
+    /// so depths never repeat while live; `fork` clears it (the
+    /// child's scopes restart empty).
     pub(super) init_scope_depths: Vec<usize>,
     /// Identity of the task this state executes (`0` = root flow).
     /// Stamped onto pipe handles minted here and compared by the promotion
