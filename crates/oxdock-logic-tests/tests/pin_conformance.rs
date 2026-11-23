@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+#[cfg(unix)]
 use indoc::indoc;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver, to_forward_slashes};
