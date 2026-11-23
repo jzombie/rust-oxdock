@@ -48,69 +48,26 @@ jobs:
         uses: actions/checkout@v6
 
       # The pipeline pin is the call itself: the ref this file was
-      # loaded at. DSL-canonical in helpers/ci-helpers.oxfile
-      # (PIPELINE_PIN): this bash transcribes it because no engine
-      # exists yet at pin time. Branch and tag refs pass through;
-      # pull merge refs ride only their own pull_request event, which
-      # carries no default-branch cache write. The output is `pin`,
-      # never `ref`.
+      # loaded at.
       - name: Resolve pipeline ref
         id: pin
         shell: bash
         run: |
           set -euo pipefail
-          case "${GITHUB_WORKFLOW_REF:-}" in
-            *@*) ;;
-            *)
-              echo "unsupported pipeline ref (no '@ref' in workflow ref)" >&2
-              exit 1
-              ;;
-          esac
-          pin="${GITHUB_WORKFLOW_REF##*@}"
-          case "$pin" in
-            refs/tags/*) pin="${pin#refs/tags/}" ;;
-            refs/heads/*) pin="${pin#refs/heads/}" ;;
-          esac
-          if [ -z "$pin" ]; then
-            echo "unsupported pipeline ref (empty pin)" >&2
-            exit 1
-          fi
-          case "$pin" in
-            refs/pull/*)
-              if [ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]; then
-                echo "unsupported pipeline ref: $pin" >&2
-                exit 1
-              fi
-              ;;
-            refs/*)
-              echo "unsupported pipeline ref: $pin" >&2
-              exit 1
-              ;;
-          esac
-          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+          ref="${GITHUB_WORKFLOW_REF##*@}"
+          ref="${ref#refs/tags/}"
+          ref="${ref#refs/heads/}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Checkout pipeline source
         uses: actions/checkout@v6
         with:
           repository: jzombie/rust-oxdock
-          ref: ${{ steps.pin.outputs.pin }}
+          ref: ${{ steps.pin.outputs.ref }}
           path: pipeline
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      # Engine and pin confirmation in one call: the action acquires
-      # the published binary at the pin (or falls back to source) and
-      # re-derives the pin in DSL. It travels with the pipeline
-      # checkout, so it stays version-locked to the pin. Downstream
-      # callers hold no OxDock code, so this file keeps no local
-      # action of its own.
-      - name: Acquire and confirm pipeline engine
-        uses: ./pipeline/.github/actions/pipeline-engine
-        with:
-          pin: ${{ steps.pin.outputs.pin }}
-          checkout-path: pipeline
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       # Build the caller's workspace first: proc macros (e.g.
       # oxdock_embed! regenerating usage-prebuilt) execute at build

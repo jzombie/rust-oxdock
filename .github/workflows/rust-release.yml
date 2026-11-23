@@ -120,80 +120,45 @@ jobs:
         uses: actions/checkout@v6
 
       # The pipeline pin is the call itself: the ref this file was
-      # loaded at. DSL-canonical in helpers/ci-helpers.oxfile
-      # (PIPELINE_PIN): this bash transcribes it because no engine
-      # exists yet at pin time. Short tags and branches pass through;
-      # pull merge refs ride only their own pull_request event, which
-      # this pipeline never observes. The output is `pin`, never
-      # `ref`.
+      # loaded at. Short tags and branches pass through; PR-merge refs
+      # pass through verbatim (exactly the code under review).
       - name: Resolve pipeline ref
         id: pin
         shell: bash
         run: |
           set -euo pipefail
-          case "${GITHUB_WORKFLOW_REF:-}" in
-            *@*) ;;
-            *)
-              echo "unsupported pipeline ref (no '@ref' in workflow ref)" >&2
-              exit 1
-              ;;
-          esac
-          pin="${GITHUB_WORKFLOW_REF##*@}"
-          case "$pin" in
-            refs/tags/*) pin="${pin#refs/tags/}" ;;
-            refs/heads/*) pin="${pin#refs/heads/}" ;;
-          esac
-          if [ -z "$pin" ]; then
-            echo "unsupported pipeline ref (empty pin)" >&2
-            exit 1
-          fi
-          case "$pin" in
-            refs/pull/*)
-              if [ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]; then
-                echo "unsupported pipeline ref: $pin" >&2
-                exit 1
-              fi
-              ;;
-            refs/*)
-              echo "unsupported pipeline ref: $pin" >&2
-              exit 1
-              ;;
-          esac
-          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+          ref="${GITHUB_WORKFLOW_REF##*@}"
+          ref="${ref#refs/tags/}"
+          ref="${ref#refs/heads/}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Checkout pipeline source
         uses: actions/checkout@v6
         with:
           repository: jzombie/rust-oxdock
-          ref: ${{ steps.pin.outputs.pin }}
+          ref: ${{ steps.pin.outputs.ref }}
           path: rust-release
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Engine and pin confirmation in one call: the action acquires
-      # the published binary at the pin (or falls back to source) and
-      # re-derives the pin in DSL. The action travels with the
-      # pipeline checkout, so it stays version-locked to the pin.
-      - name: Acquire and confirm pipeline engine
-        uses: ./rust-release/.github/actions/pipeline-engine
-        with:
-          pin: ${{ steps.pin.outputs.pin }}
-          checkout-path: rust-release
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      # The script comes from the central checkout, so binary and
-      # script stay mutually consistent. Shell tar lives in the
-      # pipeline-engine action above: cracking the first tarball
-      # predates any engine.
+      # Prefer the already-published binary at the pinned ref; fall back
+      # to a source build when the ref has no release yet (branch under
+      # development). Either way the script comes from the central
+      # checkout, so binary and script stay mutually consistent. Shell
+      # tar here: cracking the first tarball predates any engine.
       - name: Fail unless the confirmation matches the tree
         shell: bash
         env:
           OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
           RELEASE_CONFIRM: ${{ inputs.confirm_version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -x /tmp/pipeline-bin/oxdock ]; then
+          if gh release download "${{ steps.pin.outputs.ref }}" -R jzombie/rust-oxdock -p "oxdock-x86_64-unknown-linux-musl.tar.gz" -D /tmp/pipeline-dl; then
+            mkdir -p /tmp/pipeline-bin
+            tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-musl.tar.gz -C /tmp/pipeline-bin
+            chmod +x /tmp/pipeline-bin/oxdock
             /tmp/pipeline-bin/oxdock rust-release/.github/scripts/gha-rust-validate.oxfile
           else
             cargo run --manifest-path rust-release/Cargo.toml -p oxdock -- rust-release/.github/scripts/gha-rust-validate.oxfile
@@ -382,61 +347,25 @@ jobs:
         uses: actions/checkout@v6
 
       # Same derivation as validate: the pin is the call itself.
-      # DSL-canonical in helpers/ci-helpers.oxfile (PIPELINE_PIN).
       - name: Resolve pipeline ref
         id: pin
         shell: bash
         run: |
           set -euo pipefail
-          case "${GITHUB_WORKFLOW_REF:-}" in
-            *@*) ;;
-            *)
-              echo "unsupported pipeline ref (no '@ref' in workflow ref)" >&2
-              exit 1
-              ;;
-          esac
-          pin="${GITHUB_WORKFLOW_REF##*@}"
-          case "$pin" in
-            refs/tags/*) pin="${pin#refs/tags/}" ;;
-            refs/heads/*) pin="${pin#refs/heads/}" ;;
-          esac
-          if [ -z "$pin" ]; then
-            echo "unsupported pipeline ref (empty pin)" >&2
-            exit 1
-          fi
-          case "$pin" in
-            refs/pull/*)
-              if [ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]; then
-                echo "unsupported pipeline ref: $pin" >&2
-                exit 1
-              fi
-              ;;
-            refs/*)
-              echo "unsupported pipeline ref: $pin" >&2
-              exit 1
-              ;;
-          esac
-          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+          ref="${GITHUB_WORKFLOW_REF##*@}"
+          ref="${ref#refs/tags/}"
+          ref="${ref#refs/heads/}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Checkout pipeline source
         uses: actions/checkout@v6
         with:
           repository: jzombie/rust-oxdock
-          ref: ${{ steps.pin.outputs.pin }}
+          ref: ${{ steps.pin.outputs.ref }}
           path: rust-release
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      # Engine and pin confirmation in one call, same shape as
-      # validate. The action travels with the pipeline checkout, so
-      # it stays version-locked to the pin.
-      - name: Acquire and confirm pipeline engine
-        uses: ./rust-release/.github/actions/pipeline-engine
-        with:
-          pin: ${{ steps.pin.outputs.pin }}
-          checkout-path: rust-release
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download build archives
         if: ${{ inputs.binaries }}
@@ -522,9 +451,10 @@ jobs:
           ./target/runner/oxdock ./.github/scripts/gha-rust-release.oxfile
 
       # Everything else runs the central script with the central runner:
-      # the engine acquired by the pipeline-engine action above
-      # (published binary at the pin, else a source build from the
-      # central checkout). The caller's own binary is never the runner.
+      # published binary at the derived pin if the ref has a release,
+      # else a source build from the central checkout. The caller's own
+      # binary is never the runner. Shell tar below for the same
+      # reason: the first unpack predates any engine.
       - name: Run OxDock's gha-rust-release.oxfile at the derived pin (published binary, else source build)
         if: ${{ !(github.repository == 'jzombie/rust-oxdock' && inputs.binaries) }}
         shell: bash
@@ -538,7 +468,10 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -x /tmp/pipeline-bin/oxdock ]; then
+          if gh release download "${{ steps.pin.outputs.ref }}" -R jzombie/rust-oxdock -p "oxdock-x86_64-unknown-linux-musl.tar.gz" -D /tmp/pipeline-dl; then
+            mkdir -p /tmp/pipeline-bin
+            tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-musl.tar.gz -C /tmp/pipeline-bin
+            chmod +x /tmp/pipeline-bin/oxdock
             /tmp/pipeline-bin/oxdock rust-release/.github/scripts/gha-rust-release.oxfile
           else
             cargo run --manifest-path rust-release/Cargo.toml -p oxdock --features markdown -- rust-release/.github/scripts/gha-rust-release.oxfile
