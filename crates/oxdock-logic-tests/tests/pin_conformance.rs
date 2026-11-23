@@ -287,34 +287,33 @@ fn extract_resolve_blocks(text: &str, source: &str) -> Result<Vec<String>> {
     Ok(blocks)
 }
 
-/// The three bootstrap blocks are byte-identical: one rule, one text.
-/// docs.yml holds one copy, rust-release.yml two (validate, release).
+/// Loads the `Resolve pipeline ref` blocks from rust-release.yml
+/// (validate, release) and fails unless both exist and are
+/// byte-identical: one rule, one text.
+fn load_release_resolve_block() -> Result<String> {
+    let release = load_repo_file(".github/workflows/rust-release.yml")?;
+    let blocks = extract_resolve_blocks(&release, "rust-release.yml")?;
+    if blocks.len() != 2 {
+        anyhow::bail!(
+            "rust-release.yml holds {} Resolve pipeline ref steps, want 2",
+            blocks.len()
+        );
+    }
+    if blocks[0] != blocks[1] {
+        anyhow::bail!("Resolve pipeline ref blocks diverge across jobs");
+    }
+    Ok(blocks.into_iter().next().expect("one release block"))
+}
+
+/// The two `Resolve pipeline ref` blocks in rust-release.yml
+/// (validate, release) are byte-identical: one rule, one text.
 #[test]
 #[cfg_attr(
     miri,
     ignore = "reads workflow files from the repository checkout layout"
 )]
 fn resolve_blocks_identical() -> Result<()> {
-    let docs = load_repo_file(".github/workflows/docs.yml")?;
-    let release = load_repo_file(".github/workflows/rust-release.yml")?;
-    let docs_blocks = extract_resolve_blocks(&docs, "docs.yml")?;
-    let release_blocks = extract_resolve_blocks(&release, "rust-release.yml")?;
-    if docs_blocks.len() != 1 {
-        anyhow::bail!(
-            "docs.yml holds {} Resolve pipeline ref steps, want 1",
-            docs_blocks.len()
-        );
-    }
-    if release_blocks.len() != 2 {
-        anyhow::bail!(
-            "rust-release.yml holds {} Resolve pipeline ref steps, want 2",
-            release_blocks.len()
-        );
-    }
-    if docs_blocks[0] != release_blocks[0] || docs_blocks[0] != release_blocks[1] {
-        anyhow::bail!("Resolve pipeline ref blocks diverge across workflows");
-    }
-    Ok(())
+    load_release_resolve_block().map(|_| ())
 }
 
 /// Runs the workflow-extracted bash for one case. Values ride argv,
@@ -368,19 +367,9 @@ fn bash_pin(block: &str, workflow_ref: &str, event_name: &str) -> Result<PinOutc
 #[cfg(unix)]
 #[cfg_attr(miri, ignore = "spawns a real sh process")]
 fn pin_bash_matches_dsl() -> Result<()> {
-    let docs = load_repo_file(".github/workflows/docs.yml")?;
-    let release = load_repo_file(".github/workflows/rust-release.yml")?;
-    let docs_blocks = extract_resolve_blocks(&docs, "docs.yml")?;
-    let release_blocks = extract_resolve_blocks(&release, "rust-release.yml")?;
-    if docs_blocks.len() != 1 || release_blocks.len() != 2 {
-        anyhow::bail!("want 1 docs block and 2 release blocks");
-    }
-    if docs_blocks[0] != release_blocks[0] || docs_blocks[0] != release_blocks[1] {
-        anyhow::bail!("Resolve pipeline ref blocks diverge across workflows");
-    }
-    let block = &docs_blocks[0];
+    let block = load_release_resolve_block()?;
     for (workflow_ref, event_name, expected) in CASES {
-        let shell = bash_pin(block, workflow_ref, event_name)?;
+        let shell = bash_pin(&block, workflow_ref, event_name)?;
         let (dsl, _) = run_dsl(workflow_ref, event_name)?;
         match (expected, shell, dsl) {
             (Some(pin), PinOutcome::Pin(shell_out), PinOutcome::Pin(dsl_out)) => {
