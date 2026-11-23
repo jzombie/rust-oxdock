@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.44.1-alpha] - 2026-11-23
+
+### Changed
+
+- No user-facing changes. Internal only: `FAIL` cleanup in first-party scripts (#325); pipeline pin hardening, same-repo `docs.yml`, smoke timeouts (#327).
+
 ## [0.44.0-alpha] - 2026-11-23
 
 ### Changed
