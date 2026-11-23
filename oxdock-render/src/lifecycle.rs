@@ -40,7 +40,7 @@ pub(crate) fn check_plugin_uniformity(
             .with_context(|| format!("read plugin '{rel}'"))?;
         let parsed = oxdock_core::parse_script_with_modules_and_exports(&text, table.clone())
             .with_context(|| format!("parse plugin '{rel}'"))?;
-        let mut names = parsed.func_exports;
+        let mut names = parsed.exports.funcs;
         names.sort();
         match &baseline {
             None => baseline = Some(names),

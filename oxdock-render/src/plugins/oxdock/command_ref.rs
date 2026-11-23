@@ -53,7 +53,10 @@ const CONTEXTS: &[ContextDef] = &[
 fn render_math_op(op: &MathOp) -> String {
     match op {
         MathOp::PushConst(value) => format!("PushConst({value})"),
-        MathOp::LoadVar(name) => format!("LoadVar(${name})"),
+        MathOp::Load { name } => {
+            format!("LoadVar(${name})")
+        }
+        MathOp::LoadConstRef { alias, name } => format!("LoadConstRef(${alias}::{name})"),
         MathOp::LoadEnv(key) => format!("LoadEnv(env:{key})"),
         MathOp::LoadKeyPath { base, keys } => {
             let mut rendered = format!("${base}");
@@ -64,7 +67,9 @@ fn render_math_op(op: &MathOp) -> String {
             format!("LoadKeyPath({rendered})")
         }
         MathOp::Call { name, arity } => format!("Call({name}/{arity})"),
-        MathOp::Inspect(name) => format!("Inspect(${name})"),
+        MathOp::Inspect { name } => {
+            format!("Inspect(${name})")
+        }
         MathOp::Neg => "Neg".to_string(),
         MathOp::Add => "Add".to_string(),
         MathOp::Sub => "Sub".to_string(),
@@ -1015,7 +1020,18 @@ mod tests {
         use oxdock_core::Value;
         let cases = [
             (MathOp::PushConst(Value::int(2)), "PushConst(2)"),
-            (MathOp::LoadVar("a".to_string()), "LoadVar($a)"),
+            (
+                MathOp::Load {
+                    name: "a".to_string(),
+                },
+                "LoadVar($a)",
+            ),
+            (
+                MathOp::Load {
+                    name: "C".to_string(),
+                },
+                "LoadVar($C)",
+            ),
             (
                 MathOp::LoadEnv(oxdock_fs::env::os::unix::HOME.to_string()),
                 "LoadEnv(env:HOME)",
@@ -1028,13 +1044,31 @@ mod tests {
                 "LoadKeyPath($m.key.0)",
             ),
             (
+                MathOp::LoadKeyPath {
+                    base: "C".to_string(),
+                    keys: vec!["key".to_string()],
+                },
+                "LoadKeyPath($C.key)",
+            ),
+            (
                 MathOp::Call {
                     name: "STD::ABS".to_string(),
                     arity: 1,
                 },
                 "Call(STD::ABS/1)",
             ),
-            (MathOp::Inspect("x".to_string()), "Inspect($x)"),
+            (
+                MathOp::Inspect {
+                    name: "x".to_string(),
+                },
+                "Inspect($x)",
+            ),
+            (
+                MathOp::Inspect {
+                    name: "C".to_string(),
+                },
+                "Inspect($C)",
+            ),
             (MathOp::Neg, "Neg"),
             (MathOp::Add, "Add"),
             (MathOp::Sub, "Sub"),

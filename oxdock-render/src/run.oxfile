@@ -26,6 +26,6 @@ IF $pc == "1" {
     LET $exe: STRING = STD::INTERPRETER()
     LET $child: PIPE
     WITH_IO [stdout=$child] ECHO "{{ $mod }}"
-    LET $log: STRING = WITH_IO [stdin=$child] RUN [$exe, "--root", $wsroot, "--config", $cfgpath]
+    LET $log: STRING = WITH_IO [stdin=$child] RUN [$exe, "--interpret", "--root", $wsroot, "--config", $cfgpath]
     ECHO "{{ $log }}"
 }

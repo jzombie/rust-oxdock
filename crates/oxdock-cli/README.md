@@ -11,7 +11,7 @@ The default build (with the `net` feature) prints the following for
 omitted:
 
 ```text
-oxdock 0.43.0-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
+oxdock 0.44.0-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
 
 Usage: oxdock [OPTIONS] [--] [SCRIPT] [-- script-args...]
   SCRIPT             script file path (same as `--script <file>`); `-` reads stdin

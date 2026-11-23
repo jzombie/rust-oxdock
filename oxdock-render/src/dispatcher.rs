@@ -73,9 +73,10 @@ macro_rules! pipeline_emit_register {
 /// Minimal example external plugin (`TEST::PING`): proves a
 /// `run_with_plugins` module resolves in templates across the pipe
 /// without header changes. Registered in both parent and child engines
-/// (see [`pipeline_full_engine`]) so the pipe child resolves it: Rust
-/// modules cannot cross the process boundary any other way, and real
-/// pipelines link their own modules into both binaries the same way.
+/// (separate OS processes from one binary) so the pipe child resolves
+/// it: Rust modules cannot cross the process boundary any other way,
+/// and real pipelines register their own modules in both engines
+/// the same way.
 #[oxdock_func(pure, returns = TypeTag::String)]
 fn ping(value: String) -> Result<Value> {
     Ok(Value::string(format!("PONG:{value}")))
@@ -112,29 +113,19 @@ pub(crate) fn pipeline_full_engine(
     engine
 }
 
-/// Locate the pipe-child interpreter: an explicit override for tests
-/// and harnesses, else the `oxdock-render-child` binary beside the
-/// running executable (cargo installs both bins side by side).
+/// Locate the pipe interpreter: an explicit override for tests
+/// and harnesses, else this binary itself. The pipeline binary
+/// doubles as its own interpreter (`--interpret` reads the stage
+/// script from stdin), so driver and stages always share one build
+/// and a stale sidecar is impossible by construction.
 /// `INTERPRETER()` alone is unusable here: it returns the pipeline
-/// binary, which cannot interpret scripts.
+/// binary, which without `--interpret` would drive instead of run.
 pub(crate) fn child_interpreter() -> Result<String> {
     if let Ok(path) = std::env::var(oxdock_fs::env::render::CHILD) {
         return Ok(path);
     }
     let exe = std::env::current_exe().context("locate current executable")?;
-    let child = exe
-        .parent()
-        .context("executable has no parent dir")?
-        .join("oxdock-render-child");
-    if child.is_file() {
-        Ok(child.to_string_lossy().into_owned())
-    } else {
-        anyhow::bail!(
-            "pipe-child binary missing at {}: set {} explicitly",
-            child.display(),
-            oxdock_fs::env::render::CHILD,
-        )
-    }
+    Ok(exe.to_string_lossy().into_owned())
 }
 
 /// Resolve the child's workspace root: explicit `--root` wins, then

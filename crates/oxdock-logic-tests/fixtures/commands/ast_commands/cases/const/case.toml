@@ -1,0 +1,4 @@
+name = "const"
+
+[expect]
+files = { "result.txt" = "hello-3" }

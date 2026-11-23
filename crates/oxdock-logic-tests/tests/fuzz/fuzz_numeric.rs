@@ -178,8 +178,9 @@ proptest! {
     ) {
         let benign = match lower_initializer(&spelling) {
             Outcome::Failed(_) => true,
-            Outcome::Staged(StepKind::Assign {
-                expr: Expr::Literal(v),
+            Outcome::Staged(StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(v)),
+                is_const: false,
                 ..
             }) => v.as_str().is_some(),
             _ => false,

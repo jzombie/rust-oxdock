@@ -10,6 +10,21 @@
 /// Separator between module and function name (`STD::GLOB`).
 pub const MODULE_SEPARATOR: &str = "::";
 
+/// Variable sigil (`$NAME`, `$ALIAS::NAME`): the `$` prefix marking
+/// a variable read, binding head, or mutation target. Single owner
+/// for the sigil spelling, so diagnostics and renderers never
+/// restate it.
+pub const VAR_SIGIL: &str = "$";
+
+/// [`VAR_SIGIL`] as a `char`: the pattern form for tokenizer output
+/// (`TokKind::Punct`) and `char` classifiers. Always identical to
+/// [`VAR_SIGIL`]; the assertion below locks the two together so the
+/// spelling still lives exactly once.
+pub const VAR_SIGIL_CHAR: char = '$';
+
+/// The sigil is one ASCII char: the `&str` and `char` views agree.
+const _: () = assert!(VAR_SIGIL.len() == 1 && VAR_SIGIL.as_bytes()[0] == VAR_SIGIL_CHAR as u8);
+
 /// Module holding the compiled-in builtins.
 pub const STD_MODULE_NAME: &str = "STD";
 
@@ -20,6 +35,7 @@ pub const SCRIPT_MODULE_NAME: &str = "SCRIPT";
 /// lowering. Each is referenced by [`crate::STRUCTURAL_KEYWORDS`]; spelling
 /// lives here exactly once.
 pub const KEYWORD_LET: &str = "LET";
+pub const KEYWORD_CONST: &str = "CONST";
 pub const KEYWORD_FOR: &str = "FOR";
 pub const KEYWORD_IF: &str = "IF";
 pub const KEYWORD_ELSE: &str = "ELSE";
@@ -77,6 +93,17 @@ pub const KEYWORD_FAIL: &str = "FAIL";
 pub const KEYWORD_SLEEP: &str = "SLEEP";
 pub const KEYWORD_LIST_APPEND: &str = "LIST_APPEND";
 
+/// Uppercase `CONST` spelling: leading `A-Z`, then `A-Z`, digits,
+/// or `_`. Single owner for the definition gate and the bare-read
+/// gate so both agree on what counts as a const word.
+pub fn is_const_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.as_bytes()[0].is_ascii_uppercase()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// Variable inspection: a dedicated AST node, never a registry entry, so it
 /// needs no import and accepts no qualifier.
 pub const KEYWORD_INSPECT: &str = "INSPECT";
@@ -112,4 +139,14 @@ pub fn base_name(qualified: &str) -> &str {
     split_qualified(qualified)
         .map(|(_, base)| base)
         .unwrap_or(qualified)
+}
+
+/// `$NAME` rendering for diagnostics and `Display` impls.
+pub fn sigil_var(name: &str) -> String {
+    format!("{VAR_SIGIL}{name}")
+}
+
+/// `$ALIAS::NAME` rendering for diagnostics and `Display` impls.
+pub fn sigil_qualified(alias: &str, name: &str) -> String {
+    format!("{VAR_SIGIL}{alias}{MODULE_SEPARATOR}{name}")
 }

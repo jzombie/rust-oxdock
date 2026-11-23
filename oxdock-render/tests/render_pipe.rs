@@ -11,8 +11,8 @@ use oxdock_core::{Engine, ExecIo};
 use oxdock_fs::{GuardedPath, PathResolver};
 
 fn interpreter() -> String {
-    oxdock_sys_test_utils::find_built_binary("oxdock-render-child")
-        .expect("pipe-child binary missing: run `cargo build -p oxdock-render` first")
+    oxdock_sys_test_utils::find_built_binary("oxdock-render")
+        .expect("pipe interpreter binary missing: run `cargo build -p oxdock-render` first")
 }
 
 fn engine(root: &GuardedPath) -> Engine<oxdock_process::DefaultProcessManager> {
@@ -78,7 +78,7 @@ fn tracer_stages_run_through_pipe_in_order() {
         LET $exe: STRING = STD::INTERPRETER()
         LET $child: PIPE
         WITH_IO [stdout=$child] ECHO "{{ $mod }}"
-        LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe, "--root", $wsroot, "--config", "render.json"]
+        LET $out: STRING = WITH_IO [stdin=$child] RUN [$exe, "--interpret", "--root", $wsroot, "--config", "render.json"]
     "#};
     let output = engine(&root)
         .run_script(&root, parent)

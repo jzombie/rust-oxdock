@@ -2552,7 +2552,7 @@ fn worker_pool_script_parses() {
     // ECHO, LET, LET, WHILE, AWAIT.
     assert_eq!(steps.len(), 8, "all pool steps lower");
     assert!(
-        matches!(&steps[7].kind, oxdock_core::StepKind::Await { var } if var == "workers"),
+        matches!(&steps[7].kind, oxdock_core::StepKind::Await { var, .. } if var == "workers"),
         "pool ends with the group await, got {:?}",
         steps[7].kind
     );

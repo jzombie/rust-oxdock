@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-pub use crate::commands::{AssertTarget, StepKind};
+pub use crate::commands::{AssertTarget, BindRhs, StepKind};
 use crate::constants::{
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS,
     KEYWORD_ASSERT_EQ, KEYWORD_ASSERT_NE, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
-    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
+    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
     KEYWORD_DEFAULT, KEYWORD_ECHO, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXIT, KEYWORD_EXPAND,
     KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT,
     KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET,
@@ -14,7 +14,7 @@ use crate::constants::{
     KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN,
     KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT,
     KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WHILE, KEYWORD_WITH_IO, KEYWORD_WORKDIR,
-    KEYWORD_WORKSPACE, KEYWORD_WRITE,
+    KEYWORD_WORKSPACE, KEYWORD_WRITE, VAR_SIGIL, sigil_qualified,
 };
 
 /// One module's function surface for parse-time call resolution: the base
@@ -285,6 +285,7 @@ impl Command {
 /// hardcoding keyword lists elsewhere.
 pub const STRUCTURAL_KEYWORDS: &[&str] = &[
     KEYWORD_LET,
+    KEYWORD_CONST,
     KEYWORD_FOR,
     KEYWORD_IF,
     KEYWORD_ELSE,
@@ -584,7 +585,7 @@ pub struct IoBinding {
 /// value, resolved against the live variable scope when the step runs.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PipeTarget {
-    Var(String),
+    Var { name: String },
 }
 
 /// Value-model re-exports: the word, its payload, type descriptors, and the
@@ -626,11 +627,12 @@ pub enum ArithOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MathOp {
     PushConst(Value),
-    LoadVar(String),
+    Load { name: String },
+    LoadConstRef { alias: String, name: String },
     LoadEnv(String),
     LoadKeyPath { base: String, keys: Vec<String> },
     Call { name: String, arity: usize },
-    Inspect(String),
+    Inspect { name: String },
     Neg,
     Add,
     Sub,
@@ -653,10 +655,26 @@ pub enum LogicalOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Value),
-    Var(String),
+    /// Binding read (`$name`): `LET` and `CONST` bindings share one
+    /// namespace and one read syntax. Whether the name is immutable
+    /// is a declaration property, enforced at declare/mutate sites,
+    /// never at the read.
+    Var {
+        name: String,
+    },
+    /// Qualified immutable read (`$ALIAS::NAME`): a `CONST` exported by
+    /// the module imported under `ALIAS`. Evaluation resolves through
+    /// the active unit's alias targets and fails closed on unknown
+    /// aliases, non-exported names, and `LET` bindings (never
+    /// exportable).
+    ConstRef {
+        alias: String,
+        name: String,
+    },
     /// Environment read (`env:KEY`): resolves against the script
     /// environment at evaluation time.
     Env(String),
+    /// Key path traversal (`$base.key`) over either binding family.
     KeyPath {
         base: String,
         keys: Vec<String>,
@@ -672,11 +690,14 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
-    /// Variable inspection (`INSPECT($var)`): carries the variable name
-    /// unevaluated so evaluation can snapshot the binding. Produced only by
-    /// the parser for the exact `INSPECT` name; evaluators match on this
-    /// variant and never on a function-name string.
-    Inspect(String),
+    /// Variable inspection (`INSPECT($var)`): carries the variable
+    /// name unevaluated so evaluation can snapshot the binding.
+    /// Produced only by the parser for the exact `INSPECT`
+    /// name; evaluators match on this variant and never on a
+    /// function-name string.
+    Inspect {
+        name: String,
+    },
     Compare {
         op: CompareOp,
         left: Box<Expr>,
@@ -749,10 +770,11 @@ impl Expr {
         f(self);
         match self {
             Expr::Literal(_)
-            | Expr::Var(_)
+            | Expr::Var { .. }
+            | Expr::ConstRef { .. }
             | Expr::Env(_)
             | Expr::KeyPath { .. }
-            | Expr::Inspect(_)
+            | Expr::Inspect { .. }
             | Expr::FreshPipe
             | Expr::UnsignedIntBoundary(_) => {}
             Expr::Call { args, .. } => {
@@ -796,10 +818,11 @@ impl Expr {
         f(self);
         match self {
             Expr::Literal(_)
-            | Expr::Var(_)
+            | Expr::Var { .. }
+            | Expr::ConstRef { .. }
             | Expr::Env(_)
             | Expr::KeyPath { .. }
-            | Expr::Inspect(_)
+            | Expr::Inspect { .. }
             | Expr::FreshPipe
             | Expr::UnsignedIntBoundary(_) => {}
             Expr::Call { args, .. } => {
@@ -1262,10 +1285,15 @@ impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expr::Literal(v) => write!(f, "{}", v),
-            Expr::Var(name) => write!(f, "${}", name),
+            Expr::Var { name } => {
+                write!(f, "{VAR_SIGIL}{}", name)
+            }
+            Expr::ConstRef { alias, name } => {
+                write!(f, "{}", sigil_qualified(alias, name))
+            }
             Expr::Env(key) => write!(f, "env:{}", key),
             Expr::KeyPath { base, keys } => {
-                write!(f, "${}", base)?;
+                write!(f, "{VAR_SIGIL}{}", base)?;
                 for key in keys {
                     write!(f, ".{}", key)?;
                 }
@@ -1281,7 +1309,9 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
-            Expr::Inspect(var) => write!(f, "INSPECT(${})", var),
+            Expr::Inspect { name } => {
+                write!(f, "INSPECT(${})", name)
+            }
             Expr::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
@@ -1379,10 +1409,13 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
     for op in ops {
         match op {
             MathOp::PushConst(v) => stack.push(format!("{}", v)),
-            MathOp::LoadVar(name) => stack.push(format!("${}", name)),
+            MathOp::Load { name } => {
+                stack.push(format!("{VAR_SIGIL}{}", name));
+            }
+            MathOp::LoadConstRef { alias, name } => stack.push(sigil_qualified(alias, name)),
             MathOp::LoadEnv(key) => stack.push(format!("env:{}", key)),
             MathOp::LoadKeyPath { base, keys } => {
-                let mut s = format!("${}", base);
+                let mut s = format!("{VAR_SIGIL}{}", base);
                 for key in keys {
                     s.push('.');
                     s.push_str(key);
@@ -1397,7 +1430,9 @@ fn format_compiled_math(ops: &[MathOp]) -> String {
                 args.reverse();
                 stack.push(format!("{}({})", name, args.join(", ")));
             }
-            MathOp::Inspect(name) => stack.push(format!("INSPECT(${})", name)),
+            MathOp::Inspect { name } => {
+                stack.push(format!("INSPECT({VAR_SIGIL}{})", name));
+            }
             MathOp::Neg => {
                 let inner = stack.pop().unwrap_or_else(|| "<underflow>".to_string());
                 stack.push(format!("(-{})", inner));
@@ -1550,6 +1585,7 @@ mod tests {
         // the dispatch when adding a head.
         for head in [
             "LET",
+            "CONST",
             "RETURN",
             "BREAK",
             "CONTINUE",

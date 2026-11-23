@@ -39,7 +39,8 @@
 //!   satisfy completeness (zero-trip); a `RETURN` solely inside a loop
 //!   needs an unconditional fallback after it.
 //! - Environments are flow-sensitive and sequential: `LET` declares,
-//!   `SET` keeps the declared type (runtime coerces), branches fork
+//!   `$var = <expr>` reassignment keeps the declared type (runtime coerces),
+//!   branches fork
 //!   and discard (arm declarations are scope-local at runtime, so no
 //!   merge is needed — discarding is exact, not conservative).
 //! - `ANY` widens unidirectionally only. An `ANY`-typed argument into
@@ -72,15 +73,21 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// Home-scope function index: (defining file, base) to all guarded
+/// overloads. Single alias so the complex type appears once.
+type HomeFuncs = HashMap<(String, String), Vec<(Option<GuardExpr>, FuncInfo)>>;
+
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
-use oxdock_parser::constants::{KEYWORD_BREAK, KEYWORD_CONTINUE, KEYWORD_IMPORT};
+use oxdock_parser::constants::{
+    KEYWORD_BREAK, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_IMPORT, KEYWORD_LET, MODULE_SEPARATOR,
+};
 use oxdock_parser::template::{
     PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
 };
 use oxdock_parser::{
-    CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag, Value,
-    qualify, render_structural,
+    CompareOp, ExportKind, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag,
+    Value, base_name, qualify, render_structural, sigil_var, split_qualified,
 };
 use oxdock_process::ProcessManager;
 
@@ -116,7 +123,7 @@ enum StaticTy {
 /// One collected script function: resolved params, body, and owning
 /// file module (#115, `None` for entry/REPL functions). The owner
 /// decides whose shared store the body resolves against.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct FuncInfo {
     params: Vec<(String, TypeTag, bool)>,
     declared: TypeTag,
@@ -133,12 +140,37 @@ struct FuncInfo {
     col: usize,
 }
 
-/// One top-level binding with its declaration guard. Guards ride along
-/// so platform-specific `LET`s enforce coverage instead of reading as
-/// unconditional.
-type GuardedLet = (String, TypeTag, Option<GuardExpr>);
+/// One top-level binding with its guard and constness. Guards ride along
+/// so platform-specific `LET`s/`CONST`s enforce coverage instead of
+/// reading as unconditional. `is_const` distinguishes the binding
+/// family: `$var = <expr>` reassignment, `LIST_APPEND`, and redeclaration
+/// diagnostics consult it, and only `is_const` bindings satisfy `EXPORT CONST`.
+#[derive(Clone, Debug)]
+struct GuardedLet {
+    name: String,
+    tag: TypeTag,
+    guard: Option<GuardExpr>,
+    is_const: bool,
+}
 /// Module-owned bindings by module key.
 type ModuleLets = HashMap<String, Vec<GuardedLet>>;
+
+/// Fold top-level bindings into a static scope map: one entry list
+/// per name so disjoint guards coexist exactly like the runtime
+/// same-frame walk. Single owner behind module-store seeding and
+/// entry `CONST` seeding; callers filter first (modules seed every
+/// family, entry seeds `CONST` only).
+fn seed_map(bindings: &[GuardedLet]) -> HashMap<String, Vec<Binding>> {
+    let mut map: HashMap<String, Vec<Binding>> = HashMap::new();
+    for entry in bindings {
+        map.entry(entry.name.clone()).or_default().push(Binding {
+            tag: entry.tag.clone(),
+            guard: entry.guard.clone(),
+            is_const: entry.is_const,
+        });
+    }
+    map
+}
 
 /// Lexical environment: a stack of frames mirroring the runtime
 /// `var_scopes`. Frames push on `scope_enter` markers, branch and
@@ -146,16 +178,17 @@ type ModuleLets = HashMap<String, Vec<GuardedLet>>;
 /// discarded with a fork. `LET` declares in the top frame only (a
 /// duplicate there mirrors the runtime redeclaration error);
 /// shadowing an outer frame is legal exactly where the runtime
-/// pushes a scope. `SET` and reads walk outward; types never change
-/// on mutation (runtime coerces).
-/// One live declaration: its tag plus the guard it was declared
-/// under. Same-scope duplicates with disjoint guards coexist (only
-/// one path ever binds); reads unify across entries since the path
-/// is unknowable statically.
+/// pushes a scope. `$var = <expr>` reassignment and reads walk outward; types
+/// never change on mutation (runtime coerces).
+/// One live declaration: its tag, the guard it was declared under,
+/// and whether it is a `CONST`. Same-scope duplicates with disjoint
+/// guards coexist (only one path ever binds); reads unify across
+/// entries since the path is unknowable statically.
 #[derive(Clone, Debug)]
 struct Binding {
     tag: TypeTag,
     guard: Option<GuardExpr>,
+    is_const: bool,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -176,6 +209,20 @@ struct Env {
     /// every other `env:` read must be preceded by an explicit
     /// declaration in the same file.
     env_frames: Vec<HashSet<String>>,
+    /// Body-local nested `FUNC` definitions, one map per lexical
+    /// frame (#322): mirrors the runtime registry save/restore
+    /// frames, so a nested def shadows the home top-level and
+    /// globals for the rest of its block in both layers. Pushed and
+    /// popped with every other frame below, never separately.
+    func_frames: Vec<HashMap<String, FuncInfo>>,
+    /// Block-scoped `IMPORT` targets, one table per lexical frame:
+    /// an `IMPORT` inside a block resolves within that block only,
+    /// mirroring the runtime scope-frame unwind. Guards ride along
+    /// so platform branches resolve exactly like unit-top entries.
+    /// Pushed and popped with every other frame below, never
+    /// separately; reads merge outer-to-inner over the checker's
+    /// unit-top table.
+    import_frames: Vec<super::native::AliasTargets>,
 }
 
 /// Module-shared bindings plus a fork-shared touch flag. `Rc` (not
@@ -300,21 +347,111 @@ struct Checker<'a, P: ProcessManager> {
     /// touch probes) stay lenient: without the closure they cannot
     /// tell an unimported alias from a not-yet-collected one.
     strict_qualified: bool,
+    /// Home-scope function index (#319): every top-level `FUNC` per
+    /// closure file, exported or private, keyed by (defining file,
+    /// base name) to all guarded overloads. Disjoint guarded defs
+    /// coexist like runtime `top_funcs`; resolution filters by the
+    /// active site guard instead of last-wins. Entry top-level
+    /// `FUNC`s index under (`"entry"`, base) the same way, so entry
+    /// bodies resolve their own file frame (#322).
+    home_funcs: HomeFuncs,
+    /// First textual top-level `FUNC` per file, keyed like
+    /// `home_funcs` (#322): harvests bind the first matching
+    /// definition (mirroring `import_funcs`' first-match lookup),
+    /// while the file frame serves the last live one. Separate
+    /// index so neither lookup can drift into the other's rule.
+    harvest_first: HashMap<(String, String), FuncInfo>,
+    /// Bare-harvest visibility (#322): (importing unit, base) to
+    /// defining file. An explicit harvest names its file, served in
+    /// the importing unit like the runtime harvest map. Entry imports
+    /// key under `"entry"`.
+    harvested: HashMap<(String, String), String>,
     /// Outbound alias targets for the checked unit: `ALIAS` to
     /// (defining file, import guard) pairs. `resolve_call` requires a
     /// unique resolvable target, so same-alias different-file imports
-    /// cannot cross-resolve.
+    /// cannot cross-resolve. Holds the unit top-level only: block
+    /// imports merge in from the walk's lexical frames (see
+    /// `effective_alias_targets`), unwinding with their block.
     alias_targets: super::native::AliasTargets,
-    /// Per-function import overlays: file-top imports plus the
-    /// function's own subtree imports, keyed by (owner module key,
-    /// `"entry"` for entry functions, function name). Swapped in while
-    /// checking that body so function-local imports resolve without
-    /// leaking into sibling functions or the top level.
+    /// Walk-time import resolution: the closure tables plus the unit
+    /// under check, so an `IMPORT` step records its defining file into
+    /// the walk's lexical frame as the walk visits it (mirroring
+    /// runtime execution order). `None` keeps single-file validation
+    /// lenient: imports record nothing and reads fall back to the
+    /// unit-top table.
+    import_ctx: Option<ImportResolveCtx<'a>>,
+    /// `EXPORT CONST` names per module key, populated alongside
+    /// `module_lets` for the closure pass. Qualified `$ALIAS::NAME`
+    /// reads gate against these: only listed names resolve, and only
+    /// to `CONST` bindings.
+    module_const_exports: HashMap<String, Vec<String>>,
+    /// Outbound alias targets per closure file, keyed by module key:
+    /// the unit scope each file's own qualified reads resolve under.
+    /// [`resolve_const_ref`](Checker::resolve_const_ref) chases
+    /// qualified `EXPORT CONST` forwards through these, so a hop
+    /// always resolves in its exporting file's namespace, never the
+    /// reader's.
+    file_targets: HashMap<String, super::native::AliasTargets>,
+    /// `EXPORT FUNC` names per module key, built from the closure
+    /// files alongside `module_const_exports`. `resolve_call` reads
+    /// these for the #319 missing-import hint: only listed
+    /// (exported, never private) names can be suggested.
+    module_func_exports: HashMap<String, Vec<String>>,
+    /// Per-function import overlays: the unit top-level, keyed by
+    /// (owner module key, `"entry"` for entry functions, function
+    /// name). Swapped in while checking that body; the walk appends
+    /// the body's own imports to its frame, so function-local imports
+    /// resolve without leaking into sibling functions or the top level.
     body_scopes: BodyScopes,
     /// Nesting depth inside `ISOLATED` bodies: the isolated allowlist node
     /// is legal only below an `ISOLATED` head, at any depth including
     /// through nested blocks and nested `ISOLATED` itself.
     isolated_depth: usize,
+}
+
+/// Closure tables plus the unit under check, so an `IMPORT` step
+/// resolves its defining file while the walk visits it. Single owner
+/// for walk-time resolution; the collection phase (`unit_imports`)
+/// shares the same `resolve_static_top_level` rule.
+#[derive(Clone, Copy)]
+struct ImportResolveCtx<'a> {
+    files: &'a [super::import::ClosureFile],
+    parent: Option<&'a GuardedPath>,
+    dir: &'a GuardedPath,
+    is_entry: bool,
+}
+
+/// Read-only [`ModuleGraphView`](super::native::ModuleGraphView) over
+/// borrowed closure tables. One struct serves the static twin and the
+/// eager closure check, so both read the same tables through the same
+/// code.
+struct CheckerConstView<'a> {
+    exports: &'a HashMap<String, Vec<String>>,
+    targets: &'a HashMap<String, super::native::AliasTargets>,
+    lets: &'a ModuleLets,
+}
+
+impl super::native::ModuleGraphView for CheckerConstView<'_> {
+    fn const_exports(&self, file: &str) -> Option<&[String]> {
+        self.exports.get(file).map(Vec::as_slice)
+    }
+
+    fn alias_targets(&self, file: &str) -> super::native::AliasTargets {
+        self.targets.get(file).cloned().unwrap_or_default()
+    }
+
+    fn binding(&self, file: &str, name: &str) -> super::native::BindingPresence {
+        use super::native::BindingPresence;
+        match self
+            .lets
+            .get(file)
+            .and_then(|lets| lets.iter().find(|entry| entry.name == name))
+        {
+            Some(entry) if entry.is_const => BindingPresence::Const,
+            Some(_) => BindingPresence::Let,
+            None => BindingPresence::Absent,
+        }
+    }
 }
 
 /// Run the static pass over an imported file's body (#115). The
@@ -429,20 +566,39 @@ fn module_lets_indexed<P: ProcessManager>(
         if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
             continue;
         }
-        // Every top-level binding form counts, so a file using
-        // capture/async/readline initializers resolves exactly like
-        // one using plain `LET`.
+        // Every top-level binding counts, whatever its right-hand
+        // side, so capture/async/readline initializers resolve
+        // exactly like plain `LET`/`CONST`.
         match &step.kind {
-            StepKind::Assign { var, decl_type, .. }
-            | StepKind::AssignCapture { var, decl_type, .. }
-            | StepKind::AssignAsync { var, decl_type, .. } => {
+            StepKind::Bind {
+                var,
+                decl_type,
+                is_const,
+                ..
+            } => {
                 let tag = exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("variable `${var}`: {err:#}"))?;
-                out.push(((clean_var(var), tag, step.guard.clone()), idx));
+                out.push((
+                    GuardedLet {
+                        name: clean_var(var),
+                        tag,
+                        guard: step.guard.clone(),
+                        is_const: *is_const,
+                    },
+                    idx,
+                ));
             }
             StepKind::ReadLine { var } | StepKind::Prompt { var, .. } => {
-                out.push(((clean_var(var), TypeTag::String, step.guard.clone()), idx));
+                out.push((
+                    GuardedLet {
+                        name: clean_var(var),
+                        tag: TypeTag::String,
+                        guard: step.guard.clone(),
+                        is_const: false,
+                    },
+                    idx,
+                ));
             }
             _ => {}
         }
@@ -521,13 +677,68 @@ fn merge_harvest<P: ProcessManager>(
     };
     let aliases = super::typing::collect_type_aliases(&file.steps, exec)?;
     for name in type_names {
-        if !file.type_exports.iter().any(|e| e == name) {
-            anyhow::bail!("IMPORT `{path}` does not export TYPE `{name}`");
-        }
+        // Harvest validity lives in `super::import::gate_harvested_name`
+        // (single owner, shared with the runtime): gate first, persist
+        // after. The fetch below cannot miss (gated), but keeps loud
+        // failure instead of restating the scan.
+        super::import::gate_harvested_name(
+            ExportKind::Type,
+            &file.steps,
+            &file.exports,
+            name,
+            path,
+        )?;
         let Some(target) = aliases.get(name) else {
             anyhow::bail!("IMPORT `{path}` has no such TYPE `{name}`");
         };
         super::import::insert_imported_type(exec, name, target, alias, path)?;
+    }
+    Ok(())
+}
+
+/// Bare-harvest edges (#322): (importing unit, base) to defining
+/// file, walked per importing file (entry keyed `"entry"`). Path
+/// resolution reuses the shared static top-level resolver, so
+/// defining keys match the runtime harvest map exactly. Host-module
+/// paths are skipped: host funcs resolve through the host map.
+/// Nested bodies included: validation is conservative, like
+/// expansion; unexecuted conditional harvests fail loud at runtime.
+fn collect_func_harvest_edges<P: ProcessManager>(
+    exec: &ExecState<P>,
+    files: &[super::import::ClosureFile],
+    dir: &GuardedPath,
+    steps: &[Step],
+    unit: &str,
+    is_entry: bool,
+    out: &mut HashMap<(String, String), String>,
+) -> Result<()> {
+    for step in steps {
+        if let StepKind::ImportFuncs {
+            path,
+            alias: None,
+            func_names,
+            ..
+        } = &step.kind
+            && !func_names.is_empty()
+            && !exec.module_table.modules.contains_key(path)
+        {
+            let entry_parent = exec.entry_file.as_ref().and_then(|entry| entry.parent());
+            let Some(key) = super::import::resolve_static_top_level(
+                entry_parent.as_ref(),
+                dir,
+                files,
+                path,
+                is_entry,
+            ) else {
+                anyhow::bail!("IMPORT `{path}` cannot be read: not in the import closure");
+            };
+            for name in func_names {
+                out.insert((unit.to_string(), name.clone()), key.clone());
+            }
+        }
+        for body in super::import::child_bodies(&step.kind) {
+            collect_func_harvest_edges(exec, files, dir, body, unit, is_entry, out)?;
+        }
     }
     Ok(())
 }
@@ -593,7 +804,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 local.insert(name.clone());
             }
         }
-        for name in &file.type_exports {
+        for name in &file.exports.types {
             if !local.contains(name) {
                 anyhow::bail!(
                     "IMPORT `{}` EXPORT TYPE `{name}` does not match any top-level TYPE in that file",
@@ -630,7 +841,7 @@ pub fn validate_script_closure<P: ProcessManager>(
                 if site.alias.is_none() || site.func_names.is_some() || site.type_names.is_some() {
                     continue;
                 }
-                for name in &file.type_exports {
+                for name in &file.exports.types {
                     if let Some(target) = defs.get(name) {
                         super::import::insert_imported_type(
                             exec,
@@ -648,8 +859,23 @@ pub fn validate_script_closure<P: ProcessManager>(
         // (bare harvests stay bare); bodies check below.
         let mut all_funcs = HashMap::new();
         let mut all_lets: ModuleLets = HashMap::new();
-        // Per-unit file-import aliases: the entry's own outbound imports
-        // plus each file's own outbound imports (nested included).
+        let mut all_const_exports: HashMap<String, Vec<String>> = HashMap::new();
+        // Home-scope index (#319): every top-level `FUNC` per file,
+        // exported or private, for sibling validation. Built
+        // alongside `all_funcs` so both see identical definitions.
+        let mut home_funcs: HomeFuncs = HashMap::new();
+        // First textual def per file for harvest binding (#322):
+        // mirrors `import_funcs` first-match. Extended alongside
+        // `home_funcs` so both indexes see identical definitions.
+        let mut harvest_first: HashMap<(String, String), FuncInfo> = HashMap::new();
+        // Bare-harvest visibility (#322): base name to defining file
+        // for every bare harvest in the closure. Global like the
+        // runtime harvest map: an explicit harvest names its file.
+        let mut harvested: HashMap<(String, String), String> = HashMap::new();
+        // Per-unit file-import aliases: the entry's own top-level
+        // imports plus each file's own top-level imports. Block-nested
+        // imports scope to their block (resolved from the walk's
+        // lexical frames), never to the unit table.
         // Zero-function modules contribute no `ALIAS::` func keys, so
         // the alias set (not a func-key prefix scan) proves the
         // namespace known. Scoped per unit so sibling modules cannot
@@ -678,9 +904,6 @@ pub fn validate_script_closure<P: ProcessManager>(
         collect_body_scopes(
             entry,
             super::import::ENTRY_UNIT,
-            &entry_base,
-            files,
-            entry_parent.as_ref(),
             &entry_targets,
             &mut body_scopes,
         );
@@ -688,9 +911,6 @@ pub fn validate_script_closure<P: ProcessManager>(
             collect_body_scopes(
                 &file.steps,
                 &file.key,
-                &file.dir,
-                files,
-                None,
                 &file_targets.get(&file.key).cloned().unwrap_or_default(),
                 &mut body_scopes,
             );
@@ -702,7 +922,41 @@ pub fn validate_script_closure<P: ProcessManager>(
         with_scope_aliases(exec, &entry_defs, |exec| {
             let mut checker = Checker::new(exec);
             checker.collect(entry)?;
+            // Entry file frame (#322): index the entry top-level
+            // `FUNC`s under the entry unit key, mirroring
+            // `collect_home` for files (dead-guarded defs skipped).
+            for step in entry {
+                if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+                    continue;
+                }
+                if let StepKind::FuncDef {
+                    name,
+                    params,
+                    return_type,
+                    is_async,
+                    body,
+                    ..
+                } = &step.kind
+                {
+                    let info = checker.make_func_info(
+                        name,
+                        params,
+                        return_type,
+                        *is_async,
+                        body,
+                        None,
+                        step.line,
+                        step.col,
+                    )?;
+                    checker
+                        .home_funcs
+                        .entry((super::import::ENTRY_UNIT.to_string(), name.clone()))
+                        .or_default()
+                        .push((step.guard.clone(), info));
+                }
+            }
             extend_funcs_checked(&mut all_funcs, checker.funcs, "entry")?;
+            home_funcs.extend(checker.home_funcs);
             entry_lets = module_lets(entry, exec)?;
             Ok(())
         })?;
@@ -716,10 +970,57 @@ pub fn validate_script_closure<P: ProcessManager>(
                 for site in &file.sites {
                     checker.collect_site(site, file)?;
                 }
+                checker.collect_home(file)?;
                 extend_funcs_checked(&mut all_funcs, checker.funcs, &file.path)?;
+                home_funcs.extend(checker.home_funcs);
+                harvest_first.extend(checker.harvest_first);
                 all_lets.insert(file.key.clone(), module_lets(&file.steps, exec)?);
+                all_const_exports.insert(file.key.clone(), file.exports.consts.clone());
                 Ok(())
             })?;
+        }
+        // Eager forward check: every qualified `EXPORT CONST
+        // ALIAS::NAME` must resolve through the shared walk now, even
+        // when no expression reads it yet. An unread dangling
+        // re-export is still a broken export list, so it fails here
+        // instead of waiting for a first read that never comes.
+        {
+            let view = CheckerConstView {
+                exports: &all_const_exports,
+                targets: &file_targets,
+                lets: &all_lets,
+            };
+            for file in files {
+                for entry in &file.exports.consts {
+                    if let Some((_, base)) = split_qualified(entry) {
+                        super::native::chase_const_forward(&view, &file.key, base, entry)
+                            .map_err(|err| anyhow::anyhow!("{}: {err}", file.key))?;
+                    }
+                }
+            }
+        }
+        // Bare-harvest edges (#322): walk the entry and every file for
+        // unaliased harvests, attributed to the file holding the step.
+        // Entry imports key under the entry unit.
+        collect_func_harvest_edges(
+            exec,
+            files,
+            &entry_base,
+            entry,
+            super::import::ENTRY_UNIT,
+            true,
+            &mut harvested,
+        )?;
+        for file in files {
+            collect_func_harvest_edges(
+                exec,
+                files,
+                &file.dir,
+                &file.steps,
+                &file.key,
+                false,
+                &mut harvested,
+            )?;
         }
         // Earliest-call LET views for entry functions (entry runs
         // top level sequentially, so calls only observe earlier
@@ -755,10 +1056,33 @@ pub fn validate_script_closure<P: ProcessManager>(
                 Some(module) => file_targets.get(module).cloned().unwrap_or_default(),
             };
             with_scope_aliases(exec, &defs, |exec| {
+                let import_ctx = match &owner {
+                    None => Some(ImportResolveCtx {
+                        files,
+                        parent: entry_parent.as_ref(),
+                        dir: &entry_base,
+                        is_entry: true,
+                    }),
+                    Some(module) => {
+                        files
+                            .iter()
+                            .find(|f| f.key == *module)
+                            .map(|file| ImportResolveCtx {
+                                files,
+                                parent: None,
+                                dir: &file.dir,
+                                is_entry: false,
+                            })
+                    }
+                };
                 let mut checker = seeded_checker(
                     exec,
                     &all_funcs,
+                    &home_funcs,
+                    &harvest_first,
+                    &harvested,
                     &all_lets,
+                    &all_const_exports,
                     &entry_lets,
                     &inferred,
                     entry,
@@ -766,9 +1090,82 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &owner_targets,
                     &body_scopes,
                     &entry_let_scopes,
+                    &file_targets,
+                    import_ctx,
                 );
                 let ty = checker.func_return(&key, 0)?;
                 inferred.insert(key.clone(), ty);
+                Ok(())
+            })?;
+        }
+        // Infer private home entries under the same owner scope, so a
+        // broken unexported helper fails here like any collected
+        // function instead of surfacing only when a sibling calls it.
+        // Entries already inferred under a collected key are skipped.
+        // Sorted for determinism.
+        let mut home_keys: Vec<(String, String)> = home_funcs.keys().cloned().collect();
+        home_keys.sort();
+        for (module, base) in home_keys {
+            let canonical = super::native::file_func_key(&module, &base);
+            if inferred.contains_key(&canonical) {
+                continue;
+            }
+            let Some(overloads) = home_funcs.get(&(module.clone(), base.clone())) else {
+                continue;
+            };
+            let Some((_, info)) = overloads.last().cloned() else {
+                continue;
+            };
+            let defs: Vec<(String, String)> = files
+                .iter()
+                .find(|f| f.key == module)
+                .map(|file| {
+                    super::typing::collect_type_aliases(&file.steps, exec)
+                        .map(|aliases| aliases.into_iter().collect())
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let owner_targets: super::native::AliasTargets =
+                file_targets.get(&module).cloned().unwrap_or_default();
+            with_scope_aliases(exec, &defs, |exec| {
+                let import_ctx = if module == super::import::ENTRY_UNIT {
+                    Some(ImportResolveCtx {
+                        files,
+                        parent: entry_parent.as_ref(),
+                        dir: &entry_base,
+                        is_entry: true,
+                    })
+                } else {
+                    files
+                        .iter()
+                        .find(|f| f.key == module)
+                        .map(|file| ImportResolveCtx {
+                            files,
+                            parent: None,
+                            dir: &file.dir,
+                            is_entry: false,
+                        })
+                };
+                let mut checker = seeded_checker(
+                    exec,
+                    &all_funcs,
+                    &home_funcs,
+                    &harvest_first,
+                    &harvested,
+                    &all_lets,
+                    &all_const_exports,
+                    &entry_lets,
+                    &inferred,
+                    entry,
+                    files,
+                    &owner_targets,
+                    &body_scopes,
+                    &entry_let_scopes,
+                    &file_targets,
+                    import_ctx,
+                );
+                let ty = checker.func_return_owned(&info, &canonical, 0)?;
+                inferred.insert(canonical.clone(), ty);
                 Ok(())
             })?;
         }
@@ -784,23 +1181,39 @@ pub fn validate_script_closure<P: ProcessManager>(
         fn seeded_checker<'a, P: ProcessManager>(
             exec: &'a mut ExecState<P>,
             funcs: &HashMap<String, FuncInfo>,
+            home_funcs: &HomeFuncs,
+            harvest_first: &HashMap<(String, String), FuncInfo>,
+            harvested: &HashMap<(String, String), String>,
             lets: &ModuleLets,
+            const_exports: &HashMap<String, Vec<String>>,
             entry_lets: &[GuardedLet],
             inferred: &HashMap<String, StaticTy>,
             entry: &[Step],
-            files: &[ClosureFile],
+            files: &'a [ClosureFile],
             alias_targets: &super::native::AliasTargets,
             body_scopes: &BodyScopes,
             entry_let_scopes: &HashMap<(String, usize, usize), Vec<GuardedLet>>,
+            file_targets: &HashMap<String, super::native::AliasTargets>,
+            import_ctx: Option<ImportResolveCtx<'a>>,
         ) -> Checker<'a, P> {
             let mut checker = Checker::new(exec);
             checker.funcs = funcs.clone();
+            checker.home_funcs = home_funcs.clone();
+            checker.harvest_first = harvest_first.clone();
+            checker.harvested = harvested.clone();
             checker.module_lets = lets.clone();
+            checker.module_const_exports = const_exports.clone();
+            checker.module_func_exports = files
+                .iter()
+                .map(|file| (file.key.clone(), file.exports.funcs.clone()))
+                .collect();
             checker.entry_lets = entry_lets.to_vec();
             checker.entry_let_scopes = entry_let_scopes.clone();
             checker.inferred = inferred.clone();
             checker.strict_qualified = true;
             checker.alias_targets = alias_targets.clone();
+            checker.import_ctx = import_ctx;
+            checker.file_targets = file_targets.clone();
             checker.body_scopes = body_scopes.clone();
             checker.build_env_unions(entry, files);
             checker
@@ -809,7 +1222,11 @@ pub fn validate_script_closure<P: ProcessManager>(
             seeded_checker(
                 exec,
                 &all_funcs,
+                &home_funcs,
+                &harvest_first,
+                &harvested,
                 &all_lets,
+                &all_const_exports,
                 &entry_lets,
                 &inferred,
                 entry,
@@ -817,6 +1234,13 @@ pub fn validate_script_closure<P: ProcessManager>(
                 &entry_targets,
                 &body_scopes,
                 &entry_let_scopes,
+                &file_targets,
+                Some(ImportResolveCtx {
+                    files,
+                    parent: entry_parent.as_ref(),
+                    dir: &entry_base,
+                    is_entry: true,
+                }),
             )
             .check_top_level(entry)
         })?;
@@ -830,7 +1254,11 @@ pub fn validate_script_closure<P: ProcessManager>(
                 seeded_checker(
                     exec,
                     &all_funcs,
+                    &home_funcs,
+                    &harvest_first,
+                    &harvested,
                     &all_lets,
+                    &all_const_exports,
                     &entry_lets,
                     &inferred,
                     entry,
@@ -838,6 +1266,13 @@ pub fn validate_script_closure<P: ProcessManager>(
                     &targets,
                     &body_scopes,
                     &entry_let_scopes,
+                    &file_targets,
+                    Some(ImportResolveCtx {
+                        files,
+                        parent: None,
+                        dir: &file.dir,
+                        is_entry: false,
+                    }),
                 )
                 .check_import_body(&file.key, &file.steps, Some(&file.key))
             })?;
@@ -1113,10 +1548,80 @@ fn clean_var(name: &str) -> String {
     name.trim_start_matches('$').to_string()
 }
 
-/// Display form of a callee name: the runtime boundary messages use
-/// the bare name (`INT()`), never the qualified registry key.
-fn base_name(name: &str) -> &str {
-    name.rsplit("::").next().unwrap_or(name)
+/// Single owner for binding reads in static checking: every `Var`,
+/// `KeyPath` base, and `Inspect` read gates here, so AST and RPN
+/// agree by construction. `$` reads whichever family the name was
+/// declared in; `prefix` carries the step attribution (`""` in RPN
+/// contexts whose runtime errors carry no step number).
+fn check_var_binding_access(
+    env: &Env,
+    key: &str,
+    site: Option<&GuardExpr>,
+    prefix: &str,
+) -> Result<TypeTag> {
+    if !env.is_declared(key) {
+        bail!("{prefix}undefined variable ${key}");
+    }
+    env.read_guarded(key, site)
+}
+
+/// Single owner for static key-path traversal: every `KeyPath` and
+/// `LoadKeyPath` (AST and RPN) walks here, so shape errors agree by
+/// construction. `prefix` carries step attribution (`"at: "` in AST,
+/// `""` in RPN); the empty-prefix RPN wording matches the historical
+/// runtime errors. `Map`/`List`/`Any` and traversable unions defer to
+/// `Any`, mirroring the evaluator's value-resolved misses.
+fn traverse_static_keypath(mut current: TypeTag, keys: &[String], prefix: &str) -> Result<TypeTag> {
+    for part in keys {
+        match current {
+            TypeTag::Record(fields) => {
+                let Some(field) = fields.iter().find(|field| field.name == *part) else {
+                    bail!(
+                        "{prefix}unknown field '{part}'; expected fields: {}",
+                        fields
+                            .iter()
+                            .map(|field| field.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                };
+                current = field.ty.clone();
+            }
+            TypeTag::ListOf(element) => {
+                if part.parse::<usize>().is_err() {
+                    bail!("{prefix}Invalid array index '{part}'");
+                }
+                current = element.as_ref().clone();
+            }
+            TypeTag::MapOf(values) => {
+                current = values.as_ref().clone();
+            }
+            TypeTag::Map | TypeTag::List | TypeTag::Any => {
+                return Ok(TypeTag::Any);
+            }
+            TypeTag::Union(_, members) => {
+                let traversable = |member: &TypeTag| {
+                    matches!(
+                        member,
+                        TypeTag::Record(_)
+                            | TypeTag::ListOf(_)
+                            | TypeTag::MapOf(_)
+                            | TypeTag::Map
+                            | TypeTag::List
+                            | TypeTag::Any
+                    )
+                };
+                if members.iter().all(|member| !traversable(member)) {
+                    bail!("{prefix}Cannot traverse into scalar value at key '{part}'");
+                }
+                return Ok(TypeTag::Any);
+            }
+            _ => {
+                bail!("{prefix}Cannot traverse into scalar value at key '{part}'");
+            }
+        }
+    }
+    Ok(current)
 }
 
 /// Step prefix, or empty for RPN contexts whose runtime errors carry
@@ -1166,14 +1671,18 @@ fn file_env_union(steps: &[Step]) -> HashSet<String> {
     union
 }
 
-/// Outbound imports of one step tree in a single walk: each visible
-/// `AS` alias mapped to its defining file keys. `entry_parent`
-/// enables entry-first key matching for the entry unit; file units
-/// pass `None`. Single owner for the closure's per-unit import view;
-/// dead steps register nowhere, `FUNC` bodies never leak into the
-/// enclosing scope (they own per-function overlays), bare harvests
-/// stay global. The target map's key set is the alias set: no
-/// parallel `HashSet` is kept.
+/// Outbound imports of one unit's top-level steps: each visible
+/// `AS` alias mapped to its defining file keys. Block-nested imports
+/// never land here: `StepKind` bodies scope lexically and bare guard
+/// blocks scope through `scope_enter`/`scope_exit` markers, so both
+/// resolve from the walk's lexical frames instead — a read past the
+/// block fails closed instead of seeing a binding whose step may
+/// never execute. `FUNC` bodies never land here either (their
+/// overlays in `collect_body_scopes` start from this same table).
+/// `entry_parent` enables entry-first key matching for the entry
+/// unit; file units pass `None`. Single owner for the closure's
+/// per-unit import view; dead steps register nowhere. The target
+/// map's key set is the alias set: no parallel `HashSet` is kept.
 fn unit_imports(
     steps: &[Step],
     dir: &GuardedPath,
@@ -1181,38 +1690,45 @@ fn unit_imports(
     entry_parent: Option<&GuardedPath>,
     targets: &mut super::native::AliasTargets,
 ) {
+    // Marker depth mirrors the runtime scope stack step for step:
+    // the walk pushes a frame per `scope_enter` and pops per
+    // `scope_exit`, so collection tracks the same nesting to decide
+    // what counts as top level. Bare guard blocks lower to flat
+    // steps carrying markers (no `StepKind` body to recurse into),
+    // and only depth zero is the unit top level.
+    let mut depth: usize = 0;
     for step in steps {
-        if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
-            continue;
-        }
-        // Function-local imports belong to the enclosing function's
-        // overlay, never the unit: skipping `FUNC` bodies here keeps
-        // sibling functions from cross-resolving each other's aliases.
-        if matches!(step.kind, StepKind::FuncDef { .. }) {
-            continue;
-        }
-        let (path, alias) = match &step.kind {
-            StepKind::ImportFile { path, alias } => (path.clone(), Some(alias.clone())),
-            StepKind::ImportFuncs {
-                path,
-                alias: Some(alias),
-                ..
-            } => (path.clone(), Some(alias.clone())),
-            _ => (String::new(), None),
+        depth = depth.saturating_add(step.scope_enter);
+        // Only depth zero counts, and only for live steps:
+        // marker-scoped and dead steps never seed the unit table,
+        // resolving from the walk frames instead (or nowhere).
+        let live_top_level =
+            depth == 0 && !matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead);
+        let import = if live_top_level && !matches!(step.kind, StepKind::FuncDef { .. }) {
+            match &step.kind {
+                StepKind::ImportFile { path, alias } => Some((path.clone(), alias.clone())),
+                StepKind::ImportFuncs {
+                    path,
+                    alias: Some(alias),
+                    ..
+                } => Some((path.clone(), alias.clone())),
+                _ => None,
+            }
+        } else {
+            None
         };
-        if let Some(alias) = alias {
-            let unit = targets.entry(alias).or_default();
-            let is_entry = entry_parent.is_some();
-            // Host harvests have no closure file: record an explicit
-            // host branch so disjoint file+host aliases never collapse
-            // to `Canonical` (see `classify_alias_call`).
-            let defining =
-                super::import::resolve_static_top_level(entry_parent, dir, files, &path, is_entry);
-            unit.push((defining, step.guard.clone()));
-        }
-        for body in super::import::child_bodies(&step.kind) {
-            unit_imports(body, dir, files, entry_parent, targets);
-        }
+        depth = depth.saturating_sub(step.scope_exit);
+        let Some((path, alias)) = import else {
+            continue;
+        };
+        let unit = targets.entry(alias).or_default();
+        let is_entry = entry_parent.is_some();
+        // Host harvests have no closure file: record an explicit
+        // host branch so disjoint file+host aliases never collapse
+        // to `Canonical` (see `classify_alias_call`).
+        let defining =
+            super::import::resolve_static_top_level(entry_parent, dir, files, &path, is_entry);
+        unit.push((defining, step.guard.clone()));
     }
 }
 
@@ -1295,10 +1811,11 @@ fn expr_call_names(expr: &Expr, enter_funcdefs: bool, out: &mut Vec<String>) {
             expr_call_names(right, enter_funcdefs, out);
         }
         Expr::Not(inner) => expr_call_names(inner, enter_funcdefs, out),
-        Expr::Var(_)
+        Expr::Var { .. }
+        | Expr::ConstRef { .. }
         | Expr::Env(_)
         | Expr::KeyPath { .. }
-        | Expr::Inspect(_)
+        | Expr::Inspect { .. }
         | Expr::FreshPipe
         | Expr::UnsignedIntBoundary(_) => {}
     }
@@ -1307,7 +1824,7 @@ fn expr_call_names(expr: &Expr, enter_funcdefs: bool, out: &mut Vec<String>) {
 /// One call spelling snapped to entry-namespace names: bare heads and
 /// `SCRIPT::` heads; file aliases and hosts belong to other units.
 fn push_entry_call_name(name: &str, out: &mut Vec<String>) {
-    if let Some((module, base)) = name.split_once("::") {
+    if let Some((module, base)) = split_qualified(name) {
         if module == oxdock_parser::SCRIPT_MODULE_NAME {
             out.push(base.to_string());
         }
@@ -1430,30 +1947,31 @@ fn entry_let_scopes<P: ProcessManager>(
     }
     Ok(out)
 }
-/// Per-function import overlay: the enclosing unit's top-level imports
-/// plus the function's own direct imports. Nested function bodies get
-/// their own overlays isolated to the unit top-level (never the
-/// lexically enclosing function's locals), matching the runtime call
-/// frames where each invocation pushes a fresh frame. Keyed by (owner
-/// module key, function name, definition line, definition column) so
-/// same-named block-local functions in distinct blocks never
-/// overwrite each other's overlays. Single owner for function-local
-/// alias visibility; `check_function_body_probed` swaps it in while
-/// checking that body.
+/// Per-function import overlay: the enclosing unit's top-level imports.
+/// The walk appends the body's own imports to its lexical frame when
+/// the body is checked (block-nested imports land in deeper frames),
+/// so function-local imports resolve inside their function without
+/// leaking into sibling functions or the top level. Nested function
+/// definitions get their own overlays isolated to the unit top-level
+/// (never the lexically enclosing function's locals), matching the
+/// runtime call frames where each invocation pushes a fresh frame.
+/// Keyed by (owner module key, function name, definition line,
+/// definition column) so same-named block-local functions in distinct
+/// blocks never overwrite each other's overlays. Single owner for
+/// function-local alias visibility; `check_function_body_probed`
+/// swaps it in while checking that body.
 type BodyScopes = HashMap<(String, String, usize, usize), super::native::AliasTargets>;
 
-/// Collect one overlay per `FUNC` definition under `steps`: each
-/// overlay is the unit top-level plus that body's own direct imports.
-/// `unit_top` is the unit's own table (never an enclosing function's
-/// overlay), so nested definitions stay isolated exactly like the
-/// runtime frames. Dead steps contribute nothing, like the unit walk.
-#[allow(clippy::too_many_arguments)]
+/// Collect one overlay per `FUNC` definition under `steps`: the unit
+/// top-level, cloned. The walk records each body's own imports into
+/// its frame as it checks the body, so overlays stay order-free while
+/// reads observe execution order. `unit_top` is the unit's own table
+/// (never an enclosing function's overlay), so nested definitions stay
+/// isolated exactly like the runtime frames. Dead steps contribute
+/// nothing, like the unit walk.
 fn collect_body_scopes(
     steps: &[Step],
     module_key: &str,
-    dir: &GuardedPath,
-    files: &[ClosureFile],
-    entry_parent: Option<&GuardedPath>,
     unit_top: &super::native::AliasTargets,
     out: &mut BodyScopes,
 ) {
@@ -1462,19 +1980,17 @@ fn collect_body_scopes(
             continue;
         }
         if let StepKind::FuncDef { name, body, .. } = &step.kind {
-            let mut scope = unit_top.clone();
-            unit_imports(body, dir, files, entry_parent, &mut scope);
             out.insert(
                 (module_key.to_string(), name.clone(), step.line, step.col),
-                scope,
+                unit_top.clone(),
             );
             // Nested definitions isolate to the unit top-level too:
             // at runtime the nested body runs under its own fresh
             // frame, never the enclosing function's frame.
-            collect_body_scopes(body, module_key, dir, files, entry_parent, unit_top, out);
+            collect_body_scopes(body, module_key, unit_top, out);
         } else {
             for nested in super::import::child_bodies(&step.kind) {
-                collect_body_scopes(nested, module_key, dir, files, entry_parent, unit_top, out);
+                collect_body_scopes(nested, module_key, unit_top, out);
             }
         }
     }
@@ -1508,13 +2024,32 @@ impl Env {
     fn one_frame(bindings: Vec<(String, TypeTag, bool)>) -> Self {
         let mut top = HashMap::new();
         for (name, tag, _) in bindings {
-            top.insert(name, vec![Binding { tag, guard: None }]);
+            top.insert(
+                name,
+                vec![Binding {
+                    tag,
+                    guard: None,
+                    is_const: false,
+                }],
+            );
         }
         Self {
             frames: vec![top],
             module: None,
             env_frames: vec![HashSet::new()],
+            func_frames: vec![HashMap::new()],
+            import_frames: vec![HashMap::new()],
         }
+    }
+
+    /// Push one lexical frame across every stack (bindings, env
+    /// names, nested functions, block imports): single owner mirroring
+    /// runtime `push_scope`, so none of them can ever desync.
+    fn push_frame(&mut self) {
+        self.frames.push(HashMap::new());
+        self.env_frames.push(HashSet::new());
+        self.func_frames.push(HashMap::new());
+        self.import_frames.push(HashMap::new());
     }
 
     /// Fork for a scoped body: clone the stack and push a fresh frame,
@@ -1522,8 +2057,7 @@ impl Env {
     /// loop declarations never leak at runtime.
     fn fork(&self) -> Self {
         let mut fork = self.clone();
-        fork.frames.push(HashMap::new());
-        fork.env_frames.push(HashSet::new());
+        fork.push_frame();
         fork
     }
 
@@ -1534,6 +2068,37 @@ impl Env {
         if let Some(frame) = self.env_frames.last_mut() {
             frame.insert(name);
         }
+    }
+
+    /// Append one executed `IMPORT` to the innermost lexical frame:
+    /// block imports resolve for the rest of their block (the frame
+    /// discards on exit), top-level imports for the rest of the unit.
+    /// Same alias from several files overlaps (ambiguous) unless the
+    /// guards are disjoint, exactly like the unit-top table.
+    fn append_import_target(
+        &mut self,
+        alias: String,
+        defining: Option<String>,
+        guard: Option<GuardExpr>,
+    ) {
+        if let Some(frame) = self.import_frames.last_mut() {
+            frame.entry(alias).or_default().push((defining, guard));
+        }
+    }
+
+    /// Block imports outer-to-inner, merged in walk order. The checker
+    /// layers these over its unit-top table, so reads see every live
+    /// scope exactly once.
+    fn visible_imports(&self) -> super::native::AliasTargets {
+        let mut out = super::native::AliasTargets::new();
+        for frame in &self.import_frames {
+            for (alias, targets) in frame {
+                out.entry(alias.clone())
+                    .or_default()
+                    .extend(targets.iter().cloned());
+            }
+        }
+        out
     }
 
     /// Whether `name` was declared in any live frame.
@@ -1598,7 +2163,7 @@ impl Env {
                         Some(acc) => unify(
                             acc,
                             entry.tag.clone(),
-                            &format!("${key} across platform guards"),
+                            &format!("{} across platform guards", sigil_var(key)),
                         )?,
                     });
                     union = match (union, entry.guard.clone()) {
@@ -1651,7 +2216,7 @@ impl Env {
                         Some(acc) => unify(
                             acc,
                             entry.tag.clone(),
-                            &format!("${key} across platform guards"),
+                            &format!("{} across platform guards", sigil_var(key)),
                         )?,
                     });
                 }
@@ -1673,10 +2238,40 @@ impl Env {
                 .is_some_and(|scope| scope.lets.contains_key(key))
     }
 
+    /// Whether `key` names a `CONST` binding visible here: the innermost
+    /// frame holding the name decides (shadowing an outer `CONST`
+    /// with an inner `LET` stays mutable); module-shared bindings
+    /// consult their entries the same way. Only entries whose guard
+    /// overlaps the active step's site count, mirroring
+    /// [`declare_inner`](Self::declare_inner): a platform-conditional
+    /// `LET` never reads as `CONST` through a disjoint `CONST` entry.
+    /// Single owner for the static const gate behind `$var = <expr>`
+    /// reassignment and `LIST_APPEND` rejection.
+    fn is_const(&self, key: &str, site: Option<&GuardExpr>) -> bool {
+        for frame in self.frames.iter().rev() {
+            if let Some(entries) = frame.get(key) {
+                return entries.iter().any(|entry| {
+                    entry.is_const && oxdock_parser::guards_overlap(entry.guard.as_ref(), site)
+                });
+            }
+        }
+        if let Some(scope) = &self.module
+            && let Some(entries) = scope.lets.get(key)
+        {
+            return entries.iter().any(|entry| {
+                entry.is_const && oxdock_parser::guards_overlap(entry.guard.as_ref(), site)
+            });
+        }
+        false
+    }
+
     /// Declare in the top frame. A duplicate whose guard overlaps any
     /// live entry mirrors the runtime redeclaration error; a disjoint
     /// one (e.g. `[os:windows]` after `[os:macos]`) shadows across exclusive
-    /// paths and is allowed.
+    /// paths and is allowed. `LET` and `CONST` share one namespace, so
+    /// redeclaring across families fails here exactly like the runtime
+    /// same-scope check; the message names the blocking family instead
+    /// of suggesting a mutation that would fail.
     fn declare(
         &mut self,
         key: String,
@@ -1684,11 +2279,40 @@ impl Env {
         guard: Option<&GuardExpr>,
         idx: usize,
     ) -> Result<()> {
+        self.declare_inner(key, tag, guard, idx, false)
+    }
+
+    /// `CONST` twin of [`declare`](Self::declare): same overlap rule,
+    /// marks the new entry immutable.
+    fn declare_const(
+        &mut self,
+        key: String,
+        tag: TypeTag,
+        guard: Option<&GuardExpr>,
+        idx: usize,
+    ) -> Result<()> {
+        self.declare_inner(key, tag, guard, idx, true)
+    }
+
+    fn declare_inner(
+        &mut self,
+        key: String,
+        tag: TypeTag,
+        guard: Option<&GuardExpr>,
+        idx: usize,
+        is_const: bool,
+    ) -> Result<()> {
         if let Some(frame) = self.frames.last()
             && let Some(entries) = frame.get(&key)
         {
             for entry in entries {
                 if oxdock_parser::guards_overlap(entry.guard.as_ref(), guard) {
+                    if entry.is_const || is_const {
+                        bail!(
+                            "step {}: redeclaration error: {key} is a CONST binding and cannot be redeclared; CONST and LET share one namespace",
+                            idx + 1
+                        );
+                    }
                     bail!(
                         "step {}: redeclaration error: ${key} already declared in this scope; \
                          use ${key} = ... to mutate",
@@ -1701,6 +2325,7 @@ impl Env {
             frame.entry(key).or_default().push(Binding {
                 tag,
                 guard: guard.cloned(),
+                is_const,
             });
         }
         Ok(())
@@ -1713,6 +2338,7 @@ impl Env {
                 vec![Binding {
                     tag,
                     guard: guard.cloned(),
+                    is_const: false,
                 }],
             );
         }
@@ -1746,8 +2372,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             inferring: Vec::new(),
             visits: 0,
             strict_qualified: false,
+            home_funcs: HashMap::new(),
+            harvest_first: HashMap::new(),
+            harvested: HashMap::new(),
             entry_let_scopes: HashMap::new(),
             alias_targets: HashMap::new(),
+            import_ctx: None,
+            module_const_exports: HashMap::new(),
+            file_targets: HashMap::new(),
+            module_func_exports: HashMap::new(),
             body_scopes: HashMap::new(),
             isolated_depth: 0,
         }
@@ -1859,7 +2492,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     let name = name.trim();
                     self.check_env_name(env, name, "script_env:", scope)?;
                 }
-                // `$` and bare reads flow through the single var
+                // `$` and template reads flow through the single var
                 // extractor plus expression inference, so templates and
                 // code agree on every error. Malformed `$` paths (empty
                 // segments like `{{ $ }}`) fail here like they do in
@@ -1869,6 +2502,19 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // runtime (undefined script variable), qualified heads
                 // resolve like expression calls (unknown `ALIAS::TYPO`
                 // fails here, never at runtime).
+                PlaceholderKey::DollarQualified { alias, name, keys } => {
+                    if !keys.is_empty() {
+                        return Err(anyhow::anyhow!(
+                            oxdock_parser::template::qualified_keypath_error()
+                        ));
+                    }
+                    let expr = Expr::ConstRef {
+                        alias: alias.to_string(),
+                        name: name.to_string(),
+                    };
+                    let idx = scope.idx;
+                    let _ = self.infer_expr(&expr, env, scope, idx, depth + 1)?;
+                }
                 PlaceholderKey::Dollar(rest) => {
                     if oxdock_parser::template::parse_var_path(rest).is_none() {
                         bail!("invalid placeholder variable: empty variable reference");
@@ -1876,6 +2522,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     for var in placeholder_vars(key) {
                         self.check_template_var(&var, env, scope, depth)?;
                     }
+                }
+                PlaceholderKey::ConstRef { .. }
+                | PlaceholderKey::KeyPath { .. }
+                | PlaceholderKey::Var(_) => {
+                    return Err(anyhow::anyhow!(oxdock_parser::template::bare_sigil_error(
+                        key.trim()
+                    )));
                 }
                 PlaceholderKey::Bare(_) => {
                     for var in placeholder_vars(key) {
@@ -1898,7 +2551,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// One template variable read through expression inference, so
     /// templates and code agree on every error. `$a.b` traverses like
-    /// `KeyPath`; bare keys read like `Var`.
+    /// `KeyPath`. Bare shapes (`ConstRef`, `KeyPath`, `Var`) never
+    /// resolve: only call-arg nesting reaches them here (top-level
+    /// bare keys fail in `check_template_env`), and they fail with
+    /// the same `$` hint as everywhere else. Non-identifier keys
+    /// (`Bare`) read as plain undeclared variable reads.
     fn check_template_var(
         &mut self,
         var: &oxdock_parser::template::TemplateVar,
@@ -1906,14 +2563,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         scope: &Scope,
         depth: usize,
     ) -> Result<()> {
-        use oxdock_parser::template::TemplateVar;
+        use oxdock_parser::template::{TemplateVar, bare_sigil_error};
         let expr = match var {
             TemplateVar::Path(parts) => {
                 let (base, rest) = parts
                     .split_first()
                     .expect("placeholder_vars never emits empty paths");
                 if rest.is_empty() {
-                    Expr::Var(base.clone())
+                    Expr::Var { name: base.clone() }
                 } else {
                     Expr::KeyPath {
                         base: base.clone(),
@@ -1921,7 +2578,19 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     }
                 }
             }
-            TemplateVar::Bare(name) => Expr::Var(name.clone()),
+            TemplateVar::ConstRef { alias, name } => {
+                return Err(anyhow::anyhow!(bare_sigil_error(&qualify(alias, name))));
+            }
+            TemplateVar::KeyPath { base, keys } => {
+                return Err(anyhow::anyhow!(bare_sigil_error(&format!(
+                    "{base}.{}",
+                    keys.join(".")
+                ))));
+            }
+            TemplateVar::Var(name) => {
+                return Err(anyhow::anyhow!(bare_sigil_error(name)));
+            }
+            TemplateVar::Bare(name) => Expr::Var { name: name.clone() },
         };
         let idx = scope.idx;
         let _ = self.infer_expr(&expr, env, scope, idx, depth + 1)?;
@@ -1951,13 +2620,27 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             // miss wording below is a script, stateful, or known-alias
             // callee that can never run in `{{ }}`.
             let mut is_script_visible = false;
-            match super::native::classify_alias_call(&self.alias_targets, &qualified, &|key| {
+            let effective = self.effective_alias_targets(env);
+            match super::native::classify_alias_call(&effective, &qualified, &|key| {
                 self.funcs.contains_key(key)
             }) {
                 // Global spellings resolve as written; only `SCRIPT::`
-                // names can hit a script entry this way.
+                // names can hit a script entry this way. Visibility
+                // walks the same frames as call resolution (#322):
+                // nested defs, then the owning file (entry included),
+                // then bare harvests.
                 super::native::AliasResolution::Global => {
                     is_script_visible = self.funcs.contains_key(&qualified);
+                    if module == oxdock_parser::SCRIPT_MODULE_NAME {
+                        let unit =
+                            super::import::unit_key(env.module.as_ref().map(|m| m.key.as_str()));
+                        if self
+                            .find_frame_hit(unit, name, &env.func_frames, scope.site.as_ref())
+                            .is_some()
+                        {
+                            is_script_visible = true;
+                        }
+                    }
                 }
                 super::native::AliasResolution::Canonical(canonical) => {
                     is_script_visible = self.funcs.contains_key(&canonical);
@@ -1997,7 +2680,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 name,
                 is_script_visible,
                 self.hosts.contains_key(&qualified),
-                self.alias_targets.contains_key(module),
+                effective.contains_key(module),
             ) {
                 bail!("{text}");
             }
@@ -2077,20 +2760,30 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         literal_depth: usize,
     ) -> Result<StaticTy> {
         use oxdock_parser::template::{
-            MAX_TEMPLATE_ARG_DEPTH, ScalarLit, TemplateArg, classify_template_arg,
-            parse_string_literal, parse_var_path,
+            MAX_TEMPLATE_ARG_DEPTH, ScalarLit, TemplateArg, bare_sigil_error,
+            classify_template_arg, parse_string_literal, parse_var_path, qualified_keypath_error,
         };
         if literal_depth > MAX_TEMPLATE_ARG_DEPTH {
             bail!("placeholder call argument nests too deep (limit {MAX_TEMPLATE_ARG_DEPTH})");
         }
         match classify_template_arg(src) {
+            TemplateArg::DollarQualified { alias, name, keys } => {
+                if !keys.is_empty() {
+                    return Err(anyhow::anyhow!(qualified_keypath_error()));
+                }
+                let expr = Expr::ConstRef {
+                    alias: alias.to_string(),
+                    name: name.to_string(),
+                };
+                self.infer_expr(&expr, env, scope, scope.idx, depth + 1)
+            }
             TemplateArg::Dollar(rest) => {
                 let Some(parts) = parse_var_path(rest) else {
                     bail!("invalid placeholder call argument: empty variable reference");
                 };
                 let (base, segs) = parts.split_first().expect("split always yields one");
                 let expr = if segs.is_empty() {
-                    Expr::Var(base.clone())
+                    Expr::Var { name: base.clone() }
                 } else {
                     Expr::KeyPath {
                         base: base.clone(),
@@ -2120,6 +2813,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     ScalarLit::Int(_) => TypeTag::Int,
                     ScalarLit::Float(_) => TypeTag::Float,
                 }))
+            }
+            TemplateArg::ConstRef { .. } | TemplateArg::KeyPath { .. } | TemplateArg::Var(_) => {
+                Err(anyhow::anyhow!(bare_sigil_error(src.trim())))
             }
             TemplateArg::Invalid(invalid) => {
                 bail!("invalid placeholder call argument '{invalid}'")
@@ -2233,6 +2929,41 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// Define one collected function under explicit keys: resolve the
     /// param tags now (the same error execution reports), store the
     /// body for return inference, and collect nested definitions.
+    /// `FuncInfo` construction is shared with [`Self::collect_home`]:
+    /// one owner for resolved params, declared returns, and owner
+    /// tagging, so home entries check exactly like collected ones.
+    #[allow(clippy::too_many_arguments)]
+    fn make_func_info(
+        &self,
+        name: &str,
+        params: &[(String, String, bool)],
+        return_type: &str,
+        is_async: bool,
+        body: &[Step],
+        module: Option<&str>,
+        line: usize,
+        col: usize,
+    ) -> Result<FuncInfo> {
+        let resolved = resolve_script_params(self.exec, name, params)?;
+        let declared = self
+            .exec
+            .resolve_tag(return_type)
+            .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+        self.exec
+            .check_return_tag(&format!("function `{name}` returns"), &declared)
+            .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+        Ok(FuncInfo {
+            params: resolved,
+            declared,
+            is_async,
+            body: body.to_vec(),
+            module: module.map(|m| m.to_string()),
+            name: name.to_string(),
+            line,
+            col,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn define_collected(
         &mut self,
@@ -2246,31 +2977,85 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         line: usize,
         col: usize,
     ) -> Result<()> {
-        let resolved = resolve_script_params(self.exec, name, params)?;
-        let declared = self
-            .exec
-            .resolve_tag(return_type)
-            .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
-        self.exec
-            .check_return_tag(&format!("function `{name}` returns"), &declared)
-            .map_err(|err| anyhow::anyhow!("function `{name}`: {err:#}"))?;
+        let info =
+            self.make_func_info(name, params, return_type, is_async, body, module, line, col)?;
         for key in keys {
-            self.funcs.insert(
-                key,
-                FuncInfo {
-                    params: resolved.clone(),
-                    declared: declared.clone(),
-                    is_async,
-                    body: body.to_vec(),
-                    module: module.map(|m| m.to_string()),
-                    name: name.to_string(),
-                    line,
-                    col,
-                },
-            );
+            self.funcs.insert(key, info.clone());
         }
         let nested = body.to_vec();
         self.collect_owned(&nested, module)?;
+        Ok(())
+    }
+
+    /// Index every top-level `FUNC` of one closure file for home-scope
+    /// resolution (#319): exported, harvested, and private alike, keyed
+    /// by (defining file, base name). Separate from `funcs` so
+    /// `LIB::PRIVATE` stays unresolvable externally while home bodies
+    /// still validate against the sibling's declared signature.
+    /// Last definition wins, mirroring `define_collected` overwrite
+    /// and runtime definition order; statically-dead steps never
+    /// index, like collection.
+    fn collect_home(&mut self, file: &super::import::ClosureFile) -> Result<()> {
+        for step in &file.steps {
+            if let StepKind::FuncDef {
+                name,
+                params,
+                return_type,
+                is_async,
+                body,
+                ..
+            } = &step.kind
+            {
+                // Harvests bind the first textual definition
+                // (mirroring `import_funcs`' guard-blind first match),
+                // recorded before the dead-guard skip below so the
+                // harvest arm resolves exactly what the runtime
+                // registers. Dead defs still fail validation here
+                // rather than silently validating: a dead harvest
+                // target is a loud error, never a quiet wrong body.
+                let key = (file.key.clone(), name.clone());
+                if !self.harvest_first.contains_key(&key) {
+                    let info = self.make_func_info(
+                        name,
+                        params,
+                        return_type,
+                        *is_async,
+                        body,
+                        Some(file.key.as_str()),
+                        step.line,
+                        step.col,
+                    )?;
+                    self.harvest_first.insert(key, info);
+                }
+            }
+            if matches!(classify_guard(step.guard.as_ref()), GuardClass::Dead) {
+                continue;
+            }
+            if let StepKind::FuncDef {
+                name,
+                params,
+                return_type,
+                is_async,
+                body,
+                ..
+            } = &step.kind
+            {
+                let info = self.make_func_info(
+                    name,
+                    params,
+                    return_type,
+                    *is_async,
+                    body,
+                    Some(file.key.as_str()),
+                    step.line,
+                    step.col,
+                )?;
+                self.home_funcs
+                    .entry((file.key.clone(), name.clone()))
+                    .or_default()
+                    .push((step.guard.clone(), info));
+            }
+        }
         Ok(())
     }
 
@@ -2286,7 +3071,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             } => {
                 self.define_collected(
                     name,
-                    vec![name.clone(), format!("SCRIPT::{name}")],
+                    vec![
+                        name.clone(),
+                        oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, name),
+                    ],
                     params,
                     return_type,
                     *is_async,
@@ -2338,58 +3126,51 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// means private: full imports skip unexported functions, and
     /// harvesting one fails upfront. Harvesting a state-touching
     /// function fails too: the body never runs, so there is no
-    /// initialized state for it to observe. Nested control-flow bodies
-    /// collect under the same owner. Shadowing follows the same
+    /// initialized state for it to observe. The harvest gate itself
+    /// (exported plus defined, both kinds) lives in
+    /// [`super::import::gate_harvested_name`], shared with the runtime,
+    /// so static and runtime fail identically. Shadowing follows the
     /// last-wins rule as [`collect_owned`](Self::collect_owned); the
     /// runtime registry remains the enforcer for true duplicates.
-    /// Type harvests gate against `EXPORT TYPE` the same way; types
-    /// persist bare globally for later `resolve_tag` calls, which read
-    /// the global alias map.
+    /// Types persist bare globally for later `resolve_tag` calls, which
+    /// read the global alias map.
     fn collect_site(&mut self, site: &ClosureSite, file: &ClosureFile) -> Result<()> {
         let module = file.key.as_str();
         let steps = file.steps.as_slice();
         let alias = site.alias.as_deref();
         let func_names = site.func_names.as_deref();
         let type_names = site.type_names.as_deref();
-        let func_exports = &file.func_exports;
-        let type_exports = &file.type_exports;
+        let func_exports = &file.exports.funcs;
         let file_path = file.path.as_str();
         if !self.module_lets.contains_key(module) {
             let lets = module_lets(steps, self.exec)?;
             self.module_lets.insert(module.to_string(), lets);
         }
         if let Some(names) = func_names {
-            let defined: Vec<&str> = steps
-                .iter()
-                .filter_map(|step| match &step.kind {
-                    StepKind::FuncDef { name, .. } => Some(name.as_str()),
-                    _ => None,
-                })
-                .collect();
+            // Harvest validity lives in `super::import::gate_harvested_name`
+            // (single owner, shared with the runtime): export gate first,
+            // then the defined check, so static and runtime fail
+            // identically. This also fixes the old order here
+            // (defined-first) to match every other site.
             for name in names {
-                if !defined.iter().any(|d| d == name) {
-                    bail!("IMPORT `{file_path}` has no such function `{name}`");
-                }
-                if !func_exports.iter().any(|e| e == name) {
-                    bail!("IMPORT `{file_path}` does not export `{name}`");
-                }
+                super::import::gate_harvested_name(
+                    ExportKind::Func,
+                    steps,
+                    &file.exports,
+                    name,
+                    file_path,
+                )?;
             }
         }
         if let Some(type_names) = type_names {
-            let defined_types: Vec<&str> = steps
-                .iter()
-                .filter_map(|step| match &step.kind {
-                    StepKind::TypeAlias { name, .. } => Some(name.as_str()),
-                    _ => None,
-                })
-                .collect();
             for name in type_names {
-                if !defined_types.iter().any(|d| d == name) {
-                    bail!("IMPORT `{file_path}` has no such TYPE `{name}`");
-                }
-                if !type_exports.iter().any(|e| e == name) {
-                    bail!("IMPORT `{file_path}` does not export TYPE `{name}`");
-                }
+                super::import::gate_harvested_name(
+                    ExportKind::Type,
+                    steps,
+                    &file.exports,
+                    name,
+                    file_path,
+                )?;
             }
         }
         let func_exported: std::collections::HashSet<&str> =
@@ -2436,7 +3217,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     None => {
                         self.define_collected(
                             name,
-                            vec![name.clone(), format!("SCRIPT::{name}")],
+                            vec![
+                                name.clone(),
+                                oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, name),
+                            ],
                             params,
                             return_type,
                             *is_async,
@@ -2488,8 +3272,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let mut env = Env::one_frame(Vec::new());
         if let Some(module) = module {
             let mut lets: HashMap<String, Vec<Binding>> = HashMap::new();
-            for (name, tag, guard) in self.module_lets.get(module).cloned().unwrap_or_default() {
-                lets.entry(name).or_default().push(Binding { tag, guard });
+            for entry in self.module_lets.get(module).cloned().unwrap_or_default() {
+                lets.entry(entry.name).or_default().push(Binding {
+                    tag: entry.tag,
+                    guard: entry.guard,
+                    is_const: entry.is_const,
+                });
             }
             env.module = Some(ModuleScope {
                 key: module.to_string(),
@@ -2591,18 +3379,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
         let mut env = Env::one_frame(info.params.clone());
         if let Some(module) = info.module.as_deref() {
-            let lets = self.module_lets.get(module).cloned().unwrap_or_default();
             let touched = probe.unwrap_or_default();
-            let mut module_lets: HashMap<String, Vec<Binding>> = HashMap::new();
-            for (name, tag, guard) in lets {
-                module_lets
-                    .entry(name)
-                    .or_default()
-                    .push(Binding { tag, guard });
-            }
             env.module = Some(ModuleScope {
                 key: module.to_string(),
-                lets: module_lets,
+                lets: seed_map(
+                    self.module_lets
+                        .get(module)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                ),
                 touched,
             });
             // The file's prelude union seeds the body: a module
@@ -2616,34 +3401,31 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
             }
         } else {
-            // Entry functions capture the entry's top-level `LET`s
-            // through the runtime outer scope, so the body seeds from
-            // the bindings declared before its earliest reachable call
-            // site (a call before a `LET` executes reads uninitialized
-            // memory at runtime). Uncalled functions and single-file
-            // probes keep the full union. Params stay on top: re-`LET`
-            // inside the body shadows instead of redeclaring. Guards
-            // accumulate per name so disjoint platform declarations
-            // enforce coverage instead of overwriting.
+            // Entry functions observe params plus the file's top-level
+            // `CONST`s declared before their earliest reachable call
+            // (#318): immutable file state is visible by scope, while
+            // mutable state crosses only as explicit arguments. Seeds
+            // sit beneath the params frame, so param shadowing and the
+            // const gate ride the existing frame walk with no special
+            // cases. Uncalled bodies keep the full union (dead code
+            // stays lenient). The runtime seeds the same view from the
+            // caller bottom const frame; keep the two in lockstep.
             let scoped = self
                 .entry_let_scopes
-                .get(&(info.name.clone(), info.line, info.col))
-                .cloned()
-                .unwrap_or_else(|| self.entry_lets.clone());
-            if !scoped.is_empty() {
-                let mut bottom: HashMap<String, Vec<Binding>> = HashMap::new();
-                for (name, tag, guard) in &scoped {
-                    bottom.entry(name.clone()).or_default().push(Binding {
-                        tag: tag.clone(),
-                        guard: guard.clone(),
-                    });
-                }
-                env.frames.insert(0, bottom);
+                .get(&(info.name.clone(), info.line, info.col));
+            let source: &[GuardedLet] = match scoped {
+                Some(scope) => scope,
+                None => &self.entry_lets,
+            };
+            let seeds: Vec<GuardedLet> = source.iter().filter(|b| b.is_const).cloned().collect();
+            if !seeds.is_empty() {
+                env.frames.insert(0, seed_map(&seeds));
+                env.env_frames.insert(0, HashSet::new());
+                env.func_frames.insert(0, HashMap::new());
+                env.import_frames.insert(0, HashMap::new());
             }
-            // Entry top-level declarations persist globally for later
-            // calls, so entry functions seed from the entry union.
-            for name in self.entry_env_union.clone() {
-                env.declare_env(name);
+            for name in &self.entry_env_union {
+                env.declare_env(name.clone());
             }
         }
         let scope = Scope {
@@ -2659,7 +3441,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // Function-local imports scope to this body (mirroring the
         // runtime dynamic extent): swap in the body's overlay,
         // restoring the unit sets afterward on every path.
-        let unit = info.module.as_deref().unwrap_or(super::import::ENTRY_UNIT);
+        let unit = super::import::unit_key(info.module.as_deref());
         let overlay = self
             .body_scopes
             .get(&(unit.to_string(), info.name.clone(), info.line, info.col))
@@ -2736,8 +3518,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// its returns and types but never terminates the walk: the path
     /// passes through it. Branches and loops fork the environment and
     /// discard it (arm and loop declarations are scope-local at
-    /// runtime); `SET` cannot change types (runtime coerces), so no
-    /// merge is needed — discarding is exact.
+    /// runtime); `$var = <expr>` reassignment cannot change types (runtime
+    /// coerces), so no merge is needed — discarding is exact.
     #[allow(clippy::too_many_lines)]
     fn walk_body(
         &mut self,
@@ -2751,6 +3533,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
         let base_frames = env.frames.len();
         let base_env_frames = env.env_frames.len();
+        let base_func_frames = env.func_frames.len();
+        let base_import_frames = env.import_frames.len();
         let mut out = WalkOut {
             falls_through: true,
             has_return: false,
@@ -2784,8 +3568,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             // before the guard check, restored after the step, even
             // for dead steps (net effect zero there).
             for _ in 0..step.scope_enter {
-                env.frames.push(HashMap::new());
-                env.env_frames.push(HashSet::new());
+                env.push_frame();
             }
             // Guard `[env:KEY]` references read the environment: they
             // need the same declaration as any other use. Checked
@@ -2825,6 +3608,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 if env.env_frames.len() > base_env_frames {
                     env.env_frames.pop();
                 }
+                if env.func_frames.len() > base_func_frames {
+                    env.func_frames.pop();
+                }
+                if env.import_frames.len() > base_import_frames {
+                    env.import_frames.pop();
+                }
             }
             // Early terminal returns above skip the pops and discard
             // the env, matching observable runtime behavior (restore
@@ -2835,6 +3624,264 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 
     /// Walk a single live step. The returned `falls_through` is
     /// relative to the step alone; the caller applies guard semantics.
+    /// Shared `LET`/`CONST $var: TYPE = <expr>` check: infer, reject
+    /// `VOID`, resolve and validate the tag, then declare (`CONST`
+    /// via `declare_const`). Everything but the declaration is
+    /// family-independent, so the two arms cannot drift.
+    #[allow(clippy::too_many_arguments)]
+    fn check_plain_rhs(
+        &mut self,
+        expr: &Expr,
+        env: &mut Env,
+        scope: &Scope,
+        idx: usize,
+        depth: usize,
+        var: &str,
+    ) -> Result<()> {
+        let rhs = self.infer_expr(expr, env, scope, idx, depth + 1)?;
+        if matches!(rhs, StaticTy::Void) {
+            bail!(
+                "step {}: VOID block has no value to bind to `${var}`",
+                idx + 1
+            );
+        }
+        Ok(())
+    }
+
+    /// Shared capture check (`LET`/`CONST $var: TYPE = <command>`):
+    /// the captured command checks first, the yield must coerce to
+    /// the pre-resolved tag. The caller owns tag resolution and the
+    /// final declaration. `is_const` selects the diagnostic word.
+    #[allow(clippy::too_many_arguments)]
+    fn check_capture_rhs(
+        &mut self,
+        var: &str,
+        tag: &TypeTag,
+        cmd: &StepKind,
+        env: &mut Env,
+        scope: &Scope,
+        step: &Step,
+        idx: usize,
+        depth: usize,
+        is_const: bool,
+    ) -> Result<()> {
+        // The captured command runs first at runtime, so its
+        // expressions check before the declaration lands.
+        self.walk_wrapped(step, cmd, env, scope, idx, depth + 1)?;
+        // Yield check mirroring runtime assign_capture (see
+        // capture_yield): without it a TIMEOUT-wrapped (or any
+        // non-call) command sails through with an incompatible
+        // declaration and fails only at runtime coercion.
+        if let Some(yield_tag) = self.capture_yield(cmd, env, scope.site.as_ref(), depth)?
+            && self
+                .check_arg(
+                    tag,
+                    StaticTy::Ty(yield_tag.clone()),
+                    &format!("step {}", idx + 1),
+                )
+                .is_err()
+        {
+            let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
+            bail!(
+                "step {}: {kw} ${} captures {} but declares {}",
+                idx + 1,
+                clean_var(var),
+                render_structural(&yield_tag),
+                render_structural(tag)
+            );
+        }
+        Ok(())
+    }
+
+    /// Shared `AWAIT` capture check: the handle resolves before the
+    /// output declares and the payload must fit the pre-resolved tag.
+    /// The caller owns tag resolution and the final declaration.
+    #[allow(clippy::too_many_arguments)]
+    fn check_await_rhs(
+        &mut self,
+        out_var: &str,
+        tag: &TypeTag,
+        task_var: &str,
+        env: &mut Env,
+        scope: &Scope,
+        idx: usize,
+    ) -> Result<()> {
+        // The handle resolves before the output declares.
+        let key = clean_var(task_var);
+        let prefix = format!("step {}: ", idx + 1);
+        let handle_tag = check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)?;
+        let payload = match handle_tag {
+            TypeTag::Handle => TypeTag::Any,
+            TypeTag::HandleOf(inner) => (*inner).clone(),
+            other => bail!(
+                "step {}: AWAIT ${} is {}, not HANDLE",
+                idx + 1,
+                clean_var(task_var),
+                render_structural(&other)
+            ),
+        };
+        if matches!(payload, TypeTag::Void) {
+            bail!(
+                "step {}: AWAIT ${} is HANDLE<VOID>: no value to bind to `${}`; use bare AWAIT for join",
+                idx + 1,
+                clean_var(task_var),
+                clean_var(out_var)
+            );
+        }
+        if !is_compatible(&payload, tag) && !is_compatible(tag, &payload) {
+            // Top-down: capture type must accept the task payload.
+            // Allow coercible pairs via check_arg shape.
+            if self
+                .check_arg(
+                    tag,
+                    StaticTy::Ty(payload.clone()),
+                    &format!("step {}", idx + 1),
+                )
+                .is_err()
+            {
+                bail!(
+                    "step {}: AWAIT ${} yields {} but `${}` declares {}",
+                    idx + 1,
+                    clean_var(task_var),
+                    render_structural(&payload),
+                    clean_var(out_var),
+                    render_structural(tag)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Shared `ASYNC` binding check: the body walks in a forked task
+    /// scope and the pre-resolved tag must be `HANDLE`-headed and fit
+    /// the task's returns. The caller owns tag resolution and the
+    /// final declaration.
+    #[allow(clippy::too_many_arguments)]
+    fn check_async_rhs(
+        &mut self,
+        var: &str,
+        tag: &TypeTag,
+        body: &[Step],
+        env: &mut Env,
+        scope: &Scope,
+        idx: usize,
+        depth: usize,
+    ) -> Result<()> {
+        // Bodies publish through `AWAIT`; returns belong to the task,
+        // never the enclosing function. Every ASYNC position is HANDLE-headed.
+        let mut fork = env.fork();
+        let task = Scope {
+            label: scope.label,
+            ret: RetCtx::AsyncValue,
+            loops: 0,
+            switches: 0,
+            site: scope.site.clone(),
+            line: scope.line,
+            col: scope.col,
+            idx: scope.idx,
+        };
+        let inner = self.walk_body(body, &mut fork, &task, depth + 1)?;
+        // HANDLE-headed first (the async rule owns that
+        // message), then the shared position rule for nested
+        // VOID (HANDLE<LIST<VOID>> and friends).
+        let payload = match &tag {
+            TypeTag::Handle => TypeTag::Any,
+            TypeTag::HandleOf(inner_tag) => (**inner_tag).clone(),
+            _ => bail!(
+                "step {}: ASYNC `${}` declares {}, not HANDLE; every ASYNC position is HANDLE-headed",
+                idx + 1,
+                clean_var(var),
+                render_structural(tag)
+            ),
+        };
+        if inner.bare_return && !matches!(payload, TypeTag::Void) {
+            bail!(
+                "step {}: ASYNC `${}` declares {} but task has a bare RETURN; bare RETURN is only a void exit",
+                idx + 1,
+                clean_var(var),
+                render_structural(tag)
+            );
+        }
+        if matches!(payload, TypeTag::Void) {
+            if let Some((ty, line, _col)) = inner.types.first() {
+                bail!(
+                    "step {}: HANDLE<VOID> task RETURN at line {line} yields {}",
+                    idx + 1,
+                    render_structural(ty)
+                );
+            }
+        } else if inner.types.is_empty() {
+            if !matches!(payload, TypeTag::Any) {
+                bail!(
+                    "step {}: ASYNC `${}` declares {} but task has no value RETURN",
+                    idx + 1,
+                    clean_var(var),
+                    render_structural(tag)
+                );
+            }
+        } else {
+            for (ty, line, _col) in &inner.types {
+                if !is_compatible(ty, &payload) {
+                    bail!(
+                        "step {}: ASYNC `${}` declares {} but task RETURN at line {line} yields {}",
+                        idx + 1,
+                        clean_var(var),
+                        render_structural(tag),
+                        render_structural(ty)
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Unit-top targets layered with the walk's block imports
+    /// (outer-to-inner): what every qualified read in this scope
+    /// resolves against. Single owner for the merge, so call
+    /// resolution, const reads, and template gates cannot disagree.
+    /// Exact duplicate pairs collapse (a top-level import also
+    /// appends when the walk visits it); overlapping guards stay
+    /// distinct so ambiguity still fires across files.
+    fn effective_alias_targets(&self, env: &Env) -> super::native::AliasTargets {
+        let mut out = self.alias_targets.clone();
+        for (alias, targets) in env.visible_imports() {
+            let entry = out.entry(alias).or_default();
+            for target in targets {
+                if !entry.contains(&target) {
+                    entry.push(target);
+                }
+            }
+        }
+        out
+    }
+
+    /// Record one `IMPORT` step into the walk's innermost lexical
+    /// frame: block imports resolve for the rest of their block, then
+    /// unwind with it. Top-level imports land in the unit frame and
+    /// persist for the unit. Resolution shares the collection phase's
+    /// `resolve_static_top_level` rule, so both agree file for file.
+    /// Without a resolution context (single-file validation) records
+    /// nothing: reads stay lenient instead of failing resolution.
+    fn record_walk_import(
+        &mut self,
+        alias: &str,
+        path: &str,
+        guard: Option<&GuardExpr>,
+        env: &mut Env,
+    ) {
+        let Some(rctx) = &self.import_ctx else {
+            return;
+        };
+        let defining = super::import::resolve_static_top_level(
+            rctx.parent,
+            rctx.dir,
+            rctx.files,
+            path,
+            rctx.is_entry,
+        );
+        env.append_import_target(alias.to_string(), defining, guard.cloned());
+    }
+
     fn walk_step(
         &mut self,
         step: &Step,
@@ -3039,6 +4086,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     line: step.line,
                     col: step.col,
                 };
+                // Register before validating the body: later steps in
+                // this walk resolve the nested def (mirroring runtime
+                // definition order), including the body's own
+                // self-calls. Block forks discard it on exit, exactly
+                // like runtime scope pops.
+                if let Some(frame) = env.func_frames.last_mut() {
+                    frame.insert(name.clone(), info.clone());
+                }
                 self.check_function_body(name, &info, depth + 1)?;
                 Ok(live)
             }
@@ -3046,65 +4101,48 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.check_call(name, args, env, scope, idx, depth + 1)?;
                 Ok(live)
             }
-            StepKind::Assign {
+            StepKind::Bind {
                 var,
                 decl_type,
-                expr,
+                is_const,
+                rhs,
             } => {
-                let rhs = self.infer_expr(expr, env, scope, idx, depth + 1)?;
-                if matches!(rhs, StaticTy::Void) {
-                    bail!(
-                        "step {}: VOID block has no value to bind to `${var}`",
-                        idx + 1
-                    );
-                }
+                // Single declaration owner: resolve the declared tag
+                // once, validate the right-hand side per `BindRhs`
+                // variant, then validate the position rule and declare
+                // once. RHS validation runs before the position rule so
+                // `ASYNC` reports HANDLE-headed before VOID position,
+                // matching the historical per-form order. No per-form
+                // restatement of the tag gate or the const branch.
                 let tag = self
                     .exec
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                self.exec
-                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
-                let key = clean_var(var);
-                env.declare(key, tag, step.guard.as_ref(), idx)?;
-                Ok(live)
-            }
-            StepKind::AssignCapture {
-                var,
-                decl_type,
-                cmd,
-            } => {
-                // The captured command runs first at runtime, so its
-                // expressions check before the declaration lands.
-                self.walk_wrapped(step, cmd, env, scope, idx, depth + 1)?;
-                let tag = self
-                    .exec
-                    .resolve_tag(decl_type)
-                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                self.exec
-                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
-                // Yield check mirroring runtime assign_capture (see
-                // capture_yield): without it a TIMEOUT-wrapped (or any
-                // non-call) command sails through with an incompatible
-                // declaration and fails only at runtime coercion.
-                if let Some(yield_tag) = self.capture_yield(cmd, depth)?
-                    && self
-                        .check_arg(
-                            &tag,
-                            StaticTy::Ty(yield_tag.clone()),
-                            &format!("step {}", idx + 1),
-                        )
-                        .is_err()
-                {
-                    bail!(
-                        "step {}: LET ${} captures {} but declares {}",
-                        idx + 1,
-                        clean_var(var),
-                        render_structural(&yield_tag),
-                        render_structural(&tag)
-                    );
+                match rhs {
+                    oxdock_parser::BindRhs::Expr(expr) => {
+                        self.check_plain_rhs(expr, env, scope, idx, depth, var)?;
+                    }
+                    oxdock_parser::BindRhs::Capture(cmd) => {
+                        self.check_capture_rhs(
+                            var, &tag, cmd, env, scope, step, idx, depth, *is_const,
+                        )?;
+                    }
+                    oxdock_parser::BindRhs::Async(body) => {
+                        self.check_async_rhs(var, &tag, body, env, scope, idx, depth)?;
+                    }
+                    oxdock_parser::BindRhs::Await { task_var } => {
+                        self.check_await_rhs(var, &tag, task_var, env, scope, idx)?;
+                    }
                 }
+                self.exec
+                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)
+                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
                 let key = clean_var(var);
-                env.declare(key, tag, step.guard.as_ref(), idx)?;
+                if *is_const {
+                    env.declare_const(key, tag, step.guard.as_ref(), idx)?;
+                } else {
+                    env.declare(key, tag, step.guard.as_ref(), idx)?;
+                }
                 Ok(live)
             }
             StepKind::Set { var, expr } => {
@@ -3115,68 +4153,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         idx + 1
                     );
                 }
+                if env.is_const(&key, scope.site.as_ref()) {
+                    bail!(
+                        "step {}: cannot mutate CONST {key}: CONST bindings are deeply immutable",
+                        idx + 1
+                    );
+                }
                 // Site-aware liveness: the binding must hold on this
                 // step's path, not merely somewhere in scope. A bare
                 // existence check would accept a mutation on a path
                 // where the variable never binds.
                 let _ = env.read_guarded(&key, scope.site.as_ref())?;
                 self.infer_expr(expr, env, scope, idx, depth + 1)?;
-                Ok(live)
-            }
-            StepKind::AwaitCapture {
-                out_var,
-                out_type,
-                task_var,
-            } => {
-                // The handle resolves before the output declares.
-                let handle_tag = Self::check_name_read(env, task_var, scope, idx)?;
-                let tag = self
-                    .exec
-                    .resolve_tag(out_type)
-                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                self.exec
-                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)?;
-                let payload = match handle_tag {
-                    TypeTag::Handle => TypeTag::Any,
-                    TypeTag::HandleOf(inner) => (*inner).clone(),
-                    other => bail!(
-                        "step {}: AWAIT ${} is {}, not HANDLE",
-                        idx + 1,
-                        clean_var(task_var),
-                        render_structural(&other)
-                    ),
-                };
-                if matches!(payload, TypeTag::Void) {
-                    bail!(
-                        "step {}: AWAIT ${} is HANDLE<VOID>: no value to bind to `${}`; use bare AWAIT for join",
-                        idx + 1,
-                        clean_var(task_var),
-                        clean_var(out_var)
-                    );
-                }
-                if !is_compatible(&payload, &tag) && !is_compatible(&tag, &payload) {
-                    // Top-down: capture type must accept the task payload.
-                    // Allow coercible pairs via check_arg shape.
-                    if self
-                        .check_arg(
-                            &tag,
-                            StaticTy::Ty(payload.clone()),
-                            &format!("step {}", idx + 1),
-                        )
-                        .is_err()
-                    {
-                        bail!(
-                            "step {}: AWAIT ${} yields {} but `${}` declares {}",
-                            idx + 1,
-                            clean_var(task_var),
-                            render_structural(&payload),
-                            clean_var(out_var),
-                            render_structural(&tag)
-                        );
-                    }
-                }
-                let key = clean_var(out_var);
-                env.declare(key, tag, step.guard.as_ref(), idx)?;
                 Ok(live)
             }
             StepKind::AsyncBlock { body } => {
@@ -3196,92 +4184,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.walk_body(body, &mut fork, &task, depth + 1)?;
                 Ok(live)
             }
-            StepKind::AssignAsync {
-                var,
-                decl_type,
-                body,
-            } => {
-                // `LET $t: HANDLE<VOID> = ASYNC ...` bodies publish through `AWAIT`;
-                // returns belong to the task, never the enclosing
-                // function. Every ASYNC position is HANDLE-headed.
-                let mut fork = env.fork();
-                let task = Scope {
-                    label: scope.label,
-                    ret: RetCtx::AsyncValue,
-                    loops: 0,
-                    switches: 0,
-                    site: scope.site.clone(),
-                    line: scope.line,
-                    col: scope.col,
-                    idx: scope.idx,
-                };
-                let inner = self.walk_body(body, &mut fork, &task, depth + 1)?;
-                let tag = self
-                    .exec
-                    .resolve_tag(decl_type)
-                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                // HANDLE-headed first (the async rule owns that
-                // message), then the shared position rule for nested
-                // VOID (HANDLE<LIST<VOID>> and friends).
-                let payload = match &tag {
-                    TypeTag::Handle => TypeTag::Any,
-                    TypeTag::HandleOf(inner_tag) => (**inner_tag).clone(),
-                    _ => bail!(
-                        "step {}: ASYNC `${}` declares {}, not HANDLE; every ASYNC position is HANDLE-headed",
-                        idx + 1,
-                        clean_var(var),
-                        render_structural(&tag)
-                    ),
-                };
-                self.exec
-                    .check_declaration_tag(&format!("step {}", idx + 1), &tag)
-                    .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
-                if inner.bare_return && !matches!(payload, TypeTag::Void) {
-                    bail!(
-                        "step {}: ASYNC `${}` declares {} but task has a bare RETURN; bare RETURN is only a void exit",
-                        idx + 1,
-                        clean_var(var),
-                        render_structural(&tag)
-                    );
-                }
-                if matches!(payload, TypeTag::Void) {
-                    if let Some((ty, line, _col)) = inner.types.first() {
-                        bail!(
-                            "step {}: HANDLE<VOID> task RETURN at line {line} yields {}",
-                            idx + 1,
-                            render_structural(ty)
-                        );
-                    }
-                } else if inner.types.is_empty() {
-                    if !matches!(payload, TypeTag::Any) {
-                        bail!(
-                            "step {}: ASYNC `${}` declares {} but task has no value RETURN",
-                            idx + 1,
-                            clean_var(var),
-                            render_structural(&tag)
-                        );
-                    }
-                } else {
-                    for (ty, line, _col) in &inner.types {
-                        if !is_compatible(ty, &payload) {
-                            bail!(
-                                "step {}: ASYNC `${}` declares {} but task RETURN at line {line} yields {}",
-                                idx + 1,
-                                clean_var(var),
-                                render_structural(&tag),
-                                render_structural(ty)
-                            );
-                        }
-                    }
-                }
-                let key = clean_var(var);
-                env.insert_top(key, tag, step.guard.as_ref());
-                Ok(live)
-            }
             StepKind::Timeout { body, .. } => {
                 // A dynamic duration evaluates before the body runs.
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
-                let inner = self.walk_body(body, env, scope, depth + 1)?;
+                // Scoped body: the runtime runs it under a pushed
+                // scope, so imports (and bindings) unwind on exit
+                // exactly like a braced block. Frames pop before `?`
+                // propagates, matching the restore discipline below.
+                env.frames.push(HashMap::new());
+                env.func_frames.push(HashMap::new());
+                env.import_frames.push(HashMap::new());
+                let inner = self.walk_body(body, env, scope, depth + 1);
+                env.frames.pop();
+                env.func_frames.pop();
+                env.import_frames.pop();
+                let inner = inner?;
                 let mut out = live;
                 // TIMEOUT bounds execution in place: a `RETURN`
                 // inside still returns from the enclosing function.
@@ -3296,7 +4213,17 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             StepKind::Fail { body, .. } => {
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
-                let inner = self.walk_body(body, env, scope, depth + 1)?;
+                // Scoped body like `TIMEOUT`: the runtime runs it
+                // under a pushed scope, so imports (and bindings)
+                // unwind on exit. Frames pop before `?` propagates.
+                env.frames.push(HashMap::new());
+                env.func_frames.push(HashMap::new());
+                env.import_frames.push(HashMap::new());
+                let inner = self.walk_body(body, env, scope, depth + 1);
+                env.frames.pop();
+                env.func_frames.pop();
+                env.import_frames.pop();
+                let inner = inner?;
                 let mut out = live;
                 // FAIL never yields a value (it exits or propagates
                 // control flow): unlike TIMEOUT, body types do not
@@ -3320,8 +4247,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // re-adds them. Saved and restored around the body so
                 // declarations inside never leak outward, exactly like
                 // the runtime scope pop. Types keep flowing in place.
+                // The body is scope-pushed like a braced block (the
+                // runtime runs it under `push_scope`), so bindings and
+                // imports unwind on exit too; only the scrubbed env
+                // declarations ride the save/restore above.
                 let saved = std::mem::replace(&mut env.env_frames, vec![HashSet::new()]);
+                env.frames.push(HashMap::new());
+                env.func_frames.push(HashMap::new());
+                env.import_frames.push(HashMap::new());
                 let inner = self.walk_body(body, env, scope, depth + 1);
+                env.frames.pop();
+                env.func_frames.pop();
+                env.import_frames.pop();
                 env.env_frames = saved;
                 let inner = inner?;
                 self.isolated_depth -= 1;
@@ -3399,8 +4336,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 // Body declarations shadow injected names: the seal
                 // pushes a scope exactly like a braced block.
-                sealed.frames.push(HashMap::new());
-                sealed.env_frames.push(HashSet::new());
+                sealed.push_frame();
                 let remote = Scope {
                     label: scope.label,
                     ret: RetCtx::Top,
@@ -3421,8 +4357,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             StepKind::ReadLine { var } => {
                 // Declares `STRING` when absent, mutates (type kept)
-                // when present — mirroring `read_line` exactly.
+                // when present — mirroring `read_line` exactly, which
+                // rejects `CONST` through `mutate_var`.
                 let key = clean_var(var);
+                if env.is_const(&key, scope.site.as_ref()) {
+                    bail!(
+                        "step {}: cannot mutate CONST {key}: CONST bindings are deeply immutable",
+                        idx + 1
+                    );
+                }
                 if !env.is_declared(&key) {
                     env.insert_top(key, TypeTag::String, step.guard.as_ref());
                 }
@@ -3432,6 +4375,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // Same declare-or-mutate contract as `read_line`:
                 // the answer binds as `STRING`, mutating when present.
                 let key = clean_var(var);
+                if env.is_const(&key, scope.site.as_ref()) {
+                    bail!(
+                        "step {}: cannot mutate CONST {key}: CONST bindings are deeply immutable",
+                        idx + 1
+                    );
+                }
                 if !env.is_declared(&key) {
                     env.insert_top(key, TypeTag::String, step.guard.as_ref());
                 }
@@ -3445,6 +4394,23 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 env.declare_env(key.clone());
                 Ok(live)
             }
+            StepKind::ImportFile { path, alias } => {
+                // Block-scoped linkage: the import resolves here (in
+                // execution order) and unwinds with the enclosing
+                // frame, instead of leaking into the unit table.
+                self.check_step_args(&step.kind, env, scope, idx, depth)?;
+                self.record_walk_import(alias, path, step.guard.as_ref(), env);
+                Ok(live)
+            }
+            StepKind::ImportFuncs { path, alias, .. } => {
+                // Aliased harvests scope like file imports; bare
+                // harvests stay global (see `harvested`), untouched.
+                self.check_step_args(&step.kind, env, scope, idx, depth)?;
+                if let Some(alias) = alias {
+                    self.record_walk_import(alias, path, step.guard.as_ref(), env);
+                }
+                Ok(live)
+            }
             _ => {
                 // Every remaining variant is a simple command: all its
                 // argument expressions (including `{{ }}` template
@@ -3455,12 +4421,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
                 match &step.kind {
                     StepKind::Await { var } | StepKind::Cancel { var } => {
-                        Self::check_name_read(env, var, scope, idx)?;
+                        let key = clean_var(var);
+                        let prefix = format!("step {}: ", idx + 1);
+                        check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)?;
                     }
                     StepKind::WithIoBlock { bindings } => {
                         Self::check_pipe_bindings(env, bindings, scope, idx)?;
                     }
                     StepKind::ListAppend { list, item } => {
+                        let key = clean_var(list);
+                        if env.is_const(&key, scope.site.as_ref()) {
+                            bail!(
+                                "step {}: cannot mutate CONST {key}: CONST bindings are deeply immutable",
+                                idx + 1
+                            );
+                        }
                         let tag = Self::check_name_read(env, list, scope, idx)?;
                         let element = match tag {
                             TypeTag::List => None,
@@ -3572,14 +4547,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// for one.
     fn check_name_read(env: &Env, name: &str, scope: &Scope, idx: usize) -> Result<TypeTag> {
         let key = clean_var(name);
-        if !env.is_declared(&key) {
-            bail!("step {}: undefined variable ${key}", idx + 1);
-        }
-        env.read_guarded(&key, scope.site.as_ref())
+        let prefix = format!("step {}: ", idx + 1);
+        check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)
     }
 
-    /// Static counterpart of `resolve_pipe_handle`: a `$var` pipe
-    /// endpoint must be a live `PIPE` binding, mirroring the runtime
+    /// Static counterpart of `resolve_pipe_handle`: a pipe endpoint
+    /// must be a live `PIPE` binding, mirroring the runtime
     /// `TypeMismatch` one for one.
     fn check_pipe_bindings(
         env: &Env,
@@ -3588,8 +4561,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         idx: usize,
     ) -> Result<()> {
         for binding in bindings {
-            if let Some(PipeTarget::Var(name)) = &binding.pipe {
-                let tag = Self::check_name_read(env, name, scope, idx)?;
+            if let Some(PipeTarget::Var { name }) = &binding.pipe {
+                let key = clean_var(name);
+                let prefix = format!("step {}: ", idx + 1);
+                let tag = check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)?;
                 if !tags_equal(&tag, &TypeTag::Pipe) {
                     bail!(
                         "step {}: TypeMismatch: expected PIPE, got {}",
@@ -3676,7 +4651,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// binds captured stdout `TEXT`. `TIMEOUT` peels exactly where
     /// the runtime peels, so a deadline never changes the checked
     /// type — only whether the binding happens before it fires.
-    fn capture_yield(&mut self, cmd: &StepKind, depth: usize) -> Result<Option<TypeTag>> {
+    fn capture_yield(
+        &mut self,
+        cmd: &StepKind,
+        env: &Env,
+        site: Option<&GuardExpr>,
+        depth: usize,
+    ) -> Result<Option<TypeTag>> {
         let mut current = cmd;
         loop {
             match current {
@@ -3685,7 +4666,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     current = &body[0].kind;
                 }
                 StepKind::Call { name, .. } => {
-                    let callee = self.resolve_call(name, depth)?;
+                    let callee = self.resolve_call(name, env, site, depth)?;
                     return Ok(match callee.ret {
                         StaticTy::Ty(tag) => Some(tag),
                         // A VOID callee still binds something at
@@ -3884,23 +4865,125 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         }
     }
 
+    /// #319 missing-import suffix for an unknown function: empty
+    /// when no closure file exports the base name. Single owner for
+    /// the static exporter view; every `resolve_call` unknown
+    /// failure appends this instead of restating the search.
+    fn missing_import_hint(&self, targets: &super::native::AliasTargets, name: &str) -> String {
+        super::native::missing_import_hint(
+            self.module_func_exports
+                .iter()
+                .map(|(file, exports)| (file.as_str(), exports.as_slice())),
+            targets,
+            name,
+        )
+        .unwrap_or_default()
+    }
+
+    /// Frame walk shared by call resolution and the template gate
+    /// (#322): precedence lives in [`super::native::FuncFrameView::walk`], shared
+    /// with the runtime walk; this is the static store adapter.
+    /// Returns the defining info plus the memoization key; hosts and
+    /// canonical file views stay with their existing checks.
+    fn find_frame_hit(
+        &self,
+        unit: &str,
+        base: &str,
+        nested: &[HashMap<String, FuncInfo>],
+        site: Option<&GuardExpr>,
+    ) -> Option<(FuncInfo, String)> {
+        use super::native::FuncFrameView;
+        struct StaticView<'a> {
+            unit: &'a str,
+            nested: &'a [HashMap<String, FuncInfo>],
+            home: &'a HomeFuncs,
+            harvested: &'a HashMap<(String, String), String>,
+            first: &'a HashMap<(String, String), FuncInfo>,
+            site: Option<&'a GuardExpr>,
+        }
+        impl FuncFrameView for StaticView<'_> {
+            type Hit = (FuncInfo, String);
+            fn find_nested(&self, base: &str) -> Option<Self::Hit> {
+                for frame in self.nested.iter().rev() {
+                    if let Some(info) = frame.get(base) {
+                        let info = info.clone();
+                        let key = format!("nested:{}:{base}:{}:{}", self.unit, info.line, info.col);
+                        return Some((info, key));
+                    }
+                }
+                None
+            }
+            fn find_home(&self, unit: &str, base: &str) -> Option<Self::Hit> {
+                let overloads = self.home.get(&(unit.to_string(), base.to_string()))?;
+                // Site-aware pick among disjoint guarded overloads,
+                // mirroring runtime live-guard filtering; last live
+                // wins to preserve the unguarded last-wins rule.
+                let mut pick: Option<FuncInfo> = None;
+                for (guard, info) in overloads {
+                    if oxdock_parser::guards_overlap(guard.as_ref(), self.site) {
+                        pick = Some(info.clone());
+                    }
+                }
+                let info = pick?;
+                let key = super::native::file_func_key(unit, base);
+                Some((info, key))
+            }
+            fn find_harvest(&self, unit: &str, base: &str) -> Option<Self::Hit> {
+                let defining = self.harvested.get(&(unit.to_string(), base.to_string()))?;
+                let info = self
+                    .first
+                    .get(&(defining.clone(), base.to_string()))?
+                    .clone();
+                let key = super::native::file_func_key(defining, base);
+                Some((info, key))
+            }
+        }
+        StaticView {
+            unit,
+            nested,
+            home: &self.home_funcs,
+            harvested: &self.harvested,
+            first: &self.harvest_first,
+            site,
+        }
+        .walk(unit, base)
+    }
+
     /// Resolve a callee through the shared alias-target matcher;
     /// script functions (bare or `SCRIPT::`) win over host metas.
     /// Unknown names yield `ANY`: the parse-time unknown-function gate
-    /// owns that error, not this pass.
-    fn resolve_call(&mut self, name: &str, depth: usize) -> Result<Callee> {
+    /// owns that error, not this pass. `env_module` is the owning file
+    /// of the body under check (from `env.module`): `SCRIPT::BASE` and
+    /// bare `BASE` calls resolve through the frame walk (nested, then
+    /// that file, then harvests), so canonically-keyed imports infer
+    /// declared returns instead of `ANY`. `nested` carries the live
+    /// body-local definitions from the walk environment.
+    fn resolve_call(
+        &mut self,
+        name: &str,
+        env: &Env,
+        site: Option<&GuardExpr>,
+        depth: usize,
+    ) -> Result<Callee> {
+        let env_module = env.module.as_ref().map(|m| m.key.as_str());
+        let nested: &[_] = &env.func_frames;
         // Canonical lookup key through the single alias-target
         // matcher: file-aliased spellings map to the defining file,
-        // everything else resolves as spelled.
+        // everything else resolves as spelled. Block imports layer
+        // over the unit table, unwinding with their block.
+        let effective = self.effective_alias_targets(env);
         let mut lookup = name.to_string();
         {
-            match super::native::classify_alias_call(&self.alias_targets, name, &|key| {
+            match super::native::classify_alias_call(&effective, name, &|key| {
                 self.funcs.contains_key(key)
             }) {
                 super::native::AliasResolution::Global => {}
                 super::native::AliasResolution::Canonical(key) => lookup = key,
                 super::native::AliasResolution::Unknown => {
-                    bail!("unknown function `{name}`");
+                    bail!(
+                        "unknown function `{name}`{}",
+                        self.missing_import_hint(&effective, name)
+                    );
                 }
                 super::native::AliasResolution::Ambiguous { alias, base, files } => {
                     bail!(
@@ -3921,7 +5004,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     // A host-harvest branch holds no file functions, so
                     // any file-backed call misses there.
                     if has_host {
-                        bail!("unknown function `{name}`");
+                        bail!(
+                            "unknown function `{name}`{}",
+                            self.missing_import_hint(&effective, name)
+                        );
                     }
                     // Every disjoint target must export the name: a
                     // missing branch fails the call on its platform.
@@ -3929,7 +5015,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     for file in files {
                         let canonical = super::native::file_func_key(file.as_str(), base.as_str());
                         let Some(info) = self.funcs.get(&canonical) else {
-                            bail!("unknown function `{name}`");
+                            bail!(
+                                "unknown function `{name}`{}",
+                                self.missing_import_hint(&effective, name)
+                            );
                         };
                         canonicals.push((canonical, info.clone()));
                     }
@@ -3991,15 +5080,38 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
             }
         }
-        if let Some(info) = self.funcs.get(&lookup) {
-            let info = info.clone();
-            let ret = self.func_return_owned(&info, &lookup, depth)?;
-            let params = info.params;
-            return Ok(Callee {
-                params: Some(params),
-                ret,
-                host_params: None,
-            });
+        if lookup != name {
+            // Canonical qualified spelling: the file's own index.
+            if let Some(info) = self.funcs.get(&lookup) {
+                let info = info.clone();
+                let ret = self.func_return_owned(&info, &lookup, depth)?;
+                let params = info.params;
+                return Ok(Callee {
+                    params: Some(params),
+                    ret,
+                    host_params: None,
+                });
+            }
+        } else if let Some(base) = match name.split_once(MODULE_SEPARATOR) {
+            Some((head, tail)) if head == oxdock_parser::SCRIPT_MODULE_NAME => Some(tail),
+            Some(_) => None,
+            None => Some(name),
+        } {
+            // Bare and `SCRIPT::` spellings walk the frame stack
+            // (#322): innermost nested frame outward, then the
+            // owning file frame (entry included), then bare
+            // harvests. Entry bodies resolve their own file; module
+            // bodies resolve theirs. No flat cross-file reads.
+            let unit = super::import::unit_key(env_module);
+            if let Some((info, key)) = self.find_frame_hit(unit, base, nested, site) {
+                let ret = self.func_return_owned(&info, &key, depth)?;
+                let params = info.params;
+                return Ok(Callee {
+                    params: Some(params),
+                    ret,
+                    host_params: None,
+                });
+            }
         }
         if let Some(meta) = self.hosts.get(name) {
             let meta = meta.clone();
@@ -4039,17 +5151,117 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // Single-file and probe checkers stay lenient: without the
         // closure they cannot tell unimported from uncollected.
         if self.strict_qualified
-            && let Some((alias, _)) = name.split_once("::")
+            && let Some((alias, _)) = name.split_once(MODULE_SEPARATOR)
             && alias != oxdock_parser::SCRIPT_MODULE_NAME
             && !self.hosts.contains_key(name)
         {
-            bail!("unknown function `{name}`");
+            bail!(
+                "unknown function `{name}`{}",
+                self.missing_import_hint(&effective, name)
+            );
         }
         Ok(Callee {
             params: None,
             ret: StaticTy::Ty(TypeTag::Any),
             host_params: None,
         })
+    }
+
+    /// Resolve one `$ALIAS::NAME` read to its `CONST` tag: the static
+    /// twin of [`import::resolve_const_ref`](super::import::resolve_const_ref).
+    /// Alias matching runs through the shared classifier; only
+    /// `EXPORT`ed `CONST` bindings resolve. Unknown aliases stay
+    /// lenient without the closure (single-file probes) and fail
+    /// closed on it; a `LET` spelling with the same name names the
+    /// real error (never exportable) instead of an unknown-name miss.
+    fn resolve_const_ref(
+        &self,
+        alias: &str,
+        name: &str,
+        env: &Env,
+        scope: &Scope,
+    ) -> Result<TypeTag> {
+        use super::native::{
+            ConstHolders, ambiguous_alias_message, chase_const_forward, const_holder_files,
+            missing_const_hint,
+        };
+        let at = || step_pos(scope.line, scope.col, scope.idx);
+        let qualified = oxdock_parser::qualify(alias, name);
+        let view = CheckerConstView {
+            exports: &self.module_const_exports,
+            targets: &self.file_targets,
+            lets: &self.module_lets,
+        };
+        // Holders through the shared walk: the static twin and the
+        // runtime twin classify identically, so a read accepted here
+        // serves there. Block imports layer over the unit table here
+        // too, unwinding with their block.
+        let effective = self.effective_alias_targets(env);
+        let files = match const_holder_files(&view, &effective, alias, name) {
+            ConstHolders::Found(files) => files,
+            ConstHolders::NoAlias => {
+                if self.strict_qualified {
+                    bail!(
+                        "{}: unknown CONST `{qualified}`: no import alias `{alias}` exports that name",
+                        at()
+                    );
+                }
+                return Ok(TypeTag::Any);
+            }
+            ConstHolders::Ambiguous { alias, base, files } => {
+                bail!(
+                    "{}: {}",
+                    at(),
+                    ambiguous_alias_message(&alias, &base, &files).replacen("function", "CONST", 1)
+                );
+            }
+        };
+        // Tag lookup over exporting files, following qualified
+        // forwards to the defining files first so the tag and the LET
+        // check read terminal bindings, never forwards. Disjoint
+        // terminals union like disjoint holders: same tags read, and
+        // differing tags fall back to `ANY` since only the live branch
+        // initializes.
+        let mut tags: Vec<TypeTag> = Vec::new();
+        for file in &files {
+            let terminals = chase_const_forward(&view, file, name, &qualified)
+                .map_err(|err| anyhow::anyhow!("{}: {err}", at()))?;
+            for terminal in &terminals {
+                let Some(binding) = self
+                    .module_lets
+                    .get(terminal)
+                    .and_then(|lets| lets.iter().find(|entry| entry.name == name))
+                else {
+                    continue;
+                };
+                if !binding.is_const {
+                    bail!(
+                        "{}: `{qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary",
+                        at()
+                    );
+                }
+                tags.push(binding.tag.clone());
+            }
+        }
+        if tags.len() > 1 {
+            let first = tags[0].clone();
+            if !tags.iter().all(|tag| tags_equal(&first, tag)) {
+                return Ok(TypeTag::Any);
+            }
+        }
+        match tags.into_iter().next() {
+            Some(tag) => Ok(tag),
+            None => {
+                let hint = missing_const_hint(&view, &effective, alias, name);
+                match hint {
+                    Some(hint) => bail!("{}: unknown CONST `{qualified}`: {hint}", at()),
+                    None => bail!(
+                        "{}: unknown CONST `{qualified}`: no import alias `{alias}` exports that name",
+                        at()
+                    ),
+                }
+            }
+        }
     }
 
     /// Whether checking this function observes module-shared state
@@ -4102,7 +5314,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // Order mirrors execution: the arity gate fires before any
         // argument evaluates, so undeclared names in extra arguments
         // never surface. (`native_arity_failure_...` pins this.)
-        let callee = self.resolve_call(name, depth)?;
+        let callee = self.resolve_call(name, env, scope.site.as_ref(), depth)?;
         // Arity range comes from the full host metadata (which carries
         // the optional flags); script FUNCs and bare shape lists are
         // always exact. Missing lists (INSPECT-like) skip the check:
@@ -4394,12 +5606,19 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(StaticTy::Ty(literal_tag(value)))
             }
-            Expr::Var(name) => {
+            Expr::Var { name } => {
                 let key = clean_var(name);
-                if !env.is_declared(&key) {
-                    bail!("{}undefined variable ${key}", loc(Some(&at())));
-                }
-                Ok(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?))
+                let prefix = loc(Some(&at()));
+                Ok(StaticTy::Ty(check_var_binding_access(
+                    env,
+                    &key,
+                    scope.site.as_ref(),
+                    &prefix,
+                )?))
+            }
+            Expr::ConstRef { alias, name } => {
+                let tag = self.resolve_const_ref(alias, name, env, scope)?;
+                Ok(StaticTy::Ty(tag))
             }
             Expr::Env(name) => {
                 self.check_env_name(env, name, "env:", scope)?;
@@ -4407,84 +5626,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             Expr::KeyPath { base, keys } => {
                 let key = clean_var(base);
-                if !env.is_declared(&key) {
-                    bail!("{}undefined variable ${key}", loc(Some(&at())));
-                }
-                let mut current = env.read_guarded(&key, scope.site.as_ref())?;
-                for part in keys {
-                    match current {
-                        TypeTag::Record(fields) => {
-                            let Some(field) = fields
-                                .iter()
-                                .find(|field| field.name.as_str() == part.as_str())
-                            else {
-                                bail!(
-                                    "{}: unknown field '{part}'; expected fields: {}",
-                                    at(),
-                                    fields
-                                        .iter()
-                                        .map(|field| field.name.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                );
-                            };
-                            current = field.ty.clone();
-                        }
-                        TypeTag::ListOf(element) => {
-                            // Shaped lists step into the element type on
-                            // numeric segments (bounds stay runtime);
-                            // anything else mirrors the evaluator's
-                            // invalid-index failure statically.
-                            if part.parse::<usize>().is_err() {
-                                bail!("{}: Invalid array index '{part}'", at());
-                            }
-                            current = element.as_ref().clone();
-                        }
-                        TypeTag::MapOf(values) => {
-                            // Unknown maps step into their value shape;
-                            // keys resolve by value at runtime.
-                            current = values.as_ref().clone();
-                        }
-                        // MAP keys and LIST indices resolve by value at
-                        // runtime (missing keys, bounds); the shape
-                        // stays unknown here.
-                        TypeTag::Map | TypeTag::List | TypeTag::Any => {
-                            return Ok(StaticTy::Ty(TypeTag::Any));
-                        }
-                        // Unions defer when some member traverses (the
-                        // runtime value holds one member; static cannot
-                        // know which) and fail only when no member can:
-                        // an all-scalar set definitely fails, exactly
-                        // like a scalar below.
-                        TypeTag::Union(_, members) => {
-                            let traversable = |member: &TypeTag| {
-                                matches!(
-                                    member,
-                                    TypeTag::Record(_)
-                                        | TypeTag::ListOf(_)
-                                        | TypeTag::MapOf(_)
-                                        | TypeTag::Map
-                                        | TypeTag::List
-                                        | TypeTag::Any
-                                )
-                            };
-                            if members.iter().all(|member| !traversable(member)) {
-                                bail!(
-                                    "{}: Cannot traverse into scalar value at key '{part}'",
-                                    at()
-                                );
-                            }
-                            return Ok(StaticTy::Ty(TypeTag::Any));
-                        }
-                        _ => {
-                            bail!(
-                                "{}: Cannot traverse into scalar value at key '{part}'",
-                                at()
-                            );
-                        }
-                    }
-                }
-                Ok(StaticTy::Ty(current))
+                let prefix = loc(Some(&at()));
+                let current = check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)?;
+                let traversed = traverse_static_keypath(current, keys, &format!("{}: ", at()))?;
+                Ok(StaticTy::Ty(traversed))
             }
             Expr::List(items) => self.infer_list_literal(items, env, scope, idx, depth),
             Expr::Map(entries) => self.infer_map_literal(entries, env, scope, idx, depth),
@@ -4530,12 +5675,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 Ok(StaticTy::Ty(unified.expect("has_return implies a type")))
             }
             Expr::Call { name, args } => self.check_call(name, args, env, scope, idx, depth),
-            Expr::Inspect(name) => {
+            Expr::Inspect { name } => {
                 let key = clean_var(name);
-                if !env.is_declared(&key) {
-                    bail!("{}undefined variable ${key}", loc(Some(&at())));
-                }
-                env.read_guarded(&key, scope.site.as_ref())?;
+                let prefix = loc(Some(&at()));
+                check_var_binding_access(env, &key, scope.site.as_ref(), &prefix)?;
                 Ok(StaticTy::Ty(TypeTag::Any))
             }
             Expr::Compare { op, left, right } => {
@@ -4607,12 +5750,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     }
                     stack.push(StaticTy::Ty(literal_tag(value)))
                 }
-                MathOp::LoadVar(name) => {
+                MathOp::Load { name } => {
                     let key = clean_var(name);
-                    if !env.is_declared(&key) {
-                        bail!("undefined variable ${key}");
-                    }
-                    stack.push(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?));
+                    let tag = check_var_binding_access(env, &key, scope.site.as_ref(), "")?;
+                    stack.push(StaticTy::Ty(tag));
+                }
+                MathOp::LoadConstRef { alias, name } => {
+                    let tag = self.resolve_const_ref(alias, name, env, scope)?;
+                    stack.push(StaticTy::Ty(tag));
                 }
                 MathOp::LoadEnv(name) => {
                     self.check_env_name(env, name, "env:", scope)?;
@@ -4620,66 +5765,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 MathOp::LoadKeyPath { base, keys } => {
                     let key = clean_var(base);
-                    if !env.is_declared(&key) {
-                        bail!("undefined variable ${key}");
-                    }
-                    let mut current = env.read_guarded(&key, scope.site.as_ref())?;
-                    for part in keys {
-                        match current {
-                            TypeTag::Record(fields) => {
-                                let Some(field) = fields.iter().find(|field| field.name == *part)
-                                else {
-                                    bail!(
-                                        "unknown field '{part}'; expected fields: {}",
-                                        fields
-                                            .iter()
-                                            .map(|field| field.name.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    );
-                                };
-                                current = field.ty.clone();
-                            }
-                            TypeTag::ListOf(element) => {
-                                if part.parse::<usize>().is_err() {
-                                    bail!("Invalid array index '{part}'");
-                                }
-                                current = element.as_ref().clone();
-                            }
-                            TypeTag::MapOf(values) => {
-                                current = values.as_ref().clone();
-                            }
-                            TypeTag::Map | TypeTag::List | TypeTag::Any => {
-                                current = TypeTag::Any;
-                                break;
-                            }
-                            // Unions mirror the AST path: defer when
-                            // some member traverses, fail only when no
-                            // member can.
-                            TypeTag::Union(_, members) => {
-                                let traversable = |member: &TypeTag| {
-                                    matches!(
-                                        member,
-                                        TypeTag::Record(_)
-                                            | TypeTag::ListOf(_)
-                                            | TypeTag::MapOf(_)
-                                            | TypeTag::Map
-                                            | TypeTag::List
-                                            | TypeTag::Any
-                                    )
-                                };
-                                if members.iter().all(|member| !traversable(member)) {
-                                    bail!("Cannot traverse into scalar value at key '{part}'");
-                                }
-                                current = TypeTag::Any;
-                                break;
-                            }
-                            _ => {
-                                bail!("Cannot traverse into scalar value at key '{part}'");
-                            }
-                        }
-                    }
-                    stack.push(StaticTy::Ty(current));
+                    let current = check_var_binding_access(env, &key, scope.site.as_ref(), "")?;
+                    let traversed = traverse_static_keypath(current, keys, "")?;
+                    stack.push(StaticTy::Ty(traversed));
                 }
                 MathOp::Call { name, arity } => {
                     let before = stack.len();
@@ -4696,16 +5784,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     // arity still are. (Math-position calls are
                     // numeric builtins in practice.)
                     let blanks = vec![None; taken.len()];
-                    let callee = self.resolve_call(name, depth)?;
+                    let callee = self.resolve_call(name, env, scope.site.as_ref(), depth)?;
                     let ret = self.apply_checked(name, &callee, &taken, &blanks, None)?;
                     stack.push(ret);
                 }
-                MathOp::Inspect(name) => {
+                MathOp::Inspect { name } => {
                     let key = clean_var(name);
-                    if !env.is_declared(&key) {
-                        bail!("undefined variable ${key}");
-                    }
-                    env.read_guarded(&key, scope.site.as_ref())?;
+                    check_var_binding_access(env, &key, scope.site.as_ref(), "")?;
                     stack.push(StaticTy::Ty(TypeTag::Any));
                 }
                 MathOp::Neg => {

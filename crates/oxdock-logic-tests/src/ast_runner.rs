@@ -786,8 +786,16 @@ fn step_kinds_in_steps(steps: &[Step]) -> HashSet<String> {
 }
 
 fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
+    use oxdock_parser::BindRhs;
     kinds.insert(step_kind_name(kind).to_string());
-    if let StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } = kind {
+    if let StepKind::WithIo { cmd, .. } = kind {
+        collect_step_kinds(cmd, kinds);
+    }
+    if let StepKind::Bind {
+        rhs: BindRhs::Capture(cmd),
+        ..
+    } = kind
+    {
         collect_step_kinds(cmd, kinds);
     }
     // Control-flow bodies nest kinds (RETURN inside FUNC, BREAK inside
@@ -799,9 +807,12 @@ fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
         | StepKind::Timeout { body, .. }
         | StepKind::Fail { body, .. }
         | StepKind::RemoteBlock { body, .. }
-        | StepKind::AssignAsync { body, .. }
         | StepKind::Isolated { body, .. }
         | StepKind::AsyncBlock { body } => vec![body],
+        StepKind::Bind {
+            rhs: BindRhs::Async(body),
+            ..
+        } => vec![body],
         StepKind::If {
             then_body,
             else_ifs,
@@ -1513,12 +1524,9 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::For { .. } => "For",
         StepKind::If { .. } => "If",
         StepKind::Switch { .. } => "Switch",
-        StepKind::Assign { .. } => "Assign",
+        StepKind::Bind { .. } => "Bind",
         StepKind::Set { .. } => "Set",
-        StepKind::AssignCapture { .. } => "AssignCapture",
-        StepKind::AssignAsync { .. } => "AssignAsync",
         StepKind::Await { .. } => "Await",
-        StepKind::AwaitCapture { .. } => "AwaitCapture",
         StepKind::Cancel { .. } => "Cancel",
         StepKind::Timeout { .. } => "Timeout",
         StepKind::Fail { .. } => "Fail",

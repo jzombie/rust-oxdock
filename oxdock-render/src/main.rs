@@ -15,6 +15,16 @@ fn main() -> Result<()> {
         println!("{}", cli::version());
         return Ok(());
     }
+    if opts.interpret {
+        // Pipe-stage mode: this binary serves its own stages. Reads
+        // the full stage script from stdin and runs it with the full
+        // pipeline engine; fails the process on error so the parent
+        // `RUN` propagates the failure. `--init`/`--print-child`
+        // with `--interpret` already failed in `parse_options`.
+        let script = std::io::read_to_string(std::io::stdin()).context("read stage script")?;
+        oxdock_render::run_child_script(&script)?;
+        return Ok(());
+    }
     if opts.init {
         // Scaffold a template render.json in --root (else the cwd)
         // and stop: never overwrite an existing file.

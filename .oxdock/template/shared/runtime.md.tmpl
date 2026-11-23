@@ -29,7 +29,7 @@ Two trade offs come with the form. Cloning a string still deep copies it, since 
 
 ### Transport: pipes
 
-A command's standard streams can be rerouted through pipes declared with `LET $p: PIPE`, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
+Pipes are runtime-managed streams, not file descriptors. There is exactly one interface: declare (`LET $p: PIPE`), wire (`WITH_IO [stdout=$p]` or `[stdin=$p]`), and pass or copy the handle across calls, tasks, and module boundaries. Scripts never allocate descriptors, never manage temp files, and never write platform plumbing: the runtime owns backend selection, lifetime, and EOF. Buffers stay in memory and spill to a guarded temp file past 8 MiB, background single command tasks can promote a pipe to a zero copy OS kernel pair instead, the last drop closes, and keepers pin background gaps. The same spelling runs identically on Linux, macOS, and Windows.
 
 ```oxdock
 LET $log: PIPE
@@ -84,3 +84,22 @@ crossing goes through the boundary, never around it.
 That is a competence boundary, not a security boundary. It keeps a
 clumsy agent from wandering; it does not contain a hostile payload.
 For untrusted code, run OxDock itself inside a container or VM.
+
+### Containers as orchestrated steps
+
+Static orchestration checks in fixed Compose files and image artifacts.
+Scripts can do it programmatically instead. One example pattern:
+[docker-pipeline.oxfile]({{ $global.docker_pipeline_url }}) holds the
+Dockerfile in a variable, feeds it to `docker build` over stdin with
+zero files written, fans out concurrent `docker run` containers over
+pipes, and transforms between them in the DSL with assertions on every
+hop. Other layouts work the same way.
+
+[`REMOTE`]({{ $global.remote_reference_url }}) is another pattern for the other direction: a controller
+script outside the container runs a sealed block inside it over a
+stdio transport such as `docker exec -i` (bound with `--remote`), with
+only header-listed values crossing and results returning through
+declared transfers or pipes. The plumbing is symmetric, so the reverse
+works the same way when the transport is set up: a guest inside
+orchestrates outward through the same declared channels, all under
+script control.

@@ -6,6 +6,8 @@
   "changelog_url": "https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.md",
   "env_contracts_url": "https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md",
   "license_url": "https://github.com/jzombie/rust-oxdock/blob/main/LICENSE",
+  "docker_pipeline_url": "https://github.com/jzombie/rust-oxdock/blob/main/oxdock/examples/docker-pipeline.oxfile",
+  "remote_reference_url": "https://github.com/jzombie/rust-oxdock#remote",
   "engine_example_url": "https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-core/src/exec/engine.rs",
   "engine_facade_url": "https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-core/src/exec/engine.rs",
   "ssh_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md",

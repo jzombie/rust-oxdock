@@ -436,6 +436,30 @@ fn remote_body_let_shadows_injected_name() {
 }
 
 #[test]
+fn remote_shipped_const_arrives_as_mutable_snapshot() {
+    // The ship boundary renders header vars to `LET` source lines, so
+    // a `CONST` arrives on the guest as an ordinary mutable snapshot:
+    // the guest appends in place while the host `CONST` stays frozen.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_with_runner(
+        &root,
+        indoc! {r#"
+            CONST $FLAGS: LIST<STRING> = ["a"]
+            REMOTE prod [$FLAGS] {
+                LIST_APPEND $FLAGS "b"
+                LET $joined: STRING = "{{ $FLAGS.0 }}-{{ $FLAGS.1 }}"
+                WRITE out.txt $joined
+                COPY --to-host ./out.txt out.txt
+            }
+            ASSERT_EQ {{ $FLAGS.0 }} "a"
+        "#},
+    )
+    .expect("guest mutates its CONST snapshot");
+    assert_eq!(read_trimmed(&root, "out.txt"), "a-b");
+}
+
+#[test]
 fn remote_declared_push_lands_and_guest_deletes_nothing() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

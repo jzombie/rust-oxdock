@@ -153,7 +153,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     out.extend(env_placeholders(text));
                 }
             }
-            Expr::Var(_) => {}
+            Expr::Var { .. } | Expr::ConstRef { .. } => {}
             Expr::Env(key) => {
                 out.insert(key.clone());
             }
@@ -180,7 +180,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     walk_expr(out, arg);
                 }
             }
-            Expr::Inspect(_) => {}
+            Expr::Inspect { .. } => {}
             // Fresh pipe backends carry no env references.
             Expr::FreshPipe => {}
             Expr::Compare { left, right, .. } => {
@@ -446,17 +446,22 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     }
                 }
             }
-            StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => {
-                walk_expr(&mut keys, expr);
-            }
-            StepKind::AssignCapture { cmd, .. } => {
-                collect_env_references_inner(&mut keys, cmd);
-            }
-            StepKind::AwaitCapture { .. } => {}
-            StepKind::AssignAsync { body, .. } => {
-                for k in collect_env_references(body) {
-                    keys.insert(k);
+            StepKind::Bind { rhs, .. } => match rhs {
+                oxdock_parser::BindRhs::Expr(expr) => {
+                    walk_expr(&mut keys, expr);
                 }
+                oxdock_parser::BindRhs::Capture(cmd) => {
+                    collect_env_references_inner(&mut keys, cmd);
+                }
+                oxdock_parser::BindRhs::Async(body) => {
+                    for k in collect_env_references(body) {
+                        keys.insert(k);
+                    }
+                }
+                oxdock_parser::BindRhs::Await { .. } => {}
+            },
+            StepKind::Set { expr, .. } => {
+                walk_expr(&mut keys, expr);
             }
             StepKind::Timeout { duration, body } => {
                 // Durations resolve dynamically, so they can reference env.

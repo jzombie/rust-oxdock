@@ -5,7 +5,8 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs, WorkspaceSelection};
-use oxdock_parser::{Field, Step, TypeDescriptor, TypeTag, Value};
+use oxdock_parser::constants::KEYWORD_CONST;
+use oxdock_parser::{Field, GuardExpr, Step, TypeDescriptor, TypeTag, Value, sigil_var};
 use oxdock_process::{BackgroundHandle, CancelHub, CommandContext, ProcessManager};
 
 use super::exit::exit_code_of;
@@ -53,6 +54,18 @@ impl Drop for TaskSlotGuard {
 /// foreground capture scale: the same never-grows guarantee.
 const TASK_TAIL_CAP: usize = 64 * 1024;
 
+/// Single message shape for every refused `CONST` write: `$var = <expr>`
+/// reassignment, `LIST_APPEND`, `MAP_SET`/`MERGE_MAPS`, and frozen-buffer
+/// render this prefix, so tests and diagnostics match one string.
+/// Free function (not a method) so host-function extractors and
+/// macro-generated wrappers share it without a state handle.
+pub fn const_mutation_error(what: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "cannot mutate {kw} {what}: {kw} bindings are deeply immutable",
+        kw = KEYWORD_CONST,
+    )
+}
+
 /// Execution state for one script run. Public so hosts can register
 /// functions and introspect listings; all fields stay crate-private so the
 /// scope, recursion-budget, and task invariants cannot be broken from outside.
@@ -95,6 +108,11 @@ pub struct ExecState<P: ProcessManager> {
     /// Innermost scope is last. Variables are looked up from innermost to outermost.
     /// Each entry carries its declared type name alongside the value.
     pub(super) var_scopes: Vec<HashMap<String, (TypeTag, Value)>>,
+    /// `CONST` names per variable scope frame, pushed and popped in
+    /// lockstep with `var_scopes`. A name present here refuses `$var = <expr>`
+    /// reassignment, `LIST_APPEND`, and rebinding; the value-level frozen flag
+    /// additionally refuses writes through `LET`-bound aliases.
+    pub(super) const_scopes: Vec<HashSet<String>>,
     /// Name directory for type resolution: startup descriptors plus the
     /// run's host descriptors. Words carry their own vtables, so this map
     /// serves only name queries (declarations, `TYPES()`, `TYPE_DESCRIBE`).
@@ -204,23 +222,55 @@ pub struct ExecState<P: ProcessManager> {
     /// Executed file-import alias targets per unit (#115): alias to
     /// defining file keys for imports that actually ran, keyed by the
     /// importing unit (`"entry"` for entry steps, the file key for
-    /// module bodies). Unit-top layer only: top-level (non-`FUNC`-body)
-    /// imports land here; function-local imports land on the innermost
-    /// [`ExecState::call_alias_frames`] entry instead, so a caller
-    /// function's locals never leak into a callee. Mirrors the static
+    /// module bodies). Unit-top layer only: unit-top-level imports
+    /// land here (anything executed without a live lexical scope);
+    /// function-local imports land on the innermost
+    /// [`ExecState::call_alias_frames`] entry instead, and block
+    /// imports on the innermost [`ExecState::scope_alias_frames`]
+    /// entry, so neither leaks past its boundary. Mirrors the static
     /// per-unit `outbound_alias_targets` for the runtime placeholder
     /// gate, so file-backed `EXPAND` templates (invisible to static
     /// checking) classify known aliases identically: host harvests
     /// record an explicit host branch, and module bodies resolve
     /// against their own file's imports, never the importer's.
     pub(super) executed_alias_targets: HashMap<String, super::native::AliasTargets>,
+    /// Block-scoped import frames, innermost last: one entry per
+    /// live lexical scope that executed an `IMPORT`, tagged with the
+    /// scope-stack depth at creation and the importing unit. Reads
+    /// merge every live frame for their unit (outer-to-inner) over
+    /// the unit-top map, so an `IMPORT` inside `IF`/`FOR`/`WHILE`/
+    /// `SWITCH`/`ISOLATED` resolves within its block and unwinds on
+    /// exit. `pop_scope` drops frames deeper than the surviving
+    /// stack; `fork` flattens live frames into the child's unit-top
+    /// map (the child manages its own scopes). Function bodies keep
+    /// using [`ExecState::call_alias_frames`], checked first.
+    pub(super) scope_alias_frames: Vec<ScopeAliasFrame>,
     /// Active function-call import frames: one entry per live
     /// [`call_func_value`](super::handlers::call_func_value) invocation,
     /// holding that invocation's own local imports. The innermost frame
     /// for the active unit shadows the unit-top map exactly like the
     /// static per-function overlays shadow the unit imports; popping on
-    /// return (via an RAII guard) restores the caller's view.
-    pub(super) call_alias_frames: Vec<(String, super::native::AliasTargets)>,
+    /// return (via an RAII guard) restores the caller's view. Each
+    /// frame records the scope-stack depth at call entry: imports
+    /// execute into the call frame only at that depth (the body's own
+    /// top level), while deeper block scopes record into
+    /// [`ExecState::scope_alias_frames`] so they unwind on block exit;
+    /// reads merge only scope frames deeper than the innermost live
+    /// call frame, so a caller block's imports never leak into a
+    /// same-unit callee.
+    pub(super) call_alias_frames: Vec<CallAliasFrame>,
+    /// Frame-2..N floor (#322): `functions.scopes` index at which the
+    /// current module call (or init) body starts. Nested-frame lookup
+    /// walks down to this floor and no further, so caller frames from
+    /// other units are unreachable by construction. Pushed alongside
+    /// `call_alias_frames` (and init scopes) on every path. Entry
+    /// calls walk all live frames: with inits popped, every live
+    /// frame is entry-owned by construction.
+    pub(super) func_floors: Vec<usize>,
+    /// Bare-harvest visibility per importing unit (#322): (unit, base)
+    /// to defining file key. Harvests persist through this map past
+    /// init pops, never through scope frames.
+    pub(super) harvest_map: HashMap<(String, String), String>,
     /// Parse-time module table (#115): imported files parse with the same
     /// table as the entry script.
     pub(super) module_table: oxdock_parser::ModuleTable,
@@ -228,6 +278,19 @@ pub struct ExecState<P: ProcessManager> {
     /// `MAX_CALL_DEPTH`; cloned (not reset) by `fork()` so async children
     /// inherit the caller's depth budget.
     pub(super) call_depth: usize,
+    /// Executed `INHERIT_ENV` keys per live module init, innermost last.
+    /// Pushed empty before the init body runs and popped after, so
+    /// `inherit_env` records keys as they actually execute under their
+    /// guards instead of re-scanning steps against final envs.
+    pub(super) init_inherit_stack: Vec<Vec<String>>,
+    /// Scope-stack depths that are module-init top levels, innermost
+    /// last: `ensure_module_init` (`super::import`) pushes its isolation
+    /// scope here so `record_executed_alias` can tell a module's own
+    /// top level (unit-top, like the entry's) from a lexical block
+    /// (scope frame, unwinds on exit). Nested inits nest strictly,
+    /// so depths never repeat while live; `fork` clears it (the
+    /// child's scopes restart empty).
+    pub(super) init_scope_depths: Vec<usize>,
     /// Identity of the task this state executes (`0` = root flow).
     /// Stamped onto pipe handles minted here and compared by the promotion
     /// check: only the declaring task may promote its own pipes.
@@ -248,6 +311,35 @@ pub(super) struct ScopeSnapshot {
     pub(super) envs: Arc<HashMap<String, String>>,
 }
 
+/// One live block's imports: the scope-stack depth at creation plus
+/// the importing unit's alias targets. Single owner for the
+/// scope-frame shape; `record_executed_alias` writes it,
+/// `unit_alias_targets` merges it, `pop_scope` reaps it.
+#[derive(Clone, Default)]
+pub(super) struct ScopeAliasFrame {
+    pub(super) depth: usize,
+    pub(super) unit: String,
+    pub(super) targets: super::native::AliasTargets,
+}
+
+/// One live function call's imports: the importing unit, the
+/// scope-stack depth at call entry (right after the call scope
+/// pushes), and the call's own local imports. The depth tells
+/// `record_executed_alias` apart the body's own top level (records
+/// here) from nested blocks (record into [`ScopeAliasFrame`]), and
+/// tells `unit_alias_targets` which scope frames belong to this
+/// invocation (deeper ones) versus caller context. A forked child
+/// restarts its scope stack at zero, so a cloned frame whose depth
+/// exceeds the child's stack is stale: the child still merges its
+/// targets (inherited visibility) but applies no depth floor from
+/// it. Single owner for the call-frame shape.
+#[derive(Clone, Default)]
+pub(super) struct CallAliasFrame {
+    pub(super) unit: String,
+    pub(super) depth: usize,
+    pub(super) targets: super::native::AliasTargets,
+}
+
 /// One parsed file module (#115), keyed by resolved display path: parse
 /// once, validate once, initialize once. `init` is `None` until the
 /// first import executes the body; every alias is a view onto the
@@ -255,11 +347,75 @@ pub(super) struct ScopeSnapshot {
 #[derive(Clone, Default)]
 pub(super) struct ModuleRecord {
     pub(super) steps: Vec<Step>,
-    pub(super) func_exports: Vec<String>,
-    /// `EXPORT TYPE` names in source order. Separate from func exports
-    /// so the MCP server never confuses a type for a tool.
-    pub(super) type_exports: Vec<String>,
+    /// Single-file `EXPORT` metadata: `EXPORT` func names, `EXPORT TYPE`
+    /// names, and `EXPORT CONST` names, each in source order. One struct
+    /// (never three parallel lists) so the MCP server never confuses a
+    /// type for a tool, and only `CONST` names are readable through
+    /// `$ALIAS::NAME`.
+    pub(super) exports: oxdock_parser::Exports,
     pub(super) init: Option<ModuleInit>,
+    /// Frame-1 file scope (#322): every top-level `FUNC` of the file
+    /// (exported, harvested, and private alike), indexed once at load
+    /// so calls resolve without scanning steps on every invocation.
+    /// Single owner for the defining-file view; the runtime walk and
+    /// the static home index read the same shape.
+    pub(super) top_funcs: HashMap<String, Vec<RawFuncDef>>,
+}
+
+impl ModuleInit {
+    /// Fresh entry-unit init store (#4): the session seed plus the
+    /// entry top-level's own `ENV` contributions, tracked as they
+    /// execute. Entry `FUNC` calls reset to this map (never caller
+    /// env), mirroring how module calls reset to `ModuleInit::envs`.
+    /// `vars`/`const_vars` hold the entry prelude `CONST`s seeded
+    /// into every entry call; `inherit_names` re-reads from the
+    /// engine per call. Single owner for the entry record shape, so
+    /// `new_state` and the test constructors can never drift.
+    pub(super) fn entry_seed(envs: HashMap<String, String>, cwd: GuardedPath) -> Self {
+        Self {
+            vars: HashMap::new(),
+            const_vars: HashSet::new(),
+            return_value: Value::string(String::new()),
+            envs,
+            inherit_names: Vec::new(),
+            selection: WorkspaceSelection::Snapshot,
+            cwd,
+        }
+    }
+}
+
+impl ModuleRecord {
+    /// Fresh entry-unit record (#4): empty steps/top-funcs plus the
+    /// seeded init store above. Single owner for the entry shape, so
+    /// every constructor seeds the same fields.
+    pub(super) fn entry_record(envs: HashMap<String, String>, cwd: GuardedPath) -> Self {
+        Self {
+            steps: Vec::new(),
+            exports: oxdock_parser::Exports::default(),
+            init: Some(ModuleInit::entry_seed(envs, cwd)),
+            top_funcs: HashMap::new(),
+        }
+    }
+}
+
+/// One top-level `FUNC` definition as parsed: the file frame of the
+/// unit scope stack (#322). Params and return stay in source spelling
+/// until a call resolves tags. Guards ride along and are evaluated
+/// with the live env at use time, mirroring the previous per-call
+/// step scan exactly (init-gated defs behave as before). `jail` is
+/// sealed at execution: the first top-level execution of this
+/// definition pins the live workspace selection and cwd, so later
+/// calls restore the definition site, never caller ambient. `None`
+/// for never-executed defs (forward refs, skipped harvests), which
+/// fall back to the defining file default at call time.
+#[derive(Clone, Debug, Default)]
+pub(super) struct RawFuncDef {
+    pub(super) params: Vec<(String, String, bool)>,
+    pub(super) return_spelling: String,
+    pub(super) is_async: bool,
+    pub(super) body: Vec<Step>,
+    pub(super) guard: Option<GuardExpr>,
+    pub(super) jail: Option<(WorkspaceSelection, GuardedPath)>,
 }
 
 /// Initialized module state (#115): the shared globals every alias of
@@ -272,6 +428,10 @@ pub(super) struct ModuleRecord {
 #[derive(Clone)]
 pub(super) struct ModuleInit {
     pub(super) vars: HashMap<String, (TypeTag, Value)>,
+    /// Top-level `CONST` names drained with `vars`: rebinding,
+    /// `$var = <expr>` reassignment, and `LIST_APPEND` against these fail;
+    /// rebuilds fail on the value-level frozen flag.
+    pub(super) const_vars: HashSet<String>,
     pub(super) return_value: Value,
     /// Script env the module's functions execute with (#115): the
     /// session seed plus the init body's own `ENV` contributions
@@ -287,6 +447,14 @@ pub(super) struct ModuleInit {
     /// reads, and the values flow from the host (or literals) at
     /// init/call time.
     pub(super) inherit_names: Vec<String>,
+    /// The module top-level jail (#322): the workspace selection and
+    /// cwd as the init body left them. Module-owned `FUNC`s restore
+    /// this on entry (unless the body overrides it), so a callee
+    /// executes in its defining file context no matter which
+    /// workspace the caller sits in. Captured before the init scope
+    /// pops; the pop restores the importer afterwards.
+    pub(super) selection: WorkspaceSelection,
+    pub(super) cwd: GuardedPath,
 }
 
 /// One anonymous background worker: the thread-join handle plus the
@@ -608,6 +776,16 @@ impl KeeperExpiry {
     }
 }
 
+/// Defining-file call context (#322): (envs, inherit names,
+/// selection, cwd). One alias shared by the resolver and every call
+/// site, never a restated tuple.
+pub(super) type FileCallCtx = (
+    HashMap<String, String>,
+    Vec<String>,
+    WorkspaceSelection,
+    GuardedPath,
+);
+
 impl<P: ProcessManager> ExecState<P> {
     /// Script-map environment lookup for DSL evaluation (`is_exec_name`,
     /// `Expr::Env`, expansions): exact hit first, case-insensitive
@@ -707,14 +885,28 @@ impl<P: ProcessManager> ExecState<P> {
 
     /// Fork the execution state for a child thread. The child gets:
     /// - A cloned filesystem handle (shared snapshot backing, independent root selection)
-    /// - Cloned envs, cwd, cargo scratch name, var_scopes
+    /// - Cloned envs, cwd, cargo scratch name, var_scopes, const_scopes
     /// - Fresh bg_children, scope_stack (empty -- child manages its own)
+    /// - Block imports flattened into the cloned unit-top map (the live
+    ///   frames stay with the parent's scopes, so the child observes
+    ///   what the parent saw at spawn without inheriting unwindable frames)
     /// - Shared assert_windows, assert_windows_stderr, exact_stdout (Arc clones)
     /// - Cloned io configuration
     /// - Independent cancel_token, active_process (child manages its own)
     /// - Shared named_tasks and next_task_id (via Arc clone)
     #[allow(dead_code)]
     pub(super) fn fork(&self) -> Self {
+        let mut executed_alias_targets = self.executed_alias_targets.clone();
+        for frame in &self.scope_alias_frames {
+            for (alias, targets) in &frame.targets {
+                executed_alias_targets
+                    .entry(frame.unit.clone())
+                    .or_default()
+                    .entry(alias.clone())
+                    .or_default()
+                    .extend(targets.iter().cloned());
+            }
+        }
         Self {
             fs: self.fs.clone_box(),
             cargo_scratch: self.cargo_scratch.clone(),
@@ -729,6 +921,7 @@ impl<P: ProcessManager> ExecState<P> {
             assert_windows_stderr: Arc::clone(&self.assert_windows_stderr),
             exact_stdout: Arc::clone(&self.exact_stdout),
             var_scopes: self.var_scopes.clone(),
+            const_scopes: self.const_scopes.clone(),
             cancel_token: Arc::new(AtomicBool::new(false)),
             // Fresh cancellation, inherited telemetry: the fork's
             // workers still attribute to the originating run.
@@ -749,8 +942,12 @@ impl<P: ProcessManager> ExecState<P> {
             modules: self.modules.clone(),
             validated_modules: self.validated_modules.clone(),
             module_stack: self.module_stack.clone(),
-            executed_alias_targets: self.executed_alias_targets.clone(),
+            executed_alias_targets,
             call_alias_frames: self.call_alias_frames.clone(),
+            scope_alias_frames: Vec::new(),
+            init_scope_depths: Vec::new(),
+            func_floors: self.func_floors.clone(),
+            harvest_map: self.harvest_map.clone(),
             module_table: self.module_table.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
@@ -758,6 +955,7 @@ impl<P: ProcessManager> ExecState<P> {
             type_aliases: self.type_aliases.clone(),
             type_env_digest: self.type_env_digest,
             call_depth: self.call_depth,
+            init_inherit_stack: self.init_inherit_stack.clone(),
             task_id: self.task_id,
             // Forks start with an empty manifest: async children record
             // their own executions; the guest packs the root manifest.
@@ -805,19 +1003,71 @@ impl<P: ProcessManager> ExecState<P> {
 
     pub(super) fn push_var_scope(&mut self) {
         self.var_scopes.push(HashMap::new());
+        self.const_scopes.push(HashSet::new());
     }
 
     pub(super) fn pop_var_scope(&mut self) {
         self.var_scopes.pop();
+        self.const_scopes.pop();
     }
 
-    /// Reset module-owned env (#115): env to the module init's
-    /// stored map. Nothing else is touched: workspace selection and
-    /// cwd are ambient and flow through from the caller, so a module
-    /// operates in the same workspace its importer does. The
-    /// surrounding `push_scope` restores the caller afterwards.
+    /// Reset module-owned env (#115, #322): env to the module init
+    /// stored map. Workspace and cwd are reset separately by the
+    /// caller to the snapshot jail, so a module never observes the
+    /// importer workspace. The surrounding `push_scope` restores the
+    /// caller afterwards.
     pub(super) fn reset_module_env(&mut self, envs: HashMap<String, String>) {
         self.envs = Arc::new(envs);
+    }
+
+    /// Entry top-level tracking (#322 follow-up): true only for the
+    /// entry prelude itself, never inside any call, module, or
+    /// lexical block. Blocks (`ISOLATED`, `IF`, `FOR`, `WHILE`,
+    /// `SWITCH`, `WITH_IO`) push `scope_stack` so their env unwinds
+    /// on exit; capturing those writes would leak block-scoped and
+    /// isolated secrets into every later entry call. Guard-gated
+    /// top-level statements execute without pushing a scope, so
+    /// conditional configuration still seeds the prelude. Caller
+    /// env must never flow into the entry prelude store: `INHERIT_ENV`
+    /// inherits from the engine, never another script, ever.
+    pub(super) fn is_entry_top_level(&self) -> bool {
+        self.call_depth == 0 && self.module_stack.is_empty() && self.scope_stack.is_empty()
+    }
+
+    /// Defining-file call context (#322): the single owner resolving
+    /// what a `FUNC` body restores. The definition-site jail wins
+    /// when the definition sealed one; otherwise the defining file
+    /// fallback applies (module init jail, entry snapshot default).
+    /// Env always resolves file-level (module init delta, entry
+    /// prelude) with `INHERIT_ENV` re-read from the engine, never
+    /// caller ambient. One lookup for every file, entry included:
+    /// the entry record lives under the sentinel, so callers never
+    /// restate a `Some`/`None` branch. Spelled once as [`FileCallCtx`].
+    pub(super) fn callee_file_ctx(
+        &self,
+        module_key: Option<&str>,
+        def_jail: Option<(WorkspaceSelection, GuardedPath)>,
+    ) -> Option<FileCallCtx> {
+        let unit = super::import::unit_key(module_key);
+        if let Some((selection, cwd)) = def_jail {
+            let (envs, inherit_names) = self.modules.get(unit).and_then(|record| {
+                record
+                    .init
+                    .as_ref()
+                    .map(|init| (init.envs.clone(), init.inherit_names.clone()))
+            })?;
+            return Some((envs, inherit_names, selection, cwd));
+        }
+        self.modules.get(unit).and_then(|record| {
+            record.init.as_ref().map(|init| {
+                (
+                    init.envs.clone(),
+                    init.inherit_names.clone(),
+                    init.selection,
+                    init.cwd.clone(),
+                )
+            })
+        })
     }
 
     /// Enter a lexical scope: snapshot cwd/root/envs and open a fresh
@@ -834,7 +1084,9 @@ impl<P: ProcessManager> ExecState<P> {
         self.push_var_scope();
     }
 
-    /// Exit a lexical scope, restoring everything `push_scope` saved.
+    /// Exit a lexical scope, restoring everything `push_scope` saved
+    /// plus dropping block import frames deeper than the surviving
+    /// stack, so block imports unwind with their block.
     pub(super) fn pop_scope(&mut self) -> Result<()> {
         let snapshot = self
             .scope_stack
@@ -845,6 +1097,8 @@ impl<P: ProcessManager> ExecState<P> {
         self.envs = snapshot.envs;
         self.functions.pop_scope();
         self.pop_var_scope();
+        let depth = self.scope_stack.len();
+        self.scope_alias_frames.retain(|frame| frame.depth <= depth);
         Ok(())
     }
     pub(super) fn declare_var(&mut self, key: String, kind: TypeTag, value: Value) -> Result<()> {
@@ -869,7 +1123,133 @@ impl<P: ProcessManager> ExecState<P> {
         Ok(())
     }
 
+    /// Declare a `CONST` binding: same namespace as
+    /// [`declare_var`](Self::declare_var)
+    /// (a `LET` and a `CONST` cannot share a name in one frame), then
+    /// mark the frame const and deep-freeze the value, so nested
+    /// containers freeze with the binding instead of aliasing a
+    /// mutable buffer.
+    pub(super) fn declare_const(&mut self, key: String, kind: TypeTag, value: Value) -> Result<()> {
+        let at_entry_top = self.is_entry_top_level();
+        if self
+            .var_scopes
+            .last()
+            .map(|s| s.contains_key(&key))
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "redeclaration error: {key} already declared in this scope; {kw} bindings are immutable and cannot redeclare it",
+                kw = KEYWORD_CONST,
+            );
+        }
+        let coerced = super::args::coerce_value(value, &kind)?;
+        let frozen = Value::deep_freeze(&coerced);
+        let scope = self
+            .var_scopes
+            .last_mut()
+            .ok_or_else(|| anyhow::anyhow!("no variable scope for declaration"))?;
+        scope.insert(key.clone(), (kind.clone(), frozen.clone()));
+        if let Some(frame) = self.const_scopes.last_mut() {
+            frame.insert(key.clone());
+        }
+        if at_entry_top {
+            // Entry prelude capture: the entry record's init store
+            // holds the top-level `CONST`s seeded into every entry
+            // call, mirroring how module inits drain theirs.
+            if let Some(init) = self
+                .modules
+                .get_mut(super::import::ENTRY_UNIT)
+                .and_then(|record| record.init.as_mut())
+            {
+                init.vars.insert(key.clone(), (kind, frozen));
+                init.const_vars.insert(key);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the entry-`CONST` fallback applies here: entry context
+    /// (no owning module) whose caller is also entry (or top level).
+    /// Entry callees called from module code stay params-only, so a
+    /// module caller never observes entry file state. Single owner
+    /// for the caller check every entry fallback reads.
+    fn entry_fallback_allowed(&self) -> bool {
+        if self.current_module().is_some() {
+            return false;
+        }
+        match self.module_stack.len() {
+            0 => true,
+            1 => true,
+            _ => matches!(
+                self.module_stack.get(self.module_stack.len() - 2),
+                None | Some(None)
+            ),
+        }
+    }
+
+    /// Entry-`CONST` fallback init: the entry record's init when the
+    /// fallback is allowed (entry context whose caller is also entry).
+    /// Single owner for the caller check plus the init borrow, so
+    /// every entry fallback reads hashes `ENTRY_UNIT` and checks the
+    /// caller once. Call sites filter to `const_vars`, so `LET`s never
+    /// cross.
+    fn entry_const_init(&self) -> Option<&ModuleInit> {
+        if !self.entry_fallback_allowed() {
+            return None;
+        }
+        self.modules.get(super::import::ENTRY_UNIT)?.init.as_ref()
+    }
+
+    /// Whether `key` names a `CONST` binding visible here: the
+    /// innermost lexical frame holding the name decides (a local
+    /// `LET` shadowing a module-level `CONST` stays mutable), exactly
+    /// mirroring [`mutate_var`](Self::mutate_var)'s resolution; only
+    /// when no lexical frame declares the name does the owning
+    /// module's shared store answer. Single owner for the const check
+    /// behind `$var = <expr>` reassignment and `LIST_APPEND`.
+    pub(super) fn is_const_var(&self, key: &str) -> bool {
+        for idx in (0..self.var_scopes.len()).rev() {
+            if self.var_scopes[idx].contains_key(key) {
+                return self
+                    .const_scopes
+                    .get(idx)
+                    .is_some_and(|frame| frame.contains(key));
+            }
+        }
+        if let Some(module) = self.current_module()
+            && let Some(record) = self.modules.get(&module)
+            && let Some(init) = record.init.as_ref()
+            && init.vars.contains_key(key)
+        {
+            return init.const_vars.contains(key);
+        }
+        // Entry `CONST`s are visible by fallback (#318): no synthetic
+        // seed frame, just the init store filtered to consts.
+        self.entry_const_init()
+            .is_some_and(|init| init.vars.contains_key(key) && init.const_vars.contains(key))
+    }
+
+    /// Shared declaration switch behind `LET` and `CONST` capture,
+    /// async, and await paths: one call site per declare, so a new
+    /// binding form cannot forget the const branch.
+    pub(super) fn declare_binding(
+        &mut self,
+        key: String,
+        kind: TypeTag,
+        value: Value,
+        is_const: bool,
+    ) -> Result<()> {
+        if is_const {
+            self.declare_const(key, kind, value)
+        } else {
+            self.declare_var(key, kind, value)
+        }
+    }
+
     pub(super) fn mutate_var(&mut self, key: &str, value: Value) -> Result<()> {
+        if self.is_const_var(key) {
+            return Err(const_mutation_error(key));
+        }
         let kind = self
             .var_scopes
             .iter()
@@ -904,6 +1284,9 @@ impl<P: ProcessManager> ExecState<P> {
     /// the item against the element tag, so a push can never silently
     /// corrupt the shape the declaration promises.
     pub(super) fn push_into_list(&mut self, key: &str, item: Value) -> Result<()> {
+        if self.is_const_var(key) {
+            return Err(const_mutation_error(key));
+        }
         let kind = self
             .var_scopes
             .iter()
@@ -924,6 +1307,9 @@ impl<P: ProcessManager> ExecState<P> {
         };
         for scope in self.var_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key) {
+                if slot.1.is_frozen() {
+                    return Err(const_mutation_error(key));
+                }
                 let list = slot.1.as_list_mut().ok_or_else(|| {
                     anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
                 })?;
@@ -931,7 +1317,7 @@ impl<P: ProcessManager> ExecState<P> {
                     oxdock_parser::check_value_at(
                         &expected,
                         &item,
-                        &format!("${key}[{}]", list.len()),
+                        &format!("{}[{}]", sigil_var(key), list.len()),
                     )?;
                 }
                 list.push(item);
@@ -942,6 +1328,9 @@ impl<P: ProcessManager> ExecState<P> {
         // store in place, so module-global lists stay appendable from
         // module-owned functions with no importer visibility.
         if let Some((_, value)) = self.module_var_mut(key) {
+            if value.is_frozen() {
+                return Err(const_mutation_error(key));
+            }
             let list = value.as_list_mut().ok_or_else(|| {
                 anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
             })?;
@@ -949,7 +1338,7 @@ impl<P: ProcessManager> ExecState<P> {
                 oxdock_parser::check_value_at(
                     &expected,
                     &item,
-                    &format!("${key}[{}]", list.len()),
+                    &format!("{}[{}]", sigil_var(key), list.len()),
                 )?;
             }
             list.push(item);
@@ -967,8 +1356,15 @@ impl<P: ProcessManager> ExecState<P> {
         }
         // Module-owned code falls back to the owning module's shared
         // store (#115): one file's functions share one global state.
-        // Entry code never sees it (its boundary pushes `None`).
         if let Some((_, value)) = self.module_var(key) {
+            return Some(value.clone());
+        }
+        // Entry `CONST` fallback (#318): same init-store read the seed
+        // frame copied, filtered to consts so `LET`s never cross.
+        if let Some(init) = self.entry_const_init()
+            && let Some((_, value)) = init.vars.get(key)
+            && init.const_vars.contains(key)
+        {
             return Some(value.clone());
         }
         None
@@ -981,6 +1377,12 @@ impl<P: ProcessManager> ExecState<P> {
             }
         }
         if let Some(entry) = self.module_var(key) {
+            return Some(entry.clone());
+        }
+        if let Some(init) = self.entry_const_init()
+            && let Some(entry) = init.vars.get(key)
+            && init.const_vars.contains(key)
+        {
             return Some(entry.clone());
         }
         None
@@ -996,6 +1398,14 @@ impl<P: ProcessManager> ExecState<P> {
             Some(Some(key)) => Some(key.clone()),
             _ => None,
         }
+    }
+
+    /// Frame-1 file scope for one unit: entry and modules share this
+    /// one lookup, so the runtime walk reads the same shape for both.
+    /// `None` only when the unit record is absent (never after
+    /// validation, which registers the entry record).
+    pub(super) fn unit_top_funcs(&self, unit: &str) -> Option<&HashMap<String, Vec<RawFuncDef>>> {
+        self.modules.get(unit).map(|record| &record.top_funcs)
     }
 
     /// One lookup for the owning module's shared store (#115): the
@@ -1016,7 +1426,8 @@ impl<P: ProcessManager> ExecState<P> {
     /// Get a flattened view of all variables across all scopes.
     /// Inner scopes take precedence over outer scopes. Module-owned
     /// code additionally sees the owning module's shared store beneath
-    /// every lexical frame; entry code never does.
+    /// every lexical frame; entry code sees the entry `CONST` fallback
+    /// (filtered to consts) instead of a seed frame.
     pub(super) fn all_vars(&self) -> HashMap<String, Value> {
         let mut result = HashMap::new();
         for scope in self.var_scopes.iter().rev() {
@@ -1027,6 +1438,13 @@ impl<P: ProcessManager> ExecState<P> {
         if let Some(store) = self.module_store() {
             for (k, (_, v)) in store {
                 result.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        if let Some(init) = self.entry_const_init() {
+            for (k, (_, v)) in &init.vars {
+                if init.const_vars.contains(k) {
+                    result.entry(k.clone()).or_insert_with(|| v.clone());
+                }
             }
         }
         result

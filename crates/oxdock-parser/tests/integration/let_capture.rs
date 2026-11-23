@@ -12,13 +12,16 @@ fn parse_one(script: &str) -> StepKind {
 #[test]
 fn let_capture_sync_command_binds_assign_capture() {
     match parse_one("LET $x: STRING = ECHO hi\n") {
-        StepKind::AssignCapture { var, .. } => {
+        StepKind::Bind { var, .. } => {
             assert_eq!(var, "x");
         }
         other => panic!("expected AssignCapture, got {other:?}"),
     }
     match parse_one("LET $x: STRING = ECHO hi\n") {
-        StepKind::AssignCapture { cmd, .. } => {
+        StepKind::Bind {
+            rhs: oxdock_parser::BindRhs::Capture(cmd),
+            ..
+        } => {
             assert!(
                 matches!(cmd.as_ref(), StepKind::Echo(_)),
                 "expected ECHO body, got {cmd:?}"
@@ -31,7 +34,11 @@ fn let_capture_sync_command_binds_assign_capture() {
 #[test]
 fn let_capture_run_command() {
     match parse_one("LET $out: STRING = RUN \"echo hi\"\n") {
-        StepKind::AssignCapture { var, cmd, .. } => {
+        StepKind::Bind {
+            var,
+            rhs: oxdock_parser::BindRhs::Capture(cmd),
+            ..
+        } => {
             assert_eq!(var, "out");
             assert!(matches!(cmd.as_ref(), StepKind::Run(_)));
         }
@@ -47,7 +54,7 @@ fn let_capture_run_exec_binds_assign_capture() {
     // it to RunExec, the mock wraps shell Run), so this pins the
     // capture shape while run_exec.rs pins RunExec end to end.
     match parse_one("LET $cargo: STRING = RUN [\"cargo\", \"--version\"]\n") {
-        StepKind::AssignCapture { var, .. } => {
+        StepKind::Bind { var, .. } => {
             assert_eq!(var, "cargo");
         }
         other => panic!("expected AssignCapture, got {other:?}"),
@@ -68,7 +75,10 @@ fn let_capture_run_exec_rejects_trailing_span() {
 fn let_capture_shell_run_stays_shell() {
     // No regression: bracket-free RUN still captures shell form.
     match parse_one("LET $out: STRING = RUN cargo --version\n") {
-        StepKind::AssignCapture { cmd, .. } => {
+        StepKind::Bind {
+            rhs: oxdock_parser::BindRhs::Capture(cmd),
+            ..
+        } => {
             assert!(
                 matches!(cmd.as_ref(), StepKind::Run(_)),
                 "expected shell Run body, got {cmd:?}"
@@ -82,15 +92,15 @@ fn let_capture_shell_run_stays_shell() {
 fn let_capture_unknown_lead_stays_expression() {
     // Uppercase-but-unknown leads must not break expression assignment.
     match parse_one("LET $x: STRING = MY_VAR\n") {
-        StepKind::Assign { var, .. } => assert_eq!(var, "x"),
+        StepKind::Bind { var, .. } => assert_eq!(var, "x"),
         other => panic!("expected Assign, got {other:?}"),
     }
     match parse_one("LET $x: STRING = foo\n") {
-        StepKind::Assign { var, .. } => assert_eq!(var, "x"),
+        StepKind::Bind { var, .. } => assert_eq!(var, "x"),
         other => panic!("expected Assign, got {other:?}"),
     }
     match parse_one("LET $d: STRING = 30s\n") {
-        StepKind::Assign { var, .. } => assert_eq!(var, "d"),
+        StepKind::Bind { var, .. } => assert_eq!(var, "d"),
         other => panic!("expected Assign, got {other:?}"),
     }
 }
@@ -100,7 +110,7 @@ fn let_capture_func_call_stays_expression() {
     // `GLOB("...")` starts with an uppercase lead but the paren form is an
     // expression; the end-guard must route it to let_statement.
     match parse_one("LET $files: LIST = GLOB(\"*.txt\")\n") {
-        StepKind::Assign { var, .. } => assert_eq!(var, "files"),
+        StepKind::Bind { var, .. } => assert_eq!(var, "files"),
         other => panic!("expected Assign, got {other:?}"),
     }
 }
@@ -118,8 +128,10 @@ fn let_capture_unknown_command_with_args_stays_error() {
 #[test]
 fn let_capture_await_binds_await_capture() {
     match parse_one("LET $o: STRING = AWAIT $t\n") {
-        StepKind::AwaitCapture {
-            out_var, task_var, ..
+        StepKind::Bind {
+            var: out_var,
+            rhs: oxdock_parser::BindRhs::Await { task_var, .. },
+            ..
         } => {
             assert_eq!(out_var, "o");
             assert_eq!(task_var, "t");
@@ -131,7 +143,11 @@ fn let_capture_await_binds_await_capture() {
 #[test]
 fn let_capture_timeout_wrapper() {
     match parse_one("LET $x: STRING = TIMEOUT 5s ECHO hi\n") {
-        StepKind::AssignCapture { var, cmd, .. } => {
+        StepKind::Bind {
+            var,
+            rhs: oxdock_parser::BindRhs::Capture(cmd),
+            ..
+        } => {
             assert_eq!(var, "x");
             assert!(
                 matches!(cmd.as_ref(), StepKind::Timeout { .. }),
@@ -155,7 +171,7 @@ fn let_async_still_binds_task_handle() {
     let steps =
         parse_with_math("LET $t: HANDLE = ASYNC ECHO hi\n", mock_lower).expect("parse ASYNC");
     assert!(
-        matches!(steps[0].kind, StepKind::AssignAsync { .. }),
+        matches!(steps[0].kind, StepKind::Bind { .. }),
         "expected AssignAsync, got {:?}",
         steps[0].kind
     );
@@ -190,8 +206,8 @@ fn let_capture_example_block() {
     "#};
     let steps = parse_with_math(script, mock_lower).expect("parse mixed block");
     assert_eq!(steps.len(), 4);
-    assert!(matches!(steps[0].kind, StepKind::Assign { .. }));
-    assert!(matches!(steps[1].kind, StepKind::AssignCapture { .. }));
-    assert!(matches!(steps[2].kind, StepKind::AssignAsync { .. }));
-    assert!(matches!(steps[3].kind, StepKind::AwaitCapture { .. }));
+    assert!(matches!(steps[0].kind, StepKind::Bind { .. }));
+    assert!(matches!(steps[1].kind, StepKind::Bind { .. }));
+    assert!(matches!(steps[2].kind, StepKind::Bind { .. }));
+    assert!(matches!(steps[3].kind, StepKind::Bind { .. }));
 }

@@ -7,7 +7,7 @@ fn decl_of(script: &str) -> String {
     let steps = parse_script(script, mock_lower).expect("parses");
     assert_eq!(steps.len(), 1, "{script}");
     match &steps[0].kind {
-        StepKind::Assign { decl_type, .. } => decl_type.clone(),
+        StepKind::Bind { decl_type, .. } => decl_type.clone(),
         StepKind::TypeAlias { target, .. } => target.clone(),
         other => panic!("expected declaration, got {other:?}"),
     }

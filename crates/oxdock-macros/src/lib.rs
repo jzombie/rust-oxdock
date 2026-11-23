@@ -842,13 +842,16 @@ fn emit_arg_part(
 fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2::TokenStream {
     match expr {
         Expr::Literal(v) => emit_value(v, interp),
-        Expr::Var(s) => {
+        Expr::Var { name: s } => {
             if let Some(idx) = is_placeholder(s) {
                 let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
-                quote! { Expr::Var(#ident.to_string()) }
+                quote! { Expr::Var { name: #ident.to_string() } }
             } else {
-                quote! { Expr::Var(#s.to_string()) }
+                quote! { Expr::Var { name: #s.to_string() } }
             }
+        }
+        Expr::ConstRef { alias, name } => {
+            quote! { Expr::ConstRef { alias: #alias.to_string(), name: #name.to_string() } }
         }
         Expr::Env(k) => {
             quote! { Expr::Env(#k.to_string()) }
@@ -895,8 +898,8 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             let arg_tokens: Vec<_> = args.iter().map(|e| emit_expr(e, interp)).collect();
             quote! { Expr::Call { name: #name.to_string(), args: vec![#(#arg_tokens),*] } }
         }
-        Expr::Inspect(var) => {
-            quote! { Expr::Inspect(#var.to_string()) }
+        Expr::Inspect { name: var } => {
+            quote! { Expr::Inspect { name: #var.to_string() } }
         }
         Expr::Compare { op, left, right } => {
             let op_token = match op {
@@ -973,7 +976,12 @@ fn emit_math_op(op: &oxdock_parser::ast::MathOp) -> proc_macro2::TokenStream {
             let raw = emit_raw_value(v, &[]);
             quote! { oxdock_parser::ast::MathOp::PushConst(#raw) }
         }
-        M::LoadVar(s) => quote! { oxdock_parser::ast::MathOp::LoadVar(#s.to_string()) },
+        M::Load { name } => {
+            quote! { oxdock_parser::ast::MathOp::Load { name: #name.to_string() } }
+        }
+        M::LoadConstRef { alias, name } => {
+            quote! { oxdock_parser::ast::MathOp::LoadConstRef { alias: #alias.to_string(), name: #name.to_string() } }
+        }
         M::LoadEnv(k) => quote! { oxdock_parser::ast::MathOp::LoadEnv(#k.to_string()) },
         M::LoadKeyPath { base, keys } => {
             quote! { oxdock_parser::ast::MathOp::LoadKeyPath { base: #base.to_string(), keys: vec![#(#keys.to_string()),*] } }
@@ -981,7 +989,9 @@ fn emit_math_op(op: &oxdock_parser::ast::MathOp) -> proc_macro2::TokenStream {
         M::Call { name, arity } => {
             quote! { oxdock_parser::ast::MathOp::Call { name: #name.to_string(), arity: #arity } }
         }
-        M::Inspect(name) => quote! { oxdock_parser::ast::MathOp::Inspect(#name.to_string()) },
+        M::Inspect { name } => {
+            quote! { oxdock_parser::ast::MathOp::Inspect { name: #name.to_string() } }
+        }
         M::Neg => quote! { oxdock_parser::ast::MathOp::Neg },
         M::Add => quote! { oxdock_parser::ast::MathOp::Add },
         M::Sub => quote! { oxdock_parser::ast::MathOp::Sub },
@@ -1452,44 +1462,35 @@ fn emit_stepkind(
                 }
             }
         }
-        StepKind::Assign {
+        StepKind::Bind {
             var,
             decl_type,
-            expr,
+            is_const,
+            rhs,
         } => {
-            let e = emit_expr(expr, interp);
+            use oxdock_parser::BindRhs;
             let t = emit_typekind(decl_type);
-            quote! { StepKind::Assign { var: #var.to_string(), decl_type: #t, expr: #e } }
+            match rhs {
+                BindRhs::Expr(expr) => {
+                    let e = emit_expr(expr, interp);
+                    quote! { StepKind::Bind { var: #var.to_string(), decl_type: #t, is_const: #is_const, rhs: oxdock_parser::BindRhs::Expr(#e) } }
+                }
+                BindRhs::Capture(cmd) => {
+                    let c = emit_stepkind(cmd, interp);
+                    quote! { StepKind::Bind { var: #var.to_string(), decl_type: #t, is_const: #is_const, rhs: oxdock_parser::BindRhs::Capture(Box::new(#c)) } }
+                }
+                BindRhs::Await { task_var } => {
+                    quote! { StepKind::Bind { var: #var.to_string(), decl_type: #t, is_const: #is_const, rhs: oxdock_parser::BindRhs::Await { task_var: #task_var.to_string() } } }
+                }
+                BindRhs::Async(body) => {
+                    let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+                    quote! { StepKind::Bind { var: #var.to_string(), decl_type: #t, is_const: #is_const, rhs: oxdock_parser::BindRhs::Async(vec![#(#steps),*]) } }
+                }
+            }
         }
         StepKind::Set { var, expr } => {
             let e = emit_expr(expr, interp);
             quote! { StepKind::Set { var: #var.to_string(), expr: #e } }
-        }
-        StepKind::AssignCapture {
-            var,
-            decl_type,
-            cmd,
-        } => {
-            let c = emit_stepkind(cmd, interp);
-            let t = emit_typekind(decl_type);
-            quote! { StepKind::AssignCapture { var: #var.to_string(), decl_type: #t, cmd: Box::new(#c) } }
-        }
-        StepKind::AwaitCapture {
-            out_var,
-            out_type,
-            task_var,
-        } => {
-            let t = emit_typekind(out_type);
-            quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string() } }
-        }
-        StepKind::AssignAsync {
-            var,
-            decl_type,
-            body,
-        } => {
-            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
-            let t = emit_typekind(decl_type);
-            quote! { StepKind::AssignAsync { var: #var.to_string(), decl_type: #t, body: vec![#(#steps),*] } }
         }
         StepKind::Await { var } => {
             quote! { StepKind::Await { var: #var.to_string() } }
@@ -1620,8 +1621,8 @@ fn emit_io_bindings(bindings: &[oxdock_parser::IoBinding]) -> proc_macro2::Token
             };
             let pipe = match &b.pipe {
                 None => quote! { None },
-                Some(oxdock_parser::PipeTarget::Var(v)) => {
-                    quote! { Some(oxdock_parser::PipeTarget::Var(#v.to_string())) }
+                Some(oxdock_parser::PipeTarget::Var { name: v }) => {
+                    quote! { Some(oxdock_parser::PipeTarget::Var { name: #v.to_string() }) }
                 }
             };
             quote! { oxdock_parser::IoBinding { stream: oxdock_parser::IoStream::#stream, pipe: #pipe } }
@@ -2145,20 +2146,22 @@ mod tests {
 
     #[test]
     fn emit_async_await_round_trip() {
-        let task = StepKind::AssignAsync {
+        let task = StepKind::Bind {
             var: "job".to_string(),
             decl_type: "HANDLE".to_string(),
-            body: vec![Step {
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Async(vec![Step {
                 guard: None,
                 kind: StepKind::Echo(Arg::String("hi".to_string(), false)),
                 scope_enter: 0,
                 scope_exit: 0,
                 line: 0,
                 col: 0,
-            }],
+            }]),
         };
         let rendered = emit_stepkind(&task, &[]).to_string();
-        assert!(rendered.contains("AssignAsync"), "shape: {rendered}");
+        assert!(rendered.contains("Bind"), "shape: {rendered}");
+        assert!(rendered.contains("BindRhs :: Async"), "rhs: {rendered}");
         assert!(rendered.contains("job"), "var name: {rendered}");
 
         let awaited = StepKind::Await {

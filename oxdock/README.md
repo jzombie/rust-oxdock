@@ -4,15 +4,15 @@
 
 Bash gives you strings and exit codes. OxDock gives you [typed values](https://github.com/jzombie/rust-oxdock#value-types), [guarded paths](https://github.com/jzombie/rust-oxdock#workspaces--filesystem), [managed pipes](https://github.com/jzombie/rust-oxdock#transport-pipes), and identical behavior on Linux/macOS/Windows (the things you'd re-implement badly in every growing bash script). And with hot-loading [MCP tooling](https://github.com/jzombie/rust-oxdock#mcp-hosting), *English-to-OxDock* just skips the boilerplate of getting there. [Workspaces](https://github.com/jzombie/rust-oxdock#workspaces--filesystem) (`SNAPSHOT`, `LOCAL`, `CACHE`, `SYSTEM`) and [scoped blocks](https://github.com/jzombie/rust-oxdock#guards-and-scoped-blocks) with [selective environment inheritance](https://github.com/jzombie/rust-oxdock#selective-environment-inheritance) give every run an isolated root that reverts on scope exit. When plain shell is the right tool, [`RUN`](https://github.com/jzombie/rust-oxdock#run) still reaches it, and [platform guards](https://github.com/jzombie/rust-oxdock#platform-guards) keep the OS-specific bits fenced: the two combine instead of competing.
 
-Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on Linux, macOS, and Windows. Execute scripts on bare metal, inside containers, or dispatched across remote machines simultaneously. No daemons. No hypervisors.
+Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on Linux, macOS, and Windows. Execute scripts on bare metal, inside containers, or dispatched across remote machines simultaneously. No daemons. No hypervisors. See [Containers as orchestrated steps](#containers-as-orchestrated-steps).
 
 Platform gating selects OS-specific steps, and remote targets bind over any stdio transport. Only RUN touches the host shell.
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.43.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.44.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.43.0-alpha`, or install the standalone runner with `cargo install oxdock@0.43.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.44.0-alpha`, or install the standalone runner with `cargo install oxdock@0.44.0-alpha`.
 
 ### Run a script with the CLI
 
@@ -88,6 +88,45 @@ LET $e: STRING = env:FOO
 WRITE env.txt "{{ $e }}"
 LET $v: STRING = READ env.txt
 ASSERT_EQ $v "bar"
+```
+
+Three spellings read distinct stores. `$name` reads a binding, whether `LET` or `CONST`; `env:KEY` reads script env; bare words never read a binding. Bare words stay literal text in command arguments (and fail elsewhere, naming the `$` form to use). `RUN` shell words stay literal too, so only `{{ $name }}` templates read bindings there.
+
+```oxdock
+# LET bindings read through the dollar sigil.
+LET $note: STRING = "let-hello"
+ECHO $note
+ASSERT_CONTAINS stdout "let-hello"
+
+# Script env reads through the env prefix.
+ENV DOC_MOOD="env-hello"
+ECHO env:DOC_MOOD
+ASSERT_CONTAINS stdout "env-hello"
+
+# Bare words stay literal in command arguments.
+CONST $BADGE: STRING = "const-hello"
+ECHO BADGE
+ASSERT_CONTAINS stdout "BADGE"
+
+# CONST reads sigiled, like LET.
+ECHO $BADGE
+ASSERT_CONTAINS stdout "const-hello"
+
+# CONST reads through templates.
+ECHO "{{ $BADGE }}"
+ASSERT_CONTAINS stdout "const-hello"
+
+# CONST reads sigiled in expression positions.
+LET $badge: STRING = $BADGE
+ASSERT_EQ $badge "const-hello"
+
+# RUN keeps shell words literal, so only templates read CONST.
+LET $raw: STRING = RUN echo BADGE
+ASSERT_CONTAINS $raw "BADGE"
+
+# RUN reads CONST through templates.
+LET $cooked: STRING = RUN echo "{{ $BADGE }}"
+ASSERT_CONTAINS $cooked "const-hello"
 ```
 
 ### Functions and commands
@@ -463,7 +502,7 @@ Every variable the seed provides to spawned children is specified in [ENV_CONTRA
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.43.0-alpha
+cargo install oxdock@0.44.0-alpha
 ```
 
 Run a script file:
@@ -510,7 +549,7 @@ Two trade offs come with the form. Cloning a string still deep copies it, since 
 
 ### Transport: pipes
 
-A command's standard streams can be rerouted through pipes declared with `LET $p: PIPE`, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
+Pipes are runtime-managed streams, not file descriptors. There is exactly one interface: declare (`LET $p: PIPE`), wire (`WITH_IO [stdout=$p]` or `[stdin=$p]`), and pass or copy the handle across calls, tasks, and module boundaries. Scripts never allocate descriptors, never manage temp files, and never write platform plumbing: the runtime owns backend selection, lifetime, and EOF. Buffers stay in memory and spill to a guarded temp file past 8 MiB, background single command tasks can promote a pipe to a zero copy OS kernel pair instead, the last drop closes, and keepers pin background gaps. The same spelling runs identically on Linux, macOS, and Windows.
 
 ```oxdock
 LET $log: PIPE
@@ -565,6 +604,25 @@ crossing goes through the boundary, never around it.
 That is a competence boundary, not a security boundary. It keeps a
 clumsy agent from wandering; it does not contain a hostile payload.
 For untrusted code, run OxDock itself inside a container or VM.
+
+### Containers as orchestrated steps
+
+Static orchestration checks in fixed Compose files and image artifacts.
+Scripts can do it programmatically instead. One example pattern:
+[docker-pipeline.oxfile](https://github.com/jzombie/rust-oxdock/blob/main/oxdock/examples/docker-pipeline.oxfile) holds the
+Dockerfile in a variable, feeds it to `docker build` over stdin with
+zero files written, fans out concurrent `docker run` containers over
+pipes, and transforms between them in the DSL with assertions on every
+hop. Other layouts work the same way.
+
+[`REMOTE`](https://github.com/jzombie/rust-oxdock#remote) is another pattern for the other direction: a controller
+script outside the container runs a sealed block inside it over a
+stdio transport such as `docker exec -i` (bound with `--remote`), with
+only header-listed values crossing and results returning through
+declared transfers or pipes. The plumbing is symmetric, so the reverse
+works the same way when the transport is set up: a guest inside
+orchestrates outward through the same declared channels, all under
+script control.
 
 ### Prepare during the build
 
@@ -722,12 +780,13 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $version: STRING = #crate_version
     MKDIR dist
 
-    FUNC STAMP($name: STRING): STRING {
+    FUNC STAMP($name: STRING, $version: STRING): STRING {
+        ENV PROJECT=OxDock
         WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
         RETURN $name
     }
     FOR $name: STRING IN ["alpha", "beta"] {
-        STAMP($name)
+        STAMP($name, $version)
     }
 
     FUNC PICK($flag: BOOL): STRING {
@@ -742,8 +801,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.43.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.43.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.44.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.44.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -755,7 +814,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.43.0-alpha"
+    "alpha OxDock 0.44.0-alpha"
 );
 ```
 
@@ -1247,7 +1306,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.43.0-alpha", default-features = false }
+oxdock = { version = "0.44.0-alpha", default-features = false }
 ```
 
 ## Glossary

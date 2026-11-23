@@ -1311,14 +1311,18 @@ mod tests {
             crate::parse_script(&script, crate::lower_command).expect("parse rebuilt script");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::AssignCapture { var, cmd, .. } => {
+            StepKind::Bind {
+                var,
+                rhs: crate::commands::BindRhs::Capture(cmd),
+                ..
+            } => {
                 assert_eq!(var, "cargo");
                 assert!(
                     matches!(cmd.as_ref(), StepKind::RunExec { .. }),
                     "rebuilt {script:?} degraded to {cmd:?}"
                 );
             }
-            other => panic!("expected AssignCapture, got {other:?}"),
+            other => panic!("expected Bind Capture, got {other:?}"),
         }
     }
 
@@ -1484,9 +1488,9 @@ mod tests {
         .expect("tokens");
         let steps = parse_braced_tokens(&ts, mock_lower).expect("continuations parse");
         assert_eq!(steps.len(), 3, "got: {steps:?}");
-        assert!(matches!(steps[0].kind, StepKind::Assign { .. }));
+        assert!(matches!(steps[0].kind, StepKind::Bind { .. }));
         assert!(matches!(steps[1].kind, StepKind::For { .. }));
-        assert!(matches!(steps[2].kind, StepKind::AssignCapture { .. }));
+        assert!(matches!(steps[2].kind, StepKind::Bind { .. }));
     }
 
     #[test]
@@ -1500,7 +1504,7 @@ mod tests {
         .expect("tokens");
         let steps = parse_braced_tokens(&ts, mock_lower).expect("map literal parses");
         assert_eq!(steps.len(), 1, "got: {steps:?}");
-        assert!(matches!(steps[0].kind, StepKind::Assign { .. }));
+        assert!(matches!(steps[0].kind, StepKind::Bind { .. }));
     }
 
     #[test]

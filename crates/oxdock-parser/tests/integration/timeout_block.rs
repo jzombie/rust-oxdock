@@ -46,7 +46,12 @@ fn timeout_dynamic_forms() {
     // Variables, quoted literals, and templates resolve at runtime
     // instead of freezing at parse.
     let (duration, _) = timeout_case("TIMEOUT $d ECHO x");
-    assert_eq!(duration, Arg::Expr(Expr::Var("d".to_string())));
+    assert_eq!(
+        duration,
+        Arg::Expr(Expr::Var {
+            name: "d".to_string()
+        })
+    );
     let (duration, _) = timeout_case("TIMEOUT \"10s\" ECHO x");
     assert_eq!(duration, Arg::String("10s".to_string(), true));
     let (duration, _) = timeout_case("TIMEOUT {{ $d }} ECHO x");

@@ -20,10 +20,21 @@ Boolean `true` or `false`.
 ### Value type: LIST
 
 Ordered list of values. Shared heap: cloning bumps a refcount.
+A `CONST`-owned list is deeply immutable: `LIST_APPEND` on it,
+or on any alias of it, fails with `cannot mutate CONST`,
+including for lists nested inside it. The `CONST` copy is
+detached, so mutating the `LET` source it was built from leaves
+the `CONST` unchanged. Equality ignores `CONST`-ness, so
+`ASSERT_EQ` never observes it.
 
 ### Value type: MAP
 
 String-keyed map of values. Shared heap: cloning bumps a refcount.
+Freezing mirrors `LIST`: a `CONST`-owned map is deeply immutable,
+so `MAP_SET` and `MERGE_MAPS` on it (or any alias of it) fail
+with `cannot mutate CONST`, including for maps nested inside it.
+The `CONST` copy is detached from the `LET` source it was built
+from.
 
 ### Value type: PATH
 
@@ -35,10 +46,15 @@ Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
 
 ### Value type: PIPE
 
-Anonymous pipe handle. The backend materializes lazily on first
-binding (never eagerly at declaration), so the choice always has full
-usage context. Cloning shares the backend (explicit-sharing fan-out);
-equality is handle identity, never byte comparison.
+Runtime-managed stream handle, never a raw descriptor. A `PIPE` names a
+runtime-managed byte stream with exactly one interface: declare it
+(`LET $p: PIPE`), wire it (`WITH_IO`), and pass or copy it across
+calls and module boundaries. Script code never manages descriptors,
+temp files, or platform plumbing. The backend materializes lazily
+on first binding (never eagerly at declaration), so the choice
+always has full usage context. Cloning shares the backend
+(explicit-sharing fan-out); equality is handle identity, never
+byte comparison.
 
 ### Value type: HANDLE
 

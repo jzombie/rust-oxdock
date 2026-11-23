@@ -14,8 +14,8 @@
 //!
 //! Coverage: generic commands (head word plus gap-split args with
 //! quote-accurate joins), guards (leading `[..]` groups; in-body
-//! brackets splice to raw text), `LET`/`SET`/`RETURN` with the full
-//! expression tiers, static calls and RUN-exec with instruction
+//! brackets splice to raw text), `LET`/reassignment (`$var = <expr>`)/`RETURN`
+//! with the full expression tiers, static calls and RUN-exec with instruction
 //! exactness, single-command wrappers (`WITH_IO`/`TIMEOUT`/`ISOLATED`/
 //! `ASYNC`), io-blocks, `AWAIT`/`CANCEL`, multi-element statements,
 //! block statements (`IF`/`FOR`/`WHILE`/`FUNC`/`REMOTE`/`TYPE`/
@@ -88,17 +88,18 @@ use crate::ast::{
 };
 use crate::command::ArgType;
 use crate::commands::{
-    InsToken, apply_unary_neg, canonical_assignment_arg, check_tty_wrapping, classify_numeric_text,
-    is_known_command, lower_env_tokens, lower_expand_tokens, make_arith, make_compare,
-    reject_boundary,
+    BindRhs, InsToken, apply_unary_neg, canonical_assignment_arg, check_tty_wrapping,
+    classify_numeric_text, is_known_command, lower_env_tokens, lower_expand_tokens, make_arith,
+    make_compare, reject_boundary,
 };
 use crate::constants::{
     INJECT_PREFIX, INJECT_SUFFIX, KEYWORD_AS, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
-    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_DEFAULT, KEYWORD_ELSE, KEYWORD_ENV,
-    KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FROM, KEYWORD_FUNC,
-    KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT, KEYWORD_ISOLATED,
-    KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH, KEYWORD_TIMEOUT,
-    KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
+    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_DEFAULT, KEYWORD_ELSE,
+    KEYWORD_ENV, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FROM,
+    KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_IN, KEYWORD_INHERIT_ENV, KEYWORD_INSPECT,
+    KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SWITCH,
+    KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
+    VAR_SIGIL_CHAR, qualify, sigil_qualified, sigil_var,
 };
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 
@@ -190,7 +191,7 @@ impl PartialEq for Stmt {
 impl Eq for Stmt {}
 
 /// True when a newline continues the statement for a multi-line
-/// generic: the body opens a type-carrying statement (TYPE/LET/FOR)
+/// generic: the body opens a type-carrying statement (TYPE/LET/CONST/FOR)
 /// and holds an unclosed `<...>` shape. Only a joint `<` after an
 /// uppercase word opens (never `<=`, never `$VAR<`), so spaced
 /// comparisons keep ending the statement as before. FUNC needs no
@@ -199,7 +200,7 @@ impl Eq for Stmt {}
 fn type_continuation_rides(body: &[Tok], next: Option<&Tok>) -> bool {
     if !matches!(
         body.first().map(|t| &t.kind),
-        Some(TokKind::Word(w)) if w == KEYWORD_TYPE || w == KEYWORD_LET || w == KEYWORD_FOR
+        Some(TokKind::Word(w)) if w == KEYWORD_TYPE || w == KEYWORD_LET || w == KEYWORD_CONST || w == KEYWORD_FOR
     ) {
         return false;
     }
@@ -234,7 +235,7 @@ fn open_generic_depth(body: &[Tok], next: Option<&Tok>) -> usize {
             && body.get(idx - 1).is_some_and(|t| t.joint)
             && matches!(
                 body.get(idx - 2).map(|t| &t.kind),
-                Some(TokKind::Punct('$'))
+                Some(TokKind::Punct(VAR_SIGIL_CHAR))
             )
         {
             continue;
@@ -264,7 +265,7 @@ fn boundary_ends_statement(body: &[Tok]) -> Result<bool, String> {
         Some(t) => t,
     };
     match &head.kind {
-        TokKind::Word(_) | TokKind::Punct('$') => Ok(true),
+        TokKind::Word(_) | TokKind::Punct(VAR_SIGIL_CHAR) => Ok(true),
         // A lone leading `{...}` ends here too: the splitter merges
         // it into pending waits (`WITH_IO`, `IF`/`ELSE` chains) or
         // emits it for block-statement lowering, never splitting
@@ -1066,7 +1067,7 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
         match &tok.kind {
             TokKind::Word(w) => out.push_str(w),
             TokKind::Punct(c) => {
-                if *c == '$' {
+                if *c == VAR_SIGIL_CHAR {
                     // Lone-`$` runs never reach here (expression
                     // extension claims them first and fails loudly).
                     // Elsewhere `$` renders literally (probed `a$(x)`
@@ -1091,7 +1092,7 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
                             kind: None,
                         });
                     }
-                    out.push('$');
+                    out.push(VAR_SIGIL_CHAR);
                 } else {
                     out.push(*c);
                 }
@@ -1283,8 +1284,10 @@ fn try_squote_value(region: &[Tok]) -> Option<String> {
 }
 
 /// Lone assignable shapes (`assign_expr` without continuation): `$var`,
-/// key paths, `env:KEY`, and full-region calls (resolved). Anything
-/// longer renders raw; the caller decides strictness.
+/// key paths, `env:KEY`, `$`-sigiled `CONST` reads (`$NAME`,
+/// `$ALIAS::NAME`), and full-region calls
+/// (resolved). Anything longer renders raw; the caller decides
+/// strictness.
 fn try_lone_value_expr(
     region: &[Tok],
     stmt: usize,
@@ -1292,7 +1295,10 @@ fn try_lone_value_expr(
 ) -> Result<Option<Arg>, TokenError> {
     // `$` shapes: exactly Punct+Word or dotted runs, all joint past
     // the first (the region starts at an argument start by construction).
-    if matches!(region.first().map(|t| &t.kind), Some(TokKind::Punct('$'))) {
+    if matches!(
+        region.first().map(|t| &t.kind),
+        Some(TokKind::Punct(VAR_SIGIL_CHAR))
+    ) {
         let mut cur = Cursor::expr(region, stmt);
         cur.pos += 1;
         let base = match cur.next() {
@@ -1304,6 +1310,33 @@ fn try_lone_value_expr(
             }
             _ => return Ok(None),
         };
+        // Qualified immutable read (`$ALIAS::NAME`). Key paths
+        // never ride qualified names: copy to a local first.
+        if let Some(name) = match_joint_qualified(cur.toks, cur.pos) {
+            if cur.toks.get(cur.pos + 3).is_some() {
+                if matches!(
+                    cur.toks.get(cur.pos + 3).map(|t| &t.kind),
+                    Some(TokKind::Punct('.'))
+                ) && cur.toks.get(cur.pos + 3).is_some_and(|t| t.joint)
+                {
+                    return Err(TokenError {
+                        stmt,
+                        msg: crate::template::qualified_keypath_error(),
+                        line: 0,
+                        col: 0,
+                        kind: None,
+                    });
+                }
+                return Err(TokenError {
+                    stmt,
+                    msg: format!("unexpected text after {}", sigil_qualified(&base, &name)),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                });
+            }
+            return Ok(Some(Arg::Expr(Expr::ConstRef { alias: base, name })));
+        }
         let mut keys = Vec::new();
         loop {
             let dot = matches!(
@@ -1326,7 +1359,7 @@ fn try_lone_value_expr(
             return Ok(None);
         }
         return Ok(Some(Arg::Expr(if keys.is_empty() {
-            Expr::Var(base)
+            Expr::Var { name: base }
         } else {
             Expr::KeyPath { base, keys }
         })));
@@ -1379,8 +1412,8 @@ fn try_lone_call_expr(
                     kind: None,
                 });
             };
-            if let Expr::Var(var) = arg {
-                return Ok(Some(Arg::Expr(Expr::Inspect(var.clone()))));
+            if let Expr::Var { name } = arg {
+                return Ok(Some(Arg::Expr(Expr::Inspect { name: name.clone() })));
             }
             return Err(TokenError {
                 stmt,
@@ -1411,8 +1444,10 @@ fn try_expr_arg(
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<Option<(Arg, usize)>, TokenError> {
-    let extend = matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Punct('$')))
-        || matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == "env");
+    let extend = matches!(
+        toks.get(pos).map(|t| &t.kind),
+        Some(TokKind::Punct(VAR_SIGIL_CHAR))
+    ) || matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Word(w)) if w == "env");
     if !extend {
         return Ok(None);
     }
@@ -2041,7 +2076,10 @@ fn split_top_commas(toks: &[Tok]) -> Vec<&[Tok]> {
 /// the terminators the parser enforces separately. `;` arrives as its
 /// own token kind; the key charset admits it, so runs accept it literally.
 fn key_char(c: char) -> bool {
-    !matches!(c, ':' | '=' | '!' | ',' | '|' | '(' | ')' | ']' | '$')
+    !matches!(
+        c,
+        ':' | '=' | '!' | ',' | '|' | '(' | ')' | ']' | VAR_SIGIL_CHAR
+    )
 }
 
 /// Consume a joint run of words/punctuation as one bare key or value.
@@ -2264,7 +2302,7 @@ fn value_run(arg: &mut Cursor) -> Result<String, TokenError> {
             | TokKind::Punct('|')
             | TokKind::Punct(']')
             | TokKind::Punct(')') => break,
-            TokKind::Punct('$') => break,
+            TokKind::Punct(VAR_SIGIL_CHAR) => break,
             TokKind::Punct('/') if is_comment_open(arg.toks, arg.pos) => break,
             TokKind::Group { .. } => break,
             _ => {}
@@ -2485,14 +2523,11 @@ pub struct ParseCtx<'a> {
     /// braced body; short borrows only,
     /// never held across recursive parses.
     pub funcs: RefCell<Vec<HashSet<String>>>,
-    pub imports: RefCell<Vec<Vec<String>>>,
-    /// `EXPORT` func names in source order, validated at end of parse
-    /// (forward references allowed).
-    pub func_exports: RefCell<Vec<String>>,
-    /// `EXPORT TYPE` names in source order, validated at end of parse
-    /// (forward references allowed). Separate from func exports so the
-    /// MCP server never confuses a type for a tool.
-    pub type_exports: RefCell<Vec<String>>,
+    pub imports: RefCell<Vec<Vec<(String, bool)>>>,
+    /// Single-file `EXPORT` metadata in source order, validated at end
+    /// of parse (forward references allowed). One struct for all three
+    /// kinds so holders never thread parallel lists.
+    pub exports: RefCell<Exports>,
     /// Top-level `FUNC` names pre-declared before lowering, so forward
     /// references resolve regardless of order. Separate from `funcs`
     /// frames so duplicate detection in `declare_func` stays intact;
@@ -2519,8 +2554,7 @@ impl<'a> ParseCtx<'a> {
             reserved,
             funcs: RefCell::new(vec![HashSet::new()]),
             imports: RefCell::new(vec![Vec::new()]),
-            func_exports: RefCell::new(Vec::new()),
-            type_exports: RefCell::new(Vec::new()),
+            exports: RefCell::new(Exports::default()),
             forward: RefCell::new(vec![HashSet::new()]),
             current_line: RefCell::new(0),
         }
@@ -2528,7 +2562,8 @@ impl<'a> ParseCtx<'a> {
 
     /// Snapshot of everything visible at this point: `FUNC` names
     /// unioned across frames plus imports flattened outer-to-inner
-    /// (unions `FUNC` names across frames, flattens imports outer-to-inner).
+    /// (unions `FUNC` names across frames, flattens imports outer-to-inner,
+    /// dropping guardedness: call resolution only needs names).
     fn visible_snapshot(&self) -> (HashSet<String>, Vec<String>) {
         let mut funcs = HashSet::new();
         for scope in self.funcs.borrow().iter() {
@@ -2542,7 +2577,7 @@ impl<'a> ParseCtx<'a> {
         );
         let mut imports = Vec::new();
         for frame in self.imports.borrow().iter() {
-            for module in frame {
+            for (module, _) in frame {
                 if !imports.contains(module) {
                     imports.push(module.clone());
                 }
@@ -2563,20 +2598,40 @@ impl<'a> ParseCtx<'a> {
 
     /// Record `IMPORT`ed modules in the innermost frame (deduped,
     /// (deduped; the unknown-module table check lives at the import site),
-    /// which lives at the import site).
-    fn import_into_frame(&self, modules: &[String]) {
+    /// which lives at the import site. `guarded` marks guard-gated
+    /// imports so the same-frame duplicate gate can tell a probable
+    /// typo (unguarded, always collides) from a platform branch
+    /// (guarded, disjointness decided by the static pass).
+    fn import_into_frame(&self, modules: &[String], guarded: bool) {
         match self.imports.borrow_mut().last_mut() {
             Some(frame) => {
                 for module in modules {
-                    if !frame.contains(module) {
-                        frame.push(module.clone());
+                    if !frame.iter().any(|(known, _)| known == module) {
+                        frame.push((module.clone(), guarded));
                     }
                 }
             }
             None => {
-                self.imports.borrow_mut().push(modules.to_vec());
+                self.imports
+                    .borrow_mut()
+                    .push(modules.iter().map(|m| (m.clone(), guarded)).collect());
             }
         }
+    }
+
+    /// Guardedness of every visible entry for `alias`, outer to inner.
+    /// Single owner for the duplicate-gate input, so the gate never
+    /// restates the frame walk.
+    fn import_guard_flags(&self, alias: &str) -> Vec<bool> {
+        let mut out = Vec::new();
+        for frame in self.imports.borrow().iter() {
+            for (known, guarded) in frame {
+                if known == alias {
+                    out.push(*guarded);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -2783,8 +2838,9 @@ fn parse_call_args(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<Vec<Exp
 }
 
 /// Lower a call-shape to `Expr`: `INSPECT` keeps its variable
-/// unevaluated; everything else
-/// resolves statically through the shared resolver.
+/// unevaluated (`INSPECT($var)` for `LET` and `$`-sigiled `CONST`
+/// reads); everything else resolves statically through the shared
+/// resolver.
 fn parse_expr_call(
     name: String,
     inner: &[Tok],
@@ -2802,8 +2858,8 @@ fn parse_expr_call(
                 kind: None,
             });
         };
-        if let Expr::Var(var) = arg {
-            return Ok(Expr::Inspect(var.clone()));
+        if let Expr::Var { name } = arg {
+            return Ok(Expr::Inspect { name: name.clone() });
         }
         return Err(TokenError {
             stmt,
@@ -3037,10 +3093,10 @@ fn parse_timeout_duration_at(
     }
     let arg = match &head.kind {
         TokKind::Word(w) if is_timeout_literal(w) => Arg::String(w.clone(), false),
-        TokKind::Punct('$') => match toks.get(pos + 1) {
+        TokKind::Punct(VAR_SIGIL_CHAR) => match toks.get(pos + 1) {
             Some(var) if var.joint && matches!(&var.kind, TokKind::Word(w) if is_ident_word(w)) => {
                 match &var.kind {
-                    TokKind::Word(w) => Arg::Expr(Expr::Var(w.clone())),
+                    TokKind::Word(w) => Arg::Expr(Expr::Var { name: w.clone() }),
                     _ => unreachable!(),
                 }
             }
@@ -3060,7 +3116,7 @@ fn parse_timeout_duration_at(
         _ => return Ok(None),
     };
     let used = match &head.kind {
-        TokKind::Punct('$') => 2,
+        TokKind::Punct(VAR_SIGIL_CHAR) => 2,
         _ => 1,
     };
     ArgType::Duration.check_arg(&arg).map_err(|e| TokenError {
@@ -3081,7 +3137,11 @@ fn parse_timeout_duration_at(
 /// Grammar-matched but invalid bindings (tty
 /// values, out-of-range geometry) fail loudly, mirroring
 /// `parse_io_binding`'s messages one by one.
-fn parse_io_bindings(inner: &[Tok], stmt: usize) -> Result<Option<Vec<IoBinding>>, TokenError> {
+fn parse_io_bindings(
+    inner: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<Vec<IoBinding>>, TokenError> {
     let mut parts: Vec<&[Tok]> = Vec::new();
     let mut start = 0;
     for (i, tok) in inner.iter().enumerate() {
@@ -3103,7 +3163,7 @@ fn parse_io_bindings(inner: &[Tok], stmt: usize) -> Result<Option<Vec<IoBinding>
             .iter()
             .filter(|t| !matches!(&t.kind, TokKind::Newline))
             .collect();
-        match parse_io_binding_part(&part, stmt)? {
+        match parse_io_binding_part(&part, stmt, ctx)? {
             Some(binding) => out.push(binding),
             None => return Ok(None),
         }
@@ -3114,12 +3174,17 @@ fn parse_io_bindings(inner: &[Tok], stmt: usize) -> Result<Option<Vec<IoBinding>
     Ok(Some(out))
 }
 
-/// One `stream[=$var]` / `rows|cols=int` binding. Gaps ride free
-/// around `=`/`,`/names like `ws?`; only `$`+name stays gapless
-/// (atomic `dollar_ident`). Streams and size names outside the
-/// grammar's words miss the shape; a valued `tty` and out-of-range
-/// geometry fail loudly with exact messages.
-fn parse_io_binding_part(part: &[&Tok], stmt: usize) -> Result<Option<IoBinding>, TokenError> {
+/// One `stream[=$var]` / `rows|cols=int` binding.
+/// Gaps ride free around `=`/`,`/names like `ws?`; only `$`+name
+/// stays gapless (atomic `dollar_ident`), covering `LET` and
+/// `$`-sigiled `CONST` pipes alike. Streams and size names outside the grammar's words
+/// miss the shape; a valued `tty` and out-of-range geometry fail
+/// loudly with exact messages.
+fn parse_io_binding_part(
+    part: &[&Tok],
+    stmt: usize,
+    _ctx: &ParseCtx,
+) -> Result<Option<IoBinding>, TokenError> {
     let fail = |msg: String| TokenError {
         stmt,
         msg,
@@ -3186,29 +3251,24 @@ fn parse_io_binding_part(part: &[&Tok], stmt: usize) -> Result<Option<IoBinding>
         }));
     }
     // Stream pipe: `= $var` with a gapless name.
-    if value.len() != 2 {
-        return Ok(None);
+    if value.len() == 2
+        && matches!(&value[0].kind, TokKind::Punct(VAR_SIGIL_CHAR))
+        && let TokKind::Word(var) = &value[1].kind
+        && value[1].joint
+        && is_ident_word(var)
+    {
+        if stream == "tty" {
+            return Err(fail(
+                "WITH_IO [tty] takes no value: use bare `tty`, with `rows = <int>` / `cols = <int>` for geometry (e.g. `[tty, rows=40, cols=100]`)"
+                    .to_string(),
+            ));
+        }
+        return Ok(Some(IoBinding {
+            stream: io_stream_of(stream),
+            pipe: Some(crate::ast::PipeTarget::Var { name: var.clone() }),
+        }));
     }
-    if !matches!(&value[0].kind, TokKind::Punct('$')) {
-        return Ok(None);
-    }
-    let TokKind::Word(var) = &value[1].kind else {
-        return Ok(None);
-    };
-    if !value[1].joint || !is_ident_word(var) {
-        return Ok(None);
-    }
-    if stream == "tty" {
-        // `tty` is a bare flag (mirrors `parse_io_binding`).
-        return Err(fail(
-            "WITH_IO [tty] takes no value: use bare `tty`, with `rows = <int>` / `cols = <int>` for geometry (e.g. `[tty, rows=40, cols=100]`)"
-                .to_string(),
-        ));
-    }
-    Ok(Some(IoBinding {
-        stream: io_stream_of(stream),
-        pipe: Some(crate::ast::PipeTarget::Var(var.clone())),
-    }))
+    Ok(None)
 }
 
 /// Stream word to [`IoStream`]: only grammar words reach here, so
@@ -3222,57 +3282,56 @@ fn io_stream_of(name: &str) -> IoStream {
     }
 }
 
-/// `AWAIT`/`CANCEL $var` shape at `pos`. A head without `$` misses
-/// (`None`: generic fails it in lowering); once `$`
-/// commits, the name must follow and parse errors stay loud, like
-/// the grammar's committed `"$" ~ ident`. `var_joint` enforces the
-/// atomic `$var` adjacency inside compound-atomic parents; element
-/// level admits the gap (probed `AWAIT $ t`). The caller continues
-/// its element loop past the shape.
+/// `AWAIT`/`CANCEL $var` shape at `pos` (`$`-sigiled, covering `LET`
+/// and `CONST` handles alike). A head without `$` misses
+/// (`None`: generic fails it in lowering); once `$` commits, the
+/// name must follow and parse errors stay loud. `var_joint`
+/// enforces atomic adjacency inside compound parents.
 fn parse_await_cancel_at(
     toks: &[Tok],
     pos: usize,
     stmt: usize,
     var_joint: bool,
+    _ctx: &ParseCtx,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
     let head = match toks.get(pos).map(|t| &t.kind) {
         Some(TokKind::Word(w)) if w == KEYWORD_AWAIT || w == KEYWORD_CANCEL => w.clone(),
         _ => return Ok(None),
     };
-    if !matches!(
+    if matches!(
         toks.get(pos + 1).map(|t| &t.kind),
-        Some(TokKind::Punct('$'))
+        Some(TokKind::Punct(VAR_SIGIL_CHAR))
     ) {
-        return Ok(None);
-    }
-    let var = match toks.get(pos + 2) {
-        Some(t)
-            if matches!(&t.kind, TokKind::Word(w) if is_ident_word(w))
-                && (!var_joint || t.joint) =>
-        {
-            match &t.kind {
-                TokKind::Word(w) => w.clone(),
-                _ => unreachable!(),
+        let var = match toks.get(pos + 2) {
+            Some(t)
+                if matches!(&t.kind, TokKind::Word(w) if is_ident_word(w))
+                    && (!var_joint || t.joint) =>
+            {
+                match &t.kind {
+                    TokKind::Word(w) => w.clone(),
+                    _ => unreachable!(),
+                }
             }
-        }
-        _ => {
-            return Err(TokenError {
-                stmt,
-                msg: format!("{head} requires a variable"),
-                line: 0,
-                col: 0,
-                kind: None,
-            });
-        }
-    };
-    Ok(Some((
-        if head == KEYWORD_AWAIT {
-            StepKind::Await { var }
-        } else {
-            StepKind::Cancel { var }
-        },
-        3,
-    )))
+            _ => {
+                return Err(TokenError {
+                    stmt,
+                    msg: format!("{head} requires a variable"),
+                    line: 0,
+                    col: 0,
+                    kind: None,
+                });
+            }
+        };
+        return Ok(Some((
+            if head == KEYWORD_AWAIT {
+                StepKind::Await { var }
+            } else {
+                StepKind::Cancel { var }
+            },
+            3,
+        )));
+    }
+    Ok(None)
 }
 
 /// Wrapper strictness for one single-command inner: `AWAIT` parses
@@ -3333,12 +3392,12 @@ fn parse_single_inner(
     // they decline falls through to generic below.
     if head_word.as_deref() == Some(KEYWORD_AWAIT)
         && rules.allow_await
-        && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true)?
+        && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true, ctx)?
     {
         return Ok(found);
     }
     if head_word.as_deref() == Some(KEYWORD_CANCEL)
-        && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true)?
+        && let Some(found) = parse_await_cancel_at(toks, pos, stmt, true, ctx)?
     {
         return Ok(found);
     }
@@ -3647,10 +3706,12 @@ fn render_inherit_key(part: &[Tok], stmt: usize) -> Result<Option<String>, Token
     if out.contains("//") || out.contains("/*") {
         return Ok(None);
     }
-    if out
-        .chars()
-        .any(|c| matches!(c, ':' | '=' | '!' | ',' | '|' | '(' | ')' | ']' | '$'))
-    {
+    if out.chars().any(|c| {
+        matches!(
+            c,
+            ':' | '=' | '!' | ',' | '|' | '(' | ')' | ']' | VAR_SIGIL_CHAR
+        )
+    }) {
         return Ok(None);
     }
     Ok(Some(out))
@@ -3726,6 +3787,7 @@ fn parse_body_steps(
     let mut out = Vec::new();
     let stmts = split_statements(inner, saved)?;
     predeclare_forward_funcs(&stmts, ctx);
+
     for s in &stmts {
         // The innermost statement owns error positions: record it for
         // nested splits and stamp failures that have none yet (deeper
@@ -3774,7 +3836,7 @@ fn parse_with_io_single(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let bindings = match parse_io_bindings(&inner, stmt)? {
+    let bindings = match parse_io_bindings(&inner, stmt, ctx)? {
         Some(bindings) => bindings,
         None => return Ok(None),
     };
@@ -4229,7 +4291,7 @@ fn is_lower_ident(w: &str) -> bool {
 fn peek_dollar_var(toks: &[Tok], pos: usize) -> Option<(String, usize)> {
     match (toks.get(pos), toks.get(pos + 1)) {
         (Some(dollar), Some(name))
-            if matches!(&dollar.kind, TokKind::Punct('$'))
+            if matches!(&dollar.kind, TokKind::Punct(VAR_SIGIL_CHAR))
                 && name.joint
                 && matches!(&name.kind, TokKind::Word(w) if is_ident_word(w)) =>
         {
@@ -5203,6 +5265,7 @@ fn parse_func_at(
 fn parse_remote_bindings(
     inner: &[Tok],
     stmt: usize,
+    _ctx: &ParseCtx,
 ) -> Result<Option<(Vec<String>, Vec<String>)>, TokenError> {
     let _ = stmt;
     let mut parts: Vec<&[Tok]> = Vec::new();
@@ -5239,8 +5302,13 @@ fn parse_remote_bindings(
         ) {
             part = &part[..part.len() - 1];
         }
-        // `$var`: gapless `$` + ident.
-        if matches!(part.first().map(|t| &t.kind), Some(TokKind::Punct('$'))) && part.len() == 2 {
+        // `$var` entries only: bare words are literal text, never
+        // bindings.
+        if matches!(
+            part.first().map(|t| &t.kind),
+            Some(TokKind::Punct(VAR_SIGIL_CHAR))
+        ) && part.len() == 2
+        {
             if part[1].joint
                 && let TokKind::Word(w) = &part[1].kind
                 && is_ident_word(w)
@@ -5289,6 +5357,7 @@ fn parse_import_statement(
     pos: usize,
     stmt: usize,
     ctx: &ParseCtx,
+    guarded: bool,
 ) -> Result<Option<(ImportEntries, usize)>, TokenError> {
     let fail = |msg: String| TokenError {
         stmt,
@@ -5500,11 +5569,12 @@ fn parse_import_statement(
                         known.join(", ")
                     )));
                 }
-                ctx.import_into_frame(std::slice::from_ref(&module));
+                ctx.import_into_frame(std::slice::from_ref(&module), false);
                 modules.push(module);
             }
             RawEntry::File { path, alias } => {
-                let (path, alias) = validate_file_import(&path, &alias, ctx).map_err(fail)?;
+                let (path, alias) =
+                    validate_file_import(&path, &alias, ctx, guarded).map_err(fail)?;
                 steps.push(StepKind::ImportFile { path, alias });
             }
             RawEntry::From {
@@ -5518,8 +5588,15 @@ fn parse_import_statement(
                     type_names,
                     path,
                     alias,
-                } = validate_from_import(&func_names, &type_names, &path, alias.as_deref(), ctx)
-                    .map_err(fail)?;
+                } = validate_from_import(
+                    &func_names,
+                    &type_names,
+                    &path,
+                    alias.as_deref(),
+                    ctx,
+                    guarded,
+                )
+                .map_err(fail)?;
                 steps.push(StepKind::ImportFuncs {
                     path,
                     alias,
@@ -5542,7 +5619,8 @@ fn parse_single_file_import(
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<Option<(String, String, usize)>, TokenError> {
-    let Some(((modules, mut kinds), used)) = parse_import_statement(toks, pos, stmt, ctx)? else {
+    let Some(((modules, mut kinds), used)) = parse_import_statement(toks, pos, stmt, ctx, false)?
+    else {
         return Ok(None);
     };
     if !modules.is_empty() || !matches!(kinds.as_slice(), [StepKind::ImportFile { .. }]) {
@@ -5572,36 +5650,76 @@ fn parse_single_file_import(
 }
 
 /// One `EXPORT` name: an uppercase word with an optional joint
-/// `::UPPER` tail. Returns the name and tokens consumed, or `None`
-/// on shape miss.
-fn parse_export_name(toks: &[Tok], pos: usize) -> Option<(String, usize)> {
-    let head = match toks.get(pos).map(|t| &t.kind) {
+/// `::UPPER` tail. Returns the name and tokens consumed, `Ok(None)`
+/// on shape miss, or `Err` when a recognizable identifier carries
+/// the wrong sigil (`CONST` requires `$`, `FUNC`/`TYPE` forbid it).
+fn parse_export_name(
+    toks: &[Tok],
+    pos: usize,
+    require_sigil: bool,
+    stmt: usize,
+) -> Result<Option<(String, usize)>, TokenError> {
+    // Sigil rule: `EXPORT CONST $N` and `EXPORT CONST $LIB::V` require
+    // the `$`, exactly like every other `CONST` read; `EXPORT FOO`,
+    // `EXPORT TYPE T`, and qualified func forwards never take one.
+    // Stored without the sigil; downstream matching (top-level tables,
+    // harvest maps) is unchanged. `$` must ride gapless onto the
+    // name, like every `$` read.
+    let fail = |msg: String| TokenError {
+        stmt,
+        line: 0,
+        col: 0,
+        kind: None,
+        msg,
+    };
+    let offset = match toks.get(pos).map(|t| &t.kind) {
+        Some(TokKind::Punct(VAR_SIGIL_CHAR)) if toks.get(pos + 1).is_some_and(|t| t.joint) => 1,
+        Some(TokKind::Punct(VAR_SIGIL_CHAR)) => return Ok(None),
+        _ => 0,
+    };
+    if require_sigil != (offset == 1) {
+        let head = toks.get(pos + offset).map(|t| &t.kind);
+        let recognizable = matches!(head, Some(TokKind::Word(w)) if is_upper_ident(w));
+        if !recognizable {
+            return Ok(None);
+        }
+        if require_sigil {
+            return Err(fail(
+                "EXPORT CONST requires `$`: write EXPORT CONST $NAME (never bare)".to_string(),
+            ));
+        } else {
+            return Err(fail(
+                "EXPORT FUNC and EXPORT TYPE names never take `$`: write EXPORT FOO".to_string(),
+            ));
+        }
+    }
+    let head = match toks.get(pos + offset).map(|t| &t.kind) {
         Some(TokKind::Word(w)) if is_upper_ident(w) => w.clone(),
-        _ => return None,
+        _ => return Ok(None),
     };
     let mut name = head;
-    let mut used = 1;
+    let mut used = 1 + offset;
     // Greedy-prefix `::tail` (atomic, like the grammar): a valid
     // tail joins, an invalid one stays trailing (failing downstream
     // exactly like the grammar's committed prefix).
     if matches!(
-        toks.get(pos + 1).map(|t| &t.kind),
+        toks.get(pos + offset + 1).map(|t| &t.kind),
         Some(TokKind::Punct(':'))
-    ) && toks.get(pos + 1).is_some_and(|t| t.joint)
+    ) && toks.get(pos + offset + 1).is_some_and(|t| t.joint)
         && matches!(
-            toks.get(pos + 2).map(|t| &t.kind),
+            toks.get(pos + offset + 2).map(|t| &t.kind),
             Some(TokKind::Punct(':'))
         )
-        && toks.get(pos + 2).is_some_and(|t| t.joint)
-        && let Some(TokKind::Word(tail)) = toks.get(pos + 3).map(|t| &t.kind)
-        && toks[pos + 3].joint
+        && toks.get(pos + offset + 2).is_some_and(|t| t.joint)
+        && let Some(TokKind::Word(tail)) = toks.get(pos + offset + 3).map(|t| &t.kind)
+        && toks[pos + offset + 3].joint
         && is_upper_ident(tail)
     {
         name.push_str(MODULE_SEPARATOR);
         name.push_str(tail);
-        used = 4;
+        used = 4 + offset;
     }
-    Some((name, used))
+    Ok(Some((name, used)))
 }
 
 /// One selective harvest (`[[F, G FROM "path" (AS ALIAS)?]]`): the
@@ -5810,8 +5928,12 @@ fn is_prefixed_name(part: &[&Tok]) -> bool {
 }
 
 /// Validate an `IMPORT` alias: hard errors (never shape misses) plus
-/// registration into the innermost import frame.
-fn validate_import_alias(alias: &str, ctx: &ParseCtx) -> Result<String, String> {
+/// registration into the innermost import frame. Same-frame duplicates
+/// reject, unless the new import and every visible same-alias entry
+/// are guard-gated: an unguarded duplicate always collides at runtime
+/// (probable typo, fail fast), while guarded duplicates may be
+/// platform branches whose disjointness the static pass decides.
+fn validate_import_alias(alias: &str, ctx: &ParseCtx, guarded: bool) -> Result<String, String> {
     if !is_upper_ident(alias) {
         return Err(format!(
             "IMPORT alias must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{alias}`"
@@ -5822,11 +5944,11 @@ fn validate_import_alias(alias: &str, ctx: &ParseCtx) -> Result<String, String> 
             "IMPORT alias `{alias}` collides with module `{alias}`"
         ));
     }
-    let (_, imports) = ctx.visible_snapshot();
-    if imports.iter().any(|i| i == alias) {
+    let flags = ctx.import_guard_flags(alias);
+    if !flags.is_empty() && (!guarded || flags.iter().any(|g| !g)) {
         return Err(format!("duplicate IMPORT alias `{alias}`"));
     }
-    ctx.import_into_frame(std::slice::from_ref(&alias.to_string()));
+    ctx.import_into_frame(std::slice::from_ref(&alias.to_string()), guarded);
     Ok(alias.to_string())
 }
 
@@ -5848,12 +5970,15 @@ fn validate_import_path(path: &str) -> Result<String, String> {
 
 /// Validate a file-import path/alias pair: hard errors (never shape
 /// misses) plus alias registration into the innermost import frame.
+/// `guarded` marks a guard-gated statement, relaxing the same-frame
+/// duplicate gate for platform branches (see `validate_import_alias`).
 fn validate_file_import(
     path: &str,
     alias: &str,
     ctx: &ParseCtx,
+    guarded: bool,
 ) -> Result<(String, String), String> {
-    let alias = validate_import_alias(alias, ctx)?;
+    let alias = validate_import_alias(alias, ctx, guarded)?;
     let path = validate_import_path(path)?;
     Ok((path, alias))
 }
@@ -5871,6 +5996,7 @@ fn validate_from_import(
     path: &str,
     alias: Option<&str>,
     ctx: &ParseCtx,
+    guarded: bool,
 ) -> Result<HarvestImport, String> {
     let path = validate_import_path(path)?;
     let mut out_func_names = Vec::with_capacity(func_names.len());
@@ -5898,7 +6024,7 @@ fn validate_from_import(
         return Err("IMPORT harvest needs at least one function or type name".to_string());
     }
     if let Some(alias) = alias {
-        let alias = validate_import_alias(alias, ctx)?;
+        let alias = validate_import_alias(alias, ctx, guarded)?;
         Ok(HarvestImport {
             func_names: out_func_names,
             type_names: out_type_names,
@@ -5923,37 +6049,44 @@ fn validate_from_import(
     }
 }
 
-/// One `EXPORT ...` name list: function names plus type names in
-/// source order. Bare names are functions; explicit `TYPE`/`FUNC`
-/// prefixes select the kind.
+/// One `EXPORT ...` name list: function, type, and const names in
+/// source order. Bare names are functions; explicit `TYPE`/`FUNC`/
+/// `CONST` prefixes select the kind.
 struct ExportNames {
     func_names: Vec<String>,
     type_names: Vec<String>,
+    const_names: Vec<String>,
 }
 
 /// `EXPORT ...` names at `pos`: bracket list (strict, `ws` gaps:
 /// newlines ok, comments miss) or a bare greedy-prefix name.
-/// Supports explicit `TYPE`/`FUNC` qualifiers for clarity:
-/// `EXPORT TYPE FOO`, `EXPORT TYPE [A, B]`, `EXPORT FUNC FOO`,
-/// plus mixed `EXPORT [TYPE A, FUNC B, C]` (bare stays func).
-/// Returns the name lists plus tokens consumed, or `None` on shape
-/// miss (generic fails it in lowering like the grammar). Recording and
+/// Supports explicit `TYPE`/`FUNC`/`CONST` qualifiers for clarity:
+/// `EXPORT TYPE FOO`, `EXPORT FUNC FOO`, `EXPORT CONST $FOO`,
+/// plus mixed `EXPORT [TYPE A, FUNC B, CONST $C, D]` (bare stays func).
+/// Returns the name lists plus tokens consumed, `Ok(None)` on shape
+/// miss (generic fails it in lowering like the grammar), or `Err`
+/// when a recognizable name carries the wrong sigil. Recording and
 /// duplicate checks live with the caller (they need the guard and
 /// level context).
-fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(ExportNames, usize)> {
+fn parse_export_at(
+    toks: &[Tok],
+    pos: usize,
+    stmt: usize,
+) -> Result<Option<(ExportNames, usize)>, TokenError> {
     let next = match toks.get(pos + 1) {
         // `sep` after `EXPORT`: joint followers miss.
         Some(t) if !t.joint => t,
-        _ => return None,
+        _ => return Ok(None),
     };
-    // Explicit `EXPORT TYPE ...` or `EXPORT FUNC ...` prefix.
+    // Explicit `EXPORT TYPE ...`, `EXPORT FUNC ...`, or
+    // `EXPORT CONST ...` prefix.
     if let TokKind::Word(w) = &next.kind
-        && (w == KEYWORD_TYPE || w == KEYWORD_FUNC)
+        && (w == KEYWORD_TYPE || w == KEYWORD_FUNC || w == KEYWORD_CONST)
     {
-        let is_type = w == KEYWORD_TYPE;
+        let kind = w.as_str();
         let after = match toks.get(pos + 2) {
             Some(t) if !t.joint => t,
-            _ => return None,
+            _ => return Ok(None),
         };
         if let TokKind::Group {
             delim: GroupDelim::Bracket,
@@ -5963,67 +6096,72 @@ fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(ExportNames, usize)> {
         {
             let mut func_names = Vec::new();
             let mut type_names = Vec::new();
+            let mut const_names = Vec::new();
             for part in split_bracket_entries(inner) {
-                let mut part = part;
-                while matches!(part.first().map(|t| &t.kind), Some(TokKind::Newline)) {
-                    part = &part[1..];
-                }
-                while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
-                    part = &part[..part.len() - 1];
-                }
+                let part = trim_export_part(part);
                 // A trailing comma leaves an empty final entry; it
                 // carries no name and must not fail the list.
                 if part.is_empty() {
                     continue;
                 }
-                let (name, used) = parse_export_name(part, 0)?;
+                let require_sigil = kind == KEYWORD_CONST;
+                let Some((name, used)) = parse_export_name(part, 0, require_sigil, stmt)? else {
+                    return Ok(None);
+                };
                 if used != part.len() {
-                    return None;
+                    return Ok(None);
                 }
-                if is_type {
-                    type_names.push(name);
-                } else {
-                    func_names.push(name);
+                match kind {
+                    k if k == KEYWORD_TYPE => type_names.push(name),
+                    k if k == KEYWORD_CONST => const_names.push(name),
+                    _ => func_names.push(name),
                 }
             }
-            if func_names.is_empty() && type_names.is_empty() {
-                return None;
+            if func_names.is_empty() && type_names.is_empty() && const_names.is_empty() {
+                return Ok(None);
             }
-            return Some((
+            return Ok(Some((
                 ExportNames {
                     func_names,
                     type_names,
+                    const_names,
                 },
                 3,
-            ));
+            )));
         }
         if matches!(&after.kind, TokKind::Group { .. }) {
-            return None;
+            return Ok(None);
         }
-        let (name, used) = parse_export_name(toks, pos + 2)?;
-        // Bare name after TYPE/FUNC prefix must consume exactly one
-        // name; trailing loops stay outside like the unprefixed case.
-        // `used` counts from pos+2, so 1 name is valid.
+        let require_sigil = kind == KEYWORD_CONST;
+        let Some((name, used)) = parse_export_name(toks, pos + 2, require_sigil, stmt)? else {
+            return Ok(None);
+        };
+        // Bare name after TYPE/FUNC/CONST prefix must consume exactly
+        // one name; trailing loops stay outside like the unprefixed
+        // case. `used` counts from pos+2, so 1 name is valid.
         if used == 0 {
-            return None;
+            return Ok(None);
         }
-        if is_type {
-            return Some((
-                ExportNames {
+        return Ok(Some((
+            match kind {
+                k if k == KEYWORD_TYPE => ExportNames {
                     func_names: Vec::new(),
                     type_names: vec![name],
+                    const_names: Vec::new(),
                 },
-                2 + used,
-            ));
-        } else {
-            return Some((
-                ExportNames {
+                k if k == KEYWORD_CONST => ExportNames {
+                    func_names: Vec::new(),
+                    type_names: Vec::new(),
+                    const_names: vec![name],
+                },
+                _ => ExportNames {
                     func_names: vec![name],
                     type_names: Vec::new(),
+                    const_names: Vec::new(),
                 },
-                2 + used,
-            ));
-        }
+            },
+            2 + used,
+        )));
     }
     if let TokKind::Group {
         delim: GroupDelim::Bracket,
@@ -6033,70 +6171,97 @@ fn parse_export_at(toks: &[Tok], pos: usize) -> Option<(ExportNames, usize)> {
     {
         let mut func_names = Vec::new();
         let mut type_names = Vec::new();
+        let mut const_names = Vec::new();
         for part in split_bracket_entries(inner) {
-            let mut part = part;
-            while matches!(part.first().map(|t| &t.kind), Some(TokKind::Newline)) {
-                part = &part[1..];
-            }
-            while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
-                part = &part[..part.len() - 1];
-            }
+            let part = trim_export_part(part);
             // A trailing comma leaves an empty final entry; it
             // carries no name and must not fail the list.
             if part.is_empty() {
                 continue;
             }
-            // Optional per-entry `TYPE`/`FUNC` prefix for mixed lists:
-            // `EXPORT [TYPE A, FUNC B, C]` (bare stays func). The name
-            // must be `sep` from the prefix; the prefix itself may be
-            // joint to a preceding `[` or `,`, so only the name's joint
-            // flag matters.
-            let (is_type, rest) = match part {
-                [first, second, ..]
-                    if matches!(&first.kind, TokKind::Word(w) if w == KEYWORD_TYPE || w == KEYWORD_FUNC)
-                        && !second.joint =>
-                {
-                    let is_t = matches!(&first.kind, TokKind::Word(w) if w == KEYWORD_TYPE);
-                    (is_t, &part[1..])
-                }
-                _ => (false, part),
-            };
+            let (kind, rest) = split_export_prefix(part);
+            let is_const = matches!(&kind, TokKind::Word(w) if w == KEYWORD_CONST);
+            let is_type = matches!(&kind, TokKind::Word(w) if w == KEYWORD_TYPE);
             // Exactly one name per entry (entries never trail).
-            let (name, used) = parse_export_name(rest, 0)?;
+            let Some((name, used)) = parse_export_name(rest, 0, is_const, stmt)? else {
+                return Ok(None);
+            };
             if used != rest.len() {
-                return None;
+                return Ok(None);
             }
-            if is_type {
+            if is_const {
+                const_names.push(name);
+            } else if is_type {
                 type_names.push(name);
             } else {
                 func_names.push(name);
             }
         }
-        if func_names.is_empty() && type_names.is_empty() {
-            return None;
+        if func_names.is_empty() && type_names.is_empty() && const_names.is_empty() {
+            return Ok(None);
         }
-        return Some((
+        return Ok(Some((
             ExportNames {
                 func_names,
                 type_names,
+                const_names,
             },
             2,
-        ));
+        )));
     }
     if matches!(&next.kind, TokKind::Group { .. }) {
-        return None;
+        return Ok(None);
     }
     // Bare name (greedy `::` prefix; trailing loops outside). Bare
     // stays func for back-compat; `TYPE`/`FUNC` prefix selects above.
-    parse_export_name(toks, pos + 1).map(|(name, used)| {
-        (
+    // Func names never take `$`: `EXPORT $X` errors inside
+    // `parse_export_name`, exactly like a `$`-less read elsewhere.
+    match parse_export_name(toks, pos + 1, false, stmt)? {
+        Some((name, used)) => Ok(Some((
             ExportNames {
                 func_names: vec![name],
                 type_names: Vec::new(),
+                const_names: Vec::new(),
             },
             1 + used,
-        )
-    })
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Trim leading/trailing newlines around one `EXPORT` bracket entry.
+/// Single owner so the explicit-prefix and mixed-list loops cannot
+/// drift on trailing-comma handling.
+fn trim_export_part(part: &[Tok]) -> &[Tok] {
+    let mut part = part;
+    while matches!(part.first().map(|t| &t.kind), Some(TokKind::Newline)) {
+        part = &part[1..];
+    }
+    while matches!(part.last().map(|t| &t.kind), Some(TokKind::Newline)) {
+        part = &part[..part.len() - 1];
+    }
+    part
+}
+
+/// Split one mixed-list `EXPORT` entry into its kind prefix and name
+/// slice. `TYPE`/`FUNC`/`CONST` plus a gapped name selects the kind;
+/// anything else defaults to `FUNC`. Single owner so both bracket
+/// loops agree on prefix parsing.
+fn split_export_prefix(part: &[Tok]) -> (TokKind, &[Tok]) {
+    // Optional per-entry `TYPE`/`FUNC`/`CONST` prefix for mixed
+    // lists: `EXPORT [TYPE A, FUNC B, CONST $C, D]` (bare stays
+    // func, `CONST` entries require `$`). The name must be `sep`
+    // from the prefix; the prefix itself may be joint to a
+    // preceding `[` or `,`, so only the name's joint flag matters.
+    match part {
+        [first, second, ..]
+            if matches!(&first.kind, TokKind::Word(w) if w == KEYWORD_TYPE || w == KEYWORD_FUNC || w == KEYWORD_CONST)
+                && !second.joint =>
+        {
+            (first.kind.clone(), &part[1..])
+        }
+        _ => (TokKind::Word(KEYWORD_FUNC.to_string()), part),
+    }
 }
 
 /// Split bracket inner tokens on top-level commas, preserving entries
@@ -6225,7 +6390,7 @@ fn parse_remote_single(
             TokKind::Group { inner, .. } => inner.clone(),
             _ => unreachable!(),
         };
-        match parse_remote_bindings(&inner, stmt)? {
+        match parse_remote_bindings(&inner, stmt, ctx)? {
             Some((v, e)) => {
                 vars = v;
                 env = e;
@@ -6528,6 +6693,31 @@ fn is_ident_word(w: &str) -> bool {
     !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// One joint `::NAME` tail at `pos` (the first `:`): both colons and
+/// the name ride gapless, and the name matches [`is_ident_word`].
+/// Single owner for qualified-`$ALIAS::NAME` matching, so `$` arms
+/// and bare-word diagnostics cannot drift on jointness or charset.
+fn match_joint_qualified(toks: &[Tok], pos: usize) -> Option<String> {
+    let first = matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Punct(':')))
+        && toks.get(pos).is_some_and(|t| t.joint);
+    let second = matches!(
+        toks.get(pos + 1).map(|t| &t.kind),
+        Some(TokKind::Punct(':'))
+    ) && toks.get(pos + 1).is_some_and(|t| t.joint);
+    let name_tok = toks.get(pos + 2);
+    let ok = first
+        && second
+        && matches!(name_tok.map(|t| &t.kind), Some(TokKind::Word(w)) if is_ident_word(w))
+        && name_tok.is_some_and(|t| t.joint);
+    if !ok {
+        return None;
+    }
+    match &name_tok.expect("checked").kind {
+        TokKind::Word(w) => Some(w.clone()),
+        _ => unreachable!(),
+    }
+}
+
 fn is_key_segment(w: &str) -> bool {
     !w.is_empty()
         && (w.chars().all(|c| c.is_ascii_digit())
@@ -6690,7 +6880,7 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
             cur.pos = paren + 1;
             parse_expr_call(name, &inner, cur.stmt, ctx)
         }
-        Some(TokKind::Punct('$')) => {
+        Some(TokKind::Punct(VAR_SIGIL_CHAR)) => {
             cur.pos += 1;
             // Atomic `variable`: `$` and the name ride gapless (the
             // enclosing rules are compound-atomic).
@@ -6704,6 +6894,19 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
                 _ => return Err(cur.err("`$` requires a variable name")),
             };
             let mut keys = Vec::new();
+            // Qualified immutable read (`$ALIAS::NAME`). Key paths
+            // never ride qualified names: copy to a local first.
+            if let Some(name) = match_joint_qualified(cur.toks, cur.pos) {
+                cur.pos += 3;
+                if matches!(
+                    cur.toks.get(cur.pos).map(|t| &t.kind),
+                    Some(TokKind::Punct('.'))
+                ) && cur.toks.get(cur.pos).is_some_and(|t| t.joint)
+                {
+                    return Err(cur.err(crate::template::qualified_keypath_error()));
+                }
+                return Ok(Expr::ConstRef { alias: base, name });
+            }
             loop {
                 // Key-path dots are gapless too (`~` without `gap`).
                 let dot = matches!(
@@ -6723,7 +6926,7 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
                 cur.pos += 2;
             }
             if keys.is_empty() {
-                Ok(Expr::Var(base))
+                Ok(Expr::Var { name: base })
             } else {
                 Ok(Expr::KeyPath { base, keys })
             }
@@ -6788,7 +6991,20 @@ fn parse_expr_atom(cur: &mut Cursor, ctx: &ParseCtx) -> Result<Expr, TokenError>
         Some(TokKind::Word(w)) if w.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
             parse_numeric_atom(cur, ctx)
         }
-        Some(TokKind::Word(_)) => parse_bare_atom(cur, ctx, false),
+        Some(TokKind::Word(_)) => {
+            // Bare `ALIAS::NAME` never reads: without the `$` sigil
+            // there is no qualified shape, only a bare word followed
+            // by stray punctuation. Name the `$` form instead of
+            // stranding the reader on the colons.
+            if let Some(TokKind::Word(base)) = cur.toks.get(cur.pos).map(|t| &t.kind)
+                && is_ident_word(base)
+                && let Some(name) = match_joint_qualified(cur.toks, cur.pos + 1)
+            {
+                let base = base.clone();
+                return Err(cur.err(crate::template::bare_sigil_error(&qualify(&base, &name))));
+            }
+            parse_bare_atom(cur, ctx, false)
+        }
         Some(TokKind::Punct('-')) => parse_bare_atom(cur, ctx, true),
         Some(TokKind::Punct('/')) => parse_bare_atom(cur, ctx, false),
         _ => Err(cur.err("missing expression operand")),
@@ -7118,7 +7334,7 @@ fn expect_dollar_var(cur: &mut Cursor, msg: &str) -> Result<String, TokenError> 
     // enclosing statements are compound-atomic, so implicit spacing is
     // off and only explicit `gap`s admit whitespace).
     match cur.next() {
-        Some(t) if matches!(&t.kind, TokKind::Punct('$')) => {}
+        Some(t) if matches!(&t.kind, TokKind::Punct(VAR_SIGIL_CHAR)) => {}
         _ => return Err(cur.err(msg)),
     }
     match cur.next() {
@@ -7132,40 +7348,118 @@ fn expect_dollar_var(cur: &mut Cursor, msg: &str) -> Result<String, TokenError> 
     }
 }
 
-/// `LET` body: `LET` is already matched. Returns `None` (miss to
-/// generic, which fails in lowering like the grammar's committed
-/// `instruction`) when the shape cannot match any `LET` form: no
-/// gapless `$var`, or no `:` after it
+/// Reject a qualified `$ALIAS::NAME` where a declaration or mutation
+/// target stands: bindings declare plain locals, and module `CONST`s
+/// are immutable (reads use `$ALIAS::NAME` in expressions).
+/// Single owner for the qualified-target gate, shared by the binding
+/// (`LET`/`CONST`) and reassignment (`$var = <expr>`) heads so all fail
+/// with one message shape.
+fn reject_qualified_target(cur: &Cursor, base: &str) -> Result<(), TokenError> {
+    let first = matches!(
+        cur.toks.get(cur.pos).map(|t| &t.kind),
+        Some(TokKind::Punct(':'))
+    ) && cur.toks.get(cur.pos).is_some_and(|t| t.joint);
+    let second = matches!(
+        cur.toks.get(cur.pos + 1).map(|t| &t.kind),
+        Some(TokKind::Punct(':'))
+    ) && cur.toks.get(cur.pos + 1).is_some_and(|t| t.joint);
+    if first && second {
+        return Err(cur.err(format!(
+            "cannot declare or assign ${base}::...: module values read as $ALIAS::NAME in expressions and are never binding targets"
+        )));
+    }
+    Ok(())
+}
+
+/// `LET`/`CONST` body: the keyword is already matched. Returns `None`
+/// (miss to generic, which fails in lowering like the grammar's
+/// committed `instruction`) when the shape cannot match any binding
+/// form: no gapless `$var`, or no `:` after it
 /// (every form needs `: TYPE`). Past that the shape is committed and
-/// malformed tails fail loudly.
+/// malformed tails fail loudly. `kw` selects the produced StepKind
+/// family (`LET` or `CONST`) and the diagnostic spellings.
 fn parse_let_body(
     body: &[Tok],
     stmt: usize,
     ctx: &ParseCtx,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
+    parse_binding_body(body, stmt, ctx, KEYWORD_LET)
+}
+
+/// `CONST` body: same shapes as `LET`, producing the `Const` family.
+/// Miss semantics mirror [`parse_let_body`].
+fn parse_const_body(
+    body: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    parse_binding_body(body, stmt, ctx, KEYWORD_CONST)
+}
+
+/// Shared `LET`/`CONST` body: the head keyword is already matched.
+/// `kw` must be `KEYWORD_LET` or `KEYWORD_CONST`. Both take a `$var`
+/// head; `CONST` additionally requires an uppercase name.
+/// Single owner for the binding header: the `is_const` flag rides
+/// straight into [`StepKind::Bind`], so no post-pass flips per form.
+fn parse_binding_body(
+    body: &[Tok],
+    stmt: usize,
+    ctx: &ParseCtx,
+    kw: &'static str,
+) -> Result<Option<(StepKind, usize)>, TokenError> {
+    use crate::commands::BindRhs;
+    let is_const = kw == KEYWORD_CONST;
     let mut cur = Cursor::expr(body, stmt);
     match cur.next() {
-        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == KEYWORD_LET) => {}
+        Some(t) if matches!(&t.kind, TokKind::Word(w) if w == kw) => {}
         _ => return Err(cur.err("unreachable")),
     }
-    // No `$var`: no `LET` form can match (miss, never a hard fail).
-    let var = match expect_dollar_var(&mut cur, "LET requires a variable") {
-        Ok(var) => var,
-        Err(_) => return Ok(None),
+    // Head: `$var` for both `LET` and `CONST`. `CONST` additionally
+    // requires an uppercase name (see `validate_const_name`). The
+    // keyword already committed to a binding, so a malformed head
+    // fails loudly; only a non-name head misses to generic.
+    let var = if is_const {
+        cur.skip_gap();
+        match cur.toks.get(cur.pos).map(|t| &t.kind) {
+            Some(TokKind::Punct(VAR_SIGIL_CHAR)) => {
+                let var = expect_dollar_var(
+                    &mut cur,
+                    "CONST requires a `$NAME` head: CONST $NAME: TYPE = ...",
+                )?;
+                reject_qualified_target(&cur, &var)?;
+                validate_const_name(ctx, &cur, &var)?;
+                var
+            }
+            Some(TokKind::Word(_)) => {
+                return Err(
+                    cur.err("CONST requires `$`: write CONST $NAME: TYPE = ... (never bare)")
+                );
+            }
+            _ => return Ok(None),
+        }
+    } else {
+        // No `$var`: no binding form can match (miss, never a hard fail).
+        let var = match expect_dollar_var(&mut cur, &format!("{kw} requires a variable")) {
+            Ok(var) => var,
+            Err(_) => return Ok(None),
+        };
+        reject_qualified_target(&cur, &var)?;
+        var
     };
     // The header allows gaps (comments, never newlines).
     cur.skip_gap();
-    // No `:`: untyped LET is rejected outright. Every binding is
+    // No `:`: untyped bindings are rejected outright. Every binding is
     // typed; the old miss-to-generic path only hid that behind a
     // rambling "invalid syntax" message. (FOR already does this.)
+    let head_example = if is_const { "$NAME" } else { "$var" };
     if !cur.eat_punct(':') {
         return Err(TokenError {
             stmt,
-            msg: "LET requires explicit types: LET $var: TYPE = <expr>".to_string(),
+            msg: format!("{kw} requires explicit types: {kw} {head_example}: TYPE = <expr>"),
             line: 0,
             col: 0,
             kind: Some(ParseErrorKind::InvalidSyntax {
-                command: KEYWORD_LET.to_string(),
+                command: kw.to_string(),
             }),
         });
     }
@@ -7174,29 +7468,49 @@ fn parse_let_body(
     let type_start = cur.pos;
     let assign = find_assign_eq(&body[type_start..]).map(|i| i + type_start);
     let Some(eq) = assign else {
-        // Bare `LET $p: PIPE` mints a fresh pipe and ends with the
+        // Bare `$p: PIPE` mints a fresh pipe and ends with the
         // type word (trailing elements loop on, probed); every other
         // bare type is a validation error, mirroring the grammar.
         if matches!(
             body.get(type_start).map(|t| &t.kind),
             Some(TokKind::Word(w)) if w == crate::TypeTag::Pipe.name()
         ) {
-            return Ok(Some((
-                StepKind::Assign {
-                    var,
-                    decl_type: crate::TypeTag::Pipe.name().to_string(),
-                    expr: Expr::FreshPipe,
-                },
-                type_start + 1,
-            )));
+            let kind = StepKind::Bind {
+                var: var.clone(),
+                decl_type: crate::TypeTag::Pipe.name().to_string(),
+                is_const,
+                rhs: BindRhs::Expr(Expr::FreshPipe),
+            };
+            return Ok(Some((kind, type_start + 1)));
         }
-        return Err(cur.err(
-            "LET requires an expression: LET $var: TYPE = <expr> (only LET $p: PIPE omits the initializer)",
-        ));
+        return Err(cur.err(format!(
+            "{kw} requires an expression: {kw} {head_example}: TYPE = <expr> (only {kw} {head_example}: PIPE omits the initializer)"
+        )));
     };
     let decl_type = render_type_region(&body[type_start..eq], stmt)?;
-    let (kind, rhs_used) = parse_let_rhs(&body[eq + 1..], var, decl_type, stmt, ctx)?;
+    let (kind, rhs_used) = parse_let_rhs(&body[eq + 1..], var, decl_type, stmt, ctx, is_const)?;
     Ok(Some((kind, eq + 1 + rhs_used)))
+}
+
+/// Collision gate for `CONST` names: uppercase plus keywords,
+/// commands, types, and workspace targets. `FUNC` names and host
+/// functions live in separate namespaces and may share a spelling
+/// with a private `CONST`.
+/// Same-scope `LET`/`CONST` duplicates rely on the static gate so
+/// guard-disjoint declarations stay legal.
+fn validate_const_name(ctx: &ParseCtx, cur: &Cursor, name: &str) -> Result<(), TokenError> {
+    let _ = ctx;
+    // Single gate for the declaration spelling: uppercase plus
+    // freedom from reserved words (see [`crate::constants`]).
+    if !crate::constants::is_const_name(name) {
+        return Err(cur.err(format!("CONST names must be UPPERCASE: got `{name}`")));
+    }
+    if crate::commands::is_reserved_const_name(name) {
+        return Err(cur.err(format!(
+            "CONST {name} collides with reserved keyword `{name}`"
+        )));
+    }
+    Ok(())
 }
 
 /// LET right-hand side dispatch, mirroring the grammar order
@@ -7216,6 +7530,7 @@ fn parse_let_rhs(
     decl_type: String,
     stmt: usize,
     ctx: &ParseCtx,
+    is_const: bool,
 ) -> Result<(StepKind, usize), TokenError> {
     // Leading gap comments vanish like the `=` gap (but a `//`/`#`
     // to end of input leaves no expression, failing).
@@ -7230,7 +7545,8 @@ fn parse_let_rhs(
     // `ASYNC` forms (the grammar claims every WITH_IO-led LET
     // there); shape misses fall through to generic below.
     if head_word.as_deref() == Some(KEYWORD_WITH_IO)
-        && let Some(found) = try_let_with_io_rhs(rhs, var.clone(), decl_type.clone(), stmt, ctx)?
+        && let Some(found) =
+            try_let_with_io_rhs(rhs, var.clone(), decl_type.clone(), stmt, ctx, is_const)?
     {
         let (kind, used) = found;
         return Ok((kind, skipped + used));
@@ -7240,7 +7556,7 @@ fn parse_let_rhs(
     // background tasks. No `WITH_IO` scan here (probed: the LET
     // path accepts what statement `ASYNC` rejects).
     if head_word.as_deref() == Some(KEYWORD_ASYNC) && rhs.len() > 1 {
-        let (kind, used) = parse_let_async_rhs(&rhs[1..], var, decl_type, stmt, ctx)?;
+        let (kind, used) = parse_let_async_rhs(&rhs[1..], var, decl_type, stmt, ctx, is_const)?;
         return Ok((kind, skipped + 1 + used));
     }
     // `TIMEOUT`-led lines capture through the wrapper (shape misses
@@ -7264,30 +7580,34 @@ fn parse_let_rhs(
             kind: None,
         })?;
         return Ok((
-            StepKind::AssignCapture {
+            StepKind::Bind {
                 var,
                 decl_type,
-                cmd: Box::new(kind),
+                is_const,
+                rhs: BindRhs::Capture(Box::new(kind)),
             },
             skipped + used,
         ));
     }
     // `AWAIT $v` captures the task output (`$`+name ride gapless in
-    // this atomic position, like the grammar); anything else
+    // this atomic position, like the grammar). Anything else
     // `AWAIT`-led goes generic below (lowering fails it, probed).
     if head_word.as_deref() == Some(KEYWORD_AWAIT)
         && rhs.len() == 3
         && let (Some(dollar), Some(task)) = (rhs.get(1), rhs.get(2))
-        && matches!(&dollar.kind, TokKind::Punct('$'))
+        && matches!(&dollar.kind, TokKind::Punct(VAR_SIGIL_CHAR))
         && task.joint
         && let TokKind::Word(task_var) = &task.kind
         && is_ident_word(task_var)
     {
         return Ok((
-            StepKind::AwaitCapture {
-                out_var: var,
-                out_type: decl_type,
-                task_var: task_var.clone(),
+            StepKind::Bind {
+                var,
+                decl_type,
+                is_const,
+                rhs: BindRhs::Await {
+                    task_var: task_var.clone(),
+                },
             },
             skipped + 3,
         ));
@@ -7319,10 +7639,11 @@ fn parse_let_rhs(
             let kind =
                 (ctx.lower)(KEYWORD_RUN, vec![Arg::Expr(list)]).map_err(|e| lower_err(stmt, e))?;
             return Ok((
-                StepKind::AssignCapture {
+                StepKind::Bind {
                     var,
                     decl_type,
-                    cmd: Box::new(kind),
+                    is_const,
+                    rhs: BindRhs::Capture(Box::new(kind)),
                 },
                 skipped + 2,
             ));
@@ -7337,10 +7658,11 @@ fn parse_let_rhs(
         && let Some((path, alias, used)) = parse_single_file_import(rhs, 0, stmt, ctx)?
     {
         return Ok((
-            StepKind::AssignCapture {
+            StepKind::Bind {
                 var,
                 decl_type,
-                cmd: Box::new(StepKind::ImportFile { path, alias }),
+                is_const,
+                rhs: BindRhs::Capture(Box::new(StepKind::ImportFile { path, alias })),
             },
             skipped + used,
         ));
@@ -7379,10 +7701,11 @@ fn parse_let_rhs(
                 kind: None,
             })?;
             return Ok((
-                StepKind::AssignCapture {
+                StepKind::Bind {
                     var,
                     decl_type,
-                    cmd: Box::new(cmd),
+                    is_const,
+                    rhs: BindRhs::Capture(Box::new(cmd)),
                 },
                 skipped + used,
             ));
@@ -7393,10 +7716,11 @@ fn parse_let_rhs(
     let expr = parse_expr_checked(&mut cur, ctx)?;
     let used = skipped + cur.pos;
     Ok((
-        StepKind::Assign {
+        StepKind::Bind {
             var,
             decl_type,
-            expr,
+            is_const,
+            rhs: BindRhs::Expr(expr),
         },
         used,
     ))
@@ -7415,7 +7739,9 @@ fn try_let_with_io_rhs(
     decl_type: String,
     stmt: usize,
     ctx: &ParseCtx,
+    is_const: bool,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
+    let kw = if is_const { KEYWORD_CONST } else { KEYWORD_LET };
     let bracket = match rhs.get(1) {
         Some(t)
             if !t.joint
@@ -7435,7 +7761,7 @@ fn try_let_with_io_rhs(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let bindings = match parse_io_bindings(&inner, stmt)? {
+    let bindings = match parse_io_bindings(&inner, stmt, ctx)? {
         Some(bindings) => bindings,
         None => return Ok(None),
     };
@@ -7449,18 +7775,16 @@ fn try_let_with_io_rhs(
     let rest = &rhs[2..];
     let Some(first) = rest.first() else {
         // Bare bracket: the grammar's committed validation error.
-        return Err(fail(
-            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
-                .to_string(),
-        ));
+        return Err(fail(format!(
+            "{kw} $var: TYPE = WITH_IO requires an ASYNC command (e.g. {kw} $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+        )));
     };
     if first.joint {
         // The inner rides after a `sep`: joint followers miss the
         // shape and fail validation like the grammar's bare bracket.
-        return Err(fail(
-            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
-                .to_string(),
-        ));
+        return Err(fail(format!(
+            "{kw} $var: TYPE = WITH_IO requires an ASYNC command (e.g. {kw} $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+        )));
     }
     if matches!(&first.kind, TokKind::Word(w) if w == KEYWORD_ASYNC) {
         // `WITH_IO [..] ASYNC <single|block>`: the bindings apply
@@ -7477,9 +7801,9 @@ fn try_let_with_io_rhs(
             match parse_inner_command(&rest[..1], stmt, ctx) {
                 Err(e) => return Err(e),
                 Ok(_) => {
-                    return Err(fail(
-                        "LET $var: HANDLE<T> = ASYNC requires a body".to_string(),
-                    ));
+                    return Err(fail(format!(
+                        "{kw} $var: HANDLE<T> = ASYNC requires a body"
+                    )));
                 }
             }
         }
@@ -7499,10 +7823,9 @@ fn try_let_with_io_rhs(
             };
             let body = parse_body_steps(&brace_inner, stmt, ctx, false)?;
             if body.len() != 1 {
-                return Err(fail(
-                        "LET $var: TYPE = WITH_IO [..] ASYNC accepts a single command; use LET $var: HANDLE<T> = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks"
-                            .to_string(),
-                    ));
+                return Err(fail(format!(
+                    "{kw} $var: TYPE = WITH_IO [..] ASYNC accepts a single command; use {kw} $var: HANDLE<T> = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks"
+                )));
             }
             let wrapped = Step {
                 guard: None,
@@ -7523,10 +7846,11 @@ fn try_let_with_io_rhs(
                 col: 0,
             };
             return Ok(Some((
-                StepKind::AssignAsync {
+                StepKind::Bind {
                     var,
                     decl_type,
-                    body: vec![wrapped],
+                    is_const,
+                    rhs: BindRhs::Async(vec![wrapped]),
                 },
                 2 + 2,
             )));
@@ -7560,10 +7884,11 @@ fn try_let_with_io_rhs(
             line: 0,
             col: 0,
         };
-        let kind = StepKind::AssignAsync {
+        let kind = StepKind::Bind {
             var,
             decl_type,
-            body: vec![wrapped],
+            is_const,
+            rhs: BindRhs::Async(vec![wrapped]),
         };
         let span = lowering_ctx(stmt);
         crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
@@ -7583,10 +7908,9 @@ fn try_let_with_io_rhs(
         }
     ) {
         // A brace is no sync command: same validation error (probed).
-        return Err(fail(
-            "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
-                .to_string(),
-        ));
+        return Err(fail(format!(
+            "{kw} $var: TYPE = WITH_IO requires an ASYNC command (e.g. {kw} $t: HANDLE<VOID> = WITH_IO [stdin=$p] ASYNC WRITE \"f\")"
+        )));
     }
     // Sync inner: capture with the shared checks (the capture sink
     // owns stdout; async never runs inline).
@@ -7602,10 +7926,9 @@ fn try_let_with_io_rhs(
     )?;
     let span = lowering_ctx(stmt);
     if crate::commands::has_stdout_pipe(&bindings) {
-        return Err(fail(
-            "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
-                .to_string(),
-        ));
+        return Err(fail(format!(
+            "{kw} capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
+        )));
     }
     crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| TokenError {
         stmt,
@@ -7615,13 +7938,14 @@ fn try_let_with_io_rhs(
         kind: None,
     })?;
     Ok(Some((
-        StepKind::AssignCapture {
+        StepKind::Bind {
             var,
             decl_type,
-            cmd: Box::new(StepKind::WithIo {
+            is_const,
+            rhs: BindRhs::Capture(Box::new(StepKind::WithIo {
                 bindings,
                 cmd: Box::new(cmd),
-            }),
+            })),
         },
         2 + used,
     )))
@@ -7637,11 +7961,12 @@ fn parse_let_async_rhs(
     decl_type: String,
     stmt: usize,
     ctx: &ParseCtx,
+    is_const: bool,
 ) -> Result<(StepKind, usize), TokenError> {
     let Some(first) = rest.first() else {
         return Err(TokenError {
             stmt,
-            msg: "LET $var: HANDLE<T> = ASYNC requires a body".to_string(),
+            msg: "binding $var: HANDLE<T> = ASYNC requires a body".to_string(),
             line: 0,
             col: 0,
             kind: None,
@@ -7660,10 +7985,11 @@ fn parse_let_async_rhs(
             _ => unreachable!(),
         };
         let body = parse_body_steps(&inner, stmt, ctx, false)?;
-        let kind = StepKind::AssignAsync {
+        let kind = StepKind::Bind {
             var,
             decl_type,
-            body,
+            is_const,
+            rhs: BindRhs::Async(body),
         };
         let span = lowering_ctx(stmt);
         crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
@@ -7678,7 +8004,7 @@ fn parse_let_async_rhs(
     if first.joint {
         return Err(TokenError {
             stmt,
-            msg: "LET $var: HANDLE<T> = ASYNC requires a body".to_string(),
+            msg: "binding $var: HANDLE<T> = ASYNC requires a body".to_string(),
             line: 0,
             col: 0,
             kind: None,
@@ -7694,17 +8020,18 @@ fn parse_let_async_rhs(
             allow_with_io: false,
         },
     )?;
-    let kind = StepKind::AssignAsync {
+    let kind = StepKind::Bind {
         var,
         decl_type,
-        body: vec![Step {
+        is_const,
+        rhs: BindRhs::Async(vec![Step {
             guard: None,
             kind: cmd,
             scope_enter: 0,
             scope_exit: 0,
             line: 0,
             col: 0,
-        }],
+        }]),
     };
     let span = lowering_ctx(stmt);
     crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
@@ -7723,19 +8050,56 @@ fn parse_set_body(
     ctx: &ParseCtx,
 ) -> Result<(StepKind, usize), TokenError> {
     let mut cur = Cursor::expr(body, stmt);
-    let var = expect_dollar_var(&mut cur, "mutation requires a variable: $var = <expr>")?;
-    let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);
-    let eq = match assign {
-        Some(eq) => eq,
-        None => {
-            return Err(cur.err("mutation requires a variable: $var = <expr>"));
+    if matches!(
+        cur.toks.get(cur.pos).map(|t| &t.kind),
+        Some(TokKind::Punct(VAR_SIGIL_CHAR))
+    ) {
+        let var = expect_dollar_var(&mut cur, "mutation requires a variable: $var = <expr>")?;
+        reject_qualified_target(&cur, &var)?;
+        // Key paths never serve as mutation targets: without this,
+        // `$M.a = ...` would drop `.a` when the head jumps to `=`
+        // below and silently rebind the whole `$M`. Reads use key
+        // paths in expressions; writes rebind the variable
+        // (e.g. `$M = MAP_SET($M, "a", 2)`).
+        if matches!(
+            cur.toks.get(cur.pos).map(|t| &t.kind),
+            Some(TokKind::Punct('.'))
+        ) {
+            let mut target = sigil_var(&var);
+            let mut p = cur.pos;
+            loop {
+                let dot = matches!(cur.toks.get(p).map(|t| &t.kind), Some(TokKind::Punct('.')));
+                let word = match cur.toks.get(p + 1).map(|t| &t.kind) {
+                    Some(TokKind::Word(w)) if is_key_segment(w) => w.clone(),
+                    _ => break,
+                };
+                if !dot {
+                    break;
+                }
+                target.push('.');
+                target.push_str(&word);
+                p += 2;
+            }
+            return Err(cur.err(format!(
+                "cannot assign to {target}: key paths read in expressions but are never mutation targets; rebind the variable instead (e.g. {example} = MAP_SET({example}, \"a\", 2))",
+                example = sigil_var(&var),
+            )));
         }
-    };
-    cur.pos = eq + 1;
-    // Leading gap comments vanish like the `=` gap.
-    cur.skip_gap();
-    let expr = parse_expr_checked(&mut cur, ctx)?;
-    Ok((StepKind::Set { var, expr }, cur.pos))
+        let assign = find_assign_eq(&body[cur.pos..]).map(|i| i + cur.pos);
+        let eq = match assign {
+            Some(eq) => eq,
+            None => {
+                return Err(cur.err("mutation requires a variable: $var = <expr>"));
+            }
+        };
+        cur.pos = eq + 1;
+        cur.skip_gap();
+        let expr = parse_expr_checked(&mut cur, ctx)?;
+        return Ok((StepKind::Set { var, expr }, cur.pos));
+    }
+    // Bare words are literal text, never variable targets: only
+    // `$var = <expr>` mutates.
+    Err(cur.err("mutation requires a variable: $var = <expr>"))
 }
 
 fn parse_return_body(
@@ -7890,7 +8254,13 @@ fn qualify_kind_templates(
     // Boxed single commands share the outer scope frame (no recursive
     // statement pass built them): qualify the inner kind directly.
     match kind {
-        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
+        StepKind::WithIo { cmd, .. } => {
+            qualify_kind_templates(cmd, ctx, stmt, failed);
+        }
+        StepKind::Bind {
+            rhs: BindRhs::Capture(cmd),
+            ..
+        } => {
             qualify_kind_templates(cmd, ctx, stmt, failed);
         }
         _ => {}
@@ -7912,8 +8282,7 @@ fn qualify_kind_templates(
     match kind {
         StepKind::Timeout { body, .. }
         | StepKind::Isolated { body }
-        | StepKind::AsyncBlock { body }
-        | StepKind::AssignAsync { body, .. } => {
+        | StepKind::AsyncBlock { body } => {
             for step in body.iter_mut() {
                 if failed.is_some() {
                     return;
@@ -7921,6 +8290,17 @@ fn qualify_kind_templates(
                 qualify_step_templates(step, ctx, stmt, failed);
             }
         }
+        StepKind::Bind { rhs, .. } => match rhs {
+            BindRhs::Async(body) => {
+                for step in body.iter_mut() {
+                    if failed.is_some() {
+                        return;
+                    }
+                    qualify_step_templates(step, ctx, stmt, failed);
+                }
+            }
+            BindRhs::Capture(_) | BindRhs::Expr(_) | BindRhs::Await { .. } => {}
+        },
         _ => {}
     }
 }
@@ -8121,7 +8501,9 @@ fn parse_elements(
             // A top-level guard on a statement with module entries fails
             // like the historical directive; file-only statements consume
             // the guard like any other element.
-            if let Some(((modules, kinds), used)) = parse_import_statement(toks, pos, stmt, ctx)? {
+            if let Some(((modules, kinds), used)) =
+                parse_import_statement(toks, pos, stmt, ctx, pending_guard.is_some())?
+            {
                 if !modules.is_empty() && !in_block && pending_guard.is_some() {
                     return Err(TokenError {
                         stmt,
@@ -8206,8 +8588,8 @@ fn parse_element_at(
             kind: None,
         });
     }
-    // LET/SET/RETURN heads parse with groups intact, then trailing
-    // elements loop on (probed `LET $x: INT = 1 ECHO bye`). LET shape
+    // LET/CONST/SET/RETURN heads parse with groups intact, then trailing
+    // elements loop on (probed `LET $x: INT = 1 ECHO bye`). Binding shape
     // misses fall to generic (lowering fails them like a committed
     // `instruction` would, e.g. `LET foo`).
     if head_word.as_deref() == Some(KEYWORD_LET)
@@ -8215,7 +8597,15 @@ fn parse_element_at(
     {
         return Ok((vec![step(kind)], used));
     }
-    if matches!(toks.get(pos).map(|t| &t.kind), Some(TokKind::Punct('$'))) {
+    if head_word.as_deref() == Some(KEYWORD_CONST)
+        && let Some((kind, used)) = parse_const_body(&toks[pos..], stmt, ctx)?
+    {
+        return Ok((vec![step(kind)], used));
+    }
+    if matches!(
+        toks.get(pos).map(|t| &t.kind),
+        Some(TokKind::Punct(VAR_SIGIL_CHAR))
+    ) {
         let (kind, used) = parse_set_body(&toks[pos..], stmt, ctx)?;
         return Ok((vec![step(kind)], used));
     }
@@ -8230,6 +8620,20 @@ fn parse_element_at(
     if call_shape_at(toks, pos, true).is_some() {
         let (kind, used) = parse_inner_command(&toks[pos..], stmt, ctx)?;
         return Ok((vec![step(kind)], used));
+    }
+    if let Some(TokKind::Word(base)) = toks.get(pos).map(|t| &t.kind)
+        && is_ident_word(base)
+        && match_joint_qualified(toks, pos + 1).is_some()
+    {
+        // Qualified calls already returned above; anything else
+        // starting `ALIAS::NAME` is a binding-target misuse.
+        return Err(TokenError {
+            stmt,
+            msg: "cannot declare or assign ALIAS::NAME: module values read as $ALIAS::NAME in expressions and are never binding targets".to_string(),
+            line: 0,
+            col: 0,
+            kind: None,
+        });
     }
     // Block statements (shape misses fall to generic, which fails
     // them in lowering like the grammar's committed `instruction`).
@@ -8311,11 +8715,12 @@ fn parse_element_at(
         _ => {}
     }
     // AWAIT/CANCEL statements (element level admits the `$` gap,
-    // probed); heads without `$` go generic (lowering fails them).
+    // probed); heads without `$` go generic (lowering fails the
+    // rest).
     if matches!(
         head_word.as_deref(),
         Some(KEYWORD_AWAIT) | Some(KEYWORD_CANCEL)
-    ) && let Some((kind, used)) = parse_await_cancel_at(toks, pos, stmt, false)?
+    ) && let Some((kind, used)) = parse_await_cancel_at(toks, pos, stmt, false, ctx)?
     {
         return Ok((vec![step(kind)], used));
     }
@@ -8328,7 +8733,7 @@ fn parse_element_at(
         return Ok((vec![step(kind)], used));
     }
     // `EXPORT ...` records names (zero steps) or misses to generic;
-    // level and guard violations fail loudly like the backend.
+    // level, guard, and sigil violations fail loudly like the backend.
     if head_word.as_deref() == Some(KEYWORD_EXPORT) {
         if in_block {
             return Err(TokenError {
@@ -8352,21 +8757,27 @@ fn parse_element_at(
             ExportNames {
                 func_names,
                 type_names,
+                const_names,
             },
             used,
-        )) = parse_export_at(toks, pos)
+        )) = parse_export_at(toks, pos, stmt)?
         {
             for name in &func_names {
                 for part in name.split(MODULE_SEPARATOR) {
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
-                if ctx.func_exports.borrow().contains(name)
-                    || ctx.type_exports.borrow().contains(name)
+                // Recording and the duplicate rule live in
+                // `Exports::insert` (single owner); this loop only
+                // validates identifier shapes.
+                if let Err(msg) = ctx
+                    .exports
+                    .borrow_mut()
+                    .insert(ExportKind::Func, name.clone())
                 {
                     return Err(TokenError {
                         stmt,
-                        msg: format!("duplicate EXPORT `{name}`"),
+                        msg,
                         line: 0,
                         col: 0,
                         kind: Some(ParseErrorKind::Validation {
@@ -8374,19 +8785,20 @@ fn parse_element_at(
                         }),
                     });
                 }
-                ctx.func_exports.borrow_mut().push(name.clone());
             }
             for name in &type_names {
                 for part in name.split(MODULE_SEPARATOR) {
                     crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
                         .map_err(|e| lower_err(stmt, e))?;
                 }
-                if ctx.func_exports.borrow().contains(name)
-                    || ctx.type_exports.borrow().contains(name)
+                if let Err(msg) = ctx
+                    .exports
+                    .borrow_mut()
+                    .insert(ExportKind::Type, name.clone())
                 {
                     return Err(TokenError {
                         stmt,
-                        msg: format!("duplicate EXPORT `{name}`"),
+                        msg,
                         line: 0,
                         col: 0,
                         kind: Some(ParseErrorKind::Validation {
@@ -8394,7 +8806,27 @@ fn parse_element_at(
                         }),
                     });
                 }
-                ctx.type_exports.borrow_mut().push(name.clone());
+            }
+            for name in &const_names {
+                for part in name.split(MODULE_SEPARATOR) {
+                    crate::resolve::check_func_ident(&lowering_ctx(stmt), part)
+                        .map_err(|e| lower_err(stmt, e))?;
+                }
+                if let Err(msg) = ctx
+                    .exports
+                    .borrow_mut()
+                    .insert(ExportKind::Const, name.clone())
+                {
+                    return Err(TokenError {
+                        stmt,
+                        msg,
+                        line: 0,
+                        col: 0,
+                        kind: Some(ParseErrorKind::Validation {
+                            command: KEYWORD_EXPORT.to_string(),
+                        }),
+                    });
+                }
             }
             return Ok((Vec::new(), used));
         }
@@ -8493,7 +8925,7 @@ fn parse_with_io_element(
         TokKind::Group { inner, .. } => inner.clone(),
         _ => unreachable!(),
     };
-    let bindings = match parse_io_bindings(&inner, stmt)? {
+    let bindings = match parse_io_bindings(&inner, stmt, ctx)? {
         Some(bindings) => bindings,
         // Shape miss: generic fails it.
         None => {
@@ -8767,6 +9199,7 @@ fn parse_inner_command(
                 head.as_str(),
                 KEYWORD_FUNC
                     | KEYWORD_LET
+                    | KEYWORD_CONST
                     | KEYWORD_IF
                     | KEYWORD_SWITCH
                     | KEYWORD_FOR
@@ -8875,19 +9308,34 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
     )?;
     {
         let top: HashSet<String> = ctx.funcs.borrow().first().cloned().unwrap_or_default();
-        let top_imports: Vec<String> = ctx.imports.borrow().first().cloned().unwrap_or_default();
+        let top_imports: Vec<String> = ctx
+            .imports
+            .borrow()
+            .first()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
         let mut top_types = HashSet::new();
+        let mut top_consts = HashSet::new();
         for step in &out {
             if let StepKind::TypeAlias { name, .. } = &step.kind {
                 top_types.insert(name.clone());
             }
+            match &step.kind {
+                StepKind::Bind { var, is_const, .. } if *is_const => {
+                    top_consts.insert(var.clone());
+                }
+                _ => {}
+            }
         }
         crate::commands::validate_exports(
             &lowering_ctx(out.len()),
-            &ctx.func_exports.borrow(),
-            &ctx.type_exports.borrow(),
+            &ctx.exports.borrow(),
             &top,
             &top_types,
+            &top_consts,
             ctx.modules,
             &top_imports,
         )
@@ -9011,14 +9459,13 @@ fn parse_with_ctx(
     // Snippet re-parses seed their base frames so lookup behaves
     // identically; snippets never define, only read.
     ctx.funcs.borrow_mut()[0].extend(preseed_funcs);
-    ctx.imports.borrow_mut()[0].extend(preseed_imports);
+    ctx.imports.borrow_mut()[0].extend(preseed_imports.into_iter().map(|name| (name, false)));
     let steps = parse_tokens_with_ctx(&toks, &ctx).map_err(|e| token_error(input, e))?;
     let mut steps = steps;
     stamp_func_docs(input, &mut steps);
     Ok(ScriptWithExports {
         steps,
-        func_exports: ctx.func_exports.borrow().clone(),
-        type_exports: ctx.type_exports.borrow().clone(),
+        exports: ctx.exports.borrow().clone(),
     })
 }
 
@@ -9026,8 +9473,7 @@ fn parse_with_ctx(
 /// Callers needing docs build a [`ParsedScript`] from this.
 struct ScriptWithExports {
     steps: Vec<Step>,
-    func_exports: Vec<String>,
-    type_exports: Vec<String>,
+    exports: Exports,
 }
 
 /// Parse a script with an unknown host environment.
@@ -9090,11 +9536,7 @@ pub fn parse_script_with_modules_and_exports(
     reserved_names: HashSet<String>,
     modules: ModuleTable,
 ) -> ParseResult<ParsedScript> {
-    let ScriptWithExports {
-        steps,
-        func_exports,
-        type_exports,
-    } = parse_with_ctx(
+    let ScriptWithExports { steps, exports } = parse_with_ctx(
         input,
         lower,
         reserved_names,
@@ -9105,8 +9547,7 @@ pub fn parse_script_with_modules_and_exports(
     Ok(ParsedScript {
         func_docs: collect_func_docs(input, &steps),
         steps,
-        func_exports,
-        type_exports,
+        exports,
     })
 }
 
@@ -9116,11 +9557,7 @@ pub fn parse_script_with_exports(
     input: &str,
     lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
 ) -> ParseResult<ParsedScript> {
-    let ScriptWithExports {
-        steps,
-        func_exports,
-        type_exports,
-    } = parse_with_ctx(
+    let ScriptWithExports { steps, exports } = parse_with_ctx(
         input,
         lower,
         HashSet::new(),
@@ -9131,8 +9568,7 @@ pub fn parse_script_with_exports(
     Ok(ParsedScript {
         func_docs: collect_func_docs(input, &steps),
         steps,
-        func_exports,
-        type_exports,
+        exports,
     })
 }
 
@@ -9163,16 +9599,60 @@ pub fn parse_guard_expr_str(input: &str) -> ParseResult<GuardExpr> {
 }
 
 /// Parsed script with single-file `EXPORT` metadata. `steps` is the
-/// linear execution plan, `func_exports` the `EXPORT` func names in
-/// source order, `type_exports` the `EXPORT TYPE` names in source order,
-/// and `func_docs` maps top-level `FUNC` base names to (summary, docs)
-/// collected from the immediately preceding `#` comment block.
+/// linear execution plan, `exports` the `EXPORT` names in source order
+/// per kind, and `func_docs` maps top-level `FUNC` base names to
+/// (summary, docs) collected from the immediately preceding `#`
+/// comment block.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedScript {
     pub steps: Vec<Step>,
-    pub func_exports: Vec<String>,
-    pub type_exports: Vec<String>,
+    pub exports: Exports,
     pub func_docs: std::collections::HashMap<String, (String, String)>,
+}
+
+/// One `EXPORT` list kind. Single owner for the func/type/const
+/// distinction, so the duplicate rule and every holder never restate
+/// the three-way split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportKind {
+    Func,
+    Type,
+    Const,
+}
+
+/// Single-file `EXPORT` metadata: per-kind names in source order.
+/// Separate lists (never one mixed vec) so the MCP server never
+/// confuses a type for a tool, and reads stay kind-addressed.
+#[derive(Debug, Clone, Default)]
+pub struct Exports {
+    pub funcs: Vec<String>,
+    pub types: Vec<String>,
+    pub consts: Vec<String>,
+}
+
+impl Exports {
+    /// Record one `EXPORT` name, enforcing the duplicate rule.
+    /// Uniqueness is by exported base name for every kind: `EXPORT FOO`
+    /// and `EXPORT LIB::FOO` name one servable tool, `EXPORT CONST $N`
+    /// and `EXPORT CONST $A::N` name one read, so the second spelling
+    /// shapes the same `duplicate EXPORT` instead of silently
+    /// shadowing. One base name rides exactly one export kind.
+    /// `Err` carries the `duplicate EXPORT` message unchanged.
+    pub fn insert(&mut self, kind: ExportKind, name: String) -> Result<(), String> {
+        let base = crate::base_name(&name);
+        let clash = [&self.funcs, &self.types, &self.consts]
+            .iter()
+            .any(|list| list.iter().any(|e| crate::base_name(e) == base));
+        if clash {
+            return Err(format!("duplicate EXPORT `{name}`"));
+        }
+        match kind {
+            ExportKind::Func => self.funcs.push(name),
+            ExportKind::Type => self.types.push(name),
+            ExportKind::Const => self.consts.push(name),
+        }
+        Ok(())
+    }
 }
 
 fn collect_func_docs(
@@ -10170,7 +10650,10 @@ mod tests {
         )
         .expect("LET template parses");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => match expr {
+            StepKind::Bind {
+                rhs: BindRhs::Expr(expr),
+                ..
+            } => match expr {
                 Expr::Literal(value) => assert_eq!(
                     value.as_str().unwrap_or_default(),
                     "n: {{ STD::LEN($x) }}",
@@ -10178,7 +10661,7 @@ mod tests {
                 ),
                 other => panic!("expected literal, got {other:?}"),
             },
-            other => panic!("expected Assign, got {other:?}"),
+            other => panic!("expected Bind, got {other:?}"),
         }
         // RETURN string literal qualifies.
         let steps = parse(

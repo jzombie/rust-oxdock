@@ -1,0 +1,4 @@
+name = "const_async"
+
+[expect]
+files = { "result.txt" = "async_worked\n" }
