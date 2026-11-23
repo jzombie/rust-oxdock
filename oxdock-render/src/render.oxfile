@@ -12,15 +12,13 @@ IMPORT [TYPE PLUGIN, TYPE TARGET, TYPE TARGET_FILE, TYPE LIFECYCLE_REF FROM "typ
 FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): STRING {
     LET $clean: BOOL = STD::CONTAINS($types, "\\")
     IF $clean {
-        ECHO "types path '{{ $types }}' uses backslashes; use forward slashes"
-        EXIT 1
+        FAIL "types path '{{ $types }}' uses backslashes; use forward slashes"
     }
     LET $entries: LIST<PLUGIN> = []
     FOR $path: STRING IN $plugins {
         LET $bad: BOOL = STD::CONTAINS($path, "\\")
         IF $bad {
-            ECHO "plugin path '{{ $path }}' uses backslashes; use forward slashes"
-            EXIT 1
+            FAIL "plugin path '{{ $path }}' uses backslashes; use forward slashes"
         }
         LET $parts: LIST<STRING> = STD::TEXT_SPLIT($path, "/")
         LET $stem: STRING = ""
@@ -40,8 +38,7 @@ FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): 
             }
         }
         IF $dup {
-            ECHO "plugins '{{ $dupe }}' and '{{ $path }}' share qualifier '{{ $qual }}'; rename one file"
-            EXIT 1
+            FAIL "plugins '{{ $dupe }}' and '{{ $path }}' share qualifier '{{ $qual }}'; rename one file"
         }
         LET $entry: PLUGIN = {as: $qual, path: $path}
         LIST_APPEND $entries $entry
@@ -102,34 +99,29 @@ FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): 
             LET $tjs: LIST<STRING> = GLOB("\{{ $scope }}/**/target.json")
             LET $nfound: INT = LEN($tjs)
             IF $nfound == 0 {
-                ECHO "render: scope '\{{ $scope }}' holds no target.json; check 'scopes' in \{{ $cfgpath }}"
-                EXIT 1
+                FAIL "render: scope '\{{ $scope }}' holds no target.json; check 'scopes' in \{{ $cfgpath }}"
             }
             FOR $tj: STRING IN $tjs {
                 LET $file: TARGET_FILE = LOAD_JSON($tj)
                 FOR $t: TARGET IN $file.targets {
                     LET $tname: STRING = $t.name
                     IF HAS_KEY($seen, $tname) {
-                        ECHO "duplicate target name '\{{ $tname }}' (in \{{ $tj }})"
-                        EXIT 1
+                        FAIL "duplicate target name '\{{ $tname }}' (in \{{ $tj }})"
                     }
                     $seen = MAP_SET($seen, $tname, $tj)
                     $count = $count + 1
                     IF HAS_KEY($t, "globs") {
-                        ECHO "target '\{{ $t.name }}' still uses 'globs'; declare 'template' and grouped 'fragments' patterns instead"
-                        EXIT 1
+                        FAIL "target '\{{ $t.name }}' still uses 'globs'; declare 'template' and grouped 'fragments' patterns instead"
                     }
                     LET $name: STRING = $t.name
                     LET $exec: BOOL = false
                     IF HAS_KEY($t, "executable") {
                         LET $has_out: BOOL = HAS_KEY($t, "out")
                         IF $has_out == false {
-                            ECHO "target '\{{ $tname }}' sets 'executable' without a string 'out'"
-                            EXIT 1
+                            FAIL "target '\{{ $tname }}' sets 'executable' without a string 'out'"
                         }
                         IF TYPE_OF($t.executable) != "BOOL" {
-                            ECHO "target '\{{ $tname }}' sets 'executable' to a non-boolean; use true or omit it"
-                            EXIT 1
+                            FAIL "target '\{{ $tname }}' sets 'executable' to a non-boolean; use true or omit it"
                         }
                         $exec = $t.executable
                     }
@@ -152,8 +144,7 @@ FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): 
                         LET $babs: STRING = "\{{ $wsroot }}/\{{ $base }}"
                         LET $bkind: STRING = PATH_TYPE($babs)
                         IF $bkind != "dir" {
-                            ECHO "target '\{{ $tname }}' base '\{{ $base }}' is not a directory (found: \{{ $bkind }})"
-                            EXIT 1
+                            FAIL "target '\{{ $tname }}' base '\{{ $base }}' is not a directory (found: \{{ $bkind }})"
                         }
                         LET $rooted_t: BOOL = STD::TEXT_STARTS_WITH($template, ".oxdock/") || STD::TEXT_STARTS_WITH($template, "/")
                         IF $rooted_t == false {
@@ -192,8 +183,7 @@ FUNC RENDER_ALL($plugins: LIST<STRING>, $stages: LIST<STRING>, $types: STRING): 
             }
         }
         IF $count == 0 {
-            ECHO "no targets discovered under the configured scopes; check 'scopes' in \{{ $cfgpath }}"
-            EXIT 1
+            FAIL "no targets discovered under the configured scopes; check 'scopes' in \{{ $cfgpath }}"
         }
         """
     RETURN $mod

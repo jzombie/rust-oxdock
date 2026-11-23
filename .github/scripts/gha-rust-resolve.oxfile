@@ -40,8 +40,7 @@ LET $flat_sep: STRING = " "
 LET $canon: STRING = TEXT_JOIN($parts, $flat_sep)
 IF $canon == "" {
     IF $want {
-        ECHO "no release products: set bins: or add workspace.metadata.oxdock release_bins to the root Cargo.toml"
-        EXIT 1
+        FAIL "no release products: set bins: or add workspace.metadata.oxdock release_bins to the root Cargo.toml"
     }
 }
 LET $quoted: LIST<STRING> = []

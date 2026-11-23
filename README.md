@@ -30,7 +30,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.44.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.44.1-alpha/oxdock/)
 
 Jump to the [Command Reference](#command-reference) below for the full
 command list with runnable examples, or view the standard library
@@ -63,11 +63,11 @@ Installs to `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH. Set `$env:I
 For a reproducible install, pin an explicit release:
 
 ```sh
-(export VERSION=v0.44.0-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
+(export VERSION=v0.44.1-alpha; curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash)
 ```
 
 ```powershell
-$env:VERSION = 'v0.44.0-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
+$env:VERSION = 'v0.44.1-alpha'; (irm 'https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1') | iex
 ```
 
 </details>
@@ -82,7 +82,7 @@ release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 From the registry:
 
 ```sh
-cargo install oxdock@0.44.0-alpha
+cargo install oxdock@0.44.1-alpha
 ```
 
 From a local checkout:
@@ -96,7 +96,7 @@ cargo install --path oxdock
 ### Add to Rust project
 
 ```sh
-cargo add oxdock@0.44.0-alpha
+cargo add oxdock@0.44.1-alpha
 ```
 
 ### Run a script with the CLI
@@ -931,9 +931,8 @@ ASSERT_EQ $band "mid"
 **Example: break and continue inside switch**
 
 ```oxdock
-# BREAK exits the SWITCH early: the trailing ECHO and
-# EXIT 1 never run, so reaching them would print a
-# marker and fail the script.
+# BREAK exits the SWITCH early: the trailing FAIL
+# never runs, so reaching it fails the script.
 # CONTINUE passes through to the enclosing loop.
 LET $items: LIST<STRING> = ["a", "skip", "b"]
 FOR $item: STRING IN $items {
@@ -944,8 +943,7 @@ FOR $item: STRING IN $items {
     CASE "a" {
       ECHO saw-a
       BREAK
-      ECHO unreachable
-      EXIT 1
+      FAIL "trap: BREAK must skip trailing steps"
     }
     DEFAULT {
       ECHO saw-other
@@ -6276,10 +6274,10 @@ IMPORT [STD]
 LET $draw: FLOAT = RAND()
 LET $delay: FLOAT = 1.0 + $draw * 10.0
 IF $delay < 1.0 {
-    EXIT 1
+    FAIL "trap: RAND draw below range"
 }
 IF $delay >= 11.0 {
-    EXIT 1
+    FAIL "trap: RAND draw above range"
 }
 ECHO "retrying in {{ $delay }}s"
 ```
@@ -8165,8 +8163,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.44.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.44.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.44.1-alpha"
+    ASSERT_EQ $b "beta OxDock 0.44.1-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -8178,7 +8176,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.44.0-alpha"
+    "alpha OxDock 0.44.1-alpha"
 );
 ```
 
@@ -8847,13 +8845,13 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 
 ## Citation
 
-If you use OxDock in published work, cite version `0.44.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+If you use OxDock in published work, cite version `0.44.1-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
 
 ```bibtex
 @software{oxdock,
   author = "Jeremy Harris",
   title = "OxDock",
-  version = "0.44.0-alpha",
+  version = "0.44.1-alpha",
   url = "https://github.com/jzombie/rust-oxdock",
   license = "Apache-2.0"
 }

@@ -21,23 +21,19 @@ FUNC SETUP($ctx: CTX): CTX {
 FUNC INGEST($ctx: CTX): CTX {
     LET $target: STRING = $ctx.target
     IF $target == "" {
-        ECHO "ingest: target name is empty"
-        EXIT 1
+        FAIL "ingest: target name is empty"
     }
     LET $template: STRING = $ctx.template
     IF $template == "" {
-        ECHO "ingest: target '{{ $target }}' has no template"
-        EXIT 1
+        FAIL "ingest: target '{{ $target }}' has no template"
     }
     LET $out: STRING = $ctx.out
     IF $out == "" {
-        ECHO "ingest: target '{{ $target }}' has no out"
-        EXIT 1
+        FAIL "ingest: target '{{ $target }}' has no out"
     }
     LET $values: STRING = $ctx.values
     IF $values == "" {
-        ECHO "ingest: target '{{ $target }}' has no values"
-        EXIT 1
+        FAIL "ingest: target '{{ $target }}' has no values"
     }
     RETURN $ctx
 }
@@ -57,8 +53,7 @@ FUNC ASSEMBLE($ctx: CTX): CTX {
     LET $spath: STRING = "{{ $ctx.staging }}/{{ $ctx.target }}.source.json"
     LET $pt: STRING = PATH_TYPE($spath)
     IF $pt != "file" {
-        ECHO "assemble: no staged source for target '{{ $ctx.target }}'; scanner SCAN must run first"
-        EXIT 1
+        FAIL "assemble: no staged source for target '{{ $ctx.target }}'; scanner SCAN must run first"
     }
     LET $src: STRING = READ $spath
     WRITE "{{ $ctx.staging }}/{{ $ctx.target }}.json" $src
@@ -91,14 +86,12 @@ FUNC RENDER($ctx: CTX): CTX {
     IF $has_ws {
         LET $has_vkey: BOOL = HAS_KEY($cfg, "version_key")
         IF $has_vkey == false {
-            ECHO "render: staging snapshot present but config lacks 'version_key'"
-            EXIT 1
+            FAIL "render: staging snapshot present but config lacks 'version_key'"
         }
         $vkey = $cfg.version_key
         LET $has_vpkg: BOOL = HAS_KEY($vars, "workspace_pkg")
         IF $has_vpkg == false {
-            ECHO "render: staging snapshot present but config lacks 'vars.workspace_pkg'"
-            EXIT 1
+            FAIL "render: staging snapshot present but config lacks 'vars.workspace_pkg'"
         }
         $vpkg = $vars.workspace_pkg
     }
@@ -134,8 +127,7 @@ FUNC RENDER($ctx: CTX): CTX {
         }
     }
     IF $text == "" {
-        ECHO "render: target '{{ $ctx.target }}' rendered empty"
-        EXIT 1
+        FAIL "render: target '{{ $ctx.target }}' rendered empty"
     }
     WRITE $ctx.out $text
     RETURN {wsroot: $ctx.wsroot, config: $ctx.config, staging: $ctx.staging, globals: $ctx.globals, target: $ctx.target, template: $ctx.template, out: $ctx.out, values: $ctx.values, fragments: $ctx.fragments, text: $text, exec: $ctx.exec}
@@ -163,8 +155,7 @@ FUNC WRITE_OUT($ctx: CTX): CTX {
 FUNC VERIFY($ctx: CTX): CTX {
     LET $disk: STRING = READ $ctx.out
     IF $disk != $ctx.text {
-        ECHO "verify: target '{{ $ctx.target }}' drifted between pipe and disk"
-        EXIT 1
+        FAIL "verify: target '{{ $ctx.target }}' drifted between pipe and disk"
     }
     RETURN $ctx
 }
