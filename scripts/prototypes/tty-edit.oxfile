@@ -19,6 +19,5 @@ FOR $prog: STRING IN $progs {
 }
 
 IF !$ran_prog {
-    ECHO "No configured editor available."
-    EXIT 1
+    FAIL "No configured editor available."
 }

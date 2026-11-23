@@ -931,9 +931,8 @@ ASSERT_EQ $band "mid"
 **Example: break and continue inside switch**
 
 ```oxdock
-# BREAK exits the SWITCH early: the trailing ECHO and
-# EXIT 1 never run, so reaching them would print a
-# marker and fail the script.
+# BREAK exits the SWITCH early: the trailing FAIL
+# never runs, so reaching it fails the script.
 # CONTINUE passes through to the enclosing loop.
 LET $items: LIST<STRING> = ["a", "skip", "b"]
 FOR $item: STRING IN $items {
@@ -944,8 +943,7 @@ FOR $item: STRING IN $items {
     CASE "a" {
       ECHO saw-a
       BREAK
-      ECHO unreachable
-      EXIT 1
+      FAIL "trap: BREAK must skip trailing steps"
     }
     DEFAULT {
       ECHO saw-other
@@ -6276,10 +6274,10 @@ IMPORT [STD]
 LET $draw: FLOAT = RAND()
 LET $delay: FLOAT = 1.0 + $draw * 10.0
 IF $delay < 1.0 {
-    EXIT 1
+    FAIL "trap: RAND draw below range"
 }
 IF $delay >= 11.0 {
-    EXIT 1
+    FAIL "trap: RAND draw above range"
 }
 ECHO "retrying in {{ $delay }}s"
 ```

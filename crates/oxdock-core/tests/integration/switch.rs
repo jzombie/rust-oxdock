@@ -99,7 +99,7 @@ fn switch_strict_cross_type_values_never_match() {
         LET $cmd: STRING = "1"
         SWITCH $cmd {
             CASE 1 {
-                EXIT 1
+                FAIL "trap: STRING 1 must not match INT 1"
             }
             DEFAULT {
                 WRITE hit.txt fallback
@@ -123,7 +123,7 @@ fn switch_numeric_values_compare_across_int_and_float() {
                 WRITE hit.txt numeric
             }
             DEFAULT {
-                EXIT 1
+                FAIL "trap: INT 1 must match FLOAT 1.0"
             }
         }
         LET $hit: STRING = READ hit.txt
@@ -144,13 +144,13 @@ fn switch_later_case_values_never_evaluate_after_a_hit() {
         LET $n: INT = 1
         SWITCH $n {
             CASE 2 {
-                EXIT 1
+                FAIL "trap: CASE 2 must not hit for n=1"
             }
             CASE 1 {
                 WRITE hit.txt one
             }
             CASE 1 / $z {
-                EXIT 1
+                FAIL "trap: arm after hit must not evaluate"
             }
         }
         LET $hit: STRING = READ hit.txt
@@ -266,7 +266,7 @@ fn switch_bare_conditions_short_circuit_after_a_hit() {
                 WRITE hit.txt taken
             }
             CASE 1 / $z == 0 {
-                EXIT 1
+                FAIL "trap: later condition must not evaluate after hit"
             }
         }
         LET $hit: STRING = READ hit.txt
@@ -288,7 +288,7 @@ fn switch_bare_call_conditions_and_no_match_noop() {
         LET $n: INT = 2
         SWITCH {
             CASE IS_BIG($n) {
-                EXIT 1
+                FAIL "trap: IS_BIG(2) must be false"
             }
         }
         WRITE done.txt done
@@ -552,7 +552,7 @@ fn switch_break_at_top_level_of_switch_is_legal() {
                 BREAK
             }
             DEFAULT {
-                EXIT 1
+                FAIL "trap: BREAK in SWITCH must skip DEFAULT"
             }
         }
         WRITE done.txt done

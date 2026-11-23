@@ -38,8 +38,7 @@ LET $note_lines: LIST<STRING> = TEXT_LINES($notes)
 LET $note_head: STRING = $note_lines.0
 LET $note_date_ok: BOOL = TEXT_MATCH($note_head, "\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$")
 IF $note_date_ok == false {
-    ECHO "CHANGELOG [{{ $version }}] heading must end with ' - YYYY-MM-DD' (no TBD): {{ $note_head }}"
-    EXIT 1
+    FAIL "CHANGELOG [{{ $version }}] heading must end with ' - YYYY-MM-DD' (no TBD): {{ $note_head }}"
 }
 
 # Products resolve before anything publishes or tags: an empty list
@@ -53,8 +52,7 @@ LET $argline: STRING = ""
 IF $bins {
     LET $raw: STRING = "{{ env:RELEASE_BINS }}"
     IF $raw == "" {
-        ECHO "no release products: the workflow resolves RELEASE_BINS from bins: or workspace.metadata.oxdock release_bins"
-        EXIT 1
+        FAIL "no release products: the workflow resolves RELEASE_BINS from bins: or workspace.metadata.oxdock release_bins"
     }
     LET $products: LIST<STRING> = TEXT_FIELDS($raw)
     LET $targets: LIST<STRING> = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "aarch64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
@@ -95,8 +93,7 @@ IF !$dry {
     WHILE !$landed {
         $round = $round + 1
         IF $round == 10 {
-            ECHO "workspace publish did not converge"
-            EXIT 1
+            FAIL "workspace publish did not converge"
         }
         LET $excludes: STRING = ""
         LET $missing: INT = 0
