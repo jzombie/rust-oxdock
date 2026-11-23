@@ -74,3 +74,38 @@ FUNC WORKSPACE_PACKAGES(): LIST<MAP<ANY>> {
   RETURN $pkgs
 }
 EXPORT WORKSPACE_PACKAGES
+
+# Pipeline pin from a workflow ref: the text after the last `@`
+# with one prefix stripped. Tag and head prefixes are exclusive:
+# only the matching branch strips, so a tag literally named
+# `refs/heads/foo` keeps its remainder and fails the `refs/`
+# guard below. Pull merge refs ride only the pull_request event
+# that produced them. Anything else under `refs/`, an empty pin,
+# or a ref with no `@` fails closed.
+FUNC PIPELINE_PIN($workflow_ref: STRING, $event_name: STRING): STRING {
+  LET $at: LIST<STRING> = TEXT_EXTRACT($workflow_ref, "@([^@]+)$")
+  IF LEN($at) == 0 {
+    FAIL "unsupported pipeline ref (no '@ref' in workflow ref): {{ $workflow_ref }}"
+  }
+  LET $raw: STRING = $at.1
+  LET $pin: STRING = $raw
+  IF TEXT_STARTS_WITH($raw, "refs/tags/") {
+    $pin = TEXT_TRIM_PREFIX($raw, "refs/tags/")
+  } ELSE IF TEXT_STARTS_WITH($raw, "refs/heads/") {
+    $pin = TEXT_TRIM_PREFIX($raw, "refs/heads/")
+  }
+  IF LEN($pin) == 0 {
+    FAIL "unsupported pipeline ref (empty pin)"
+  }
+  IF TEXT_STARTS_WITH($pin, "refs/pull/") {
+    IF $event_name != "pull_request" {
+      FAIL "unsupported pipeline ref: {{ $pin }}"
+    }
+    RETURN $pin
+  }
+  IF TEXT_STARTS_WITH($pin, "refs/") {
+    FAIL "unsupported pipeline ref: {{ $pin }}"
+  }
+  RETURN $pin
+}
+EXPORT PIPELINE_PIN

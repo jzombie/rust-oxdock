@@ -1,0 +1,18 @@
+# Pipeline pin resolver: derives the checkout ref from the calling
+# workflow reference and publishes it as `pin` on GITHUB_OUTPUT.
+# The DSL is canonical here: the bootstrap bash legs in docs.yml and
+# rust-release.yml transcribe this function Shell-side because no
+# engine exists yet at pin time. Branch and tag refs pass through;
+# pull merge refs ride only their own pull_request event.
+INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKFLOW_REF, GITHUB_EVENT_NAME]
+IMPORT [STD, "helpers/ci-helpers.oxfile" AS CI_HELPERS]
+
+# Unconfined: GITHUB_OUTPUT is an absolute host path outside the
+# checkout, and WORKSPACE LOCAL would rebase it back under the repo
+# where no runner ever reads it. No checkout reads here.
+WORKSPACE SYSTEM
+
+LET $workflow_ref: STRING = "{{ env:GITHUB_WORKFLOW_REF }}"
+LET $event_name: STRING = "{{ env:GITHUB_EVENT_NAME }}"
+LET $pin: STRING = CI_HELPERS::PIPELINE_PIN($workflow_ref, $event_name)
+APPEND_LINE "{{ env:GITHUB_OUTPUT }}" "pin={{ $pin }}"
