@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.44.1-alpha] - 2026-11-23
+
+### Changed
+
+- Replace `ECHO ...` + `EXIT 1` error sequences with `FAIL` across installer, `gha-*` scripts, `oxdock-render` lifecycle, prototypes, and doc/test fences (#311). Messages now go to stderr; no exit-code change.
+
 ## [0.44.0-alpha] - 2026-11-23
 
 ### Changed
