@@ -171,21 +171,53 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Engine and pin confirmation in one call: the action acquires
-      # the published binary at the pin (or falls back to source) and
-      # re-derives the pin in DSL. The action travels with the
-      # pipeline checkout, so it stays version-locked to the pin.
-      - name: Acquire and confirm pipeline engine
-        uses: ./rust-release/.github/actions/pipeline-engine
-        with:
-          pin: ${{ steps.pin.outputs.pin }}
-          checkout-path: rust-release
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # Pipeline engine first: prefer the already-published binary at
+      # the pinned ref; fall back to a source build from the central
+      # checkout when the ref has no release yet (branch under
+      # development). Either way the binary below is the central
+      # checkout's, so binary and script stay mutually consistent. It
+      # lands in RUNNER_TEMP (a real host path on every OS) and rides
+      # PATH, clear of the setup action's install dir.
+      - name: Acquire pipeline engine
+        shell: bash
+        env:
+          OXDOCK_PIN: ${{ steps.pin.outputs.pin }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dl="$RUNNER_TEMP/pipeline-dl"
+          bin_dir="$RUNNER_TEMP/pipeline-bin"
+          mkdir -p "$dl" "$bin_dir"
+          if gh release download "$OXDOCK_PIN" --clobber -R jzombie/rust-oxdock -p "oxdock-x86_64-unknown-linux-musl.tar.gz" -D "$dl"; then
+            tar -xzf "$dl/oxdock-x86_64-unknown-linux-musl.tar.gz" -C "$bin_dir"
+          else
+            cargo build --release --manifest-path rust-release/Cargo.toml -p oxdock
+            cp "rust-release/target/release/oxdock" "$bin_dir/oxdock"
+          fi
+          chmod +x "$bin_dir/oxdock"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      # DSL confirmation of the bootstrap pin above: re-derives the
+      # pin through helpers/ci-helpers.oxfile (PIPELINE_PIN) and fails
+      # unless it matches. The pin rides in through env, never
+      # interpolated into the script.
+      - name: Confirm pipeline pin in DSL
+        shell: bash
+        env:
+          OXDOCK_PIN: ${{ steps.pin.outputs.pin }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          trap 'rm -f "$tmp"' EXIT
+          GITHUB_OUTPUT="$tmp" oxdock rust-release/.github/scripts/gha-rust-pin.oxfile
+          if ! grep -qxF "pin=$OXDOCK_PIN" "$tmp"; then
+            echo "DSL pin mismatch:" >&2
+            cat "$tmp" >&2
+            exit 1
+          fi
 
       # The script comes from the central checkout, so binary and
-      # script stay mutually consistent. Shell tar lives in the
-      # pipeline-engine action above: cracking the first tarball
-      # predates any engine.
+      # script stay mutually consistent.
       - name: Fail unless the confirmation matches the tree
         shell: bash
         env:
@@ -193,11 +225,7 @@ jobs:
           RELEASE_CONFIRM: ${{ inputs.confirm_version }}
         run: |
           set -euo pipefail
-          if [ -x /tmp/pipeline-bin/oxdock ]; then
-            /tmp/pipeline-bin/oxdock rust-release/.github/scripts/gha-rust-validate.oxfile
-          else
-            cargo run --manifest-path rust-release/Cargo.toml -p oxdock -- rust-release/.github/scripts/gha-rust-validate.oxfile
-          fi
+          oxdock rust-release/.github/scripts/gha-rust-validate.oxfile
 
   resolve:
     name: resolve
@@ -428,15 +456,44 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Engine and pin confirmation in one call, same shape as
-      # validate. The action travels with the pipeline checkout, so
-      # it stays version-locked to the pin.
-      - name: Acquire and confirm pipeline engine
-        uses: ./rust-release/.github/actions/pipeline-engine
-        with:
-          pin: ${{ steps.pin.outputs.pin }}
-          checkout-path: rust-release
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # Pipeline engine first, same shape as validate: prefer the
+      # published binary at the pin, else a source build from the
+      # central checkout. Lives under RUNNER_TEMP and rides PATH.
+      - name: Acquire pipeline engine
+        shell: bash
+        env:
+          OXDOCK_PIN: ${{ steps.pin.outputs.pin }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dl="$RUNNER_TEMP/pipeline-dl"
+          bin_dir="$RUNNER_TEMP/pipeline-bin"
+          mkdir -p "$dl" "$bin_dir"
+          if gh release download "$OXDOCK_PIN" --clobber -R jzombie/rust-oxdock -p "oxdock-x86_64-unknown-linux-musl.tar.gz" -D "$dl"; then
+            tar -xzf "$dl/oxdock-x86_64-unknown-linux-musl.tar.gz" -C "$bin_dir"
+          else
+            cargo build --release --manifest-path rust-release/Cargo.toml -p oxdock
+            cp "rust-release/target/release/oxdock" "$bin_dir/oxdock"
+          fi
+          chmod +x "$bin_dir/oxdock"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      # DSL confirmation of the bootstrap pin above, same shape as
+      # validate: re-derives through PIPELINE_PIN and fails on drift.
+      - name: Confirm pipeline pin in DSL
+        shell: bash
+        env:
+          OXDOCK_PIN: ${{ steps.pin.outputs.pin }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          trap 'rm -f "$tmp"' EXIT
+          GITHUB_OUTPUT="$tmp" oxdock rust-release/.github/scripts/gha-rust-pin.oxfile
+          if ! grep -qxF "pin=$OXDOCK_PIN" "$tmp"; then
+            echo "DSL pin mismatch:" >&2
+            cat "$tmp" >&2
+            exit 1
+          fi
 
       - name: Download build archives
         if: ${{ inputs.binaries }}
@@ -522,9 +579,9 @@ jobs:
           ./target/runner/oxdock ./.github/scripts/gha-rust-release.oxfile
 
       # Everything else runs the central script with the central runner:
-      # the engine acquired by the pipeline-engine action above
-      # (published binary at the pin, else a source build from the
-      # central checkout). The caller's own binary is never the runner.
+      # the engine installed above, running the central checkout's
+      # script, so the two stay mutually consistent. The caller's own
+      # binary is never the runner.
       - name: Run OxDock's gha-rust-release.oxfile at the derived pin (published binary, else source build)
         if: ${{ !(github.repository == 'jzombie/rust-oxdock' && inputs.binaries) }}
         shell: bash
@@ -538,8 +595,4 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -x /tmp/pipeline-bin/oxdock ]; then
-            /tmp/pipeline-bin/oxdock rust-release/.github/scripts/gha-rust-release.oxfile
-          else
-            cargo run --manifest-path rust-release/Cargo.toml -p oxdock --features markdown -- rust-release/.github/scripts/gha-rust-release.oxfile
-          fi
+          oxdock rust-release/.github/scripts/gha-rust-release.oxfile

@@ -365,7 +365,7 @@ fn bash_pin(block: &str, workflow_ref: &str, event_name: &str) -> Result<PinOutc
 /// table entry: pins match byte for byte, failures happen together.
 #[test]
 #[cfg(unix)]
-#[cfg_attr(miri, ignore = "spawns a real sh process")]
+#[cfg_attr(miri, ignore = "spawns a real bash process")]
 fn pin_bash_matches_dsl() -> Result<()> {
     let block = load_release_resolve_block()?;
     for (workflow_ref, event_name, expected) in CASES {
