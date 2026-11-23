@@ -2,11 +2,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
+use oxdock_fs::to_forward_slashes;
+use oxdock_fs::{GuardedPath, WorkspaceSelection};
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
-    Field, GuardExpr, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step,
-    TypeTag, Value, base_name, guards_overlap, qualify, render_structural, split_qualified,
+    Field, GuardExpr, KEYWORD_INSPECT, MODULE_SEPARATOR, SCRIPT_MODULE_NAME, STD_MODULE_NAME,
+    SemaphoreState, Step, TypeTag, Value, base_name, guards_overlap, qualify, render_structural,
+    split_qualified,
 };
 use oxdock_pipe::PipeHandle;
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
@@ -86,6 +89,28 @@ pub(super) enum AliasResolution {
 /// once taken).
 pub(super) type AliasTargets = HashMap<String, Vec<(Option<String>, Option<GuardExpr>)>>;
 
+/// Shared frame-walk precedence for script resolution (#322):
+/// innermost nested frames, then the owning file top-level, then
+/// per-unit harvests. Static checking and runtime dispatch implement
+/// this trait over their own stores and share [`FuncFrameView::walk`],
+/// so precedence lives once and the twins cannot drift.
+pub(super) trait FuncFrameView {
+    /// Resolution hit for this layer (entry, info+key, etc.).
+    type Hit;
+    /// Innermost nested frames outward.
+    fn find_nested(&self, base: &str) -> Option<Self::Hit>;
+    /// Owning file top-level (entry included via its unit key).
+    fn find_home(&self, unit: &str, base: &str) -> Option<Self::Hit>;
+    /// Per-unit bare harvests.
+    fn find_harvest(&self, unit: &str, base: &str) -> Option<Self::Hit>;
+    /// Precedence owner: nested, home, harvest.
+    fn walk(&self, unit: &str, base: &str) -> Option<Self::Hit> {
+        self.find_nested(base)
+            .or_else(|| self.find_home(unit, base))
+            .or_else(|| self.find_harvest(unit, base))
+    }
+}
+
 /// Classify one call spelling under a unit's alias targets. Single
 /// entry point for alias-target matching: splits the spelling,
 /// resolves `SCRIPT::` and bare names globally, and maps file aliases
@@ -96,7 +121,7 @@ pub(super) fn classify_alias_call(
     name: &str,
     exists: &dyn Fn(&str) -> bool,
 ) -> AliasResolution {
-    let Some((alias, base)) = name.split_once("::") else {
+    let Some((alias, base)) = split_qualified(name) else {
         return AliasResolution::Global;
     };
     if alias == SCRIPT_MODULE_NAME {
@@ -175,6 +200,463 @@ pub(super) fn classify_alias_call(
     AliasResolution::Unknown
 }
 
+/// Missing-import hint for an unknown function (#319): when `base`
+/// is `EXPORT`ed by already-loaded files, name them so the error
+/// directs the author to the fix instead of dead-ending. `files`
+/// pairs each loaded file's key with its exported func names (only
+/// exported names suggest: privates would fail the `EXPORT` gate);
+/// `unit_targets` is the failing unit's alias map for `did you mean
+/// ALIAS::BASE` suggestions. Bare and `SCRIPT::` spellings search
+/// the same way. Labels sort for determinism. Only unknown-function
+/// errors append this; nothing else restates the exporter search.
+pub(super) fn missing_import_hint<'a>(
+    files: impl IntoIterator<Item = (&'a str, &'a [String])>,
+    unit_targets: &AliasTargets,
+    name: &str,
+) -> Option<String> {
+    let base = match split_qualified(name) {
+        Some((_, base)) => base,
+        None => name,
+    };
+    if base.is_empty() {
+        return None;
+    }
+    let mut exporters: Vec<&str> = files
+        .into_iter()
+        .filter(|(_, exports)| exports.iter().any(|exported| exported == base))
+        .map(|(file, _)| file)
+        .collect();
+    exporters.sort();
+    exporters.dedup();
+    if exporters.is_empty() {
+        return None;
+    }
+    // Aliases the failing unit already imports each exporter under.
+    let imported_as = |file: &str| {
+        let mut aliases: Vec<&str> = unit_targets
+            .iter()
+            .filter(|(_, targets)| {
+                targets
+                    .iter()
+                    .any(|(target, _)| target.as_deref() == Some(file))
+            })
+            .map(|(alias, _)| alias.as_str())
+            .collect();
+        aliases.sort();
+        aliases
+    };
+    if exporters.len() == 1 {
+        let file = exporters[0];
+        let aliases = imported_as(file);
+        // Prefer a working spelling: when the file is imported under
+        // several aliases, an alias spelling the failed call
+        // differently resolves, so suggest it before falling back to
+        // the self-view diagnostic.
+        let import_alias = aliases
+            .iter()
+            .find(|alias| qualify(alias, base) != name)
+            .or(aliases.first())
+            .copied();
+        let suggestion = match import_alias {
+            Some(import_alias) => {
+                let spelling = qualify(import_alias, base);
+                if spelling == name {
+                    // Disjoint-guard view: the file exports the name
+                    // but this alias resolves it elsewhere here.
+                    format!(
+                        "file \"{file}\" exports `{base}` but the `{import_alias}` view does not resolve it here"
+                    )
+                } else {
+                    format!("did you mean `{spelling}`? (file \"{file}\" exports `{base}`)")
+                }
+            }
+            None => {
+                // Forward slashes: a raw Windows path would emit
+                // invalid escapes inside the quoted suggestion.
+                let path = to_forward_slashes(file);
+                format!(
+                    "file \"{file}\" exports `{base}`: add `[FUNC {base} FROM \"{path}\"]` to an IMPORT"
+                )
+            }
+        };
+        return Some(format!("; {suggestion}"));
+    }
+    let mut files = exporters.join("\", \"");
+    files.insert(0, '"');
+    files.push('"');
+    Some(format!(
+        "; files {files} export `{base}`: qualify the call with the importing alias"
+    ))
+}
+
+/// Whether one `EXPORT CONST` entry serves reads of stored `name`
+/// (the sigil-stripped binding key): the entry itself, or a
+/// qualified `ALIAS::NAME` forward of the same base. Single owner
+/// for the cover rule every qualified-`CONST` path matches on.
+pub(super) fn const_export_covers(entry: &str, name: &str) -> bool {
+    base_name(entry) == name
+}
+
+/// How a module holds a top-level binding, for broken-forward
+/// diagnostics: a `CONST`, a never-exportable `LET`, or nothing.
+pub(super) enum BindingPresence {
+    Const,
+    Let,
+    Absent,
+}
+
+/// Missing-`CONST` hint from the queried alias's own files: an
+/// unexported `CONST` or a private `LET` with the same base names the
+/// real fault instead of a bare unknown-name miss. Single owner for
+/// the hint every qualified-`CONST` miss renders, so static and
+/// runtime agree word for word. Reads only `view.binding`, never a
+/// twin-local store scan.
+pub(super) fn missing_const_hint<S: ModuleGraphView>(
+    view: &S,
+    targets: &AliasTargets,
+    alias: &str,
+    name: &str,
+) -> Option<String> {
+    targets
+        .get(alias)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(file, _)| file.as_ref())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+        .iter()
+        .find_map(|file| match view.binding(file, name) {
+            BindingPresence::Const => Some(format!(
+                "module holds `{name}` as CONST but does not export it: add `EXPORT CONST ${name}`"
+            )),
+            BindingPresence::Let => Some(format!(
+                "`{name}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+            )),
+            BindingPresence::Absent => None,
+        })
+}
+
+/// Read-only view of the module graph one qualified-`CONST`
+/// resolution needs. Implemented once for live runtime stores and
+/// once for static closure tables, so the walk below runs
+/// identically on both and the twins cannot drift: static
+/// validation, eager closure checks, and serving all chase through
+/// this one owner.
+pub(super) trait ModuleGraphView {
+    /// Raw `EXPORT CONST` entries (stored bare names and qualified forwards).
+    fn const_exports(&self, file: &str) -> Option<&[String]>;
+    /// Outbound alias targets for `file`'s own unit: the namespace
+    /// each forward hop resolves in.
+    fn alias_targets(&self, file: &str) -> AliasTargets;
+    /// How `file` holds top-level `name`, for broken-link detail.
+    fn binding(&self, file: &str, name: &str) -> BindingPresence;
+}
+
+/// One `ALIAS::NAME` read's holder files: the unit's alias targets
+/// classified through the shared matcher, kept only when the file
+/// covers the base. Single owner for the holder half of
+/// qualified-`CONST` resolution; the chase half is
+/// [`chase_const_forward`].
+#[derive(Debug)]
+pub(super) enum ConstHolders {
+    /// Covering files, sorted, possibly empty (callers run their
+    /// own missing-name hints then).
+    Found(Vec<String>),
+    /// The alias is unknown to this unit.
+    NoAlias,
+    /// Several overlapping files hold the base: fail loud.
+    Ambiguous {
+        alias: String,
+        base: String,
+        files: HashSet<String>,
+    },
+}
+
+/// Suffix probe for the matcher's canonical keys (`file::base`):
+/// the base is ours, so stripping it recovers the file exactly,
+/// and only a covering file counts as a holder. Single owner for
+/// the suffix shape, so call sites never restate the separator.
+fn const_canonical_suffix(name: &str) -> String {
+    format!("{MODULE_SEPARATOR}{name}")
+}
+
+/// Classify one qualified-`CONST` read to its holder files.
+pub(super) fn const_holder_files<S: ModuleGraphView>(
+    view: &S,
+    unit_targets: &AliasTargets,
+    alias: &str,
+    name: &str,
+) -> ConstHolders {
+    let qualified = qualify(alias, name);
+    let suffix = const_canonical_suffix(name);
+    // Suffix probe for the matcher's canonical keys
+    // (`file::base`): the base is ours, so stripping it recovers the
+    // file exactly, and only a covering file counts as a holder.
+    let exports = |canonical: &str| {
+        canonical
+            .strip_suffix(suffix.as_str())
+            .and_then(|file| view.const_exports(file))
+            .is_some_and(|names| names.iter().any(|entry| const_export_covers(entry, name)))
+    };
+    let mut holders = match classify_alias_call(unit_targets, &qualified, &exports) {
+        AliasResolution::Global | AliasResolution::Unknown => return ConstHolders::NoAlias,
+        AliasResolution::Ambiguous { alias, base, files } => {
+            return ConstHolders::Ambiguous { alias, base, files };
+        }
+        AliasResolution::Canonical(canonical) => {
+            let Some(file) = canonical.strip_suffix(suffix.as_str()) else {
+                return ConstHolders::NoAlias;
+            };
+            vec![file.to_string()]
+        }
+        AliasResolution::Any { mut files, .. } => {
+            let mut files: Vec<String> = files.drain().collect();
+            files.sort();
+            files
+        }
+    };
+    holders.retain(|file| {
+        view.const_exports(file)
+            .is_some_and(|names| names.iter().any(|entry| const_export_covers(entry, name)))
+    });
+    ConstHolders::Found(holders)
+}
+
+/// Failure modes of [`chase_const_forward`], rendered by each caller
+/// with its own position context (static line/col, runtime none,
+/// eager file attribution). Wording lives here once, on [`std::fmt::Display`],
+/// so diagnostics cannot drift between the twins.
+#[derive(Debug)]
+pub(super) enum ForwardError {
+    /// The holder file itself is gone from the view.
+    Unknown { original: String },
+    /// A forward hop lands where the base is missing.
+    Broken {
+        original: String,
+        hop: String,
+        detail: BrokenDetail,
+    },
+    /// One file forwards the same base from several aliases.
+    Split { original: String, hops: Vec<String> },
+    /// Hops revisit a spelling. Import cycles are rejected before
+    /// resolution, so this is defense in depth.
+    Cycle { chain: Vec<String> },
+    /// One hop resolves to several overlapping files.
+    HopAmbiguous {
+        alias: String,
+        base: String,
+        files: HashSet<String>,
+    },
+}
+
+/// Why a forward hop lands nowhere.
+#[derive(Debug)]
+pub(super) enum BrokenDetail {
+    /// The terminal file holds the base as an unexported `CONST`.
+    UnexportedConst,
+    /// The terminal file holds the base as a `LET`.
+    Let,
+    /// Nothing there answers to the base.
+    Absent,
+}
+
+impl std::fmt::Display for ForwardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ForwardError::Unknown { original } => write!(f, "unknown CONST `{original}`"),
+            ForwardError::Broken {
+                original,
+                hop,
+                detail,
+            } => {
+                let base = base_name(hop);
+                let detail = match detail {
+                    BrokenDetail::UnexportedConst => format!(
+                        "module holds `{base}` as CONST but does not export it: add `EXPORT CONST ${base}`"
+                    ),
+                    BrokenDetail::Let => format!(
+                        "`{base}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+                    ),
+                    BrokenDetail::Absent => {
+                        let (forward, _) = split_qualified(hop).unwrap_or(("", base));
+                        format!("no import alias `{forward}` exports `{base}`")
+                    }
+                };
+                write!(
+                    f,
+                    "unknown CONST `{original}`: re-export `{hop}` does not resolve: {detail}"
+                )
+            }
+            ForwardError::Split { original, hops } => write!(
+                f,
+                "ambiguous CONST `{original}`: re-exported from {}; export exactly one source",
+                hops.join(" and ")
+            ),
+            ForwardError::Cycle { chain } => {
+                write!(f, "CONST re-export cycle detected: {}", chain.join(" -> "))
+            }
+            ForwardError::HopAmbiguous { alias, base, files } => write!(
+                f,
+                "{}",
+                ambiguous_alias_message(alias, base, files).replacen("function", "CONST", 1)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ForwardError {}
+
+/// Follow qualified `EXPORT CONST $ALIAS::NAME` forwards from `file`
+/// to the files holding the stored bare binding, resolving each hop
+/// in the exporting file's own unit. A local bare definition shadows
+/// forwards; disjoint-guard branches each chase to their own
+/// terminal, so all terminals return (callers apply their own
+/// multi-holder policy). Each hop preserves the base name.
+pub(super) fn chase_const_forward<S: ModuleGraphView>(
+    view: &S,
+    file: &str,
+    name: &str,
+    original: &str,
+) -> Result<Vec<String>, ForwardError> {
+    let mut terminals: Vec<String> = Vec::new();
+    chase_from(view, file, name, original, &mut Vec::new(), &mut terminals)?;
+    terminals.sort();
+    terminals.dedup();
+    Ok(terminals)
+}
+
+fn chase_from<S: ModuleGraphView>(
+    view: &S,
+    current: &str,
+    name: &str,
+    original: &str,
+    chain: &mut Vec<String>,
+    terminals: &mut Vec<String>,
+) -> Result<(), ForwardError> {
+    let suffix = const_canonical_suffix(name);
+    let covering = |canonical: &str| {
+        canonical
+            .strip_suffix(suffix.as_str())
+            .and_then(|file| view.const_exports(file))
+            .is_some_and(|names| names.iter().any(|entry| const_export_covers(entry, name)))
+    };
+    let mut current = current.to_string();
+    loop {
+        let Some(names) = view.const_exports(current.as_str()) else {
+            return Err(ForwardError::Unknown {
+                original: original.to_string(),
+            });
+        };
+        if names.iter().any(|entry| entry == name) {
+            terminals.push(current);
+            return Ok(());
+        }
+        let mut aliases: Vec<&str> = Vec::new();
+        for entry in names {
+            if let Some((alias, base)) = split_qualified(entry)
+                && base == name
+                && !aliases.contains(&alias)
+            {
+                aliases.push(alias);
+            }
+        }
+        if aliases.is_empty() {
+            if chain.is_empty() {
+                return Err(ForwardError::Unknown {
+                    original: original.to_string(),
+                });
+            }
+            let hop = chain.last().expect("chain never empty").clone();
+            let detail = match view.binding(current.as_str(), name) {
+                BindingPresence::Const => BrokenDetail::UnexportedConst,
+                BindingPresence::Let => BrokenDetail::Let,
+                BindingPresence::Absent => BrokenDetail::Absent,
+            };
+            return Err(ForwardError::Broken {
+                original: original.to_string(),
+                hop,
+                detail,
+            });
+        }
+        if aliases.len() > 1 {
+            let mut hops: Vec<String> = aliases.iter().map(|alias| qualify(alias, name)).collect();
+            hops.sort();
+            return Err(ForwardError::Split {
+                original: original.to_string(),
+                hops,
+            });
+        }
+        let forward = aliases[0];
+        let hop = qualify(forward, name);
+        if chain.contains(&hop) {
+            chain.push(hop);
+            return Err(ForwardError::Cycle {
+                chain: chain.clone(),
+            });
+        }
+        chain.push(hop.clone());
+        let targets = view.alias_targets(current.as_str());
+        match classify_alias_call(&targets, &hop, &covering) {
+            AliasResolution::Global | AliasResolution::Unknown => {
+                return Err(ForwardError::Broken {
+                    original: original.to_string(),
+                    hop,
+                    detail: BrokenDetail::Absent,
+                });
+            }
+            AliasResolution::Ambiguous { alias, base, files } => {
+                return Err(ForwardError::HopAmbiguous { alias, base, files });
+            }
+            AliasResolution::Canonical(canonical) => {
+                let Some(next) = canonical.strip_suffix(suffix.as_str()) else {
+                    return Err(ForwardError::Unknown {
+                        original: original.to_string(),
+                    });
+                };
+                current = next.to_string();
+            }
+            AliasResolution::Any { mut files, .. } => {
+                let mut covering: Vec<String> = files
+                    .drain()
+                    .filter(|file| {
+                        view.const_exports(file).is_some_and(|names| {
+                            names.iter().any(|entry| const_export_covers(entry, name))
+                        })
+                    })
+                    .collect();
+                covering.sort();
+                match covering.len() {
+                    0 => {
+                        return Err(ForwardError::Broken {
+                            original: original.to_string(),
+                            hop,
+                            detail: BrokenDetail::Absent,
+                        });
+                    }
+                    1 => {
+                        current = covering.into_iter().next().expect("len checked");
+                    }
+                    _ => {
+                        for branch in covering {
+                            let mut branch_chain = chain.clone();
+                            chase_from(
+                                view,
+                                branch.as_str(),
+                                name,
+                                original,
+                                &mut branch_chain,
+                                terminals,
+                            )?;
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+}
 /// Whether a disjoint-alias template call names a script function,
 /// owned here so every placeholder path agrees with `resolve_call`:
 /// visible only when no host-harvest branch competes (`!has_host`)
@@ -463,6 +945,12 @@ pub(super) struct FuncDefData {
     /// lexical frames miss. `None` for entry/REPL definitions, which
     /// stay params-only.
     pub(super) module: Option<String>,
+    /// Definition-site jail (#322): the workspace selection and cwd
+    /// as they stood when this `FUNC` was defined. `Some` for
+    /// definitions executed at file top level (entry or module init);
+    /// `None` for call-time materializations and bodies, which must
+    /// never capture caller ambient (the file fallback applies).
+    pub(super) def_jail: Option<(WorkspaceSelection, GuardedPath)>,
 }
 
 /// Zero value for an omitted trailing optional script param, by
@@ -819,6 +1307,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TextStartsWith::registration(),
             TextEndsWith::registration(),
             Contains::registration(),
+            Unique::registration(),
             Len::registration(),
             TextCount::registration(),
             TextCountMatches::registration(),
@@ -841,6 +1330,33 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// Single lookup for every callable: script, pure, or stateful.
     pub(super) fn get(&self, name: &str) -> Option<FuncEntry<P>> {
         self.entries.get(name).cloned()
+    }
+
+    /// Number of live function scope frames. Callers record this as
+    /// their frame floor so nested lookup stays within the current
+    /// call (or init), never reaching caller frames.
+    pub(super) fn scope_depth(&self) -> usize {
+        self.scopes.len()
+    }
+
+    /// Frame-2..N lookup (#322): innermost scope frame at or above
+    /// `floor` defining `SCRIPT::BASE`, innermost first. The live
+    /// slot always holds the innermost defining frame's value
+    /// (save/restore discipline), so a hit here is definitionally
+    /// lexical: nested defs shadow everything below them with no
+    /// owner tags consulted. Cross-unit exclusion comes from the
+    /// caller choosing `floor` (call/init boundary), never from
+    /// inspecting whose definition was found.
+    pub(super) fn get_scoped(&self, base: &str, floor: usize) -> Option<FuncEntry<P>> {
+        let qualified = qualify(SCRIPT_MODULE_NAME, base);
+        let len = self.scopes.len();
+        let start = floor.min(len);
+        for frame in self.scopes[start..].iter().rev() {
+            if frame.defined.contains(&qualified) {
+                return self.entries.get(&qualified).cloned();
+            }
+        }
+        None
     }
 
     /// Single lazy miss classifier for runtime placeholder paths with
@@ -1076,6 +1592,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         is_async: bool,
         body: &[Step],
         module: Option<&str>,
+        def_jail: Option<(WorkspaceSelection, GuardedPath)>,
     ) -> Result<()> {
         let qualified = qualify(SCRIPT_MODULE_NAME, name);
         let shadowable = matches!(
@@ -1138,6 +1655,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     is_async,
                     body: body.to_vec(),
                     module: module.map(|m| m.to_string()),
+                    def_jail,
                 }),
             },
         );
@@ -1231,6 +1749,11 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     is_async,
                     body: body.to_vec(),
                     module: Some(defining.to_string()),
+                    // Harvest registration never captures a jail: it
+                    // runs in the importer context, so capturing here
+                    // would leak caller ambient into the defining
+                    // file. The file fallback applies at call time.
+                    def_jail: None,
                 }),
             },
         );
@@ -1241,6 +1764,26 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             }
         }
         Ok(())
+    }
+
+    /// Backfill a definition-site jail onto an import-registered
+    /// canonical entry (#322). Imports register canonical slots
+    /// before init runs, so they start jail-less; the first
+    /// top-level definition seals them exactly once, mirroring the
+    /// file frame. Later definitions never overwrite. Harvest-only
+    /// registrations stay `None`: without init there is no
+    /// definition site to seal.
+    pub(super) fn seal_canonical_jail(
+        &mut self,
+        canonical: &str,
+        jail: (WorkspaceSelection, GuardedPath),
+    ) {
+        if let Some(entry) = self.entries.get_mut(canonical)
+            && let FuncBody::Script(def) = &mut entry.body
+            && def.def_jail.is_none()
+        {
+            def.def_jail = Some(jail);
+        }
     }
 
     /// Open a lexical scope frame for script definitions. Native entries
@@ -1266,17 +1809,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         }
     }
 
-    /// True when `name` is an interpreted script definition (needing call
-    /// scoping and depth budgeting through `call_func_value` rather than
-    /// inline evaluation). Callers resolve file-aliased spellings to
-    /// the canonical key first (see `resolve_file_call_key`).
-    pub(super) fn contains_script(&self, name: &str) -> bool {
-        matches!(
-            self.entries.get(name).map(|entry| &entry.body),
-            Some(FuncBody::Script(_))
-        )
-    }
-
     /// Registry lookup key for a runtime call-site spelling, through
     /// the shared alias-target matcher.
     pub(super) fn resolve_file_call_key(
@@ -1296,17 +1828,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         }
     }
 
-    /// Clone the pure fn for `name` (ending the registry borrow) so callers
-    /// can invoke it without holding `&self` across a `&mut StepCtx` use.
-    /// Dual entries answer with their template arm.
-    fn clone_pure_fn(&self, name: &str) -> Option<PureFn> {
-        match self.entries.get(name)?.body {
-            FuncBody::Pure(ref func) => Some(Arc::clone(func)),
-            FuncBody::Both { ref pure, .. } => Some(Arc::clone(pure)),
-            _ => None,
-        }
-    }
-
     /// Shared snapshot of every pure entry, nested by module and base
     /// name. Cloning the `Arc` is refcount-only: placeholder dispatch
     /// borrows this per expansion with no map copies.
@@ -1318,18 +1839,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// run-start type tag validation.
     pub(super) fn all_metas(&self) -> Vec<FuncMeta> {
         self.entries_metas()
-    }
-
-    /// Clone the ctx fn for `name` (ending the registry borrow) so callers
-    /// can invoke it with `&mut StepCtx` without double-borrowing state.
-    /// Dual entries answer with their stateful arm, which is the full
-    /// behavior wherever step IO exists.
-    fn clone_ctx_fn(&self, name: &str) -> Option<NativeFn<P>> {
-        match self.entries.get(name)?.body {
-            FuncBody::Ctx(ref func) => Some(Arc::clone(func)),
-            FuncBody::Both { ref ctx, .. } => Some(Arc::clone(ctx)),
-            _ => None,
-        }
     }
 
     fn meta(&self, name: &str) -> Option<FuncMeta> {
@@ -2135,10 +2644,14 @@ fn get(
     Ok(map.get(&key).cloned().unwrap_or(default))
 }
 
-/// Insert one key into a map.
+/// Insert one key into a map, returning the extended map.
 ///
 /// Fails on duplicates so two entries sharing a key fail the run
 /// instead of silently shadowing each other.
+///
+/// A frozen (`CONST`-derived) map fails instead of deriving: `CONST`
+/// bindings never produce a mutable map, so snapshot explicitly
+/// through a `LET` copy of unfrozen data if derivation is intended.
 ///
 #[oxdock_func(pure, returns = TypeTag::MapOf(std::sync::Arc::new(TypeTag::Any)))]
 #[example(
@@ -2151,6 +2664,7 @@ fn get(
 )]
 fn map_set(
     /// Map to insert into.
+    #[reject_frozen]
     map: BTreeMap<String, Value>,
     /// Key to insert; duplicates fail.
     key: String,
@@ -2308,6 +2822,10 @@ fn type_of(
 /// other. `overwrite` lets later files win, for environment overlays.
 /// Non MAP elements fail naming their position.
 ///
+/// A frozen (`CONST`-derived) list or element fails instead of
+/// deriving, mirroring `MAP_SET`: `CONST` bindings never produce a
+/// mutable map.
+///
 #[oxdock_func(pure, returns = TypeTag::MapOf(std::sync::Arc::new(TypeTag::Any)))]
 #[example(
     name = "merge",
@@ -2320,6 +2838,7 @@ fn type_of(
 )]
 fn merge_maps(
     /// LIST of MAPs to merge in order.
+    #[reject_frozen]
     maps: Vec<BTreeMap<String, Value>>,
     /// Duplicate policy.
     #[values("fail_on_duplicate", "overwrite")]
@@ -4602,6 +5121,64 @@ fn contains(
     ))
 }
 
+/// Deduplicate a `LIST`, keeping the first occurrence of each member.
+///
+/// Membership uses strict `values_equal` (numeric `INT` and `FLOAT`
+/// compare across types, every other cross-type pair is unequal,
+/// matching `CONTAINS` and `==`), so `[1, 1.0]` collapses to one
+/// element while `["1", 1]` keeps both. Order is first occurrence;
+/// the empty list binds empty, never failing.
+#[oxdock_func(pure, returns = TypeTag::List)]
+#[example(
+    name = "deduplicate",
+    code = r###"
+    # First occurrences win, later repeats drop.
+    IMPORT [STD]
+    LET $seen: LIST<STRING> = UNIQUE(["a", "b", "a", "c", "b"])
+    ASSERT_EQ $seen.0 "a"
+    ASSERT_EQ $seen.1 "b"
+    ASSERT_EQ $seen.2 "c"
+    ASSERT_EQ LEN($seen) 3
+
+    # The empty list stays empty.
+    LET $empty: LIST<STRING> = UNIQUE([])
+    ASSERT_EQ LEN($empty) 0
+    "###
+)]
+#[example(
+    name = "strict membership",
+    code = r###"
+    # Numerics collapse across INT and FLOAT like CONTAINS.
+    IMPORT [STD]
+    LET $nums: LIST<ANY> = UNIQUE([1, 2.0, 1, 3])
+    ASSERT_EQ $nums.0 1
+    ASSERT_EQ $nums.1 2.0
+    ASSERT_EQ $nums.2 3
+    ASSERT_EQ LEN($nums) 3
+
+    # Stringified numbers never coerce to integers.
+    LET $mixed: LIST<ANY> = UNIQUE(["1", 1])
+    ASSERT_EQ $mixed.0 "1"
+    ASSERT_EQ $mixed.1 1
+    ASSERT_EQ LEN($mixed) 2
+    "###
+)]
+fn unique(
+    /// List to deduplicate.
+    items: Vec<Value>,
+) -> Result<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(items.len());
+    for item in items {
+        if !out
+            .iter()
+            .any(|seen| super::args::values_equal(seen, &item))
+        {
+            out.push(item);
+        }
+    }
+    Ok(Value::list(out))
+}
+
 /// Count the elements of a text, list, or map as an `INT`.
 ///
 /// Strings count Unicode scalars: multibyte characters count once
@@ -5248,24 +5825,12 @@ impl<P: ProcessManager> ExecState<P> {
         None
     }
 
-    pub(super) fn clone_native_pure(&self, name: &str) -> Option<PureFn> {
-        self.functions.clone_pure_fn(name)
-    }
-
     /// Shared snapshot of every registered pure function for
     /// placeholder and host driven expansion. Public so host crates
     /// resolve calls through the live registry instead of hardcoding
     /// module or function names. Cloning the `Arc` never copies the map.
     pub fn pure_function_table(&self) -> Arc<PureTable> {
         self.functions.pure_shared()
-    }
-
-    pub(super) fn clone_native_ctx(&self, name: &str) -> Option<NativeFn<P>> {
-        self.functions.clone_ctx_fn(name)
-    }
-
-    pub(super) fn native_meta(&self, name: &str) -> Option<FuncMeta> {
-        self.functions.meta(name)
     }
 }
 
@@ -5553,5 +6118,241 @@ mod tests {
         let back = shell_words::split(&joined).expect("join output must parse");
         assert_eq!(back, words);
         assert!(shell_words::split("unbalanced \"quote").is_err());
+    }
+
+    /// Fake module graph for the shared forward walk: export lists,
+    /// per-file alias targets, and per-file bindings set directly,
+    /// so every chase branch pins without files or execution.
+    struct FakeView {
+        exports: HashMap<String, Vec<String>>,
+        targets: HashMap<String, AliasTargets>,
+        bindings: HashMap<String, HashMap<String, bool>>,
+    }
+
+    impl ModuleGraphView for FakeView {
+        fn const_exports(&self, file: &str) -> Option<&[String]> {
+            self.exports.get(file).map(Vec::as_slice)
+        }
+
+        fn alias_targets(&self, file: &str) -> AliasTargets {
+            self.targets.get(file).cloned().unwrap_or_default()
+        }
+
+        fn binding(&self, file: &str, name: &str) -> BindingPresence {
+            match self.bindings.get(file).and_then(|names| names.get(name)) {
+                Some(true) => BindingPresence::Const,
+                Some(false) => BindingPresence::Let,
+                None => BindingPresence::Absent,
+            }
+        }
+    }
+
+    fn fake_targets(pairs: &[(&str, &str)]) -> AliasTargets {
+        let mut targets = AliasTargets::new();
+        for (alias, file) in pairs {
+            targets
+                .entry((*alias).to_string())
+                .or_default()
+                .push((Some((*file).to_string()), None));
+        }
+        targets
+    }
+
+    fn os_guard(os: &str) -> GuardExpr {
+        GuardExpr::Predicate(oxdock_parser::Guard::Attr {
+            ns: oxdock_parser::Ns::Os,
+            key: None,
+            val: Some(os.to_string()),
+        })
+    }
+
+    #[test]
+    fn chase_resolves_bare_and_single_forward() {
+        // Bare entries terminate in place; one forward hop lands on
+        // the defining file; chains compose hop by hop.
+        let mut view = FakeView {
+            exports: HashMap::from([
+                ("a".to_string(), vec!["N".to_string()]),
+                ("b".to_string(), vec!["A::N".to_string()]),
+                ("c".to_string(), vec!["B::N".to_string()]),
+            ]),
+            targets: HashMap::from([
+                ("u".to_string(), fake_targets(&[("B", "b")])),
+                ("b".to_string(), fake_targets(&[("A", "a")])),
+                ("c".to_string(), fake_targets(&[("B", "b")])),
+            ]),
+            bindings: HashMap::new(),
+        };
+        assert_eq!(
+            chase_const_forward(&view, "a", "N", "U::N").expect("bare"),
+            vec!["a".to_string()]
+        );
+        assert_eq!(
+            chase_const_forward(&view, "b", "N", "U::N").expect("forward"),
+            vec!["a".to_string()]
+        );
+        view.targets
+            .insert("u".to_string(), fake_targets(&[("C", "c")]));
+        assert_eq!(
+            chase_const_forward(&view, "c", "N", "U::N").expect("chain"),
+            vec!["a".to_string()]
+        );
+    }
+
+    #[test]
+    fn chase_prefers_bare_over_forwards() {
+        // A local bare definition shadows forwards of the same base:
+        // the file answers for its own binding.
+        let view = FakeView {
+            exports: HashMap::from([("b".to_string(), vec!["N".to_string(), "A::N".to_string()])]),
+            targets: HashMap::from([("b".to_string(), fake_targets(&[("A", "a")]))]),
+            bindings: HashMap::new(),
+        };
+        assert_eq!(
+            chase_const_forward(&view, "b", "N", "U::N").expect("bare wins"),
+            vec!["b".to_string()]
+        );
+    }
+
+    #[test]
+    fn chase_rejects_split_forwards() {
+        // Two forwards of one base in one file fail instead of
+        // picking one.
+        let view = FakeView {
+            exports: HashMap::from([(
+                "b".to_string(),
+                vec!["A::N".to_string(), "C::N".to_string()],
+            )]),
+            targets: HashMap::new(),
+            bindings: HashMap::new(),
+        };
+        let err = format!(
+            "{}",
+            chase_const_forward(&view, "b", "N", "U::N").expect_err("split must fail")
+        );
+        assert!(err.contains("ambiguous CONST `U::N`"), "{err}");
+        assert!(err.contains("A::N") && err.contains("C::N"), "{err}");
+    }
+
+    #[test]
+    fn chase_names_broken_link_detail() {
+        // A hop landing nowhere names the break: missing binding,
+        // unexported CONST, or LET terminal each render distinctly.
+        let view = FakeView {
+            exports: HashMap::from([
+                ("b".to_string(), vec!["A::M".to_string()]),
+                ("c".to_string(), vec!["A::P".to_string()]),
+                ("d".to_string(), vec!["A::Q".to_string()]),
+                ("a".to_string(), Vec::new()),
+            ]),
+            targets: HashMap::from([
+                ("b".to_string(), fake_targets(&[("A", "a")])),
+                ("c".to_string(), fake_targets(&[("A", "a")])),
+                ("d".to_string(), fake_targets(&[("A", "a")])),
+            ]),
+            bindings: HashMap::from([(
+                "a".to_string(),
+                HashMap::from([("P".to_string(), true), ("Q".to_string(), false)]),
+            )]),
+        };
+        let err = format!(
+            "{}",
+            chase_const_forward(&view, "b", "M", "U::M").expect_err("missing must fail")
+        );
+        assert!(err.contains("does not resolve"), "{err}");
+        assert!(err.contains("no import alias `A` exports `M`"), "{err}");
+        let err = format!(
+            "{}",
+            chase_const_forward(&view, "c", "P", "U::P").expect_err("unexported must fail")
+        );
+        assert!(
+            err.contains("holds `P` as CONST but does not export it"),
+            "{err}"
+        );
+        let err = format!(
+            "{}",
+            chase_const_forward(&view, "d", "Q", "U::Q").expect_err("LET must fail")
+        );
+        assert!(
+            err.contains("is a LET binding and cannot be exported"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn chase_rejects_cycles() {
+        // Mutual forwards never resolve: the walk names the chain
+        // instead of recursing forever.
+        let view = FakeView {
+            exports: HashMap::from([
+                ("a".to_string(), vec!["B::N".to_string()]),
+                ("b".to_string(), vec!["A::N".to_string()]),
+            ]),
+            targets: HashMap::from([
+                ("a".to_string(), fake_targets(&[("B", "b")])),
+                ("b".to_string(), fake_targets(&[("A", "a")])),
+            ]),
+            bindings: HashMap::new(),
+        };
+        let err = format!(
+            "{}",
+            chase_const_forward(&view, "a", "N", "U::N").expect_err("cycle must fail")
+        );
+        assert!(err.contains("re-export cycle"), "{err}");
+    }
+
+    #[test]
+    fn chase_unions_disjoint_guard_branches() {
+        // One forward over disjoint platform imports chases each live
+        // branch to its own terminal instead of failing ambiguous.
+        let mut guarded = AliasTargets::new();
+        guarded.insert(
+            "A".to_string(),
+            vec![
+                (Some("lin".to_string()), Some(os_guard("linux"))),
+                (Some("mac".to_string()), Some(os_guard("macos"))),
+            ],
+        );
+        let view = FakeView {
+            exports: HashMap::from([
+                ("b".to_string(), vec!["A::N".to_string()]),
+                ("lin".to_string(), vec!["N".to_string()]),
+                ("mac".to_string(), vec!["N".to_string()]),
+            ]),
+            targets: HashMap::from([("b".to_string(), guarded)]),
+            bindings: HashMap::new(),
+        };
+        assert_eq!(
+            chase_const_forward(&view, "b", "N", "U::N").expect("disjoint branches"),
+            vec!["lin".to_string(), "mac".to_string()]
+        );
+    }
+
+    #[test]
+    fn holder_classification_sorts_and_rejects() {
+        // Holders come back sorted; unknown aliases and overlapping
+        // files report through their own variants.
+        let view = FakeView {
+            exports: HashMap::from([
+                ("b".to_string(), vec!["N".to_string()]),
+                ("c".to_string(), vec!["N".to_string()]),
+            ]),
+            targets: HashMap::new(),
+            bindings: HashMap::new(),
+        };
+        let unit = fake_targets(&[("B", "b"), ("B", "c")]);
+        match const_holder_files(&view, &unit, "B", "N") {
+            ConstHolders::Ambiguous { .. } => {}
+            other => panic!("overlapping holders must be ambiguous, got {other:?}"),
+        }
+        match const_holder_files(&view, &unit, "Z", "N") {
+            ConstHolders::NoAlias => {}
+            other => panic!("unknown alias must report NoAlias, got {other:?}"),
+        }
+        let unit = fake_targets(&[("B", "b")]);
+        match const_holder_files(&view, &unit, "B", "N") {
+            ConstHolders::Found(files) => assert_eq!(files, vec!["b".to_string()]),
+            other => panic!("single holder must be found, got {other:?}"),
+        }
     }
 }

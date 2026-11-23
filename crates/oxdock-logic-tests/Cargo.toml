@@ -27,7 +27,6 @@ libtest-mimic.workspace = true
 oxdock-core.workspace = true
 oxdock-fixture.workspace = true
 oxdock-fs.workspace = true
-oxdock-net-plugin.workspace = true
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
@@ -42,6 +41,7 @@ indoc.workspace = true
 line-ending.workspace = true
 oxdock-macros.workspace = true
 oxdock-markdown-plugin.workspace = true
+oxdock-net-plugin.workspace = true
 oxdock-parser = { workspace = true, features = ["proc-macro-api"] }
 oxdock-ssh-plugin.workspace = true
 proc-macro2.workspace = true

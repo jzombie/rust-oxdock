@@ -40,11 +40,9 @@ define_pipeline! {
     StepKind::AssertContains { .. } => exec::dispatch_assert_contains,
     StepKind::Exit(..) => exec::dispatch_exit,
     StepKind::Fail { .. } => exec::dispatch_fail,
-    StepKind::AssignAsync { .. } => exec::dispatch_assign_async_step,
+    StepKind::Bind { .. } => exec::dispatch_bind_step,
     StepKind::Set { .. } => exec::dispatch_set,
     StepKind::Await { .. } => exec::dispatch_await_step,
-    StepKind::AssignCapture { .. } => exec::dispatch_assign_capture_step,
-    StepKind::AwaitCapture { .. } => exec::dispatch_await_capture_step,
     StepKind::Cancel { .. } => exec::dispatch_cancel_step,
     StepKind::Timeout { .. } => exec::dispatch_timeout_step,
     StepKind::Isolated { .. } => exec::dispatch_isolated_step,
@@ -1388,22 +1386,22 @@ mod tests {
         // The mid level re-adds OUTER; the deep level drops it again, so
         // the three dumps prove pass-through, re-adding, and narrowing.
         // PATH needs no allowlist: the seed provides it at every level.
+        // Dumps run inline (no FUNC): callees reset env to the seed,
+        // so only inline scopes observe the ISOLATED narrowing here.
         let script = indoc!(
             r#"
             ENV OUTER=outer-val
-            FUNC DUMPENV(): STRING {
-                [family:unix] LET $o: STRING = RUN ["sh", "-c", "env"]
-                [family:windows] LET $o: STRING = RUN ["cmd", "/c", "set"]
-                RETURN $o
-            }
-            LET $top: STRING = DUMPENV()
+            [family:unix] LET $top: STRING = RUN ["sh", "-c", "env"]
+            [family:windows] LET $top: STRING = RUN ["cmd", "/c", "set"]
             WRITE top.txt "{{ $top }}"
             ISOLATED {
                 INHERIT_ENV [OUTER]
-                LET $mid: STRING = DUMPENV()
+                [family:unix] LET $mid: STRING = RUN ["sh", "-c", "env"]
+                [family:windows] LET $mid: STRING = RUN ["cmd", "/c", "set"]
                 WRITE mid.txt "{{ $mid }}"
                 ISOLATED {
-                    LET $deep: STRING = DUMPENV()
+                    [family:unix] LET $deep: STRING = RUN ["sh", "-c", "env"]
+                    [family:windows] LET $deep: STRING = RUN ["cmd", "/c", "set"]
                     WRITE deep.txt "{{ $deep }}"
                 }
             }

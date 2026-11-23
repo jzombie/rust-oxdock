@@ -39,6 +39,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`SWITCH`](#switch) | `SWITCH [<expr>] { CASE <expr>[, <expr> ...] { <commands> } ... [DEFAULT { <commands> }] }` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
+| [`CONST`](#const) | `CONST $NAME: TYPE = <expr> \| CONST $NAME: PIPE \| CONST $NAME: TYPE = ASYNC { <commands> } \| CONST $NAME: TYPE = <command> \| CONST $NAME: TYPE = AWAIT $TASK \| CONST $NAME: TYPE = { <commands> }` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE<T> = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
@@ -910,6 +911,213 @@ ASSERT_EQ $t "absent"
 ```
 
 
+### CONST
+
+Bind deeply immutable script-local values.
+
+**Syntax:** `CONST $NAME: TYPE = <expr> | CONST $NAME: PIPE | CONST $NAME: TYPE = ASYNC { <commands> } | CONST $NAME: TYPE = <command> | CONST $NAME: TYPE = AWAIT $TASK | CONST $NAME: TYPE = { <commands> }`
+
+Declares a script-local constant with an explicit type. The
+right-hand side accepts every `LET` form (expression,
+capture, `ASYNC`, `AWAIT`, inline block, bare `PIPE`).
+
+Immutability is deep and total: reassignment (`$var = ...`),
+`LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS`
+on a `CONST` value all fail. Nested containers freeze with
+the binding, so reaching a list or map through a `CONST`
+never exposes a mutable handle. Reads use `$NAME`,
+exactly like `LET` reads.
+
+`CONST` and `LET` share one namespace: declaring either
+twice in the same scope frame is a redeclaration error.
+A `CONST` name cannot collide with a reserved word or
+another binding. `FUNC` names live in a separate namespace
+and may share the spelling; only `EXPORT`s share one
+registry, so at most one of a same-named `FUNC`/`CONST`
+pair may be exported. Shadowing an outer binding in
+an inner block stays legal and the inner declaration
+reverts on block exit.
+
+A file's top-level `CONST`s read inside that file's
+own `FUNC` bodies: immutable file state is visible by
+scope, while mutable state crosses only as explicit
+arguments. Visibility is declaration-ordered: a call
+landing before the `CONST` executes fails instead of
+reading uninitialized memory. `$ALIAS::NAME` reads work
+in bodies exactly like at top level. Writes stay
+forbidden everywhere: a body mutating a file `CONST`
+fails with the same message as a top-level write.
+
+`CONST` is the only variable binding an `EXPORT` can name
+(`EXPORT CONST $NAME`, `EXPORT [CONST $A, $B]`): `LET`
+bindings never cross the module boundary. Importers read
+the value as `$ALIAS::NAME` (see IMPORT).
+
+
+**Examples:**
+
+**Example: const**
+
+```oxdock
+# CONST reads through `$`, like LET.
+CONST $NAME: STRING = "world"
+ECHO "hello, {{ $NAME }}"
+ASSERT_CONTAINS stdout "hello, world"
+
+# Containers freeze with the binding.
+CONST $ITEMS: LIST<STRING> = ["a", "b"]
+ASSERT_CONTAINS {{ $ITEMS }} "a"
+
+# File CONSTs read inside the file's own FUNCs.
+CONST $GREETING: STRING = "hi"
+FUNC SHOUT(): STRING {
+    RETURN $GREETING
+}
+LET $s: STRING = SHOUT()
+ASSERT_EQ $s "hi"
+```
+
+**Example: const alias reads across modules**
+
+```oxdock roots:unified
+# Exported CONSTs cross only as alias reads, never bare.
+IMPORT [STD]
+WRITE lib.oxfile """
+    CONST $VERSION: STRING = "1.2.3"
+    CONST $BUILD: INT = 4
+    EXPORT CONST $VERSION
+    EXPORT [CONST $BUILD]
+    """
+
+# The entry reads the exports at top level, in math, and in templates.
+WRITE main.oxfile """
+    IMPORT ["lib.oxfile" AS LIB]
+    LET $v: STRING = $LIB::VERSION
+    ASSERT_EQ $v "1.2.3"
+    LET $e: INT = $LIB::BUILD * 2
+    ASSERT_EQ $e 8
+    LET $w: STRING = "v\{{ $LIB::VERSION }}"
+    ASSERT_EQ $w "v1.2.3"
+    ECHO "export-ok \{{ $LIB::VERSION }}"
+    """
+
+# A child run proves the import from a fresh interpreter.
+LET $exe: STRING = INTERPRETER()
+LET $out: STRING = RUN [$exe, "main.oxfile"]
+ASSERT_CONTAINS $out "export-ok 1.2.3"
+```
+
+**Example: const alias reads inside func bodies**
+
+```oxdock roots:unified
+# Alias reads work inside importer FUNC bodies exactly like at top level.
+IMPORT [STD]
+WRITE lib.oxfile """
+    CONST $VERSION: STRING = "1.2.3"
+    EXPORT CONST $VERSION
+    """
+
+# The importer FUNCs return alias reads from expressions and templates.
+WRITE main.oxfile """
+    IMPORT ["lib.oxfile" AS LIB]
+    FUNC SHOW(): STRING {
+        RETURN $LIB::VERSION
+    }
+    FUNC LABELED(): STRING {
+        RETURN "v\{{ $LIB::VERSION }}"
+    }
+    LET $s: STRING = SHOW()
+    ASSERT_EQ $s "1.2.3"
+    LET $t: STRING = LABELED()
+    ASSERT_EQ $t "v1.2.3"
+    ECHO "body-ok \{{ $LIB::VERSION }}"
+    """
+
+# A child run proves body reads from a fresh interpreter.
+LET $exe: STRING = INTERPRETER()
+LET $out: STRING = RUN [$exe, "main.oxfile"]
+ASSERT_CONTAINS $out "body-ok 1.2.3"
+```
+
+**Example: const rejects mutation**
+
+```oxdock expect_error:"cannot mutate CONST"
+# SET on a CONST fails instead of rebinding.
+CONST $N: INT = 1
+$N = 2
+```
+
+**Expected error:** `cannot mutate CONST`
+
+**Example: const rejects append**
+
+```oxdock expect_error:"cannot mutate CONST"
+# LIST_APPEND on a CONST fails instead of pushing.
+CONST $ITEMS: LIST<STRING> = ["a"]
+LIST_APPEND $ITEMS "b"
+```
+
+**Expected error:** `cannot mutate CONST`
+
+**Example: const freeze detaches from its source**
+
+```oxdock
+# Freezing detaches: the LET source stays mutable.
+LET $inner: LIST<STRING> = ["a"]
+CONST $C: LIST<ANY> = [$inner]
+LIST_APPEND $inner "b"
+ASSERT_CONTAINS $inner "b"
+
+# Equality ignores CONST-ness: the frozen copy equals an unfrozen twin.
+LET $twin: LIST<ANY> = [["a"]]
+ASSERT_EQ $C $twin
+```
+
+**Example: const nested freeze**
+
+```oxdock expect_error:"cannot mutate CONST"
+# Nested containers freeze with the binding.
+CONST $C: LIST<ANY> = [["a"]]
+LET $nested: LIST<STRING> = $C.0
+LIST_APPEND $nested "b"
+```
+
+**Expected error:** `cannot mutate CONST`
+
+**Example: const alias shares frozenness**
+
+```oxdock expect_error:"cannot mutate CONST"
+# Aliases share frozenness: copying a CONST never thaws it.
+CONST $C: LIST<STRING> = ["a"]
+LET $alias: LIST<STRING> = $C
+LIST_APPEND $alias "b"
+```
+
+**Expected error:** `cannot mutate CONST`
+
+**Example: const map set fails**
+
+```oxdock expect_error:"cannot mutate CONST"
+# MAP_SET on a CONST fails instead of deriving.
+IMPORT [STD]
+CONST $M: MAP<ANY> = {a: 1}
+LET $z: MAP<ANY> = MAP_SET($M, "x", 1)
+```
+
+**Expected error:** `cannot mutate CONST`
+
+**Example: const merge maps fails**
+
+```oxdock expect_error:"cannot mutate CONST"
+# MERGE_MAPS over a CONST fails instead of merging.
+IMPORT [STD]
+CONST $M: MAP<ANY> = {a: 1}
+LET $n: MAP<ANY> = MERGE_MAPS([$M], "overwrite")
+```
+
+**Expected error:** `cannot mutate CONST`
+
+
 ### MUTATION
 
 Mutate a declared variable.
@@ -989,6 +1197,21 @@ LET $frac_str: STRING = ECHO 2.5
 LET $f: FLOAT = FLOAT($frac_str) + 0.25
 ASSERT_EQ $f 2.75
 ```
+
+**Example: reject keypath target**
+
+```oxdock expect_error:"cannot assign to $M.a"
+# Rebind the whole variable to update one entry.
+IMPORT [STD]
+LET $M: MAP<ANY> = {a: 1}
+$M = MAP_SET($M, "a", 2)
+ASSERT_EQ $M.a 2
+
+# Key paths read in expressions but are never mutation targets.
+$M.a = 3
+```
+
+**Expected error:** `cannot assign to $M.a`
 
 
 ### ASYNC
@@ -1547,7 +1770,22 @@ definition, and an optional param with no zero value
 (records with required fields, unions, handles, custom
 types) fails at definition naming the fix: drop the `?`
 or pass the argument explicitly.
-Bodies run in a fresh variable scope; LETs inside do not leak. A nested
+Bodies run isolated: a fresh variable scope plus the
+callee definition-site jail (workspace, cwd, and env
+reset; only explicit arguments cross, #322). Module
+bodies restore the workspace selection and cwd their
+own top-level left behind, so a lib declaring
+WORKSPACE at the top serves its FUNCs from there no
+matter which workspace the caller sits in; entry
+bodies restore the workspace selection and cwd sealed
+at their definition site (defaulting to the snapshot
+jail when none was set before definition). A FUNC-level
+WORKSPACE or WORKDIR statement overrides the file
+default for that call, and the caller context returns
+on every exit path. Conditional top-level configuration
+uses guards (`[env:FLAG] WORKSPACE LOCAL`): `IF` bodies
+unwind on exit and never become the jail; see IMPORT.
+LETs inside do not leak. A nested
 FUNC definition is scoped to its block and reverts on exit. Names share
 one namespace with native and host-registered functions, which a FUNC
 may never shadow.
@@ -1877,10 +2115,21 @@ Bare calls:
   parse errors, never runtime surprises.
 
 Scope:
-- `IMPORT` is a lowering directive, not a step. It
-  applies from its line to the enclosing block exit,
-  then reverts like `LET` scoping, with no runtime
-  footprint. Guards do not apply to it.
+- A file or harvest `IMPORT` applies from its line to
+  the enclosing block exit, then unwinds like `LET`
+  scoping: reads inside the block resolve, reads past
+  it fail closed. Top-level imports persist for the
+  unit. Module-only imports (`IMPORT [STD]`) register
+  names with no step and no scope.
+- An `IMPORT` that never executes leaves its alias
+  unknown: reads must follow the import in execution
+  order.
+- Guards gate execution: a guarded `IMPORT` runs only
+  where its guard holds. Same-frame duplicates reject
+  at parse unless every entry is guard-gated;
+  all-guarded duplicates resolve per platform when
+  their guards are disjoint, and fail ambiguous on
+  overlap.
 - Two imported modules exporting one name is an
   ambiguity error: qualify the call instead.
 
@@ -1952,9 +2201,11 @@ Paths:
 - Workspace-side, against the importing file's
   directory (entry parent at top level; off-workspace
   entries resolve like stdin against the root).
-- Relative operation paths resolve against the ambient
-  cwd in every file, module or entry alike. `WORKSPACE`
-  and `WORKDIR` mean the same everywhere.
+- Relative operation paths resolve against the
+  defining file's own jail: each module top-level
+  runs isolated in the snapshot jail, and its
+  WORKSPACE and WORKDIR statements establish the
+  context its FUNCs restore on every call (#322).
 - Missing files fail before the first step runs.
   Write-then-import in one script is rejected; check
   libraries into the tree, or combine them at runtime
@@ -1966,18 +2217,30 @@ Module rules (every file import is a module):
   resets to the seed plus the module init's own
   contributions (declared `INHERIT_ENV` names re-read
   from the host on every call). Workspace selection
-  and cwd flow through untouched, so module code
-  observes the same workspace its importer does.
+  and cwd reset to the module top-level jail: the
+  init body runs isolated in the snapshot jail, and
+  the selection plus cwd it leaves behind become the
+  default every FUNC of that file restores on entry,
+  unless the FUNC body overrides them. A module
+  function needing the caller directory takes it as
+  a path argument.
 - Determinism: behavior is a pure function of the
-  script. The same file with the same ambient cwd and
-  selection behaves identically no matter who imports
-  it.
+  file. The same file behaves identically no matter
+  who imports it or which workspace the importer
+  sits in.
 - State: one init per file, shared by every alias.
   Top-level `LET` bindings drain into a single store
   visible to all of the module's functions.
-- Workspace: `WORKSPACE` and `WORKDIR` mean the same
-  in module scope as in entry code, selecting the
-  shared workspace and moving the shared cwd.
+- Workspace: `WORKSPACE` and `WORKDIR` at a module
+  top-level establish that module's jail for its
+  FUNCs; `WORKSPACE` and `WORKDIR` inside a FUNC
+  body override the file default for that call.
+  Caller and callee selections never leak across
+  the call in either direction.
+- Conditional top-level: `IF` bodies unwind on exit,
+  so a `WORKSPACE` inside one never becomes the jail.
+  Guard-gated steps (`[env:FLAG]`) run in place, so
+  they persist: use guards for conditional config.
 - Exports: only `EXPORT`ed top-level `FUNC`s and
   `EXPORT TYPE` aliases cross. Variables never cross.
 - Imports: whole-file or harvest, only exported
@@ -2015,6 +2278,69 @@ WRITE a.txt "hi \{{ env:WHO }}!"
 IMPORT [STD]
 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
 ASSERT_CONTAINS stdout "hi World!"
+```
+
+**Example: module top-level jail**
+
+```oxdock roots:unified
+# A module top-level establishes its own jail: the lib
+# selects WORKSPACE LOCAL and a WORKDIR up front, and
+# its FUNC restores both on entry while the entry sits
+# elsewhere. Unified roots: the child inherits one
+# workspace, so parent and child see the same files.
+IMPORT [STD]
+WRITE lib.oxfile """
+    IMPORT [STD]
+    WORKSPACE LOCAL
+    MKDIR modsub
+    WORKDIR modsub
+    EXPORT [FUNC WHERE]
+    FUNC WHERE(): STRING {
+        LET $c: STRING = CWD()
+        RETURN $c
+    }
+    """
+WRITE main.oxfile """
+    IMPORT [STD, "lib.oxfile" AS LIB]
+    MKDIR entry-sub
+    WORKDIR entry-sub
+    LET $caller: STRING = CWD()
+    LET $callee: STRING = LIB::WHERE()
+    ASSERT_NE $caller $callee
+    LET $base: STRING = STD::PATH_BASE($callee)
+    ECHO "base \{{ $base }}"
+    """
+LET $exe: STRING = INTERPRETER()
+LET $out: STRING = RUN [$exe, "main.oxfile"]
+ASSERT_CONTAINS $out "base modsub"
+```
+
+**Example: blocks unwind, guards persist**
+
+```oxdock
+# Blocks unwind on exit: the WORKDIR inside IF reverts,
+# so it never becomes a module jail. Bare guarded blocks
+# unwind the same way. Guards only skip, never push a
+# scope, so a guard-gated step persists.
+IMPORT [STD]
+WORKSPACE LOCAL
+LET $root: STRING = CWD()
+LET $go: BOOL = true
+IF $go {
+    MKDIR inner
+    WORKDIR inner
+}
+LET $after_if: STRING = CWD()
+ASSERT_EQ $root $after_if
+[bool:true] WORKDIR inner
+LET $after_guard: STRING = CWD()
+ASSERT_NE $root $after_guard
+MKDIR bare
+[bool:true] {
+    WORKDIR bare
+}
+LET $after_bare: STRING = CWD()
+ASSERT_EQ $after_guard $after_bare
 ```
 
 **Example: import missing file fails upfront**
@@ -2211,7 +2537,8 @@ ASSERT_EQ $body "generated-under-workdir"
 
 ```oxdock
 # The block reverts to the starting directory on exit.
-LET $outside: STRING = CWD
+IMPORT [STD]
+LET $outside: STRING = CWD()
 MKDIR project
 
 [bool:true] {
@@ -2219,7 +2546,7 @@ MKDIR project
     WRITE inner.txt inner
 }
 
-LET $back: STRING = CWD
+LET $back: STRING = CWD()
 ASSERT_EQ $back $outside
 LET $body: STRING = READ project/inner.txt
 ASSERT_EQ $body "inner"
@@ -2474,15 +2801,15 @@ ASSERT_EQ stdout "braced:World\nWorld\n"
 **Example: interpolation**
 
 ```oxdock
-# `{{ env:KEY }}` reads the script environment; a bare name
-# resolves a DSL variable instead. Spelling rules:
+# `{{ env:KEY }}` reads the script environment; `$NAME`
+# reads either binding. Spelling rules:
 # `script_env:` is always case-sensitive; `env:` is
 # case-sensitive too, except on Windows where it matches
 # case-insensitively. Every read must be declared first:
 # KEY here comes from the ENV below.
 ENV USER=OxDock
-LET $WHO: STRING = "Ada"
-ECHO "Hello {{ env:USER }}! Hi {{ WHO }}! Again {{ script_env:USER }}!"
+CONST $WHO: STRING = "Ada"
+ECHO "Hello {{ env:USER }}! Hi {{ $WHO }}! Again {{ script_env:USER }}!"
 ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada! Again OxDock!"
 ```
 
@@ -2554,6 +2881,24 @@ ASSERT_CONTAINS stdout "cargo"
 
 LET $t: STRING = PATH_TYPE("x.txt")
 ASSERT_EQ $t "absent"
+```
+
+**Example: run binding reads**
+
+```oxdock
+# The shell line expands templates and `$var` reads before
+# spawning: the shell sees values, never spellings.
+CONST $WHO: STRING = "world"
+LET $tpl: STRING = RUN echo "{{ $WHO }}"
+ASSERT_CONTAINS $tpl "world"
+
+# A bare `$var` outside a template reads the same way.
+LET $sigil: STRING = RUN echo $WHO
+ASSERT_CONTAINS $sigil "world"
+
+# Bare words pass through untouched and never resolve.
+LET $raw: STRING = RUN echo who
+ASSERT_CONTAINS $raw "who"
 ```
 
 
@@ -3346,6 +3691,9 @@ Assert strict equality.
 Compares two evaluated values with typed equality (no coercion:
 `INT(42)` never equals `STRING("42")`), aborting the pipeline
 with a step-numbered error showing expected vs actual otherwise.
+The mismatch error prints both values to stderr, so never
+assert against a live secret: a failure would write it into
+the log.
 
 Both sides are values: `$var`, literals, templates, and calls
 evaluate in memory and never touch disk. Read files explicitly
@@ -3406,7 +3754,9 @@ Assert strict inequality.
 Compares two evaluated values with typed inequality (no coercion:
 `INT(42)` never equals `STRING("42")`), aborting the pipeline
 with a step-numbered error showing expected vs actual when they
-are equal; differing values pass silently.
+are equal; differing values pass silently. The match error
+prints both values to stderr, so never assert against a live
+secret: a failure would write it into the log.
 
 Both sides are values: `$var`, literals, templates, and calls
 evaluate in memory and never touch disk. Read files explicitly
@@ -3623,10 +3973,21 @@ Boolean `true` or `false`.
 ### Value type: LIST
 
 Ordered list of values. Shared heap: cloning bumps a refcount.
+A `CONST`-owned list is deeply immutable: `LIST_APPEND` on it,
+or on any alias of it, fails with `cannot mutate CONST`,
+including for lists nested inside it. The `CONST` copy is
+detached, so mutating the `LET` source it was built from leaves
+the `CONST` unchanged. Equality ignores `CONST`-ness, so
+`ASSERT_EQ` never observes it.
 
 ### Value type: MAP
 
 String-keyed map of values. Shared heap: cloning bumps a refcount.
+Freezing mirrors `LIST`: a `CONST`-owned map is deeply immutable,
+so `MAP_SET` and `MERGE_MAPS` on it (or any alias of it) fail
+with `cannot mutate CONST`, including for maps nested inside it.
+The `CONST` copy is detached from the `LET` source it was built
+from.
 
 ### Value type: PATH
 
@@ -3638,10 +3999,15 @@ Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
 
 ### Value type: PIPE
 
-Anonymous pipe handle. The backend materializes lazily on first
-binding (never eagerly at declaration), so the choice always has full
-usage context. Cloning shares the backend (explicit-sharing fan-out);
-equality is handle identity, never byte comparison.
+Runtime-managed stream handle, never a raw descriptor. A `PIPE` names a
+runtime-managed byte stream with exactly one interface: declare it
+(`LET $p: PIPE`), wire it (`WITH_IO`), and pass or copy it across
+calls and module boundaries. Script code never manages descriptors,
+temp files, or platform plumbing. The backend materializes lazily
+on first binding (never eagerly at declaration), so the choice
+always has full usage context. Cloning shares the backend
+(explicit-sharing fan-out); equality is handle identity, never
+byte comparison.
 
 ### Value type: HANDLE
 
@@ -4700,10 +5066,14 @@ ASSERT_EQ $cfg.title "demo"
 
 ### STD::MAP_SET
 
-Insert one key into a map.
+Insert one key into a map, returning the extended map.
 
 Fails on duplicates so two entries sharing a key fail the run
 instead of silently shadowing each other.
+
+A frozen (`CONST`-derived) map fails instead of deriving: `CONST`
+bindings never produce a mutable map, so snapshot explicitly
+through a `LET` copy of unfrozen data if derivation is intended.
 
 
 **Signature:** `STD::MAP_SET($map: MAP<ANY>, $key: STRING, $value: ANY): MAP<ANY>`
@@ -4736,6 +5106,10 @@ Merge a LIST of MAPs in order under one duplicate policy.
 claiming one placeholder fail the run instead of shadowing each
 other. `overwrite` lets later files win, for environment overlays.
 Non MAP elements fail naming their position.
+
+A frozen (`CONST`-derived) list or element fails instead of
+deriving, mirroring `MAP_SET`: `CONST` bindings never produce a
+mutable map.
 
 
 **Signature:** `STD::MERGE_MAPS($maps: LIST<MAP<ANY>>, $policy: STRING = "fail_on_duplicate" | "overwrite"): MAP<ANY>`
@@ -6606,6 +6980,62 @@ on config shapes (a path string or a path list) without failing.
 IMPORT [STD]
 LET $word: STRING = TYPE_OF(42)
 ASSERT_EQ $word "INT"
+```
+
+### STD::UNIQUE
+
+Deduplicate a `LIST`, keeping the first occurrence of each member.
+
+Membership uses strict `values_equal` (numeric `INT` and `FLOAT`
+compare across types, every other cross-type pair is unequal,
+matching `CONTAINS` and `==`), so `[1, 1.0]` collapses to one
+element while `["1", 1]` keeps both. Order is first occurrence;
+the empty list binds empty, never failing.
+
+**Signature:** `STD::UNIQUE($items: LIST<ANY>): LIST`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$items` (`LIST<ANY>`): List to deduplicate.
+
+**Returns:** `LIST`
+
+**Examples:**
+
+**Example: deduplicate**
+
+```oxdock
+# First occurrences win, later repeats drop.
+IMPORT [STD]
+LET $seen: LIST<STRING> = UNIQUE(["a", "b", "a", "c", "b"])
+ASSERT_EQ $seen.0 "a"
+ASSERT_EQ $seen.1 "b"
+ASSERT_EQ $seen.2 "c"
+ASSERT_EQ LEN($seen) 3
+
+# The empty list stays empty.
+LET $empty: LIST<STRING> = UNIQUE([])
+ASSERT_EQ LEN($empty) 0
+```
+
+**Example: strict membership**
+
+```oxdock
+# Numerics collapse across INT and FLOAT like CONTAINS.
+IMPORT [STD]
+LET $nums: LIST<ANY> = UNIQUE([1, 2.0, 1, 3])
+ASSERT_EQ $nums.0 1
+ASSERT_EQ $nums.1 2.0
+ASSERT_EQ $nums.2 3
+ASSERT_EQ LEN($nums) 3
+
+# Stringified numbers never coerce to integers.
+LET $mixed: LIST<ANY> = UNIQUE(["1", 1])
+ASSERT_EQ $mixed.0 "1"
+ASSERT_EQ $mixed.1 1
+ASSERT_EQ LEN($mixed) 2
 ```
 
 ### STD::VERSION

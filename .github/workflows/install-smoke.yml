@@ -158,21 +158,17 @@ jobs:
           COPY install.sh {{ $stage }}/install.sh
           COPY install.ps1 {{ $stage }}/install.ps1
           COPY install.oxfile {{ $stage }}/install.oxfile
-          # Renderer product, staged like the release: every binary of
-          # the package at the tarball top level, sidecar included.
-          # Members stay relative to this dir so the stub's flat
-          # inventory matches the real asset layout.
+          # Renderer product, staged like the release: the package
+          # binary at the tarball top level. Members stay relative
+          # to this dir so the stub's flat inventory matches the
+          # real asset layout.
           [family:unix] LET $cbin: STRING = "oxdock-render"
           [family:windows] LET $cbin: STRING = "oxdock-render.exe"
-          [family:unix] LET $cchild: STRING = "oxdock-render-child"
-          [family:windows] LET $cchild: STRING = "oxdock-render-child.exe"
           LET $casset: STRING = "oxdock-render-{{ $target }}.tar.gz"
           LET $cpkg: STRING = PATH_JOIN($stage, "render-pkg")
           MKDIR {{ $cpkg }}
           LET $cb1: STRING = PATH_JOIN($cpkg, $cbin)
-          LET $cb2: STRING = PATH_JOIN($cpkg, $cchild)
           COPY target/release/{{ $cbin }} {{ $cb1 }}
-          COPY target/release/{{ $cchild }} {{ $cb2 }}
           WORKDIR {{ $stage }}
 
           # Self-hosted pack: the pinned engine carries ARCHIVE, so
@@ -489,7 +485,7 @@ jobs:
           [family:windows] WITH_IO [stdout=$o] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
           ASSERT_CONTAINS $o "installed oxdock-render local-test to "
 
-          # Placement proof: the renderer and its sidecar land, and the
+          # Placement proof: the renderer lands, and the
           # ephemeral interpreter does not. Suffix rides the platform
           # the same way the stub names it.
           [family:unix] LET $exe: STRING = ""
@@ -497,12 +493,10 @@ jobs:
           LET $dir: STRING = "{{ env:INSTALL_DIR }}"
           LET $k1: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock-render{{ $exe }}"))
           ASSERT_EQ $k1 "file"
-          LET $k2: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock-render-child{{ $exe }}"))
-          ASSERT_EQ $k2 "file"
           LET $k3: STRING = PATH_TYPE(PATH_JOIN($dir, "oxdock{{ $exe }}"))
           ASSERT_EQ $k3 "absent"
 
-          # PATH publish proof: the sidecar branch appends the
+          # PATH publish proof: the renderer branch appends the
           # destination without any version gate.
           LET $gp: STRING = "{{ env:GITHUB_PATH }}"
           LET $gb: STRING = READ $gp

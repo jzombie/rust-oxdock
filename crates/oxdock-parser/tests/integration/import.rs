@@ -79,7 +79,11 @@ fn import_in_let_rhs_resolves() {
     "#})
     .expect("import parses");
     assert_eq!(steps.len(), 1, "{steps:?}");
-    let StepKind::Assign { expr, .. } = &steps[0].kind else {
+    let StepKind::Bind {
+        rhs: oxdock_parser::BindRhs::Expr(expr),
+        ..
+    } = &steps[0].kind
+    else {
         panic!("expected Assign, got {:?}", steps[0].kind);
     };
     assert!(
@@ -205,7 +209,7 @@ fn export_single_and_list_forms() {
         table(),
     )
     .expect("single export parses");
-    assert_eq!(parsed.func_exports, vec!["FOO".to_string()]);
+    assert_eq!(parsed.exports.funcs, vec!["FOO".to_string()]);
     assert_eq!(parsed.steps.len(), 1);
 
     let parsed = parse_script_with_modules_and_exports(
@@ -224,7 +228,7 @@ fn export_single_and_list_forms() {
     )
     .expect("list export parses");
     assert_eq!(
-        parsed.func_exports,
+        parsed.exports.funcs,
         vec!["FOO".to_string(), "BAR".to_string()]
     );
 }
@@ -244,7 +248,7 @@ fn export_forward_reference_allowed() {
         table(),
     )
     .expect("forward export parses");
-    assert_eq!(parsed.func_exports, vec!["FOO".to_string()]);
+    assert_eq!(parsed.exports.funcs, vec!["FOO".to_string()]);
 }
 
 #[test]
@@ -280,7 +284,7 @@ fn export_qualified_host_name_passes() {
     )
     .expect("qualified export parses");
     assert_eq!(
-        parsed.func_exports,
+        parsed.exports.funcs,
         vec!["FOO".to_string(), "ALPHA::GLOB".to_string()]
     );
 }
@@ -300,7 +304,7 @@ fn export_qualified_script_name_passes() {
         table(),
     )
     .expect("SCRIPT-qualified export parses");
-    assert_eq!(parsed.func_exports, vec!["SCRIPT::FOO".to_string()]);
+    assert_eq!(parsed.exports.funcs, vec!["SCRIPT::FOO".to_string()]);
 }
 
 #[test]
@@ -339,7 +343,7 @@ fn export_qualified_opaque_module_passes() {
         table(),
     )
     .expect("opaque module export parses; the registry resolves it or fails serving");
-    assert_eq!(parsed.func_exports, vec!["OPAQ::ANYTHING".to_string()]);
+    assert_eq!(parsed.exports.funcs, vec!["OPAQ::ANYTHING".to_string()]);
 }
 
 #[test]
@@ -361,6 +365,71 @@ fn export_duplicate_fails() {
 }
 
 #[test]
+fn export_func_same_base_distinct_spelling_fails() {
+    // One base name rides exactly one export kind: a bare `EXPORT FOO`
+    // and a qualified `EXPORT LIB::FOO` name one servable tool, so the
+    // second spelling is the same duplicate, not a distinct serve.
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["./lib.oxdock" AS LIB]
+            FUNC FOO(): STRING {
+                RETURN "x"
+            }
+            EXPORT [FOO, LIB::FOO]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("same-base distinct-spelling func exports must fail");
+    assert!(err.to_string().contains("duplicate EXPORT"), "{err}");
+}
+
+#[test]
+fn export_type_same_base_distinct_spelling_fails() {
+    // Same base rule for types: `EXPORT TYPE A` and
+    // `EXPORT TYPE LIB::A` collide on base `A`.
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["./lib.oxdock" AS LIB]
+            TYPE A = STRING
+            EXPORT TYPE [A, LIB::A]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("same-base distinct-spelling type exports must fail");
+    assert!(err.to_string().contains("duplicate EXPORT"), "{err}");
+}
+
+#[test]
+fn export_distinct_bases_pass() {
+    // The base test only rejects shared bases: a local tool plus a
+    // re-export under another base parses and validates.
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["./lib.oxdock" AS LIB]
+            FUNC FOO(): STRING {
+                RETURN "x"
+            }
+            EXPORT [FOO, LIB::BAZ]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("distinct-base exports parse");
+    assert_eq!(
+        parsed.exports.funcs,
+        vec!["FOO".to_string(), "LIB::BAZ".to_string()]
+    );
+}
+
+#[test]
 fn export_type_single_and_list_forms() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let parsed = parse_script_with_modules_and_exports(
@@ -373,8 +442,8 @@ fn export_type_single_and_list_forms() {
         table(),
     )
     .expect("single TYPE export parses");
-    assert!(parsed.func_exports.is_empty());
-    assert_eq!(parsed.type_exports, vec!["PERSON".to_string()]);
+    assert!(parsed.exports.funcs.is_empty());
+    assert_eq!(parsed.exports.types, vec!["PERSON".to_string()]);
 
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
@@ -387,7 +456,7 @@ fn export_type_single_and_list_forms() {
         table(),
     )
     .expect("TYPE list export parses");
-    assert_eq!(parsed.type_exports, vec!["A".to_string(), "B".to_string()]);
+    assert_eq!(parsed.exports.types, vec!["A".to_string(), "B".to_string()]);
 }
 
 #[test]
@@ -418,10 +487,10 @@ fn export_lists_span_lines() {
     )
     .expect("multi-line EXPORT lists parse");
     assert_eq!(
-        parsed.func_exports,
+        parsed.exports.funcs,
         vec!["FOO".to_string(), "BAR".to_string()]
     );
-    assert_eq!(parsed.type_exports, vec!["A".to_string(), "B".to_string()]);
+    assert_eq!(parsed.exports.types, vec!["A".to_string(), "B".to_string()]);
 
     let parsed = parse_script_with_modules_and_exports(
         indoc! {r#"
@@ -439,8 +508,8 @@ fn export_lists_span_lines() {
         table(),
     )
     .expect("multi-line mixed EXPORT parses");
-    assert_eq!(parsed.func_exports, vec!["MAKE".to_string()]);
-    assert_eq!(parsed.type_exports, vec!["PERSON".to_string()]);
+    assert_eq!(parsed.exports.funcs, vec!["MAKE".to_string()]);
+    assert_eq!(parsed.exports.types, vec!["PERSON".to_string()]);
 
     // A trailing comma leaves an empty final entry; it carries no
     // name and must not fail the list (single- or multi-line).
@@ -463,7 +532,7 @@ fn export_lists_span_lines() {
     )
     .expect("trailing comma in multi-line EXPORT parses");
     assert_eq!(
-        parsed.func_exports,
+        parsed.exports.funcs,
         vec!["FOO".to_string(), "BAR".to_string()]
     );
 }
@@ -484,8 +553,8 @@ fn export_mixed_type_and_func_list_parses() {
         table(),
     )
     .expect("mixed TYPE/FUNC export parses");
-    assert_eq!(parsed.func_exports, vec!["MAKE".to_string()]);
-    assert_eq!(parsed.type_exports, vec!["PERSON".to_string()]);
+    assert_eq!(parsed.exports.funcs, vec!["MAKE".to_string()]);
+    assert_eq!(parsed.exports.types, vec!["PERSON".to_string()]);
 }
 
 #[test]
@@ -526,6 +595,26 @@ fn export_type_duplicate_across_kinds_fails() {
 }
 
 #[test]
+fn export_type_qualified_rejected_at_parse() {
+    // Qualified `ALIAS::TYPE` is unservable downstream (MCP takes
+    // bare only, closure validation matches top-level TYPEs in the
+    // file), so parse rejects it instead of stranding a reader.
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT ["./lib.oxdock" AS LIB]
+            TYPE A = STRING
+            EXPORT TYPE LIB::A
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("qualified TYPE export must fail at parse");
+    assert!(err.to_string().contains("must be bare"), "{err}");
+}
+
+#[test]
 fn export_type_reexport_with_local_func_same_name_passes() {
     // Regression: bare `EXPORT TYPE F` must not be rejected merely
     // because a local *function* shares the name. Func and type
@@ -544,7 +633,7 @@ fn export_type_reexport_with_local_func_same_name_passes() {
         table(),
     )
     .expect("TYPE re-export with same-named local func parses");
-    assert_eq!(parsed.type_exports, vec!["FOO".to_string()]);
+    assert_eq!(parsed.exports.types, vec!["FOO".to_string()]);
 }
 
 #[test]
@@ -823,7 +912,11 @@ fn file_import_in_let_captures_return() {
     "#})
     .expect("LET IMPORT parses");
     assert_eq!(steps.len(), 2, "{steps:?}");
-    let StepKind::AssignCapture { cmd, .. } = &steps[1].kind else {
+    let StepKind::Bind {
+        rhs: oxdock_parser::BindRhs::Capture(cmd),
+        ..
+    } = &steps[1].kind
+    else {
         panic!("expected AssignCapture, got {:?}", steps[1].kind);
     };
     assert!(
@@ -840,7 +933,11 @@ fn file_import_in_let_async_spawns_task() {
     "#})
     .expect("LET ASYNC IMPORT parses");
     assert_eq!(steps.len(), 2, "{steps:?}");
-    let StepKind::AssignAsync { body, .. } = &steps[1].kind else {
+    let StepKind::Bind {
+        rhs: oxdock_parser::BindRhs::Async(body),
+        ..
+    } = &steps[1].kind
+    else {
         panic!("expected AssignAsync, got {:?}", steps[1].kind);
     };
     assert_eq!(body.len(), 1, "{body:?}");
@@ -867,7 +964,7 @@ fn file_import_reexport_parses_for_visible_alias() {
         table(),
     )
     .expect("re-export of visible alias parses");
-    assert_eq!(parsed.func_exports, vec!["LIB::FOO".to_string()]);
+    assert_eq!(parsed.exports.funcs, vec!["LIB::FOO".to_string()]);
 }
 
 #[test]
@@ -1180,7 +1277,7 @@ fn file_import_from_reexport_allowed_like_alias() {
         table(),
     )
     .expect("re-export of harvest alias parses");
-    assert_eq!(parsed.func_exports, vec!["LIB::FOO".to_string()]);
+    assert_eq!(parsed.exports.funcs, vec!["LIB::FOO".to_string()]);
 }
 
 #[test]

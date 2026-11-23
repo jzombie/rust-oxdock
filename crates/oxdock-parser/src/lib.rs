@@ -54,9 +54,10 @@ pub use macro_input::{
 };
 pub use markdown::{BlockMetadata, FencedBlock, expect_error_from_info, extract_fenced_blocks};
 pub use parser::{
-    ParseCtx, ParsedScript, TokenError, parse_expression_str, parse_guard_expr_str, parse_script,
-    parse_script_with_exports, parse_script_with_modules, parse_script_with_modules_and_exports,
-    parse_script_with_preseed, parse_tokens, parse_tokens_with_ctx,
+    ExportKind, Exports, ParseCtx, ParsedScript, TokenError, parse_expression_str,
+    parse_guard_expr_str, parse_script, parse_script_with_exports, parse_script_with_modules,
+    parse_script_with_modules_and_exports, parse_script_with_preseed, parse_tokens,
+    parse_tokens_with_ctx,
 };
 pub use strip_flags::strip_flags;
 pub use tag::{
@@ -348,9 +349,15 @@ mod tests {
             StepKind::WithIo { bindings, cmd } => {
                 assert_eq!(bindings.len(), 2);
                 assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
-                    && b.pipe == Some(PipeTarget::Var("p".to_string()))));
+                    && b.pipe
+                        == Some(PipeTarget::Var {
+                            name: "p".to_string(),
+                        })));
                 assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin)
-                    && b.pipe == Some(PipeTarget::Var("q".to_string()))));
+                    && b.pipe
+                        == Some(PipeTarget::Var {
+                            name: "q".to_string(),
+                        })));
                 assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
             }
             other => panic!("expected WITH_IO, saw {:?}", other),
@@ -415,10 +422,11 @@ mod tests {
         let steps = parse_script("LET $p: PIPE", test_lower).expect("bare LET $p: PIPE parses");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign {
+            StepKind::Bind {
                 var,
                 decl_type,
-                expr,
+                rhs: BindRhs::Expr(expr),
+                ..
             } => {
                 assert_eq!(var, "p");
                 assert_eq!(decl_type, "PIPE");
@@ -427,7 +435,7 @@ mod tests {
                     "expected FreshPipe, got {expr:?}"
                 );
             }
-            other => panic!("expected Assign, got {other:?}"),
+            other => panic!("expected Bind, got {other:?}"),
         }
         // Display round-trips the bare form (no initializer).
         assert_eq!(steps[0].kind.to_string(), "LET $p: PIPE");
@@ -839,14 +847,22 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 3);
         match &steps[0].kind {
-            StepKind::Assign { var, expr, .. } => {
+            StepKind::Bind {
+                var,
+                rhs: BindRhs::Expr(expr),
+                ..
+            } => {
                 assert_eq!(var, "text");
                 assert_eq!(expr, &Expr::Literal(Value::string("hello".to_string())));
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
         match &steps[1].kind {
-            StepKind::Assign { var, expr, .. } => {
+            StepKind::Bind {
+                var,
+                rhs: BindRhs::Expr(expr),
+                ..
+            } => {
                 assert_eq!(var, "items");
                 assert_eq!(
                     expr,
@@ -856,10 +872,14 @@ mod tests {
                     ])
                 );
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
         match &steps[2].kind {
-            StepKind::Assign { var, expr, .. } => {
+            StepKind::Bind {
+                var,
+                rhs: BindRhs::Expr(expr),
+                ..
+            } => {
                 assert_eq!(var, "entry");
                 assert_eq!(
                     expr,
@@ -869,7 +889,7 @@ mod tests {
                     )])
                 );
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -896,7 +916,10 @@ mod tests {
         let steps = parse_script("LET $m: MAP = {\"\"\"\nkey\n\"\"\": \"v\"}", test_lower)
             .expect("parse ok");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => {
                 assert_eq!(
                     expr,
                     &Expr::Map(vec![(
@@ -905,7 +928,7 @@ mod tests {
                     )])
                 );
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1072,15 +1095,15 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign {
+            StepKind::Bind {
                 var,
-                decl_type: _,
-                expr,
+                rhs: BindRhs::Expr(expr),
+                ..
             } => {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Literal(Value::string("hello".to_string())));
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1089,19 +1112,25 @@ mod tests {
         let steps =
             parse_script("LET $x: INT = 1_000_000", test_lower).expect("grouped int parses");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => {
                 assert_eq!(expr, &Expr::Literal(Value::int(1_000_000)));
             }
-            other => panic!("expected Assign, got {other:?}"),
+            other => panic!("expected Bind, got {other:?}"),
         }
         // Grouping rides the fraction too.
         let steps =
             parse_script("LET $f: FLOAT = 1_024.768", test_lower).expect("grouped float parses");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => {
                 assert_eq!(expr, &Expr::Literal(Value::float(1024.768)));
             }
-            other => panic!("expected Assign, got {other:?}"),
+            other => panic!("expected Bind, got {other:?}"),
         }
         // Stray separators never read as numbers: the spelling stays a
         // bare word, exactly like expression position decides.
@@ -1128,10 +1157,13 @@ mod tests {
             let script = format!("LET $x: ANY = {spelling}");
             let steps = parse_script(&script, test_lower).expect("parses");
             match &steps[0].kind {
-                StepKind::Assign { expr, .. } => {
+                StepKind::Bind {
+                    rhs: oxdock_parser::BindRhs::Expr(expr),
+                    ..
+                } => {
                     assert_eq!(expr, &Expr::Literal(expected.clone()), "{spelling:?}");
                 }
-                other => panic!("expected Assign, got {other:?}"),
+                other => panic!("expected Bind, got {other:?}"),
             }
             // The plain spelling stages the identical value.
             let plain = spelling.replace('_', "");
@@ -1150,10 +1182,13 @@ mod tests {
         let steps = parse_script("LET $x: INT = -9_223_372_036_854_775_808", test_lower)
             .expect("negated boundary parses");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => {
                 assert_eq!(expr, &Expr::Literal(Value::int(i64::MIN)));
             }
-            other => panic!("expected Assign, got {other:?}"),
+            other => panic!("expected Bind, got {other:?}"),
         }
         let err = parse_script("LET $x: ANY = 9_223_372_036_854_775_809", test_lower)
             .expect_err("overflow must fail");
@@ -1166,10 +1201,10 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign {
+            StepKind::Bind {
                 var,
-                decl_type: _,
-                expr,
+                rhs: BindRhs::Expr(expr),
+                ..
             } => {
                 assert_eq!(var, "x");
                 assert_eq!(
@@ -1177,7 +1212,7 @@ mod tests {
                     &Expr::Literal(Value::string("hello world".to_string()))
                 );
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1187,10 +1222,10 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign {
+            StepKind::Bind {
                 var,
-                decl_type: _,
-                expr,
+                rhs: BindRhs::Expr(expr),
+                ..
             } => {
                 assert_eq!(var, "x");
                 assert_eq!(
@@ -1202,7 +1237,7 @@ mod tests {
                     ])
                 );
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1212,15 +1247,20 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign {
+            StepKind::Bind {
                 var,
-                decl_type: _,
-                expr,
+                rhs: BindRhs::Expr(expr),
+                ..
             } => {
                 assert_eq!(var, "x");
-                assert_eq!(expr, &Expr::Var("y".to_string()));
+                assert_eq!(
+                    expr,
+                    &Expr::Var {
+                        name: "y".to_string(),
+                    }
+                );
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1230,7 +1270,11 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign { var, expr, .. } => {
+            StepKind::Bind {
+                var,
+                rhs: BindRhs::Expr(expr),
+                ..
+            } => {
                 assert_eq!(var, "a");
                 match expr {
                     Expr::Block(body) => {
@@ -1240,7 +1284,7 @@ mod tests {
                     other => panic!("expected Block, got {:?}", other),
                 }
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1255,19 +1299,26 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => match expr {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => match expr {
                 Expr::Block(body) => {
                     assert_eq!(body.len(), 2);
-                    assert!(matches!(body[0].kind, StepKind::Assign { .. }));
+                    assert!(matches!(body[0].kind, StepKind::Bind { .. }));
                     assert!(matches!(body[1].kind, StepKind::Return { .. }));
-                    let StepKind::Assign { expr: inner, .. } = &body[0].kind else {
-                        panic!("expected inner Assign");
+                    let StepKind::Bind {
+                        rhs: BindRhs::Expr(inner),
+                        ..
+                    } = &body[0].kind
+                    else {
+                        panic!("expected inner Bind");
                     };
                     assert!(matches!(inner, Expr::Block(_)));
                 }
                 other => panic!("expected Block, got {:?}", other),
             },
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1276,10 +1327,13 @@ mod tests {
         let script = r#"LET $m: MAP = {a: 1, b: 2}"#;
         let steps = parse_script(script, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => {
                 assert!(matches!(expr, Expr::Map(entries) if entries.len() == 2));
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1295,7 +1349,10 @@ mod tests {
         "#};
         let steps = parse_script(script, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => match expr {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => match expr {
                 Expr::Map(entries) => {
                     assert_eq!(entries.len(), 2);
                     assert_eq!(entries[0].0, "a");
@@ -1303,7 +1360,7 @@ mod tests {
                 }
                 other => panic!("expected Map, got {:?}", other),
             },
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1326,7 +1383,10 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 2);
         match &steps[1].kind {
-            StepKind::Assign { expr, .. } => match expr {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => match expr {
                 Expr::Call { name, args } => {
                     assert_eq!(name, "SCRIPT::SERVE");
                     assert_eq!(args.len(), 4);
@@ -1334,7 +1394,7 @@ mod tests {
                 }
                 other => panic!("expected Call, got {:?}", other),
             },
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1348,14 +1408,17 @@ mod tests {
         "#};
         let steps = parse_script(script, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => match expr {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => match expr {
                 Expr::Map(entries) => {
                     assert_eq!(entries.len(), 1);
                     assert_eq!(entries[0].0, "key_path");
                 }
                 other => panic!("expected Map, got {:?}", other),
             },
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1377,7 +1440,10 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 2);
         match &steps[1].kind {
-            StepKind::Assign { expr, .. } => match expr {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => match expr {
                 Expr::Call { name, args } => {
                     assert_eq!(name, "SCRIPT::SERVE");
                     assert_eq!(args.len(), 2);
@@ -1385,7 +1451,7 @@ mod tests {
                 }
                 other => panic!("expected Call, got {:?}", other),
             },
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1440,7 +1506,12 @@ mod tests {
             } => {
                 assert_eq!(key_var.as_deref(), Some("k"));
                 assert_eq!(var, "v");
-                assert_eq!(in_expr, &Expr::Var("map".to_string()));
+                assert_eq!(
+                    in_expr,
+                    &Expr::Var {
+                        name: "map".to_string(),
+                    }
+                );
                 assert_eq!(body.len(), 1);
             }
             other => panic!("expected For, got {:?}", other),
@@ -1474,21 +1545,24 @@ mod tests {
         let script = r#"LET $x: BOOL = !true"#;
         let steps = parse_script(script, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Assign {
+            StepKind::Bind {
                 var,
-                decl_type: _,
-                expr,
+                rhs: BindRhs::Expr(expr),
+                ..
             } => {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Not(Box::new(Expr::Literal(Value::bool(true)))));
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
 
         // Double negation nests.
         let steps = parse_script(r#"LET $x: BOOL = !!false"#, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => {
                 assert_eq!(
                     expr,
                     &Expr::Not(Box::new(Expr::Not(Box::new(Expr::Literal(Value::bool(
@@ -1496,29 +1570,35 @@ mod tests {
                     ))))))
                 );
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
 
         // `!` binds tighter than `==`: `!true == false` is `(!true) == false`.
         let steps = parse_script(r#"LET $x: BOOL = !true == false"#, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => {
                 assert!(matches!(expr, Expr::Compare { .. }), "got {expr:?}");
                 if let Expr::Compare { left, .. } = expr {
                     assert!(matches!(left.as_ref(), Expr::Not(_)), "got {left:?}");
                 }
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
 
         // Parentheses invert the grouping: `!(true == false)`.
         let steps =
             parse_script(r#"LET $x: BOOL = !(true == false)"#, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Assign { expr, .. } => {
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => {
                 assert!(matches!(expr, Expr::Not(_)), "got {expr:?}");
             }
-            other => panic!("expected Assign, got {:?}", other),
+            other => panic!("expected Bind, got {:?}", other),
         }
     }
 
@@ -1667,7 +1747,12 @@ mod tests {
             StepKind::WithIo { bindings, cmd } => {
                 assert_eq!(bindings.len(), 1);
                 assert!(matches!(bindings[0].stream, IoStream::Stdout));
-                assert_eq!(bindings[0].pipe, Some(PipeTarget::Var("out".to_string())));
+                assert_eq!(
+                    bindings[0].pipe,
+                    Some(PipeTarget::Var {
+                        name: "out".to_string(),
+                    })
+                );
                 match cmd.as_ref() {
                     StepKind::AsyncBlock { body } => {
                         assert_eq!(body.len(), 1);
@@ -1870,7 +1955,7 @@ mod tests {
         match &steps[0].kind {
             StepKind::WithIo { cmd, .. } => match cmd.as_ref() {
                 StepKind::AsyncBlock { body } => {
-                    assert!(matches!(&body[0].kind, StepKind::Assign { .. }));
+                    assert!(matches!(&body[0].kind, StepKind::Bind { .. }));
                 }
                 other => panic!("expected AsyncBlock, got {:?}", other),
             },
@@ -1901,12 +1986,16 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::AssignAsync { var, body, .. } => {
+            StepKind::Bind {
+                var,
+                rhs: BindRhs::Async(body),
+                ..
+            } => {
                 assert_eq!(var, "task");
                 assert_eq!(body.len(), 1);
                 assert!(matches!(&body[0].kind, StepKind::Run(_)));
             }
-            other => panic!("expected AssignAsync, got {:?}", other),
+            other => panic!("expected Bind Async, got {:?}", other),
         }
     }
 
@@ -1916,12 +2005,16 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::AssignAsync { var, body, .. } => {
+            StepKind::Bind {
+                var,
+                rhs: BindRhs::Async(body),
+                ..
+            } => {
                 assert_eq!(var, "t");
                 assert_eq!(body.len(), 1);
                 assert!(matches!(&body[0].kind, StepKind::Run(_)));
             }
-            other => panic!("expected AssignAsync, got {:?}", other),
+            other => panic!("expected Bind Async, got {:?}", other),
         }
     }
 
@@ -1931,7 +2024,7 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Await { var } => {
+            StepKind::Await { var, .. } => {
                 assert_eq!(var, "task");
             }
             other => panic!("expected Await, got {:?}", other),

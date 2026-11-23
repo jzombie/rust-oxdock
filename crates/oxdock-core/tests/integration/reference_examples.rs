@@ -22,8 +22,11 @@ fn verify_display_sync_with_metadata() {
             | StepKind::Timeout { body, .. }
             | StepKind::Fail { body, .. }
             | StepKind::Isolated { body }
-            | StepKind::AssignAsync { body, .. }
             | StepKind::AsyncBlock { body } => vec![body],
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Async(body),
+                ..
+            } => vec![body],
             StepKind::If {
                 then_body,
                 else_ifs,
@@ -39,7 +42,11 @@ fn verify_display_sync_with_metadata() {
                 if let StepKind::WithIo { cmd, .. } = kind {
                     return step_contains_kind(cmd, name);
                 }
-                if let StepKind::AssignCapture { cmd, .. } = kind {
+                if let StepKind::Bind {
+                    rhs: oxdock_parser::BindRhs::Capture(cmd),
+                    ..
+                } = kind
+                {
                     return step_contains_kind(cmd, name);
                 }
                 return false;

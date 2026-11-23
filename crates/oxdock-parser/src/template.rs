@@ -88,31 +88,34 @@ pub fn parse_placeholder_call(key: &str) -> Option<PlaceholderCall<'_>> {
         Bare(&'a str),
         Qualified { name: &'a str, start: usize },
     }
-    let head_parsed = if let Some((left, right)) = head.split_once("::") {
-        if left.is_empty() || !left.chars().all(is_module_char) {
-            return None;
-        }
-        let name = right.trim();
-        if name.is_empty() || !name.chars().all(is_module_char) {
-            return None;
-        }
-        // Qualified heads stay permissive here (runtime spellings
-        // allow `alnum _ -`); resolution validates case later, so an
-        // unknown-case head still fails naming the culprit.
-        // `head` opens `trimmed`, so the name offset inside `head`
-        // is its offset inside `trimmed` too.
-        let colon = head.find("::").expect("split found ::");
-        let leading = head[colon + 2..].len() - head[colon + 2..].trim_start().len();
-        Head::Qualified {
-            name,
-            start: colon + 2 + leading,
-        }
-    } else {
-        if !is_bare_head(head) {
-            return None;
-        }
-        Head::Bare(head)
-    };
+    let head_parsed =
+        if let Some((left, right)) = head.split_once(crate::constants::MODULE_SEPARATOR) {
+            if left.is_empty() || !left.chars().all(is_module_char) {
+                return None;
+            }
+            let name = right.trim();
+            if name.is_empty() || !name.chars().all(is_module_char) {
+                return None;
+            }
+            // Qualified heads stay permissive here (runtime spellings
+            // allow `alnum _ -`); resolution validates case later, so an
+            // unknown-case head still fails naming the culprit.
+            // `head` opens `trimmed`, so the name offset inside `head`
+            // is its offset inside `trimmed` too.
+            let colon = head
+                .find(crate::constants::MODULE_SEPARATOR)
+                .expect("split found ::");
+            let leading = head[colon + 2..].len() - head[colon + 2..].trim_start().len();
+            Head::Qualified {
+                name,
+                start: colon + 2 + leading,
+            }
+        } else {
+            if !is_bare_head(head) {
+                return None;
+            }
+            Head::Bare(head)
+        };
     // The shared atom scan drives depth: quoted runs (including
     // `"""` blocks) arrive whole as Text, so parens inside strings
     // never count. Only structural opens and closes move depth.
@@ -155,7 +158,11 @@ pub fn parse_placeholder_call(key: &str) -> Option<PlaceholderCall<'_>> {
         Head::Qualified { name, start } => {
             let abs = base + start;
             Some(PlaceholderCall {
-                module: Some(&head[..head.find("::").expect("split found ::")]),
+                module: Some(
+                    &head[..head
+                        .find(crate::constants::MODULE_SEPARATOR)
+                        .expect("split found ::")],
+                ),
                 name,
                 name_span: abs..abs + name.len(),
                 args_raw,
@@ -497,10 +504,16 @@ pub fn strip_wrapped_delimiters(src: &str, open: char, close: char) -> Option<&s
 /// One variable read inside a `{{ ... }}` key: a `$a.b` path as its
 /// dotted parts, or a bare `key` as one literal lookup. Call args
 /// contribute their nested `$` refs; env keys contribute nothing.
+/// Bare `CONST` shapes (`ConstRef`, `KeyPath`, `Var`) still classify
+/// here so phases can name them in the `$`-sigil error; only `$`
+/// paths ever resolve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateVar {
     Path(Vec<String>),
     Bare(String),
+    ConstRef { alias: String, name: String },
+    KeyPath { base: String, keys: Vec<String> },
+    Var(String),
 }
 
 /// One `{{ ... }}` key, classified. The single grammar behind every
@@ -517,7 +530,19 @@ pub enum PlaceholderKey<'a> {
     /// Empty key: every phase rejects it.
     Empty,
     /// `$` plus the raw rest: split through [`split_var_path`].
+    /// Never holds `ALIAS::NAME`: those classify as
+    /// [`PlaceholderKey::DollarQualified`].
     Dollar(&'a str),
+    /// `$ALIAS::NAME` with optional `.key` tail. Single owner for
+    /// the split (see [`parse_dollar_qualified`]), so no call site
+    /// restates [`crate::constants::split_qualified`].
+    /// The empty-tail shape resolves; a `.key` tail fails with
+    /// [`qualified_keypath_error`].
+    DollarQualified {
+        alias: &'a str,
+        name: &'a str,
+        keys: Vec<String>,
+    },
     /// `env:` plus the raw name.
     Env(&'a str),
     /// `script_env:` plus the raw name.
@@ -525,9 +550,100 @@ pub enum PlaceholderKey<'a> {
     /// One `[MODULE::]FUNC(args)` body, through the shared
     /// [`parse_placeholder_call`] grammar.
     Call(PlaceholderCall<'a>),
+    /// Bare `ALIAS::NAME` shape. Never resolves: phases reject it
+    /// with [`bare_sigil_error`] (use `$ALIAS::NAME`).
+    ConstRef { alias: &'a str, name: &'a str },
+    /// Bare `NAME.key...` shape (keys validated non-empty, no
+    /// spaces or commas; base is a bare identifier). Never resolves:
+    /// phases reject it with [`bare_sigil_error`].
+    KeyPath { base: &'a str, keys: Vec<String> },
+    /// Bare identifier shape (`NAME`). Never resolves: phases reject
+    /// it with [`bare_sigil_error`] (use `$NAME`).
+    Var(&'a str),
     /// Anything else, verbatim: script-var lookup, step-override
     /// lookup, or a hard error, per the caller's contract.
     Bare(&'a str),
+}
+
+/// Bare identifier rule shared by every CONST shape: ASCII
+/// alphanumeric plus underscore, non-empty. Dots, commas, spaces,
+/// dashes, and sigils never qualify, so override keys with `-` stay
+/// `Bare` and CONST shapes classify identically everywhere.
+pub fn is_bare_ident(src: &str) -> bool {
+    !src.is_empty() && src.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// One `ALIAS::NAME` CONST reference from trimmed source. `None` means
+/// not that shape: the caller keeps its own invalid-syntax error.
+/// Single owner for qualified-CONST syntax; every phase routes here.
+pub fn parse_qualified_const(src: &str) -> Option<(&str, &str)> {
+    let (alias, rest) = crate::constants::split_qualified(src)?;
+    if !is_bare_ident(alias) || !is_bare_ident(rest) {
+        return None;
+    }
+    if rest.contains(['.', ',', ' ', '\t']) {
+        return None;
+    }
+    Some((alias, rest))
+}
+
+/// One `BASE.key...` path from trimmed source. Base and every dot
+/// segment are bare identifiers. `None` means not that shape.
+/// Single owner for key-path syntax; empty segments (`A.`, `A..b`)
+/// and punctuation (`A.foo-bar`, `A.@#$`) never parse here, so
+/// static and runtime agree by construction.
+pub fn parse_bare_key_path(src: &str) -> Option<(&str, Vec<String>)> {
+    let (base, tail) = src.split_once('.')?;
+    if !is_bare_ident(base) {
+        return None;
+    }
+    if tail.is_empty() {
+        return None;
+    }
+    let segs: Vec<String> = tail.split('.').map(|s| s.to_string()).collect();
+    if segs.iter().any(|s| !is_bare_ident(s)) {
+        return None;
+    }
+    Some((base, segs))
+}
+
+/// Error text for a bare word where only `$` reads a binding:
+/// command arguments, `{{ }}` keys, and placeholder call args never
+/// resolve bare words. Single owner for the wording, so the static
+/// gate and runtime expansion agree word for word.
+pub fn bare_sigil_error(src: &str) -> String {
+    format!(
+        "bare `{src}` never reads a binding here; use `{}{src}`",
+        crate::constants::VAR_SIGIL
+    )
+}
+
+/// Error text for a key path on `$ALIAS::NAME`. Qualified reads
+/// never traverse: copy to a local binding first. Single owner for
+/// the wording, so every phase agrees word for word.
+pub fn qualified_keypath_error() -> String {
+    "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+        .to_string()
+}
+
+/// One `$ALIAS::NAME[.key...]` shape from post-`$` rest. Returns the
+/// alias, the name, and the dot tail (possibly empty). `None` means
+/// not that shape. Single owner for the `$`-qualified split (see
+/// [`crate::constants::split_qualified`]), so no call site restates it.
+pub fn parse_dollar_qualified(rest: &str) -> Option<(&str, &str, Vec<String>)> {
+    let (head, tail) = match rest.split_once('.') {
+        Some((h, t)) => (h, Some(t)),
+        None => (rest, None),
+    };
+    let (alias, name) = crate::constants::split_qualified(head)?;
+    if !is_bare_ident(alias) || !is_bare_ident(name) {
+        return None;
+    }
+    let keys = match tail {
+        Some(t) => t.split('.').map(|s| s.to_string()).collect::<Vec<_>>(),
+        None => Vec::new(),
+    };
+    Some((alias, name, keys))
 }
 
 /// Classify one trimmed placeholder key. Shape only, no resolution:
@@ -538,6 +654,9 @@ pub fn classify_placeholder_key(key: &str) -> PlaceholderKey<'_> {
         return PlaceholderKey::Empty;
     }
     if let Some(rest) = key.strip_prefix('$') {
+        if let Some((alias, name, keys)) = parse_dollar_qualified(rest) {
+            return PlaceholderKey::DollarQualified { alias, name, keys };
+        }
         return PlaceholderKey::Dollar(rest);
     }
     if let Some(rest) = key.strip_prefix("env:") {
@@ -548,6 +667,15 @@ pub fn classify_placeholder_key(key: &str) -> PlaceholderKey<'_> {
     }
     if let Some(call) = parse_placeholder_call(key) {
         return PlaceholderKey::Call(call);
+    }
+    if let Some((alias, name)) = parse_qualified_const(key) {
+        return PlaceholderKey::ConstRef { alias, name };
+    }
+    if let Some((base, keys)) = parse_bare_key_path(key) {
+        return PlaceholderKey::KeyPath { base, keys };
+    }
+    if is_bare_ident(key) {
+        return PlaceholderKey::Var(key);
     }
     PlaceholderKey::Bare(key)
 }
@@ -573,6 +701,7 @@ pub fn placeholder_vars(key: &str) -> Vec<TemplateVar> {
     match classify_placeholder_key(key.trim()) {
         PlaceholderKey::Empty => Vec::new(),
         PlaceholderKey::Dollar(rest) => parse_dollar_path(rest).into_iter().collect(),
+        PlaceholderKey::DollarQualified { .. } => Vec::new(),
         PlaceholderKey::Env(_) | PlaceholderKey::ScriptEnv(_) => Vec::new(),
         PlaceholderKey::Call(call) => {
             let mut out = Vec::new();
@@ -581,6 +710,15 @@ pub fn placeholder_vars(key: &str) -> Vec<TemplateVar> {
             }
             out
         }
+        PlaceholderKey::ConstRef { alias, name } => vec![TemplateVar::ConstRef {
+            alias: alias.to_string(),
+            name: name.to_string(),
+        }],
+        PlaceholderKey::KeyPath { base, keys } => vec![TemplateVar::KeyPath {
+            base: base.to_string(),
+            keys,
+        }],
+        PlaceholderKey::Var(name) => vec![TemplateVar::Var(name.to_string())],
         PlaceholderKey::Bare(key) => vec![TemplateVar::Bare(key.to_string())],
     }
 }
@@ -605,8 +743,18 @@ pub const MAX_TEMPLATE_ARG_DEPTH: usize = 16;
 /// result with its own types and errors.
 pub enum TemplateArg<'a> {
     /// `$` variable path: raw rest after `$` (validate with
-    /// [`parse_var_path`]).
+    /// [`parse_var_path`]). Never holds `ALIAS::NAME`: those classify
+    /// as [`TemplateArg::DollarQualified`].
     Dollar(&'a str),
+    /// `$ALIAS::NAME` with optional `.key` tail: the empty tail
+    /// resolves, a `.key` tail fails with [`qualified_keypath_error`].
+    /// Single owner for the split (see [`parse_dollar_qualified`]),
+    /// so no call site restates [`crate::constants::split_qualified`].
+    DollarQualified {
+        alias: &'a str,
+        name: &'a str,
+        keys: Vec<String>,
+    },
     /// String literal source in any spelling (parse with
     /// [`parse_string_literal`]).
     Str(&'a str),
@@ -617,6 +765,15 @@ pub enum TemplateArg<'a> {
     /// Bare scalar source (`true`, `false`, numbers; see
     /// [`parse_scalar_literal`]).
     Scalar(&'a str),
+    /// Bare `ALIAS::NAME` shape. Never resolves: phases reject it
+    /// with [`bare_sigil_error`].
+    ConstRef { alias: &'a str, name: &'a str },
+    /// Bare `NAME.key...` path (validated by [`parse_bare_key_path`]).
+    /// Never resolves: phases reject it with [`bare_sigil_error`].
+    KeyPath { base: &'a str, keys: Vec<String> },
+    /// Bare `NAME` identifier. Never resolves: phases reject it with
+    /// [`bare_sigil_error`] (use `$NAME`).
+    Var(&'a str),
     /// Anything else: the caller owns the invalid-syntax error.
     Invalid(&'a str),
 }
@@ -626,6 +783,9 @@ pub enum TemplateArg<'a> {
 pub fn classify_template_arg(src: &str) -> TemplateArg<'_> {
     let src = src.trim();
     if let Some(rest) = src.strip_prefix('$') {
+        if let Some((alias, name, keys)) = parse_dollar_qualified(rest) {
+            return TemplateArg::DollarQualified { alias, name, keys };
+        }
         return TemplateArg::Dollar(rest);
     }
     if parse_string_literal(src).is_some() {
@@ -639,6 +799,15 @@ pub fn classify_template_arg(src: &str) -> TemplateArg<'_> {
     }
     if parse_scalar_literal(src).is_some() {
         return TemplateArg::Scalar(src);
+    }
+    if let Some((alias, name)) = parse_qualified_const(src) {
+        return TemplateArg::ConstRef { alias, name };
+    }
+    if let Some((base, keys)) = parse_bare_key_path(src) {
+        return TemplateArg::KeyPath { base, keys };
+    }
+    if is_bare_ident(src) {
+        return TemplateArg::Var(src);
     }
     TemplateArg::Invalid(src)
 }
@@ -722,6 +891,22 @@ fn collect_call_arg_vars(src: &str, out: &mut Vec<TemplateVar>) {
                 collect_call_arg_vars(&item, out);
             }
         }
+        TemplateArg::ConstRef { alias, name } => {
+            out.push(TemplateVar::ConstRef {
+                alias: alias.to_string(),
+                name: name.to_string(),
+            });
+        }
+        TemplateArg::KeyPath { base, keys } => {
+            out.push(TemplateVar::KeyPath {
+                base: base.to_string(),
+                keys,
+            });
+        }
+        TemplateArg::Var(name) => {
+            out.push(TemplateVar::Var(name.to_string()));
+        }
+        TemplateArg::DollarQualified { .. } => {}
         TemplateArg::Str(_) | TemplateArg::Scalar(_) | TemplateArg::Invalid(_) => {}
     }
 }
@@ -966,7 +1151,7 @@ mod tests {
         );
         assert_eq!(
             placeholder_vars("key"),
-            vec![TemplateVar::Bare("key".to_string())],
+            vec![TemplateVar::Var("key".to_string())],
         );
         assert!(placeholder_vars("env:FOO").is_empty());
         assert!(placeholder_vars("script_env:BAR").is_empty());

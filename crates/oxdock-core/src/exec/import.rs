@@ -15,11 +15,13 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use oxdock_fs::{GuardedPath, WorkspaceFs};
-use oxdock_parser::{ModuleTable, Step, StepKind, Value};
+use oxdock_parser::{
+    ExportKind, Exports, MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value, qualify,
+};
 use oxdock_process::ProcessManager;
 
 use super::resolve_script_params;
-use super::state::ExecState;
+use super::state::{ExecState, RawFuncDef, ScopeAliasFrame};
 use super::steps::{Flow, StepCtx, execute_steps};
 
 /// Import-only read exemption (#310.1): the entry tree stays readable
@@ -389,6 +391,56 @@ fn read_and_parse_import(
 /// harvested functions keep their helpers. Nothing else in the file
 /// runs: no top-level steps execute, so cherry-picking never triggers
 /// side effects.
+/// Single owner for harvest validity: every `IMPORT [NAME FROM ...]`
+/// request, static or runtime, gates here. Export gate first, then the
+/// defined check, with the exact historical messages, so all stages
+/// fail identically on the same input. A second copy of either scan
+/// anywhere else is piecemealing: route it here instead.
+pub(crate) fn gate_harvested_name(
+    kind: ExportKind,
+    steps: &[Step],
+    exports: &Exports,
+    name: &str,
+    path: &str,
+) -> Result<()> {
+    let (exported, kind_word, noun, defined) = match kind {
+        ExportKind::Func => (
+            &exports.funcs,
+            "",
+            "function",
+            steps.iter().any(|step| {
+                matches!(&step.kind, StepKind::FuncDef { name: def, .. } if def.as_str() == name)
+            }),
+        ),
+        ExportKind::Type => (
+            &exports.types,
+            "TYPE ",
+            "TYPE",
+            steps.iter().any(|step| {
+                matches!(&step.kind, StepKind::TypeAlias { name: alias, .. } if alias.as_str() == name)
+            }),
+        ),
+        // `CONST` harvests do not exist: reads arrive as `ALIAS::NAME`
+        // expressions through the forward chase, never as harvest
+        // requests. The arm exists so callers never restate the kind
+        // split; the export scan still applies if one ever arrives.
+        ExportKind::Const => (&exports.consts, "CONST ", "CONST", true),
+    };
+    if !exported.iter().any(|e| e == name) {
+        bail!("IMPORT `{path}` does not export {kind_word}`{name}`");
+    }
+    if !defined {
+        bail!("IMPORT `{path}` has no such {noun} `{name}`");
+    }
+    Ok(())
+}
+
+/// Execute `IMPORT [[F, G FROM "<path>" (AS <ALIAS>)?]]`: load the
+/// file, register only the named top-level `FUNC`s (bare, or under the
+/// alias), and execute the file's own top-level nested imports so the
+/// harvested functions keep their helpers. Nothing else in the file
+/// runs: no top-level steps execute, so cherry-picking never triggers
+/// side effects.
 pub(crate) fn import_funcs<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
@@ -428,8 +480,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
     let LoadedFile {
         resolved,
         steps,
-        func_exports,
-        type_exports,
+        exports,
     } = load_import(cx.state, path)?;
     let key = resolved.display();
     if let Some(alias) = alias {
@@ -441,7 +492,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
     // Join the import stack like a full import: nested loads need this
     // file on the chain for cycle/depth detection and for
     // importer-relative resolution.
-    cx.state.import_stack.push(resolved);
+    cx.state.import_stack.push(resolved.clone());
     let saved_aliases = cx.state.type_aliases.clone();
     let outcome: Result<()> = (|| {
         let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
@@ -466,12 +517,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             bail!("IMPORT `{path}` cannot harvest stateful function `{offender}`: import the file");
         }
         for name in func_names {
-            // EXPORT gate (#115): unexported means private. Harvesting a
-            // name the file does not export fails here, before anything
-            // registers or runs.
-            if !func_exports.iter().any(|e| e == name) {
-                bail!("IMPORT `{path}` does not export `{name}`");
-            }
+            // Harvest validity lives in `gate_harvested_name` (single
+            // owner): unexported means private, undefined means no such
+            // function. Both fail here, before anything registers.
+            gate_harvested_name(ExportKind::Func, &steps, &exports, name, path)?;
             let Some(def) = steps.iter().find_map(|step| match &step.kind {
                 StepKind::FuncDef {
                     name: def_name,
@@ -485,6 +534,8 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 }
                 _ => None,
             }) else {
+                // Gated above: the scan already proved the def exists.
+                // This preserves loud failure without restating it.
                 bail!("IMPORT `{path}` has no such function `{name}`");
             };
             let resolved_params = resolve_script_params(cx.state, name, &def.0)?;
@@ -520,8 +571,18 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                             def.2,
                             &def.3,
                             Some(&key),
+                            None,
                         )?;
                     }
+                    // Harvest visibility per importing unit (#322):
+                    // record the defining file so calls resolve through
+                    // the harvest map, surviving init pops that evict
+                    // scope frames. Last harvest wins, mirroring the
+                    // registry slot it replaces for lookup.
+                    let unit = active_unit_key(cx.state);
+                    cx.state
+                        .harvest_map
+                        .insert((unit, name.clone()), key.clone());
                 }
             }
         }
@@ -532,9 +593,10 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         {
             let file_aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
             for name in type_names {
-                if !type_exports.iter().any(|e| e == name) {
-                    bail!("IMPORT `{path}` does not export TYPE `{name}`");
-                }
+                // Same single owner as funcs above: gate first, persist
+                // after. The alias fetch below cannot miss (gated), but
+                // keeps loud failure instead of restating the scan.
+                gate_harvested_name(ExportKind::Type, &steps, &exports, name, path)?;
                 let Some(target) = file_aliases.get(name) else {
                     bail!("IMPORT `{path}` has no such TYPE `{name}`");
                 };
@@ -573,6 +635,20 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         let _ = cx.state.module_stack.pop();
         if let Some(e) = nested_cause {
             return Err(e);
+        }
+        // Jail setup for harvested FUNCs (#322): the file body never
+        // ran on this path, so a module top-level `WORKSPACE` or
+        // `WORKDIR` would be dropped and harvested FUNCs would serve
+        // from the snapshot default instead of the module jail.
+        // Ensuring init when the top-level sets a jail gives harvests
+        // the exact jail whole-file imports observe; cached inits
+        // return without re-running. Modules without a top-level jail
+        // skip init entirely, so pure harvests stay side-effect free
+        // (see `file_import_from_bare_harvest_skips_body`). Stateful
+        // harvests already failed above, so only pure names reach
+        // their jail.
+        if module_top_level_sets_jail(&steps) {
+            ensure_module_init(cx, &key, &resolved, &steps, path)?;
         }
         Ok(())
     })();
@@ -630,7 +706,7 @@ pub(crate) fn insert_imported_type<P: ProcessManager>(
     path: &str,
 ) -> Result<()> {
     let key = match alias {
-        Some(alias) => format!("{alias}::{name}"),
+        Some(alias) => qualify(alias, name),
         None => name.to_string(),
     };
     if let Some(existing) = state.type_aliases.get(&key) {
@@ -712,9 +788,16 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
         let harvested = load_import(cx.state, harvest_path)?;
         let file_aliases = super::typing::collect_type_aliases(&harvested.steps, cx.state)?;
         for name in harvest_types {
-            if !harvested.type_exports.iter().any(|e| e == name) {
-                anyhow::bail!("IMPORT `{harvest_path}` does not export TYPE `{name}`");
-            }
+            // Same single owner as `import_funcs`: gate first, persist
+            // after. The fetch below cannot miss (gated), but keeps loud
+            // failure instead of restating the scan.
+            gate_harvested_name(
+                ExportKind::Type,
+                &harvested.steps,
+                &harvested.exports,
+                name,
+                harvest_path,
+            )?;
             let Some(target) = file_aliases.get(name) else {
                 anyhow::bail!("IMPORT `{harvest_path}` has no such TYPE `{name}`");
             };
@@ -730,6 +813,231 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
     Ok(())
 }
 
+/// Whether a module top-level establishes its own jail (#322): a
+/// direct top-level `WORKSPACE` or `WORKDIR` step, whether or not
+/// guard-gated. Block scopes (`IF`, `FOR`, `WHILE`, `SWITCH`,
+/// `ISOLATED`, `TIMEOUT`) unwind `WORKSPACE` and `WORKDIR` on exit
+/// and can never establish a module jail, so nested bodies never
+/// count. Nested `FUNC` bodies never count: they run in their own
+/// call jail, never the init flow. Single owner for the harvest
+/// init-requirement gate, so the classifier can never disagree with
+/// the init it triggers.
+fn module_top_level_sets_jail(steps: &[Step]) -> bool {
+    steps.iter().any(|step| step_sets_jail(&step.kind))
+}
+
+/// One step's contribution to [`module_top_level_sets_jail`]: only
+/// direct top-level jail setters count. Block-nested setters unwind
+/// on block exit and nested `FUNC` bodies run in their own call
+/// jail, so neither can establish the module jail.
+fn step_sets_jail(kind: &StepKind) -> bool {
+    matches!(kind, StepKind::Workspace(_) | StepKind::Workdir(_))
+}
+
+/// Run a module top-level init body once per file (#322): the jail
+/// the module FUNCs restore on every call. Shared by full imports
+/// and harvests so both observe the same module context: a harvest
+/// that skipped init would serve its FUNCs from the snapshot root
+/// instead of the module top-level `WORKSPACE`/`WORKDIR`. Cached
+/// inits return the stored value without re-running. The caller
+/// holds no stack entry; this pushes `resolved` for the run and pops
+/// it after, restoring every swapped scope on all paths.
+fn ensure_module_init<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    key: &str,
+    resolved: &GuardedPath,
+    steps: &[Step],
+    path: &str,
+) -> Result<Value> {
+    // Cached init: every alias shares the first run's state and
+    // `RETURN`. Nothing pushed below, so unwinds stay balanced.
+    if let Some(init) = cx
+        .state
+        .modules
+        .get(key)
+        .and_then(|record| record.init.as_ref())
+    {
+        return Ok(init.return_value.clone());
+    }
+    // The init body observes nothing of the importer: the whole
+    // variable stack swaps for a fresh one, exactly like a
+    // module-owned call, and restores after the scope pops. The
+    // workspace, cwd, and env reset to the snapshot jail and seed
+    // first, so the init top-level establishes the module own
+    // context from a fixed default, never caller ambient (#322).
+    let saved_vars = std::mem::take(&mut cx.state.var_scopes);
+    let saved_consts = std::mem::take(&mut cx.state.const_scopes);
+    let saved_aliases = cx.state.type_aliases.clone();
+    let saved_isolated = std::mem::take(&mut cx.state.isolated_stack);
+    let outcome: Result<Value> = (|| {
+        let aliases = super::typing::collect_type_aliases(steps, cx.state)?;
+        for (name, target) in aliases {
+            cx.state.register_alias(name, target);
+        }
+        cx.state.import_stack.push(resolved.clone());
+        // Mark the isolation scope as a module top level (not a
+        // lexical block): the init body's own direct imports land on
+        // the unit-top map like the entry's, while nested blocks
+        // still unwind through scope frames. Removed with the scope
+        // below on every path.
+        cx.state
+            .init_scope_depths
+            .push(cx.state.scope_stack.len() + 1);
+        cx.state.push_scope();
+        // Frame floor for the nested walk (#322): the init body's
+        // own frames start here. Popped with the scope below on
+        // every path.
+        cx.state
+            .func_floors
+            .push(cx.state.functions.scope_depth().saturating_sub(1));
+        // Definition-site jails seal only at file top-level
+        // (`call_depth == 0`): a module first imported inside a `FUNC`
+        // body would otherwise run its init with `call_depth >= 1`
+        // and silently drop every `def_jail`. Reset across init so
+        // top-level `FUNC`s seal their site no matter the importer.
+        // Balanced calls inside the body increment from zero and
+        // restore to zero before the outer depth returns.
+        let saved_call_depth = cx.state.call_depth;
+        cx.state.call_depth = 0;
+        // Executed `INHERIT_ENV` keys accumulate here as they run,
+        // drained into `ModuleInit::inherit_names` after execution.
+        cx.state.init_inherit_stack.push(Vec::new());
+        // Fixed default jail for the module top-level (#322): the
+        // snapshot root with the seed env. Caller workspace, cwd,
+        // env, and isolated scrubs never flow into init. The init
+        // body own WORKSPACE, WORKDIR, and ENV statements then build
+        // the module context its FUNCs restore on every call.
+        cx.state.fs.switch_to_snapshot();
+        cx.state.cwd = cx.state.fs.root().clone();
+        cx.state.envs = std::sync::Arc::new((*cx.state.seed).clone());
+        cx.state.isolated_stack = Vec::new();
+        // Baseline for the call-time env delta: the seed. Every init
+        // contribution counts, importer values cannot appear by
+        // construction since the live env already reset above.
+        let env_before: std::collections::HashMap<String, String> = (*cx.state.seed).clone();
+        // The init body runs with its module on the context stack so
+        // nested definitions owner-tag correctly; lexical reads still
+        // resolve through the pushed frames first.
+        cx.state.module_stack.push(Some(key.to_string()));
+        let flow = execute_steps(
+            cx.state,
+            cx.process,
+            steps,
+            cx.stdin.clone(),
+            false,
+            cx.out.clone(),
+            cx.err.clone(),
+            cx.out_pipe.clone(),
+            cx.stdin_pipe.clone(),
+            false,
+        );
+        // Unwind the module context on every path: nested definitions
+        // below already owner-tagged while it was up. Restore the
+        // caller call depth and drain executed `INHERIT_ENV` keys
+        // before propagating errors, so failures never leak init
+        // state into the importer.
+        let _ = cx.state.module_stack.pop();
+        let inherit_names = cx.state.init_inherit_stack.pop().unwrap_or_default();
+        cx.state.call_depth = saved_call_depth;
+        let flow = flow?;
+        // Drain the init frame's top-level bindings into the shared
+        // store before the scope pops: this is the module's global
+        // state, visible to every module-owned function and alias.
+        // Capture the init-final jail alongside: the workspace
+        // selection and cwd the top-level left behind become the
+        // module default its FUNCs restore on entry (#322). The pop
+        // below restores the importer afterwards.
+        let drained = std::mem::take(
+            cx.state
+                .var_scopes
+                .last_mut()
+                .expect("import pushed exactly one var scope"),
+        );
+        let drained_consts = std::mem::take(
+            cx.state
+                .const_scopes
+                .last_mut()
+                .expect("import pushed exactly one const scope"),
+        );
+        // Capture the init-final jail alongside: the workspace
+        // selection and cwd as the top-level left them. Def-carrying
+        // calls restore their own definition-site jail instead; this
+        // final state serves materialized defs that never executed.
+        // The pop below restores the importer afterwards.
+        let init_selection = cx.state.fs.selection();
+        let init_cwd = cx.state.cwd.clone();
+        let value = match flow {
+            Flow::Done => Value::string(String::new()),
+            Flow::Return { value, .. } => value,
+            Flow::Break { idx } => {
+                bail!(
+                    "step {}: BREAK cannot cross import boundary (in IMPORT `{}`)",
+                    idx + 1,
+                    path
+                );
+            }
+            Flow::Continue { idx } => {
+                bail!(
+                    "step {}: CONTINUE cannot cross import boundary (in IMPORT `{}`)",
+                    idx + 1,
+                    path
+                );
+            }
+        };
+        let record = cx.state.modules.entry(key.to_string()).or_default();
+        // Module call-time env (#115): the session seed plus this
+        // init's own contributions. Comparing against the seed keeps
+        // importer-established values out, so module functions never
+        // inherit caller context. Removals (e.g. `INHERIT_ENV` of a
+        // removed name) drop seed rows too. A re-inherit of an
+        // already-present value leaves no delta, so `INHERIT_ENV`
+        // names are additionally recorded for per-call
+        // re-establishment from the host.
+        let after = cx.state.envs.clone();
+        let mut module_env = (*cx.state.seed).clone();
+        for (name, value) in after.iter() {
+            if env_before.get(name) != Some(value) {
+                module_env.insert(name.clone(), value.clone());
+            }
+        }
+        for name in env_before.keys() {
+            if !after.contains_key(name) {
+                module_env.remove(name);
+            }
+        }
+        // `inherit_names` were recorded as `INHERIT_ENV` steps actually
+        // executed (see `handlers::inherit_env`); no post-hoc guard
+        // re-evaluation against final envs, so later `ENV` mutations
+        // cannot rewrite which names ran.
+        record.init = Some(super::state::ModuleInit {
+            vars: drained,
+            const_vars: drained_consts,
+            return_value: value.clone(),
+            envs: module_env,
+            inherit_names,
+            selection: init_selection,
+            cwd: init_cwd,
+        });
+        Ok(value)
+    })();
+    let pop_res = cx.state.pop_scope();
+    let _ = cx.state.func_floors.pop();
+    let init_depth = cx.state.scope_stack.len() + 1;
+    cx.state
+        .init_scope_depths
+        .retain(|depth| *depth != init_depth);
+    cx.state.var_scopes = saved_vars;
+    cx.state.const_scopes = saved_consts;
+    cx.state.isolated_stack = saved_isolated;
+    let _ = cx.state.import_stack.pop();
+    cx.state.restore_aliases(saved_aliases);
+    match (outcome, pop_res) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(e), _) => Err(e),
+        (Ok(_), Err(e)) => Err(e),
+    }
+}
+
 pub(crate) fn import_file<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     path: &str,
@@ -738,8 +1046,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     let LoadedFile {
         resolved,
         steps,
-        func_exports,
-        type_exports,
+        exports,
     } = load_import(cx.state, path)?;
     let key = resolved.display();
     // Record under the importing unit for the runtime placeholder gate:
@@ -776,7 +1083,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         // Owner-tagged with the module so calls share its state.
         // Skips names already present: re-imports only add new views.
         let func_exported: std::collections::HashSet<&str> =
-            func_exports.iter().map(|e| e.as_str()).collect();
+            exports.funcs.iter().map(|e| e.as_str()).collect();
         for step in &steps {
             if let StepKind::FuncDef {
                 name,
@@ -812,7 +1119,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         // idempotent; differing targets fail.
         {
             let type_exported: std::collections::HashSet<&str> =
-                type_exports.iter().map(|e| e.as_str()).collect();
+                exports.types.iter().map(|e| e.as_str()).collect();
             for (name, target) in &aliases {
                 if !type_exported.contains(name.as_str()) {
                     continue;
@@ -846,7 +1153,7 @@ pub(crate) fn import_file<P: ProcessManager>(
                 cx.state.register_alias(name.clone(), target.clone());
             }
             let type_exported: std::collections::HashSet<&str> =
-                type_exports.iter().map(|e| e.as_str()).collect();
+                exports.types.iter().map(|e| e.as_str()).collect();
             // Capture first to avoid borrow issues, then restore and
             // re-insert only exported.
             let mut to_persist: Vec<(String, String)> = Vec::new();
@@ -866,113 +1173,11 @@ pub(crate) fn import_file<P: ProcessManager>(
     if let Some(value) = cached {
         return Ok(value);
     }
-    // Phase 2 (init): runs once per file. Pushes unwind below.
-    // The init body observes nothing of the importer either: the
-    // whole variable stack swaps for a fresh one, exactly like a
-    // module-owned call, and restores after the scope pops.
-    let saved_vars = std::mem::take(&mut cx.state.var_scopes);
-    let saved_aliases = cx.state.type_aliases.clone();
-    let outcome: Result<Value> = (|| {
-        let aliases = super::typing::collect_type_aliases(&steps, cx.state)?;
-        for (name, target) in aliases {
-            cx.state.register_alias(name, target);
-        }
-        cx.state.import_stack.push(resolved.clone());
-        cx.state.push_scope();
-        // Snapshot the pre-init env: the module's call-time env is the
-        // seed plus only what this init body contributes. Values the
-        // importer established stay out by construction (the delta
-        // below is taken against this map, not the seed).
-        let env_before: std::collections::HashMap<String, String> = (*cx.state.envs).clone();
-        // The init body runs with its module on the context stack so
-        // nested definitions owner-tag correctly; lexical reads still
-        // resolve through the pushed frames first. Relative paths in
-        // the init body resolve against the ambient cwd like any
-        // other code: there is no module-dir anchoring.
-        cx.state.module_stack.push(Some(key.clone()));
-        let flow = execute_steps(
-            cx.state,
-            cx.process,
-            &steps,
-            cx.stdin.clone(),
-            false,
-            cx.out.clone(),
-            cx.err.clone(),
-            cx.out_pipe.clone(),
-            cx.stdin_pipe.clone(),
-            false,
-        );
-        // Unwind the module context on every path: nested definitions
-        // below already owner-tagged while it was up.
-        let _ = cx.state.module_stack.pop();
-        let flow = flow?;
-        // Drain the init frame's top-level bindings into the shared
-        // store before the scope pops: this is the module's global
-        // state, visible to every module-owned function and alias.
-        // Ambient run state (cwd/envs/root) still reverts on pop.
-        let drained = std::mem::take(
-            cx.state
-                .var_scopes
-                .last_mut()
-                .expect("import pushed exactly one var scope"),
-        );
-        let value = match flow {
-            Flow::Done => Value::string(String::new()),
-            Flow::Return { value, .. } => value,
-            Flow::Break { idx } => {
-                bail!(
-                    "step {}: BREAK cannot cross import boundary (in IMPORT `{}`)",
-                    idx + 1,
-                    path
-                );
-            }
-            Flow::Continue { idx } => {
-                bail!(
-                    "step {}: CONTINUE cannot cross import boundary (in IMPORT `{}`)",
-                    idx + 1,
-                    path
-                );
-            }
-        };
-        let record = cx.state.modules.entry(key.clone()).or_default();
-        // Module call-time env (#115): the session seed plus this
-        // init's own contributions. Comparing against the pre-init
-        // map (not the seed) keeps importer-established values out,
-        // so module functions never inherit caller context. Removals
-        // (e.g. `INHERIT_ENV` of a removed name) drop seed rows too.
-        // A re-inherit of an already-present value leaves no delta, so
-        // `INHERIT_ENV` names are additionally recorded for
-        // per-call re-establishment from the host.
-        let after = cx.state.envs.clone();
-        let mut module_env = (*cx.state.seed).clone();
-        for (name, value) in after.iter() {
-            if env_before.get(name) != Some(value) {
-                module_env.insert(name.clone(), value.clone());
-            }
-        }
-        for name in env_before.keys() {
-            if !after.contains_key(name) {
-                module_env.remove(name);
-            }
-        }
-        let mut inherit_names = Vec::new();
-        for step in &steps {
-            if let StepKind::InheritEnv { keys } = &step.kind {
-                inherit_names.extend(keys.iter().cloned());
-            }
-        }
-        record.init = Some(super::state::ModuleInit {
-            vars: drained,
-            return_value: value.clone(),
-            envs: module_env,
-            inherit_names,
-        });
-        Ok(value)
-    })();
-    let pop_res = cx.state.pop_scope();
-    cx.state.var_scopes = saved_vars;
-    let _ = cx.state.import_stack.pop();
-    cx.state.restore_aliases(saved_aliases);
+    // Phase 2 (init): runs once per file. Shared with harvests so
+    // both observe the same module jail (see `ensure_module_init`);
+    // the file's own harvest re-application below stays
+    // full-import-only.
+    let outcome = ensure_module_init(cx, &key, &resolved, &steps, path);
     // Re-apply the file's own harvests after the init restore: the
     // restore drops everything but exports, while harvested funcs
     // persist through the registry. Types persist like funcs do, so
@@ -980,11 +1185,7 @@ pub(crate) fn import_file<P: ProcessManager>(
     if outcome.is_ok() {
         resolve_own_type_harvests(cx, &steps, &resolved)?;
     }
-    match (outcome, pop_res) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(e), _) => Err(e),
-        (Ok(_), Err(e)) => Err(e),
-    }
+    outcome
 }
 
 /// One site importing a file in the closure (#115): the alias it
@@ -1011,8 +1212,7 @@ pub(super) struct ClosureFile {
     pub path: String,
     pub dir: GuardedPath,
     pub steps: Vec<Step>,
-    pub func_exports: Vec<String>,
-    pub type_exports: Vec<String>,
+    pub exports: Exports,
     pub sites: Vec<ClosureSite>,
 }
 
@@ -1205,15 +1405,20 @@ fn expand_walk_kind<P: ProcessManager>(
 /// here. Only direct child expressions are inspected; blocks nested
 /// deeper inside collection literals never contain imports.
 pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
+    use oxdock_parser::BindRhs;
     let mut out: Vec<&[Step]> = match kind {
-        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => child_bodies(cmd),
+        StepKind::WithIo { cmd, .. } => child_bodies(cmd),
+        StepKind::Bind { rhs, .. } => match rhs {
+            BindRhs::Capture(cmd) => child_bodies(cmd),
+            BindRhs::Async(body) => vec![body],
+            BindRhs::Expr(_) | BindRhs::Await { .. } => Vec::new(),
+        },
         StepKind::For { body, .. }
         | StepKind::While { body, .. }
         | StepKind::FuncDef { body, .. }
         | StepKind::Timeout { body, .. }
         | StepKind::Fail { body, .. }
         | StepKind::Isolated { body, .. }
-        | StepKind::AssignAsync { body, .. }
         | StepKind::AsyncBlock { body, .. }
         | StepKind::RemoteBlock { body, .. } => vec![body],
         StepKind::If {
@@ -1253,7 +1458,11 @@ pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
     // blocks nested deeper inside collection literals never contain
     // imports. (`Return` boxes its expression; the rest do not.)
     match kind {
-        StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => {
+        StepKind::Bind {
+            rhs: oxdock_parser::BindRhs::Expr(expr),
+            ..
+        }
+        | StepKind::Set { expr, .. } => {
             if let oxdock_parser::Expr::Block(body) = expr {
                 out.push(body);
             }
@@ -1276,7 +1485,7 @@ pub(crate) fn child_bodies(kind: &StepKind) -> Vec<&[Step]> {
 }
 
 /// Record an import site, deduping identical sites (diamonds share one
-/// module record; each alias is a view onto it). `func_exports` rides
+/// module record; each alias is a view onto it). `exports` rides
 /// with the first site; every site loads the same parsed body.
 fn record_site(
     files: &mut Vec<ClosureFile>,
@@ -1300,20 +1509,18 @@ fn record_site(
             path,
             dir: target.nested.clone(),
             steps: target.body.clone(),
-            func_exports: target.func_exports.clone(),
-            type_exports: target.type_exports.clone(),
+            exports: target.exports.clone(),
             sites: vec![site],
         }),
     }
 }
 /// One resolved import target during expansion: the file, its parsed
-/// body, its `EXPORT` lists (func plus type visibility gates), and the
-/// directory nested imports resolve against.
+/// body, its `EXPORT` metadata (func plus type visibility gates, const
+/// forwarding), and the directory nested imports resolve against.
 struct ExpandedImport {
     resolved: GuardedPath,
     body: Vec<Step>,
-    func_exports: Vec<String>,
-    type_exports: Vec<String>,
+    exports: Exports,
     nested: GuardedPath,
 }
 
@@ -1354,15 +1561,13 @@ fn expand_load<P: ProcessManager>(
     let LoadedFile {
         resolved,
         steps: body,
-        func_exports,
-        type_exports,
+        exports,
     } = load_file(state, dir, stack, path)?;
     let nested = resolved.parent().unwrap_or_else(|| dir.clone());
     Ok(ExpandedImport {
         resolved,
         body,
-        func_exports,
-        type_exports,
+        exports,
         nested,
     })
 }
@@ -1378,12 +1583,11 @@ fn load_import<P: ProcessManager>(state: &mut ExecState<P>, path: &str) -> Resul
 }
 
 /// One resolved import target: the file, its parsed body, and its
-/// `EXPORT` / `EXPORT TYPE` visibility gates.
+/// `EXPORT` visibility gates.
 struct LoadedFile {
     resolved: GuardedPath,
     steps: Vec<Step>,
-    func_exports: Vec<String>,
-    type_exports: Vec<String>,
+    exports: Exports,
 }
 
 /// Shared loader core: `stack` is the active chain for cycle/depth
@@ -1423,8 +1627,7 @@ fn load_file<P: ProcessManager>(
         return Ok(LoadedFile {
             resolved,
             steps: record.steps.clone(),
-            func_exports: record.func_exports.clone(),
-            type_exports: record.type_exports.clone(),
+            exports: record.exports.clone(),
         });
     }
     let bytes = read_import_bytes(state.fs.as_ref(), &resolved)
@@ -1445,16 +1648,15 @@ fn load_file<P: ProcessManager>(
         key,
         super::state::ModuleRecord {
             steps: parsed.steps.clone(),
-            func_exports: parsed.func_exports.clone(),
-            type_exports: parsed.type_exports.clone(),
+            exports: parsed.exports.clone(),
             init: None,
+            top_funcs: collect_top_funcs(&parsed.steps),
         },
     );
     Ok(LoadedFile {
         resolved,
         steps: parsed.steps,
-        func_exports: parsed.func_exports,
-        type_exports: parsed.type_exports,
+        exports: parsed.exports,
     })
 }
 
@@ -1512,41 +1714,234 @@ pub(crate) fn resolve_top_level<P: ProcessManager>(
 /// display paths, which never equal this sentinel.
 pub(crate) const ENTRY_UNIT: &str = "entry";
 
+/// Frame-1 file scope, indexed once per load (#322): every top-level
+/// `FUNC` of one step body in definition order, guards unevaluated.
+/// Guards ride along and are evaluated with the live env at use time,
+/// so gated definitions behave exactly like the previous per-call
+/// step scan. Single owner for the file-frame shape; the runtime
+/// frame walk reads this, never the steps directly.
+pub(super) fn collect_top_funcs(steps: &[Step]) -> HashMap<String, Vec<RawFuncDef>> {
+    let mut out: HashMap<String, Vec<RawFuncDef>> = HashMap::new();
+    for step in steps {
+        if let StepKind::FuncDef {
+            name,
+            params,
+            return_type,
+            is_async,
+            body,
+            ..
+        } = &step.kind
+        {
+            out.entry(name.clone()).or_default().push(RawFuncDef {
+                params: params.clone(),
+                return_spelling: return_type.clone(),
+                is_async: *is_async,
+                body: body.clone(),
+                guard: step.guard.clone(),
+                jail: None,
+            });
+        }
+    }
+    out
+}
+
+/// Live top-level def of one file frame (#322): last definition wins,
+/// gated definitions filtered against the live env. Mirrors the
+/// previous scan's forward-overwrite order exactly.
+pub(super) fn live_top_func(
+    defs: &[RawFuncDef],
+    envs: &impl oxdock_parser::EnvLookup,
+) -> Option<RawFuncDef> {
+    let mut found = None;
+    for def in defs {
+        if oxdock_parser::guard_option_allows(def.guard.as_ref(), envs) {
+            found = Some(def.clone());
+        }
+    }
+    found
+}
+
+/// One script resolution site (#322): the single frame walk both
+/// the runtime dispatcher and the expression router share, so they
+/// can never disagree. Variants carry owned data; callers build
+/// entries or route on presence alone.
+pub(super) enum ScriptSite<P: ProcessManager> {
+    /// Live nested definition from scope frames (covers entry
+    /// top-level and nested defs positionally).
+    Live(super::native::FuncEntry<P>),
+    /// Owning-file top-level definition: raw def plus the defining
+    /// unit key for jail attribution (`None` for the entry unit,
+    /// whose calls push no module context).
+    File {
+        raw: RawFuncDef,
+        unit: Option<String>,
+    },
+}
+
+/// Runtime frame-walk adapter: the [`super::native::FuncFrameView`] implementation
+/// over live [`ExecState`] stores, so static and runtime share the
+/// nested, home, harvest precedence through [`super::native::FuncFrameView::walk`].
+struct RuntimeFrame<'a, P: ProcessManager> {
+    state: &'a ExecState<P>,
+    current: Option<String>,
+}
+
+impl<P: ProcessManager> super::native::FuncFrameView for RuntimeFrame<'_, P> {
+    type Hit = ScriptSite<P>;
+    fn find_nested(&self, base: &str) -> Option<Self::Hit> {
+        // Uniform floor: the innermost call/init boundary, or 0 at
+        // the top level.
+        let floor = self.state.func_floors.last().copied().unwrap_or(0);
+        self.state
+            .functions
+            .get_scoped(base, floor)
+            .map(ScriptSite::Live)
+    }
+    fn find_home(&self, unit: &str, base: &str) -> Option<Self::Hit> {
+        // Owning file frame through the one unit lookup. Entry hits
+        // carry no unit key so calls push no module context.
+        let tops = self.state.unit_top_funcs(unit)?;
+        let defs = tops.get(base)?;
+        let raw = live_top_func(defs, &self.state.envs)?;
+        let unit = self.current.clone();
+        Some(ScriptSite::File { raw, unit })
+    }
+    fn find_harvest(&self, unit: &str, base: &str) -> Option<Self::Hit> {
+        // Per-unit harvests: first textual definition wins.
+        let defining = self
+            .state
+            .harvest_map
+            .get(&(unit.to_string(), base.to_string()))?;
+        let raw = self
+            .state
+            .modules
+            .get(defining)
+            .and_then(|r| r.top_funcs.get(base))
+            .and_then(|defs| defs.first().cloned())?;
+        Some(ScriptSite::File {
+            raw,
+            unit: Some(defining.clone()),
+        })
+    }
+}
+
+/// Single frame walk for bare and `SCRIPT::` call spellings (#322):
+/// nested frames down to the call/init floor, then the owning file
+/// frame (entry included via its precomputed index), then the
+/// per-unit harvest map. Caller frames below the floor are
+/// unreachable by construction; at entry the live frames hold only
+/// entry-owned and explicitly harvested defs (inits pop). Qualified
+/// non-`SCRIPT` spellings and canonical matches never reach here:
+/// the caller handles those through the alias matcher first.
+/// Returns `None` when only hosts/natives (or nothing) answer.
+pub(super) fn find_script_site<P: ProcessManager>(
+    state: &ExecState<P>,
+    name: &str,
+) -> Result<Option<ScriptSite<P>>> {
+    use super::native::FuncFrameView;
+    let base = match name.split_once(MODULE_SEPARATOR) {
+        Some((module, base)) if module == oxdock_parser::SCRIPT_MODULE_NAME => base,
+        Some(_) => return Ok(None),
+        None => name,
+    };
+    let current = state.current_module();
+    let view = RuntimeFrame {
+        state,
+        current: current.clone(),
+    };
+    Ok(view.walk(unit_key(current.as_deref()), base))
+}
+
+/// Runtime #319 missing-import suffix for an unknown function:
+/// empty when no loaded module exports the base name. Single
+/// owner for the runtime exporter view; every runtime
+/// unknown-function error appends this instead of restating the
+/// module scan.
+pub(crate) fn missing_import_hint<P: ProcessManager>(state: &ExecState<P>, name: &str) -> String {
+    super::native::missing_import_hint(
+        state
+            .modules
+            .iter()
+            .map(|(file, record)| (file.as_str(), record.exports.funcs.as_slice())),
+        &active_unit_alias_targets(state),
+        name,
+    )
+    .unwrap_or_default()
+}
+
+/// Unit key for an owning file: the module key, or the entry
+/// sentinel when `None`. Single owner for the `unwrap_or(ENTRY_UNIT)`
+/// fallback, so runtime and static lookups can never restate it.
+pub(crate) fn unit_key(owner: Option<&str>) -> &str {
+    owner.unwrap_or(ENTRY_UNIT)
+}
+
 /// Active unit for runtime alias attribution: the innermost module
 /// on the context stack, else the entry.
 pub(crate) fn active_unit_key<P: ProcessManager>(state: &ExecState<P>) -> String {
-    if let Some(key) = state.current_module() {
-        return key;
-    }
-    ENTRY_UNIT.to_string()
+    unit_key(state.current_module().as_deref()).to_string()
 }
 
-/// Alias targets for the active unit: executed top-level imports plus
-/// the innermost live call frame for this unit, if any. Mirrors the
-/// static per-function overlays (unit top-level plus the body's own
-/// imports, appended in the same order): a callee never sees its
-/// caller's function-local imports. Conditional imports that never
-/// execute stay absent and fall back to unknown.
-pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
+/// Alias targets for one unit: executed unit-top imports, plus the
+/// live block-scope frames for that unit (outer-to-inner), plus the
+/// innermost call frame for that unit, if any. Scope frames merge
+/// only when deeper than the innermost live call frame's entry depth
+/// (a stale forked frame carries no floor), so a caller block's
+/// imports never leak into a same-unit callee. Single owner behind
+/// [`active_unit_alias_targets`], so forward-chasing reads the same
+/// tables the direct read does.
+pub(crate) fn unit_alias_targets<P: ProcessManager>(
     state: &ExecState<P>,
+    unit: &str,
 ) -> super::native::AliasTargets {
-    let unit = active_unit_key(state);
     let mut out = state
         .executed_alias_targets
-        .get(&unit)
+        .get(unit)
         .cloned()
         .unwrap_or_default();
-    if let Some((_, frame)) = state
-        .call_alias_frames
+    // Innermost frame for the unit, preferring a live one (entry
+    // depth at or below the current scope depth; a forked child
+    // restarts its stack, so deeper cloned frames are stale). A
+    // stale frame still merges its targets (inherited visibility),
+    // but carries no floor: only a live frame bounds the scope
+    // frames to its own invocation.
+    let live_floor = {
+        let mut floor = 0;
+        let mut inherited: Option<&super::native::AliasTargets> = None;
+        for frame in state.call_alias_frames.iter().rev() {
+            if frame.unit == unit {
+                if frame.depth <= state.scope_stack.len() {
+                    for (alias, targets) in &frame.targets {
+                        out.entry(alias.clone())
+                            .or_default()
+                            .extend(targets.iter().cloned());
+                    }
+                    floor = frame.depth;
+                    inherited = None;
+                    break;
+                }
+                inherited.get_or_insert(&frame.targets);
+            }
+        }
+        if let Some(targets) = inherited {
+            for (alias, alias_targets) in targets {
+                out.entry(alias.clone())
+                    .or_default()
+                    .extend(alias_targets.iter().cloned());
+            }
+        }
+        floor
+    };
+    for frame in state
+        .scope_alias_frames
         .iter()
-        .rev()
-        .find(|(key, _)| *key == unit)
+        .filter(|frame| frame.unit == unit && frame.depth > live_floor)
     {
-        // Append, never overwrite: the static overlay appends the
-        // body's own imports onto the unit top-level, so the same
+        // Append, never overwrite: the static walk layers block
+        // imports over the unit table the same way, so the same
         // alias in both layers overlaps (ambiguous) here too instead
         // of the frame silently shadowing the unit map.
-        for (alias, targets) in frame {
+        for (alias, targets) in &frame.targets {
             out.entry(alias.clone())
                 .or_default()
                 .extend(targets.iter().cloned());
@@ -1555,30 +1950,196 @@ pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
     out
 }
 
+/// Alias targets for the active unit: executed unit-top imports,
+/// live block-scope frames, plus the innermost live call frame for
+/// this unit, if any. Mirrors the static per-function overlays (unit
+/// top-level plus the body's own imports, appended in the same order):
+/// a callee never sees its caller's function-local imports.
+/// Block imports unwind with their block: imports that never execute
+/// stay absent and fall back to unknown.
+pub(crate) fn active_unit_alias_targets<P: ProcessManager>(
+    state: &ExecState<P>,
+) -> super::native::AliasTargets {
+    unit_alias_targets(state, &active_unit_key(state))
+}
+
+/// Live [`ModuleGraphView`](super::native::ModuleGraphView): raw export
+/// lists, per-file unit targets, and store bindings straight off the
+/// executed modules.
+impl<P: ProcessManager> super::native::ModuleGraphView for ExecState<P> {
+    fn const_exports(&self, file: &str) -> Option<&[String]> {
+        self.modules
+            .get(file)
+            .map(|record| record.exports.consts.as_slice())
+    }
+
+    fn alias_targets(&self, file: &str) -> super::native::AliasTargets {
+        unit_alias_targets(self, file)
+    }
+
+    fn binding(&self, file: &str, name: &str) -> super::native::BindingPresence {
+        use super::native::BindingPresence;
+        match self
+            .modules
+            .get(file)
+            .and_then(|record| record.init.as_ref())
+        {
+            Some(init) => match init.vars.get(name) {
+                Some(_) if init.const_vars.contains(name) => BindingPresence::Const,
+                Some(_) => BindingPresence::Let,
+                None => BindingPresence::Absent,
+            },
+            None => BindingPresence::Absent,
+        }
+    }
+}
+
+/// Resolve one `$ALIAS::NAME` read against the active unit's alias
+/// targets: the single runtime owner for qualified `CONST` reads
+/// (expression, math, and template positions all route here, so the
+/// three can never disagree). Only `EXPORT`ed `CONST` bindings
+/// resolve: `LET` bindings never cross the boundary, and an alias
+/// with several live files exporting the name fails loud instead of
+/// picking one. Holders and forwards resolve through the shared
+/// [`native`](super::native) graph walk, so a re-export reads exactly
+/// the value a direct read would.
+pub(crate) fn resolve_const_ref<P: ProcessManager>(
+    state: &ExecState<P>,
+    alias: &str,
+    name: &str,
+) -> Result<Value> {
+    use super::native::{
+        ConstHolders, ambiguous_alias_message, chase_const_forward, const_holder_files,
+        missing_const_hint,
+    };
+    let qualified = oxdock_parser::qualify(alias, name);
+    let targets = active_unit_alias_targets(state);
+    // Holder files only: exactly one live holder reads; several fail
+    // loud instead of picking.
+    let holders = match const_holder_files(state, &targets, alias, name) {
+        ConstHolders::Found(holders) => holders,
+        ConstHolders::NoAlias => {
+            bail!("unknown CONST `{qualified}`: no import alias `{alias}` exports that name");
+        }
+        ConstHolders::Ambiguous { alias, base, files } => {
+            bail!(
+                "{}",
+                ambiguous_alias_message(&alias, &base, &files).replacen("function", "CONST", 1)
+            );
+        }
+    };
+    if holders.len() > 1 {
+        let files: std::collections::HashSet<String> = holders.into_iter().collect();
+        bail!(
+            "{}",
+            ambiguous_alias_message(alias, name, &files).replacen("function", "CONST", 1)
+        );
+    }
+    let Some(file) = holders.into_iter().next() else {
+        // Hint owned by `missing_const_hint`: unexported CONST or
+        // private LET under the queried alias only.
+        let hint = missing_const_hint(state, &targets, alias, name);
+        match hint {
+            Some(hint) => bail!("unknown CONST `{qualified}`: {hint}"),
+            None => {
+                bail!("unknown CONST `{qualified}`: no import alias `{alias}` exports that name")
+            }
+        }
+    };
+    // Follow qualified forwards to the defining files: a re-export
+    // reads exactly the value a direct read would, frozen flag
+    // included (the clone below shares the frozen buffer). Runtime
+    // targets carry no guards, so disjoint branches cannot co-exist
+    // here: several terminals fail loud like several holders.
+    let mut terminals = chase_const_forward(state, &file, name, &qualified)?;
+    if terminals.len() > 1 {
+        let files: std::collections::HashSet<String> = terminals.drain(..).collect();
+        bail!(
+            "{}",
+            ambiguous_alias_message(alias, name, &files).replacen("function", "CONST", 1)
+        );
+    }
+    let Some(terminal) = terminals.into_iter().next() else {
+        bail!("unknown CONST `{qualified}`");
+    };
+    let Some(record) = state.modules.get(&terminal) else {
+        bail!("unknown CONST `{qualified}`");
+    };
+    let Some(init) = record.init.as_ref() else {
+        bail!(
+            "`{qualified}` cannot be read: the module was harvested but never initialized; import the file"
+        );
+    };
+    if !init.const_vars.contains(name) {
+        bail!(
+            "`{qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+        );
+    }
+    init.vars
+        .get(name)
+        .map(|(_, value)| value.clone())
+        .ok_or_else(|| anyhow::anyhow!("unknown CONST `{qualified}`"))
+}
+
 /// Record one executed import under the importing unit: alias to its
 /// defining file key (`None` for host-only harvests, which keep the
 /// alias known with an explicit host branch, mirroring the static
 /// host fallback). Inside a function body the record lands on the
-/// innermost call frame for the active unit, never the shared
-/// unit-top map, so sibling and caller scopes stay isolated.
-/// Top-level imports land on the unit-top map. Runtime imports execute
-/// unconditionally once taken, so they record no guard.
+/// innermost call frame for the active unit when executing at the
+/// call's own top level (scope depth equals the frame's entry
+/// depth), never the shared unit-top map, so sibling and caller
+/// scopes stay isolated. Inside a lexical block (`IF`/`FOR`/`WHILE`/
+/// `SWITCH`/...) the record lands on the innermost scope frame for
+/// the active unit at the current scope depth, unwinding with the
+/// block on scope exit — including blocks nested in function bodies.
+/// A module init's own top level and the entry top level land on the
+/// unit-top map. Runtime imports execute unconditionally once taken,
+/// so they record no guard.
 pub(crate) fn record_executed_alias<P: ProcessManager>(
     state: &mut ExecState<P>,
     alias: &str,
     defining: Option<String>,
 ) {
     let unit = active_unit_key(state);
-    if let Some((_, frame)) = state
+    let depth = state.scope_stack.len();
+    if let Some(frame) = state
         .call_alias_frames
         .iter_mut()
         .rev()
-        .find(|(key, _)| *key == unit)
+        .find(|frame| frame.unit == unit)
+        && frame.depth == depth
     {
         frame
+            .targets
             .entry(alias.to_string())
             .or_default()
             .push((defining, None));
+        return;
+    }
+    if !state.scope_stack.is_empty() && !state.init_scope_depths.contains(&depth) {
+        if let Some(frame) = state
+            .scope_alias_frames
+            .iter_mut()
+            .rev()
+            .find(|frame| frame.depth == depth && frame.unit == unit)
+        {
+            frame
+                .targets
+                .entry(alias.to_string())
+                .or_default()
+                .push((defining, None));
+            return;
+        }
+        let mut targets = super::native::AliasTargets::new();
+        targets
+            .entry(alias.to_string())
+            .or_default()
+            .push((defining, None));
+        state.scope_alias_frames.push(ScopeAliasFrame {
+            depth,
+            unit,
+            targets,
+        });
         return;
     }
     let targets = state

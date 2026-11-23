@@ -136,10 +136,13 @@ fn run_shell_routes_dollar_forms_to_dsl_or_shell() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "who".into(),
                 decl_type: "STRING".to_string(),
-                expr: Expr::Literal(Value::string("world".to_string())),
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string(
+                    "world".to_string(),
+                ))),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -188,13 +191,14 @@ fn run_exec_resolves_and_flattens_argv() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "args".into(),
                 decl_type: "LIST<STRING>".to_string(),
-                expr: Expr::List(vec![
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::List(vec![
                     Expr::Literal(Value::string("-v".to_string())),
                     Expr::Literal(Value::string("--all".to_string())),
-                ]),
+                ])),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -206,7 +210,9 @@ fn run_exec_resolves_and_flattens_argv() {
             kind: StepKind::RunExec {
                 argv: vec![
                     Arg::Expr(Expr::Literal(Value::string("cargo".to_string()))),
-                    Arg::Expr(Expr::Var("args".to_string())),
+                    Arg::Expr(Expr::Var {
+                        name: "args".to_string(),
+                    }),
                     Arg::Expr(Expr::Literal(Value::int(3))),
                     Arg::Expr(Expr::Literal(Value::bool(true))),
                     Arg::String("{{ env:GREETING }}".to_string(), false),
@@ -292,10 +298,13 @@ fn run_exec_resolves_every_variable_type() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "who".into(),
                 decl_type: "STRING".to_string(),
-                expr: Expr::Literal(Value::string("world".to_string())),
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string(
+                    "world".to_string(),
+                ))),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -304,13 +313,14 @@ fn run_exec_resolves_every_variable_type() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "m".into(),
                 decl_type: "MAP<k: STRING>".to_string(),
-                expr: Expr::Map(vec![(
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::Map(vec![(
                     "k".to_string(),
                     Expr::Literal(Value::string("keyval".to_string())),
-                )]),
+                )])),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -323,7 +333,9 @@ fn run_exec_resolves_every_variable_type() {
                 argv: vec![
                     Arg::Expr(Expr::Literal(Value::string("echo".to_string()))),
                     // Whole-element `$var` and `$map.key` references.
-                    Arg::Expr(Expr::Var("who".to_string())),
+                    Arg::Expr(Expr::Var {
+                        name: "who".to_string(),
+                    }),
                     Arg::Expr(Expr::KeyPath {
                         base: "m".to_string(),
                         keys: vec!["k".to_string()],
@@ -455,10 +467,13 @@ fn run_exec_treats_variable_values_as_opaque() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "data".into(),
                 decl_type: "STRING".to_string(),
-                expr: Expr::Literal(Value::string("\\{{ env:SECRET }}".to_string())),
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string(
+                    "\\{{ env:SECRET }}".to_string(),
+                ))),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -470,7 +485,9 @@ fn run_exec_treats_variable_values_as_opaque() {
             kind: StepKind::RunExec {
                 argv: vec![
                     Arg::Expr(Expr::Literal(Value::string("echo".to_string()))),
-                    Arg::Expr(Expr::Var("data".to_string())),
+                    Arg::Expr(Expr::Var {
+                        name: "data".to_string(),
+                    }),
                 ],
             },
             scope_enter: 0,
@@ -680,17 +697,20 @@ fn guard_groups_allow_any_matching_branch() {
 #[test]
 fn with_io_pipe_routes_stdout_to_run_stdin() {
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "shared".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("shared".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "shared".into(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::Echo("hello".into())),
             },
@@ -704,7 +724,9 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("shared".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "shared".into(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::Run("cat".into())),
             },
@@ -747,17 +769,20 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
 #[test]
 fn async_echo_pipe_write_preserves_exact_bytes() {
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "async_out".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("async_out".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "async_out".into(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
                     body: vec![step(StepKind::Echo("hello".into()))],
@@ -773,7 +798,9 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("async_out".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "async_out".into(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "async_out.txt".into(),
@@ -804,22 +831,26 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
 #[test]
 fn async_stdin_pipe_unblocks_background_write() {
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "in_chan".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
-            kind: StepKind::AssignAsync {
+            kind: StepKind::Bind {
                 var: "writer".into(),
                 decl_type: "HANDLE<VOID>".to_string(),
-                body: vec![Step {
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Async(vec![Step {
                     guard: None,
                     kind: StepKind::WithIo {
                         bindings: vec![IoBinding {
                             stream: IoStream::Stdin,
-                            pipe: Some(oxdock_parser::PipeTarget::Var("in_chan".into())),
+                            pipe: Some(oxdock_parser::PipeTarget::Var {
+                                name: "in_chan".into(),
+                            }),
                         }],
                         cmd: Box::new(StepKind::Write {
                             path: "inline_direct.txt".into(),
@@ -830,7 +861,7 @@ fn async_stdin_pipe_unblocks_background_write() {
                     scope_exit: 0,
                     line: 0,
                     col: 0,
-                }],
+                }]),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -842,7 +873,9 @@ fn async_stdin_pipe_unblocks_background_write() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("in_chan".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "in_chan".into(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::Echo("unblock_inline_payload".into())),
             },
@@ -938,6 +971,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         assert_windows_stderr: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         exact_stdout: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         var_scopes: Vec::new(),
+        const_scopes: Vec::new(),
         cancel_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cancel_hub: Arc::new(oxdock_process::CancelHub::new()),
         active_process: Arc::new(std::sync::Mutex::new(None)),
@@ -953,7 +987,17 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         import_stack: Vec::new(),
         executed_alias_targets: std::collections::HashMap::new(),
         call_alias_frames: Vec::new(),
-        modules: std::collections::HashMap::new(),
+        scope_alias_frames: Vec::new(),
+        init_scope_depths: Vec::new(),
+        func_floors: Vec::new(),
+        harvest_map: std::collections::HashMap::new(),
+        modules: std::collections::HashMap::from([(
+            super::import::ENTRY_UNIT.to_string(),
+            super::state::ModuleRecord::entry_record(
+                std::collections::HashMap::new(),
+                fs.root().clone(),
+            ),
+        )]),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
         module_table: super::native::std_module_table(),
@@ -963,6 +1007,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         type_aliases: std::collections::HashMap::new(),
         type_env_digest: 0,
         call_depth: 0,
+        init_inherit_stack: Vec::new(),
         task_id: 0,
         push_manifest: Vec::new(),
         _marker: std::marker::PhantomData,
@@ -1494,10 +1539,11 @@ fn cat_and_capture_expand_env_paths() {
     let temp = GuardedPath::tempdir().expect("tempdir");
     let root = temp.as_guarded_path().clone();
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "cap_cat".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
@@ -1537,7 +1583,9 @@ fn cat_and_capture_expand_env_paths() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("cap_cat".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "cap_cat".to_string(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::Read(Some("{{ env:SNIPPET }}".into()))),
             },
@@ -1551,7 +1599,9 @@ fn cat_and_capture_expand_env_paths() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("cap_cat".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "cap_cat".to_string(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "{{ env:OUT_FILE }}".into(),
@@ -2005,10 +2055,11 @@ fn failing_foreground_run_aborts_with_step_context() {
 #[test]
 fn with_io_rejects_duplicate_stdout_binding() {
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "p".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
@@ -2016,11 +2067,11 @@ fn with_io_rejects_duplicate_stdout_binding() {
                 bindings: vec![
                     IoBinding {
                         stream: IoStream::Stdout,
-                        pipe: Some(oxdock_parser::PipeTarget::Var("p".into())),
+                        pipe: Some(oxdock_parser::PipeTarget::Var { name: "p".into() }),
                     },
                     IoBinding {
                         stream: IoStream::Stdout,
-                        pipe: Some(oxdock_parser::PipeTarget::Var("p".into())),
+                        pipe: Some(oxdock_parser::PipeTarget::Var { name: "p".into() }),
                     },
                 ],
                 cmd: Box::new(StepKind::Echo("x".into())),
@@ -2065,10 +2116,11 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
             (IoStream::Stderr, IoStream::Stderr)
         };
         let steps = vec![
-            step(StepKind::Assign {
+            step(StepKind::Bind {
                 var: "p".into(),
                 decl_type: "PIPE".to_string(),
-                expr: Expr::FreshPipe,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
             }),
             Step {
                 guard: None,
@@ -2076,11 +2128,11 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
                     bindings: vec![
                         IoBinding {
                             stream: stream_a,
-                            pipe: Some(oxdock_parser::PipeTarget::Var("p".into())),
+                            pipe: Some(oxdock_parser::PipeTarget::Var { name: "p".into() }),
                         },
                         IoBinding {
                             stream: stream_b,
-                            pipe: Some(oxdock_parser::PipeTarget::Var("p".into())),
+                            pipe: Some(oxdock_parser::PipeTarget::Var { name: "p".into() }),
                         },
                     ],
                     cmd: Box::new(StepKind::Echo("x".into())),
@@ -2122,17 +2174,20 @@ fn with_io_async_outer_pipe_stays_script() {
     // itself. `$live` is main-declared and shared into the task, so it
     // stays a script pipe even though the task body is a single RUN.
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "live".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("live".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "live".into(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
                     body: vec![Step {
@@ -2241,17 +2296,20 @@ fn with_io_async_guarded_and_exec_form_outer_pipe_stays_script() {
 #[test]
 fn with_io_async_dsl_body_stays_script_pipe() {
     let steps = vec![
-        step(StepKind::Assign {
+        step(StepKind::Bind {
             var: "plain".into(),
             decl_type: "PIPE".to_string(),
-            expr: Expr::FreshPipe,
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe),
         }),
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("plain".into())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "plain".into(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
                     body: vec![Step {
@@ -3773,10 +3831,11 @@ fn timeout_scope_does_not_join_prior_background_work() {
     let steps = vec![
         Step {
             guard: None,
-            kind: StepKind::AssignAsync {
+            kind: StepKind::Bind {
                 var: "srv".into(),
                 decl_type: "HANDLE<VOID>".to_string(),
-                body: vec![step(StepKind::Run("server".into()))],
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Async(vec![step(StepKind::Run("server".into()))]),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -4099,11 +4158,14 @@ mod escape_props {
             let reparsed = crate::parse_script(&format!("LET $v: STRING = {literal}\n"))
                 .expect("rendered literal parses");
             let payload = match &reparsed[0].kind {
-                StepKind::Assign { expr, .. } => match expr {
+                StepKind::Bind {
+                    rhs: oxdock_parser::BindRhs::Expr(expr),
+                    ..
+                } => match expr {
                     Expr::Literal(value) => value.as_str().expect("string payload").to_string(),
                     other => panic!("expected literal, got {other:?}"),
                 },
-                other => panic!("expected Assign, got {other:?}"),
+                other => panic!("expected Bind, got {other:?}"),
             };
             prop_assert_eq!(expand_string(&payload, &state.envs, &state).expect("expand"), raw);
         }
@@ -4675,7 +4737,8 @@ fn host_round_trip_through_adapters() {
 
 #[test]
 fn expand_placeholders_reject_missing_names() {
-    // Runtime half of the missing-key contract: `$var`, bare keys,
+    // Runtime half of the missing-key contract: `$var` reads fail
+    // undeclared, bare keys fail with the `$` hint (they never read),
     // and empty placeholders have no static coverage (the gate checks
     // only `env:` names), so direct expansion must fail loudly.
     // Absent env reads empty here by design: declaration is enforced
@@ -4689,9 +4752,10 @@ fn expand_placeholders_reject_missing_names() {
     let err = expand_string("{{ bare_nope }}", &state.envs.clone(), &state)
         .expect_err("missing bare key must fail");
     assert!(
-        format!("{err:#}").contains("undefined script variable"),
+        format!("{err:#}").contains("never reads a binding"),
         "{err:#}"
     );
+    assert!(format!("{err:#}").contains("$bare_nope"), "{err:#}");
     let err = expand_string("{{ }}", &state.envs.clone(), &state)
         .expect_err("empty placeholder must fail");
     assert!(
@@ -4705,14 +4769,14 @@ fn expand_placeholders_reject_missing_names() {
     )
     .expect("runtime env miss reads empty; the static gate owns declaration");
     assert_eq!(out, "");
-    // A bare key shadowing a present env name still fails: bare keys
-    // never read the environment, so the error points at `env:`.
+    // A bare uppercase key never reads, even when the env name exists:
+    // the error points at the `$` form.
     Arc::make_mut(&mut state.envs)
         .insert("OXDOCK_TEST_PRESENT".to_string(), "host-value".to_string());
     let err = expand_string("{{ OXDOCK_TEST_PRESENT }}", &state.envs.clone(), &state)
         .expect_err("bare key must fail even when the env name exists");
     assert!(
-        format!("{err:#}").contains("env:OXDOCK_TEST_PRESENT"),
+        format!("{err:#}").contains("$OXDOCK_TEST_PRESENT"),
         "unexpected error: {err:#}"
     );
 }
@@ -6860,9 +6924,10 @@ fn forward_reference_caller_before_callee_runs() {
 
 #[test]
 fn file_scope_top_level_let_visible_in_func_and_template() {
-    // Issue A: top-level `LET $NAME: TYPE = ...` is the supported
-    // file-scope constant idiom. The entry binding below reads inside
-    // a `FUNC` body and inside `{{ }}` with no per-FUNC rebinding.
+    // Hard isolation (#322): an entry top-level `LET` never flows
+    // into a `FUNC` body. The body must take it as an argument.
+    // Module file globals stay visible through the module store;
+    // entry globals do not.
     let fs = MockFs::new();
     let steps = parse_entry(indoc! {r#"
         LET $OUT: STRING = "shared"
@@ -6871,13 +6936,26 @@ fn file_scope_top_level_let_visible_in_func_and_template() {
         }
         LET $v: STRING = FETCH()
     "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("undefined variable"),
+        "entry top-level LET must not leak into FUNC, got: {err:#}"
+    );
+    let fs = MockFs::new();
+    let steps = parse_entry(indoc! {r#"
+        LET $OUT: STRING = "shared"
+        FUNC FETCH($OUT: STRING): STRING {
+         RETURN $OUT
+        }
+        LET $v: STRING = FETCH($OUT)
+    "#});
     let (_, _, bindings) = run_steps_with_manager(
         Box::new(fs),
         &steps,
         MockProcessManager::default(),
         ExecIo::new(),
     )
-    .expect("top-level LET reads in FUNC");
+    .expect("explicit argument must pass");
     assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("shared"));
 }
 
@@ -7294,20 +7372,23 @@ fn file_import_function_read_of_caller_var_fails() {
 /// args with `undefined variable`.
 #[test]
 fn entry_function_run_argv_sees_entry_let() {
+    // Hard isolation (#322): entry bindings cross into a callee only
+    // as explicit arguments. The container image arrives as a param,
+    // never through the ambient scope.
     let fs = MockFs::new();
     let mock = MockProcessManager::default();
     let steps = parse_entry(indoc! {r#"
         IMPORT [STD]
-        WORKSPACE LOCAL
         LET $container_image: STRING = "mock-container-image"
-        FUNC BUILD(): VOID {
-            RUN ["docker", "build", "-t", $container_image, "."]
+        FUNC BUILD($image: STRING): VOID {
+            WORKSPACE LOCAL
+            RUN ["docker", "build", "-t", $image, "."]
         }
-        FUNC PROBE(): VOID {
-            ECHO "probing {{ $container_image }}"
+        FUNC PROBE($image: STRING): VOID {
+            ECHO "probing {{ $image }}"
         }
-        BUILD()
-        PROBE()
+        BUILD($container_image)
+        PROBE($container_image)
     "#});
     run_steps_with_manager(Box::new(fs), &steps, mock.clone(), ExecIo::new())
         .expect("entry lets resolve in RUN argv and templates inside FUNC");
@@ -7474,12 +7555,13 @@ fn file_import_function_env_does_not_leak_out() {
     );
 }
 
-/// Module law, cwd leg: the ambient cwd is the same everywhere.
-/// A module function observes the caller's working directory, not
-/// its defining file's directory: WORKSPACE and WORKDIR mean the
-/// same in every file.
+/// Module law, cwd leg (#322): the callee jail is lexical, not
+/// ambient. A module function observes the snapshot root regardless
+/// of the caller working directory: same args, any caller cwd, same
+/// result. A callee needing the caller directory takes it as a path
+/// argument.
 #[test]
-fn file_import_function_cwd_is_ambient_cwd() {
+fn file_import_function_cwd_is_definition_site() {
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -7496,7 +7578,6 @@ fn file_import_function_cwd_is_ambient_cwd() {
     let steps = parse_entry(indoc! {r#"
         IMPORT [STD]
         IMPORT ["lib.oxdock" AS LIB]
-        LET $root_cwd: STRING = CWD()
         MKDIR sub
         WORKDIR sub
         LET $here: STRING = CWD()
@@ -7509,19 +7590,21 @@ fn file_import_function_cwd_is_ambient_cwd() {
         ExecIo::new(),
     )
     .expect("import runs");
-    let root_cwd = bindings
-        .get("root_cwd")
-        .and_then(|v| v.as_str())
-        .expect("root cwd bound");
     let here = bindings
         .get("here")
         .and_then(|v| v.as_str())
         .expect("caller cwd bound");
-    assert_ne!(here, root_cwd, "caller really moved into sub");
-    assert_eq!(
-        bindings.get("there").and_then(|v| v.as_str()),
-        Some(here),
-        "module function observes the same ambient cwd as entry code"
+    let there = bindings
+        .get("there")
+        .and_then(|v| v.as_str())
+        .expect("callee cwd bound");
+    assert_ne!(
+        here, there,
+        "callee must not inherit the caller workdir: caller {here}, callee {there}"
+    );
+    assert!(
+        !there.ends_with("sub"),
+        "callee stays in the snapshot jail, got {there}"
     );
 }
 
@@ -7589,7 +7672,7 @@ fn file_import_function_template_reads_module_store() {
         indoc! {r#"
                 LET $shared: STRING = "module-value"
                 FUNC SHOW(): STRING {
-                    RETURN "{{ shared }}"
+                    RETURN "{{ $shared }}"
                 }
                 EXPORT SHOW
             "#},
@@ -7907,8 +7990,11 @@ fn file_import_from_missing_func_fails() {
     );
     let steps = parse_entry("IMPORT [[NOPE FROM \"lib.oxdock\"]]\n");
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    // Export gate fires first in every stage (`gate_harvested_name`),
+    // so a name that is neither defined nor exported reports the
+    // export fault, statically and at runtime alike.
     assert!(
-        format!("{err:#}").contains("has no such function `NOPE`"),
+        format!("{err:#}").contains("does not export `NOPE`"),
         "{err:#}"
     );
 }
@@ -8726,11 +8812,9 @@ fn platform_conditional_imports_under_one_alias_are_not_ambiguous() {
         LET $go: BOOL = true
         IF $go {
          [os:macos] IMPORT ["mac.oxdock" AS LIB]
-        }
-        IF $go {
          [not(os:macos)] IMPORT ["lin.oxdock" AS LIB]
+         ECHO "{{ LIB::FOO() }}"
         }
-        ECHO "{{ LIB::FOO() }}"
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
@@ -8746,9 +8830,10 @@ fn platform_conditional_imports_under_one_alias_are_not_ambiguous() {
 
 #[test]
 fn block_scoped_import_resolves_inside_block() {
-    // Inline blocks run in the enclosing dynamic scope, so their
-    // imports belong to the enclosing unit: a top-level block's
-    // import resolves inside the block instead of reading unknown.
+    // Block imports scope to their block like `LET`/`ENV`: an import
+    // inside a block resolves for the rest of that block (not past
+    // its closing brace), so a top-level block's import reads inside
+    // the block instead of reading unknown.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -8772,7 +8857,7 @@ fn block_scoped_import_resolves_inside_block() {
         MockProcessManager::default(),
         ExecIo::new(),
     )
-    .expect("block import resolves in its enclosing scope");
+    .expect("block import resolves inside its block");
     assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("ok"));
 }
 
@@ -8974,7 +9059,9 @@ fn disjoint_host_harvest_branch_fails_unknown() {
     // A host-harvest branch holds no file functions: pairing a file
     // import with a disjoint host harvest under one alias must fail
     // unknown (the host platform has no `FOO`), never collapse to
-    // `Canonical` on the file branch.
+    // `Canonical` on the file branch. Both imports share one block
+    // so both branches are visible at the read; block exit would
+    // unwind them instead.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -8990,10 +9077,8 @@ fn disjoint_host_harvest_branch_fails_unknown() {
         LET $go: BOOL = true
         IF $go {
             [os:macos] IMPORT ["mac.oxdock" AS LIB]
+            [not(os:macos)] IMPORT [TYPE PIPE FROM STD AS LIB]
             LET $v: STRING = LIB::FOO()
-        }
-        IF $go {
-         [not(os:macos)] IMPORT [TYPE PIPE FROM STD AS LIB]
         }
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
@@ -9125,12 +9210,28 @@ fn entry_func_call_before_let_fails_static() {
 
 #[test]
 fn entry_func_call_after_let_passes() {
-    // The same program with the declaration first validates and runs:
-    // earliest-call seeding includes `$late` for the call at step 3.
+    // Hard isolation (#322): even a declaration before the call does
+    // not flow into the callee. Only explicit arguments cross the
+    // boundary, so this fails with undefined variable. The explicit
+    // argument form below is the supported path.
     let steps = parse_entry(indoc! {r#"
         LET $late: STRING = "late"
         FUNC FETCH(): STRING { RETURN $late }
         LET $v: STRING = FETCH()
+    "#});
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    state.push_var_scope();
+    let err = super::validate_closure_for_run(&mut state, &steps)
+        .expect_err("outer let must not be visible inside the callee");
+    assert!(
+        format!("{err:#}").contains("undefined variable"),
+        "isolation must report undefined variable, got: {err:#}"
+    );
+    let steps = parse_entry(indoc! {r#"
+        LET $late: STRING = "late"
+        FUNC FETCH($late: STRING): STRING { RETURN $late }
+        LET $v: STRING = FETCH($late)
     "#});
     let (_, _, bindings) = run_steps_with_manager(
         Box::new(MockFs::new()),
@@ -9138,7 +9239,7 @@ fn entry_func_call_after_let_passes() {
         MockProcessManager::default(),
         ExecIo::new(),
     )
-    .expect("call-after-let must pass");
+    .expect("explicit argument must pass");
     assert_eq!(bindings.get("v").and_then(|v| v.as_str()), Some("late"));
 }
 
@@ -9355,11 +9456,9 @@ fn template_disjoint_host_branch_does_not_suggest_let() {
         LET $go: BOOL = true
         IF $go {
             [os:macos] IMPORT ["mac.oxdock" AS LIB]
-        }
-        IF $go {
             [not(os:macos)] IMPORT [TYPE PIPE FROM STD AS LIB]
+            ECHO "{{ LIB::FOO() }}"
         }
-        ECHO "{{ LIB::FOO() }}"
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
@@ -9974,6 +10073,30 @@ fn file_import_unexported_fn_invisible_to_full_import() {
 }
 
 #[test]
+fn file_import_harvest_undefined_unexported_reports_export_gate() {
+    // A harvested name that is neither defined nor exported reports the
+    // export gate from every stage: `gate_harvested_name` checks export
+    // first, so static and runtime fail identically instead of each
+    // stage naming a different fault.
+    let fs = MockFs::new();
+    seed_lib(
+        &fs,
+        "lib.oxdock",
+        indoc! {r#"
+                FUNC SHOWN($x: STRING): STRING {
+                 RETURN $x
+                }
+                EXPORT SHOWN
+            "#},
+    );
+    let steps = parse_entry(indoc! {r#"
+        IMPORT [[MISSING FROM "lib.oxdock"]]
+    "#});
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(format!("{err:#}").contains("does not export"), "{err:#}");
+}
+
+#[test]
 fn file_import_harvest_unexported_fails_upfront() {
     // Harvesting a defined-but-unexported name is a closure error with
     // its own message, distinct from a missing function.
@@ -10300,10 +10423,11 @@ fn file_import_transitive_syntax_error_fails_before_any_step() {
 
 #[test]
 fn file_import_module_paths_follow_caller_workdir() {
-    // The store is single and shared (the counter increments across
-    // aliases and across WORKDIR changes), while relative paths
-    // resolve against the ambient cwd in every file: after the
-    // caller moves, the module reads the caller's files.
+    // Hard isolation (#322): the store is single and shared (the
+    // counter increments across aliases), while relative paths
+    // resolve against the callee snapshot jail, never the caller
+    // workdir. Both calls read the snapshot root file even after the
+    // caller moves.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -10338,19 +10462,23 @@ fn file_import_module_paths_follow_caller_workdir() {
         MockProcessManager::default(),
         ExecIo::new(),
     )
-    .expect("shared store with ambient paths");
+    .expect("shared store with isolated paths");
     assert_eq!(bindings.get("r1").and_then(|v| v.as_str()), Some("root"));
-    assert_eq!(bindings.get("r2").and_then(|v| v.as_str()), Some("nested"));
+    assert_eq!(
+        bindings.get("r2").and_then(|v| v.as_str()),
+        Some("root"),
+        "callee stays in the snapshot jail after the caller moves"
+    );
     assert_eq!(bindings.get("total").and_then(|v| v.as_i64()), Some(2));
 }
 
 #[test]
 fn file_import_module_paths_resolve_ambiently() {
-    // Relative paths resolve against the ambient cwd in every file:
-    // the module init writes next to the entry (import time cwd),
-    // and a later call reads the caller's files, never the module's
-    // own directory. The seeded copy next to the module is never
-    // touched.
+    // Hard isolation (#322): relative paths resolve against the
+    // callee snapshot jail, never the caller workdir. The module init
+    // writes next to the entry (import time cwd), and a later call
+    // reads the snapshot root even after the caller moves. The
+    // caller directory file is never touched.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -10365,21 +10493,15 @@ fn file_import_module_paths_resolve_ambiently() {
         indoc! {r#"
             WRITE out.txt "from-lib"
             FUNC READIT(): STRING {
-             LET $c: STRING = READ "data.txt"
+             LET $c: STRING = READ "shared.txt"
              RETURN $c
             }
             EXPORT READIT
         "#},
     );
-    seed_lib(
-        &fs,
-        "other/data.txt",
-        indoc! {r#"
-            caller-data
-        "#},
-    );
     let steps = parse_entry(indoc! {r#"
         IMPORT ["sub/lib.oxdock" AS LIB]
+        WRITE shared.txt "snapshot-data"
         MKDIR other
         WORKDIR other
         LET $v: STRING = LIB::READIT()
@@ -10390,11 +10512,11 @@ fn file_import_module_paths_resolve_ambiently() {
         MockProcessManager::default(),
         ExecIo::new(),
     )
-    .expect("module paths resolve ambiently");
-    // Call-time read hit the caller directory, not the module's.
+    .expect("module paths resolve against the callee jail");
+    // Call-time read hit the snapshot root, not the caller directory.
     assert_eq!(
         bindings.get("v").and_then(|v| v.as_str()),
-        Some("caller-data\n")
+        Some("snapshot-data")
     );
     // Init-time write landed next to the entry, not the module.
     let snap = fs.snapshot();
@@ -10412,9 +10534,9 @@ fn file_import_module_paths_resolve_ambiently() {
 
 #[test]
 fn file_import_module_run_uses_caller_cwd() {
-    // Child processes spawned by module-owned code start in the
-    // ambient cwd, wherever the importer happens to be: RUN means
-    // the same in every file.
+    // Hard isolation (#322): child processes spawned by module-owned
+    // code start in the snapshot jail, never the caller workdir. A
+    // callee needing the caller directory takes it as a path arg.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -10437,13 +10559,13 @@ fn file_import_module_run_uses_caller_cwd() {
     let mock = MockProcessManager::default();
     let (_, _, bindings) =
         run_steps_with_manager(Box::new(fs), &steps, mock.clone(), ExecIo::new())
-            .expect("module RUN uses caller cwd");
+            .expect("module RUN uses the callee jail");
     assert_eq!(bindings.get("r").and_then(|v| v.as_str()), Some("done"));
     let runs = mock.recorded_argv_runs();
     assert_eq!(runs.len(), 1);
     assert!(
-        runs[0].cwd.ends_with("other"),
-        "module RUN cwd is the caller cwd: {:?}",
+        !runs[0].cwd.ends_with("other"),
+        "module RUN cwd must not be the caller cwd: {:?}",
         runs[0].cwd
     );
 }
@@ -10674,6 +10796,7 @@ fn workflow_inline_scripts_pass_static_gate() {
                 )),
                 exact_stdout: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 var_scopes: Vec::new(),
+                const_scopes: Vec::new(),
                 cancel_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 cancel_hub: Arc::new(oxdock_process::CancelHub::new()),
                 active_process: Arc::new(std::sync::Mutex::new(None)),
@@ -10689,7 +10812,17 @@ fn workflow_inline_scripts_pass_static_gate() {
                 import_stack: Vec::new(),
                 executed_alias_targets: std::collections::HashMap::new(),
                 call_alias_frames: Vec::new(),
-                modules: std::collections::HashMap::new(),
+                scope_alias_frames: Vec::new(),
+                init_scope_depths: Vec::new(),
+                func_floors: Vec::new(),
+                harvest_map: std::collections::HashMap::new(),
+                modules: std::collections::HashMap::from([(
+                    super::import::ENTRY_UNIT.to_string(),
+                    super::state::ModuleRecord::entry_record(
+                        std::collections::HashMap::new(),
+                        root.clone(),
+                    ),
+                )]),
                 validated_modules: std::collections::HashSet::new(),
                 module_stack: Vec::new(),
                 module_table: super::native::std_module_table(),
@@ -10699,6 +10832,7 @@ fn workflow_inline_scripts_pass_static_gate() {
                 type_aliases: std::collections::HashMap::new(),
                 type_env_digest: 0,
                 call_depth: 0,
+                init_inherit_stack: Vec::new(),
                 task_id: 0,
                 push_manifest: Vec::new(),
                 _marker: std::marker::PhantomData,
@@ -10718,9 +10852,9 @@ fn workflow_inline_scripts_pass_static_gate() {
 
 #[test]
 fn entry_guarded_top_level_let_requires_guarded_read() {
-    // Directive 1: a single-platform top-level `LET` carries its guard
-    // into entry `FUNC` bodies, so an unguarded read fails coverage
-    // instead of passing statically and aborting at runtime.
+    // Hard isolation (#322): entry top-level bindings never enter a
+    // `FUNC` body, guarded or not. The read fails as undefined, not
+    // as a coverage diagnostic.
     let steps = parse_entry(indoc! {r#"
         [os:macos] LET $target: STRING = "mac"
         FUNC READ_IT(): STRING {
@@ -10733,20 +10867,21 @@ fn entry_guarded_top_level_let_requires_guarded_read() {
         MockProcessManager::default(),
     );
     assert!(
-        format!("{err:#}").contains("not guaranteed to be defined"),
-        "guarded entry let must enforce coverage, got: {err:#}"
+        format!("{err:#}").contains("undefined variable"),
+        "entry let must not leak into FUNC, got: {err:#}"
     );
 }
 
 #[test]
 fn entry_disjoint_guarded_lets_accumulate_per_platform() {
-    // Directive 1: disjoint guarded bindings for one name accumulate
-    // instead of overwriting, so a macos-guarded read sees the macos
-    // binding instead of `undefined variable` from the overwrite.
+    // Hard isolation (#322): disjoint guarded entry bindings also
+    // stay outside `FUNC` bodies. The callee takes what it needs as
+    // an argument, so this proves the explicit-argument path
+    // validates without any outer leakage.
     let steps = parse_entry(indoc! {r#"
         [os:macos] LET $x: INT = 1
-        [os:linux] LET $x: STRING = "lin"
-        FUNC READ_MAC(): INT {
+        [os:linux] LET $x: INT = 2
+        FUNC READ_MAC($x: INT): INT {
             [os:macos] RETURN $x
             RETURN 0
         }
@@ -10757,7 +10892,7 @@ fn entry_disjoint_guarded_lets_accumulate_per_platform() {
         MockProcessManager::default(),
         ExecIo::new(),
     )
-    .expect("disjoint guarded entry lets resolve per platform");
+    .expect("explicit argument must validate");
     let _ = bindings;
 }
 
@@ -10784,7 +10919,8 @@ fn template_bare_call_fails_statically() {
 fn template_qualified_typo_fails_statically() {
     // Directive 2: `{{ ALIAS::TYPO($x) }}` validates the callee through
     // `resolve_call`, so the closure pass names the culprit before
-    // runtime expansion.
+    // runtime expansion. The template argument arrives as an explicit
+    // `FUNC` param, never through outer scope (#322).
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -10799,7 +10935,7 @@ fn template_qualified_typo_fails_statically() {
     let steps = parse_entry(indoc! {r#"
         IMPORT ["lib.oxdock" AS CB]
         LET $x: STRING = "v"
-        FUNC T(): STRING {
+        FUNC T($x: STRING): STRING {
             RETURN "{{ CB::TYPO($x) }}"
         }
     "#});
@@ -10897,8 +11033,10 @@ fn template_rejects_script_and_stateful_callees_with_pure_arity() {
         ),
         ("{{ STD::LEN() }}", "expects 1 argument"),
     ] {
+        // Explicit param carries the template argument (#322): no
+        // outer scope leaks into the body.
         let steps = parse_entry(&format!(
-            "IMPORT [\"lib.oxdock\" AS CB]\nLET $x: STRING = \"v\"\nFUNC T(): STRING {{\n RETURN \"{body}\"\n}}\n"
+            "IMPORT [\"lib.oxdock\" AS CB]\nLET $x: STRING = \"v\"\nFUNC T($x: STRING): STRING {{\n RETURN \"{body}\"\n}}\n"
         ));
         let err = run_expect_err(Box::new(fs.clone()), &steps, MockProcessManager::default());
         assert!(
@@ -11415,11 +11553,14 @@ fn function_scoped_import_survives_scope_exit_for_later_reimports() {
 
 #[test]
 fn expand_template_with_sequential_conditional_imports_fails_ambiguous() {
-    // Two sequential conditional imports under one alias in the same
-    // scope both execute at runtime: the file-backed `EXPAND` (which
-    // skips static validation) sees both targets and fails ambiguous
-    // exactly like the static gate, instead of suggesting a `LET`
-    // binding for a call that can never resolve.
+    // Two top-level guarded imports under one alias both execute at
+    // runtime (overlapping `[bool:true]` guards always run): the
+    // file-backed `EXPAND` (which skips static validation) sees both
+    // targets and fails ambiguous exactly like the static gate,
+    // instead of suggesting a `LET` binding for a call that can never
+    // resolve. Same-frame guarded duplicates parse (the static pass
+    // decides disjoint vs overlapping); unguarded duplicates still
+    // reject at parse as probable typos.
     let fs = MockFs::new();
     seed_lib(
         &fs,
@@ -11447,18 +11588,82 @@ fn expand_template_with_sequential_conditional_imports_fails_ambiguous() {
     )
     .expect("seed template file");
     let steps = parse_entry(indoc! {r#"
-        LET $go: BOOL = true
-        IF $go {
-         IMPORT ["a.oxdock" AS LIB]
-        }
-        IF $go {
-         IMPORT ["c.oxdock" AS LIB]
-        }
+        [bool:true] IMPORT ["a.oxdock" AS LIB]
+        [bool:true] IMPORT ["c.oxdock" AS LIB]
         LET $o: STRING = EXPAND "t.txt"
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
         format!("{err:#}").contains("is ambiguous: alias `LIB` is imported from multiple files"),
         "EXPAND ambiguity must match the static gate, got: {err:#}"
+    );
+}
+
+#[test]
+fn missing_import_hint_names_exporter_and_spelling() {
+    // Single owner for the #319 hint, exercised directly: alias
+    // suggestion, FROM suggestion, multi-file list, self-view, and
+    // the silent no-match case.
+    let shared_exports = vec!["OUT_DIR".to_string()];
+    let files = vec![("shared.oxfile", shared_exports.as_slice())];
+    let mut targets: super::native::AliasTargets = HashMap::new();
+    targets.insert(
+        "LIB".to_string(),
+        vec![(Some("shared.oxfile".to_string()), None)],
+    );
+    let hint =
+        super::native::missing_import_hint(files.clone(), &targets, "LIB2::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("did you mean `LIB::OUT_DIR`?") && hint.contains("exports `OUT_DIR`"),
+        "alias suggestion, got: {hint}"
+    );
+    let empty: super::native::AliasTargets = HashMap::new();
+    let hint =
+        super::native::missing_import_hint(files.clone(), &empty, "LIB2::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("[FUNC OUT_DIR FROM \"shared.oxfile\"]"),
+        "FROM suggestion, got: {hint}"
+    );
+    let hint =
+        super::native::missing_import_hint(files.clone(), &targets, "LIB::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("does not resolve it here"),
+        "self-view names the disjoint alias instead of echoing it, got: {hint}"
+    );
+    let other_exports = vec!["OUT_DIR".to_string()];
+    let both = vec![
+        ("a.oxfile", shared_exports.as_slice()),
+        ("b.oxfile", other_exports.as_slice()),
+    ];
+    let hint = super::native::missing_import_hint(both, &empty, "LIB2::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("files \"a.oxfile\", \"b.oxfile\""),
+        "multi-file list, got: {hint}"
+    );
+    assert!(
+        super::native::missing_import_hint(files.clone(), &empty, "LIB2::NOPE").is_none(),
+        "unexported names stay silent"
+    );
+    // A second alias for the same file wins over the self-view: the
+    // failed spelling stays diagnostic only when no working spelling
+    // exists.
+    targets.insert(
+        "LIBB".to_string(),
+        vec![(Some("shared.oxfile".to_string()), None)],
+    );
+    let hint =
+        super::native::missing_import_hint(files.clone(), &targets, "LIB::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("did you mean `LIBB::OUT_DIR`?"),
+        "secondary alias preferred, got: {hint}"
+    );
+    // Windows separators normalize in the quoted FROM path: raw
+    // backslashes would read as escapes in the suggestion.
+    let win_exports = vec!["OUT_DIR".to_string()];
+    let win = vec![("C:\\proj\\shared.oxfile", win_exports.as_slice())];
+    let hint = super::native::missing_import_hint(win, &empty, "LIB2::OUT_DIR").expect("hint");
+    assert!(
+        hint.contains("[FUNC OUT_DIR FROM \"C:/proj/shared.oxfile\"]"),
+        "forward-slash FROM path, got: {hint}"
     );
 }

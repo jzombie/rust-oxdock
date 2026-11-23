@@ -124,14 +124,40 @@ struct StringValue(pub String);
 struct BoolValue(pub bool);
 
 /// Ordered list of values. Shared heap: cloning bumps a refcount.
+/// A `CONST`-owned list is deeply immutable: `LIST_APPEND` on it,
+/// or on any alias of it, fails with `cannot mutate CONST`,
+/// including for lists nested inside it. The `CONST` copy is
+/// detached, so mutating the `LET` source it was built from leaves
+/// the `CONST` unchanged. Equality ignores `CONST`-ness, so
+/// `ASSERT_EQ` never observes it.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "LIST", shared)]
-#[derive(Debug, Clone, PartialEq)]
-struct ListValue(pub Vec<Value>);
+#[derive(Debug, Clone)]
+struct ListValue(pub Vec<Value>, pub bool);
+
+impl PartialEq for ListValue {
+    /// Payload equality only: a frozen buffer still equals its
+    /// unfrozen twin, so `ASSERT_EQ` never observes `CONST`-ness.
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
 
 /// String-keyed map of values. Shared heap: cloning bumps a refcount.
+/// Freezing mirrors `LIST`: a `CONST`-owned map is deeply immutable,
+/// so `MAP_SET` and `MERGE_MAPS` on it (or any alias of it) fail
+/// with `cannot mutate CONST`, including for maps nested inside it.
+/// The `CONST` copy is detached from the `LET` source it was built
+/// from.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "MAP", shared)]
-#[derive(Debug, Clone, PartialEq)]
-struct MapValue(pub BTreeMap<String, Value>);
+#[derive(Debug, Clone)]
+struct MapValue(pub BTreeMap<String, Value>, pub bool);
+
+impl PartialEq for MapValue {
+    /// Payload equality only: see [`ListValue::eq`].
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
 
 /// Workspace path, resolved against cwd and guarded against escape.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "PATH")]
@@ -148,14 +174,19 @@ struct PathValue(#[allow(clippy::disallowed_types)] pub std::path::PathBuf);
 #[derive(Debug, Clone, PartialEq)]
 struct DurationValue(pub Duration);
 
-/// Anonymous pipe handle. The backend materializes lazily on first
-/// binding (never eagerly at declaration), so the choice always has full
-/// usage context. Cloning shares the backend (explicit-sharing fan-out);
-/// equality is handle identity, never byte comparison.
+/// Runtime-managed stream handle, never a raw descriptor. A `PIPE` names a
+/// runtime-managed byte stream with exactly one interface: declare it
+/// (`LET $p: PIPE`), wire it (`WITH_IO`), and pass or copy it across
+/// calls and module boundaries. Script code never manages descriptors,
+/// temp files, or platform plumbing. The backend materializes lazily
+/// on first binding (never eagerly at declaration), so the choice
+/// always has full usage context. Cloning shares the backend
+/// (explicit-sharing fan-out); equality is handle identity, never
+/// byte comparison.
 #[oxdock_type(
     crate_path = "::oxdock_parser",
     name = "PIPE",
-    summary = "Anonymous pipe handle.",
+    summary = "Runtime-managed stream handle.",
     shared
 )]
 #[derive(Debug, Clone)]
@@ -576,12 +607,12 @@ impl Value {
 
     /// Construct a list word (shared heap: clones share the buffer).
     pub fn list(items: Vec<Value>) -> Self {
-        Self::mint_heap_shared(ListValue::descriptor(), ListValue(items))
+        Self::mint_heap_shared(ListValue::descriptor(), ListValue(items, false))
     }
 
     /// Construct a map word (shared heap: clones share the buffer).
     pub fn map(entries: BTreeMap<String, Value>) -> Self {
-        Self::mint_heap_shared(MapValue::descriptor(), MapValue(entries))
+        Self::mint_heap_shared(MapValue::descriptor(), MapValue(entries, false))
     }
 
     /// Construct a path word.
@@ -689,7 +720,12 @@ impl Value {
     /// Borrow a list payload mutably, detaching the shared buffer first when
     /// clones exist. Returns `None` for non-`LIST` words. This is the choke
     /// point every future in-place container mutation must go through.
+    /// Frozen (`CONST`-owned) buffers refuse: `None` without detaching,
+    /// so an attempted write can never observe or disturb the buffer.
     pub fn as_list_mut(&mut self) -> Option<&mut Vec<Value>> {
+        if self.is_frozen() {
+            return None;
+        }
         self.read_heap_mut::<ListValue>(ListValue::descriptor())
             .map(|v| &mut v.0)
     }
@@ -703,9 +739,56 @@ impl Value {
     /// Borrow a map payload mutably, detaching the shared buffer first when
     /// clones exist. Returns `None` for non-`MAP` words. This is the choke
     /// point every future in-place container mutation must go through.
+    /// Frozen (`CONST`-owned) buffers refuse like lists above.
     pub fn as_map_mut(&mut self) -> Option<&mut BTreeMap<String, Value>> {
+        if self.is_frozen() {
+            return None;
+        }
         self.read_heap_mut::<MapValue>(MapValue::descriptor())
             .map(|v| &mut v.0)
+    }
+
+    /// Whether this word names a frozen (`CONST`-owned) container
+    /// buffer. Non-containers never freeze: rebinding a `LET` that
+    /// happens to hold a frozen value stays legal, only writes into
+    /// the buffer fail.
+    pub fn is_frozen(&self) -> bool {
+        if let Some(list) = self.read_heap::<ListValue>(ListValue::descriptor()) {
+            return list.1;
+        }
+        if let Some(map) = self.read_heap::<MapValue>(MapValue::descriptor()) {
+            return map.1;
+        }
+        false
+    }
+
+    /// Deep-freeze one value for `CONST` ownership: rebuild every
+    /// reachable `LIST`/`MAP` on fresh buffers with the frozen flag
+    /// set, so the tree shares nothing with the bindings it was built
+    /// from. Scalars (including strings, which have no in-place
+    /// mutator) clone as-is. The result reads exactly like the input
+    /// and refuses every in-place write.
+    pub fn deep_freeze(value: &Value) -> Value {
+        if let Some(list) = value.as_list() {
+            let items: Vec<Value> = list.iter().map(Self::deep_freeze).collect();
+            let mut out = Self::list(items);
+            if let Some(slot) = out.read_heap_mut::<ListValue>(ListValue::descriptor()) {
+                slot.1 = true;
+            }
+            return out;
+        }
+        if let Some(map) = value.as_map() {
+            let entries: BTreeMap<String, Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), Self::deep_freeze(v)))
+                .collect();
+            let mut out = Self::map(entries);
+            if let Some(slot) = out.read_heap_mut::<MapValue>(MapValue::descriptor()) {
+                slot.1 = true;
+            }
+            return out;
+        }
+        value.clone()
     }
 
     /// Clone the pipe handle out of a `PIPE` word. Returns `None` for

@@ -11,7 +11,7 @@ use anyhow::{Result, bail};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::{TypeDescriptor, Value};
+use crate::{TypeDescriptor, Value, constants::VAR_SIGIL};
 
 /// Maximum generic nesting for one spelling: syntactic `<` levels
 /// and alias hops share this budget at resolution, so neither deep
@@ -815,7 +815,7 @@ pub fn intern_rendered(canonical: String, tag: TypeTag) -> TypeTag {
 /// satisfied when absent (every binding site fills them before
 /// verifying), so the lock holds without restating it per call site.
 pub fn check_value(tag: &TypeTag, value: &Value) -> Result<()> {
-    check_value_at(tag, value, "$")
+    check_value_at(tag, value, VAR_SIGIL)
 }
 
 /// Shape conformance with a caller-chosen path prefix: the single

@@ -1,4 +1,4 @@
 name = "isolated"
 
 [expect]
-stdout = "inner:outer-val\nsecret:\ntop:outer-val\n"
+stdout = "inner:outer-val\nsecret:top-secret\ntop:outer-val\n"

@@ -121,7 +121,7 @@ impl ArgType {
             }
             Arg::String(_, _) => Ok(CheckOutcome::Deferred),
             Arg::Parts(_) => Ok(CheckOutcome::Deferred),
-            Arg::Expr(Expr::Var(_)) => {
+            Arg::Expr(Expr::Var { .. }) => {
                 if matches!(*self, ArgType::List) {
                     Ok(CheckOutcome::Static)
                 } else {
@@ -647,7 +647,9 @@ mod tests {
     }
 
     fn var(name: &str) -> Arg {
-        Arg::Expr(Expr::Var(name.to_string()))
+        Arg::Expr(Expr::Var {
+            name: name.to_string(),
+        })
     }
 
     #[test]

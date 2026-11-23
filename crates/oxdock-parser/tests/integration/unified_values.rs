@@ -95,7 +95,12 @@ fn env_equals_in_value_and_empty() {
 fn env_bare_variable_stays_typed() {
     match parse_one("ENV SOME_ENV=$x") {
         StepKind::Env { value, .. } => {
-            assert_eq!(value, Arg::Expr(Expr::Var("x".to_string())));
+            assert_eq!(
+                value,
+                Arg::Expr(Expr::Var {
+                    name: "x".to_string()
+                })
+            );
         }
         other => panic!("expected Env, saw {other:?}"),
     }
@@ -167,14 +172,24 @@ fn expand_bare_variable_forms() {
     // Override value evaluates like ECHO $x.
     match parse_one("EXPAND tmpl.txt FILE=$x") {
         StepKind::Expand { overrides, .. } => {
-            assert_eq!(overrides[0].1, Arg::Expr(Expr::Var("x".to_string())));
+            assert_eq!(
+                overrides[0].1,
+                Arg::Expr(Expr::Var {
+                    name: "x".to_string()
+                })
+            );
         }
         other => panic!("expected Expand, saw {other:?}"),
     }
     // Lone variable path stays a typed path.
     match parse_one("EXPAND $x") {
         StepKind::Expand { path, .. } => {
-            assert_eq!(path, Some(Arg::Expr(Expr::Var("x".to_string()))));
+            assert_eq!(
+                path,
+                Some(Arg::Expr(Expr::Var {
+                    name: "x".to_string()
+                }))
+            );
         }
         other => panic!("expected Expand, saw {other:?}"),
     }
@@ -214,9 +229,19 @@ fn expand_multi_assignment_splits_uniformly() {
             assert_eq!(path, None);
             assert_eq!(overrides.len(), 2);
             assert_eq!(overrides[0].0, "K1");
-            assert_eq!(overrides[0].1, Arg::Expr(Expr::Var("x".to_string())));
+            assert_eq!(
+                overrides[0].1,
+                Arg::Expr(Expr::Var {
+                    name: "x".to_string()
+                })
+            );
             assert_eq!(overrides[1].0, "K2");
-            assert_eq!(overrides[1].1, Arg::Expr(Expr::Var("y".to_string())));
+            assert_eq!(
+                overrides[1].1,
+                Arg::Expr(Expr::Var {
+                    name: "y".to_string()
+                })
+            );
         }
         other => panic!("expected Expand, saw {other:?}"),
     }
@@ -256,7 +281,9 @@ fn echo_mixed_variable_keeps_expression() {
             assert_eq!(
                 parts,
                 vec![
-                    ArgPart::Expr(Expr::Var("x".to_string())),
+                    ArgPart::Expr(Expr::Var {
+                        name: "x".to_string()
+                    }),
                     ArgPart::Text(" ".to_string(), false),
                     ArgPart::Text("hello".to_string(), false),
                 ]

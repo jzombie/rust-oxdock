@@ -18,7 +18,7 @@
 use crate::constants::{
     KEYWORD_ASYNC, KEYWORD_CASE, KEYWORD_DEFAULT, KEYWORD_ELSE, KEYWORD_FOR, KEYWORD_FUNC,
     KEYWORD_IF, KEYWORD_ISOLATED, KEYWORD_REMOTE, KEYWORD_SWITCH, KEYWORD_TIMEOUT, KEYWORD_WHILE,
-    KEYWORD_WITH_IO,
+    KEYWORD_WITH_IO, VAR_SIGIL_CHAR,
 };
 use crate::error::ParseErrorKind;
 use std::fmt;
@@ -190,7 +190,7 @@ fn is_delim(c: char) -> bool {
     matches!(
         c,
         '"' | '\''
-            | '$'
+            | VAR_SIGIL_CHAR
             | ':'
             | ','
             | '='
@@ -317,7 +317,7 @@ fn quote_opens_before(src: &str) -> bool {
         .map(|c| {
             matches!(
                 c,
-                '[' | '(' | '{' | ',' | ':' | '=' | '$' | '!' | '<' | '>' | '|' | '&'
+                '[' | '(' | '{' | ',' | ':' | '=' | VAR_SIGIL_CHAR | '!' | '<' | '>' | '|' | '&'
             )
         })
         .unwrap_or(true)
@@ -1138,12 +1138,12 @@ mod tests {
             toks,
             vec![
                 w("LET"),
-                punct('$'),
+                punct(VAR_SIGIL_CHAR),
                 wj("x"),
                 punctj(':'),
                 w("INT"),
                 punct('='),
-                punct('$'),
+                punct(VAR_SIGIL_CHAR),
                 wj("a"),
                 punct('='),
                 punctj('='),
@@ -1293,15 +1293,15 @@ mod tests {
             "LET $x: INT = $a + $b",
             vec![
                 w("LET"),
-                punct('$'),
+                punct(VAR_SIGIL_CHAR),
                 wj("x"),
                 punctj(':'),
                 w("INT"),
                 punct('='),
-                punct('$'),
+                punct(VAR_SIGIL_CHAR),
                 wj("a"),
                 punct('+'),
-                punct('$'),
+                punct(VAR_SIGIL_CHAR),
                 wj("b"),
             ],
         );

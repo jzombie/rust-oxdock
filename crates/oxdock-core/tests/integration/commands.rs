@@ -24,10 +24,11 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
     vec![
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: var.clone(),
                 decl_type: "PIPE".to_string(),
-                expr: oxdock_parser::Expr::FreshPipe,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(oxdock_parser::Expr::FreshPipe),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -39,7 +40,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var(var.clone())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var { name: var.clone() }),
                 }],
                 cmd: Box::new(cmd),
             },
@@ -53,7 +54,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var(var)),
+                    pipe: Some(oxdock_parser::PipeTarget::Var { name: var.clone() }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: path.into(),
@@ -851,7 +852,8 @@ fn copy_git_includes_dirty_file() {
     // Modify the tracked file without committing.
     write_text(&hello, "dirty hello");
 
-    let script = "COPY_GIT --include-dirty HEAD hello.txt out_hello.txt";
+    // Quote the git ref so it stays a literal string.
+    let script = "COPY_GIT --include-dirty \"HEAD\" hello.txt out_hello.txt";
     let steps = oxdock_core::parse_script(script).unwrap();
     run_steps_with_context(&snapshot, &repo, &steps).unwrap();
 
@@ -2975,12 +2977,9 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
         StepKind::Switch { .. } => {}
-        StepKind::Assign { .. } => {}
+        StepKind::Bind { .. } => {}
         StepKind::Set { .. } => {}
-        StepKind::AssignCapture { .. } => {}
-        StepKind::AssignAsync { .. } => {}
         StepKind::Await { .. } => {}
-        StepKind::AwaitCapture { .. } => {}
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
         StepKind::Isolated { .. } => {}
@@ -3973,6 +3972,45 @@ fn mutation_converts_to_declared_type() {
 }
 
 #[test]
+fn keypath_mutation_target_is_rejected_end_to_end() {
+    // `$M.a = ...` must fail instead of dropping `.a` and silently
+    // rebinding the whole `$M`: key paths read in expressions but
+    // are never mutation targets.
+    // Parse-time rejection: the key path never reaches execution,
+    // so assert on `parse_script` directly (`run_script` unwraps
+    // parse errors instead of returning them).
+    for (script, what) in [
+        (
+            indoc! {r#"
+                LET $M: MAP<ANY> = {a: 1}
+                $M.a = 2
+            "#},
+            "map key target",
+        ),
+        (
+            indoc! {r#"
+                LET $C: LIST<ANY> = [["a"]]
+                $C.0 = ["b"]
+            "#},
+            "list index target",
+        ),
+        (
+            indoc! {r#"
+                CONST $M: MAP<ANY> = {a: 1}
+                $M.a = 2
+            "#},
+            "const map key target",
+        ),
+    ] {
+        let err = oxdock_core::parse_script(script).expect_err("{what} must fail");
+        assert!(
+            format!("{err:#}").contains("cannot assign to"),
+            "{what}: {err:#}"
+        );
+    }
+}
+
+#[test]
 fn for_loop_body_mutations_do_not_leak() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -4413,10 +4451,11 @@ fn read_large_file_streams_without_oom() {
     let io_steps = vec![
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: pipe_var.clone(),
                 decl_type: "PIPE".to_string(),
-                expr: oxdock_parser::Expr::FreshPipe,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(oxdock_parser::Expr::FreshPipe),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -4428,7 +4467,9 @@ fn read_large_file_streams_without_oom() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var(pipe_var.clone())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: pipe_var.clone(),
+                    }),
                 }],
                 cmd: Box::new(read_steps[0].kind.clone()),
             },
@@ -4442,7 +4483,9 @@ fn read_large_file_streams_without_oom() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var(pipe_var)),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: pipe_var.clone(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "output.txt".into(),
@@ -4486,10 +4529,11 @@ fn read_stdin_streaming_via_pipe() {
         },
         Step {
             guard: None,
-            kind: StepKind::Assign {
+            kind: StepKind::Bind {
                 var: "pipe_read".into(),
                 decl_type: "PIPE".to_string(),
-                expr: oxdock_parser::Expr::FreshPipe,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(oxdock_parser::Expr::FreshPipe),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -4501,7 +4545,9 @@ fn read_stdin_streaming_via_pipe() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("pipe_read".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "pipe_read".to_string(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::Read(Some("source.txt".into()))),
             },
@@ -4515,7 +4561,9 @@ fn read_stdin_streaming_via_pipe() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Var("pipe_read".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var {
+                        name: "pipe_read".to_string(),
+                    }),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "dest.txt".into(),
@@ -4927,12 +4975,12 @@ fn fail_block_reroutes_nested_output_to_stderr() {
         &root,
         indoc! {r#"
             LET $who: STRING = "caller-val"
-            FUNC SHOUT(): VOID {
+            FUNC SHOUT($who: STRING): VOID {
                 ECHO "func-sees:{{ $who }}"
             }
             FAIL "fail-msg" {
                 ECHO "block-sees:{{ $who }}"
-                SHOUT()
+                SHOUT($who)
             }
             WRITE never.txt written
         "#},
@@ -5263,12 +5311,13 @@ fn func_return_only_inside_loop_fails() {
 #[test]
 fn func_guarded_return_without_fallback_fails() {
     // A conditionally-guarded RETURN with no unconditional fallback
-    // leaves fallthrough reachable.
+    // leaves fallthrough reachable. The guard name declares inside
+    // the body: entry top-level ENV never leaks into a callee (#322).
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        ENV STATIC_CHECK_DEMO_GUARD=1
         FUNC MAYBE(): STRING {
+            ENV STATIC_CHECK_DEMO_GUARD=1
             [env:STATIC_CHECK_DEMO_GUARD] RETURN "yes"
         }
     "#};

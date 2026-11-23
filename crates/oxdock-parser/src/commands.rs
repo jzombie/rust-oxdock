@@ -26,14 +26,14 @@ use crate::command::{
 use crate::constants::{
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS,
     KEYWORD_ASSERT_EQ, KEYWORD_ASSERT_NE, KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK,
-    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
+    KEYWORD_CANCEL, KEYWORD_CASE, KEYWORD_CONST, KEYWORD_CONTINUE, KEYWORD_COPY, KEYWORD_COPY_GIT,
     KEYWORD_DEFAULT, KEYWORD_ECHO, KEYWORD_ELSE, KEYWORD_ENV, KEYWORD_EXIT, KEYWORD_EXPAND,
     KEYWORD_EXPORT, KEYWORD_FAIL, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT,
     KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_ISOLATED, KEYWORD_LET, KEYWORD_LIST_APPEND,
     KEYWORD_LS, KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ, KEYWORD_READ_LINE, KEYWORD_REMOTE,
     KEYWORD_REMOVE, KEYWORD_RETURN, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP,
     KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE,
-    KEYWORD_WHILE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE,
+    KEYWORD_WHILE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE, sigil_var,
 };
 use crate::error::{ParseError, ParseResult, SpanContext};
 use indoc::indoc;
@@ -252,6 +252,45 @@ fn escape_block_text(s: &str) -> String {
     out
 }
 
+/// Reserved uppers that never name a `CONST`: statement keywords,
+/// known commands, builtin types, and workspace targets. Single
+/// owner for the definition gate and the bare-read gate so a word
+/// the definition rejects never parses as a const read. Type
+/// spellings reuse the canonical `*_TYPE_NAME` constants and
+/// workspace targets reuse `REMOTE_RESERVED_WORDS` instead of
+/// restating the literals.
+pub(crate) fn is_reserved_const_name(name: &str) -> bool {
+    if crate::Command::is_statement_keyword(name) || is_known_command(name) {
+        return true;
+    }
+    if [
+        crate::tag::STRING_TYPE_NAME,
+        crate::tag::INT_TYPE_NAME,
+        crate::tag::FLOAT_TYPE_NAME,
+        crate::tag::BOOL_TYPE_NAME,
+        crate::tag::LIST_TYPE_NAME,
+        crate::tag::MAP_TYPE_NAME,
+        crate::tag::PIPE_TYPE_NAME,
+        crate::tag::HANDLE_TYPE_NAME,
+        crate::tag::VOID_TYPE_NAME,
+        crate::tag::DURATION_TYPE_NAME,
+        crate::tag::PATH_TYPE_NAME,
+        crate::tag::SEMAPHORE_TYPE_NAME,
+        crate::tag::PERMIT_TYPE_NAME,
+        crate::tag::ANY_TYPE_NAME,
+    ]
+    .contains(&name)
+    {
+        return true;
+    }
+    REMOTE_RESERVED_WORDS.contains(&name)
+}
+
+/// Render one literal so it re-parses to itself: bare-safe words
+/// stay bare, everything else quotes. Statement keywords always
+/// quote: a bare keyword would parse as the statement, not the
+/// value. Bare uppercase words are literal text, never `CONST`
+/// refs, so they render bare like any other literal.
 fn quote_arg(s: &str) -> String {
     let is_safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '/' || c == '.')
@@ -336,7 +375,7 @@ fn fmt_io(b: &IoBinding) -> String {
         IoStream::Cols(cols) => format!("cols={cols}"),
     };
     match &b.pipe {
-        Some(PipeTarget::Var(v)) => format!("{}=${}", s, v),
+        Some(PipeTarget::Var { name }) => format!("{}=${}", s, name),
         None => s,
     }
 }
@@ -833,7 +872,7 @@ macro_rules! define_expr_walkers {
 
 impl StepKind {
     define_expr_walkers!(f, walk_arg, walk_opt, walk_target, {
-            StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => f(expr),
+            StepKind::Bind { rhs: BindRhs::Expr(expr), .. } | StepKind::Set { expr, .. } => f(expr),
             StepKind::Return { expr, .. } => f(expr),
             StepKind::Call { args, .. } => {
                 for arg in args {
@@ -949,10 +988,8 @@ impl StepKind {
             | StepKind::Isolated { .. }
             | StepKind::IsolatedInheritEnv { .. }
             | StepKind::ReadLine { .. }
-            | StepKind::AssignCapture { .. }
-            | StepKind::AwaitCapture { .. }
+            | StepKind::Bind { .. }
             | StepKind::AsyncBlock { .. }
-            | StepKind::AssignAsync { .. }
             | StepKind::Await { .. }
             | StepKind::Cancel { .. }
             | StepKind::RemoteBlock { .. }
@@ -962,8 +999,7 @@ impl StepKind {
     });
 
     define_raw_string_walkers!(f, walk_arg, walk_opt, walk_target, {
-        StepKind::Assign { .. }
-                | StepKind::Set { .. }
+        StepKind::Set { .. }
                 | StepKind::Call { .. }
                 | StepKind::Return { .. }
                 | StepKind::For { .. }
@@ -1058,10 +1094,8 @@ impl StepKind {
                 | StepKind::Isolated { .. }
                 | StepKind::IsolatedInheritEnv { .. }
                 | StepKind::ReadLine { .. }
-                | StepKind::AssignCapture { .. }
-                | StepKind::AwaitCapture { .. }
+                | StepKind::Bind { .. }
                 | StepKind::AsyncBlock { .. }
-                | StepKind::AssignAsync { .. }
                 | StepKind::Await { .. }
                 | StepKind::Cancel { .. }
                 | StepKind::RemoteBlock { .. }
@@ -1081,14 +1115,17 @@ impl StepKind {
         }
         match self {
             StepKind::WithIo { cmd, .. } => f(cmd),
-            StepKind::AssignCapture { cmd, .. } => f(cmd),
+            StepKind::Bind { rhs, .. } => match rhs {
+                BindRhs::Capture(cmd) => f(cmd),
+                BindRhs::Async(body) => walk_body(body, f),
+                BindRhs::Expr(_) | BindRhs::Await { .. } => {}
+            },
             StepKind::For { body, .. }
             | StepKind::While { body, .. }
             | StepKind::FuncDef { body, .. }
             | StepKind::Timeout { body, .. }
             | StepKind::Fail { body, .. }
             | StepKind::Isolated { body }
-            | StepKind::AssignAsync { body, .. }
             | StepKind::AsyncBlock { body }
             | StepKind::RemoteBlock { body, .. } => walk_body(body, f),
             StepKind::If {
@@ -1148,9 +1185,7 @@ impl StepKind {
             | StepKind::AssertContains { .. }
             | StepKind::Exit(_)
             | StepKind::WithIoBlock { .. }
-            | StepKind::Assign { .. }
             | StepKind::Set { .. }
-            | StepKind::AwaitCapture { .. }
             | StepKind::Await { .. }
             | StepKind::Cancel { .. }
             | StepKind::Sleep { .. }
@@ -1300,6 +1335,21 @@ fn lower_equality_args(
     Ok((hash, actual, expected))
 }
 
+/// Right-hand side of one [`StepKind::Bind`]: the single owner for
+/// the four binding forms, so parsing, `Display`, static checking,
+/// and dispatch never restate the `LET`/`CONST` split per form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BindRhs {
+    /// `LET $v: T = <expr>` / `CONST $N: T = <expr>`.
+    Expr(Expr),
+    /// `LET $v: T = <cmd>` capture (single command or wrapper).
+    Capture(Box<StepKind>),
+    /// `LET $v: T = ASYNC { ... }` task body.
+    Async(Vec<crate::ast::Step>),
+    /// `LET $v: T = AWAIT $t` join-and-bind.
+    Await { task_var: String },
+}
+
 declare_commands! {
     structural [
         WithIo { bindings: Vec<IoBinding>, cmd: Box<StepKind> },
@@ -1308,12 +1358,9 @@ declare_commands! {
         For { key_var: Option<String>, key_type: Option<String>, var: String, var_type: String, in_expr: Expr, body: Vec<Step> },
         If { cond: Box<Expr>, then_body: Vec<Step>, else_ifs: Vec<(Box<Expr>, Vec<Step>)>, else_body: Option<Vec<Step>> },
         Switch { discriminant: Option<Box<Expr>>, cases: Vec<(Vec<Expr>, Vec<Step>)>, default_body: Option<Vec<Step>> },
-        Assign { var: String, decl_type: String, expr: Expr },
+        Bind { var: String, decl_type: String, is_const: bool, rhs: BindRhs },
         Set { var: String, expr: Expr },
-        AssignCapture { var: String, decl_type: String, cmd: Box<StepKind> },
-        AwaitCapture { out_var: String, out_type: String, task_var: String },
         AsyncBlock { body: Vec<Step> },
-        AssignAsync { var: String, decl_type: String, body: Vec<Step> },
         Await { var: String },
         Cancel { var: String },
         Timeout { duration: Arg, body: Vec<Step> },
@@ -1360,7 +1407,8 @@ declare_commands! {
             ASSERT_EQ $body "generated-under-workdir"
         "#} },             Example { name: "workdir in a scoped block", fence_meta: None, code: indoc! {r#"
             # The block reverts to the starting directory on exit.
-            LET $outside: STRING = CWD
+            IMPORT [STD]
+            LET $outside: STRING = CWD()
             MKDIR project
 
             [bool:true] {
@@ -1368,7 +1416,7 @@ declare_commands! {
                 WRITE inner.txt inner
             }
 
-            LET $back: STRING = CWD
+            LET $back: STRING = CWD()
             ASSERT_EQ $back $outside
             LET $body: STRING = READ project/inner.txt
             ASSERT_EQ $body "inner"
@@ -1581,15 +1629,15 @@ declare_commands! {
                 ASSERT_EQ stdout "braced:World\nWorld\n"
             "#} },
             Example { name: "interpolation", fence_meta: None, code: indoc! {r#"
-                # `{{ env:KEY }}` reads the script environment; a bare name
-                # resolves a DSL variable instead. Spelling rules:
+                # `{{ env:KEY }}` reads the script environment; `$NAME`
+                # reads either binding. Spelling rules:
                 # `script_env:` is always case-sensitive; `env:` is
                 # case-sensitive too, except on Windows where it matches
                 # case-insensitively. Every read must be declared first:
                 # KEY here comes from the ENV below.
                 ENV USER=OxDock
-                LET $WHO: STRING = "Ada"
-                ECHO "Hello {{ env:USER }}! Hi {{ WHO }}! Again {{ script_env:USER }}!"
+                CONST $WHO: STRING = "Ada"
+                ECHO "Hello {{ env:USER }}! Hi {{ $WHO }}! Again {{ script_env:USER }}!"
                 ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada! Again OxDock!"
             "#} },
             Example { name: "undeclared env read fails", fence_meta: Some("expect_error:\"env:OXDOCK_DOC_NO_SUCH_KEY\""), code: indoc! {r#"
@@ -1646,6 +1694,20 @@ declare_commands! {
 
             LET $t: STRING = PATH_TYPE("x.txt")
             ASSERT_EQ $t "absent"
+        "#} }, Example { name: "run binding reads", fence_meta: None, code: indoc! {r#"
+            # The shell line expands templates and `$var` reads before
+            # spawning: the shell sees values, never spellings.
+            CONST $WHO: STRING = "world"
+            LET $tpl: STRING = RUN echo "{{ $WHO }}"
+            ASSERT_CONTAINS $tpl "world"
+
+            # A bare `$var` outside a template reads the same way.
+            LET $sigil: STRING = RUN echo $WHO
+            ASSERT_CONTAINS $sigil "world"
+
+            # Bare words pass through untouched and never resolve.
+            LET $raw: STRING = RUN echo who
+            ASSERT_CONTAINS $raw "who"
         "#} } ],
         lower: |_flags, args| match args.as_slice() {
             [Arg::Expr(Expr::List(elems))] if elems.is_empty() => {
@@ -2048,7 +2110,7 @@ declare_commands! {
         lower: |_flags, args| {
             let arg = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_READ_LINE, "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
             let var = match arg {
-                Arg::Expr(Expr::Var(name)) => name,
+                Arg::Expr(Expr::Var { name, .. }) => name,
                 // Quoted "$var" keeps its sigil through the generic string
                 // path; templates defer untouched exactly as before.
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
@@ -2091,7 +2153,7 @@ declare_commands! {
             let mut it = args.into_iter();
             let var_arg = it.next().ok_or_else(|| ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))?;
             let var = match var_arg {
-                Arg::Expr(Expr::Var(name)) => name,
+                Arg::Expr(Expr::Var { name, .. }) => name,
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
                 other => return Err(ParseError::validation(KEYWORD_PROMPT, format!("PROMPT requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
@@ -2381,6 +2443,9 @@ declare_commands! {
             Compares two evaluated values with typed equality (no coercion:
             `INT(42)` never equals `STRING("42")`), aborting the pipeline
             with a step-numbered error showing expected vs actual otherwise.
+            The mismatch error prints both values to stderr, so never
+            assert against a live secret: a failure would write it into
+            the log.
 
             Both sides are values: `$var`, literals, templates, and calls
             evaluate in memory and never touch disk. Read files explicitly
@@ -2427,7 +2492,9 @@ declare_commands! {
             Compares two evaluated values with typed inequality (no coercion:
             `INT(42)` never equals `STRING("42")`), aborting the pipeline
             with a step-numbered error showing expected vs actual when they
-            are equal; differing values pass silently.
+            are equal; differing values pass silently. The match error
+            prints both values to stderr, so never assert against a live
+            secret: a failure would write it into the log.
 
             Both sides are values: `$var`, literals, templates, and calls
             evaluate in memory and never touch disk. Read files explicitly
@@ -2613,7 +2680,7 @@ declare_commands! {
                 .next()
                 .ok_or_else(|| ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
             let list = match raw_list {
-                Arg::Expr(Expr::Var(name)) => name,
+                Arg::Expr(Expr::Var { name, .. }) => name,
                 Arg::String(s, _) => s.trim_start_matches('$').to_string(),
                 other => return Err(ParseError::validation(KEYWORD_LIST_APPEND, format!("LIST_APPEND requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
@@ -3533,6 +3600,213 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            in_index: true,
+            name: KEYWORD_CONST,
+            syntax: "CONST $NAME: TYPE = <expr> | CONST $NAME: PIPE | CONST $NAME: TYPE = ASYNC { <commands> } | CONST $NAME: TYPE = <command> | CONST $NAME: TYPE = AWAIT $TASK | CONST $NAME: TYPE = { <commands> }",
+            summary: "Bind deeply immutable script-local values.",
+            description: indoc! {r#"
+                Declares a script-local constant with an explicit type. The
+                right-hand side accepts every `LET` form (expression,
+                capture, `ASYNC`, `AWAIT`, inline block, bare `PIPE`).
+
+                Immutability is deep and total: reassignment (`$var = ...`),
+                `LIST_APPEND`, and `MAP_SET`/`MERGE_MAPS`
+                on a `CONST` value all fail. Nested containers freeze with
+                the binding, so reaching a list or map through a `CONST`
+                never exposes a mutable handle. Reads use `$NAME`,
+                exactly like `LET` reads.
+
+                `CONST` and `LET` share one namespace: declaring either
+                twice in the same scope frame is a redeclaration error.
+                A `CONST` name cannot collide with a reserved word or
+                another binding. `FUNC` names live in a separate namespace
+                and may share the spelling; only `EXPORT`s share one
+                registry, so at most one of a same-named `FUNC`/`CONST`
+                pair may be exported. Shadowing an outer binding in
+                an inner block stays legal and the inner declaration
+                reverts on block exit.
+
+                A file's top-level `CONST`s read inside that file's
+                own `FUNC` bodies: immutable file state is visible by
+                scope, while mutable state crosses only as explicit
+                arguments. Visibility is declaration-ordered: a call
+                landing before the `CONST` executes fails instead of
+                reading uninitialized memory. `$ALIAS::NAME` reads work
+                in bodies exactly like at top level. Writes stay
+                forbidden everywhere: a body mutating a file `CONST`
+                fails with the same message as a top-level write.
+
+                `CONST` is the only variable binding an `EXPORT` can name
+                (`EXPORT CONST $NAME`, `EXPORT [CONST $A, $B]`): `LET`
+                bindings never cross the module boundary. Importers read
+                the value as `$ALIAS::NAME` (see IMPORT).
+            "#},
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[
+                Example {
+                    name: "const",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # CONST reads through `$`, like LET.
+                CONST $NAME: STRING = "world"
+                ECHO "hello, {{ $NAME }}"
+                ASSERT_CONTAINS stdout "hello, world"
+
+                # Containers freeze with the binding.
+                CONST $ITEMS: LIST<STRING> = ["a", "b"]
+                ASSERT_CONTAINS {{ $ITEMS }} "a"
+
+                # File CONSTs read inside the file's own FUNCs.
+                CONST $GREETING: STRING = "hi"
+                FUNC SHOUT(): STRING {
+                    RETURN $GREETING
+                }
+                LET $s: STRING = SHOUT()
+                ASSERT_EQ $s "hi"
+            "#},
+                },
+                Example {
+                    name: "const alias reads across modules",
+                    fence_meta: Some("roots:unified"),
+                    code: indoc! {r#"
+                # Exported CONSTs cross only as alias reads, never bare.
+                IMPORT [STD]
+                WRITE lib.oxfile """
+                    CONST $VERSION: STRING = "1.2.3"
+                    CONST $BUILD: INT = 4
+                    EXPORT CONST $VERSION
+                    EXPORT [CONST $BUILD]
+                    """
+
+                # The entry reads the exports at top level, in math, and in templates.
+                WRITE main.oxfile """
+                    IMPORT ["lib.oxfile" AS LIB]
+                    LET $v: STRING = $LIB::VERSION
+                    ASSERT_EQ $v "1.2.3"
+                    LET $e: INT = $LIB::BUILD * 2
+                    ASSERT_EQ $e 8
+                    LET $w: STRING = "v\{{ $LIB::VERSION }}"
+                    ASSERT_EQ $w "v1.2.3"
+                    ECHO "export-ok \{{ $LIB::VERSION }}"
+                    """
+
+                # A child run proves the import from a fresh interpreter.
+                LET $exe: STRING = INTERPRETER()
+                LET $out: STRING = RUN [$exe, "main.oxfile"]
+                ASSERT_CONTAINS $out "export-ok 1.2.3"
+            "#},
+                },
+                Example {
+                    name: "const alias reads inside func bodies",
+                    fence_meta: Some("roots:unified"),
+                    code: indoc! {r#"
+                # Alias reads work inside importer FUNC bodies exactly like at top level.
+                IMPORT [STD]
+                WRITE lib.oxfile """
+                    CONST $VERSION: STRING = "1.2.3"
+                    EXPORT CONST $VERSION
+                    """
+
+                # The importer FUNCs return alias reads from expressions and templates.
+                WRITE main.oxfile """
+                    IMPORT ["lib.oxfile" AS LIB]
+                    FUNC SHOW(): STRING {
+                        RETURN $LIB::VERSION
+                    }
+                    FUNC LABELED(): STRING {
+                        RETURN "v\{{ $LIB::VERSION }}"
+                    }
+                    LET $s: STRING = SHOW()
+                    ASSERT_EQ $s "1.2.3"
+                    LET $t: STRING = LABELED()
+                    ASSERT_EQ $t "v1.2.3"
+                    ECHO "body-ok \{{ $LIB::VERSION }}"
+                    """
+
+                # A child run proves body reads from a fresh interpreter.
+                LET $exe: STRING = INTERPRETER()
+                LET $out: STRING = RUN [$exe, "main.oxfile"]
+                ASSERT_CONTAINS $out "body-ok 1.2.3"
+            "#},
+                },
+                Example {
+                    name: "const rejects mutation",
+                    fence_meta: Some("expect_error:\"cannot mutate CONST\""),
+                    code: indoc! {r#"
+                # SET on a CONST fails instead of rebinding.
+                CONST $N: INT = 1
+                $N = 2
+            "#},
+                },
+                Example {
+                    name: "const rejects append",
+                    fence_meta: Some("expect_error:\"cannot mutate CONST\""),
+                    code: indoc! {r#"
+                # LIST_APPEND on a CONST fails instead of pushing.
+                CONST $ITEMS: LIST<STRING> = ["a"]
+                LIST_APPEND $ITEMS "b"
+            "#},
+                },
+                Example {
+                    name: "const freeze detaches from its source",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Freezing detaches: the LET source stays mutable.
+                LET $inner: LIST<STRING> = ["a"]
+                CONST $C: LIST<ANY> = [$inner]
+                LIST_APPEND $inner "b"
+                ASSERT_CONTAINS $inner "b"
+
+                # Equality ignores CONST-ness: the frozen copy equals an unfrozen twin.
+                LET $twin: LIST<ANY> = [["a"]]
+                ASSERT_EQ $C $twin
+            "#},
+                },
+                Example {
+                    name: "const nested freeze",
+                    fence_meta: Some("expect_error:\"cannot mutate CONST\""),
+                    code: indoc! {r#"
+                # Nested containers freeze with the binding.
+                CONST $C: LIST<ANY> = [["a"]]
+                LET $nested: LIST<STRING> = $C.0
+                LIST_APPEND $nested "b"
+            "#},
+                },
+                Example {
+                    name: "const alias shares frozenness",
+                    fence_meta: Some("expect_error:\"cannot mutate CONST\""),
+                    code: indoc! {r#"
+                # Aliases share frozenness: copying a CONST never thaws it.
+                CONST $C: LIST<STRING> = ["a"]
+                LET $alias: LIST<STRING> = $C
+                LIST_APPEND $alias "b"
+            "#},
+                },
+                Example {
+                    name: "const map set fails",
+                    fence_meta: Some("expect_error:\"cannot mutate CONST\""),
+                    code: indoc! {r#"
+                # MAP_SET on a CONST fails instead of deriving.
+                IMPORT [STD]
+                CONST $M: MAP<ANY> = {a: 1}
+                LET $z: MAP<ANY> = MAP_SET($M, "x", 1)
+            "#},
+                },
+                Example {
+                    name: "const merge maps fails",
+                    fence_meta: Some("expect_error:\"cannot mutate CONST\""),
+                    code: indoc! {r#"
+                # MERGE_MAPS over a CONST fails instead of merging.
+                IMPORT [STD]
+                CONST $M: MAP<ANY> = {a: 1}
+                LET $n: MAP<ANY> = MERGE_MAPS([$M], "overwrite")
+            "#},
+                },
+            ],
+        },
+        CommandMeta {
             // `MUTATION` is not an actual keyword, so don't index it as such.
             in_index: false,
             name: "MUTATION",
@@ -3615,6 +3889,20 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $frac_str: STRING = ECHO 2.5
                 LET $f: FLOAT = FLOAT($frac_str) + 0.25
                 ASSERT_EQ $f 2.75
+            "#},
+                },
+                Example {
+                    name: "reject keypath target",
+                    fence_meta: Some("expect_error:\"cannot assign to $M.a\""),
+                    code: indoc! {r#"
+                # Rebind the whole variable to update one entry.
+                IMPORT [STD]
+                LET $M: MAP<ANY> = {a: 1}
+                $M = MAP_SET($M, "a", 2)
+                ASSERT_EQ $M.a 2
+
+                # Key paths read in expressions but are never mutation targets.
+                $M.a = 3
             "#},
                 },
             ],
@@ -4198,7 +4486,22 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 (records with required fields, unions, handles, custom
                 types) fails at definition naming the fix: drop the `?`
                 or pass the argument explicitly.
-                Bodies run in a fresh variable scope; LETs inside do not leak. A nested
+                Bodies run isolated: a fresh variable scope plus the
+                callee definition-site jail (workspace, cwd, and env
+                reset; only explicit arguments cross, #322). Module
+                bodies restore the workspace selection and cwd their
+                own top-level left behind, so a lib declaring
+                WORKSPACE at the top serves its FUNCs from there no
+                matter which workspace the caller sits in; entry
+                bodies restore the workspace selection and cwd sealed
+                at their definition site (defaulting to the snapshot
+                jail when none was set before definition). A FUNC-level
+                WORKSPACE or WORKDIR statement overrides the file
+                default for that call, and the caller context returns
+                on every exit path. Conditional top-level configuration
+                uses guards (`[env:FLAG] WORKSPACE LOCAL`): `IF` bodies
+                unwind on exit and never become the jail; see IMPORT.
+                LETs inside do not leak. A nested
                 FUNC definition is scoped to its block and reverts on exit. Names share
                 one namespace with native and host-registered functions, which a FUNC
                 may never shadow.
@@ -4545,10 +4848,21 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   parse errors, never runtime surprises.
 
                 Scope:
-                - `IMPORT` is a lowering directive, not a step. It
-                  applies from its line to the enclosing block exit,
-                  then reverts like `LET` scoping, with no runtime
-                  footprint. Guards do not apply to it.
+                - A file or harvest `IMPORT` applies from its line to
+                  the enclosing block exit, then unwinds like `LET`
+                  scoping: reads inside the block resolve, reads past
+                  it fail closed. Top-level imports persist for the
+                  unit. Module-only imports (`IMPORT [STD]`) register
+                  names with no step and no scope.
+                - An `IMPORT` that never executes leaves its alias
+                  unknown: reads must follow the import in execution
+                  order.
+                - Guards gate execution: a guarded `IMPORT` runs only
+                  where its guard holds. Same-frame duplicates reject
+                  at parse unless every entry is guard-gated;
+                  all-guarded duplicates resolve per platform when
+                  their guards are disjoint, and fail ambiguous on
+                  overlap.
                 - Two imported modules exporting one name is an
                   ambiguity error: qualify the call instead.
 
@@ -4620,9 +4934,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 - Workspace-side, against the importing file's
                   directory (entry parent at top level; off-workspace
                   entries resolve like stdin against the root).
-                - Relative operation paths resolve against the ambient
-                  cwd in every file, module or entry alike. `WORKSPACE`
-                  and `WORKDIR` mean the same everywhere.
+                - Relative operation paths resolve against the
+                  defining file's own jail: each module top-level
+                  runs isolated in the snapshot jail, and its
+                  WORKSPACE and WORKDIR statements establish the
+                  context its FUNCs restore on every call (#322).
                 - Missing files fail before the first step runs.
                   Write-then-import in one script is rejected; check
                   libraries into the tree, or combine them at runtime
@@ -4634,18 +4950,30 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   resets to the seed plus the module init's own
                   contributions (declared `INHERIT_ENV` names re-read
                   from the host on every call). Workspace selection
-                  and cwd flow through untouched, so module code
-                  observes the same workspace its importer does.
+                  and cwd reset to the module top-level jail: the
+                  init body runs isolated in the snapshot jail, and
+                  the selection plus cwd it leaves behind become the
+                  default every FUNC of that file restores on entry,
+                  unless the FUNC body overrides them. A module
+                  function needing the caller directory takes it as
+                  a path argument.
                 - Determinism: behavior is a pure function of the
-                  script. The same file with the same ambient cwd and
-                  selection behaves identically no matter who imports
-                  it.
+                  file. The same file behaves identically no matter
+                  who imports it or which workspace the importer
+                  sits in.
                 - State: one init per file, shared by every alias.
                   Top-level `LET` bindings drain into a single store
                   visible to all of the module's functions.
-                - Workspace: `WORKSPACE` and `WORKDIR` mean the same
-                  in module scope as in entry code, selecting the
-                  shared workspace and moving the shared cwd.
+                - Workspace: `WORKSPACE` and `WORKDIR` at a module
+                  top-level establish that module's jail for its
+                  FUNCs; `WORKSPACE` and `WORKDIR` inside a FUNC
+                  body override the file default for that call.
+                  Caller and callee selections never leak across
+                  the call in either direction.
+                - Conditional top-level: `IF` bodies unwind on exit,
+                  so a `WORKSPACE` inside one never becomes the jail.
+                  Guard-gated steps (`[env:FLAG]`) run in place, so
+                  they persist: use guards for conditional config.
                 - Exports: only `EXPORT`ed top-level `FUNC`s and
                   `EXPORT TYPE` aliases cross. Variables never cross.
                 - Imports: whole-file or harvest, only exported
@@ -4685,6 +5013,71 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IMPORT [STD]
                 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
                 ASSERT_CONTAINS stdout "hi World!"
+            "#},
+                },
+                Example {
+                    name: "module top-level jail",
+                    fence_meta: Some("roots:unified"),
+                    code: indoc! {r#"
+                # A module top-level establishes its own jail: the lib
+                # selects WORKSPACE LOCAL and a WORKDIR up front, and
+                # its FUNC restores both on entry while the entry sits
+                # elsewhere. Unified roots: the child inherits one
+                # workspace, so parent and child see the same files.
+                IMPORT [STD]
+                WRITE lib.oxfile """
+                    IMPORT [STD]
+                    WORKSPACE LOCAL
+                    MKDIR modsub
+                    WORKDIR modsub
+                    EXPORT [FUNC WHERE]
+                    FUNC WHERE(): STRING {
+                        LET $c: STRING = CWD()
+                        RETURN $c
+                    }
+                    """
+                WRITE main.oxfile """
+                    IMPORT [STD, "lib.oxfile" AS LIB]
+                    MKDIR entry-sub
+                    WORKDIR entry-sub
+                    LET $caller: STRING = CWD()
+                    LET $callee: STRING = LIB::WHERE()
+                    ASSERT_NE $caller $callee
+                    LET $base: STRING = STD::PATH_BASE($callee)
+                    ECHO "base \{{ $base }}"
+                    """
+                LET $exe: STRING = INTERPRETER()
+                LET $out: STRING = RUN [$exe, "main.oxfile"]
+                ASSERT_CONTAINS $out "base modsub"
+            "#},
+                },
+                Example {
+                    name: "blocks unwind, guards persist",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Blocks unwind on exit: the WORKDIR inside IF reverts,
+                # so it never becomes a module jail. Bare guarded blocks
+                # unwind the same way. Guards only skip, never push a
+                # scope, so a guard-gated step persists.
+                IMPORT [STD]
+                WORKSPACE LOCAL
+                LET $root: STRING = CWD()
+                LET $go: BOOL = true
+                IF $go {
+                    MKDIR inner
+                    WORKDIR inner
+                }
+                LET $after_if: STRING = CWD()
+                ASSERT_EQ $root $after_if
+                [bool:true] WORKDIR inner
+                LET $after_guard: STRING = CWD()
+                ASSERT_NE $root $after_guard
+                MKDIR bare
+                [bool:true] {
+                    WORKDIR bare
+                }
+                LET $after_bare: STRING = CWD()
+                ASSERT_EQ $after_guard $after_bare
             "#},
                 },
                 Example {
@@ -5176,7 +5569,7 @@ impl fmt::Display for StepKind {
             } => {
                 match key_var {
                     Some(k) => {
-                        let kt = key_type.as_deref().unwrap_or("STRING");
+                        let kt = key_type.as_deref().unwrap_or(crate::tag::STRING_TYPE_NAME);
                         write!(
                             f,
                             "{} ${}: {}, ${}: {} IN {} {{",
@@ -5253,26 +5646,51 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, " }}")
             }
-            StepKind::Assign {
+            StepKind::Bind {
                 var,
                 decl_type,
-                expr,
+                is_const,
+                rhs,
             } => {
-                // Bare pipe declarations round-trip without an initializer.
-                if matches!(expr, Expr::FreshPipe) {
-                    write!(f, "{} ${}: {}", KEYWORD_LET, var, decl_type)
+                let keyword = if *is_const {
+                    KEYWORD_CONST
                 } else {
-                    write!(f, "{} ${}: {} = {}", KEYWORD_LET, var, decl_type, expr)
+                    KEYWORD_LET
+                };
+                let name = sigil_var(var);
+                match rhs {
+                    BindRhs::Expr(expr) => {
+                        // Bare pipe declarations round-trip without an initializer.
+                        if matches!(expr, Expr::FreshPipe) {
+                            write!(f, "{} {}: {}", keyword, name, decl_type)
+                        } else {
+                            write!(f, "{} {}: {} = {}", keyword, name, decl_type, expr)
+                        }
+                    }
+                    BindRhs::Capture(cmd) => {
+                        write!(f, "{} {}: {} = {}", keyword, name, decl_type, cmd)
+                    }
+                    BindRhs::Async(body) => {
+                        write!(
+                            f,
+                            "{} {}: {} = {} {{",
+                            keyword, name, decl_type, KEYWORD_ASYNC
+                        )?;
+                        for s in body {
+                            write!(f, "\n    {}", s)?;
+                        }
+                        write!(f, "\n}}")
+                    }
+                    BindRhs::Await { task_var } => {
+                        write!(
+                            f,
+                            "{} {}: {} = {} ${}",
+                            keyword, name, decl_type, KEYWORD_AWAIT, task_var
+                        )
+                    }
                 }
             }
             StepKind::Set { var, expr } => write!(f, "${} = {}", var, expr),
-            StepKind::AssignCapture {
-                var,
-                decl_type,
-                cmd,
-            } => {
-                write!(f, "{} ${}: {} = {}", KEYWORD_LET, var, decl_type, cmd)
-            }
             StepKind::AsyncBlock { body } => {
                 write!(f, "{} {{", KEYWORD_ASYNC)?;
                 for s in body {
@@ -5280,34 +5698,12 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
-            StepKind::AssignAsync {
-                var,
-                decl_type,
-                body,
-            } => {
-                write!(
-                    f,
-                    "{} ${}: {} = {} {{",
-                    KEYWORD_LET, var, decl_type, KEYWORD_ASYNC
-                )?;
-                for s in body {
-                    write!(f, "\n    {}", s)?;
-                }
-                write!(f, "\n}}")
+            StepKind::Await { var } => {
+                write!(f, "{} ${}", KEYWORD_AWAIT, var)
             }
-            StepKind::Await { var } => write!(f, "{} ${}", KEYWORD_AWAIT, var),
-            StepKind::AwaitCapture {
-                out_var,
-                out_type,
-                task_var,
-            } => {
-                write!(
-                    f,
-                    "{} ${}: {} = {} ${}",
-                    KEYWORD_LET, out_var, out_type, KEYWORD_AWAIT, task_var
-                )
+            StepKind::Cancel { var } => {
+                write!(f, "{} ${}", KEYWORD_CANCEL, var)
             }
-            StepKind::Cancel { var } => write!(f, "{} ${}", KEYWORD_CANCEL, var),
             StepKind::Timeout { duration, body } => {
                 let budget = fmt_raw_arg(duration);
                 // Single-command form cannot carry an inner guard (the
@@ -5346,7 +5742,7 @@ impl fmt::Display for StepKind {
                 env,
                 body,
             } => {
-                let mut entries: Vec<String> = vars.iter().map(|v| format!("${v}")).collect();
+                let mut entries: Vec<String> = vars.iter().map(|v| sigil_var(v)).collect();
                 entries.extend(env.iter().map(|e| format!("env:{e}")));
                 if entries.is_empty() {
                     write!(f, "{} {target} {{", KEYWORD_REMOTE)?;
@@ -5377,7 +5773,12 @@ impl fmt::Display for StepKind {
                 let ps: Vec<String> = params
                     .iter()
                     .map(|(p, t, optional)| {
-                        format!("${}{}: {}", p, if *optional { "?" } else { "" }, t)
+                        format!(
+                            "{}{}: {}",
+                            sigil_var(p),
+                            if *optional { "?" } else { "" },
+                            t
+                        )
                     })
                     .collect();
                 if *is_async {
@@ -5659,9 +6060,11 @@ pub(crate) fn has_stdout_pipe(bindings: &[IoBinding]) -> bool {
 pub(crate) fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
     let bad = match kind {
         StepKind::AsyncBlock { .. }
-        | StepKind::AssignAsync { .. }
+        | StepKind::Bind {
+            rhs: BindRhs::Async(_) | BindRhs::Await { .. },
+            ..
+        }
         | StepKind::Await { .. }
-        | StepKind::AwaitCapture { .. }
         | StepKind::Cancel { .. } => true,
         _ => {
             let mut bad = false;
@@ -5721,8 +6124,11 @@ pub(crate) fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
         | StepKind::Timeout { body, .. }
         | StepKind::Fail { body, .. }
         | StepKind::Isolated { body }
-        | StepKind::AssignAsync { body, .. }
         | StepKind::AsyncBlock { body } => rewrite_isolated_inherit(body),
+        StepKind::Bind {
+            rhs: BindRhs::Async(body),
+            ..
+        } => rewrite_isolated_inherit(body),
         StepKind::If {
             then_body,
             else_ifs,
@@ -5749,7 +6155,13 @@ pub(crate) fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
                 rewrite_isolated_inherit(default_body);
             }
         }
-        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
+        StepKind::WithIo { cmd, .. } => {
+            rewrite_isolated_inherit_kind(cmd);
+        }
+        StepKind::Bind {
+            rhs: BindRhs::Capture(cmd),
+            ..
+        } => {
             rewrite_isolated_inherit_kind(cmd);
         }
         _ => {}
@@ -5832,23 +6244,29 @@ pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> Parse
 }
 
 /// Validate `EXPORT` names at end of parse. Forward references are
-/// allowed (EXPORT may precede its FUNCs), so this runs against the
-/// completed top-level scope. Bare names must match a top-level
-/// `FUNC`; qualified `MOD::NAME` names must match a known module
-/// member (opaque modules skip the member check; the runtime registry
-/// resolves them or fails serving). Duplicates are rejected at the
-/// EXPORT site. Promoted verbatim (the pest finish pass delegates).
+/// allowed (EXPORT may precede its FUNCs, TYPEs, and CONSTs), so this
+/// runs against the completed top-level scope. Bare names must match
+/// a top-level `FUNC`; qualified `MOD::NAME` names must match a known
+/// module member (opaque modules skip the member check; the runtime
+/// registry resolves them or fails serving). `EXPORT CONST` names must
+/// match a top-level `CONST` binding, or forward one with a qualified
+/// `$ALIAS::NAME` naming a visible import (same gate as func
+/// re-exports; existence resolves where the import loads, since parse
+/// performs no IO). `LET` bindings never satisfy an export.
+/// Duplicates are rejected at the EXPORT site. Promoted
+/// verbatim (the pest finish pass delegates).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_exports(
     ctx: &SpanContext,
-    func_exports: &[String],
-    type_exports: &[String],
+    exports: &super::parser::Exports,
     top: &HashSet<String>,
     top_types: &HashSet<String>,
+    top_consts: &HashSet<String>,
     modules: &ModuleTable,
     top_imports: &[String],
 ) -> ParseResult<()> {
-    for name in func_exports {
-        let valid = match name.split_once(crate::constants::MODULE_SEPARATOR) {
+    for name in &exports.funcs {
+        let valid = match crate::constants::split_qualified(name) {
             None => top.contains(name),
             Some((module, base)) if module == crate::constants::SCRIPT_MODULE_NAME => {
                 top.contains(base)
@@ -5876,35 +6294,65 @@ pub(crate) fn validate_exports(
             ));
         }
     }
-    for name in type_exports {
-        // Local TYPE aliases export bare; qualified `ALIAS::TYPE`
-        // re-exports defer existence to import loading (same as func
-        // re-exports), requiring only a visible import alias here.
-        // Bare re-exports of imported types (whole-file types land
-        // bare) defer when the file has imports, so `EXPORT PERSON`
-        // after `IMPORT ["lib" AS LIB]` can promote the imported type.
-        let valid = match name.split_once(crate::constants::MODULE_SEPARATOR) {
-            None => top_types.contains(name) || !top_imports.is_empty(),
-            Some((module, _base)) => {
-                if module == crate::constants::SCRIPT_MODULE_NAME {
-                    top_types.contains(_base)
-                } else {
-                    match modules.modules.get(module) {
-                        None => top_imports.iter().any(|m| m == module),
-                        // Host modules: types live in the global type
-                        // directory, not the func table. Parse cannot
-                        // know host type membership (descriptors register
-                        // at runtime), so a known module passes here and
-                        // import loading validates the member.
-                        Some(_) => true,
-                    }
-                }
-            }
-        };
-        if !valid {
+    for name in &exports.types {
+        // `EXPORT TYPE` names the alias bare. Qualified `ALIAS::TYPE`
+        // is rejected here instead of stranding a reader later: no
+        // downstream path serves it (MCP takes bare only, closure
+        // validation matches top-level TYPEs in the file, harvests
+        // address bare names). Bare re-exports of imported types
+        // (whole-file types land bare) defer when the file has
+        // imports, so `EXPORT PERSON` after `IMPORT ["lib" AS LIB]`
+        // can promote the imported type.
+        if crate::constants::split_qualified(name).is_some() {
+            return Err(ParseError::validation(
+                crate::constants::KEYWORD_EXPORT,
+                format!(
+                    "EXPORT TYPE `{name}` must be bare: qualified ALIAS::TYPE re-exports are not served; import the file and re-export the bare name"
+                ),
+                ctx,
+            ));
+        }
+        if !top_types.contains(name) && top_imports.is_empty() {
             return Err(ParseError::validation(
                 crate::constants::KEYWORD_EXPORT,
                 format!("EXPORT TYPE `{name}` does not match any top-level TYPE"),
+                ctx,
+            ));
+        }
+    }
+    for name in &exports.consts {
+        // `CONST` exports name the binding with `$`, exactly like a
+        // read (`EXPORT CONST $N`): the binding must be a top-level
+        // `CONST` in this file. `LET` bindings never satisfy an export,
+        // even when the spelling matches.
+        // Qualified `$ALIAS::NAME` forwards re-export an imported
+        // file's `CONST` under this file's alias (same gate as func
+        // re-exports): the alias must be a visible import here, and
+        // whether the target file exports the name is checked where
+        // the import loads (closure validation, then serving), since
+        // parse performs no IO. `SCRIPT::` is not a `CONST`
+        // namespace (local `CONST`s always read through `$`), so it is
+        // rejected here instead of stranding a reader later.
+        let valid = match crate::constants::split_qualified(name) {
+            None => top_consts.contains(name),
+            Some((module, _)) if module == crate::constants::SCRIPT_MODULE_NAME => false,
+            Some((module, _base)) => top_imports.iter().any(|m| m == module),
+        };
+        if !valid {
+            let msg = match crate::constants::split_qualified(name) {
+                Some((module, _)) if module == crate::constants::SCRIPT_MODULE_NAME => format!(
+                    "EXPORT CONST `{name}` must name a top-level CONST (`$NAME`) or `$ALIAS::NAME` for a visible import: `SCRIPT::` is not a CONST namespace"
+                ),
+                Some((module, _)) => format!(
+                    "EXPORT CONST `{name}` names unknown import alias `{module}`: import a file as `{module}` to re-export its CONSTs"
+                ),
+                None => format!(
+                    "EXPORT CONST `{name}` does not match any top-level CONST (LET bindings are never exportable)"
+                ),
+            };
+            return Err(ParseError::validation(
+                crate::constants::KEYWORD_EXPORT,
+                msg,
                 ctx,
             ));
         }
@@ -6246,7 +6694,11 @@ pub(crate) fn make_compare(
 pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
     match expr {
         Expr::Literal(v) => Some(vec![MathOp::PushConst(v.clone())]),
-        Expr::Var(name) => Some(vec![MathOp::LoadVar(name.clone())]),
+        Expr::Var { name } => Some(vec![MathOp::Load { name: name.clone() }]),
+        Expr::ConstRef { alias, name } => Some(vec![MathOp::LoadConstRef {
+            alias: alias.clone(),
+            name: name.clone(),
+        }]),
         Expr::Env(key) => Some(vec![MathOp::LoadEnv(key.clone())]),
         Expr::KeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
             base: base.clone(),
@@ -6263,7 +6715,7 @@ pub(crate) fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
             });
             Some(ops)
         }
-        Expr::Inspect(var) => Some(vec![MathOp::Inspect(var.clone())]),
+        Expr::Inspect { name } => Some(vec![MathOp::Inspect { name: name.clone() }]),
         Expr::Arithmetic { op, left, right } => {
             let mut ops = expr_to_rpn(left)?;
             ops.extend(expr_to_rpn(right)?);
@@ -6745,8 +7197,13 @@ mod tests {
         // against the descriptor table at runtime, so host types need no
         // grammar change (see the custom_types core tests).
         let steps = parse_script("LET $x: FOO = 1\n", lower_command).expect("custom tag parses");
-        let StepKind::Assign { decl_type, .. } = &steps[0].kind else {
-            panic!("expected Assign, got {:?}", steps[0].kind);
+        let StepKind::Bind {
+            decl_type,
+            rhs: BindRhs::Expr(_),
+            ..
+        } = &steps[0].kind
+        else {
+            panic!("expected Bind, got {:?}", steps[0].kind);
         };
         assert_eq!(decl_type, "FOO");
     }
@@ -6761,6 +7218,17 @@ mod tests {
     fn mutate_statement_parses_without_keyword() {
         let steps = parse_script("$y = 2\n", lower_command).expect("mutation parses");
         assert!(matches!(steps[0].kind, StepKind::Set { .. }));
+    }
+
+    #[test]
+    fn keypath_mutation_target_is_rejected() {
+        // `$M.a = ...` must fail instead of dropping `.a` and
+        // silently rebinding the whole `$M`.
+        for script in ["$M.a = 2\n", "$C.0 = 2\n"] {
+            let err = parse_err(script);
+            assert!(err.contains("cannot assign to"), "{script}: {err}");
+            assert!(err.contains("never mutation targets"), "{script}: {err}");
+        }
     }
 
     #[test]
@@ -6893,14 +7361,26 @@ mod tests {
             "{err}"
         );
         assert!(!err.contains("unknown command"), "{err}");
+        // Bare uppercase words are literal text, never variable
+        // targets: a `CONST` list cannot be named here at all.
+        let err = parse_err("LIST_APPEND ITEMS \"a\"\n");
+        assert!(
+            err.contains("invalid syntax for command LIST_APPEND"),
+            "{err}"
+        );
+        assert!(!err.contains("unknown command"), "{err}");
     }
 
     #[test]
     fn read_line_rejects_bare_word_target() {
         // The `$var` shape lives in the lower function now that the
         // central vocabulary holds value types only: a missing sigil
-        // fails lowering with the command-specific error.
+        // fails lowering with the command-specific error. Bare
+        // uppercase is literal text, never a variable target.
         let err = parse_err("READ_LINE reply\n");
+        assert!(err.contains("READ_LINE requires a $variable"), "{err}");
+        assert!(!err.contains("unknown command"), "{err}");
+        let err = parse_err("READ_LINE X\n");
         assert!(err.contains("READ_LINE requires a $variable"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
     }
@@ -7076,8 +7556,13 @@ mod tests {
             lower_command,
         )
         .expect("capture call parses");
-        let StepKind::Assign { var, expr, .. } = &steps[1].kind else {
-            panic!("expected Assign, got {:?}", steps[1].kind);
+        let StepKind::Bind {
+            var,
+            rhs: BindRhs::Expr(expr),
+            ..
+        } = &steps[1].kind
+        else {
+            panic!("expected Bind, got {:?}", steps[1].kind);
         };
         assert_eq!(var, "r");
         assert!(
@@ -7090,7 +7575,13 @@ mod tests {
         )
         .expect("async call parses");
         assert!(
-            matches!(&steps[1].kind, StepKind::AssignAsync { .. }),
+            matches!(
+                &steps[1].kind,
+                StepKind::Bind {
+                    rhs: BindRhs::Async(_),
+                    ..
+                }
+            ),
             "{:?}",
             steps[1].kind
         );
@@ -7106,8 +7597,12 @@ mod tests {
             lower_command,
         )
         .expect("multiline call parses");
-        let StepKind::Assign { expr, .. } = &steps[1].kind else {
-            panic!("expected Assign, got {:?}", steps[1].kind);
+        let StepKind::Bind {
+            rhs: BindRhs::Expr(expr),
+            ..
+        } = &steps[1].kind
+        else {
+            panic!("expected Bind, got {:?}", steps[1].kind);
         };
         let Expr::Call { name, args } = expr else {
             panic!("expected Call expr, got {expr:?}");
@@ -7152,8 +7647,12 @@ mod tests {
             lower_command,
         )
         .expect("multiline list parses");
-        let StepKind::Assign { expr, .. } = &steps[0].kind else {
-            panic!("expected Assign, got {:?}", steps[0].kind);
+        let StepKind::Bind {
+            rhs: BindRhs::Expr(expr),
+            ..
+        } = &steps[0].kind
+        else {
+            panic!("expected Bind, got {:?}", steps[0].kind);
         };
         assert!(
             matches!(expr, Expr::List(items) if items.len() == 2),
@@ -7345,36 +7844,56 @@ mod tests {
         // commands map to None; they are covered by declare_commands!.
         fn metadata_name(kind: &StepKind) -> Option<&'static str> {
             match kind {
-                StepKind::WithIo { .. } | StepKind::WithIoBlock { .. } => Some("WITH_IO"),
-                StepKind::For { .. } => Some("FOR"),
-                StepKind::If { .. } => Some("IF"),
-                StepKind::Switch { .. } => Some("SWITCH"),
-                StepKind::Assign { .. } => Some("LET"),
+                StepKind::WithIo { .. } | StepKind::WithIoBlock { .. } => Some(KEYWORD_WITH_IO),
+                StepKind::For { .. } => Some(KEYWORD_FOR),
+                StepKind::If { .. } => Some(KEYWORD_IF),
+                StepKind::Switch { .. } => Some(KEYWORD_SWITCH),
+                StepKind::Bind { is_const, rhs, .. } => Some(match rhs {
+                    BindRhs::Await { .. } => {
+                        if *is_const {
+                            KEYWORD_CONST
+                        } else {
+                            KEYWORD_AWAIT
+                        }
+                    }
+                    BindRhs::Async(_) => {
+                        if *is_const {
+                            KEYWORD_CONST
+                        } else {
+                            KEYWORD_ASYNC
+                        }
+                    }
+                    _ => {
+                        if *is_const {
+                            KEYWORD_CONST
+                        } else {
+                            KEYWORD_LET
+                        }
+                    }
+                }),
                 StepKind::Set { .. } => Some("MUTATION"),
-                StepKind::AssignCapture { .. } => Some("LET"),
-                StepKind::AwaitCapture { .. } => Some("AWAIT"),
-                StepKind::AsyncBlock { .. } | StepKind::AssignAsync { .. } => Some("ASYNC"),
-                StepKind::Await { .. } => Some("AWAIT"),
-                StepKind::Cancel { .. } => Some("CANCEL"),
-                StepKind::Timeout { .. } => Some("TIMEOUT"),
-                StepKind::Fail { .. } => Some("FAIL"),
-                StepKind::Isolated { .. } => Some("ISOLATED"),
-                StepKind::IsolatedInheritEnv { .. } => Some("ISOLATED"),
-                StepKind::RemoteBlock { .. } => Some("REMOTE"),
-                StepKind::FuncDef { .. } => Some("FUNC"),
+                StepKind::AsyncBlock { .. } => Some(KEYWORD_ASYNC),
+                StepKind::Await { .. } => Some(KEYWORD_AWAIT),
+                StepKind::Cancel { .. } => Some(KEYWORD_CANCEL),
+                StepKind::Timeout { .. } => Some(KEYWORD_TIMEOUT),
+                StepKind::Fail { .. } => Some(KEYWORD_FAIL),
+                StepKind::Isolated { .. } => Some(KEYWORD_ISOLATED),
+                StepKind::IsolatedInheritEnv { .. } => Some(KEYWORD_ISOLATED),
+                StepKind::RemoteBlock { .. } => Some(KEYWORD_REMOTE),
+                StepKind::FuncDef { .. } => Some(KEYWORD_FUNC),
                 // Bare `NAME(...)` calls share the `FUNC` reference page;
                 // there is no call keyword to document on its own.
                 StepKind::Call { .. } => None,
                 // Both import forms are documented on the `IMPORT` page.
-                StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => Some("IMPORT"),
-                StepKind::Return { .. } => Some("RETURN"),
-                StepKind::While { .. } => Some("WHILE"),
-                StepKind::Break => Some("BREAK"),
-                StepKind::Continue => Some("CONTINUE"),
+                StepKind::ImportFile { .. } | StepKind::ImportFuncs { .. } => Some(KEYWORD_IMPORT),
+                StepKind::Return { .. } => Some(KEYWORD_RETURN),
+                StepKind::While { .. } => Some(KEYWORD_WHILE),
+                StepKind::Break => Some(KEYWORD_BREAK),
+                StepKind::Continue => Some(KEYWORD_CONTINUE),
                 // Aliases are declared by `TYPE` but documented with the
                 // type-word prose on the `LET` page (define-once,
                 // use-everywhere); no dedicated reference page.
-                StepKind::TypeAlias { .. } => Some("LET"),
+                StepKind::TypeAlias { .. } => Some(KEYWORD_LET),
                 StepKind::RunExec { .. } => None,
                 StepKind::Workdir(_)
                 | StepKind::Workspace(_)
@@ -7422,7 +7941,7 @@ mod tests {
                 key_var: None,
                 key_type: None,
                 var: "i".to_string(),
-                var_type: "STRING".to_string(),
+                var_type: crate::tag::STRING_TYPE_NAME.to_string(),
                 in_expr: Expr::Literal(Value::bool(true)),
                 body: Vec::new(),
             },
@@ -7437,33 +7956,45 @@ mod tests {
                 cases: Vec::new(),
                 default_body: None,
             },
-            StepKind::Assign {
+            StepKind::Bind {
                 var: "v".to_string(),
-                decl_type: "BOOL".to_string(),
-                expr: Expr::Literal(Value::bool(true)),
+                decl_type: crate::tag::BOOL_TYPE_NAME.to_string(),
+                is_const: false,
+                rhs: BindRhs::Expr(Expr::Literal(Value::bool(true))),
+            },
+            StepKind::Bind {
+                var: "v".to_string(),
+                decl_type: crate::tag::BOOL_TYPE_NAME.to_string(),
+                is_const: true,
+                rhs: BindRhs::Expr(Expr::Literal(Value::bool(true))),
             },
             StepKind::Set {
                 var: "v".to_string(),
                 expr: Expr::Literal(Value::bool(true)),
             },
-            StepKind::AssignCapture {
+            StepKind::Bind {
                 var: "v".to_string(),
-                decl_type: "STRING".to_string(),
-                cmd: Box::new(StepKind::Echo(crate::ast::Arg::String(
+                decl_type: crate::tag::STRING_TYPE_NAME.to_string(),
+                is_const: false,
+                rhs: BindRhs::Capture(Box::new(StepKind::Echo(crate::ast::Arg::String(
                     "x".to_string(),
                     false,
-                ))),
+                )))),
             },
-            StepKind::AwaitCapture {
-                out_var: "o".to_string(),
-                out_type: "STRING".to_string(),
-                task_var: "t".to_string(),
+            StepKind::Bind {
+                var: "o".to_string(),
+                decl_type: crate::tag::STRING_TYPE_NAME.to_string(),
+                is_const: false,
+                rhs: BindRhs::Await {
+                    task_var: "t".to_string(),
+                },
             },
             StepKind::AsyncBlock { body: Vec::new() },
-            StepKind::AssignAsync {
+            StepKind::Bind {
                 var: "t".to_string(),
-                decl_type: "HANDLE".to_string(),
-                body: Vec::new(),
+                decl_type: crate::tag::HANDLE_TYPE_NAME.to_string(),
+                is_const: false,
+                rhs: BindRhs::Async(Vec::new()),
             },
             StepKind::Await {
                 var: "t".to_string(),

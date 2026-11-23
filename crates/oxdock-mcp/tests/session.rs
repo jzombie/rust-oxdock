@@ -87,8 +87,11 @@ const DEMO: &str = indoc! {r#"
       ECHO "hello"
       RETURN $name
     }
-    # Returns the ambient app name. Proves linear init ran.
+    # Returns its own declared app name. Callees never inherit init
+    # globals (#322): the ENV declares inside the body, so the tool
+    # serves with or without the top-level line above.
     FUNC APP_NAME(): STRING {
+      ENV APP_NAME=oxdock-demo
       RETURN env:APP_NAME
     }
     EXPORT [ADD, GREET, APP_NAME]
@@ -97,9 +100,9 @@ const DEMO: &str = indoc! {r#"
 #[test]
 fn init_executes_linear_steps_and_serves_tools() {
     let mut session = init_session(DEMO);
-    // APP_NAME reads top-level ENV: init ran the linear steps (discarding
-    // them would leave env:APP_NAME undefined and fail here). Script
-    // functions close over params only, so LET globals stay out of bodies.
+    // The tool serves its own declared env (init globals never leak
+    // into bodies, #322). Tool count proves init ran the linear
+    // steps and registered the exports.
     let out = session.call("APP_NAME", vec![]).expect("call");
     assert_eq!(out.value.as_str(), Some("oxdock-demo"));
     let metas = session.tool_metas().expect("metas");
@@ -295,7 +298,8 @@ fn qualified_opaque_export_still_registers() {
         .expect("export must parse");
     assert!(
         parsed
-            .func_exports
+            .exports
+            .funcs
             .iter()
             .any(|name| name == "STD::TEXT_TRIM")
     );
@@ -616,7 +620,7 @@ const BG_WORKSPACE_DEMO: &str = indoc! {r#"
     FUNC BG_WHERE(): HANDLE<STRING> {
       LET $t: HANDLE<STRING> = ASYNC {
         WORKSPACE LOCAL
-        LET $d: STRING = CWD
+        LET $d: STRING = CWD()
         LET $trimmed: STRING = TEXT_TRIM($d)
         RETURN $trimmed
       }

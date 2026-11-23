@@ -32,9 +32,8 @@ pub use self::engine::{Engine, EngineOutput};
 pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
     dispatch_append, dispatch_append_line, dispatch_archive, dispatch_assert_contains,
-    dispatch_assert_eq, dispatch_assert_ne, dispatch_assign, dispatch_assign_async_step,
-    dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
-    dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
+    dispatch_assert_eq, dispatch_assert_ne, dispatch_async_block, dispatch_await_step,
+    dispatch_bind_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
     dispatch_copy, dispatch_copy_git, dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand,
     dispatch_fail, dispatch_for_loop, dispatch_func_def, dispatch_if_then, dispatch_import_file,
     dispatch_import_funcs, dispatch_inherit_env, dispatch_install, dispatch_isolated_inherit_env,
@@ -59,6 +58,7 @@ pub use self::native::{
 };
 pub use self::state::ExecState;
 pub use self::state::MAX_RUNNING_TASKS;
+pub use self::state::const_mutation_error;
 pub use self::steps::StepCtx;
 pub use self::typing::{
     Field, LIST_TAG, MAP_TAG, OxDockType, TypeDescriptor, TypeTag, Value, ValuePayload,
@@ -435,6 +435,8 @@ pub(crate) fn new_state<P: ProcessManager>(
     // Run-scoped worker telemetry: the root hub adopts the staged
     // counter so every pump worker this run spawns attributes to it.
     let worker_counter = io.worker_counter();
+    let entry_seed_envs = (*seed).clone();
+    let entry_cwd = cwd.clone();
     let mut state = ExecState {
         fs,
         cargo_scratch,
@@ -449,6 +451,7 @@ pub(crate) fn new_state<P: ProcessManager>(
         assert_windows_stderr: assert_windows_stderr.clone(),
         exact_stdout: exact_stdout.clone(),
         var_scopes: Vec::new(),
+        const_scopes: Vec::new(),
         cancel_token: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cancel_hub: std::sync::Arc::new(oxdock_process::CancelHub::with_counter(worker_counter)),
         active_process: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -464,7 +467,14 @@ pub(crate) fn new_state<P: ProcessManager>(
         import_stack: Vec::new(),
         executed_alias_targets: std::collections::HashMap::new(),
         call_alias_frames: Vec::new(),
-        modules: std::collections::HashMap::new(),
+        scope_alias_frames: Vec::new(),
+        init_scope_depths: Vec::new(),
+        func_floors: Vec::new(),
+        harvest_map: std::collections::HashMap::new(),
+        modules: std::collections::HashMap::from([(
+            self::import::ENTRY_UNIT.to_string(),
+            self::state::ModuleRecord::entry_record(entry_seed_envs, entry_cwd),
+        )]),
         validated_modules: std::collections::HashSet::new(),
         module_stack: Vec::new(),
         module_table: self::native::std_module_table(),
@@ -474,6 +484,7 @@ pub(crate) fn new_state<P: ProcessManager>(
         type_aliases: std::collections::HashMap::new(),
         type_env_digest: 0,
         call_depth: 0,
+        init_inherit_stack: Vec::new(),
         // Root flow is task 0; worker ids start at 1 (see next_task_id).
         task_id: 0,
         push_manifest: Vec::new(),
@@ -550,13 +561,30 @@ pub fn validate_closure_for_run<P: ProcessManager>(
 ) -> Result<Vec<String>> {
     state.restore_aliases(self::typing::collect_type_aliases(steps, state)?);
     state.validate_function_type_tags()?;
+    // Entry Frame-1 file scope (#322): index the entry top-level
+    // `FUNC`s once. Every execution path (Engine, MCP, dry run)
+    // funnels through here with the steps it is about to run, so
+    // one build covers them all and entry calls resolve their own
+    // file without scanning steps. The entry is one `ModuleRecord`
+    // under the entry sentinel, so frame walks read entry and
+    // modules through the same `unit_top_funcs` lookup.
+    let top_funcs = self::import::collect_top_funcs(steps);
+    // In-place entry refresh: re-validation must keep the live
+    // prelude (`init`) and any sealed jails, updating only the
+    // freshly indexed steps and file frame.
+    let entry_record = state
+        .modules
+        .entry(self::import::ENTRY_UNIT.to_string())
+        .or_default();
+    entry_record.steps = steps.to_vec();
+    entry_record.top_funcs = top_funcs;
     let saved_aliases = state.type_aliases.clone();
     let closure = self::import::expand_import_closure(state, steps)?;
     static_check::validate_script_closure(steps, &closure, state)?;
     state.restore_aliases(saved_aliases);
     let mut exported = Vec::new();
     for file in &closure {
-        exported.extend(file.type_exports.iter().cloned());
+        exported.extend(file.exports.types.iter().cloned());
     }
     Ok(exported)
 }

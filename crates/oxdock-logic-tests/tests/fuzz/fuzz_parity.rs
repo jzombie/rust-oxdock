@@ -140,7 +140,7 @@ fn arb_scalar_literal() -> impl Strategy<Value = Expr> {
 /// Variable operand pool for math/logic generation: short names both
 /// pathways spell identically, with no quoting or module involvement.
 fn arb_math_var() -> impl Strategy<Value = Expr> {
-    "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Var)
+    "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Var { name })
 }
 
 /// Numeric leaves for arithmetic: vars plus non-negative ints and
@@ -381,15 +381,17 @@ fn flat_body_image_eq(a: &Step, b: &Step) -> bool {
             kx == ky && arg_content_eq(vx, vy)
         }
         (
-            StepKind::Assign {
+            StepKind::Bind {
                 var: vx,
                 decl_type: tx,
-                expr: ex,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(ex),
             },
-            StepKind::Assign {
+            StepKind::Bind {
                 var: vy,
                 decl_type: ty,
-                expr: ey,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(ey),
             },
         ) => vx == vy && tx == ty && expr_image_eq(ex, ey),
         (
@@ -446,11 +448,20 @@ fn flat_body_image_eq(a: &Step, b: &Step) -> bool {
 fn arb_leaf_expr() -> impl Strategy<Value = Expr> {
     prop_oneof![
         arb_scalar_literal(),
-        "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Var),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Var { name }),
+        "[A-Z][A-Z0-9_]*".prop_map(|name| Expr::Var { name }),
+        ("[A-Z][A-Z0-9_]*", "[A-Z][A-Z0-9_]*")
+            .prop_map(|(alias, name)| Expr::ConstRef { alias, name }),
         "[A-Z][A-Z0-9_]*".prop_map(Expr::Env),
-        "[a-z][a-zA-Z0-9_]*".prop_map(Expr::Inspect),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|name| Expr::Inspect { name }),
+        "[A-Z][A-Z0-9_]*".prop_map(|name| Expr::Inspect { name }),
         (
             "[a-z][a-zA-Z0-9_]*",
+            prop::collection::vec("[a-z][a-zA-Z0-9_]*", 1..=2),
+        )
+            .prop_map(|(base, keys)| Expr::KeyPath { base, keys }),
+        (
+            "[A-Z][A-Z0-9_]*",
             prop::collection::vec("[a-z][a-zA-Z0-9_]*", 1..=2),
         )
             .prop_map(|(base, keys)| Expr::KeyPath { base, keys }),
@@ -719,45 +730,58 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         // strict.
         prop_oneof![
             ("[a-z][a-zA-Z0-9_]*", safe_string()).prop_map(|(var, s)| {
-                StepKind::Assign {
+                StepKind::Bind {
                     var,
                     decl_type: "STRING".to_string(),
-                    expr: Expr::Literal(Value::string(s)),
+                    is_const: false,
+                    rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string(s))),
+                }
+            }),
+            ("[A-Z][A-Z0-9_]*", safe_string()).prop_map(|(var, s)| {
+                StepKind::Bind {
+                    var,
+                    decl_type: "STRING".to_string(),
+                    is_const: true,
+                    rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string(s))),
                 }
             }),
             ("[a-z][a-zA-Z0-9_]*", 0u32..999_999).prop_map(|(var, i)| {
-                StepKind::Assign {
+                StepKind::Bind {
                     var,
                     decl_type: "INT".to_string(),
-                    expr: Expr::Literal(Value::int(i as i64)),
+                    is_const: false,
+                    rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::int(i as i64))),
                 }
             }),
             ("[a-z][a-zA-Z0-9_]*", any::<bool>()).prop_map(|(var, b)| {
-                StepKind::Assign {
+                StepKind::Bind {
                     var,
                     decl_type: "BOOL".to_string(),
-                    expr: Expr::Literal(Value::bool(b)),
+                    is_const: false,
+                    rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::bool(b))),
                 }
             }),
             (
                 "[a-z][a-zA-Z0-9_]*",
                 prop::collection::vec(safe_string(), 0..=2)
             )
-                .prop_map(|(var, items)| StepKind::Assign {
+                .prop_map(|(var, items)| StepKind::Bind {
                     var,
                     decl_type: "LIST<STRING>".to_string(),
-                    expr: Expr::List(
+                    is_const: false,
+                    rhs: oxdock_parser::BindRhs::Expr(Expr::List(
                         items
                             .into_iter()
                             .map(Value::string)
                             .map(Expr::Literal)
                             .collect(),
-                    ),
+                    ))
                 },),
-            "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Assign {
+            "[a-z][a-zA-Z0-9_]*".prop_map(|var| StepKind::Bind {
                 var,
                 decl_type: "PIPE".to_string(),
-                expr: Expr::FreshPipe,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(Expr::FreshPipe)
             }),
             ("[a-z][a-zA-Z0-9_]*", arb_expr()).prop_map(|(var, expr)| {
                 let decl_type = match &expr {
@@ -768,10 +792,11 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
                     _ => "STRING",
                 }
                 .to_string();
-                StepKind::Assign {
+                StepKind::Bind {
                     var,
                     decl_type,
-                    expr,
+                    is_const: false,
+                    rhs: oxdock_parser::BindRhs::Expr(expr),
                 }
             }),
         ],
@@ -853,10 +878,17 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         }),
         arb_command_body().prop_map(|body| StepKind::Isolated { body }),
         arb_body().prop_map(|body| StepKind::AsyncBlock { body }),
-        ("[a-z][a-zA-Z0-9_]*", arb_body()).prop_map(|(var, body)| StepKind::AssignAsync {
+        ("[a-z][a-zA-Z0-9_]*", arb_body()).prop_map(|(var, body)| StepKind::Bind {
             var,
             decl_type: "HANDLE".to_string(),
-            body,
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Async(body)
+        }),
+        ("[A-Z][A-Z0-9_]*", arb_body()).prop_map(|(var, body)| StepKind::Bind {
+            var,
+            decl_type: "HANDLE".to_string(),
+            is_const: true,
+            rhs: oxdock_parser::BindRhs::Async(body)
         }),
         arb_body().prop_map(|body| StepKind::RemoteBlock {
             target: "coveragetarget".to_string(),
@@ -864,15 +896,31 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             env: vec![],
             body,
         }),
-        ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::AssignCapture {
+        ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::Bind {
             var,
             decl_type: "STRING".to_string(),
-            cmd: Box::new(StepKind::Echo("coverage echo".into())),
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Capture(Box::new(StepKind::Echo("coverage echo".into())))
         }),
-        ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::AwaitCapture {
-            out_var: var.clone(),
-            out_type: "STRING".to_string(),
-            task_var: var,
+        ("[A-Z][A-Z0-9_]*",).prop_map(|(var,)| StepKind::Bind {
+            var,
+            decl_type: "STRING".to_string(),
+            is_const: true,
+            rhs: oxdock_parser::BindRhs::Capture(Box::new(StepKind::Echo("coverage echo".into())))
+        }),
+        ("[a-z][a-zA-Z0-9_]*",).prop_map(|(var,)| StepKind::Bind {
+            var: var.clone(),
+            decl_type: "STRING".to_string(),
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Await { task_var: var }
+        }),
+        ("[A-Z][A-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(out_var, task_var)| {
+            StepKind::Bind {
+                var: out_var,
+                decl_type: "STRING".to_string(),
+                is_const: true,
+                rhs: oxdock_parser::BindRhs::Await { task_var },
+            }
         }),
         ("[a-z][a-zA-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(var, item)| {
             StepKind::For {
@@ -887,7 +935,9 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         Just(StepKind::WithIo {
             bindings: vec![IoBinding {
                 stream: IoStream::Stdout,
-                pipe: Some(PipeTarget::Var("coverage".to_string())),
+                pipe: Some(PipeTarget::Var {
+                    name: "coverage".to_string()
+                }),
             }],
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         }),
@@ -958,7 +1008,10 @@ fn zero_kind_markers(kind: &mut StepKind) {
         | StepKind::Fail { body, .. }
         | StepKind::Isolated { body, .. }
         | StepKind::AsyncBlock { body, .. }
-        | StepKind::AssignAsync { body, .. }
+        | StepKind::Bind {
+            rhs: oxdock_parser::BindRhs::Async(body),
+            ..
+        }
         | StepKind::RemoteBlock { body, .. } => zero_markers(body),
         StepKind::Switch {
             cases,
@@ -972,9 +1025,11 @@ fn zero_kind_markers(kind: &mut StepKind) {
                 zero_markers(body);
             }
         }
-        StepKind::AssignCapture { cmd, .. } | StepKind::WithIo { cmd, .. } => {
-            zero_kind_markers(cmd)
+        StepKind::Bind {
+            rhs: oxdock_parser::BindRhs::Capture(cmd),
+            ..
         }
+        | StepKind::WithIo { cmd, .. } => zero_kind_markers(cmd),
         _ => {}
     }
 }
@@ -1023,15 +1078,15 @@ fn arb_command_body_kind() -> impl Strategy<Value = StepKind> {
 fn arb_bool_expr() -> impl Strategy<Value = Expr> {
     prop_oneof![
         any::<bool>().prop_map(|b| Expr::Literal(Value::bool(b))),
-        "[a-z][a-zA-Z0-9_]*".prop_map(|v| Expr::Not(Box::new(Expr::Var(v)))),
+        "[a-z][a-zA-Z0-9_]*".prop_map(|v| Expr::Not(Box::new(Expr::Var { name: v }))),
         ("[a-z][a-zA-Z0-9_]*", "[a-z][a-zA-Z0-9_]*").prop_map(|(l, r)| Expr::Logical {
             op: LogicalOp::And,
-            left: Box::new(Expr::Var(l)),
-            right: Box::new(Expr::Var(r)),
+            left: Box::new(Expr::Var { name: l }),
+            right: Box::new(Expr::Var { name: r }),
         }),
         ("[a-z][a-zA-Z0-9_]*", 0u32..999).prop_map(|(v, i)| Expr::Compare {
             op: CompareOp::Eq,
-            left: Box::new(Expr::Var(v)),
+            left: Box::new(Expr::Var { name: v }),
             right: Box::new(Expr::Literal(Value::int(i as i64))),
         }),
     ]
@@ -1093,10 +1148,11 @@ fn arb_body_step_kind() -> impl Strategy<Value = StepKind> {
             key: "COVERAGE".to_string(),
             value: "covered".into(),
         }),
-        Just(StepKind::Assign {
+        Just(StepKind::Bind {
             var: "coverage".to_string(),
             decl_type: "STRING".to_string(),
-            expr: Expr::Literal(Value::string("covered".to_string())),
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string("covered".to_string())))
         }),
         Just(StepKind::AssertEq {
             hash: None,
@@ -1488,15 +1544,17 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             }
         }
         (
-            StepKind::Assign {
+            StepKind::Bind {
                 var: lv,
                 decl_type: lt,
-                expr: le,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(le),
             },
-            StepKind::Assign {
+            StepKind::Bind {
                 var: rv,
                 decl_type: rt,
-                expr: re,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Expr(re),
             },
         ) => {
             assert_eq!(lv, rv, "Assign var mismatch: {}", msg);
@@ -1533,10 +1591,10 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert!(arg_content_eq(li, ri), "ListAppend item mismatch: {}", msg);
         }
         (StepKind::Await { var: l }, StepKind::Await { var: r }) => {
-            assert_eq!(l, r, "Await var mismatch: {}", msg)
+            assert_eq!(l, r, "Await var mismatch: {}", msg);
         }
         (StepKind::Cancel { var: l }, StepKind::Cancel { var: r }) => {
-            assert_eq!(l, r, "Cancel var mismatch: {}", msg)
+            assert_eq!(l, r, "Cancel var mismatch: {}", msg);
         }
         (
             StepKind::If {
@@ -1671,19 +1729,39 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_bodies_eq(lb, rb, msg)
         }
         (
-            StepKind::AssignAsync {
+            StepKind::Bind {
                 var: lv,
                 decl_type: lt,
-                body: lb,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Async(lb),
             },
-            StepKind::AssignAsync {
+            StepKind::Bind {
                 var: rv,
                 decl_type: rt,
-                body: rb,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Async(rb),
             },
         ) => {
             assert_eq!(lv, rv, "AssignAsync var mismatch: {}", msg);
             assert_eq!(lt, rt, "AssignAsync type mismatch: {}", msg);
+            assert_bodies_eq(lb, rb, msg);
+        }
+        (
+            StepKind::Bind {
+                var: lv,
+                decl_type: lt,
+                is_const: true,
+                rhs: oxdock_parser::BindRhs::Async(lb),
+            },
+            StepKind::Bind {
+                var: rv,
+                decl_type: rt,
+                is_const: true,
+                rhs: oxdock_parser::BindRhs::Async(rb),
+            },
+        ) => {
+            assert_eq!(lv, rv, "ConstAsync var mismatch: {}", msg);
+            assert_eq!(lt, rt, "ConstAsync type mismatch: {}", msg);
             assert_bodies_eq(lb, rb, msg);
         }
         (
@@ -1706,15 +1784,17 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_bodies_eq(lb, rb, msg);
         }
         (
-            StepKind::AssignCapture {
+            StepKind::Bind {
                 var: lv,
                 decl_type: lt,
-                cmd: lc,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Capture(lc),
             },
-            StepKind::AssignCapture {
+            StepKind::Bind {
                 var: rv,
                 decl_type: rt,
-                cmd: rc,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Capture(rc),
             },
         ) => {
             assert_eq!(lv, rv, "AssignCapture var mismatch: {}", msg);
@@ -1722,20 +1802,58 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert_bodies_eq(&[shell_of_kind(lc)], &[shell_of_kind(rc)], msg);
         }
         (
-            StepKind::AwaitCapture {
-                out_var: lo,
-                out_type: lt,
-                task_var: lv,
+            StepKind::Bind {
+                var: lv,
+                decl_type: lt,
+                is_const: true,
+                rhs: oxdock_parser::BindRhs::Capture(lc),
             },
-            StepKind::AwaitCapture {
-                out_var: ro,
-                out_type: rt,
-                task_var: rv,
+            StepKind::Bind {
+                var: rv,
+                decl_type: rt,
+                is_const: true,
+                rhs: oxdock_parser::BindRhs::Capture(rc),
+            },
+        ) => {
+            assert_eq!(lv, rv, "ConstCapture var mismatch: {}", msg);
+            assert_eq!(lt, rt, "ConstCapture type mismatch: {}", msg);
+            assert_bodies_eq(&[shell_of_kind(lc)], &[shell_of_kind(rc)], msg);
+        }
+        (
+            StepKind::Bind {
+                var: lo,
+                decl_type: lt,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Await { task_var: lv },
+            },
+            StepKind::Bind {
+                var: ro,
+                decl_type: rt,
+                is_const: false,
+                rhs: oxdock_parser::BindRhs::Await { task_var: rv },
             },
         ) => {
             assert_eq!(lo, ro, "AwaitCapture out mismatch: {}", msg);
             assert_eq!(lt, rt, "AwaitCapture type mismatch: {}", msg);
             assert_eq!(lv, rv, "AwaitCapture task mismatch: {}", msg);
+        }
+        (
+            StepKind::Bind {
+                var: lo,
+                decl_type: lt,
+                is_const: true,
+                rhs: oxdock_parser::BindRhs::Await { task_var: lv },
+            },
+            StepKind::Bind {
+                var: ro,
+                decl_type: rt,
+                is_const: true,
+                rhs: oxdock_parser::BindRhs::Await { task_var: rv },
+            },
+        ) => {
+            assert_eq!(lo, ro, "ConstAwaitCapture out mismatch: {}", msg);
+            assert_eq!(lt, rt, "ConstAwaitCapture type mismatch: {}", msg);
+            assert_eq!(lv, rv, "ConstAwaitCapture task mismatch: {}", msg);
         }
         (
             StepKind::WithIo {
@@ -2184,10 +2302,17 @@ fn sample_covered_kinds() -> Vec<StepKind> {
             name: "COVERAGE".to_string(),
             target: "MAP".to_string(),
         },
-        StepKind::Assign {
+        StepKind::Bind {
             var: "coverage".to_string(),
             decl_type: "STRING".to_string(),
-            expr: Expr::Literal(Value::string("covered".to_string())),
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string("covered".to_string()))),
+        },
+        StepKind::Bind {
+            var: "COVERAGE".to_string(),
+            decl_type: "STRING".to_string(),
+            is_const: true,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::Literal(Value::string("covered".to_string()))),
         },
         StepKind::Set {
             var: "coverage".to_string(),
@@ -2239,50 +2364,68 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         },
         // Expression shapes: dynamic math/logic lower to images both
         // pathways must agree on; the sample asserts the agreement.
-        StepKind::Assign {
+        StepKind::Bind {
             var: "coverage".to_string(),
             decl_type: "INT".to_string(),
-            expr: Expr::Arithmetic {
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::Arithmetic {
                 op: ArithOp::Add,
-                left: Box::new(Expr::Var("coverage".to_string())),
-                right: Box::new(Expr::Var("coverage".to_string())),
-            },
+                left: Box::new(Expr::Var {
+                    name: "coverage".to_string(),
+                }),
+                right: Box::new(Expr::Var {
+                    name: "coverage".to_string(),
+                }),
+            }),
         },
-        StepKind::Assign {
+        StepKind::Bind {
             var: "coverage".to_string(),
             decl_type: "BOOL".to_string(),
-            expr: Expr::Compare {
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::Compare {
                 op: CompareOp::Eq,
-                left: Box::new(Expr::Var("coverage".to_string())),
+                left: Box::new(Expr::Var {
+                    name: "coverage".to_string(),
+                }),
                 right: Box::new(Expr::Literal(Value::int(7))),
-            },
+            }),
         },
-        StepKind::Assign {
+        StepKind::Bind {
             var: "coverage".to_string(),
             decl_type: "BOOL".to_string(),
-            expr: Expr::Not(Box::new(Expr::Var("coverage".to_string()))),
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::Not(Box::new(Expr::Var {
+                name: "coverage".to_string(),
+            }))),
         },
-        StepKind::Assign {
+        StepKind::Bind {
             var: "coverage".to_string(),
             decl_type: "BOOL".to_string(),
-            expr: Expr::Logical {
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::Logical {
                 op: LogicalOp::And,
-                left: Box::new(Expr::Var("coverage".to_string())),
-                right: Box::new(Expr::Var("coverage".to_string())),
-            },
+                left: Box::new(Expr::Var {
+                    name: "coverage".to_string(),
+                }),
+                right: Box::new(Expr::Var {
+                    name: "coverage".to_string(),
+                }),
+            }),
         },
-        StepKind::Assign {
+        StepKind::Bind {
             var: "coverage".to_string(),
             decl_type: "INT".to_string(),
-            expr: Expr::Call {
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::Call {
                 name: "STD::LEN".to_string(),
                 args: vec![Expr::Literal(Value::string("coverage".to_string()))],
-            },
+            }),
         },
-        StepKind::Assign {
+        StepKind::Bind {
             var: "coverage".to_string(),
             decl_type: "STRING".to_string(),
-            expr: Expr::Block(vec![Step {
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Expr(Expr::Block(vec![Step {
                 guard: None,
                 kind: StepKind::Return {
                     expr: Box::new(Expr::Literal(Value::string("covered".to_string()))),
@@ -2292,7 +2435,7 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 scope_exit: 0,
                 line: 0,
                 col: 0,
-            }]),
+            }])),
         },
         StepKind::If {
             cond: Box::new(Expr::Literal(Value::bool(true))),
@@ -2393,17 +2536,31 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 col: 0,
             }],
         },
-        StepKind::AssignAsync {
+        StepKind::Bind {
             var: "coverage".to_string(),
             decl_type: "HANDLE".to_string(),
-            body: vec![Step {
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Async(vec![Step {
                 guard: None,
                 kind: StepKind::Echo("coverage echo".into()),
                 scope_enter: 0,
                 scope_exit: 0,
                 line: 0,
                 col: 0,
-            }],
+            }]),
+        },
+        StepKind::Bind {
+            var: "COVERAGE".to_string(),
+            decl_type: "HANDLE".to_string(),
+            is_const: true,
+            rhs: oxdock_parser::BindRhs::Async(vec![Step {
+                guard: None,
+                kind: StepKind::Echo("coverage echo".into()),
+                scope_enter: 0,
+                scope_exit: 0,
+                line: 0,
+                col: 0,
+            }]),
         },
         StepKind::RemoteBlock {
             target: "coveragetarget".to_string(),
@@ -2418,15 +2575,33 @@ fn sample_covered_kinds() -> Vec<StepKind> {
                 col: 0,
             }],
         },
-        StepKind::AssignCapture {
+        StepKind::Bind {
             var: "coverage".to_string(),
             decl_type: "STRING".to_string(),
-            cmd: Box::new(StepKind::Echo("coverage echo".into())),
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Capture(Box::new(StepKind::Echo("coverage echo".into()))),
         },
-        StepKind::AwaitCapture {
-            out_var: "coverage".to_string(),
-            out_type: "STRING".to_string(),
-            task_var: "coverage".to_string(),
+        StepKind::Bind {
+            var: "COVERAGE".to_string(),
+            decl_type: "STRING".to_string(),
+            is_const: true,
+            rhs: oxdock_parser::BindRhs::Capture(Box::new(StepKind::Echo("coverage echo".into()))),
+        },
+        StepKind::Bind {
+            var: "coverage".to_string(),
+            decl_type: "STRING".to_string(),
+            is_const: false,
+            rhs: oxdock_parser::BindRhs::Await {
+                task_var: "coverage".to_string(),
+            },
+        },
+        StepKind::Bind {
+            var: "COVERAGE".to_string(),
+            decl_type: "STRING".to_string(),
+            is_const: true,
+            rhs: oxdock_parser::BindRhs::Await {
+                task_var: "coverage".to_string(),
+            },
         },
         StepKind::For {
             key_var: None,
@@ -2446,7 +2621,9 @@ fn sample_covered_kinds() -> Vec<StepKind> {
         StepKind::WithIo {
             bindings: vec![IoBinding {
                 stream: IoStream::Stdout,
-                pipe: Some(PipeTarget::Var("coverage".to_string())),
+                pipe: Some(PipeTarget::Var {
+                    name: "coverage".to_string(),
+                }),
             }],
             cmd: Box::new(StepKind::Echo("coverage echo".into())),
         },
@@ -2504,12 +2681,9 @@ fn fuzz_covers_kind(kind: &StepKind) -> bool {
         | StepKind::TypeAlias { .. } => true,
         // Expression bodies need Expr strategies (literals, math,
         // calls, keypaths) before generation is sound.
-        StepKind::Assign { .. } => true,
+        StepKind::Bind { .. } => true,
         StepKind::Set { .. } => true,
-        StepKind::AssignCapture { .. } => true,
-        StepKind::AwaitCapture { .. } => true,
         StepKind::AsyncBlock { .. } => true,
-        StepKind::AssignAsync { .. } => true,
         StepKind::Await { .. } => true,
         StepKind::Cancel { .. } => true,
         StepKind::Timeout { .. } => true,
@@ -2616,14 +2790,15 @@ fn fuzz_inventory_covers_claimed_kinds() {
 fn expr_covers_kind(expr: &Expr) -> bool {
     match expr {
         Expr::Literal(..)
-        | Expr::Var(..)
+        | Expr::Var { .. }
+        | Expr::ConstRef { .. }
         | Expr::Env(..)
         | Expr::KeyPath { .. }
         | Expr::List(..)
         | Expr::Map(..)
         | Expr::Block(..)
         | Expr::Call { .. }
-        | Expr::Inspect(..)
+        | Expr::Inspect { .. }
         | Expr::Compare { .. }
         | Expr::Arithmetic { .. }
         | Expr::Not(..)
@@ -2648,10 +2823,23 @@ fn sample_covered_exprs() -> Vec<Expr> {
         Expr::Literal(Value::string("coverage".to_string())),
         Expr::Literal(Value::int(7)),
         Expr::Literal(Value::bool(true)),
-        Expr::Var("coverage".to_string()),
+        Expr::Var {
+            name: "coverage".to_string(),
+        },
+        Expr::Var {
+            name: "COVERAGE".to_string(),
+        },
+        Expr::ConstRef {
+            alias: "COVERAGE".to_string(),
+            name: "COVERAGE".to_string(),
+        },
         Expr::Env("COVERAGE".to_string()),
         Expr::KeyPath {
             base: "coverage".to_string(),
+            keys: vec!["key".to_string()],
+        },
+        Expr::KeyPath {
+            base: "COVERAGE".to_string(),
             keys: vec!["key".to_string()],
         },
         Expr::List(vec![Expr::Literal(Value::string("covered".to_string()))]),
@@ -2659,7 +2847,12 @@ fn sample_covered_exprs() -> Vec<Expr> {
             "coverage".to_string(),
             Expr::Literal(Value::string("covered".to_string())),
         )]),
-        Expr::Inspect("coverage".to_string()),
+        Expr::Inspect {
+            name: "coverage".to_string(),
+        },
+        Expr::Inspect {
+            name: "COVERAGE".to_string(),
+        },
         Expr::FreshPipe,
         Expr::Block(vec![Step {
             guard: None,
@@ -2678,19 +2871,31 @@ fn sample_covered_exprs() -> Vec<Expr> {
         },
         Expr::Compare {
             op: CompareOp::Eq,
-            left: Box::new(Expr::Var("coverage".to_string())),
+            left: Box::new(Expr::Var {
+                name: "coverage".to_string(),
+            }),
             right: Box::new(Expr::Literal(Value::int(7))),
         },
         Expr::Arithmetic {
             op: ArithOp::Add,
-            left: Box::new(Expr::Var("coverage".to_string())),
-            right: Box::new(Expr::Var("coverage".to_string())),
+            left: Box::new(Expr::Var {
+                name: "coverage".to_string(),
+            }),
+            right: Box::new(Expr::Var {
+                name: "coverage".to_string(),
+            }),
         },
-        Expr::Not(Box::new(Expr::Var("coverage".to_string()))),
+        Expr::Not(Box::new(Expr::Var {
+            name: "coverage".to_string(),
+        })),
         Expr::Logical {
             op: LogicalOp::And,
-            left: Box::new(Expr::Var("coverage".to_string())),
-            right: Box::new(Expr::Var("coverage".to_string())),
+            left: Box::new(Expr::Var {
+                name: "coverage".to_string(),
+            }),
+            right: Box::new(Expr::Var {
+                name: "coverage".to_string(),
+            }),
         },
     ]
 }
@@ -2708,10 +2913,11 @@ fn assert_expr_tree_claimed(expr: &Expr) {
     );
     match expr {
         Expr::Literal(..)
-        | Expr::Var(..)
+        | Expr::Var { .. }
+        | Expr::ConstRef { .. }
         | Expr::Env(..)
         | Expr::KeyPath { .. }
-        | Expr::Inspect(..)
+        | Expr::Inspect { .. }
         | Expr::FreshPipe
         | Expr::CompiledMath(..)
         | Expr::UnsignedIntBoundary(..) => {}
@@ -2805,7 +3011,10 @@ fn fuzz_expr_inventory_enforced() {
         // replace it, but only with a folded `Literal` or `CompiledMath`:
         // any other image is a new lowering behavior to classify.
         let out_expr = match &string_out[0].kind {
-            StepKind::Assign { expr, .. } => expr,
+            StepKind::Bind {
+                rhs: oxdock_parser::BindRhs::Expr(expr),
+                ..
+            } => expr,
             other => panic!("math sample must lower to Assign, got {other:?}"),
         };
         if std::mem::discriminant(out_expr) != std::mem::discriminant(&expr) {
@@ -2826,8 +3035,7 @@ fn fuzz_expr_inventory_enforced() {
     let src = format!("LET $coverage: INT = {witness}");
     let survives = parse_string_with_std_modules(&src).is_ok_and(|steps| {
         steps.len() == 1
-            && matches!(&steps[0].kind, StepKind::Assign { expr, .. }
-                if std::mem::discriminant(expr) == std::mem::discriminant(&witness))
+            && matches!(&steps[0].kind, StepKind::Bind { rhs: oxdock_parser::BindRhs::Expr(expr), .. } if std::mem::discriminant(expr) == std::mem::discriminant(&witness))
     });
     assert!(
         !survives,
@@ -2853,7 +3061,9 @@ fn sample_excluded_kinds() -> Vec<StepKind> {
     vec![StepKind::WithIoBlock {
         bindings: vec![IoBinding {
             stream: IoStream::Stdout,
-            pipe: Some(PipeTarget::Var("coverage".to_string())),
+            pipe: Some(PipeTarget::Var {
+                name: "coverage".to_string(),
+            }),
         }],
     }]
 }

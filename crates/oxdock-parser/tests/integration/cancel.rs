@@ -8,7 +8,7 @@ fn cancel_case(script: &str) -> String {
     let steps = parse_script(script, mock_lower).expect("parse CANCEL");
     assert_eq!(steps.len(), 1, "expected a single CANCEL step");
     match &steps[0].kind {
-        StepKind::Cancel { var } => var.clone(),
+        StepKind::Cancel { var, .. } => var.clone(),
         other => panic!("expected Cancel, got {other:?}"),
     }
 }
@@ -86,7 +86,11 @@ fn let_async_wraps_cancel_and_timeout() {
         .expect("parse LET ASYNC CANCEL");
     assert_eq!(steps.len(), 1);
     match &steps[0].kind {
-        StepKind::AssignAsync { var, body, .. } => {
+        StepKind::Bind {
+            var,
+            rhs: oxdock_parser::BindRhs::Async(body),
+            ..
+        } => {
             assert_eq!(var, "a");
             assert_eq!(body.len(), 1);
             assert!(matches!(&body[0].kind, StepKind::Cancel { .. }));
@@ -100,7 +104,11 @@ fn let_async_wraps_cancel_and_timeout() {
     )
     .expect("parse LET ASYNC TIMEOUT");
     match &steps[0].kind {
-        StepKind::AssignAsync { var, body, .. } => {
+        StepKind::Bind {
+            var,
+            rhs: oxdock_parser::BindRhs::Async(body),
+            ..
+        } => {
             assert_eq!(var, "a");
             assert_eq!(body.len(), 1);
             assert!(matches!(&body[0].kind, StepKind::Timeout { .. }));

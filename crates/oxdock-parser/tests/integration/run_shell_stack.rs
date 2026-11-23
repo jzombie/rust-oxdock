@@ -8,7 +8,11 @@ use oxdock_parser::ast::Arg;
 use oxdock_parser::{StepKind, lower_command, parse_script};
 
 fn shell_text(step: &oxdock_parser::Step) -> &str {
-    let StepKind::AssignCapture { cmd, .. } = &step.kind else {
+    let StepKind::Bind {
+        rhs: oxdock_parser::BindRhs::Capture(cmd),
+        ..
+    } = &step.kind
+    else {
         panic!("expected AssignCapture, got {:?}", step.kind);
     };
     let StepKind::Run(arg) = cmd.as_ref() else {

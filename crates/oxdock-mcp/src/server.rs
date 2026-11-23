@@ -837,11 +837,12 @@ impl OxDockHandler {
         }
         let parsed =
             oxdock_core::parse_script_with_modules_and_exports(script_text, engine.module_table())?;
-        if parsed.func_exports.is_empty() {
+        if parsed.exports.funcs.is_empty() {
             anyhow::bail!("no EXPORT entries: add `EXPORT [NAME, ...]` to expose MCP tools");
         }
         if parsed
-            .func_exports
+            .exports
+            .funcs
             .iter()
             .any(|name| name == STATUS_TOOL_NAME)
         {

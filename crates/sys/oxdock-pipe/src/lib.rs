@@ -1,5 +1,10 @@
-//! Anonymous pipe backends for OxDock: spillable script buffers, OS kernel
+//! Runtime-managed stream backends for OxDock: spillable script buffers, OS kernel
 //! pairs, and the owned handle slots that bind them lazily.
+//!
+//! A pipe is a runtime-managed byte stream with exactly one interface:
+//! declare it, wire it with `WITH_IO`, and pass or copy the handle
+//! across calls, tasks, and module boundaries. Script code never
+//! manages descriptors, temp files, or platform plumbing.
 //!
 //! This crate sits below `oxdock-parser` (whose `PIPE` values hold
 //! [`PipeHandle`]s) and beside `oxdock-process` (whose stdio types the

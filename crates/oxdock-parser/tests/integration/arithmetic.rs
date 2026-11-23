@@ -6,7 +6,10 @@ fn parse_assign_expr(script: &str) -> Expr {
     let steps = parse_with_math(script, mock_lower).expect("parse arithmetic");
     assert_eq!(steps.len(), 1, "expected one step, got {steps:?}");
     match steps.into_iter().next().unwrap().kind {
-        StepKind::Assign { expr, .. } => expr,
+        StepKind::Bind {
+            rhs: oxdock_parser::BindRhs::Expr(expr),
+            ..
+        } => expr,
         other => panic!("expected Assign, got {other:?}"),
     }
 }
@@ -207,9 +210,9 @@ fn unary_minus_folds_literals() {
             assert!(matches!(
                 ops.as_slice(),
                 [
-                    oxdock_parser::ast::MathOp::LoadVar(_),
+                    oxdock_parser::ast::MathOp::Load { name},
                     oxdock_parser::ast::MathOp::Neg
-                ]
+                ] if name == "v"
             ));
         }
         other => panic!("expected CompiledMath Neg, got {other:?}"),
@@ -297,8 +300,8 @@ fn call_arg_order_pushes_left_to_right() {
             assert!(matches!(
                 ops.as_slice(),
                 [
-                    oxdock_parser::ast::MathOp::LoadVar(a),
-                    oxdock_parser::ast::MathOp::LoadVar(b),
+                    oxdock_parser::ast::MathOp::Load { name: a},
+                    oxdock_parser::ast::MathOp::Load { name: b},
                     oxdock_parser::ast::MathOp::Call { name, arity: 2 }
                 ] if a == "a" && b == "b" && name == "MATH::FOO"
             ));
@@ -320,8 +323,8 @@ fn inspect_compiles_to_name_preserving_op() {
             assert!(matches!(
                 ops.as_slice(),
                 [
-                    oxdock_parser::ast::MathOp::Inspect(a),
-                    oxdock_parser::ast::MathOp::Inspect(b),
+                    oxdock_parser::ast::MathOp::Inspect { name: a},
+                    oxdock_parser::ast::MathOp::Inspect { name: b},
                     oxdock_parser::ast::MathOp::Eq
                 ] if a == "p" && b == "p"
             ));

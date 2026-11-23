@@ -7,12 +7,18 @@
 mod arithmetic;
 #[path = "integration/commands.rs"]
 mod commands;
+#[path = "integration/const.rs"]
+mod const_;
 #[path = "integration/custom_types.rs"]
 mod custom_types;
+#[path = "integration/func_isolation.rs"]
+mod func_isolation;
 #[path = "integration/glob_sandbox.rs"]
 mod glob_sandbox;
 #[path = "integration/guard_isolation.rs"]
 mod guard_isolation;
+#[path = "integration/home_scope.rs"]
+mod home_scope;
 #[path = "integration/incremental.rs"]
 mod incremental;
 #[path = "integration/key_path.rs"]
