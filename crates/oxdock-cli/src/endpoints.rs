@@ -14,12 +14,14 @@
 //! binding happens before script parsing so `EADDRINUSE` fails fast.
 
 use std::net::SocketAddr;
-#[cfg(feature = "net")]
-use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+
+use crate::errors;
 #[cfg(feature = "net")]
 use oxdock_net_plugin::{BindingSpec, EndpointKey, EndpointRegistry, Protocol, parse_endpoint_ref};
+#[cfg(feature = "net")]
+use std::sync::Arc;
 
 /// Endpoint exposure flags from CLI args. Built by `Options::parse`,
 /// consumed by [`build_registry`].
@@ -44,26 +46,20 @@ pub struct EndpointFlags {
 pub fn parse_listen_arg(raw: &str) -> Result<SocketAddr> {
     let text = raw.trim();
     if text.is_empty() {
-        bail!("--listen requires an address ([host:]port)");
+        return Err(errors::listen_requires_address());
     }
     if text.chars().all(|c| c.is_ascii_digit()) {
-        let port: u16 = text
-            .parse()
-            .map_err(|_| anyhow::anyhow!("--listen port must be numeric 1-65535, got {raw:?}"))?;
+        let port: u16 = text.parse().map_err(|_| errors::listen_port_numeric(raw))?;
         if port == 0 {
-            bail!(
-                "--listen port 0 has no stable service key (use -p 0:<endpoint> for an ephemeral outer port)"
-            );
+            return Err(errors::listen_port_zero());
         }
         return Ok(SocketAddr::from(([127, 0, 0, 1], port)));
     }
-    let addr: SocketAddr = text.parse().with_context(|| {
-        format!("--listen address must be [host:]port (try 0.0.0.0:2251), got {raw:?}")
-    })?;
+    let addr: SocketAddr = text
+        .parse()
+        .map_err(|_| errors::listen_address_invalid(raw))?;
     if addr.port() == 0 {
-        bail!(
-            "--listen port 0 has no stable service key (use -p 0:<endpoint> for an ephemeral outer port)"
-        );
+        return Err(errors::listen_port_zero());
     }
     Ok(addr)
 }
@@ -83,28 +79,21 @@ pub fn parse_listen_arg(raw: &str) -> Result<SocketAddr> {
 pub fn parse_publish_arg(raw: &str) -> Result<(SocketAddr, String)> {
     let text = raw.trim();
     let Some((outer_text, inner_text)) = text.rsplit_once(':') else {
-        bail!(
-            "-p requires [host:]outer:inner (try -p 2222:2251 or -p 127.0.0.1:1234:ssh-server), got {raw:?}"
-        );
+        return Err(errors::publish_requires_shape(raw));
     };
     let inner_text = inner_text.trim();
     if inner_text.is_empty() {
-        bail!(
-            "-p requires [host:]outer:inner (try -p 2222:2251 or -p 127.0.0.1:1234:ssh-server), got {raw:?}"
-        );
+        return Err(errors::publish_requires_shape(raw));
     }
     #[cfg(feature = "net")]
-    parse_endpoint_ref(inner_text, "-p")
-        .with_context(|| format!("-p inner endpoint invalid in {raw:?}"))?;
+    parse_endpoint_ref(inner_text, "-p").map_err(|e| errors::publish_inner_invalid(raw, &e))?;
     let outer_text = outer_text.trim();
     let addr = if let Ok(port) = outer_text.parse::<u16>() {
         SocketAddr::from(([127, 0, 0, 1], port))
     } else if let Ok(addr) = outer_text.parse::<SocketAddr>() {
         addr
     } else {
-        bail!(
-            "-p outer address invalid in {raw:?} (expected a port 0-65535 or a [host:]port address)"
-        );
+        return Err(errors::publish_outer_invalid(raw));
     };
     Ok((addr, inner_text.to_string()))
 }
@@ -135,7 +124,7 @@ pub fn build_registry(flags: &EndpointFlags) -> Result<Arc<EndpointRegistry>> {
     }
     for (addr, inner) in &flags.publishes {
         let (protocol, endpoint) = parse_endpoint_ref(inner, "-p")
-            .with_context(|| format!("-p inner endpoint invalid in {inner:?}"))?;
+            .map_err(|e| errors::publish_inner_invalid(inner, &e))?;
         let key = EndpointKey {
             protocol: protocol.unwrap_or(Protocol::Tcp),
             endpoint,
@@ -158,6 +147,7 @@ mod tests {
 
     #[test]
     fn listen_forms() {
+        use crate::errors::Diagnostic as Diag;
         assert_eq!(
             parse_listen_arg("2251").unwrap(),
             SocketAddr::from(([127, 0, 0, 1], 2251))
@@ -166,13 +156,24 @@ mod tests {
             parse_listen_arg("0.0.0.0:2251").unwrap(),
             SocketAddr::from(([0, 0, 0, 0], 2251))
         );
-        for bad in ["", "0", "2251:0", "0.0.0.0:0", "not-an-addr"] {
-            parse_listen_arg(bad).expect_err("bad listen must fail");
+        for (bad, key) in [
+            ("", "cli.listen_requires_address"),
+            ("0", "cli.listen_port_zero"),
+            ("0.0.0.0:0", "cli.listen_port_zero"),
+            ("not-an-addr", "cli.listen_address_invalid"),
+            ("2251:0", "cli.listen_address_invalid"),
+        ] {
+            let err = parse_listen_arg(bad).expect_err("bad listen must fail");
+            let diag = err
+                .downcast_ref::<Diag>()
+                .expect("listen errors stay typed");
+            assert_eq!(diag.key(), key, "{bad}: {diag}");
         }
     }
 
     #[test]
     fn publish_forms() {
+        use crate::errors::Diagnostic as Diag;
         assert_eq!(
             parse_publish_arg("2222:2251").unwrap(),
             (SocketAddr::from(([127, 0, 0, 1], 2222)), "2251".to_string())
@@ -184,14 +185,27 @@ mod tests {
                 "demo-proxy".to_string()
             )
         );
-        for bad in ["", "2251", "abc:2251"] {
-            parse_publish_arg(bad).expect_err("bad publish must fail");
+        for (bad, key) in [
+            ("", "cli.publish_requires_shape"),
+            ("2251", "cli.publish_requires_shape"),
+            ("abc:2251", "cli.publish_outer_invalid"),
+            ("2222:127.0.0.1:2251", "cli.publish_outer_invalid"),
+        ] {
+            let err = parse_publish_arg(bad).expect_err("bad publish must fail");
+            let diag = err
+                .downcast_ref::<Diag>()
+                .expect("publish errors stay typed");
+            assert_eq!(diag.key(), key, "{bad}: {diag}");
         }
         // Inner-endpoint validation is eager only with `net`; without it the
         // raw text is stored and rejected later with the feature message.
         #[cfg(feature = "net")]
-        for bad in ["2222:0", "2222:127.0.0.1:2251"] {
-            parse_publish_arg(bad).expect_err("bad inner must fail");
+        for bad in ["2222:0"] {
+            let err = parse_publish_arg(bad).expect_err("bad inner must fail");
+            let diag = err
+                .downcast_ref::<crate::errors::Diagnostic>()
+                .expect("inner errors stay typed");
+            assert_eq!(diag.key(), "cli.publish_inner_invalid", "{bad}: {diag}");
         }
     }
 
@@ -219,12 +233,17 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn registry_rejects_conflicts() {
+        use crate::errors::Diagnostic as Diag;
         let flags = EndpointFlags {
             offline: true,
             listens: vec![SocketAddr::from(([0, 0, 0, 0], 2251))],
             ..EndpointFlags::default()
         };
-        build_registry(&flags).expect_err("offline plus listen must fail");
+        let err = build_registry(&flags).expect_err("offline plus listen must fail");
+        assert_eq!(
+            err.downcast_ref::<Diag>().expect("typed").key(),
+            "cli.offline_conflict"
+        );
         let flags = EndpointFlags {
             publishes: vec![
                 (SocketAddr::from(([0, 0, 0, 0], 2222)), "2251".to_string()),
@@ -232,7 +251,11 @@ mod tests {
             ],
             ..EndpointFlags::default()
         };
-        build_registry(&flags).expect_err("duplicate inner must fail");
+        let err = build_registry(&flags).expect_err("duplicate inner must fail");
+        assert_eq!(
+            err.downcast_ref::<Diag>().expect("typed").key(),
+            "cli.endpoint_duplicate_inner"
+        );
         let flags = EndpointFlags {
             publishes: vec![
                 (SocketAddr::from(([0, 0, 0, 0], 2222)), "2251".to_string()),
@@ -240,7 +263,11 @@ mod tests {
             ],
             ..EndpointFlags::default()
         };
-        build_registry(&flags).expect_err("duplicate outer must fail");
+        let err = build_registry(&flags).expect_err("duplicate outer must fail");
+        assert_eq!(
+            err.downcast_ref::<Diag>().expect("typed").key(),
+            "cli.endpoint_duplicate_outer"
+        );
     }
 
     #[cfg(feature = "net")]
@@ -250,6 +277,12 @@ mod tests {
             publishes: vec![(SocketAddr::from(([0, 0, 0, 0], 2222)), "0".to_string())],
             ..EndpointFlags::default()
         };
-        build_registry(&flags).expect_err("bad inner must fail");
+        let err = build_registry(&flags).expect_err("bad inner must fail");
+        assert_eq!(
+            err.downcast_ref::<crate::errors::Diagnostic>()
+                .expect("typed")
+                .key(),
+            "cli.publish_inner_invalid"
+        );
     }
 }

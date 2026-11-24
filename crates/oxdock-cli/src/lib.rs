@@ -26,69 +26,14 @@ use std::collections::BTreeMap;
 mod endpoints;
 pub use endpoints::EndpointFlags;
 mod errors;
-pub use errors::{endpoint_duplicate_inner, endpoint_duplicate_outer, feature_required, offline_conflict};
+pub use errors::{
+    endpoint_duplicate_inner, endpoint_duplicate_outer, feature_required, offline_conflict, usage,
+};
 #[cfg(feature = "mcp")]
 mod mcp;
 
-// CLI usage bodies, one file per Cargo feature variant: statically
-// compiled assets cannot branch on Cargo features, so the script
-// renders both variants (version line included, through inherited
-// Cargo metadata) and Rust `#[cfg]` picks the live one.
-use oxdock_macros::oxdock_embed;
-oxdock_embed! {
-    name: UsageAssets,
-    script: {
-        INHERIT_ENV [CARGO_PKG_VERSION, CARGO_PKG_DESCRIPTION]
-        FUNC EMIT_BODY($is_net: BOOL): VOID {
-            LET $net_flags: STRING = """
-              --offline          open no sockets (endpoint flags require the `net` feature)
-            """
-
-            LET $tail: STRING = """
-            Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).
-            """
-
-            IF $is_net {
-                $net_flags = """
-                  --listen <addr>    expose a logical service port ([host:]port, repeatable)
-                  -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)
-                  --offline          open no sockets (conflicts with --listen/-p)
-                  --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
-                """
-                $tail = "Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces."
-            }
-
-            ECHO """
-            oxdock {{ env:CARGO_PKG_VERSION }} — {{ env:CARGO_PKG_DESCRIPTION }}
-
-            Usage: oxdock [OPTIONS] [--] [SCRIPT] [-- script-args...]
-              SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
-              --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
-              --shell            run the script, then drop into an interactive shell (requires a TTY)
-              --dry-run          print the transitive import closure (file:line CMD) instead of running
-              --mcp              serve EXPORTed FUNCs as MCP tools over stdio (requires the `mcp` feature)
-            {{ $net_flags }}
-              --help, -h         print this help and exit
-              --version, -V, -v   print the version and exit
-
-            With no script given, reads the script from stdin (must be piped unless `--shell`).
-            Everything after SCRIPT is a verbatim script arg (read via `STD::ARGV()`); one leading `--` there is a separator and dropped, so `--dry-run` after the script stays data.
-            {{ $tail }}
-            """
-        }
-
-        LET $p: PIPE
-        WITH_IO [stdout=$p] {
-            EMIT_BODY(true)
-        }
-        WITH_IO [stdin=$p] WRITE dist/usage-net.txt
-        WITH_IO [stdout=$p] {
-            EMIT_BODY(false)
-        }
-        WITH_IO [stdin=$p] WRITE dist/usage-lean.txt
-    },
-    out_dir: "usage-prebuilt",
-}
+// CLI usage bodies live in [`errors`]: `usage()` is user-facing CLI
+// text, so it is owned alongside the `cli.*` error templates.
 #[cfg(feature = "net")]
 pub use endpoints::build_registry;
 #[cfg(feature = "net")]
@@ -202,7 +147,95 @@ fn run_cli_steps(
 /// extra modules this is exactly `parse_script`, so base-build behavior
 /// never changes.
 fn parse_cli_script(script: &str) -> Result<Vec<Step>> {
-    parse_script_with_modules(script, cli_module_table())
+    parse_script_with_modules(script, cli_module_table()).map_err(|e| {
+        if let Some(unlinked) = unlinked_module_error(script) {
+            return unlinked;
+        }
+        e
+    })
+}
+
+/// Modules the CLI knows but this build did not link, with the Cargo
+/// feature that would link each. Empty in full-feature builds, so the
+/// scan below never fires there.
+fn unlinked_modules() -> Vec<(&'static str, &'static str)> {
+    let modules: &[(&'static str, &'static str)] = &[
+        #[cfg(not(feature = "net"))]
+        ("NET", "net"),
+        #[cfg(not(feature = "ssh"))]
+        ("SSH", "ssh"),
+    ];
+    modules.to_vec()
+}
+
+/// Known-but-unlinked module error when the script actually imports one.
+/// Matched on the lexed token stream, not raw text: comments lex as
+/// `Comment` and quoted paths as `Str`, so `// IMPORT [NET]` or
+/// `ECHO "IMPORT [NET]"` alongside an unrelated syntax error keeps its
+/// genuine parse error. Returns `None` on lex failure (broken below the
+/// token level: the genuine error rides through), in full-feature
+/// builds (nothing is unlinked), or when no unlinked module is
+/// imported (genuine parse error rides through unchanged).
+fn unlinked_module_error(script: &str) -> Option<anyhow::Error> {
+    let unlinked = unlinked_modules();
+    if unlinked.is_empty() {
+        return None;
+    }
+    let toks = oxdock_parser::lex_str(script).ok()?;
+    for (module, feature) in unlinked {
+        if imports_module(&toks, module) {
+            return Some(errors::module_unlinked(module, feature));
+        }
+    }
+    None
+}
+
+/// True when a token stream holds `IMPORT [...]` naming `module` as a
+/// bare word. Only `IMPORT` immediately followed by a bracket group
+/// counts (newlines/comments between are skipped); quoted file paths
+/// lex as `Str`, never `Word`, so they never match. Recurses into
+/// brace/paren groups for block-nested imports.
+fn imports_module(toks: &[oxdock_parser::Tok], module: &str) -> bool {
+    use oxdock_parser::{GroupDelim, TokKind};
+    let mut i = 0;
+    while i < toks.len() {
+        match &toks[i].kind {
+            TokKind::Word(w) if w == "IMPORT" => {
+                let mut j = i + 1;
+                while j < toks.len()
+                    && matches!(
+                        toks[j].kind,
+                        TokKind::Newline | TokKind::Comment(_) | TokKind::Semicolon
+                    )
+                {
+                    j += 1;
+                }
+                if let Some(next) = toks.get(j) {
+                    if let TokKind::Group {
+                        delim: GroupDelim::Bracket,
+                        inner,
+                        ..
+                    } = &next.kind
+                    {
+                        if inner
+                            .iter()
+                            .any(|t| matches!(&t.kind, TokKind::Word(w) if w == module))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            TokKind::Group { inner, .. } => {
+                if imports_module(inner, module) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Module table for CLI parsing: STD plus bundled host modules.
@@ -593,22 +626,6 @@ fn value_string(value: std::ffi::OsString) -> Result<String> {
 /// Human-readable CLI version, printed for `--version`/`-V`/`-v`.
 pub fn version() -> String {
     format!("oxdock {}", env!("CARGO_PKG_VERSION"))
-}
-
-/// Human-readable CLI usage, printed for `--help`/`-h`. The full
-/// text, version line included, is rendered once at compile time by
-/// the `UsageAssets` script above. Feature selection stays in Rust
-/// `#[cfg]`: the DSL has no feature namespace, so each variant lives
-/// in its own asset file.
-pub fn usage() -> String {
-    #[cfg(feature = "net")]
-    let asset = "dist/usage-net.txt";
-    #[cfg(not(feature = "net"))]
-    let asset = "dist/usage-lean.txt";
-    let file = UsageAssets::get(asset).expect("usage must be embedded");
-    str::from_utf8(file.data.as_ref())
-        .expect("usage is UTF-8")
-        .to_string()
 }
 
 pub fn execute(opts: Options, workspace_root: GuardedPath) -> Result<()> {
@@ -2099,6 +2116,10 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("SSH"), "{err}");
+        let diag = err
+            .downcast_ref::<oxdock_diagnostics::Diagnostic>()
+            .expect("CLI errors stay typed");
+        assert_eq!(diag.key(), "cli.module_unlinked", "{diag}");
         Ok(())
     }
 
@@ -2171,7 +2192,55 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("NET"), "{err}");
+        // Known-but-unlinked: the failure names the module and the key.
+        let diag = err
+            .downcast_ref::<oxdock_diagnostics::Diagnostic>()
+            .expect("CLI errors stay typed");
+        assert_eq!(diag.key(), "cli.module_unlinked", "{diag}");
         Ok(())
+    }
+
+    /// Token matching never fires on comments or strings: `// IMPORT
+    /// [NET]` and `ECHO "IMPORT [NET]"` name no module, and neither do
+    /// other brackets (`WITH_IO` bindings) or quoted file paths.
+    #[test]
+    fn imports_module_ignores_comments_strings_and_other_brackets() {
+        use oxdock_parser::lex_str;
+        let toks = lex_str("IMPORT [STD, NET]\n").expect("lex");
+        assert!(super::imports_module(&toks, "NET"));
+        assert!(!super::imports_module(&toks, "SSH"));
+        let toks = lex_str("IF true {\nIMPORT [SSH]\n}\n").expect("lex");
+        assert!(super::imports_module(&toks, "SSH"));
+        let toks = lex_str("IMPORT [\"./a.oxdock\" AS LIB]\n").expect("lex");
+        assert!(!super::imports_module(&toks, "NET"));
+        // A module name inside the quoted path never counts either.
+        let toks = lex_str("IMPORT [\"./NET.oxdock\" AS LIB]\n").expect("lex");
+        assert!(!super::imports_module(&toks, "NET"));
+        let toks = lex_str("// IMPORT [NET]\nECHO hi\n").expect("lex");
+        assert!(!super::imports_module(&toks, "NET"));
+        let toks = lex_str("ECHO \"IMPORT [NET]\"\n").expect("lex");
+        assert!(!super::imports_module(&toks, "NET"));
+        let toks = lex_str("WITH_IO [stdout=$p] ECHO hi\n").expect("lex");
+        assert!(!super::imports_module(&toks, "NET"));
+    }
+
+    /// Lean builds map a genuine `IMPORT [NET]` failure to the typed
+    /// unlinked-module error, but comment/string lookalikes keep `None`
+    /// so the real parse error rides through.
+    #[cfg(not(feature = "net"))]
+    #[test]
+    fn unlinked_module_error_needs_a_real_import() {
+        let err =
+            super::unlinked_module_error("IMPORT [STD, NET]\n").expect("real import must map");
+        assert_eq!(
+            err.downcast_ref::<oxdock_diagnostics::Diagnostic>()
+                .expect("typed")
+                .key(),
+            "cli.module_unlinked"
+        );
+        assert!(super::unlinked_module_error("// IMPORT [NET]\nECHO hi\n").is_none());
+        assert!(super::unlinked_module_error("ECHO \"IMPORT [NET]\"\n").is_none());
+        assert!(super::unlinked_module_error("ECHO hi\n").is_none());
     }
 
     #[test]

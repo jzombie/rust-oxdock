@@ -228,19 +228,33 @@ no `\u{1f}` in output (sanitized plus test asserts);
 `dsl.alias.duplicate_on_field`; `MAP<h: BOOL ALIAS help ALIAS Bad>`
 reports bounded `Bad`, not the tail.
 
-### Phase B — CLI per #168 (finish the issue)
+### Phase B — CLI per #168 (done 2026-11-24)
 
-Scope: `oxdock-cli` only, NET-touched lines, fold `usage()` ownership
-into `errors.rs`. No flag-shape, script-read, or shell-runner changes.
+Scope was `oxdock-cli` only, NET-touched lines, `usage()` folded into
+`errors.rs`. No flag-shape, script-read, or shell-runner changes
+(--remote shape and missing-value messages left as-is).
 
-1. `errors.rs`: add the rest of the NET set (`--listen` / `-p` shape,
-   `-p` inner invalid, `usage()` text, known-but-unlinked module
-   message). Keys under `cli.*`, owned here.
-2. Delete remaining inline `bail!` on NET-touched lines; keep pure
-   validators compiled in lean builds with the feature error winning.
-3. Tests across default / `--features ssh` / `--no-default-features`
-   green; net-required text from all call sites via the single
-   constructor; duplicates and offline assert keys.
+1. `errors.rs` owns the NET set: `listen_requires_address`,
+   `listen_port_numeric`, `listen_port_zero`,
+   `listen_address_invalid`, `publish_requires_shape`,
+   `publish_outer_invalid`, net-gated `publish_inner_invalid`
+   (with `{reason:#}` passthrough), and
+   `module_unlinked(module, feature)`. Keys under `cli.*`.
+   `UsageAssets` + `usage()` moved from `lib.rs` to `errors.rs`
+   (re-exported, `oxdock_cli::usage()` unchanged).
+2. `endpoints.rs` has zero inline `bail!`/`anyhow!` left:
+   `parse_listen_arg`/`parse_publish_arg`/`build_registry` go
+   through the constructors; pure validators stay compiled in lean
+   builds with the feature error winning (unchanged pattern).
+3. Lean `parse_cli_script` maps a parse failure to
+   `cli.module_unlinked` when the script actually `IMPORT`s an
+   unlinked module (bare words inside `IMPORT [...]` only, so strings
+   and comments never misfire; full-feature builds map nothing).
+   Lean NET/SSH rejection tests pin the typed key; endpoint,
+   registry-conflict, offline, and duplicate tests pin theirs.
+   Green: default (44), `--no-default-features` (39),
+   `--no-default-features --features ssh` (44); clippy clean
+   (pre-existing warnings only); doc clean; no new fmt drift.
 
 Acceptance B: the exact acceptance block in #168.
 
