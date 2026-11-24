@@ -1,1 +1,1 @@
-{"color":"yellow","label":"miri coverage","message":"79.7% (1895/2378)","schemaVersion":1}
+{"color":"red","label":"miri coverage","message":"failing","schemaVersion":1}
