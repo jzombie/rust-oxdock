@@ -180,22 +180,19 @@ impl<P: ProcessManager> ExecState<P> {
         depth: usize,
     ) -> Result<TypeTag> {
         if depth > MAX_GENERIC_DEPTH {
-            bail!("type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: '{name}'");
+            return Err(anyhow::Error::new(typing_diag::typing_max_depth(
+                MAX_GENERIC_DEPTH,
+                name,
+            )));
         }
         if name == MAP_TYPE_NAME {
-            bail!(
-                "bare {MAP_TYPE_NAME} is not a declaration type: write a shape ({MAP_TYPE_NAME}<name: TYPE, ...>) or {MAP_TYPE_NAME}<{ANY_TYPE_NAME}> for maps with unknown keys"
-            );
+            return Err(anyhow::Error::new(typing_diag::typing_bare_map()));
         }
         if name == LIST_TYPE_NAME {
-            bail!(
-                "bare {LIST_TYPE_NAME} is not a declaration type: write a shape ({LIST_TYPE_NAME}<TYPE>) or {LIST_TYPE_NAME}<{ANY_TYPE_NAME}> for lists with unknown elements"
-            );
+            return Err(anyhow::Error::new(typing_diag::typing_bare_list()));
         }
         if name == HANDLE_TYPE_NAME {
-            bail!(
-                "bare {HANDLE_TYPE_NAME} is not a declaration type: write {HANDLE_TYPE_NAME}<T> for a known payload or {HANDLE_TYPE_NAME}<{ANY_TYPE_NAME}> for an unknown one"
-            );
+            return Err(anyhow::Error::new(typing_diag::typing_bare_handle()));
         }
         if let Some(tag) = TypeTag::builtin(name) {
             return Ok(tag);
@@ -211,7 +208,7 @@ impl<P: ProcessManager> ExecState<P> {
         if let Some(target) = self.type_aliases.get(name) {
             if resolving.iter().any(|s| s.as_str() == name) {
                 resolving.push(name.to_string());
-                bail!("type alias cycle: {}", resolving.join(" -> "));
+                return Err(anyhow::Error::new(typing_diag::alias_cycle(resolving)));
             }
             resolving.push(name.to_string());
             let target = target.clone();
@@ -219,12 +216,12 @@ impl<P: ProcessManager> ExecState<P> {
             resolving.pop();
             return result;
         }
-        bail!(
-            "unknown type '{name}'; known types: {} and schemas: {} and aliases: {}",
-            self.type_names().join(", "),
-            self.schema_names().join(", "),
-            self.alias_names().join(", "),
-        )
+        Err(anyhow::Error::new(typing_diag::typing_unknown(
+            name,
+            &self.type_names(),
+            &self.schema_names(),
+            &self.alias_names(),
+        )))
     }
 
     /// Resolve one canonical spelling that may carry `<...>` args:
@@ -298,9 +295,10 @@ impl<P: ProcessManager> ExecState<P> {
         depth: usize,
     ) -> Result<TypeTag> {
         if depth > MAX_GENERIC_DEPTH {
-            bail!(
-                "type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: '{spelled:?}'"
-            );
+            return Err(anyhow::Error::new(typing_diag::typing_max_depth_spelled(
+                MAX_GENERIC_DEPTH,
+                spelled,
+            )));
         }
         match spelled {
             Spelled::Named(name) => self.resolve_named(name, resolving, depth),
@@ -332,7 +330,7 @@ impl<P: ProcessManager> ExecState<P> {
     ) -> Result<TypeTag> {
         if name != LIST_TYPE_NAME && name != MAP_TYPE_NAME && name != HANDLE_TYPE_NAME {
             self.resolve_named(name, resolving, depth)?;
-            bail!("'{name}' takes no type arguments");
+            return Err(anyhow::Error::new(typing_diag::typing_no_args(name)));
         }
         if name == HANDLE_TYPE_NAME {
             let [
@@ -343,7 +341,7 @@ impl<P: ProcessManager> ExecState<P> {
                 },
             ] = args
             else {
-                bail!("{HANDLE_TYPE_NAME} takes exactly one bare type argument");
+                return Err(anyhow::Error::new(typing_diag::typing_handle_arity()));
             };
             let payload = self.build_rendered(payload, resolving, depth + 1)?;
             return Ok(TypeTag::HandleOf(std::sync::Arc::new(payload)));
@@ -357,7 +355,7 @@ impl<P: ProcessManager> ExecState<P> {
                 },
             ] = args
             else {
-                bail!("{LIST_TYPE_NAME} takes exactly one bare type argument");
+                return Err(anyhow::Error::new(typing_diag::typing_list_arity()));
             };
             let element = self.build_rendered(element, resolving, depth + 1)?;
             return Ok(TypeTag::ListOf(std::sync::Arc::new(element)));
@@ -380,9 +378,7 @@ impl<P: ProcessManager> ExecState<P> {
         let mut fields = Vec::with_capacity(args.len());
         for arg in args {
             let Some(field_name) = arg.name.as_ref() else {
-                bail!(
-                    "{MAP_TYPE_NAME} fields require 'name: TYPE'; '{name}' takes no bare arguments"
-                );
+                return Err(anyhow::Error::new(typing_diag::typing_map_bare(name)));
             };
             let ty = self.build_rendered(&arg.ty, resolving, depth + 1)?;
             let default = match &arg.default {
@@ -390,10 +386,10 @@ impl<P: ProcessManager> ExecState<P> {
                 Some(lit) => {
                     let value = lit.to_value();
                     check_value(&ty, &value).map_err(|_| {
-                        anyhow::anyhow!(
-                            "default for field '{field_name}' does not match {}",
-                            oxdock_parser::render_structural(&ty)
-                        )
+                        anyhow::Error::new(typing_diag::typing_default_mismatch(
+                            field_name,
+                            &oxdock_parser::render_structural(&ty),
+                        ))
                     })?;
                     Some(value)
                 }
@@ -461,7 +457,7 @@ fn finish_union(members: Vec<TypeTag>) -> Result<TypeTag> {
         }
     }
     if flat.is_empty() {
-        bail!("empty union: no member shapes to admit");
+        return Err(anyhow::Error::new(typing_diag::typing_empty_union()));
     }
     // `ANY` absorbs the set: admitting everything is `ANY`.
     if flat.iter().any(|member| matches!(member, TypeTag::Any)) {
@@ -507,19 +503,19 @@ pub fn collect_type_aliases<P: ProcessManager>(
             continue;
         };
         if aliases.contains_key(name) {
-            bail!("type alias '{name}' is already defined");
+            return Err(anyhow::Error::new(typing_diag::alias_already_defined(name)));
         }
         if TypeTag::builtin(name).is_some() {
-            bail!("type alias '{name}' collides with a builtin type");
+            return Err(anyhow::Error::new(typing_diag::alias_builtin_collision(name)));
         }
         if exec.types.contains_key(name) {
-            bail!("type alias '{name}' collides with registered host type '{name}'");
+            return Err(anyhow::Error::new(typing_diag::alias_host_collision(name)));
         }
         if exec.record_schemas.contains_key(name) {
-            bail!("type alias '{name}' collides with registered record schema '{name}'");
+            return Err(anyhow::Error::new(typing_diag::alias_schema_collision(name)));
         }
         if func_names.contains(name) {
-            bail!("type alias '{name}' collides with function '{name}'");
+            return Err(anyhow::Error::new(typing_diag::alias_func_collision(name)));
         }
         aliases.insert(name.clone(), canonicalize_spelling(target));
     }

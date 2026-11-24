@@ -109,10 +109,16 @@ directives.
 
 1. `tag.rs`: done for the pilot set. Any new spelling case gets a new
    dedicated key, never reuse of `spelling_expected`.
-2. `typing.rs`: `build_rendered` / `build_generic` / `resolve_named` /
-   alias-cycle / depth / arity errors. Each gets a `dsl.typing.*` or
-   `dsl.alias.*` constructor in `exec/diagnostics.rs` with field,
-   expected, found.
+2. `typing.rs`: done (2026-11-24). `resolve_named` (max_depth,
+   bare_map/list/handle, alias cycle, unknown), `build_rendered`
+   (max_depth_spelled), `build_generic` (no_args, handle/list arity,
+   map_bare, default_mismatch), `finish_union` (empty_union),
+   `collect_type_aliases` (already_defined, builtin/host/schema/func
+   collisions) each have a `dsl.typing.*` / `dsl.alias.*` constructor
+   in `exec/diagnostics.rs`. Wording preserved byte-identical;
+   joining/quoting live in constructors, no `format!` at call sites.
+   Left for Phase C: `check_options` unknown-option, `check_tag_known`
+   (unregistered/VOID), `validate_function_type_tags`.
 3. `parser.rs`: audit `ParseError::validation/structural/invalid_syntax`
    call sites in `commands.rs`, `command.rs`, `strip_flags.rs`,
    `lib.rs`. Route each through the owning `Diagnostic` constructor
