@@ -5068,10 +5068,7 @@ fn resolve_tag_unions_admit_member_sets() {
     let err = state
         .resolve_tag("STRING|")
         .expect_err("empty member fails");
-    assert!(
-        format!("{err:#}").contains("expected type name"),
-        "{err:#}"
-    );
+    assert!(format!("{err:#}").contains("expected type name"), "{err:#}");
     let err = state
         .resolve_tag("NOPE|STRING")
         .expect_err("unknown member fails");

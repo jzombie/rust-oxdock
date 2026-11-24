@@ -21,7 +21,10 @@ fn truly_unknown_command_reports_kind_with_span() {
     assert!(err.col_start().is_some() && err.col_end().is_some());
     assert!(err.source_line().is_some());
     let text = err_text(&err);
-    assert!(text.contains("unknown command \"FROBNICATE\""), "got: {text}");
+    assert!(
+        text.contains("unknown command \"FROBNICATE\""),
+        "got: {text}"
+    );
     assert!(text.contains("--> line 1"), "got: {text}");
     assert!(text.contains('^'), "got: {text}");
 }
@@ -69,10 +72,7 @@ fn malformed_with_io_is_invalid_syntax_never_unknown() {
         err.kind()
     );
     let text = err_text(&err);
-    assert!(
-        text.starts_with("WITH_IO"),
-        "got: {text}"
-    );
+    assert!(text.starts_with("WITH_IO"), "got: {text}");
     assert!(!text.contains("unknown command"), "got: {text}");
     assert!(text.contains("--> line 1"), "got: {text}");
 }
@@ -640,10 +640,7 @@ fn missing_block_opener_keeps_head_span() {
     );
     assert_eq!(err.line(), 1);
     let text = err_text(&err);
-    assert!(
-        text.starts_with("IF"),
-        "got: {text}"
-    );
+    assert!(text.starts_with("IF"), "got: {text}");
 }
 
 #[test]

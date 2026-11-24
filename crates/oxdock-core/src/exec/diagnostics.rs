@@ -55,8 +55,7 @@ pub fn typing_max_depth(max: usize, name: &str) -> Diagnostic {
 /// `Debug` rendering lives here so call sites pass the parsed value.
 pub fn typing_max_depth_spelled(max: usize, spelled: &Spelled) -> Diagnostic {
     let rendered = format!("{spelled:?}");
-    let message =
-        format!("type spelling exceeds maximum generic depth of {max}: `{rendered}`");
+    let message = format!("type spelling exceeds maximum generic depth of {max}: `{rendered}`");
     Diagnostic::new(
         "dsl.typing.max_depth",
         message,
@@ -171,9 +170,8 @@ pub fn typing_list_arity() -> Diagnostic {
 /// Bare argument where `MAP` requires `name: TYPE`. Takes the head
 /// name for the trailing clause.
 pub fn typing_map_bare(head: &str) -> Diagnostic {
-    let message = format!(
-        "`{MAP_TYPE_NAME}` fields require `name: TYPE`; `{head}` takes no bare arguments"
-    );
+    let message =
+        format!("`{MAP_TYPE_NAME}` fields require `name: TYPE`; `{head}` takes no bare arguments");
     Diagnostic::new(
         "dsl.typing.map_bare",
         message,
@@ -233,8 +231,7 @@ pub fn alias_host_collision(name: &str) -> Diagnostic {
 
 /// Alias name collides with a registered record schema.
 pub fn alias_schema_collision(name: &str) -> Diagnostic {
-    let message =
-        format!("type alias `{name}` collides with registered record schema `{name}`");
+    let message = format!("type alias `{name}` collides with registered record schema `{name}`");
     Diagnostic::new(
         "dsl.alias.schema_collision",
         message,
@@ -324,7 +321,10 @@ mod tests {
             typing_list_arity().message(),
             "`LIST` takes exactly one bare type argument"
         );
-        assert_eq!(typing_empty_union().message(), "empty union: no member shapes to admit");
+        assert_eq!(
+            typing_empty_union().message(),
+            "empty union: no member shapes to admit"
+        );
         assert_eq!(
             alias_cycle(&["A".to_string(), "B".to_string(), "A".to_string()]).message(),
             "type alias cycle: A -> B -> A"

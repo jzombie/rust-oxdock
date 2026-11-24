@@ -2142,10 +2142,7 @@ mod tests {
             let mut args = args.into_iter().map(str::to_string);
             let err = Options::parse(&mut args, workspace.as_guarded_path())
                 .expect_err("endpoint flag must fail without net");
-            assert!(
-                err.to_string().contains("`net` feature"),
-                "{err:?}"
-            );
+            assert!(err.to_string().contains("`net` feature"), "{err:?}");
             // Typed path: stable key survives rewording.
             let diag = err
                 .downcast_ref::<oxdock_diagnostics::Diagnostic>()

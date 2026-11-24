@@ -6230,8 +6230,7 @@ pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> Pars
                     dsl_diag::env_assignment_error(&e),
                     ctx,
                 )
-            })?
-        {
+            })? {
             Some((key, value)) => Ok(StepKind::Env { key, value }),
             None => Err(ParseError::from_diagnostic(
                 ParseErrorKind::Validation {
@@ -6276,8 +6275,8 @@ pub(crate) fn lower_expand_tokens(
             }
             InsToken::Pos(arg) => match &arg {
                 Arg::String(text, quoted) if !quoted && text.contains('=') => {
-                    let Some((key, value)) = crate::command::split_assignment(text)
-                        .map_err(|e| {
+                    let Some((key, value)) =
+                        crate::command::split_assignment(text).map_err(|e| {
                             ParseError::from_diagnostic(
                                 ParseErrorKind::Validation {
                                     command: KEYWORD_EXPAND.to_string(),
@@ -7632,10 +7631,7 @@ mod tests {
             ("ELSE foo\n", "ELSE"),
         ] {
             let err = parse_err(script);
-            assert!(
-                err.starts_with(cmd),
-                "{cmd}: {err}"
-            );
+            assert!(err.starts_with(cmd), "{cmd}: {err}");
             assert!(!err.contains("unknown command"), "{cmd}: {err}");
         }
     }
@@ -7724,10 +7720,7 @@ mod tests {
             "LIST_APPEND $items \"a\" \"b\"\n",
         ] {
             let err = parse_err(script);
-            assert!(
-                err.starts_with("LIST_APPEND"),
-                "{script}: {err}"
-            );
+            assert!(err.starts_with("LIST_APPEND"), "{script}: {err}");
             assert!(!err.contains("unknown command"), "{script}: {err}");
         }
     }
@@ -7735,18 +7728,12 @@ mod tests {
     #[test]
     fn list_append_rejects_non_variable_target() {
         let err = parse_err("LIST_APPEND items \"a\"\n");
-        assert!(
-            err.starts_with("LIST_APPEND"),
-            "{err}"
-        );
+        assert!(err.starts_with("LIST_APPEND"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
         // Bare uppercase words are literal text, never variable
         // targets: a `CONST` list cannot be named here at all.
         let err = parse_err("LIST_APPEND ITEMS \"a\"\n");
-        assert!(
-            err.starts_with("LIST_APPEND"),
-            "{err}"
-        );
+        assert!(err.starts_with("LIST_APPEND"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
     }
 

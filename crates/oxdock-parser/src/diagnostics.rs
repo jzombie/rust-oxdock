@@ -10,14 +10,13 @@
 use oxdock_diagnostics::Diagnostic;
 
 use crate::constants::{
-    KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS,
-    KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_COPY,
-    KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXIT, KEYWORD_EXPAND, KEYWORD_EXPORT,
-    KEYWORD_FUNC, KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_LET, KEYWORD_LIST_APPEND,
-    KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE,
-    KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SYMLINK, KEYWORD_TYPE,
-    KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE,
-    SCRIPT_MODULE_NAME,
+    KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS, KEYWORD_ASYNC,
+    KEYWORD_AWAIT, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_COPY, KEYWORD_COPY_GIT, KEYWORD_ENV,
+    KEYWORD_EXIT, KEYWORD_EXPAND, KEYWORD_EXPORT, KEYWORD_FUNC, KEYWORD_INHERIT_ENV,
+    KEYWORD_INSTALL, KEYWORD_LET, KEYWORD_LIST_APPEND, KEYWORD_MKDIR, KEYWORD_PROMPT,
+    KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE, KEYWORD_RUN, KEYWORD_SET_EXECUTABLE,
+    KEYWORD_SLEEP, KEYWORD_SYMLINK, KEYWORD_TYPE, KEYWORD_UNARCHIVE, KEYWORD_WITH_IO,
+    KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE, SCRIPT_MODULE_NAME,
 };
 
 /// Structured field keys. Single spelling for the whole module:
@@ -52,7 +51,11 @@ pub fn alias_duplicate_on_field(field: &str, first: &str, second: &str) -> Diagn
     Diagnostic::new(
         "dsl.alias.duplicate_on_field",
         message,
-        Diagnostic::make_fields(&[(FIELD_FIELD, field), (FIELD_FIRST, first), (FIELD_SECOND, second)]),
+        Diagnostic::make_fields(&[
+            (FIELD_FIELD, field),
+            (FIELD_FIRST, first),
+            (FIELD_SECOND, second),
+        ]),
     )
 }
 
@@ -201,9 +204,7 @@ pub fn unknown_flag(command: &str, flag: &str) -> Diagnostic {
 
 /// More positionals than the command spec allows.
 pub fn too_many_positionals(command: &str, max: usize, got: usize) -> Diagnostic {
-    let message = format!(
-        "{command} expects at most {max} positional arguments, got {got}"
-    );
+    let message = format!("{command} expects at most {max} positional arguments, got {got}");
     Diagnostic::new(
         "dsl.validation.too_many_positionals",
         message,
@@ -235,8 +236,7 @@ pub fn arg_type_mismatch(
     reason: &anyhow::Error,
 ) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message =
-        format!("{command} argument `{name}` got {got:?}: {reason_text}");
+    let message = format!("{command} argument `{name}` got {got:?}: {reason_text}");
     Diagnostic::new(
         "dsl.validation.arg_type_mismatch",
         message,
@@ -306,7 +306,10 @@ pub fn expand_assignment_error(reason: &anyhow::Error) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.expand_assignment_error",
         reason_text.clone(),
-        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPAND), (FIELD_REASON, &reason_text)]),
+        Diagnostic::make_fields(&[
+            (FIELD_COMMAND, KEYWORD_EXPAND),
+            (FIELD_REASON, &reason_text),
+        ]),
     )
 }
 
@@ -316,7 +319,10 @@ pub fn expand_path_error(reason: &anyhow::Error) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.expand_path_error",
         reason_text.clone(),
-        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPAND), (FIELD_REASON, &reason_text)]),
+        Diagnostic::make_fields(&[
+            (FIELD_COMMAND, KEYWORD_EXPAND),
+            (FIELD_REASON, &reason_text),
+        ]),
     )
 }
 
@@ -530,15 +536,19 @@ pub fn unarchive_bad_max_bytes(reason: &anyhow::Error) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.unarchive_bad_max_bytes",
         format!("{KEYWORD_UNARCHIVE} --max-bytes {reason_text}"),
-        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_UNARCHIVE), (FIELD_REASON, &reason_text)]),
+        Diagnostic::make_fields(&[
+            (FIELD_COMMAND, KEYWORD_UNARCHIVE),
+            (FIELD_REASON, &reason_text),
+        ]),
     )
 }
 
 /// `EXPORT` naming a function with no top-level `FUNC` or known module
 /// member. Takes the exported name; quoting lives here.
 pub fn export_unknown_func(name: &str) -> Diagnostic {
-    let message =
-        format!("{KEYWORD_EXPORT} `{name}` does not match any top-level {KEYWORD_FUNC} or known module member");
+    let message = format!(
+        "{KEYWORD_EXPORT} `{name}` does not match any top-level {KEYWORD_FUNC} or known module member"
+    );
     Diagnostic::new(
         "dsl.validation.export_unknown_func",
         message,
@@ -550,7 +560,8 @@ pub fn export_unknown_func(name: &str) -> Diagnostic {
 /// downstream path serves. Takes the exported name.
 pub fn export_type_qualified(name: &str) -> Diagnostic {
     let message = format!(
-        "{KEYWORD_EXPORT} {KEYWORD_TYPE} `{name}` must be bare: qualified ALIAS::{KEYWORD_TYPE} re-exports are not served; import the file and re-export the bare name");
+        "{KEYWORD_EXPORT} {KEYWORD_TYPE} `{name}` must be bare: qualified ALIAS::{KEYWORD_TYPE} re-exports are not served; import the file and re-export the bare name"
+    );
     Diagnostic::new(
         "dsl.validation.export_type_qualified",
         message,
@@ -561,7 +572,9 @@ pub fn export_type_qualified(name: &str) -> Diagnostic {
 /// `EXPORT TYPE` naming no top-level `TYPE` (and no imports to defer
 /// to). Takes the exported name.
 pub fn export_unknown_type(name: &str) -> Diagnostic {
-    let message = format!("{KEYWORD_EXPORT} {KEYWORD_TYPE} `{name}` does not match any top-level {KEYWORD_TYPE}");
+    let message = format!(
+        "{KEYWORD_EXPORT} {KEYWORD_TYPE} `{name}` does not match any top-level {KEYWORD_TYPE}"
+    );
     Diagnostic::new(
         "dsl.validation.export_unknown_type",
         message,
@@ -573,7 +586,8 @@ pub fn export_unknown_type(name: &str) -> Diagnostic {
 /// a `CONST`. Takes the exported name.
 pub fn export_const_script_namespace(name: &str) -> Diagnostic {
     let message = format!(
-        "{KEYWORD_EXPORT} {KEYWORD_CONST} `{name}` must name a top-level {KEYWORD_CONST} (`$NAME`) or `$ALIAS::NAME` for a visible import: `{SCRIPT_MODULE_NAME}::` is not a {KEYWORD_CONST} namespace");
+        "{KEYWORD_EXPORT} {KEYWORD_CONST} `{name}` must name a top-level {KEYWORD_CONST} (`$NAME`) or `$ALIAS::NAME` for a visible import: `{SCRIPT_MODULE_NAME}::` is not a {KEYWORD_CONST} namespace"
+    );
     Diagnostic::new(
         "dsl.validation.export_const_script_namespace",
         message,
@@ -585,7 +599,8 @@ pub fn export_const_script_namespace(name: &str) -> Diagnostic {
 /// Takes the exported name and the unknown alias.
 pub fn export_const_unknown_alias(name: &str, module: &str) -> Diagnostic {
     let message = format!(
-        "{KEYWORD_EXPORT} {KEYWORD_CONST} `{name}` names unknown import alias `{module}`: import a file as `{module}` to re-export its CONSTs");
+        "{KEYWORD_EXPORT} {KEYWORD_CONST} `{name}` names unknown import alias `{module}`: import a file as `{module}` to re-export its CONSTs"
+    );
     Diagnostic::new(
         "dsl.validation.export_const_unknown_alias",
         message,
@@ -600,7 +615,8 @@ pub fn export_const_unknown_alias(name: &str, module: &str) -> Diagnostic {
 /// `EXPORT CONST` naming no top-level `CONST`. Takes the exported name.
 pub fn export_const_unknown(name: &str) -> Diagnostic {
     let message = format!(
-        "{KEYWORD_EXPORT} {KEYWORD_CONST} `{name}` does not match any top-level {KEYWORD_CONST} ({KEYWORD_LET} bindings are never exportable)");
+        "{KEYWORD_EXPORT} {KEYWORD_CONST} `{name}` does not match any top-level {KEYWORD_CONST} ({KEYWORD_LET} bindings are never exportable)"
+    );
     Diagnostic::new(
         "dsl.validation.export_const_unknown",
         message,
@@ -633,10 +649,7 @@ pub fn invalid_syntax(command: &str, got: &str, hint: Option<&str>) -> Diagnosti
 /// no trailing period.
 pub fn unknown_command(name: &str, hint: Option<&str>) -> Diagnostic {
     let message = match hint {
-        Some(hint) => format!(
-            "unknown command {name:?}\n{}",
-            hint.trim_end_matches('.')
-        ),
+        Some(hint) => format!("unknown command {name:?}\n{}", hint.trim_end_matches('.')),
         None => format!("unknown command {name:?}"),
     };
     Diagnostic::new(
@@ -652,7 +665,9 @@ pub fn let_capture_async() -> Diagnostic {
     let rule = KEYWORD_LET.to_lowercase();
     Diagnostic::new(
         "dsl.structural.let_capture_async",
-        format!("{KEYWORD_LET} capture cannot run {KEYWORD_ASYNC}/{KEYWORD_AWAIT}/{KEYWORD_CANCEL} inline; use {KEYWORD_LET} $t: HANDLE<T> = {KEYWORD_ASYNC} ... then {KEYWORD_LET} $o: STRING = {KEYWORD_AWAIT} $t"),
+        format!(
+            "{KEYWORD_LET} capture cannot run {KEYWORD_ASYNC}/{KEYWORD_AWAIT}/{KEYWORD_CANCEL} inline; use {KEYWORD_LET} $t: HANDLE<T> = {KEYWORD_ASYNC} ... then {KEYWORD_LET} $o: STRING = {KEYWORD_AWAIT} $t"
+        ),
         Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
@@ -663,7 +678,9 @@ pub fn let_capture_pipe_stdout() -> Diagnostic {
     let rule = KEYWORD_LET.to_lowercase();
     Diagnostic::new(
         "dsl.structural.let_capture_pipe_stdout",
-        format!("{KEYWORD_LET} capture cannot use {KEYWORD_WITH_IO} [stdout=$var]; the capture sink owns stdout"),
+        format!(
+            "{KEYWORD_LET} capture cannot use {KEYWORD_WITH_IO} [stdout=$var]; the capture sink owns stdout"
+        ),
         Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
@@ -685,7 +702,9 @@ pub fn tty_geometry_without_tty() -> Diagnostic {
     let rule = KEYWORD_WITH_IO.to_lowercase();
     Diagnostic::new(
         "dsl.structural.tty_geometry_without_tty",
-        format!("{KEYWORD_WITH_IO} [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"),
+        format!(
+            "{KEYWORD_WITH_IO} [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"
+        ),
         Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
@@ -696,7 +715,9 @@ pub fn tty_with_stderr() -> Diagnostic {
     let rule = KEYWORD_WITH_IO.to_lowercase();
     Diagnostic::new(
         "dsl.structural.tty_with_stderr",
-        format!("{KEYWORD_WITH_IO} [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"),
+        format!(
+            "{KEYWORD_WITH_IO} [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"
+        ),
         Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
@@ -707,7 +728,9 @@ pub fn tty_wraps_non_run() -> Diagnostic {
     let rule = KEYWORD_WITH_IO.to_lowercase();
     Diagnostic::new(
         "dsl.structural.tty_wraps_non_run",
-        format!("{KEYWORD_WITH_IO} [tty] only wraps a {KEYWORD_RUN} step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it"),
+        format!(
+            "{KEYWORD_WITH_IO} [tty] only wraps a {KEYWORD_RUN} step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it"
+        ),
         Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
@@ -718,7 +741,9 @@ pub fn with_io_in_async() -> Diagnostic {
     let rule = KEYWORD_ASYNC.to_lowercase();
     Diagnostic::new(
         "dsl.structural.with_io_in_async",
-        format!("{KEYWORD_WITH_IO} cannot be placed inside {KEYWORD_ASYNC}. Place {KEYWORD_WITH_IO} outside {KEYWORD_ASYNC} instead (e.g. {KEYWORD_WITH_IO} [...] {KEYWORD_ASYNC} {KEYWORD_RUN} ...)"),
+        format!(
+            "{KEYWORD_WITH_IO} cannot be placed inside {KEYWORD_ASYNC}. Place {KEYWORD_WITH_IO} outside {KEYWORD_ASYNC} instead (e.g. {KEYWORD_WITH_IO} [...] {KEYWORD_ASYNC} {KEYWORD_RUN} ...)"
+        ),
         Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
@@ -729,7 +754,9 @@ pub fn copy_host_outside_remote() -> Diagnostic {
     let rule = KEYWORD_COPY.to_lowercase();
     Diagnostic::new(
         "dsl.structural.copy_host_outside_remote",
-        format!("{KEYWORD_COPY} --from-host and --to-host are only valid inside a {KEYWORD_REMOTE} block"),
+        format!(
+            "{KEYWORD_COPY} --from-host and --to-host are only valid inside a {KEYWORD_REMOTE} block"
+        ),
         Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
@@ -890,7 +917,9 @@ pub fn sleep_takes_one() -> Diagnostic {
 pub fn list_append_requires_list() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.list_append_requires_list",
-        format!("{KEYWORD_LIST_APPEND} requires a LIST variable (e.g. {KEYWORD_LIST_APPEND} $items $x)"),
+        format!(
+            "{KEYWORD_LIST_APPEND} requires a LIST variable (e.g. {KEYWORD_LIST_APPEND} $items $x)"
+        ),
         Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_LIST_APPEND)]),
     )
 }
@@ -910,7 +939,9 @@ pub fn list_append_requires_sigil(got: &str) -> Diagnostic {
 pub fn list_append_requires_item() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.list_append_requires_item",
-        format!("{KEYWORD_LIST_APPEND} requires an item to append (e.g. {KEYWORD_LIST_APPEND} $items $x)"),
+        format!(
+            "{KEYWORD_LIST_APPEND} requires an item to append (e.g. {KEYWORD_LIST_APPEND} $items $x)"
+        ),
         Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_LIST_APPEND)]),
     )
 }
@@ -919,7 +950,9 @@ pub fn list_append_requires_item() -> Diagnostic {
 pub fn list_append_takes_two() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.list_append_takes_two",
-        format!("{KEYWORD_LIST_APPEND} takes exactly two arguments: {KEYWORD_LIST_APPEND} $list <item>"),
+        format!(
+            "{KEYWORD_LIST_APPEND} takes exactly two arguments: {KEYWORD_LIST_APPEND} $list <item>"
+        ),
         Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_LIST_APPEND)]),
     )
 }
@@ -1086,7 +1119,10 @@ mod tests {
         assert!(d.message().contains("requires argument `path`"));
         assert!(d.message().starts_with("WRITE"));
         let d = too_many_positionals("CMD", 1, 3);
-        assert_eq!(d.message(), "CMD expects at most 1 positional arguments, got 3");
+        assert_eq!(
+            d.message(),
+            "CMD expects at most 1 positional arguments, got 3"
+        );
         let err = anyhow::anyhow!("expected PATH");
         let d = arg_type_mismatch("CMD", "path", "3", &err);
         assert_eq!(d.message(), "CMD argument `path` got \"3\": expected PATH");
@@ -1094,14 +1130,23 @@ mod tests {
 
     #[test]
     fn env_expand_messages_keep_legacy_wording() {
-        assert_eq!(env_requires_assignment().message(), "ENV requires KEY=value");
+        assert_eq!(
+            env_requires_assignment().message(),
+            "ENV requires KEY=value"
+        );
         assert_eq!(env_bad_format().message(), "ENV requires KEY=value format");
         assert_eq!(
             expand_bad_override().message(),
             "EXPAND requires KEY=value format for overrides"
         );
-        assert_eq!(expand_extra_path().message(), "EXPAND accepts at most one path");
-        assert_eq!(needs_value("ECHO").message(), "ECHO requires at least one argument");
+        assert_eq!(
+            expand_extra_path().message(),
+            "EXPAND accepts at most one path"
+        );
+        assert_eq!(
+            needs_value("ECHO").message(),
+            "ECHO requires at least one argument"
+        );
         let inner = anyhow::anyhow!("assignment requires KEY=value format");
         assert_eq!(
             env_assignment_error(&inner).message(),
@@ -1112,7 +1157,10 @@ mod tests {
     #[test]
     fn workspace_copy_messages_keep_legacy_wording() {
         assert_eq!(workdir_requires_path().message(), "WORKDIR requires a path");
-        assert_eq!(workspace_requires_target().message(), "WORKSPACE requires a target");
+        assert_eq!(
+            workspace_requires_target().message(),
+            "WORKSPACE requires a target"
+        );
         assert_eq!(
             workspace_local_needs_cache().message(),
             "WORKSPACE --local requires CACHE"
@@ -1146,14 +1194,23 @@ mod tests {
             copy_git_requires_destination().message(),
             "COPY_GIT requires a destination"
         );
-        assert_eq!(symlink_requires_source().message(), "SYMLINK requires a source");
-        assert_eq!(symlink_requires_target().message(), "SYMLINK requires a target");
+        assert_eq!(
+            symlink_requires_source().message(),
+            "SYMLINK requires a source"
+        );
+        assert_eq!(
+            symlink_requires_target().message(),
+            "SYMLINK requires a target"
+        );
     }
 
     #[test]
     fn fs_path_messages_keep_legacy_wording() {
         assert_eq!(mkdir_requires_path().message(), "MKDIR requires a path");
-        assert_eq!(install_requires_source().message(), "INSTALL requires a source");
+        assert_eq!(
+            install_requires_source().message(),
+            "INSTALL requires a source"
+        );
         assert_eq!(
             install_requires_destination().message(),
             "INSTALL requires a destination"
@@ -1162,7 +1219,10 @@ mod tests {
             set_executable_requires_path().message(),
             "SET_EXECUTABLE requires a path"
         );
-        assert_eq!(archive_requires_source().message(), "ARCHIVE requires a source");
+        assert_eq!(
+            archive_requires_source().message(),
+            "ARCHIVE requires a source"
+        );
         assert_eq!(
             archive_requires_destination().message(),
             "ARCHIVE requires a destination"
@@ -1299,7 +1359,10 @@ mod tests {
             prompt_requires_sigil("reply").message(),
             "PROMPT requires a $variable, found \"reply\""
         );
-        assert_eq!(prompt_requires_message().message(), "PROMPT requires a message");
+        assert_eq!(
+            prompt_requires_message().message(),
+            "PROMPT requires a message"
+        );
     }
 
     #[test]
@@ -1364,6 +1427,10 @@ mod tests {
         let err = anyhow::anyhow!("expected PATH").context("static check failed");
         let d = arg_type_mismatch("CMD", "path", "3", &err);
         assert!(d.message().contains("expected PATH"), "{}", d.message());
-        assert!(d.message().contains("static check failed"), "{}", d.message());
+        assert!(
+            d.message().contains("static check failed"),
+            "{}",
+            d.message()
+        );
     }
 }

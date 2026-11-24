@@ -7614,7 +7614,8 @@ fn parse_let_rhs(
     {
         let span = lowering_ctx(stmt);
         crate::commands::reject_async_in_capture(&span, &kind).map_err(|e| lower_err(stmt, e))?;
-        crate::commands::reject_pipe_stdout_in_capture(&span, &kind).map_err(|e| lower_err(stmt, e))?;
+        crate::commands::reject_pipe_stdout_in_capture(&span, &kind)
+            .map_err(|e| lower_err(stmt, e))?;
         return Ok((
             StepKind::Bind {
                 var,
@@ -7711,11 +7712,14 @@ fn parse_let_rhs(
         Some(head) if is_known_command(head) => {
             let (cmd, used) = parse_inner_command(rhs, stmt, ctx)?;
             let span = lowering_ctx(stmt);
-            crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| lower_err(stmt, e))?;
-            crate::commands::reject_pipe_stdout_in_capture(&span, &cmd).map_err(|e| lower_err(stmt, e))?;
+            crate::commands::reject_async_in_capture(&span, &cmd)
+                .map_err(|e| lower_err(stmt, e))?;
+            crate::commands::reject_pipe_stdout_in_capture(&span, &cmd)
+                .map_err(|e| lower_err(stmt, e))?;
             // `INHERIT_ENV`-led lines land here (generic): the
             // nesting check rejects them (probed).
-            crate::commands::reject_nested_inherit_env(&span, &cmd).map_err(|e| lower_err(stmt, e))?;
+            crate::commands::reject_nested_inherit_env(&span, &cmd)
+                .map_err(|e| lower_err(stmt, e))?;
             return Ok((
                 StepKind::Bind {
                     var,
@@ -9028,7 +9032,8 @@ fn parse_with_io_element(
         }
         let span = lowering_ctx(stmt);
         for s in &steps {
-            crate::commands::reject_nested_inherit_env(&span, &s.kind).map_err(|e| lower_err(stmt, e))?;
+            crate::commands::reject_nested_inherit_env(&span, &s.kind)
+                .map_err(|e| lower_err(stmt, e))?;
         }
         if let Some(first) = steps.first_mut() {
             first.scope_enter += 1;
@@ -9325,9 +9330,8 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
             }
         }
     }
-    crate::commands::validate_remote_copy_placement(&out, &lowering_ctx(out.len())).map_err(
-        |e| lower_err(out.len(), e),
-    )?;
+    crate::commands::validate_remote_copy_placement(&out, &lowering_ctx(out.len()))
+        .map_err(|e| lower_err(out.len(), e))?;
     {
         let top: HashSet<String> = ctx.funcs.borrow().first().cloned().unwrap_or_default();
         let top_imports: Vec<String> = ctx

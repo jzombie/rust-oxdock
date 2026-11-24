@@ -147,7 +147,8 @@ impl<'a> SpanContext<'a> {
 /// Diagnostic detail lives behind a `Box` so `ParseResult` stays small
 /// in `Result` returns (cold path allocation only).
 #[derive(Debug, Clone)]
-pub struct ParseError {    kind: ParseErrorKind,
+pub struct ParseError {
+    kind: ParseErrorKind,
     line: usize,
     detail: Box<ErrorDetail>,
 }
@@ -503,7 +504,11 @@ mod tests {
             &ctx,
         );
         assert_eq!(err.line(), 3);
-        let span = err.diagnostic().expect("payload").span().expect("span synced");
+        let span = err
+            .diagnostic()
+            .expect("payload")
+            .span()
+            .expect("span synced");
         assert_eq!(span.line, 3);
         assert_eq!(span.col_start, Some(2));
         assert_eq!(span.col_end, Some(5));
@@ -524,7 +529,11 @@ mod tests {
         let ctx = SpanContext::full(7, 1, 4, "WRITE --nope".to_string());
         let err = err.with_span(&ctx);
         assert_eq!(err.line(), 7);
-        let span = err.diagnostic().expect("payload").span().expect("span synced");
+        let span = err
+            .diagnostic()
+            .expect("payload")
+            .span()
+            .expect("span synced");
         assert_eq!(span.line, 7);
         assert_eq!(span.col_start, Some(1));
     }

@@ -8,8 +8,8 @@
 
 use anyhow::{Result, bail};
 
-use oxdock_diagnostics::Diagnostic;
 use crate::diagnostics as dsl_diag;
+use oxdock_diagnostics::Diagnostic;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -582,9 +582,7 @@ fn parse_spelled_shape(text: &str, depth: usize) -> Result<(Spelled, &str), Diag
         return Err(dsl_diag::spelling_expected_type_name());
     };
     if !first.is_ascii_uppercase() {
-        return Err(dsl_diag::spelling_expected_uppercase(
-            &first.to_string(),
-        ));
+        return Err(dsl_diag::spelling_expected_uppercase(&first.to_string()));
     }
     let mut end = first.len_utf8();
     for (idx, ch) in chars {
@@ -608,9 +606,7 @@ fn parse_spelled_shape(text: &str, depth: usize) -> Result<(Spelled, &str), Diag
         // Aliases ride named MAP fields only: bare arguments never
         // carry an alternate spelling.
         if alias.is_some() && field_name.is_none() {
-            return Err(dsl_diag::alias_needs_field(&decode_spelling_fragment(
-                rest,
-            )));
+            return Err(dsl_diag::alias_needs_field(&decode_spelling_fragment(rest)));
         }
         // Second ALIAS on the same field: the spelling parser owns
         // arity, so decode both names and fail here naming the rule.
@@ -618,11 +614,7 @@ fn parse_spelled_shape(text: &str, depth: usize) -> Result<(Spelled, &str), Diag
         if let Some(second) = peek_second_alias(after_alias) {
             let field = field_name.as_deref().unwrap_or("<bare>");
             let first = alias.as_deref().unwrap_or("<unknown>");
-            return Err(dsl_diag::alias_duplicate_on_field(
-                field,
-                first,
-                &second,
-            ));
+            return Err(dsl_diag::alias_duplicate_on_field(field, first, &second));
         }
         let (default, after_default) = parse_spelled_default(after_alias)?;
         args.push(SpelledField {
@@ -824,16 +816,16 @@ fn parse_spelled_literal(text: &str) -> Result<(SpelledDefault, &str), Diagnosti
     if is_float {
         match num.parse::<f64>() {
             Ok(f) if f.is_finite() => Ok((SpelledDefault::Float(f.to_bits()), rest)),
-            _ => Err(dsl_diag::spelling_invalid_float(
-                &decode_spelling_fragment(num),
-            )),
+            _ => Err(dsl_diag::spelling_invalid_float(&decode_spelling_fragment(
+                num,
+            ))),
         }
     } else {
         match num.parse::<i64>() {
             Ok(n) => Ok((SpelledDefault::Int(n), rest)),
-            Err(_) => Err(dsl_diag::spelling_invalid_int(
-                &decode_spelling_fragment(num),
-            )),
+            Err(_) => Err(dsl_diag::spelling_invalid_int(&decode_spelling_fragment(
+                num,
+            ))),
         }
     }
 }
@@ -1389,8 +1381,8 @@ mod tests {
 
     #[test]
     fn second_alias_on_same_field_fails_with_both_names() {
-        let err = parse_spelling("MAP<h: BOOL ALIAS help ALIAS h2>")
-            .expect_err("second ALIAS must fail");
+        let err =
+            parse_spelling("MAP<h: BOOL ALIAS help ALIAS h2>").expect_err("second ALIAS must fail");
         assert_eq!(err.key(), "dsl.alias.duplicate_on_field");
         assert!(err.message().contains("`h`"), "{err}");
         assert!(err.message().contains("`help`"), "{err}");

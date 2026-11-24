@@ -244,15 +244,11 @@ mod tests {
     #[test]
     fn endpoint_duplicates_name_the_key() {
         let inner = endpoint_duplicate_inner("2251");
-        let diag = inner
-            .downcast_ref::<Diagnostic>()
-            .expect("typed CLI error");
+        let diag = inner.downcast_ref::<Diagnostic>().expect("typed CLI error");
         assert_eq!(diag.key(), "cli.endpoint_duplicate_inner");
 
         let outer = endpoint_duplicate_outer("127.0.0.1:2222");
-        let diag = outer
-            .downcast_ref::<Diagnostic>()
-            .expect("typed CLI error");
+        let diag = outer.downcast_ref::<Diagnostic>().expect("typed CLI error");
         assert_eq!(diag.key(), "cli.endpoint_duplicate_outer");
     }
 

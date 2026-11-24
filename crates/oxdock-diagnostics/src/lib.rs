@@ -120,11 +120,7 @@ impl Diagnostic {
     /// named constructor per diagnostic. Message, field keys and values,
     /// and hints are sanitized: any [`INTERNAL_SENTINEL`] becomes a
     /// space. Never panics on untrusted input.
-    pub fn new(
-        key: &'static str,
-        message: String,
-        fields: BTreeMap<String, String>,
-    ) -> Self {
+    pub fn new(key: &'static str, message: String, fields: BTreeMap<String, String>) -> Self {
         let message = sanitize_internal_encoding(&message);
         let fields = fields
             .into_iter()
@@ -151,10 +147,7 @@ impl Diagnostic {
     pub fn make_fields(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
         for (k, v) in pairs {
-            map.insert(
-                sanitize_internal_encoding(k),
-                sanitize_internal_encoding(v),
-            );
+            map.insert(sanitize_internal_encoding(k), sanitize_internal_encoding(v));
         }
         map
     }

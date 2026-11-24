@@ -506,13 +506,17 @@ pub fn collect_type_aliases<P: ProcessManager>(
             return Err(anyhow::Error::new(typing_diag::alias_already_defined(name)));
         }
         if TypeTag::builtin(name).is_some() {
-            return Err(anyhow::Error::new(typing_diag::alias_builtin_collision(name)));
+            return Err(anyhow::Error::new(typing_diag::alias_builtin_collision(
+                name,
+            )));
         }
         if exec.types.contains_key(name) {
             return Err(anyhow::Error::new(typing_diag::alias_host_collision(name)));
         }
         if exec.record_schemas.contains_key(name) {
-            return Err(anyhow::Error::new(typing_diag::alias_schema_collision(name)));
+            return Err(anyhow::Error::new(typing_diag::alias_schema_collision(
+                name,
+            )));
         }
         if func_names.contains(name) {
             return Err(anyhow::Error::new(typing_diag::alias_func_collision(name)));

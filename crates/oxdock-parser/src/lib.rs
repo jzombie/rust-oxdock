@@ -120,9 +120,10 @@ pub mod test_lower_mock {
                     .ok_or_else(|| invalid("WORKSPACE", dsl_diag::workspace_requires_target()))?;
                 let local = it.any(|a| a.as_str() == "--local");
                 match target.as_str() {
-                    "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => {
-                        Err(invalid("WORKSPACE", dsl_diag::workspace_local_needs_cache()))
-                    }
+                    "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => Err(invalid(
+                        "WORKSPACE",
+                        dsl_diag::workspace_local_needs_cache(),
+                    )),
                     "SNAPSHOT" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
                     "LOCAL" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
                     "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache { local })),
@@ -218,9 +219,9 @@ pub mod test_lower_mock {
                 let src = it
                     .next()
                     .ok_or_else(|| invalid("UNARCHIVE", dsl_diag::unarchive_requires_archive()))?;
-                let dst = it
-                    .next()
-                    .ok_or_else(|| invalid("UNARCHIVE", dsl_diag::unarchive_requires_destination()))?;
+                let dst = it.next().ok_or_else(|| {
+                    invalid("UNARCHIVE", dsl_diag::unarchive_requires_destination())
+                })?;
                 Ok(StepKind::Unarchive {
                     src,
                     dst,
