@@ -196,10 +196,13 @@ wording instead of preserving old strings.
    the `commands.rs` bulk (validation fully migrated: zero
    `ParseError::validation` sites remain; EXPORT group done
    (2026-11-24): func/type/const lowers through six
-   `dsl.validation.export_*` constructors)
+   `dsl.validation.export_*` constructors; structural set done
+   (2026-11-24): LET/TTY/WITH_IO/REMOTE/expr lowers (10 sites)
+   through ten `dsl.structural.*` constructors carrying the rule
+   in the structured field)
    (~90 `ParseError::validation/structural` sites) goes per-command,
    plus `parser.rs` rewrap (`lower_to_diagnostic` mapping), `lib.rs`
-   mock, and `structural`/`invalid_syntax` constructors.
+   mock, and `invalid_syntax` constructors.
 4. Tests per diagnostic: constructor key test plus doc fence each for
    second-`ALIAS`-on-field, alias-equals-own-field,
    alias-clashes-across-fields, plus bounded-remainder and

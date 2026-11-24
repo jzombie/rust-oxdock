@@ -585,6 +585,107 @@ pub fn export_const_unknown(name: &str) -> Diagnostic {
     )
 }
 
+/// `LET` capture running `ASYNC`/`AWAIT`/`CANCEL` inline. The capture
+/// sink cannot stage tasks; hoist first, then await.
+pub fn let_capture_async() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.structural.let_capture_async",
+        "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE<T> = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(),
+        Diagnostic::make_fields(&[("rule", "let")]),
+    )
+}
+
+/// `LET` capture using `WITH_IO [stdout=$var]`. The capture sink owns
+/// stdout.
+pub fn let_capture_pipe_stdout() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.structural.let_capture_pipe_stdout",
+        "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout".to_string(),
+        Diagnostic::make_fields(&[("rule", "let")]),
+    )
+}
+
+/// `INHERIT_ENV` nested inside another command. The prelude directive
+/// only reads at statement level.
+pub fn nested_inherit_env() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.structural.nested_inherit_env",
+        "INHERIT_ENV cannot be nested inside other commands".to_string(),
+        Diagnostic::make_fields(&[("rule", "inherit_env")]),
+    )
+}
+
+/// `WITH_IO [rows]`/`[cols]` without `[tty]`. Geometry without a
+/// terminal has nothing to size.
+pub fn tty_geometry_without_tty() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.structural.tty_geometry_without_tty",
+        "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size".to_string(),
+        Diagnostic::make_fields(&[("rule", "with_io")]),
+    )
+}
+
+/// `WITH_IO [tty]` binding stderr. The pty master interleaves both
+/// streams, so they cannot demultiplex.
+pub fn tty_with_stderr() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.structural.tty_with_stderr",
+        "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex".to_string(),
+        Diagnostic::make_fields(&[("rule", "with_io")]),
+    )
+}
+
+/// `WITH_IO [tty]` wrapping a non-`RUN` step. Terminal-unaware
+/// commands cannot run under the pty master.
+pub fn tty_wraps_non_run() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.structural.tty_wraps_non_run",
+        "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it".to_string(),
+        Diagnostic::make_fields(&[("rule", "with_io")]),
+    )
+}
+
+/// `WITH_IO` placed inside an `ASYNC` body. Pipe wiring belongs
+/// outside the task.
+pub fn with_io_in_async() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.structural.with_io_in_async",
+        "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(),
+        Diagnostic::make_fields(&[("rule", "async")]),
+    )
+}
+
+/// `COPY --from-host` / `--to-host` outside a `REMOTE` block. Transfer
+/// declarations only mean something where a session hoists them.
+pub fn copy_host_outside_remote() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.structural.copy_host_outside_remote",
+        "COPY --from-host and --to-host are only valid inside a REMOTE block".to_string(),
+        Diagnostic::make_fields(&[("rule", "copy")]),
+    )
+}
+
+/// Staged `UnsignedIntBoundary` for `2^63` where unary `-` cannot
+/// consume it. Fixed value, parameterless.
+pub fn int_boundary_overflow() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.structural.int_boundary_overflow",
+        "integer overflow: 9223372036854775808 exceeds i64::MAX".to_string(),
+        Diagnostic::make_fields(&[("rule", "expr")]),
+    )
+}
+
+/// Integer literal exceeding `i64::MAX` under unary `-`. Takes the
+/// offending value; quoting lives here.
+pub fn int_overflow(n: u64) -> Diagnostic {
+    let message = format!("integer overflow: {n} exceeds i64::MAX");
+    Diagnostic::new(
+        "dsl.structural.int_overflow",
+        message,
+        Diagnostic::make_fields(&[("rule", "expr"), ("got", &n.to_string())]),
+    )
+}
+
 /// `WRITE` without a path.
 pub fn write_requires_path() -> Diagnostic {
     Diagnostic::new(
@@ -864,6 +965,16 @@ mod tests {
             export_const_script_namespace("SCRIPT::N").key(),
             export_const_unknown_alias("$LIB::N", "LIB").key(),
             export_const_unknown("$N").key(),
+            let_capture_async().key(),
+            let_capture_pipe_stdout().key(),
+            nested_inherit_env().key(),
+            tty_geometry_without_tty().key(),
+            tty_with_stderr().key(),
+            tty_wraps_non_run().key(),
+            with_io_in_async().key(),
+            copy_host_outside_remote().key(),
+            int_boundary_overflow().key(),
+            int_overflow(42).key(),
             write_requires_path().key(),
             append_requires_path().key(),
             append_line_requires_path().key(),
@@ -1026,6 +1137,50 @@ mod tests {
         assert_eq!(
             export_const_unknown("$N").message(),
             "EXPORT CONST `$N` does not match any top-level CONST (LET bindings are never exportable)"
+        );
+    }
+
+    #[test]
+    fn structural_messages() {
+        assert_eq!(
+            let_capture_async().message(),
+            "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE<T> = ASYNC ... then LET $o: STRING = AWAIT $t"
+        );
+        assert_eq!(
+            let_capture_pipe_stdout().message(),
+            "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
+        );
+        assert_eq!(
+            nested_inherit_env().message(),
+            "INHERIT_ENV cannot be nested inside other commands"
+        );
+        assert_eq!(
+            tty_geometry_without_tty().message(),
+            "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"
+        );
+        assert_eq!(
+            tty_with_stderr().message(),
+            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"
+        );
+        assert_eq!(
+            tty_wraps_non_run().message(),
+            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it"
+        );
+        assert_eq!(
+            with_io_in_async().message(),
+            "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)"
+        );
+        assert_eq!(
+            copy_host_outside_remote().message(),
+            "COPY --from-host and --to-host are only valid inside a REMOTE block"
+        );
+        assert_eq!(
+            int_boundary_overflow().message(),
+            "integer overflow: 9223372036854775808 exceeds i64::MAX"
+        );
+        assert_eq!(
+            int_overflow(42).message(),
+            "integer overflow: 42 exceeds i64::MAX"
         );
     }
 

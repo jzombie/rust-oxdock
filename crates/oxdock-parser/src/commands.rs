@@ -6431,7 +6431,13 @@ pub(crate) fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> Par
         }
     };
     if bad {
-        return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE<T> = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: "let".to_string(),
+            },
+            dsl_diag::let_capture_async(),
+            ctx,
+        ));
     }
     Ok(())
 }
@@ -6442,10 +6448,11 @@ pub(crate) fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) 
     if let StepKind::WithIo { bindings, .. } = kind
         && has_stdout_pipe(bindings)
     {
-        return Err(ParseError::structural(
-            "let",
-            "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
-                .to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: "let".to_string(),
+            },
+            dsl_diag::let_capture_pipe_stdout(),
             ctx,
         ));
     }
@@ -6540,9 +6547,11 @@ pub(crate) fn contains_inherit_env(kind: &StepKind) -> bool {
 /// inside `ISOLATED` bodies, which never reach here).
 pub(crate) fn reject_nested_inherit_env(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
     if contains_inherit_env(kind) {
-        return Err(ParseError::structural(
-            "inherit_env",
-            "INHERIT_ENV cannot be nested inside other commands".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: "inherit_env".to_string(),
+            },
+            dsl_diag::nested_inherit_env(),
             ctx,
         ));
     }
@@ -6559,9 +6568,11 @@ pub(crate) fn check_tty_wrapping(
         .iter()
         .any(|b| matches!(b.stream, IoStream::Rows(_) | IoStream::Cols(_)));
     if has_geometry && !has_tty {
-        return Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: "with_io".to_string(),
+            },
+            dsl_diag::tty_geometry_without_tty(),
             span,
         ));
     }
@@ -6572,17 +6583,21 @@ pub(crate) fn check_tty_wrapping(
         .iter()
         .any(|b| matches!(b.stream, IoStream::Stderr))
     {
-        return Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: "with_io".to_string(),
+            },
+            dsl_diag::tty_with_stderr(),
             span,
         ));
     }
     match cmd {
         Some(StepKind::Run(_) | StepKind::RunExec { .. }) | None => Ok(()),
-        Some(_) => Err(ParseError::structural(
-            "with_io",
-            "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it".to_string(),
+        Some(_) => Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: "with_io".to_string(),
+            },
+            dsl_diag::tty_wraps_non_run(),
             span,
         )),
     }
@@ -6593,7 +6608,13 @@ pub(crate) fn check_tty_wrapping(
 pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> ParseResult<()> {
     for step in body {
         if matches!(&step.kind, StepKind::WithIo { .. }) {
-            return Err(ParseError::structural("async", "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(), ctx));
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Structural {
+                    rule: "async".to_string(),
+                },
+                dsl_diag::with_io_in_async(),
+                ctx,
+            ));
         }
     }
     Ok(())
@@ -6732,9 +6753,11 @@ pub(crate) fn validate_remote_copy_placement(steps: &[Step], ctx: &SpanContext) 
             && (*from_host || *to_host)
             && !in_remote
         {
-            return Err(ParseError::structural(
-                "copy",
-                "COPY --from-host and --to-host are only valid inside a REMOTE block".to_string(),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Structural {
+                    rule: "copy".to_string(),
+                },
+                dsl_diag::copy_host_outside_remote(),
                 ctx,
             ));
         }
@@ -6821,9 +6844,11 @@ pub(crate) fn collect_remote_kind_symbols(
 /// backend): operates on `Expr`, never on token pairs.
 pub(crate) fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {
     if matches!(expr, Expr::UnsignedIntBoundary(_)) {
-        return Err(ParseError::structural(
-            "expr",
-            "integer overflow: 9223372036854775808 exceeds i64::MAX".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Structural {
+                rule: "expr".to_string(),
+            },
+            dsl_diag::int_boundary_overflow(),
             ctx,
         ));
     }
@@ -6861,9 +6886,11 @@ pub(crate) fn apply_unary_neg(ctx: &SpanContext, expr: Expr) -> ParseResult<Expr
             if n == i64::MAX as u64 + 1 {
                 Ok(Expr::Literal(Value::int(i64::MIN)))
             } else {
-                Err(ParseError::structural(
-                    "expr",
-                    format!("integer overflow: {} exceeds i64::MAX", n),
+                Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Structural {
+                        rule: "expr".to_string(),
+                    },
+                    dsl_diag::int_overflow(n),
                     ctx,
                 ))
             }
