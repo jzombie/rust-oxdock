@@ -279,10 +279,18 @@ Green: default (48), `--no-default-features` (42),
 `--no-default-features --features ssh` (47); clippy/doc clean; no
 fmt drift.
 
-#### C.2 remaining
+#### C.2 core runtime (in progress)
 
-- Core runtime: `native.rs`, `mcp.rs`, `fs_ops.rs`, `pipeline.rs`,
-  `static_check.rs`, `import.rs`.
+Done 2026-11-24: exec/`mcp.rs` (6 ctors: `dsl.mcp.*` incl. tail-carrying
+call_failed) and exec/`import.rs` (21 ctors: `dsl.import.*` incl.
+const-group, flow-crossing, unified type-collision detail). Both files
+have zero inline `bail!`/`anyhow!` left; lib 406 + integration 629
+green; clippy/doc clean; no fmt drift.
+
+Remaining:
+- Core runtime: `native.rs` (STD builtins, ~55 sites), `static_check.rs`
+  (~129 sites). `fs_ops.rs` and `pipeline.rs` verified clean (no inline
+  failures; `fs_ops` only re-exports `Result`).
 - Parser: `markdown.rs`, `template.rs`, `macro_input.rs`.
 - Plugins and sys crates last.
 

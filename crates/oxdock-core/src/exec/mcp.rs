@@ -15,6 +15,7 @@ use anyhow::Result;
 use oxdock_parser::{Expr, ParsedScript, StepKind};
 use oxdock_process::{CommandStdin, ProcessManager, SharedOutput};
 
+use super::diagnostics as mcp_diag;
 use super::handlers::call_func_value;
 use super::io::{ExecIo, StreamHandle, StreamHook, teed_stderr, teed_stdout};
 use super::native::{FuncMeta, HostModule};
@@ -111,9 +112,7 @@ impl<P: ProcessManager> McpSession<P> {
             }
             for name in &parsed.exports.types {
                 if !local.contains(name) && !exported_available.contains(name) {
-                    anyhow::bail!(
-                        "EXPORT TYPE `{name}` matches no local TYPE and no imported file exports it"
-                    );
+                    return Err(anyhow::Error::new(mcp_diag::mcp_export_type_unknown(name)));
                 }
             }
         }
@@ -147,13 +146,20 @@ impl<P: ProcessManager> McpSession<P> {
         )?;
         match flow {
             Flow::Done => {}
-            Flow::Break { idx } => anyhow::bail!("step {}: BREAK outside loop", idx + 1),
-            Flow::Continue { idx } => anyhow::bail!("step {}: CONTINUE outside loop", idx + 1),
+            Flow::Break { idx } => {
+                return Err(anyhow::Error::new(mcp_diag::mcp_break_outside_loop(
+                    idx + 1,
+                )));
+            }
+            Flow::Continue { idx } => {
+                return Err(anyhow::Error::new(mcp_diag::mcp_continue_outside_loop(
+                    idx + 1,
+                )));
+            }
             Flow::Return { idx, .. } => {
-                anyhow::bail!(
-                    "step {}: RETURN outside function, ASYNC task, or LET block",
-                    idx + 1
-                )
+                return Err(anyhow::Error::new(mcp_diag::mcp_return_outside_function(
+                    idx + 1,
+                )));
             }
         }
 
@@ -218,7 +224,9 @@ impl<P: ProcessManager> McpSession<P> {
                 .find(|e| oxdock_parser::base_name(e) == base)
             {
                 Some(export) => export.clone(),
-                None => anyhow::bail!("unknown MCP tool `{base}`"),
+                None => {
+                    return Err(anyhow::Error::new(mcp_diag::mcp_unknown_tool(base)));
+                }
             }
         };
         let exprs: Vec<Expr> = args.into_iter().map(Expr::Literal).collect();
@@ -253,16 +261,9 @@ impl<P: ProcessManager> McpSession<P> {
                     // this call's bytes, and the tails are the diagnosis.
                     let stdout = capped_drain(&self.stdout_buf);
                     let stderr = capped_drain(&self.stderr_buf);
-                    let mut msg = format!("{err:#}");
-                    if !stdout.is_empty() {
-                        msg.push_str("\n--- captured stdout ---\n");
-                        msg.push_str(&tail_chars(&stdout, 4096));
-                    }
-                    if !stderr.is_empty() {
-                        msg.push_str("\n--- captured stderr ---\n");
-                        msg.push_str(&tail_chars(&stderr, 4096));
-                    }
-                    return Err(anyhow::anyhow!("{msg}"));
+                    return Err(anyhow::Error::new(mcp_diag::mcp_call_failed(
+                        &err, &stdout, &stderr,
+                    )));
                 }
             }
         };
@@ -311,21 +312,6 @@ fn drain_buf(buf: &Arc<Mutex<TailRing>>) {
         guard.buf.clear();
         guard.total = 0;
     }
-}
-
-/// Last `n` chars of `s` on a char boundary. Error messages carry
-/// tails, never whole buffers.
-fn tail_chars(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return s.to_string();
-    }
-    s.chars()
-        .rev()
-        .take(n)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
 }
 
 /// Drain a tail ring into a lossy string. Truncates to zero. When the

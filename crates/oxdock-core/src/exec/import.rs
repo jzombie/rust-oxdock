@@ -13,7 +13,9 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+
+use super::diagnostics as import_diag;
 use oxdock_fs::{GuardedPath, WorkspaceFs};
 use oxdock_parser::{
     ExportKind, Exports, MODULE_SEPARATOR, ModuleTable, Step, StepKind, Value, qualify,
@@ -195,14 +197,13 @@ fn dry_run_load(
     if stack.iter().any(|p| p == &key) {
         let mut chain = stack.to_vec();
         chain.push(key);
-        bail!("IMPORT cycle detected: {}", chain.join(" -> "));
+        return Err(anyhow::Error::new(import_diag::import_cycle(&chain)));
     }
     if stack.len() >= MAX_IMPORT_DEPTH {
-        bail!(
-            "IMPORT depth limit exceeded ({}): `{}`",
+        return Err(anyhow::Error::new(import_diag::import_depth_limit(
             MAX_IMPORT_DEPTH,
-            path
-        );
+            path,
+        )));
     }
     let nested_dir = resolved.parent().unwrap_or_else(|| dir.clone());
     if let Some(cached) = cache.get(&key) {
@@ -263,7 +264,7 @@ fn resolve_top_level_with(
         return Ok(candidate);
     }
     dir.join(path)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be resolved: {e}"))
+        .map_err(|e| anyhow::Error::new(import_diag::import_cannot_resolve(path, &e)))
 }
 
 /// Preview-phase entry point: no entry handle here, so the workspace
@@ -375,14 +376,21 @@ fn read_and_parse_import(
     table: &ModuleTable,
 ) -> Result<Vec<Step>> {
     let bytes = read_import_bytes(fs, resolved)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be read: {e}"))?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` is not valid UTF-8: {e}"))?;
+        .map_err(|e| anyhow::Error::new(import_diag::import_cannot_read(path, &e)))?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| {
+        anyhow::Error::new(import_diag::import_bad_utf8(path, &anyhow::Error::new(e)))
+    })?;
     let table = table.clone();
     let mut reserved = super::native::builtin_function_names();
     reserved.extend(table.reserved_base_names());
-    oxdock_parser::parse_script_with_modules(text, crate::lower_command, reserved, table)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed to parse: {e}"))
+    oxdock_parser::parse_script_with_modules(text, crate::lower_command, reserved, table).map_err(
+        |e| {
+            anyhow::Error::new(import_diag::import_parse_failed(
+                path,
+                &anyhow::Error::new(e),
+            ))
+        },
+    )
 }
 
 /// Execute `IMPORT [[F, G FROM "<path>" (AS <ALIAS>)?]]`: load the
@@ -403,10 +411,10 @@ pub(crate) fn gate_harvested_name(
     name: &str,
     path: &str,
 ) -> Result<()> {
-    let (exported, kind_word, noun, defined) = match kind {
+    let (exported, kind, noun, defined) = match kind {
         ExportKind::Func => (
             &exports.funcs,
-            "",
+            "FUNC",
             "function",
             steps.iter().any(|step| {
                 matches!(&step.kind, StepKind::FuncDef { name: def, .. } if def.as_str() == name)
@@ -414,7 +422,7 @@ pub(crate) fn gate_harvested_name(
         ),
         ExportKind::Type => (
             &exports.types,
-            "TYPE ",
+            "TYPE",
             "TYPE",
             steps.iter().any(|step| {
                 matches!(&step.kind, StepKind::TypeAlias { name: alias, .. } if alias.as_str() == name)
@@ -424,13 +432,17 @@ pub(crate) fn gate_harvested_name(
         // expressions through the forward chase, never as harvest
         // requests. The arm exists so callers never restate the kind
         // split; the export scan still applies if one ever arrives.
-        ExportKind::Const => (&exports.consts, "CONST ", "CONST", true),
+        ExportKind::Const => (&exports.consts, "CONST", "CONST", true),
     };
     if !exported.iter().any(|e| e == name) {
-        bail!("IMPORT `{path}` does not export {kind_word}`{name}`");
+        return Err(anyhow::Error::new(import_diag::import_missing_export(
+            path, kind, name,
+        )));
     }
     if !defined {
-        bail!("IMPORT `{path}` has no such {noun} `{name}`");
+        return Err(anyhow::Error::new(import_diag::import_unknown_member(
+            path, noun, name,
+        )));
     }
     Ok(())
 }
@@ -464,7 +476,7 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         if !file_exists && cx.state.module_table.modules.contains_key(path) {
             for name in type_names {
                 cx.state.resolve_tag(name).map_err(|e| {
-                    anyhow::anyhow!("IMPORT `{path}` has no such TYPE `{name}`: {e:#}")
+                    anyhow::Error::new(import_diag::import_unknown_type(path, name, Some(&e)))
                 })?;
             }
             if let Some(alias) = alias {
@@ -505,16 +517,18 @@ pub(crate) fn import_funcs<P: ProcessManager>(
         // false-positive on nested calls. Unseen files still validate.
         if !cx.state.validated_modules.contains(&key) {
             super::static_check::validate_import_body_types(&steps, cx.state, &key)
-                .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+                .map_err(|e| anyhow::Error::new(import_diag::import_failed_validation(path, &e)))?;
         }
         // Stateful harvests are rejected: the file body never runs, so
         // there is no initialized state for them to observe. Import the
         // file to share its module instead.
         if let Some(offender) =
             super::static_check::harvest_touches_module(cx.state, &key, &steps, func_names)
-                .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?
+                .map_err(|e| anyhow::Error::new(import_diag::import_failed_validation(path, &e)))?
         {
-            bail!("IMPORT `{path}` cannot harvest stateful function `{offender}`: import the file");
+            return Err(anyhow::Error::new(import_diag::import_stateful_harvest(
+                path, &offender,
+            )));
         }
         for name in func_names {
             // Harvest validity lives in `gate_harvested_name` (single
@@ -536,7 +550,9 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             }) else {
                 // Gated above: the scan already proved the def exists.
                 // This preserves loud failure without restating it.
-                bail!("IMPORT `{path}` has no such function `{name}`");
+                return Err(anyhow::Error::new(import_diag::import_unknown_function(
+                    path, name,
+                )));
             };
             let resolved_params = resolve_script_params(cx.state, name, &def.0)?;
             let return_tag = cx.state.resolve_tag(&def.1)?;
@@ -598,7 +614,9 @@ pub(crate) fn import_funcs<P: ProcessManager>(
                 // keeps loud failure instead of restating the scan.
                 gate_harvested_name(ExportKind::Type, &steps, &exports, name, path)?;
                 let Some(target) = file_aliases.get(name) else {
-                    bail!("IMPORT `{path}` has no such TYPE `{name}`");
+                    return Err(anyhow::Error::new(import_diag::import_unknown_type(
+                        path, name, None,
+                    )));
                 };
                 insert_imported_type(cx.state, name, target, alias, path)?;
             }
@@ -675,9 +693,9 @@ pub(crate) fn import_funcs<P: ProcessManager>(
             // idempotent, differing targets fail naming both files.
             if let Some(existing) = cx.state.type_aliases.get(&name) {
                 if existing != &target {
-                    anyhow::bail!(
-                        "IMPORT `{path}` TYPE `{name}` collides: already defined with a different target"
-                    );
+                    return Err(anyhow::Error::new(import_diag::import_type_collision(
+                        path, &name, existing, &target,
+                    )));
                 }
             } else {
                 cx.state.register_alias(name, target);
@@ -711,9 +729,9 @@ pub(crate) fn insert_imported_type<P: ProcessManager>(
     };
     if let Some(existing) = state.type_aliases.get(&key) {
         if existing != target {
-            anyhow::bail!(
-                "IMPORT `{path}` TYPE `{name}` collides: already defined with target `{existing}`, new target `{target}`"
-            );
+            return Err(anyhow::Error::new(import_diag::import_type_collision(
+                path, name, existing, target,
+            )));
         }
     } else {
         state.register_alias(key, target.to_string());
@@ -779,7 +797,11 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
             if !file_exists && cx.state.module_table.modules.contains_key(harvest_path) {
                 for name in harvest_types {
                     cx.state.resolve_tag(name).map_err(|e| {
-                        anyhow::anyhow!("IMPORT `{harvest_path}` has no such TYPE `{name}`: {e:#}")
+                        anyhow::Error::new(import_diag::import_unknown_type(
+                            harvest_path,
+                            name,
+                            Some(&e),
+                        ))
                     })?;
                 }
                 continue;
@@ -799,7 +821,11 @@ fn resolve_own_type_harvests_inner<P: ProcessManager>(
                 harvest_path,
             )?;
             let Some(target) = file_aliases.get(name) else {
-                anyhow::bail!("IMPORT `{harvest_path}` has no such TYPE `{name}`");
+                return Err(anyhow::Error::new(import_diag::import_unknown_type(
+                    harvest_path,
+                    name,
+                    None,
+                )));
             };
             insert_imported_type(
                 cx.state,
@@ -970,18 +996,14 @@ fn ensure_module_init<P: ProcessManager>(
             Flow::Done => Value::string(String::new()),
             Flow::Return { value, .. } => value,
             Flow::Break { idx } => {
-                bail!(
-                    "step {}: BREAK cannot cross import boundary (in IMPORT `{}`)",
-                    idx + 1,
-                    path
-                );
+                return Err(anyhow::Error::new(
+                    import_diag::import_flow_crosses_boundary("BREAK", idx + 1, path),
+                ));
             }
             Flow::Continue { idx } => {
-                bail!(
-                    "step {}: CONTINUE cannot cross import boundary (in IMPORT `{}`)",
-                    idx + 1,
-                    path
-                );
+                return Err(anyhow::Error::new(
+                    import_diag::import_flow_crosses_boundary("CONTINUE", idx + 1, path),
+                ));
             }
         };
         let record = cx.state.modules.entry(key.to_string()).or_default();
@@ -1076,7 +1098,7 @@ pub(crate) fn import_file<P: ProcessManager>(
         // false-positive on nested calls. Unseen files still validate.
         if !cx.state.validated_modules.contains(&key) {
             super::static_check::validate_import_body_types(&steps, cx.state, &key)
-                .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed validation: {e}"))?;
+                .map_err(|e| anyhow::Error::new(import_diag::import_failed_validation(path, &e)))?;
         }
         // Register the imported file's EXPORTed top-level FUNCs under
         // the alias in the caller's scope: unexported means private.
@@ -1279,7 +1301,11 @@ fn expand_walk<P: ProcessManager>(
                     if !file_exists && state.module_table.modules.contains_key(path) {
                         for name in type_names {
                             state.resolve_tag(name).map_err(|e| {
-                                anyhow::anyhow!("IMPORT `{path}` has no such TYPE `{name}`: {e:#}")
+                                anyhow::Error::new(import_diag::import_unknown_type(
+                                    path,
+                                    name,
+                                    Some(&e),
+                                ))
                             })?;
                         }
                         // No file body to recurse into; still walk nested
@@ -1351,7 +1377,11 @@ fn expand_walk_top<P: ProcessManager>(
                     if !file_exists && state.module_table.modules.contains_key(path) {
                         for name in type_names {
                             state.resolve_tag(name).map_err(|e| {
-                                anyhow::anyhow!("IMPORT `{path}` has no such TYPE `{name}`: {e:#}")
+                                anyhow::Error::new(import_diag::import_unknown_type(
+                                    path,
+                                    name,
+                                    Some(&e),
+                                ))
                             })?;
                         }
                         continue;
@@ -1540,23 +1570,20 @@ fn expand_load<P: ProcessManager>(
     if stack.iter().any(|p| p == &resolved) {
         let mut chain: Vec<String> = stack.iter().map(|p| p.display()).collect();
         chain.push(key);
-        bail!("IMPORT cycle detected: {}", chain.join(" -> "));
+        return Err(anyhow::Error::new(import_diag::import_cycle(&chain)));
     }
     if stack.len() >= MAX_IMPORT_DEPTH {
-        bail!(
-            "IMPORT depth limit exceeded ({}): `{}`",
+        return Err(anyhow::Error::new(import_diag::import_depth_limit(
             MAX_IMPORT_DEPTH,
-            path
-        );
+            path,
+        )));
     }
     // The file must already exist: expansion is the analysis pass,
     // and analysis needs bytes. Probing through the run filesystem so
     // memory-backed test filesystems answer from their own state, not
     // the host disk.
     if state.fs.entry_kind(&resolved).is_err() {
-        bail!(
-            "IMPORT `{path}` not found: the file must exist when the run starts (generated imports are not supported)"
-        );
+        return Err(anyhow::Error::new(import_diag::import_not_found(path)));
     }
     let LoadedFile {
         resolved,
@@ -1614,14 +1641,13 @@ fn load_file<P: ProcessManager>(
     if stack.iter().any(|p| p == &resolved) {
         let mut chain: Vec<String> = stack.iter().map(|p| p.display()).collect();
         chain.push(key.clone());
-        bail!("IMPORT cycle detected: {}", chain.join(" -> "));
+        return Err(anyhow::Error::new(import_diag::import_cycle(&chain)));
     }
     if stack.len() >= MAX_IMPORT_DEPTH {
-        bail!(
-            "IMPORT depth limit exceeded ({}): `{}`",
+        return Err(anyhow::Error::new(import_diag::import_depth_limit(
             MAX_IMPORT_DEPTH,
-            path
-        );
+            path,
+        )));
     }
     if let Some(record) = state.modules.get(&key) {
         return Ok(LoadedFile {
@@ -1631,9 +1657,10 @@ fn load_file<P: ProcessManager>(
         });
     }
     let bytes = read_import_bytes(state.fs.as_ref(), &resolved)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` cannot be read: {e}"))?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|e| anyhow::anyhow!("IMPORT `{path}` is not valid UTF-8: {e}"))?;
+        .map_err(|e| anyhow::Error::new(import_diag::import_cannot_read(path, &e)))?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| {
+        anyhow::Error::new(import_diag::import_bad_utf8(path, &anyhow::Error::new(e)))
+    })?;
     let table = state.module_table.clone();
     let mut reserved = super::native::builtin_function_names();
     reserved.extend(table.reserved_base_names());
@@ -1643,7 +1670,12 @@ fn load_file<P: ProcessManager>(
         reserved,
         table,
     )
-    .map_err(|e| anyhow::anyhow!("IMPORT `{path}` failed to parse: {e}"))?;
+    .map_err(|e| {
+        anyhow::Error::new(import_diag::import_parse_failed(
+            path,
+            &anyhow::Error::new(e),
+        ))
+    })?;
     state.modules.insert(
         key,
         super::state::ModuleRecord {
@@ -2009,8 +2041,7 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
     name: &str,
 ) -> Result<Value> {
     use super::native::{
-        ConstHolders, ambiguous_alias_message, chase_const_forward, const_holder_files,
-        missing_const_hint,
+        ConstHolders, chase_const_forward, const_holder_files, missing_const_hint,
     };
     let qualified = oxdock_parser::qualify(alias, name);
     let targets = active_unit_alias_targets(state);
@@ -2019,30 +2050,36 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
     let holders = match const_holder_files(state, &targets, alias, name) {
         ConstHolders::Found(holders) => holders,
         ConstHolders::NoAlias => {
-            bail!("unknown CONST `{qualified}`: no import alias `{alias}` exports that name");
+            return Err(anyhow::Error::new(import_diag::import_const_no_alias(
+                &qualified, alias,
+            )));
         }
         ConstHolders::Ambiguous { alias, base, files } => {
-            bail!(
-                "{}",
-                ambiguous_alias_message(&alias, &base, &files).replacen("function", "CONST", 1)
-            );
+            return Err(anyhow::Error::new(import_diag::import_const_ambiguous(
+                &alias, &base, &files,
+            )));
         }
     };
     if holders.len() > 1 {
         let files: std::collections::HashSet<String> = holders.into_iter().collect();
-        bail!(
-            "{}",
-            ambiguous_alias_message(alias, name, &files).replacen("function", "CONST", 1)
-        );
+        return Err(anyhow::Error::new(import_diag::import_const_ambiguous(
+            alias, name, &files,
+        )));
     }
     let Some(file) = holders.into_iter().next() else {
         // Hint owned by `missing_const_hint`: unexported CONST or
         // private LET under the queried alias only.
         let hint = missing_const_hint(state, &targets, alias, name);
         match hint {
-            Some(hint) => bail!("unknown CONST `{qualified}`: {hint}"),
+            Some(hint) => {
+                return Err(anyhow::Error::new(import_diag::import_const_hinted(
+                    &qualified, &hint,
+                )));
+            }
             None => {
-                bail!("unknown CONST `{qualified}`: no import alias `{alias}` exports that name")
+                return Err(anyhow::Error::new(import_diag::import_const_no_alias(
+                    &qualified, alias,
+                )));
             }
         }
     };
@@ -2054,31 +2091,34 @@ pub(crate) fn resolve_const_ref<P: ProcessManager>(
     let mut terminals = chase_const_forward(state, &file, name, &qualified)?;
     if terminals.len() > 1 {
         let files: std::collections::HashSet<String> = terminals.drain(..).collect();
-        bail!(
-            "{}",
-            ambiguous_alias_message(alias, name, &files).replacen("function", "CONST", 1)
-        );
+        return Err(anyhow::Error::new(import_diag::import_const_ambiguous(
+            alias, name, &files,
+        )));
     }
     let Some(terminal) = terminals.into_iter().next() else {
-        bail!("unknown CONST `{qualified}`");
+        return Err(anyhow::Error::new(import_diag::import_const_unknown(
+            &qualified,
+        )));
     };
     let Some(record) = state.modules.get(&terminal) else {
-        bail!("unknown CONST `{qualified}`");
+        return Err(anyhow::Error::new(import_diag::import_const_unknown(
+            &qualified,
+        )));
     };
     let Some(init) = record.init.as_ref() else {
-        bail!(
-            "`{qualified}` cannot be read: the module was harvested but never initialized; import the file"
-        );
+        return Err(anyhow::Error::new(import_diag::import_const_uninitialized(
+            &qualified,
+        )));
     };
     if !init.const_vars.contains(name) {
-        bail!(
-            "`{qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
-        );
+        return Err(anyhow::Error::new(import_diag::import_const_is_let(
+            &qualified,
+        )));
     }
     init.vars
         .get(name)
         .map(|(_, value)| value.clone())
-        .ok_or_else(|| anyhow::anyhow!("unknown CONST `{qualified}`"))
+        .ok_or_else(|| anyhow::Error::new(import_diag::import_const_unknown(&qualified)))
 }
 
 /// Record one executed import under the importing unit: alias to its
