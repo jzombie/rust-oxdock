@@ -424,6 +424,114 @@ pub fn symlink_requires_target() -> Diagnostic {
     )
 }
 
+/// `MKDIR` without a path.
+pub fn mkdir_requires_path() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.mkdir_requires_path",
+        "MKDIR requires a path".to_string(),
+        Diagnostic::make_fields(&[("command", "MKDIR")]),
+    )
+}
+
+/// `INSTALL` without a source positional.
+pub fn install_requires_source() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.install_requires_source",
+        "INSTALL requires a source".to_string(),
+        Diagnostic::make_fields(&[("command", "INSTALL")]),
+    )
+}
+
+/// `INSTALL` without a destination positional.
+pub fn install_requires_destination() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.install_requires_destination",
+        "INSTALL requires a destination".to_string(),
+        Diagnostic::make_fields(&[("command", "INSTALL")]),
+    )
+}
+
+/// `SET_EXECUTABLE` without a path.
+pub fn set_executable_requires_path() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.set_executable_requires_path",
+        "SET_EXECUTABLE requires a path".to_string(),
+        Diagnostic::make_fields(&[("command", "SET_EXECUTABLE")]),
+    )
+}
+
+/// `ARCHIVE` without a source positional.
+pub fn archive_requires_source() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.archive_requires_source",
+        "ARCHIVE requires a source".to_string(),
+        Diagnostic::make_fields(&[("command", "ARCHIVE")]),
+    )
+}
+
+/// `ARCHIVE` without a destination positional.
+pub fn archive_requires_destination() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.archive_requires_destination",
+        "ARCHIVE requires a destination".to_string(),
+        Diagnostic::make_fields(&[("command", "ARCHIVE")]),
+    )
+}
+
+/// `UNARCHIVE` without an archive positional.
+pub fn unarchive_requires_archive() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.unarchive_requires_archive",
+        "UNARCHIVE requires an archive".to_string(),
+        Diagnostic::make_fields(&[("command", "UNARCHIVE")]),
+    )
+}
+
+/// `UNARCHIVE` without a destination positional.
+pub fn unarchive_requires_destination() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.unarchive_requires_destination",
+        "UNARCHIVE requires a destination".to_string(),
+        Diagnostic::make_fields(&[("command", "UNARCHIVE")]),
+    )
+}
+
+/// `WRITE` without a path.
+pub fn write_requires_path() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.write_requires_path",
+        "WRITE requires a path".to_string(),
+        Diagnostic::make_fields(&[("command", "WRITE")]),
+    )
+}
+
+/// `APPEND` without a path.
+pub fn append_requires_path() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.append_requires_path",
+        "APPEND requires a path".to_string(),
+        Diagnostic::make_fields(&[("command", "APPEND")]),
+    )
+}
+
+/// `APPEND_LINE` without a path.
+pub fn append_line_requires_path() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.append_line_requires_path",
+        "APPEND_LINE requires a path".to_string(),
+        Diagnostic::make_fields(&[("command", "APPEND_LINE")]),
+    )
+}
+
+/// `REMOVE` without a path.
+pub fn remove_requires_path() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.remove_requires_path",
+        "REMOVE requires a path".to_string(),
+        Diagnostic::make_fields(&[("command", "REMOVE")]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +594,18 @@ mod tests {
             copy_git_requires_destination().key(),
             symlink_requires_source().key(),
             symlink_requires_target().key(),
+            mkdir_requires_path().key(),
+            install_requires_source().key(),
+            install_requires_destination().key(),
+            set_executable_requires_path().key(),
+            archive_requires_source().key(),
+            archive_requires_destination().key(),
+            unarchive_requires_archive().key(),
+            unarchive_requires_destination().key(),
+            write_requires_path().key(),
+            append_requires_path().key(),
+            append_line_requires_path().key(),
+            remove_requires_path().key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -561,6 +681,40 @@ mod tests {
         );
         assert_eq!(symlink_requires_source().message(), "SYMLINK requires a source");
         assert_eq!(symlink_requires_target().message(), "SYMLINK requires a target");
+    }
+
+    #[test]
+    fn fs_path_messages_keep_legacy_wording() {
+        assert_eq!(mkdir_requires_path().message(), "MKDIR requires a path");
+        assert_eq!(install_requires_source().message(), "INSTALL requires a source");
+        assert_eq!(
+            install_requires_destination().message(),
+            "INSTALL requires a destination"
+        );
+        assert_eq!(
+            set_executable_requires_path().message(),
+            "SET_EXECUTABLE requires a path"
+        );
+        assert_eq!(archive_requires_source().message(), "ARCHIVE requires a source");
+        assert_eq!(
+            archive_requires_destination().message(),
+            "ARCHIVE requires a destination"
+        );
+        assert_eq!(
+            unarchive_requires_archive().message(),
+            "UNARCHIVE requires an archive"
+        );
+        assert_eq!(
+            unarchive_requires_destination().message(),
+            "UNARCHIVE requires a destination"
+        );
+        assert_eq!(write_requires_path().message(), "WRITE requires a path");
+        assert_eq!(append_requires_path().message(), "APPEND requires a path");
+        assert_eq!(
+            append_line_requires_path().message(),
+            "APPEND_LINE requires a path"
+        );
+        assert_eq!(remove_requires_path().message(), "REMOVE requires a path");
     }
 
     #[test]

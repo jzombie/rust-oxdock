@@ -144,7 +144,10 @@ directives.
    constructors (wording owned by constructors, no prose at call
    sites); `unknown_workspace_source` is shared by COPY and SYMLINK
    (same failure mode, one key) and records the invoking command.
-   Still open: the rest of
+   Filesystem group done (2026-11-24): MKDIR/INSTALL/SET_EXECUTABLE/
+   ARCHIVE/UNARCHIVE/WRITE/APPEND/APPEND_LINE/REMOVE path-missing
+   lowers plus RUN empty-argv (reuses `needs_value`, 13 sites) through
+   eleven more parameterless constructors. Still open: the rest of
    the `commands.rs` bulk
    (~90 `ParseError::validation/structural` sites) goes per-command,
    plus `parser.rs` rewrap (`lower_to_diagnostic` mapping), `lib.rs`

@@ -1752,7 +1752,13 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| match args.as_slice() {
             [Arg::Expr(Expr::List(elems))] if elems.is_empty() => {
-                Err(ParseError::validation(KEYWORD_RUN, "RUN requires at least one argument".to_string(), &SpanContext::line_only(0)))
+                Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_RUN.to_string(),
+                    },
+                    dsl_diag::needs_value(KEYWORD_RUN),
+                    &SpanContext::line_only(0),
+                ))
             }
             [Arg::Expr(Expr::List(elems))] => Ok(StepKind::RunExec {
                 argv: elems.iter().cloned().map(Arg::Expr).collect(),
@@ -1980,7 +1986,11 @@ declare_commands! {
             LET $t: STRING = PATH_TYPE("deeply/nested/tree")
             ASSERT_EQ $t "dir"
         "#} } ],
-        lower: |_flags, args| Ok(StepKind::Mkdir(args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_MKDIR, "MKDIR requires a path".to_string(), &SpanContext::line_only(0)))?)),
+        lower: |_flags, args| Ok(StepKind::Mkdir(args.into_iter().next().ok_or_else(|| ParseError::from_diagnostic(
+            ParseErrorKind::Validation { command: KEYWORD_MKDIR.to_string() },
+            dsl_diag::mkdir_requires_path(),
+            &SpanContext::line_only(0),
+        ))?)),
     ],
 
     Install => [
@@ -2006,8 +2016,16 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_INSTALL, "INSTALL requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_INSTALL, "INSTALL requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_INSTALL.to_string() },
+                dsl_diag::install_requires_source(),
+                &SpanContext::line_only(0),
+            ))?;
+            let to = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_INSTALL.to_string() },
+                dsl_diag::install_requires_destination(),
+                &SpanContext::line_only(0),
+            ))?;
             Ok(StepKind::Install { from, to })
         },
     ],
@@ -2030,7 +2048,11 @@ declare_commands! {
             LET $t: STRING = PATH_TYPE("tool.sh")
             ASSERT_EQ $t "file"
         "#} } ],
-        lower: |_flags, args| Ok(StepKind::SetExecutable { path: args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_SET_EXECUTABLE, "SET_EXECUTABLE requires a path".to_string(), &SpanContext::line_only(0)))? }),
+        lower: |_flags, args| Ok(StepKind::SetExecutable { path: args.into_iter().next().ok_or_else(|| ParseError::from_diagnostic(
+            ParseErrorKind::Validation { command: KEYWORD_SET_EXECUTABLE.to_string() },
+            dsl_diag::set_executable_requires_path(),
+            &SpanContext::line_only(0),
+        ))? }),
     ],
 
     Archive => [
@@ -2088,8 +2110,16 @@ declare_commands! {
         lower: |flags, args| {
             let raw = flags.iter().any(|(k, _)| k == "raw");
             let mut it = args.into_iter();
-            let src = it.next().ok_or_else(|| ParseError::validation(KEYWORD_ARCHIVE, "ARCHIVE requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let dst = it.next().ok_or_else(|| ParseError::validation(KEYWORD_ARCHIVE, "ARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let src = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_ARCHIVE.to_string() },
+                dsl_diag::archive_requires_source(),
+                &SpanContext::line_only(0),
+            ))?;
+            let dst = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_ARCHIVE.to_string() },
+                dsl_diag::archive_requires_destination(),
+                &SpanContext::line_only(0),
+            ))?;
             Ok(StepKind::Archive { src, dst, raw })
         },
     ],
@@ -2142,8 +2172,16 @@ declare_commands! {
         "#} } ],
         lower: |flags, args| {
             let mut it = args.into_iter();
-            let src = it.next().ok_or_else(|| ParseError::validation(KEYWORD_UNARCHIVE, "UNARCHIVE requires an archive".to_string(), &SpanContext::line_only(0)))?;
-            let dst = it.next().ok_or_else(|| ParseError::validation(KEYWORD_UNARCHIVE, "UNARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let src = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_UNARCHIVE.to_string() },
+                dsl_diag::unarchive_requires_archive(),
+                &SpanContext::line_only(0),
+            ))?;
+            let dst = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_UNARCHIVE.to_string() },
+                dsl_diag::unarchive_requires_destination(),
+                &SpanContext::line_only(0),
+            ))?;
             let max_bytes = flags
                 .into_iter()
                 .find_map(|(k, v)| (k == "max_bytes").then_some(v));
@@ -2300,7 +2338,11 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| ParseError::validation(KEYWORD_WRITE, "WRITE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_WRITE.to_string() },
+                dsl_diag::write_requires_path(),
+                &SpanContext::line_only(0),
+            ))?;
             let remaining: Vec<Arg> = it.collect();
             let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, KEYWORD_WRITE)?) };
             Ok(StepKind::Write { path, contents })
@@ -2330,7 +2372,11 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| ParseError::validation(KEYWORD_APPEND, "APPEND requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_APPEND.to_string() },
+                dsl_diag::append_requires_path(),
+                &SpanContext::line_only(0),
+            ))?;
             let remaining: Vec<Arg> = it.collect();
             let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, KEYWORD_APPEND)?) };
             Ok(StepKind::Append { path, contents })
@@ -2360,7 +2406,11 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| ParseError::validation(KEYWORD_APPEND_LINE, "APPEND_LINE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = it.next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_APPEND_LINE.to_string() },
+                dsl_diag::append_line_requires_path(),
+                &SpanContext::line_only(0),
+            ))?;
             let remaining: Vec<Arg> = it.collect();
             let contents = join_value(remaining, KEYWORD_APPEND_LINE)?;
             Ok(StepKind::AppendLine { path, contents })
@@ -2393,7 +2443,11 @@ declare_commands! {
         "#} } ],
         lower: |flags, args| {
             let recursive = flags.iter().any(|(k, _)| k == "recursive");
-            let path = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_REMOVE, "REMOVE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = args.into_iter().next().ok_or_else(|| ParseError::from_diagnostic(
+                ParseErrorKind::Validation { command: KEYWORD_REMOVE.to_string() },
+                dsl_diag::remove_requires_path(),
+                &SpanContext::line_only(0),
+            ))?;
             Ok(StepKind::Remove { path, recursive })
         },
     ],
