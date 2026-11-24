@@ -189,7 +189,10 @@ wording instead of preserving old strings.
    `dsl.validation.*` constructors. ASSERT_EQ/NE equality group done
    (2026-11-24): shared `lower_equality_args` (3 sites) through three
    `dsl.validation.assert_equality_*` constructors taking the invoking
-   command (same failure mode, one key). Still open: the rest of
+   command (same failure mode, one key). UNARCHIVE/EXPAND leftovers
+   done (2026-11-24): --max-bytes passthrough through new
+   `dsl.validation.unarchive_bad_max_bytes`, EXPAND split/extra-path
+   through existing constructors (3 sites). Still open: the rest of
    the `commands.rs` bulk
    (~90 `ParseError::validation/structural` sites) goes per-command,
    plus `parser.rs` rewrap (`lower_to_diagnostic` mapping), `lib.rs`

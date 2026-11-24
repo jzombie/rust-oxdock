@@ -496,6 +496,17 @@ pub fn unarchive_requires_destination() -> Diagnostic {
     )
 }
 
+/// `UNARCHIVE --max-bytes` with an unparseable byte count. Takes the
+/// underlying failure; `{reason:#}` formatting lives here.
+pub fn unarchive_bad_max_bytes(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.validation.unarchive_bad_max_bytes",
+        format!("UNARCHIVE --max-bytes {reason_text}"),
+        Diagnostic::make_fields(&[("command", "UNARCHIVE"), ("reason", &reason_text)]),
+    )
+}
+
 /// `WRITE` without a path.
 pub fn write_requires_path() -> Diagnostic {
     Diagnostic::new(
@@ -768,6 +779,7 @@ mod tests {
             archive_requires_destination().key(),
             unarchive_requires_archive().key(),
             unarchive_requires_destination().key(),
+            unarchive_bad_max_bytes(&anyhow::anyhow!("bad count")).key(),
             write_requires_path().key(),
             append_requires_path().key(),
             append_line_requires_path().key(),
@@ -890,6 +902,11 @@ mod tests {
         assert_eq!(
             unarchive_requires_destination().message(),
             "UNARCHIVE requires a destination"
+        );
+        let inner = anyhow::anyhow!("bad count");
+        assert_eq!(
+            unarchive_bad_max_bytes(&inner).message(),
+            "UNARCHIVE --max-bytes bad count"
         );
         assert_eq!(write_requires_path().message(), "WRITE requires a path");
         assert_eq!(append_requires_path().message(), "APPEND requires a path");

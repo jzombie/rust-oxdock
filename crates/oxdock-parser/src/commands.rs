@@ -2198,9 +2198,11 @@ declare_commands! {
                 && !text.contains("{{")
                 && let Err(e) = crate::command::parse_byte_count(text)
             {
-                return Err(ParseError::validation(
-                    "UNARCHIVE",
-                    format!("UNARCHIVE --max-bytes {e:#}"),
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: "UNARCHIVE".to_string(),
+                    },
+                    dsl_diag::unarchive_bad_max_bytes(&e),
                     &SpanContext::line_only(0),
                 ));
             }
@@ -2654,10 +2656,26 @@ declare_commands! {
             let mut overrides = Vec::new();
             for arg in args {
                 let text = arg.as_str();
-                if let Some((key, value)) = split_assignment(text).map_err(|e| ParseError::validation(KEYWORD_EXPAND, e.to_string(), &SpanContext::line_only(0)))? {
+                if let Some((key, value)) = split_assignment(text).map_err(|e| {
+                    ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_EXPAND.to_string(),
+                        },
+                        dsl_diag::expand_assignment_error(&e),
+                        &SpanContext::line_only(0),
+                    )
+                })? {
                     overrides.push((key, value));
                 } else if path.is_none() { path = Some(arg); }
-                else { return Err(ParseError::validation(KEYWORD_EXPAND, "EXPAND accepts at most one path".to_string(), &SpanContext::line_only(0))) }
+                else {
+                    return Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_EXPAND.to_string(),
+                        },
+                        dsl_diag::expand_extra_path(),
+                        &SpanContext::line_only(0),
+                    ));
+                }
             }
             Ok(StepKind::Expand { path, overrides })
         },
