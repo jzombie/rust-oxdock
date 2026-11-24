@@ -119,12 +119,25 @@ directives.
    joining/quoting live in constructors, no `format!` at call sites.
    Left for Phase C: `check_options` unknown-option, `check_tag_known`
    (unregistered/VOID), `validate_function_type_tags`.
-3. `parser.rs`: audit `ParseError::validation/structural/invalid_syntax`
-   call sites in `commands.rs`, `command.rs`, `strip_flags.rs`,
-   `lib.rs`. Route each through the owning `Diagnostic` constructor
-   plus `with_span` / `with_source`. Keep `ParseError` as the span
-   carrier during migration, with `Diagnostic` as payload (or
-   `From<Diagnostic> for ParseError`).
+3. `parser.rs`: bridge landed (2026-11-24). `ParseError` carries an
+   optional owning [`Diagnostic`] payload via
+   `ParseError::from_diagnostic(kind, diag, ctx)` plus
+   `diagnostic()` / `key()` accessors; `Display` unchanged so legacy
+   assertions keep passing. `diagnostics.rs` owns five
+   `dsl.validation.*` constructors (flag_missing_value, unknown_flag,
+   too_many_positionals, missing_argument, arg_type_mismatch) with a
+   distinct-key test and a legacy-prefix test. Migrated: all of
+   `strip_flags.rs` (2 sites) and `command.rs`
+   (`validate_positionals_against_meta` + `check_one`, 4 sites); no
+   `format!` at those call sites. `arg_type_mismatch` takes
+   `&anyhow::Error` and renders `{reason:#}` inside the constructor so
+   the full chain survives. Span is synced both ways: `from_diagnostic`
+   attaches the `ctx` span to the embedded diagnostic, and
+   `with_span` enrichment propagates to it (only while it has none),
+   each pinned by a test. Still open: the `commands.rs` bulk
+   (~90 `ParseError::validation/structural` sites) goes per-command,
+   plus `parser.rs` rewrap (`lower_to_diagnostic` mapping), `lib.rs`
+   mock, and `structural`/`invalid_syntax` constructors.
 4. Tests per diagnostic: constructor key test plus doc fence each for
    second-`ALIAS`-on-field, alias-equals-own-field,
    alias-clashes-across-fields, plus bounded-remainder and

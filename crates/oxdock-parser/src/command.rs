@@ -1,5 +1,6 @@
 use crate::ast::{Arg, Expr, StepKind};
-use crate::error::{ParseError, SpanContext};
+use crate::diagnostics as dsl_diag;
+use crate::error::{ParseError, ParseErrorKind, SpanContext};
 use anyhow::{Result, anyhow, bail};
 
 /// Metadata for a single command argument.
@@ -164,13 +165,11 @@ pub fn validate_positionals_against_meta(
         .is_some_and(|s| matches!(s.arg_type, ArgType::Rest(_)));
 
     if !has_rest && args.len() > specs.len() {
-        return Err(ParseError::validation(
-            cmd_name,
-            format!(
-                "invalid syntax for command {cmd_name}: expects at most {} positional argument(s), got {}",
-                specs.len(),
-                args.len()
-            ),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: cmd_name.to_string(),
+            },
+            dsl_diag::too_many_positionals(cmd_name, specs.len(), args.len()),
             &SpanContext::line_only(0),
         ));
     }
@@ -181,12 +180,11 @@ pub fn validate_positionals_against_meta(
             // the inner type, not just the first.
             let tail = args.get(spec.index..).unwrap_or(&[]);
             if tail.is_empty() && spec.required {
-                return Err(ParseError::validation(
-                    cmd_name,
-                    format!(
-                        "invalid syntax for command {cmd_name}: requires argument `{}`",
-                        spec.name
-                    ),
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: cmd_name.to_string(),
+                    },
+                    dsl_diag::missing_argument(cmd_name, spec.name),
                     &SpanContext::line_only(0),
                 ));
             }
@@ -198,12 +196,11 @@ pub fn validate_positionals_against_meta(
         match args.get(spec.index) {
             Some(arg) => check_one(cmd_name, spec, &spec.arg_type, arg)?,
             None if spec.required => {
-                return Err(ParseError::validation(
-                    cmd_name,
-                    format!(
-                        "invalid syntax for command {cmd_name}: requires argument `{}`",
-                        spec.name
-                    ),
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: cmd_name.to_string(),
+                    },
+                    dsl_diag::missing_argument(cmd_name, spec.name),
                     &SpanContext::line_only(0),
                 ));
             }
@@ -221,13 +218,11 @@ fn check_one(
 ) -> Result<(), ParseError> {
     match arg_type.check_arg(arg) {
         Ok(_) => Ok(()),
-        Err(e) => Err(ParseError::validation(
-            cmd_name,
-            format!(
-                "invalid syntax for command {cmd_name}: argument `{}` got {} — {e:#}",
-                spec.name,
-                arg.render()
-            ),
+        Err(e) => Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: cmd_name.to_string(),
+            },
+            dsl_diag::arg_type_mismatch(cmd_name, spec.name, &arg.render(), &e),
             &SpanContext::line_only(0),
         )),
     }

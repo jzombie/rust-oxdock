@@ -150,6 +150,78 @@ pub fn spelling_invalid_int(got: &str) -> Diagnostic {
     )
 }
 
+/// Flag that requires a value but got none. Preserves the legacy
+/// `invalid syntax for command ...` prefix so `expect_error`
+/// assertions keep matching.
+pub fn flag_missing_value(command: &str, flag: &str) -> Diagnostic {
+    let message = format!("invalid syntax for command {command}: {flag} requires a value");
+    Diagnostic::new(
+        "dsl.validation.flag_missing_value",
+        message,
+        Diagnostic::make_fields(&[("command", command), ("flag", flag)]),
+    )
+}
+
+/// Unknown flag for a known command.
+pub fn unknown_flag(command: &str, flag: &str) -> Diagnostic {
+    let message = format!("invalid syntax for command {command}: unknown flag {flag}");
+    Diagnostic::new(
+        "dsl.validation.unknown_flag",
+        message,
+        Diagnostic::make_fields(&[("command", command), ("flag", flag)]),
+    )
+}
+
+/// More positionals than the command spec allows.
+pub fn too_many_positionals(command: &str, max: usize, got: usize) -> Diagnostic {
+    let message = format!(
+        "invalid syntax for command {command}: expects at most {max} positional argument(s), got {got}"
+    );
+    Diagnostic::new(
+        "dsl.validation.too_many_positionals",
+        message,
+        Diagnostic::make_fields(&[
+            ("command", command),
+            ("max", &max.to_string()),
+            ("got", &got.to_string()),
+        ]),
+    )
+}
+
+/// Missing required positional argument.
+pub fn missing_argument(command: &str, name: &str) -> Diagnostic {
+    let message = format!("invalid syntax for command {command}: requires argument `{name}`");
+    Diagnostic::new(
+        "dsl.validation.missing_argument",
+        message,
+        Diagnostic::make_fields(&[("command", command), ("argument", name)]),
+    )
+}
+
+/// Statically-known type violation for one positional. Takes the
+/// underlying failure; `{reason:#}` (full chain) formatting lives
+/// here so call sites stay `format!`-free.
+pub fn arg_type_mismatch(
+    command: &str,
+    name: &str,
+    got: &str,
+    reason: &anyhow::Error,
+) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message =
+        format!("invalid syntax for command {command}: argument `{name}` got {got} — {reason_text}");
+    Diagnostic::new(
+        "dsl.validation.arg_type_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("command", command),
+            ("argument", name),
+            ("got", got),
+            ("reason", &reason_text),
+        ]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,10 +258,35 @@ mod tests {
             alias_needs_name().key(),
             alias_name_lowercase("B", "B").key(),
             alias_duplicate_on_field("h", "a", "b").key(),
+            flag_missing_value("CMD", "--flag").key(),
+            unknown_flag("CMD", "--nope").key(),
+            too_many_positionals("CMD", 1, 2).key(),
+            missing_argument("CMD", "path").key(),
+            arg_type_mismatch("CMD", "path", "3", &anyhow::anyhow!("expected PATH")).key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
             assert!(seen.insert(k), "duplicate key {k}");
         }
+    }
+
+    #[test]
+    fn validation_messages_keep_legacy_prefix() {
+        let d = unknown_flag("WRITE", "--nope");
+        assert_eq!(d.key(), "dsl.validation.unknown_flag");
+        assert!(d.message().contains("invalid syntax for command WRITE"));
+        assert!(d.message().contains("unknown flag --nope"));
+        let d = missing_argument("WRITE", "path");
+        assert!(d.message().contains("requires argument `path`"));
+        let d = too_many_positionals("CMD", 1, 3);
+        assert!(d.message().contains("expects at most 1 positional argument(s), got 3"));
+    }
+
+    #[test]
+    fn arg_mismatch_renders_full_chain() {
+        let err = anyhow::anyhow!("expected PATH").context("static check failed");
+        let d = arg_type_mismatch("CMD", "path", "3", &err);
+        assert!(d.message().contains("expected PATH"), "{}", d.message());
+        assert!(d.message().contains("static check failed"), "{}", d.message());
     }
 }

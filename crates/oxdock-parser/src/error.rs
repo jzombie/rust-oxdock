@@ -11,6 +11,8 @@
 
 use std::fmt;
 
+use oxdock_diagnostics::{Diagnostic, Span};
+
 /// Backwards compatible result alias for parser entrypoints.
 /// Public functions return `ParseResult` directly instead of erasing
 /// into `anyhow::Error`, so downstream crates match statically.
@@ -145,8 +147,7 @@ impl<'a> SpanContext<'a> {
 /// Diagnostic detail lives behind a `Box` so `ParseResult` stays small
 /// in `Result` returns (cold path allocation only).
 #[derive(Debug, Clone)]
-pub struct ParseError {
-    kind: ParseErrorKind,
+pub struct ParseError {    kind: ParseErrorKind,
     line: usize,
     detail: Box<ErrorDetail>,
 }
@@ -164,6 +165,26 @@ struct ErrorDetail {
     /// Legacy message body. `Display` appends the location block,
     /// so existing `expect_error_contains` assertions keep passing.
     message: String,
+    /// Owning keyed diagnostic, when this error was built through
+    /// [`ParseError::from_diagnostic`]. Carries the stable key and
+    /// structured fields; `message` mirrors its rendered text so
+    /// `Display` output is unchanged during migration.
+    diagnostic: Option<Diagnostic>,
+}
+
+/// Build the transport [`Span`] for a [`SpanContext`]. Returns `None`
+/// when the line is unknown (`0`), so direct `lower_command` errors
+/// stay spanless until [`ParseError::with_span`] enrichment.
+fn span_from_ctx(ctx: &SpanContext) -> Option<Span> {
+    if ctx.line == 0 {
+        return None;
+    }
+    match (ctx.col_start, ctx.col_end, ctx.source_line.clone()) {
+        (Some(start), Some(end), Some(line_text)) => {
+            Some(Span::full(ctx.line, start, end, line_text))
+        }
+        _ => Some(Span::line_only(ctx.line)),
+    }
 }
 
 impl ParseError {
@@ -188,6 +209,7 @@ impl ParseError {
                 expected,
                 hint,
                 message,
+                diagnostic: None,
             }),
         }
     }
@@ -284,10 +306,45 @@ impl ParseError {
         )
     }
 
+    /// Build from an owning keyed [`Diagnostic`]. The diagnostic's
+    /// rendered message becomes the legacy body (so `Display` output
+    /// is unchanged) and its hint is forwarded when the diagnostic
+    /// carries one. The `ctx` span is synced onto both the error and
+    /// the embedded diagnostic, so `err.diagnostic().span()` matches
+    /// the error's span; later [`ParseError::with_span`] enrichment
+    /// keeps them in sync the same way.
+    pub fn from_diagnostic(
+        kind: ParseErrorKind,
+        diagnostic: Diagnostic,
+        ctx: &SpanContext,
+    ) -> Self {
+        let message = diagnostic.message().to_string();
+        let hint = diagnostic.hint().map(str::to_string);
+        let diagnostic = match span_from_ctx(ctx) {
+            Some(span) => diagnostic.with_span(span),
+            None => diagnostic,
+        };
+        let mut err = Self::new(kind, ctx.line, ctx, None, Vec::new(), hint, message);
+        err.detail.diagnostic = Some(diagnostic);
+        err
+    }
+
+    /// Owning keyed diagnostic, when built via [`ParseError::from_diagnostic`].
+    pub fn diagnostic(&self) -> Option<&Diagnostic> {
+        self.detail.diagnostic.as_ref()
+    }
+
+    /// Stable dotted key of the owning diagnostic, when present.
+    pub fn key(&self) -> Option<&'static str> {
+        self.detail.diagnostic.as_ref().map(Diagnostic::key)
+    }
+
     /// Enrich an error produced without span context (e.g. from a
     /// direct `lower_command` call) with the caller's location.
     /// Existing span fields are only overwritten when the current
-    /// value is `None`, so lexer spans are never clobbered.
+    /// value is `None`, so lexer spans are never clobbered. The
+    /// embedded diagnostic (when present) is synced the same way:
+    /// a span is attached only while it has none.
     pub fn with_span(mut self, ctx: &SpanContext) -> Self {
         if self.line == 0 {
             self.line = ctx.line;
@@ -304,6 +361,15 @@ impl ParseError {
         }
         if detail.step_index.is_none() {
             detail.step_index = ctx.step_index;
+        }
+        if detail
+            .diagnostic
+            .as_ref()
+            .is_some_and(|d| d.span().is_none())
+            && let Some(span) = span_from_ctx(ctx)
+            && let Some(d) = detail.diagnostic.take()
+        {
+            detail.diagnostic = Some(d.with_span(span));
         }
         self
     }
@@ -395,3 +461,46 @@ impl fmt::Display for ParseError {
 }
 
 impl std::error::Error for ParseError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_diagnostic_syncs_span_onto_both() {
+        let ctx = SpanContext::full(3, 2, 5, "WRITE $x".to_string());
+        let diag = crate::diagnostics::missing_argument("WRITE", "path");
+        let err = ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: "WRITE".to_string(),
+            },
+            diag,
+            &ctx,
+        );
+        assert_eq!(err.line(), 3);
+        let span = err.diagnostic().expect("payload").span().expect("span synced");
+        assert_eq!(span.line, 3);
+        assert_eq!(span.col_start, Some(2));
+        assert_eq!(span.col_end, Some(5));
+        assert_eq!(span.source_line.as_deref(), Some("WRITE $x"));
+    }
+
+    #[test]
+    fn with_span_enrichment_reaches_embedded_diagnostic() {
+        let diag = crate::diagnostics::unknown_flag("WRITE", "--nope");
+        let err = ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: "WRITE".to_string(),
+            },
+            diag,
+            &SpanContext::line_only(0),
+        );
+        assert!(err.diagnostic().expect("payload").span().is_none());
+        let ctx = SpanContext::full(7, 1, 4, "WRITE --nope".to_string());
+        let err = err.with_span(&ctx);
+        assert_eq!(err.line(), 7);
+        let span = err.diagnostic().expect("payload").span().expect("span synced");
+        assert_eq!(span.line, 7);
+        assert_eq!(span.col_start, Some(1));
+    }
+}

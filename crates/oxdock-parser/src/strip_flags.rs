@@ -1,6 +1,7 @@
 use crate::ast::Arg;
 use crate::command::{CommandMeta, FlagValueType, lower_block_string, strip_surrounding_quotes};
-use crate::error::{ParseError, SpanContext};
+use crate::diagnostics as dsl_diag;
+use crate::error::{ParseError, ParseErrorKind, SpanContext};
 
 /// Result of flag stripping: (extracted_flags, remaining_positional_args).
 pub type StrippedArgs = (Vec<(String, Arg)>, Vec<Arg>);
@@ -60,12 +61,11 @@ pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs, P
                             Arg::String("true".into(), false)
                         } else {
                             iter.next().ok_or_else(|| {
-                                ParseError::validation(
-                                    meta.name,
-                                    format!(
-                                        "invalid syntax for command {}: {} requires a value",
-                                        meta.name, flag_meta.long
-                                    ),
+                                ParseError::from_diagnostic(
+                                    ParseErrorKind::Validation {
+                                        command: meta.name.to_string(),
+                                    },
+                                    dsl_diag::flag_missing_value(meta.name, flag_meta.long),
                                     &SpanContext::line_only(0),
                                 )
                             })?
@@ -73,12 +73,11 @@ pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs, P
                         flags.push((flag_meta.name.to_string(), value));
                     }
                     None => {
-                        return Err(ParseError::validation(
-                            meta.name,
-                            format!(
-                                "invalid syntax for command {}: unknown flag {}",
-                                meta.name, s
-                            ),
+                        return Err(ParseError::from_diagnostic(
+                            ParseErrorKind::Validation {
+                                command: meta.name.to_string(),
+                            },
+                            dsl_diag::unknown_flag(meta.name, s),
                             &SpanContext::line_only(0),
                         ));
                     }
