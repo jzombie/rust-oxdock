@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use oxdock_diagnostics::Span;
+
 pub use crate::commands::{AssertTarget, BindRhs, StepKind};
 use crate::constants::{
     KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS,
@@ -758,6 +760,34 @@ impl PartialEq for Step {
 }
 
 impl Eq for Step {}
+
+impl Step {
+    /// Definition span for this step in the shared transport type.
+    /// Derived from the stamped `line`/`col` provenance (no new data,
+    /// so equality and rendering are untouched): line-only when the
+    /// column is unknown, fully unknown when the line is `0`.
+    pub fn span(&self) -> Span {
+        if self.line == 0 {
+            return Span::default();
+        }
+        if self.col == 0 {
+            return Span::line_only(self.line);
+        }
+        Span::line_col(self.line, self.col)
+    }
+
+    /// Symbol this step defines, with its definition span. Covers
+    /// `TYPE` aliases and `FUNC` definitions only: the go-to-definition
+    /// primitive future symbol tables build on. Returns `None` for
+    /// every other step.
+    pub fn defined_symbol(&self) -> Option<(&str, Span)> {
+        match &self.kind {
+            StepKind::TypeAlias { name, .. } => Some((name.as_str(), self.span())),
+            StepKind::FuncDef { name, .. } => Some((name.as_str(), self.span())),
+            _ => None,
+        }
+    }
+}
 
 impl Expr {
     /// Visit this expression and every descendant, depth first. `Block`
@@ -1650,6 +1680,91 @@ mod tests {
                 meta.name
             );
         }
+    }
+
+    /// Definition spans ride the shared transport type: `TYPE`/`FUNC`
+    /// steps expose their stamped line/col as a [`Span`], and
+    /// `defined_symbol` names the symbol. Everything else defines
+    /// nothing. Unknown positions stay unknown (`line == 0`).
+    #[test]
+    fn definition_spans_cover_type_and_func() {
+        let alias = Step {
+            guard: None,
+            kind: StepKind::TypeAlias {
+                name: "EMP".to_string(),
+                target: "MAP<n: STRING>".to_string(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 3,
+            col: 5,
+        };
+        let (name, span) = alias.defined_symbol().expect("alias defines");
+        assert_eq!(name, "EMP");
+        assert_eq!(span.line, 3);
+        assert_eq!(span.col_start, Some(5));
+
+        let func = Step {
+            guard: None,
+            kind: StepKind::FuncDef {
+                name: "F".to_string(),
+                params: Vec::new(),
+                return_type: "VOID".to_string(),
+                is_async: false,
+                body: Vec::new(),
+                docs: None,
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 7,
+            col: 1,
+        };
+        let (name, span) = func.defined_symbol().expect("func defines");
+        assert_eq!(name, "F");
+        assert_eq!(span.line, 7);
+
+        let plain = Step {
+            guard: None,
+            kind: StepKind::Break,
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 9,
+            col: 1,
+        };
+        assert!(plain.defined_symbol().is_none());
+
+        let unknown = Step {
+            guard: None,
+            kind: StepKind::Break,
+            scope_enter: 0,
+            scope_exit: 0,
+            line: 0,
+            col: 0,
+        };
+        assert_eq!(unknown.span().line, 0);
+    }
+
+    /// End to end: parsed `TYPE`/`FUNC` steps carry definition spans
+    /// from stamping, so future symbol tables read positions off the
+    /// AST instead of re-lexing.
+    #[test]
+    fn parsed_definitions_carry_spans() {
+        let steps = crate::parse_script(
+            indoc::indoc! {r#"
+                TYPE EMP = MAP<n: STRING>
+                FUNC F(): VOID {
+                RETURN
+                }
+            "#},
+            crate::commands::lower_command,
+        )
+        .expect("definitions parse");
+        let mut names: Vec<(&str, usize)> = steps
+            .iter()
+            .filter_map(|s| s.defined_symbol().map(|(n, span)| (n, span.line)))
+            .collect();
+        names.sort();
+        assert_eq!(names, vec![("EMP", 1), ("F", 2)]);
     }
 }
 

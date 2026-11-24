@@ -220,3 +220,9 @@ except shims listed, workspace tests green, no public
   Guard: distinct keys per mode, test pins uniqueness.
 - Public API break: flipping `anyhow::Result` early. Guard: Phase D
   last, `with_source` first.
+- Speculative LSP fields: `Span` gains file ids / byte offsets only
+  when a symbol table needs them. Guard: downstream crates build
+  spans only through `Span` constructors (`line_only` / `line_col` /
+  `full`), never struct literals. `Step::span()` /
+  `defined_symbol()` (TYPE/FUNC, in `ast.rs`) derive from stamped
+  line/col with zero new data; positions stay additive later.

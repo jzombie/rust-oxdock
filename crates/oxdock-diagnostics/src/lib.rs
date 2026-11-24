@@ -86,6 +86,19 @@ impl Span {
             source_line: Some(source_line),
         }
     }
+
+    /// Start position without end column or source text (e.g. token
+    /// head coordinates). Downstream crates construct spans only
+    /// through these constructors, never struct literals, so future
+    /// fields (file ids, byte offsets) stay additive.
+    pub fn line_col(line: usize, col: usize) -> Self {
+        Self {
+            line,
+            col_start: Some(col),
+            col_end: None,
+            source_line: None,
+        }
+    }
 }
 
 /// One user-facing error: stable key, rendered message, structured
@@ -297,10 +310,7 @@ mod tests {
     #[test]
     fn equality_ignores_source_chain() {
         let a = Diagnostic::new("k", "m".to_string(), Diagnostic::make_fields(&[]));
-        let b = a.clone().with_source(Arc::new(io::Error::new(
-            io::ErrorKind::Other,
-            "chain",
-        )));
+        let b = a.clone().with_source(Arc::new(io::Error::other("chain")));
         assert_eq!(a, b);
     }
 }
