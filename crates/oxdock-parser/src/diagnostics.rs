@@ -581,6 +581,89 @@ pub fn prompt_requires_message() -> Diagnostic {
     )
 }
 
+/// `ASSERT_CONTAINS` without a value.
+pub fn assert_contains_requires_value() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.assert_contains_requires_value",
+        "ASSERT_CONTAINS requires a value".to_string(),
+        Diagnostic::make_fields(&[("command", "ASSERT_CONTAINS")]),
+    )
+}
+
+/// `ASSERT_CONTAINS` without a needle.
+pub fn assert_contains_requires_needle() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.assert_contains_requires_needle",
+        "ASSERT_CONTAINS requires a needle".to_string(),
+        Diagnostic::make_fields(&[("command", "ASSERT_CONTAINS")]),
+    )
+}
+
+/// `EXIT` without a code.
+pub fn exit_requires_code() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.exit_requires_code",
+        "EXIT requires a code".to_string(),
+        Diagnostic::make_fields(&[("command", "EXIT")]),
+    )
+}
+
+/// `SLEEP` without a duration.
+pub fn sleep_requires_duration() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.sleep_requires_duration",
+        "SLEEP requires a duration (e.g. SLEEP 500ms)".to_string(),
+        Diagnostic::make_fields(&[("command", "SLEEP")]),
+    )
+}
+
+/// `SLEEP` with more than one argument.
+pub fn sleep_takes_one() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.sleep_takes_one",
+        "SLEEP takes exactly one duration argument".to_string(),
+        Diagnostic::make_fields(&[("command", "SLEEP")]),
+    )
+}
+
+/// `LIST_APPEND` without a LIST variable.
+pub fn list_append_requires_list() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.list_append_requires_list",
+        "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(),
+        Diagnostic::make_fields(&[("command", "LIST_APPEND")]),
+    )
+}
+
+/// `LIST_APPEND` target without a `$` sigil. Takes the rendered
+/// argument; quoting lives here.
+pub fn list_append_requires_sigil(got: &str) -> Diagnostic {
+    let message = format!("LIST_APPEND requires a $variable, found {got:?}");
+    Diagnostic::new(
+        "dsl.validation.list_append_requires_sigil",
+        message,
+        Diagnostic::make_fields(&[("command", "LIST_APPEND"), ("got", got)]),
+    )
+}
+
+/// `LIST_APPEND` without an item.
+pub fn list_append_requires_item() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.list_append_requires_item",
+        "LIST_APPEND requires an item to append (e.g. LIST_APPEND $items $x)".to_string(),
+        Diagnostic::make_fields(&[("command", "LIST_APPEND")]),
+    )
+}
+
+/// `LIST_APPEND` with other than two arguments.
+pub fn list_append_takes_two() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.list_append_takes_two",
+        "LIST_APPEND takes exactly two arguments: LIST_APPEND $list <item>".to_string(),
+        Diagnostic::make_fields(&[("command", "LIST_APPEND")]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,6 +743,15 @@ mod tests {
             prompt_requires_variable().key(),
             prompt_requires_sigil("reply").key(),
             prompt_requires_message().key(),
+            assert_contains_requires_value().key(),
+            assert_contains_requires_needle().key(),
+            exit_requires_code().key(),
+            sleep_requires_duration().key(),
+            sleep_takes_one().key(),
+            list_append_requires_list().key(),
+            list_append_requires_sigil("x").key(),
+            list_append_requires_item().key(),
+            list_append_takes_two().key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -790,6 +882,43 @@ mod tests {
             "PROMPT requires a $variable, found \"reply\""
         );
         assert_eq!(prompt_requires_message().message(), "PROMPT requires a message");
+    }
+
+    #[test]
+    fn assert_exit_sleep_list_append_messages() {
+        assert_eq!(
+            assert_contains_requires_value().message(),
+            "ASSERT_CONTAINS requires a value"
+        );
+        assert_eq!(
+            assert_contains_requires_needle().message(),
+            "ASSERT_CONTAINS requires a needle"
+        );
+        assert_eq!(exit_requires_code().message(), "EXIT requires a code");
+        assert_eq!(
+            sleep_requires_duration().message(),
+            "SLEEP requires a duration (e.g. SLEEP 500ms)"
+        );
+        assert_eq!(
+            sleep_takes_one().message(),
+            "SLEEP takes exactly one duration argument"
+        );
+        assert_eq!(
+            list_append_requires_list().message(),
+            "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)"
+        );
+        assert_eq!(
+            list_append_requires_sigil("x").message(),
+            "LIST_APPEND requires a $variable, found \"x\""
+        );
+        assert_eq!(
+            list_append_requires_item().message(),
+            "LIST_APPEND requires an item to append (e.g. LIST_APPEND $items $x)"
+        );
+        assert_eq!(
+            list_append_takes_two().message(),
+            "LIST_APPEND takes exactly two arguments: LIST_APPEND $list <item>"
+        );
     }
 
     #[test]

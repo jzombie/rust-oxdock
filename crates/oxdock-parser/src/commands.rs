@@ -2785,12 +2785,26 @@ declare_commands! {
         lower: |flags, args| {
             let _ = flags;
             let mut it = args.into_iter();
-            let haystack = lower_assert_target(it.next().ok_or_else(|| ParseError::validation(Command::AssertContains.as_str(), format!("{} requires a value", Command::AssertContains.as_str()), &SpanContext::line_only(0)))?)?;
+            let haystack = lower_assert_target(it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: Command::AssertContains.as_str().to_string(),
+                    },
+                    dsl_diag::assert_contains_requires_value(),
+                    &SpanContext::line_only(0),
+                )
+            })?)?;
             let remaining: Vec<Arg> = it
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
             if remaining.is_empty() {
-                return Err(ParseError::validation(Command::AssertContains.as_str(), format!("{} requires a needle", Command::AssertContains.as_str()), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: Command::AssertContains.as_str().to_string(),
+                    },
+                    dsl_diag::assert_contains_requires_needle(),
+                    &SpanContext::line_only(0),
+                ));
             }
             let needle = join_value(remaining, Command::AssertContains.as_str())?;
             Ok(StepKind::AssertContains { haystack, needle })
@@ -2820,7 +2834,15 @@ declare_commands! {
         lower: |_flags, args| {
             // Static literals were already Int-checked by the central
             // validator; dynamics resolve (and validate) at runtime.
-            let code = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_EXIT, "EXIT requires a code".to_string(), &SpanContext::line_only(0)))?;
+            let code = args.into_iter().next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_EXIT.to_string(),
+                    },
+                    dsl_diag::exit_requires_code(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             Ok(StepKind::Exit(code))
         },
     ],
@@ -2860,9 +2882,21 @@ declare_commands! {
             let mut it = args.into_iter();
             let raw = it
                 .next()
-                .ok_or_else(|| ParseError::validation(KEYWORD_SLEEP, "SLEEP requires a duration (e.g. SLEEP 500ms)".to_string(), &SpanContext::line_only(0)))?;
+                .ok_or_else(|| ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_SLEEP.to_string(),
+                    },
+                    dsl_diag::sleep_requires_duration(),
+                    &SpanContext::line_only(0),
+                ))?;
             if it.next().is_some() {
-                return Err(ParseError::validation(KEYWORD_SLEEP, "SLEEP takes exactly one duration argument".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_SLEEP.to_string(),
+                    },
+                    dsl_diag::sleep_takes_one(),
+                    &SpanContext::line_only(0),
+                ));
             }
             // Static literals were Duration-checked by the central
             // validator; dynamics ($var, templates) resolve at runtime.
@@ -2901,20 +2935,53 @@ declare_commands! {
             let mut it = args.into_iter();
             let raw_list = it
                 .next()
-                .ok_or_else(|| ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
+                .ok_or_else(|| ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_LIST_APPEND.to_string(),
+                    },
+                    dsl_diag::list_append_requires_list(),
+                    &SpanContext::line_only(0),
+                ))?;
             let list = match raw_list {
                 Arg::Expr(Expr::Var { name, .. }) => name,
                 Arg::String(s, _) => s.trim_start_matches('$').to_string(),
-                other => return Err(ParseError::validation(KEYWORD_LIST_APPEND, format!("LIST_APPEND requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+                other => {
+                    let got = other.render();
+                    return Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_LIST_APPEND.to_string(),
+                        },
+                        dsl_diag::list_append_requires_sigil(&got),
+                        &SpanContext::line_only(0),
+                    ));
+                }
             };
             if list.is_empty() {
-                return Err(ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_LIST_APPEND.to_string(),
+                    },
+                    dsl_diag::list_append_requires_list(),
+                    &SpanContext::line_only(0),
+                ));
             }
             let item = it
                 .next()
-                .ok_or_else(|| ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND requires an item to append (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
+                .ok_or_else(|| ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_LIST_APPEND.to_string(),
+                    },
+                    dsl_diag::list_append_requires_item(),
+                    &SpanContext::line_only(0),
+                ))?;
             if it.next().is_some() {
-                return Err(ParseError::validation(KEYWORD_LIST_APPEND, "LIST_APPEND takes exactly two arguments: LIST_APPEND $list <item>".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_LIST_APPEND.to_string(),
+                    },
+                    dsl_diag::list_append_takes_two(),
+                    &SpanContext::line_only(0),
+                ));
             }
             Ok(StepKind::ListAppend { list, item })
         },

@@ -184,7 +184,9 @@ wording instead of preserving old strings.
    through five `dsl.validation.*` constructors; the `found` value
    now renders the argument instead of the internal `Arg` debug
    shape (first canonical improvement: legacy substring assertions
-   still hold). Still open: the rest of
+   still hold). ASSERT/EXIT/SLEEP/LIST_APPEND group done (2026-11-24):
+   value/needle/code/duration/item/arity lowers (9 sites) through nine
+   `dsl.validation.*` constructors. Still open: the rest of
    the `commands.rs` bulk
    (~90 `ParseError::validation/structural` sites) goes per-command,
    plus `parser.rs` rewrap (`lower_to_diagnostic` mapping), `lib.rs`
