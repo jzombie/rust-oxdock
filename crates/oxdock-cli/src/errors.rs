@@ -83,13 +83,15 @@ pub fn usage() -> String {
         .to_string()
 }
 
-/// `--listen`/`-p` without the `net` feature.
-pub fn feature_required(flag: &str) -> anyhow::Error {
-    let message = format!("{flag} requires the `net` feature (rebuild with --features net)");
+/// A flag needing a Cargo feature this build lacks. Takes the flag and
+/// the feature that would provide it; both ride as structured fields.
+pub fn feature_required(flag: &str, feature: &str) -> anyhow::Error {
+    let message =
+        format!("{flag} requires the `{feature}` feature (rebuild with --features {feature})");
     let diag = Diagnostic::new(
         "cli.feature_required",
         message,
-        Diagnostic::make_fields(&[("flag", flag)]),
+        Diagnostic::make_fields(&[("flag", flag), ("feature", feature)]),
     );
     anyhow::Error::new(diag)
 }
@@ -225,20 +227,339 @@ pub fn module_unlinked(module: &str, feature: &str) -> anyhow::Error {
     anyhow::Error::new(diag)
 }
 
+/// Unknown `--long` / `-s` flag. Takes the bare name plus whether it
+/// was long (`--name`) or short (`-n`); the template owns the dashes.
+pub fn unexpected_flag(name: &str, long: bool) -> anyhow::Error {
+    let prefix = if long { "--" } else { "-" };
+    let message = format!("unexpected flag: {prefix}{name}");
+    let diag = Diagnostic::new(
+        "cli.unexpected_flag",
+        message,
+        Diagnostic::make_fields(&[("flag", name)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// `--script` without a value.
+pub fn script_flag_needs_path() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.script_flag_needs_path",
+        "--script requires a path".to_string(),
+        Diagnostic::make_fields(&[("flag", "--script")]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// SCRIPT positional that is a URL, not a workspace path.
+pub fn script_not_local(text: &str) -> anyhow::Error {
+    let message = format!("not a local path: {text:?} (pass a workspace path or `-` for stdin)");
+    let diag = Diagnostic::new(
+        "cli.script_not_local",
+        message,
+        Diagnostic::make_fields(&[("got", text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// OS argument that is not valid UTF-8.
+pub fn arg_not_utf8() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.arg_not_utf8",
+        "argument must be UTF-8".to_string(),
+        Diagnostic::make_fields(&[]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// lexopt plumbing failure. Takes the underlying failure;
+/// `{reason:#}` formatting lives here so call sites stay
+/// `format!`-free.
+pub fn arg_lex_error(reason: &lexopt::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let diag = Diagnostic::new(
+        "cli.arg_lex_error",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// `--remote` without a value.
+pub fn remote_requires_value() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.remote_requires_value",
+        "--remote requires <target>=\"<command>\"".to_string(),
+        Diagnostic::make_fields(&[("flag", "--remote")]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// `--remote` without the `<target>="<command>"` shape (lean pure
+/// validator, kept live so the flag stays diagnosed without `net`).
+#[cfg(not(feature = "net"))]
+pub fn remote_requires_shape(raw: &str) -> anyhow::Error {
+    let message = format!("invalid --remote {raw:?}: expected <target>=\"<command>\"");
+    let diag = Diagnostic::new(
+        "cli.remote_requires_shape",
+        message,
+        Diagnostic::make_fields(&[("flag", "--remote"), ("got", raw)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// No piped script on stdin and no `--shell` to justify emptiness.
+pub fn script_stdin_missing() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.script_stdin_missing",
+        "no stdin detected; pass --script <file> or pipe a script into stdin (use --script - if explicit)"
+            .to_string(),
+        Diagnostic::make_fields(&[]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// `--shell` without a controlling terminal.
+pub fn shell_needs_tty() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.shell_needs_tty",
+        "--shell requires a tty (no controlling tty available)".to_string(),
+        Diagnostic::make_fields(&[("flag", "--shell")]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// `--shell` through `execute_with_result`, which never supports it
+/// (embedder API misuse, not user input).
+pub fn shell_unsupported_in_result() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.shell_unsupported_in_result",
+        "execute_with_result does not support --shell".to_string(),
+        Diagnostic::make_fields(&[]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Windows shell re-exec staging hit a temp path without a parent
+/// (internal invariant, not user input).
+#[cfg(windows)]
+pub fn shell_temp_missing_parent() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.shell_temp_missing_parent",
+        "temp path unexpectedly missing parent".to_string(),
+        Diagnostic::make_fields(&[]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// `--remote-serve` combined with script/shell/remote inputs.
+#[cfg(feature = "net")]
+pub fn remote_serve_runs_alone() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.remote_serve_runs_alone",
+        "--remote-serve runs alone (no --script, --shell, --remote, or script args)".to_string(),
+        Diagnostic::make_fields(&[("flag", "--remote-serve")]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// `--remote-serve` without piped stdio.
+#[cfg(feature = "net")]
+pub fn remote_serve_needs_stdio() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.remote_serve_needs_stdio",
+        "--remote-serve requires piped stdio (no TTY)".to_string(),
+        Diagnostic::make_fields(&[("flag", "--remote-serve")]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Fetch tar arrived with no staging section (guest protocol
+/// invariant, not user input).
+#[cfg(feature = "net")]
+pub fn fetch_tar_no_stage() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.serve_fetch_tar_no_stage",
+        "serve fetch tar arrived with no stage".to_string(),
+        Diagnostic::make_fields(&[]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Fetch tar dir member escapes staging. Takes the member path and the
+/// underlying failure; `{reason:#}` formatting lives here so call
+/// sites stay `format!`-free.
+#[cfg(feature = "net")]
+pub fn fetch_dir_escapes(path: &str, reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("fetch dir {path:?} escapes staging: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.serve_fetch_dir_escapes",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Fetch tar file member escapes staging.
+#[cfg(feature = "net")]
+pub fn fetch_file_escapes(path: &str, reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("fetch file {path:?} escapes staging: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.serve_fetch_file_escapes",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Fetch tar parent directory escapes staging.
+#[cfg(feature = "net")]
+pub fn fetch_parent_escapes(path: &str, reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("fetch parent {path:?} escapes staging: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.serve_fetch_parent_escapes",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Fetch tar symlink member refused (content arrives resolved
+/// host-side; symlinks are never served).
+#[cfg(feature = "net")]
+pub fn fetch_symlink_refused(path: &str, target: &str) -> anyhow::Error {
+    let message = format!("fetch symlink {path:?} -> {target:?} refused: fetch entries are files");
+    let diag = Diagnostic::new(
+        "cli.serve_fetch_symlink_refused",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("target", target)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Serve engine worker thread panicked (internal invariant).
+#[cfg(feature = "net")]
+pub fn serve_engine_panicked() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.serve_engine_panicked",
+        "serve engine thread panicked".to_string(),
+        Diagnostic::make_fields(&[]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Guest push source escapes staging. Takes the underlying failure;
+/// `{reason:#}` formatting lives here.
+#[cfg(feature = "net")]
+pub fn push_source_escapes(guest_src: &str, reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("guest push source {guest_src:?} escapes staging: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.serve_push_source_escapes",
+        message,
+        Diagnostic::make_fields(&[("source", guest_src), ("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Guest push source unreadable. Takes the underlying failure;
+/// `{reason:#}` formatting lives here.
+#[cfg(feature = "net")]
+pub fn push_source_unreadable(path: &str, reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("guest push source {path:?} unreadable: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.serve_push_source_unreadable",
+        message,
+        Diagnostic::make_fields(&[("source", path), ("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// Guest push source missing from staging.
+#[cfg(feature = "net")]
+pub fn push_source_missing(guest_src: &str, reason: &anyhow::Error) -> anyhow::Error {
+    let reason_text = format!("{reason:#}");
+    let message = format!("guest push source {guest_src:?} missing: {reason_text}");
+    let diag = Diagnostic::new(
+        "cli.serve_push_source_missing",
+        message,
+        Diagnostic::make_fields(&[("source", guest_src), ("reason", &reason_text)]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// `--mcp` without piped stdio.
+#[cfg(feature = "mcp")]
+pub fn mcp_needs_stdio() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.mcp_needs_stdio",
+        "--mcp requires piped stdio transport".to_string(),
+        Diagnostic::make_fields(&[("flag", "--mcp")]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// `--mcp` reading the script from stdin (stdin carries JSON-RPC).
+#[cfg(feature = "mcp")]
+pub fn mcp_needs_script_file() -> anyhow::Error {
+    let diag = Diagnostic::new(
+        "cli.mcp_needs_script_file",
+        "--mcp requires a script file (stdin carries the JSON-RPC stream)".to_string(),
+        Diagnostic::make_fields(&[("flag", "--mcp")]),
+    );
+    anyhow::Error::new(diag)
+}
+
+/// `--mcp` combined with other run inputs. Takes the conflicting
+/// inputs as structured items; joining lives here.
+#[cfg(feature = "mcp")]
+pub fn mcp_runs_alone(conflicts: &[&str]) -> anyhow::Error {
+    let joined = conflicts.join(", ");
+    let message = format!("--mcp runs alone (no {joined})");
+    let diag = Diagnostic::new(
+        "cli.mcp_runs_alone",
+        message,
+        Diagnostic::make_fields(&[("flag", "--mcp"), ("conflicts", &joined)]),
+    );
+    anyhow::Error::new(diag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn feature_message_shared_across_three_sites() {
-        for flag in ["--listen", "-p", "script module"] {
-            let err = feature_required(flag);
+    fn feature_message_shared_across_sites() {
+        for (flag, feature) in [
+            ("--listen", "net"),
+            ("-p", "net"),
+            ("script module", "net"),
+            ("--remote-serve", "net"),
+            ("--mcp", "mcp"),
+        ] {
+            let err = feature_required(flag, feature);
             let diag = err
                 .downcast_ref::<Diagnostic>()
                 .expect("CLI errors stay typed");
             assert_eq!(diag.key(), "cli.feature_required");
             assert!(diag.message().contains(flag), "{diag}");
+            assert!(diag.message().contains(feature), "{diag}");
         }
+    }
+
+    #[test]
+    fn mcp_feature_gate_names_mcp_not_net() {
+        let err = feature_required("--mcp", "mcp");
+        let diag = err
+            .downcast_ref::<Diagnostic>()
+            .expect("CLI errors stay typed");
+        let text = diag.message();
+        assert!(text.contains("`mcp`"), "{diag}");
+        assert!(text.contains("--features mcp"), "{diag}");
+        assert!(!text.contains("net"), "{diag}");
     }
 
     #[test]
@@ -255,7 +576,7 @@ mod tests {
     #[test]
     fn untrusted_input_cannot_crash_cli_errors() {
         let evil = "bad\u{1f}flag".to_string();
-        let err = feature_required(&evil);
+        let err = feature_required(&evil, "net");
         let diag = err.downcast_ref::<Diagnostic>().expect("typed");
         assert!(!diag.message().contains('\u{1f}'));
     }
@@ -283,6 +604,74 @@ mod tests {
                 publish_inner_invalid("2222:0", &anyhow::anyhow!("bad endpoint")),
             ),
             ("cli.module_unlinked", module_unlinked("NET", "net")),
+            ("cli.unexpected_flag", unexpected_flag("frobnicate", true)),
+            ("cli.script_flag_needs_path", script_flag_needs_path()),
+            ("cli.script_not_local", script_not_local("https://x")),
+            ("cli.arg_not_utf8", arg_not_utf8()),
+            (
+                "cli.arg_lex_error",
+                arg_lex_error(&lexopt::Error::UnexpectedOption("--nope".to_string())),
+            ),
+            ("cli.remote_requires_value", remote_requires_value()),
+            #[cfg(not(feature = "net"))]
+            ("cli.remote_requires_shape", remote_requires_shape("prod")),
+            ("cli.script_stdin_missing", script_stdin_missing()),
+            ("cli.shell_needs_tty", shell_needs_tty()),
+            (
+                "cli.shell_unsupported_in_result",
+                shell_unsupported_in_result(),
+            ),
+            #[cfg(windows)]
+            ("cli.shell_temp_missing_parent", shell_temp_missing_parent()),
+            #[cfg(feature = "net")]
+            ("cli.remote_serve_runs_alone", remote_serve_runs_alone()),
+            #[cfg(feature = "net")]
+            ("cli.remote_serve_needs_stdio", remote_serve_needs_stdio()),
+            #[cfg(feature = "net")]
+            ("cli.serve_fetch_tar_no_stage", fetch_tar_no_stage()),
+            #[cfg(feature = "net")]
+            (
+                "cli.serve_fetch_dir_escapes",
+                fetch_dir_escapes("a", &anyhow::anyhow!("root")),
+            ),
+            #[cfg(feature = "net")]
+            (
+                "cli.serve_fetch_file_escapes",
+                fetch_file_escapes("a", &anyhow::anyhow!("root")),
+            ),
+            #[cfg(feature = "net")]
+            (
+                "cli.serve_fetch_parent_escapes",
+                fetch_parent_escapes("a", &anyhow::anyhow!("root")),
+            ),
+            #[cfg(feature = "net")]
+            (
+                "cli.serve_fetch_symlink_refused",
+                fetch_symlink_refused("a", "b"),
+            ),
+            #[cfg(feature = "net")]
+            ("cli.serve_engine_panicked", serve_engine_panicked()),
+            #[cfg(feature = "net")]
+            (
+                "cli.serve_push_source_escapes",
+                push_source_escapes("a", &anyhow::anyhow!("root")),
+            ),
+            #[cfg(feature = "net")]
+            (
+                "cli.serve_push_source_unreadable",
+                push_source_unreadable("a", &anyhow::anyhow!("root")),
+            ),
+            #[cfg(feature = "net")]
+            (
+                "cli.serve_push_source_missing",
+                push_source_missing("a", &anyhow::anyhow!("root")),
+            ),
+            #[cfg(feature = "mcp")]
+            ("cli.mcp_needs_stdio", mcp_needs_stdio()),
+            #[cfg(feature = "mcp")]
+            ("cli.mcp_needs_script_file", mcp_needs_script_file()),
+            #[cfg(feature = "mcp")]
+            ("cli.mcp_runs_alone", mcp_runs_alone(&["--shell"])),
         ];
         let mut seen = std::collections::HashSet::new();
         for (key, err) in cases {
@@ -292,6 +681,90 @@ mod tests {
             assert_eq!(&diag.key(), key, "{diag}");
             assert!(seen.insert(*key), "duplicate key {key}");
         }
+    }
+
+    #[test]
+    fn flag_shape_messages_name_the_flag() {
+        assert_eq!(
+            unexpected_flag("frobnicate", true)
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "unexpected flag: --frobnicate"
+        );
+        assert_eq!(
+            unexpected_flag("z", false)
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "unexpected flag: -z"
+        );
+        assert_eq!(
+            script_flag_needs_path()
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "--script requires a path"
+        );
+        assert!(
+            script_not_local("https://x/y")
+                .to_string()
+                .contains("\"https://x/y\"")
+        );
+        assert!(
+            arg_lex_error(&lexopt::Error::UnexpectedOption("--nope".to_string()))
+                .to_string()
+                .contains("--nope")
+        );
+        assert_eq!(
+            remote_requires_value()
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "--remote requires <target>=\"<command>\""
+        );
+        #[cfg(feature = "mcp")]
+        assert_eq!(
+            mcp_runs_alone(&["--shell", "--remote"])
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "--mcp runs alone (no --shell, --remote)"
+        );
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_gate_messages() {
+        assert_eq!(
+            mcp_needs_stdio()
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "--mcp requires piped stdio transport"
+        );
+        assert_eq!(
+            mcp_needs_script_file()
+                .downcast_ref::<Diagnostic>()
+                .expect("typed")
+                .message(),
+            "--mcp requires a script file (stdin carries the JSON-RPC stream)"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn serve_staging_messages_name_the_member() {
+        let err = fetch_dir_escapes("a", &anyhow::anyhow!("root"));
+        assert!(err.to_string().contains("\"a\""), "{err}");
+        assert!(err.to_string().contains("root"), "{err}");
+        let err = fetch_symlink_refused("a", "b");
+        assert_eq!(
+            err.downcast_ref::<Diagnostic>().expect("typed").message(),
+            "fetch symlink \"a\" -> \"b\" refused: fetch entries are files"
+        );
+        let err = push_source_unreadable("a", &anyhow::anyhow!("denied"));
+        assert!(err.to_string().contains("denied"), "{err}");
     }
 
     #[test]

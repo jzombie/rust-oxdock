@@ -210,26 +210,21 @@ fn imports_module(toks: &[oxdock_parser::Tok], module: &str) -> bool {
                 {
                     j += 1;
                 }
-                if let Some(next) = toks.get(j) {
-                    if let TokKind::Group {
+                if let Some(next) = toks.get(j)
+                    && let TokKind::Group {
                         delim: GroupDelim::Bracket,
                         inner,
                         ..
                     } = &next.kind
-                    {
-                        if inner
-                            .iter()
-                            .any(|t| matches!(&t.kind, TokKind::Word(w) if w == module))
-                        {
-                            return true;
-                        }
-                    }
-                }
-            }
-            TokKind::Group { inner, .. } => {
-                if imports_module(inner, module) {
+                    && inner
+                        .iter()
+                        .any(|t| matches!(&t.kind, TokKind::Word(w) if w == module))
+                {
                     return true;
                 }
+            }
+            TokKind::Group { inner, .. } if imports_module(inner, module) => {
+                return true;
             }
             _ => {}
         }
@@ -331,13 +326,13 @@ pub fn run() -> Result<()> {
             || !matches!(opts.script, ScriptSource::Stdin)
             || !opts.script_args.is_empty()
         {
-            bail!("--remote-serve runs alone (no --script, --shell, --remote, or script args)");
+            return Err(errors::remote_serve_runs_alone());
         }
         return serve::serve();
     }
     #[cfg(not(feature = "net"))]
     if opts.remote_serve {
-        bail!("--remote-serve requires the `net` feature (rebuild with --features net)");
+        return Err(errors::feature_required("--remote-serve", "net"));
     }
     // MCP tool hosting owns stdio like the guest serve loop: no script
     // execution past init, no shell, no remote serve alongside it.
@@ -345,22 +340,26 @@ pub fn run() -> Result<()> {
         #[cfg(feature = "mcp")]
         {
             if opts.shell || opts.remote_serve || !opts.remotes.is_empty() {
-                bail!("--mcp runs alone (no --shell, --remote-serve, or --remote)");
+                return Err(errors::mcp_runs_alone(&[
+                    "--shell",
+                    "--remote-serve",
+                    "--remote",
+                ]));
             }
             if !opts.endpoints.listens.is_empty() || !opts.endpoints.publishes.is_empty() {
-                bail!("--mcp runs alone (no --listen/-p)");
+                return Err(errors::mcp_runs_alone(&["--listen/-p"]));
             }
             if opts.dry_run {
-                bail!("--mcp runs alone (no --dry-run)");
+                return Err(errors::mcp_runs_alone(&["--dry-run"]));
             }
             if !opts.script_args.is_empty() {
-                bail!("--mcp runs alone (no script args)");
+                return Err(errors::mcp_runs_alone(&["script args"]));
             }
             return mcp::serve_mcp(opts, workspace_root);
         }
         #[cfg(not(feature = "mcp"))]
         {
-            bail!("--mcp requires the `mcp` feature (rebuild with --features mcp)");
+            return Err(errors::feature_required("--mcp", "mcp"));
         }
     }
     execute(opts, workspace_root)
@@ -386,7 +385,7 @@ pub enum ScriptSource {
 /// about this argument, not a claim about imports.
 fn reject_url_script(text: &str) -> Result<()> {
     if text.contains("://") {
-        bail!("not a local path: {text:?} (pass a workspace path or `-` for stdin)");
+        return Err(errors::script_not_local(text));
     }
     Ok(())
 }
@@ -440,7 +439,7 @@ impl Options {
         // pre-script positionals skip them.
         let drain_tail =
             |parser: &mut lexopt::Parser, strip_leading: bool| -> Result<Vec<String>> {
-                let mut raw = parser.raw_args().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let mut raw = parser.raw_args().map_err(|e| errors::arg_lex_error(&e))?;
                 let Some(first_os) = raw.next() else {
                     return Ok(Vec::new());
                 };
@@ -464,10 +463,10 @@ impl Options {
                     let path = value_string(
                         parser
                             .value()
-                            .map_err(|_| anyhow::anyhow!("--script requires a path"))?,
+                            .map_err(|_| errors::script_flag_needs_path())?,
                     )?;
                     if path.is_empty() {
-                        bail!("--script requires a path");
+                        return Err(errors::script_flag_needs_path());
                     }
                     if path == "-" {
                         script = Some(ScriptSource::Stdin);
@@ -494,7 +493,7 @@ impl Options {
                     let raw = value_string(
                         parser
                             .value()
-                            .map_err(|_| anyhow::anyhow!("--listen requires an address"))?,
+                            .map_err(|_| errors::listen_requires_address())?,
                     )?;
                     #[cfg(not(feature = "net"))]
                     {
@@ -502,7 +501,7 @@ impl Options {
                         // and covered in lean builds; the feature error below
                         // still wins regardless of the value.
                         let _ = endpoints::parse_listen_arg(&raw);
-                        return Err(errors::feature_required("--listen/-p"));
+                        return Err(errors::feature_required("--listen/-p", "net"));
                     }
                     #[cfg(feature = "net")]
                     endpoints.listens.push(endpoints::parse_listen_arg(&raw)?);
@@ -511,7 +510,7 @@ impl Options {
                     let raw = value_string(
                         parser
                             .value()
-                            .map_err(|_| anyhow::anyhow!("-p requires outer:inner"))?,
+                            .map_err(|_| errors::publish_requires_shape(""))?,
                     )?;
                     #[cfg(not(feature = "net"))]
                     {
@@ -519,7 +518,7 @@ impl Options {
                         // validation live in lean builds; the feature error
                         // below still wins.
                         let _ = endpoints::parse_publish_arg(&raw);
-                        return Err(errors::feature_required("--listen/-p"));
+                        return Err(errors::feature_required("--listen/-p", "net"));
                     }
                     #[cfg(feature = "net")]
                     endpoints
@@ -536,15 +535,17 @@ impl Options {
                     mcp = true;
                 }
                 Long("remote") => {
-                    let raw = value_string(parser.value().map_err(|_| {
-                        anyhow::anyhow!("--remote requires <target>=\"<command>\"")
-                    })?)?;
+                    let raw = value_string(
+                        parser
+                            .value()
+                            .map_err(|_| errors::remote_requires_value())?,
+                    )?;
                     #[cfg(not(feature = "net"))]
                     {
                         // Keep the pure validator live in lean builds; the
                         // feature error below still wins.
                         let _ = oxdock_net_plugin_stub_parse_remote(&raw);
-                        return Err(errors::feature_required("--remote"));
+                        return Err(errors::feature_required("--remote", "net"));
                     }
                     #[cfg(feature = "net")]
                     remotes.push(oxdock_net_plugin::parse_remote_arg(&raw)?);
@@ -595,8 +596,8 @@ impl Options {
                     script_args = drain_tail(&mut parser, true)?;
                     break;
                 }
-                Long(other) => bail!("unexpected flag: --{other}"),
-                Short(other) => bail!("unexpected flag: -{other}"),
+                Long(other) => return Err(errors::unexpected_flag(other, true)),
+                Short(other) => return Err(errors::unexpected_flag(&other.to_string(), false)),
             }
         }
 
@@ -618,9 +619,7 @@ impl Options {
 /// Option/positional text out of a lexopt value. Inputs arrive as
 /// `String`, so non-UTF8 is unreachable in practice; fail loudly anyway.
 fn value_string(value: std::ffi::OsString) -> Result<String> {
-    value
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("argument must be UTF-8"))
+    value.into_string().map_err(|_| errors::arg_not_utf8())
 }
 
 /// Human-readable CLI version, printed for `--version`/`-V`/`-v`.
@@ -668,7 +667,7 @@ impl ExecutionResult {
 
 pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result<ExecutionResult> {
     if opts.shell {
-        bail!("execute_with_result does not support --shell");
+        return Err(errors::shell_unsupported_in_result());
     }
 
     // Read + parse BEFORE any tempdir exists so LOCAL-only scripts never
@@ -822,7 +821,7 @@ fn oxdock_net_plugin_stub_parse_remote(raw: &str) -> Result<(String, String)> {
         Some((target, command)) if !target.trim().is_empty() && !command.trim().is_empty() => {
             Ok((target.trim().to_string(), command.to_string()))
         }
-        _ => bail!("invalid --remote {raw:?}: expected <target>=\"<command>\""),
+        _ => Err(errors::remote_requires_shape(raw)),
     }
 }
 
@@ -830,7 +829,7 @@ fn oxdock_net_plugin_stub_parse_remote(raw: &str) -> Result<(String, String)> {
 #[cfg(not(feature = "net"))]
 fn check_no_net_remotes(remotes: &[(String, String)]) -> Result<()> {
     if !remotes.is_empty() {
-        return Err(errors::feature_required("--remote"));
+        return Err(errors::feature_required("--remote", "net"));
     }
     Ok(())
 }
@@ -841,7 +840,7 @@ fn check_no_net_remotes(remotes: &[(String, String)]) -> Result<()> {
 #[cfg(not(feature = "net"))]
 fn check_no_net_endpoints(flags: &EndpointFlags) -> Result<()> {
     if !flags.listens.is_empty() || !flags.publishes.is_empty() {
-        return Err(errors::feature_required("--listen/-p"));
+        return Err(errors::feature_required("--listen/-p", "net"));
     }
     Ok(())
 }
@@ -895,9 +894,7 @@ where
                 if opts.shell {
                     String::new()
                 } else {
-                    bail!(
-                        "no stdin detected; pass --script <file> or pipe a script into stdin (use --script - if explicit)"
-                    );
+                    return Err(errors::script_stdin_missing());
                 }
             } else {
                 let mut buf = String::new();
@@ -982,7 +979,7 @@ where
     // If requested, drop into an interactive shell after running the script.
     if opts.shell {
         if require_tty && !has_controlling_tty() {
-            bail!("--shell requires a tty (no controlling tty available)");
+            return Err(errors::shell_needs_tty());
         }
         // The shell needs a concrete directory: materialize here at shell
         // entry (not at startup) when the script left the snapshot pending,
@@ -1072,7 +1069,7 @@ fn maybe_reexec_shell_to_temp(opts: &Options) -> Result<()> {
     // outside the temp dir, so use `copy_file_from_external`.
     let temp_root_guard = temp_file
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("temp path unexpectedly missing parent"))?;
+        .ok_or_else(|| errors::shell_temp_missing_parent())?;
     let resolver_temp = PathResolver::new(temp_root_guard.as_path(), temp_root_guard.as_path())?;
     let dest = temp_file;
     #[allow(clippy::disallowed_types)]

@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::errors;
 use muxio_core::rpc::rpc_internals::RpcStreamEvent;
 use muxio_rpc_service_endpoint::{RpcServiceEndpointInterface, StreamResponder};
 use muxio_sync_rpc_server::RpcSyncServer;
@@ -131,7 +133,7 @@ type HelloMap = Arc<Mutex<HashMap<u32, Vec<u8>>>>;
 pub fn serve() -> Result<()> {
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() || std::io::stdout().is_terminal() {
-        bail!("--remote-serve requires piped stdio (no TTY)");
+        return Err(errors::remote_serve_needs_stdio());
     }
     let setup = RpcSyncServer::stdio();
     let surface = Arc::new(module_surface());
@@ -263,7 +265,7 @@ fn feed_exec(exec: &mut GuestExec, bytes: &[u8]) -> Result<()> {
         let (chunk, rest) = cursor.split_at(take);
         let (Some(stage), Some(hash)) = (exec.fetch_stage.as_mut(), exec.fetch_hash.as_mut())
         else {
-            bail!("serve fetch tar arrived with no stage");
+            return Err(errors::fetch_tar_no_stage());
         };
         use sha2::Digest;
         stage.spill.write_all(chunk)?;
@@ -389,19 +391,19 @@ fn prepare_staging(
             }
             let dest = staging
                 .join(&path)
-                .map_err(|err| anyhow::anyhow!("fetch dir {path:?} escapes staging: {err:#}"))?;
+                .map_err(|err| errors::fetch_dir_escapes(&path, &err))?;
             resolver.create_dir_all(&dest)?;
             Ok(())
         }
         tar::StreamedEntry::File { path, reader, .. } => {
             let dest = staging
                 .join(&path)
-                .map_err(|err| anyhow::anyhow!("fetch file {path:?} escapes staging: {err:#}"))?;
+                .map_err(|err| errors::fetch_file_escapes(&path, &err))?;
             if let Some(idx) = path.rfind('/') {
                 resolver.create_dir_all(
                     &staging
                         .join(&path[..idx])
-                        .map_err(|err| anyhow::anyhow!("fetch parent escapes staging: {err:#}"))?,
+                        .map_err(|err| errors::fetch_parent_escapes(&path[..idx], &err))?,
                 )?;
             }
             let mut writer = resolver.open_write(&dest)?;
@@ -419,7 +421,7 @@ fn prepare_staging(
         tar::StreamedEntry::Symlink { path, target } => {
             // Fetch symlinks resolve to content host-side already; a
             // symlink member here is unexpected. Refuse rather than guess.
-            bail!("fetch symlink {path:?} -> {target:?} refused: fetch entries are files")
+            Err(errors::fetch_symlink_refused(&path, &target))
         }
     })?;
     Ok((staging, dir, resolver))
@@ -495,7 +497,7 @@ fn run_guest_engine(
     }
     let outcome = engine_thread
         .join()
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("serve engine thread panicked")));
+        .unwrap_or_else(|_| Err(errors::serve_engine_panicked()));
     drop(feed);
     let stdout_bytes = stdout_sink.lock().unwrap().clone();
     let stdout_hash = sha256_hex(&stdout_bytes);
@@ -585,9 +587,9 @@ fn pack_manifest(
     let mut files: Vec<(String, u64, Box<dyn Read + Send>)> = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
     for guest_src in &ordered {
-        let src = staging.join(guest_src).map_err(|err| {
-            anyhow::anyhow!("guest push source {guest_src:?} escapes staging: {err:#}")
-        })?;
+        let src = staging
+            .join(guest_src)
+            .map_err(|err| errors::push_source_escapes(guest_src, &err))?;
         match resolver.entry_kind(&src) {
             Ok(oxdock_fs::EntryKind::Dir) => {
                 dirs.push(guest_src.clone());
@@ -605,9 +607,10 @@ fn pack_manifest(
                                 stack.push((child, child_rel));
                             }
                             _ => {
-                                let len = resolver.metadata(&child).map(|m| m.len()).with_context(
-                                    || format!("guest push source {child_rel:?} unreadable"),
-                                )?;
+                                let len = resolver
+                                    .metadata(&child)
+                                    .map(|m| m.len())
+                                    .map_err(|e| errors::push_source_unreadable(&child_rel, &e))?;
                                 files.push((
                                     child_rel,
                                     len,
@@ -619,9 +622,10 @@ fn pack_manifest(
                 }
             }
             Ok(_) => {
-                let len = resolver.metadata(&src).map(|m| m.len()).with_context(|| {
-                    anyhow::anyhow!("guest push source {guest_src:?} unreadable")
-                })?;
+                let len = resolver
+                    .metadata(&src)
+                    .map(|m| m.len())
+                    .map_err(|e| errors::push_source_unreadable(guest_src, &e))?;
                 files.push((
                     guest_src.clone(),
                     len,
@@ -629,7 +633,7 @@ fn pack_manifest(
                 ));
             }
             Err(err) => {
-                bail!("guest push source {guest_src:?} missing: {err:#}");
+                return Err(errors::push_source_missing(guest_src, &err));
             }
         }
     }

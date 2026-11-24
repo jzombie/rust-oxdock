@@ -262,15 +262,29 @@ Acceptance B: the exact acceptance block in #168.
 
 One issue per area, each owning its keys and templates, using
 `with_source` where an underlying `io` / `fs` / `process` / `net`
-error exists:
+error exists. Never a repo-wide `bail!` sweep.
 
-- CLI flag-shape, script-read, shell-runner, `serve.rs`, `mcp.rs`.
+#### C.1 CLI remainder (done 2026-11-24)
+
+Flag-shape, script-read, shell-runner, `serve.rs`, `mcp.rs` through
+25 new `cli.*` constructors in `errors.rs` (feature-gated where the
+call site is: net-gated serve/remote-serve, mcp-gated MCP,
+lean-only remote-shape, windows-only shell-temp).
+`endpoints.rs`/`serve.rs`/`mcp.rs` have zero inline `bail!`/`anyhow!`
+left; `lib.rs` keeps only help/version surfacing (not failures) and
+pre-existing `.context` io chains. Dynamic io read chains
+(`read_script`, tempdir/resolver setup) intentionally untouched:
+already proper chained contexts, no static template to own.
+Green: default (48), `--no-default-features` (42),
+`--no-default-features --features ssh` (47); clippy/doc clean; no
+fmt drift.
+
+#### C.2 remaining
+
 - Core runtime: `native.rs`, `mcp.rs`, `fs_ops.rs`, `pipeline.rs`,
   `static_check.rs`, `import.rs`.
 - Parser: `markdown.rs`, `template.rs`, `macro_input.rs`.
 - Plugins and sys crates last.
-
-Never a repo-wide `bail!` sweep.
 
 ### Phase D — retire `anyhow` as the carrier
 

@@ -200,12 +200,12 @@ mod tests {
         // Inner-endpoint validation is eager only with `net`; without it the
         // raw text is stored and rejected later with the feature message.
         #[cfg(feature = "net")]
-        for bad in ["2222:0"] {
-            let err = parse_publish_arg(bad).expect_err("bad inner must fail");
+        {
+            let err = parse_publish_arg("2222:0").expect_err("bad inner must fail");
             let diag = err
                 .downcast_ref::<crate::errors::Diagnostic>()
                 .expect("inner errors stay typed");
-            assert_eq!(diag.key(), "cli.publish_inner_invalid", "{bad}: {diag}");
+            assert_eq!(diag.key(), "cli.publish_inner_invalid");
         }
     }
 

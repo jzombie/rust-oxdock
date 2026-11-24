@@ -7,9 +7,9 @@
 
 use std::io::IsTerminal;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
-use crate::{Options, ScriptSource, cli_host_modules_with, cli_host_types, read_script};
+use crate::{Options, ScriptSource, cli_host_modules_with, cli_host_types, errors, read_script};
 
 /// Serve `EXPORT`ed FUNCs as MCP tools over stdio. Reads the script file,
 /// binds endpoint sockets up front (fail fast), initializes the session
@@ -18,10 +18,10 @@ use crate::{Options, ScriptSource, cli_host_modules_with, cli_host_types, read_s
 /// serving the old tools with a stderr note.
 pub fn serve_mcp(opts: Options, workspace_root: oxdock_fs::GuardedPath) -> Result<()> {
     if std::io::stdin().is_terminal() || std::io::stdout().is_terminal() {
-        bail!("--mcp requires piped stdio transport");
+        return Err(errors::mcp_needs_stdio());
     }
     let ScriptSource::Path(path) = &opts.script else {
-        bail!("--mcp requires a script file (stdin carries the JSON-RPC stream)");
+        return Err(errors::mcp_needs_script_file());
     };
     let script_path = path.clone();
     let script = read_script(&opts.script)?;
