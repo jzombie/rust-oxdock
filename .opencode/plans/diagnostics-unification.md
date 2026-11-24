@@ -78,6 +78,38 @@ directives.
 
 ## 3. Design constraints (load bearing)
 
+### Unified handling contract (all `dsl.*`, no exceptions)
+
+1. **Construction**: one named constructor per failure mode, owned by
+   the domain module. Call sites pass structured data only: no
+   `format!`, no prose fragments, no articles. `anyhow::Error`
+   passthroughs take `&anyhow::Error` and render `{reason:#}` inline
+   in the message; they do NOT also attach it via `with_source`
+   (`Display` does not render `source`, and `anyhow`'s `{:#}` would
+   print an attached chain twice).
+2. **Keys**: `dsl.<family>.<mode>`, one per failure mode, never reused
+   across modes. Distinct-key test in every owner module.
+3. **Messages**: `COMMAND`-lead for validation errors, subject-lead
+   plain sentences otherwise. Backticks for DSL tokens, `{got:?}`
+   for found values. Never any line/column info; no trailing period.
+4. **Spans**: `oxdock-parser` errors sync spans through
+   `ParseError::from_diagnostic`/`with_span`; non-parser `dsl.*`
+   errors (core typing, CLI) attach positions directly via
+   `Diagnostic::with_span` when one is available. Location lives in
+   `Span` only, never in message text.
+5. **Chains**: `with_source` wherever an underlying error exists AND
+   its text is not already interpolated in the message (typed
+   io/sys/net errors wrapped in outer-context messages). Inline
+   `{reason:#}` passthroughs are the other case, never both.
+6. **Tests**: key test plus wording test per constructor, `indoc`
+   blocks, never `\n`-joined scripts.
+
+Normalization pass (after the remaining `commands.rs` sites are
+over, before Phase B): bring every migrated constructor onto this
+contract in one diff — strip the legacy `invalid syntax for command`
+prefixes, unify quoting, update affected tests to the canonical
+wording instead of preserving old strings.
+
 - Decentralized ownership: transport in `oxdock-diagnostics`, templates
   with owners (parser spelling, core typing, CLI errors). Leaf crate
   never mentions `ALIAS`, `MAP`, `--listen`, or endpoint semantics.
