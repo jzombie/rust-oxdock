@@ -2,6 +2,7 @@ mod args;
 mod capture;
 #[cfg(any(test, feature = "test-harness"))]
 pub mod conformance;
+pub mod diagnostics;
 mod engine;
 mod exit;
 mod fs_ops;

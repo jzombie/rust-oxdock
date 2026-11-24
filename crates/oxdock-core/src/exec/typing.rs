@@ -23,6 +23,7 @@ use oxdock_parser::{
 };
 use oxdock_process::ProcessManager;
 
+use super::diagnostics as typing_diag;
 use super::state::ExecState;
 
 /// Check an options map against its declared keys: unknown keys fail
@@ -241,8 +242,7 @@ impl<P: ProcessManager> ExecState<P> {
         if let Some(hit) = lookup_rendered(&key) {
             return Ok(hit);
         }
-        let spelled = parse_spelling(canonical)
-            .map_err(|err| anyhow::anyhow!("invalid type spelling: {err}"))?;
+        let spelled = parse_spelling(canonical).map_err(anyhow::Error::new)?;
         let tag = self.build_rendered(&spelled, resolving, depth)?;
         Ok(intern_rendered(key, tag))
     }
@@ -410,29 +410,31 @@ impl<P: ProcessManager> ExecState<P> {
         // Alias uniqueness: one spelling maps to one field. Canonical
         // names and aliases share one namespace, so a clash fails here
         // naming both sides instead of shadowing at parse time.
+        // Owner: typing. Single constructors, stable keys, no ad hoc
+        // strings at call sites.
         {
             use std::collections::HashMap;
             let mut seen: HashMap<&str, &str> = HashMap::new();
             for field in &fields {
                 if let Some(prev) = seen.insert(field.name.as_str(), field.name.as_str()) {
                     let _ = prev;
-                    bail!("duplicate field '{}' in MAP spelling", field.name);
+                    return Err(anyhow::Error::new(typing_diag::map_duplicate_field(
+                        &field.name,
+                    )));
                 }
                 if let Some(alias) = field.alias.as_ref() {
                     if alias == &field.name {
-                        bail!(
-                            "alias '{}' duplicates its own field '{}'",
+                        return Err(anyhow::Error::new(typing_diag::alias_self(
+                            &field.name,
                             alias,
-                            field.name
-                        );
+                        )));
                     }
                     if let Some(owner) = seen.insert(alias.as_str(), field.name.as_str()) {
-                        bail!(
-                            "alias '{}' for field '{}' clashes with '{}'",
+                        return Err(anyhow::Error::new(typing_diag::alias_clash(
                             alias,
-                            field.name,
-                            owner
-                        );
+                            &field.name,
+                            owner,
+                        )));
                     }
                 }
             }

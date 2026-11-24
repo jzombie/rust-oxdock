@@ -5069,7 +5069,7 @@ fn resolve_tag_unions_admit_member_sets() {
         .resolve_tag("STRING|")
         .expect_err("empty member fails");
     assert!(
-        format!("{err:#}").contains("invalid type spelling"),
+        format!("{err:#}").contains("expected type name"),
         "{err:#}"
     );
     let err = state

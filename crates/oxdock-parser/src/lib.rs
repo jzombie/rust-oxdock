@@ -24,6 +24,7 @@ pub mod ast;
 pub mod command;
 pub mod commands;
 pub mod constants;
+pub mod diagnostics;
 pub mod error;
 pub mod literal;
 #[cfg(feature = "proc-macro-api")]

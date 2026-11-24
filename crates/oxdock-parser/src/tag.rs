@@ -8,6 +8,8 @@
 
 use anyhow::{Result, bail};
 
+use oxdock_diagnostics::Diagnostic;
+use crate::diagnostics as dsl_diag;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -486,15 +488,22 @@ pub fn render_spelled(spelled: &Spelled) -> String {
 /// public resolution API safe for direct callers. Whitespace strips
 /// quote-aware (double-quoted default strings keep their spaces);
 /// any other spaced form parses.
-pub fn parse_spelling(s: &str) -> Result<Spelled, String> {
+pub fn parse_spelling(s: &str) -> Result<Spelled, Diagnostic> {
     let text: String = strip_spelling_whitespace(s);
     let (spelled, rest) = parse_spelled_one(&text, 0)?;
     if !rest.is_empty() {
-        return Err(format!(
-            "unexpected trailing text in type spelling: {rest:?}"
+        return Err(dsl_diag::spelling_trailing_text(
+            &dsl_diag::decode_spelling_fragment(rest),
         ));
     }
     Ok(spelled)
+}
+
+/// Decode a mid-parse fragment for user output: the transient
+/// [`WS_SENTINEL`] boundary becomes a space, so no internal encoding
+/// ever reaches a [`Diagnostic`]. Single owner for the decode rule.
+fn decode_spelling_fragment(raw: &str) -> String {
+    dsl_diag::decode_spelling_fragment(raw)
 }
 
 /// Boundary marker surviving whitespace stripping: records where
@@ -502,7 +511,7 @@ pub fn parse_spelling(s: &str) -> Result<Spelled, String> {
 /// stripping stay distinguishable (`BOOL ALIAS help` keeps its
 /// boundaries while `FLAG_ALIAS` never gains one). Never valid in
 /// spellings; matched transiently mid-parse only.
-const WS_SENTINEL: char = '\u{1f}';
+pub(crate) const WS_SENTINEL: char = '\u{1f}';
 
 /// Word characters for boundary tracking: ASCII alphanumerics plus
 /// underscore, matching field, type, and alias name shapes.
@@ -543,7 +552,7 @@ fn strip_spelling_whitespace(s: &str) -> String {
     out
 }
 
-fn parse_spelled_one(text: &str, depth: usize) -> Result<(Spelled, &str), String> {
+fn parse_spelled_one(text: &str, depth: usize) -> Result<(Spelled, &str), Diagnostic> {
     let (first, mut rest) = parse_spelled_shape(text, depth)?;
     if !rest.starts_with('|') {
         return Ok((first, rest));
@@ -561,18 +570,21 @@ fn parse_spelled_one(text: &str, depth: usize) -> Result<(Spelled, &str), String
     Ok((Spelled::Union(members), rest))
 }
 
-fn parse_spelled_shape(text: &str, depth: usize) -> Result<(Spelled, &str), String> {
+fn parse_spelled_shape(text: &str, depth: usize) -> Result<(Spelled, &str), Diagnostic> {
     if depth > MAX_GENERIC_DEPTH {
-        return Err(format!(
-            "type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: {text:?}"
+        return Err(dsl_diag::spelling_max_depth(
+            MAX_GENERIC_DEPTH,
+            &decode_spelling_fragment(text),
         ));
     }
     let mut chars = text.char_indices();
     let Some((_, first)) = chars.next() else {
-        return Err("expected type name, found end of spelling".to_string());
+        return Err(dsl_diag::spelling_expected_type_name());
     };
     if !first.is_ascii_uppercase() {
-        return Err(format!("expected uppercase type name, found {first:?}"));
+        return Err(dsl_diag::spelling_expected_uppercase(
+            &first.to_string(),
+        ));
     }
     let mut end = first.len_utf8();
     for (idx, ch) in chars {
@@ -596,8 +608,20 @@ fn parse_spelled_shape(text: &str, depth: usize) -> Result<(Spelled, &str), Stri
         // Aliases ride named MAP fields only: bare arguments never
         // carry an alternate spelling.
         if alias.is_some() && field_name.is_none() {
-            return Err(format!(
-                "{ALIAS_KEYWORD} needs a named field, found bare {rest:?}"
+            return Err(dsl_diag::alias_needs_field(&decode_spelling_fragment(
+                rest,
+            )));
+        }
+        // Second ALIAS on the same field: the spelling parser owns
+        // arity, so decode both names and fail here naming the rule.
+        // The token skipper in `parser.rs` never restates this.
+        if let Some(second) = peek_second_alias(after_alias) {
+            let field = field_name.as_deref().unwrap_or("<bare>");
+            let first = alias.as_deref().unwrap_or("<unknown>");
+            return Err(dsl_diag::alias_duplicate_on_field(
+                field,
+                first,
+                &second,
             ));
         }
         let (default, after_default) = parse_spelled_default(after_alias)?;
@@ -617,11 +641,48 @@ fn parse_spelled_shape(text: &str, depth: usize) -> Result<(Spelled, &str), Stri
             rest = tail;
             break;
         }
-        return Err(format!(
-            "expected ',' or '>' in type spelling, found {rest:?}"
+        return Err(dsl_diag::spelling_expected_delimiter(
+            &decode_spelling_fragment(rest),
         ));
     }
     Ok((Spelled::Generic { name, args }, rest))
+}
+
+/// Peek for a second `ALIAS name` after a first alias: returns the
+/// decoded second name when the keyword follows. Single owner for the
+/// duplicate-`ALIAS` rule alongside [`parse_spelled_alias`]. Bounded:
+/// only the next token up to `,`, `>`, `=`, or a word boundary is
+/// reported, never the unparsed remainder.
+fn peek_second_alias(after: &str) -> Option<String> {
+    let text = after.strip_prefix(WS_SENTINEL).unwrap_or(after);
+    let after_keyword = text.strip_prefix(ALIAS_KEYWORD)?;
+    let after_keyword = after_keyword
+        .strip_prefix(WS_SENTINEL)
+        .unwrap_or(after_keyword);
+    if after_keyword.is_empty() {
+        return Some("<missing>".to_string());
+    }
+    let mut end = 0usize;
+    for (idx, ch) in after_keyword.char_indices() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        let token: String = after_keyword
+            .chars()
+            .take_while(|c| {
+                !matches!(c, ',' | '>' | '=') && *c != WS_SENTINEL && !c.is_whitespace()
+            })
+            .collect();
+        if token.is_empty() {
+            return Some("<invalid>".to_string());
+        }
+        return Some(dsl_diag::decode_spelling_fragment(&token));
+    }
+    Some(after_keyword[..end].to_string())
 }
 
 /// Optional `field:` or `field?:` prefix of one generic argument. A
@@ -661,7 +722,7 @@ fn parse_spelled_field_name(text: &str) -> (Option<String>, bool, &str) {
 /// `BOOL ALIAS help` arrives splittable while `FLAG_ALIAS` never
 /// does; lowercase alias names keep the same shape as field names.
 /// No `ALIAS` means no alternate spelling.
-fn parse_spelled_alias(text: &str) -> Result<(Option<String>, &str), String> {
+fn parse_spelled_alias(text: &str) -> Result<(Option<String>, &str), Diagnostic> {
     let text = text.strip_prefix(WS_SENTINEL).unwrap_or(text);
     let Some(after_keyword) = text.strip_prefix(ALIAS_KEYWORD) else {
         return Ok((None, text));
@@ -670,18 +731,19 @@ fn parse_spelled_alias(text: &str) -> Result<(Option<String>, &str), String> {
         .strip_prefix(WS_SENTINEL)
         .unwrap_or(after_keyword);
     if after_keyword.is_empty() {
-        return Err(format!("{ALIAS_KEYWORD} needs a lowercase alias name"));
+        return Err(dsl_diag::alias_needs_name());
     }
     let mut chars = after_keyword.char_indices();
     let Some((_, first)) = chars.next() else {
-        return Err(format!("{ALIAS_KEYWORD} needs a lowercase alias name"));
+        return Err(dsl_diag::alias_needs_name());
     };
     if !first.is_ascii_lowercase() {
         if !first.is_ascii_alphabetic() {
-            return Err(format!("{ALIAS_KEYWORD} needs a lowercase alias name"));
+            return Err(dsl_diag::alias_needs_name());
         }
-        return Err(format!(
-            "{ALIAS_KEYWORD} name must start lowercase, found {first:?} in {after_keyword:?}"
+        return Err(dsl_diag::alias_name_lowercase(
+            &first.to_string(),
+            &decode_spelling_fragment(after_keyword),
         ));
     }
     let mut end = first.len_utf8();
@@ -694,7 +756,7 @@ fn parse_spelled_alias(text: &str) -> Result<(Option<String>, &str), String> {
     }
     let (alias, rest) = after_keyword.split_at(end);
     if alias.is_empty() {
-        return Err(format!("{ALIAS_KEYWORD} needs a lowercase alias name"));
+        return Err(dsl_diag::alias_needs_name());
     }
     Ok((Some(alias.to_string()), rest))
 }
@@ -704,7 +766,7 @@ fn parse_spelled_alias(text: &str) -> Result<(Option<String>, &str), String> {
 /// string with no escapes. No `=` means no default. Anything else
 /// fails naming the position, so malformed defaults never parse as
 /// a longer type.
-fn parse_spelled_default(text: &str) -> Result<(Option<SpelledDefault>, &str), String> {
+fn parse_spelled_default(text: &str) -> Result<(Option<SpelledDefault>, &str), Diagnostic> {
     let Some(after_eq) = text.strip_prefix('=') else {
         return Ok((None, text));
     };
@@ -716,7 +778,7 @@ fn parse_spelled_default(text: &str) -> Result<(Option<SpelledDefault>, &str), S
 /// resolution and rendering agree on what parses. Trailing boundary
 /// checks belong to the caller: anything but `,` or `>` after the
 /// literal fails there naming the remainder.
-fn parse_spelled_literal(text: &str) -> Result<(SpelledDefault, &str), String> {
+fn parse_spelled_literal(text: &str) -> Result<(SpelledDefault, &str), Diagnostic> {
     if let Some(after) = text.strip_prefix('"') {
         match after.find('"') {
             Some(end) => {
@@ -724,8 +786,8 @@ fn parse_spelled_literal(text: &str) -> Result<(SpelledDefault, &str), String> {
                 return Ok((SpelledDefault::Str(body.to_string()), &rest[1..]));
             }
             None => {
-                return Err(format!(
-                    "unterminated string default in type spelling: {text:?}"
+                return Err(dsl_diag::spelling_unterminated_string(
+                    &decode_spelling_fragment(text),
                 ));
             }
         }
@@ -746,8 +808,8 @@ fn parse_spelled_literal(text: &str) -> Result<(SpelledDefault, &str), String> {
         i += 1;
     }
     if i == int_start {
-        return Err(format!(
-            "expected default literal (INT, FLOAT, BOOL, or quoted STRING) in type spelling, found {text:?}"
+        return Err(dsl_diag::spelling_expected_literal(
+            &decode_spelling_fragment(text),
         ));
     }
     let mut is_float = false;
@@ -762,12 +824,16 @@ fn parse_spelled_literal(text: &str) -> Result<(SpelledDefault, &str), String> {
     if is_float {
         match num.parse::<f64>() {
             Ok(f) if f.is_finite() => Ok((SpelledDefault::Float(f.to_bits()), rest)),
-            _ => Err(format!("bad float default in type spelling: {num:?}")),
+            _ => Err(dsl_diag::spelling_invalid_float(
+                &decode_spelling_fragment(num),
+            )),
         }
     } else {
         match num.parse::<i64>() {
             Ok(n) => Ok((SpelledDefault::Int(n), rest)),
-            Err(_) => Err(format!("bad integer default in type spelling: {num:?}")),
+            Err(_) => Err(dsl_diag::spelling_invalid_int(
+                &decode_spelling_fragment(num),
+            )),
         }
     }
 }
@@ -1317,7 +1383,31 @@ mod tests {
             deep = format!("LIST<{deep}>");
         }
         let err = parse_spelling(&deep).expect_err("over-deep spelling must fail");
-        assert!(err.contains("maximum generic depth"), "{err}");
+        assert!(err.message().contains("generic depth"), "{err}");
+        assert_eq!(err.key(), "dsl.spelling.max_depth");
+    }
+
+    #[test]
+    fn second_alias_on_same_field_fails_with_both_names() {
+        let err = parse_spelling("MAP<h: BOOL ALIAS help ALIAS h2>")
+            .expect_err("second ALIAS must fail");
+        assert_eq!(err.key(), "dsl.alias.duplicate_on_field");
+        assert!(err.message().contains("'h'"), "{err}");
+        assert!(err.message().contains("'help'"), "{err}");
+        assert!(err.message().contains("'h2'"), "{err}");
+        assert!(err.message().contains("only one ALIAS"), "{err}");
+        // No internal encodings in user output.
+        assert!(!err.message().contains('\u{1f}'), "{err}");
+    }
+
+    #[test]
+    fn second_alias_with_bad_name_is_bounded() {
+        let err = parse_spelling("MAP<h: BOOL ALIAS help ALIAS Bad, x: INT>")
+            .expect_err("second ALIAS with bad name must fail");
+        assert_eq!(err.key(), "dsl.alias.duplicate_on_field");
+        assert!(!err.message().contains('>'), "{err}");
+        assert!(!err.message().contains("x: INT"), "{err}");
+        assert!(!err.message().contains('\u{1f}'), "{err}");
     }
 
     #[test]

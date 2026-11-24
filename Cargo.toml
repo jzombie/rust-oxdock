@@ -3,6 +3,7 @@ members = [
     "crates/oxdock-build",
     "crates/oxdock-cli",
     "crates/oxdock-core",
+    "crates/oxdock-diagnostics",
     "crates/oxdock-doc-tests",
     "crates/oxdock-embed",
     "crates/oxdock-fixture",
@@ -73,6 +74,7 @@ oxdock = { path = "oxdock", version = "0.44.1-alpha" }
 oxdock-build = { path = "crates/oxdock-build", version = "0.44.1-alpha" }
 oxdock-cli = { path = "crates/oxdock-cli", version = "0.44.1-alpha", default-features = false }
 oxdock-core = { path = "crates/oxdock-core", version = "0.44.1-alpha" }
+oxdock-diagnostics = { path = "crates/oxdock-diagnostics", version = "0.44.1-alpha" }
 oxdock-embed = { path = "crates/oxdock-embed", version = "0.44.1-alpha" }
 oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.44.1-alpha" }
 oxdock-fs = { path = "crates/sys/oxdock-fs", version = "0.44.1-alpha" }

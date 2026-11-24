@@ -4375,19 +4375,22 @@ fn parse_type_field(toks: &[Tok], pos: usize) -> Option<usize> {
         }
     }
     let mut p = parse_type_shape(toks, p)?;
-    // Optional `ALIAS name` clause (#310.5): one alternate CLI spelling
-    // for `TYPE FLAGS` fields. Skipped as a unit here so the shape
-    // matcher covers it; the spelling parser owns validation, and the
-    // renderer carries the raw tokens through. Order is fixed:
-    // `TYPE [ALIAS alias] [= default]`. The alias word itself rides
-    // along regardless of case so a miscapitalized alias still reaches
-    // the spelling diagnostic instead of missing to unknown-command.
-    let q = skip_type_nl(toks, p);
-    if matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Word(w)) if w == crate::tag::ALIAS_KEYWORD)
-    {
+    // Optional `ALIAS name` clauses (#310.5): one alternate CLI spelling
+    // per field, but the matcher covers every consecutive clause so the
+    // spelling parser owns arity (second ALIAS fails there naming both
+    // names, never here as shape miss). The renderer carries raw tokens
+    // through. Order is fixed: `TYPE [ALIAS alias]* [= default]`.
+    loop {
+        let q = skip_type_nl(toks, p);
+        if !matches!(toks.get(q).map(|t| &t.kind), Some(TokKind::Word(w)) if w == crate::tag::ALIAS_KEYWORD)
+        {
+            break;
+        }
         p = skip_type_nl(toks, q + 1);
         if matches!(toks.get(p).map(|t| &t.kind), Some(TokKind::Word(_))) {
             p = skip_type_nl(toks, p + 1);
+        } else {
+            break;
         }
     }
     // Optional `= ...` default tail: consume to the next field

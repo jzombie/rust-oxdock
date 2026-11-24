@@ -114,10 +114,11 @@ pub fn parse_publish_arg(raw: &str) -> Result<(SocketAddr, String)> {
 /// fast, never parse-then-fail-on-bind.
 #[cfg(feature = "net")]
 pub fn build_registry(flags: &EndpointFlags) -> Result<Arc<EndpointRegistry>> {
+    use crate::errors;
     use oxdock_net_plugin::VirtualEndpoint;
     use std::collections::HashSet;
     if flags.offline && (!flags.listens.is_empty() || !flags.publishes.is_empty()) {
-        bail!("--offline conflicts with --listen/-p (offline runs open no sockets)");
+        return Err(errors::offline_conflict());
     }
     let registry = Arc::new(EndpointRegistry::new(flags.offline));
     let mut inners: HashSet<EndpointKey> = HashSet::new();
@@ -125,10 +126,10 @@ pub fn build_registry(flags: &EndpointFlags) -> Result<Arc<EndpointRegistry>> {
     for addr in &flags.listens {
         let key = EndpointKey::tcp(VirtualEndpoint::Port(addr.port()));
         if !inners.insert(key.clone()) {
-            bail!("virtual endpoint '{key}' is mapped twice");
+            return Err(errors::endpoint_duplicate_inner(&key.to_string()));
         }
         if addr.port() != 0 && !outers.insert(*addr) {
-            bail!("outer socket address {addr} is mapped twice");
+            return Err(errors::endpoint_duplicate_outer(&addr.to_string()));
         }
         registry.add_mapping(&key, BindingSpec::Exposed { addr: *addr })?;
     }
@@ -140,10 +141,10 @@ pub fn build_registry(flags: &EndpointFlags) -> Result<Arc<EndpointRegistry>> {
             endpoint,
         };
         if !inners.insert(key.clone()) {
-            bail!("virtual endpoint '{key}' is mapped twice");
+            return Err(errors::endpoint_duplicate_inner(&key.to_string()));
         }
         if addr.port() != 0 && !outers.insert(*addr) {
-            bail!("outer socket address {addr} is mapped twice");
+            return Err(errors::endpoint_duplicate_outer(&addr.to_string()));
         }
         registry.add_mapping(&key, BindingSpec::Exposed { addr: *addr })?;
     }

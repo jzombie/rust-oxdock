@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 
 mod endpoints;
 pub use endpoints::EndpointFlags;
+mod errors;
+pub use errors::{endpoint_duplicate_inner, endpoint_duplicate_outer, feature_required, offline_conflict};
 #[cfg(feature = "mcp")]
 mod mcp;
 
@@ -467,9 +469,7 @@ impl Options {
                         // and covered in lean builds; the feature error below
                         // still wins regardless of the value.
                         let _ = endpoints::parse_listen_arg(&raw);
-                        bail!(
-                            "--listen/-p require the `net` feature (rebuild with --features net)"
-                        );
+                        return Err(errors::feature_required("--listen/-p"));
                     }
                     #[cfg(feature = "net")]
                     endpoints.listens.push(endpoints::parse_listen_arg(&raw)?);
@@ -486,9 +486,7 @@ impl Options {
                         // validation live in lean builds; the feature error
                         // below still wins.
                         let _ = endpoints::parse_publish_arg(&raw);
-                        bail!(
-                            "--listen/-p require the `net` feature (rebuild with --features net)"
-                        );
+                        return Err(errors::feature_required("--listen/-p"));
                     }
                     #[cfg(feature = "net")]
                     endpoints
@@ -513,7 +511,7 @@ impl Options {
                         // Keep the pure validator live in lean builds; the
                         // feature error below still wins.
                         let _ = oxdock_net_plugin_stub_parse_remote(&raw);
-                        bail!("--remote requires the `net` feature (rebuild with --features net)");
+                        return Err(errors::feature_required("--remote"));
                     }
                     #[cfg(feature = "net")]
                     remotes.push(oxdock_net_plugin::parse_remote_arg(&raw)?);
@@ -815,7 +813,7 @@ fn oxdock_net_plugin_stub_parse_remote(raw: &str) -> Result<(String, String)> {
 #[cfg(not(feature = "net"))]
 fn check_no_net_remotes(remotes: &[(String, String)]) -> Result<()> {
     if !remotes.is_empty() {
-        bail!("--remote requires the `net` feature (rebuild with --features net)");
+        return Err(errors::feature_required("--remote"));
     }
     Ok(())
 }
@@ -826,7 +824,7 @@ fn check_no_net_remotes(remotes: &[(String, String)]) -> Result<()> {
 #[cfg(not(feature = "net"))]
 fn check_no_net_endpoints(flags: &EndpointFlags) -> Result<()> {
     if !flags.listens.is_empty() || !flags.publishes.is_empty() {
-        bail!("--listen/-p require the `net` feature (rebuild with --features net)");
+        return Err(errors::feature_required("--listen/-p"));
     }
     Ok(())
 }
@@ -2124,9 +2122,14 @@ mod tests {
             let err = Options::parse(&mut args, workspace.as_guarded_path())
                 .expect_err("endpoint flag must fail without net");
             assert!(
-                err.to_string().contains("require the `net` feature"),
+                err.to_string().contains("`net` feature"),
                 "{err:?}"
             );
+            // Typed path: stable key survives rewording.
+            let diag = err
+                .downcast_ref::<oxdock_diagnostics::Diagnostic>()
+                .expect("CLI errors stay typed");
+            assert_eq!(diag.key(), "cli.feature_required");
         }
         let mut args = vec!["--offline".to_string(), "-".to_string()].into_iter();
         let opts = Options::parse(&mut args, workspace.as_guarded_path()).expect("parse");

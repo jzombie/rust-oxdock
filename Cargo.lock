@@ -1621,6 +1621,7 @@ dependencies = [
  "muxio-rpc-service-endpoint",
  "muxio-sync-rpc-server",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-macros",
  "oxdock-markdown-plugin",
@@ -1648,6 +1649,7 @@ dependencies = [
  "indoc",
  "lexopt",
  "line-ending",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-parser",
@@ -1665,6 +1667,10 @@ dependencies = [
  "tar",
  "toml",
 ]
+
+[[package]]
+name = "oxdock-diagnostics"
+version = "0.44.1-alpha"
 
 [[package]]
 name = "oxdock-doc-tests"
@@ -1843,6 +1849,7 @@ dependencies = [
  "anyhow",
  "indoc",
  "line-ending",
+ "oxdock-diagnostics",
  "oxdock-func-macro",
  "oxdock-pipe",
  "proc-macro2",
