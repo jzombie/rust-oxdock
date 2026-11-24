@@ -2261,16 +2261,39 @@ declare_commands! {
             ASSERT_EQ $reply "first"
         "#} } ],
         lower: |_flags, args| {
-            let arg = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_READ_LINE, "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
+            let arg = args.into_iter().next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_READ_LINE.to_string(),
+                    },
+                    dsl_diag::read_line_requires_variable(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             let var = match arg {
                 Arg::Expr(Expr::Var { name, .. }) => name,
                 // Quoted "$var" keeps its sigil through the generic string
                 // path; templates defer untouched exactly as before.
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
-                other => return Err(ParseError::validation(KEYWORD_READ_LINE, format!("READ_LINE requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+                other => {
+                    let got = other.render();
+                    return Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_READ_LINE.to_string(),
+                        },
+                        dsl_diag::read_line_requires_sigil(&got),
+                        &SpanContext::line_only(0),
+                    ));
+                }
             };
             if var.is_empty() {
-                return Err(ParseError::validation(KEYWORD_READ_LINE, "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_READ_LINE.to_string(),
+                    },
+                    dsl_diag::read_line_requires_variable(),
+                    &SpanContext::line_only(0),
+                ));
             }
             Ok(StepKind::ReadLine { var })
         },
@@ -2304,16 +2327,47 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let var_arg = it.next().ok_or_else(|| ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))?;
+            let var_arg = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_PROMPT.to_string(),
+                    },
+                    dsl_diag::prompt_requires_variable(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             let var = match var_arg {
                 Arg::Expr(Expr::Var { name, .. }) => name,
                 Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
-                other => return Err(ParseError::validation(KEYWORD_PROMPT, format!("PROMPT requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+                other => {
+                    let got = other.render();
+                    return Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_PROMPT.to_string(),
+                        },
+                        dsl_diag::prompt_requires_sigil(&got),
+                        &SpanContext::line_only(0),
+                    ));
+                }
             };
             if var.is_empty() {
-                return Err(ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_PROMPT.to_string(),
+                    },
+                    dsl_diag::prompt_requires_variable(),
+                    &SpanContext::line_only(0),
+                ));
             }
-            let message = it.next().ok_or_else(|| ParseError::validation(KEYWORD_PROMPT, "PROMPT requires a message".to_string(), &SpanContext::line_only(0)))?;
+            let message = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_PROMPT.to_string(),
+                    },
+                    dsl_diag::prompt_requires_message(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             let default = it.next();
             Ok(StepKind::Prompt { var, message, default })
         },

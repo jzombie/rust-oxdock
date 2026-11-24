@@ -179,7 +179,12 @@ wording instead of preserving old strings.
    Filesystem group done (2026-11-24): MKDIR/INSTALL/SET_EXECUTABLE/
    ARCHIVE/UNARCHIVE/WRITE/APPEND/APPEND_LINE/REMOVE path-missing
    lowers plus RUN empty-argv (reuses `needs_value`, 13 sites) through
-   eleven more parameterless constructors. Still open: the rest of
+   eleven more parameterless constructors. READ_LINE/PROMPT group
+   done (2026-11-24): variable/message/sigil lowers (8 sites)
+   through five `dsl.validation.*` constructors; the `found` value
+   now renders the argument instead of the internal `Arg` debug
+   shape (first canonical improvement: legacy substring assertions
+   still hold). Still open: the rest of
    the `commands.rs` bulk
    (~90 `ParseError::validation/structural` sites) goes per-command,
    plus `parser.rs` rewrap (`lower_to_diagnostic` mapping), `lib.rs`

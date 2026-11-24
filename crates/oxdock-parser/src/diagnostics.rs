@@ -532,6 +532,55 @@ pub fn remove_requires_path() -> Diagnostic {
     )
 }
 
+/// `READ_LINE` without a variable.
+pub fn read_line_requires_variable() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.read_line_requires_variable",
+        "READ_LINE requires a variable".to_string(),
+        Diagnostic::make_fields(&[("command", "READ_LINE")]),
+    )
+}
+
+/// `READ_LINE` target without a `$` sigil. Takes the rendered
+/// argument; quoting lives here. (Renders the value, never the
+/// internal `Arg` debug shape.)
+pub fn read_line_requires_sigil(got: &str) -> Diagnostic {
+    let message = format!("READ_LINE requires a $variable, found {got:?}");
+    Diagnostic::new(
+        "dsl.validation.read_line_requires_sigil",
+        message,
+        Diagnostic::make_fields(&[("command", "READ_LINE"), ("got", got)]),
+    )
+}
+
+/// `PROMPT` without a variable.
+pub fn prompt_requires_variable() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.prompt_requires_variable",
+        "PROMPT requires a variable".to_string(),
+        Diagnostic::make_fields(&[("command", "PROMPT")]),
+    )
+}
+
+/// `PROMPT` target without a `$` sigil. Takes the rendered argument.
+pub fn prompt_requires_sigil(got: &str) -> Diagnostic {
+    let message = format!("PROMPT requires a $variable, found {got:?}");
+    Diagnostic::new(
+        "dsl.validation.prompt_requires_sigil",
+        message,
+        Diagnostic::make_fields(&[("command", "PROMPT"), ("got", got)]),
+    )
+}
+
+/// `PROMPT` without a message.
+pub fn prompt_requires_message() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.prompt_requires_message",
+        "PROMPT requires a message".to_string(),
+        Diagnostic::make_fields(&[("command", "PROMPT")]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +655,11 @@ mod tests {
             append_requires_path().key(),
             append_line_requires_path().key(),
             remove_requires_path().key(),
+            read_line_requires_variable().key(),
+            read_line_requires_sigil("reply").key(),
+            prompt_requires_variable().key(),
+            prompt_requires_sigil("reply").key(),
+            prompt_requires_message().key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -715,6 +769,27 @@ mod tests {
             "APPEND_LINE requires a path"
         );
         assert_eq!(remove_requires_path().message(), "REMOVE requires a path");
+    }
+
+    #[test]
+    fn read_line_prompt_messages_keep_legacy_shape() {
+        assert_eq!(
+            read_line_requires_variable().message(),
+            "READ_LINE requires a variable"
+        );
+        assert_eq!(
+            read_line_requires_sigil("reply").message(),
+            "READ_LINE requires a $variable, found \"reply\""
+        );
+        assert_eq!(
+            prompt_requires_variable().message(),
+            "PROMPT requires a variable"
+        );
+        assert_eq!(
+            prompt_requires_sigil("reply").message(),
+            "PROMPT requires a $variable, found \"reply\""
+        );
+        assert_eq!(prompt_requires_message().message(), "PROMPT requires a message");
     }
 
     #[test]
