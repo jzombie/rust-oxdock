@@ -664,6 +664,40 @@ pub fn list_append_takes_two() -> Diagnostic {
     )
 }
 
+/// `ASSERT_EQ` / `ASSERT_NE` without an actual value. Shared by both
+/// commands: same failure mode, one key; the invoking command rides in
+/// the structured `command` field and leads the message.
+pub fn assert_equality_requires_value(command: &str) -> Diagnostic {
+    let message = format!("{command} requires a value");
+    Diagnostic::new(
+        "dsl.validation.assert_equality_requires_value",
+        message,
+        Diagnostic::make_fields(&[("command", command)]),
+    )
+}
+
+/// `ASSERT_EQ` / `ASSERT_NE` without an expected value (and no `--hash`).
+/// Shared key; invoking command in the field.
+pub fn assert_equality_requires_expected(command: &str) -> Diagnostic {
+    let message = format!("{command} requires an expected value");
+    Diagnostic::new(
+        "dsl.validation.assert_equality_requires_expected",
+        message,
+        Diagnostic::make_fields(&[("command", command)]),
+    )
+}
+
+/// `ASSERT_EQ` / `ASSERT_NE` combining `--hash` with a positional
+/// expected value. Shared key; invoking command in the field.
+pub fn assert_equality_hash_with_expected(command: &str) -> Diagnostic {
+    let message = format!("{command} --hash cannot be combined with an expected value");
+    Diagnostic::new(
+        "dsl.validation.assert_equality_hash_with_expected",
+        message,
+        Diagnostic::make_fields(&[("command", command)]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,6 +786,9 @@ mod tests {
             list_append_requires_sigil("x").key(),
             list_append_requires_item().key(),
             list_append_takes_two().key(),
+            assert_equality_requires_value("ASSERT_EQ").key(),
+            assert_equality_requires_expected("ASSERT_EQ").key(),
+            assert_equality_hash_with_expected("ASSERT_EQ").key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -918,6 +955,26 @@ mod tests {
         assert_eq!(
             list_append_takes_two().message(),
             "LIST_APPEND takes exactly two arguments: LIST_APPEND $list <item>"
+        );
+    }
+
+    #[test]
+    fn assert_equality_messages() {
+        assert_eq!(
+            assert_equality_requires_value("ASSERT_EQ").message(),
+            "ASSERT_EQ requires a value"
+        );
+        assert_eq!(
+            assert_equality_requires_value("ASSERT_NE").message(),
+            "ASSERT_NE requires a value"
+        );
+        assert_eq!(
+            assert_equality_requires_expected("ASSERT_EQ").message(),
+            "ASSERT_EQ requires an expected value"
+        );
+        assert_eq!(
+            assert_equality_hash_with_expected("ASSERT_NE").message(),
+            "ASSERT_NE --hash cannot be combined with an expected value"
         );
     }
 

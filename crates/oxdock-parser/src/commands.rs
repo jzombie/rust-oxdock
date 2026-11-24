@@ -1318,9 +1318,11 @@ fn lower_equality_args(
         .map(|(_, v)| v.as_str().to_string());
     let mut it = args.into_iter();
     let actual = lower_assert_target(it.next().ok_or_else(|| {
-        ParseError::validation(
-            verb,
-            format!("{verb} requires a value"),
+        ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: verb.to_string(),
+            },
+            dsl_diag::assert_equality_requires_value(verb),
             &SpanContext::line_only(0),
         )
     })?)?;
@@ -1329,17 +1331,21 @@ fn lower_equality_args(
         if hash.is_some() {
             None
         } else {
-            return Err(ParseError::validation(
-                verb,
-                format!("{verb} requires an expected value"),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: verb.to_string(),
+                },
+                dsl_diag::assert_equality_requires_expected(verb),
                 &SpanContext::line_only(0),
             ));
         }
     } else {
         if hash.is_some() {
-            return Err(ParseError::validation(
-                verb,
-                format!("{verb} --hash cannot be combined with an expected value"),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: verb.to_string(),
+                },
+                dsl_diag::assert_equality_hash_with_expected(verb),
                 &SpanContext::line_only(0),
             ));
         }
