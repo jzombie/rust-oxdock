@@ -507,6 +507,84 @@ pub fn unarchive_bad_max_bytes(reason: &anyhow::Error) -> Diagnostic {
     )
 }
 
+/// `EXPORT` naming a function with no top-level `FUNC` or known module
+/// member. Takes the exported name; quoting lives here.
+pub fn export_unknown_func(name: &str) -> Diagnostic {
+    let message =
+        format!("EXPORT `{name}` does not match any top-level FUNC or known module member");
+    Diagnostic::new(
+        "dsl.validation.export_unknown_func",
+        message,
+        Diagnostic::make_fields(&[("command", "EXPORT"), ("got", name)]),
+    )
+}
+
+/// `EXPORT TYPE` with a qualified `ALIAS::TYPE` name, which no
+/// downstream path serves. Takes the exported name.
+pub fn export_type_qualified(name: &str) -> Diagnostic {
+    let message = format!(
+        "EXPORT TYPE `{name}` must be bare: qualified ALIAS::TYPE re-exports are not served; import the file and re-export the bare name"
+    );
+    Diagnostic::new(
+        "dsl.validation.export_type_qualified",
+        message,
+        Diagnostic::make_fields(&[("command", "EXPORT"), ("got", name)]),
+    )
+}
+
+/// `EXPORT TYPE` naming no top-level `TYPE` (and no imports to defer
+/// to). Takes the exported name.
+pub fn export_unknown_type(name: &str) -> Diagnostic {
+    let message = format!("EXPORT TYPE `{name}` does not match any top-level TYPE");
+    Diagnostic::new(
+        "dsl.validation.export_unknown_type",
+        message,
+        Diagnostic::make_fields(&[("command", "EXPORT"), ("got", name)]),
+    )
+}
+
+/// `EXPORT CONST` through the `SCRIPT::` namespace, which never names
+/// a `CONST`. Takes the exported name.
+pub fn export_const_script_namespace(name: &str) -> Diagnostic {
+    let message = format!(
+        "EXPORT CONST `{name}` must name a top-level CONST (`$NAME`) or `$ALIAS::NAME` for a visible import: `SCRIPT::` is not a CONST namespace"
+    );
+    Diagnostic::new(
+        "dsl.validation.export_const_script_namespace",
+        message,
+        Diagnostic::make_fields(&[("command", "EXPORT"), ("got", name)]),
+    )
+}
+
+/// `EXPORT CONST` forwarding through an alias with no visible import.
+/// Takes the exported name and the unknown alias.
+pub fn export_const_unknown_alias(name: &str, module: &str) -> Diagnostic {
+    let message = format!(
+        "EXPORT CONST `{name}` names unknown import alias `{module}`: import a file as `{module}` to re-export its CONSTs"
+    );
+    Diagnostic::new(
+        "dsl.validation.export_const_unknown_alias",
+        message,
+        Diagnostic::make_fields(&[
+            ("command", "EXPORT"),
+            ("got", name),
+            ("alias", module),
+        ]),
+    )
+}
+
+/// `EXPORT CONST` naming no top-level `CONST`. Takes the exported name.
+pub fn export_const_unknown(name: &str) -> Diagnostic {
+    let message = format!(
+        "EXPORT CONST `{name}` does not match any top-level CONST (LET bindings are never exportable)"
+    );
+    Diagnostic::new(
+        "dsl.validation.export_const_unknown",
+        message,
+        Diagnostic::make_fields(&[("command", "EXPORT"), ("got", name)]),
+    )
+}
+
 /// `WRITE` without a path.
 pub fn write_requires_path() -> Diagnostic {
     Diagnostic::new(
@@ -780,6 +858,12 @@ mod tests {
             unarchive_requires_archive().key(),
             unarchive_requires_destination().key(),
             unarchive_bad_max_bytes(&anyhow::anyhow!("bad count")).key(),
+            export_unknown_func("NOPE").key(),
+            export_type_qualified("LIB::T").key(),
+            export_unknown_type("NOPE").key(),
+            export_const_script_namespace("SCRIPT::N").key(),
+            export_const_unknown_alias("$LIB::N", "LIB").key(),
+            export_const_unknown("$N").key(),
             write_requires_path().key(),
             append_requires_path().key(),
             append_line_requires_path().key(),
@@ -915,6 +999,34 @@ mod tests {
             "APPEND_LINE requires a path"
         );
         assert_eq!(remove_requires_path().message(), "REMOVE requires a path");
+    }
+
+    #[test]
+    fn export_messages() {
+        assert_eq!(
+            export_unknown_func("NOPE").message(),
+            "EXPORT `NOPE` does not match any top-level FUNC or known module member"
+        );
+        assert_eq!(
+            export_type_qualified("LIB::T").message(),
+            "EXPORT TYPE `LIB::T` must be bare: qualified ALIAS::TYPE re-exports are not served; import the file and re-export the bare name"
+        );
+        assert_eq!(
+            export_unknown_type("NOPE").message(),
+            "EXPORT TYPE `NOPE` does not match any top-level TYPE"
+        );
+        assert_eq!(
+            export_const_script_namespace("SCRIPT::N").message(),
+            "EXPORT CONST `SCRIPT::N` must name a top-level CONST (`$NAME`) or `$ALIAS::NAME` for a visible import: `SCRIPT::` is not a CONST namespace"
+        );
+        assert_eq!(
+            export_const_unknown_alias("$LIB::N", "LIB").message(),
+            "EXPORT CONST `$LIB::N` names unknown import alias `LIB`: import a file as `LIB` to re-export its CONSTs"
+        );
+        assert_eq!(
+            export_const_unknown("$N").message(),
+            "EXPORT CONST `$N` does not match any top-level CONST (LET bindings are never exportable)"
+        );
     }
 
     #[test]

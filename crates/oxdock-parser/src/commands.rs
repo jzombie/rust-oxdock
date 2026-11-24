@@ -6643,9 +6643,11 @@ pub(crate) fn validate_exports(
             },
         };
         if !valid {
-            return Err(ParseError::validation(
-                crate::constants::KEYWORD_EXPORT,
-                format!("EXPORT `{name}` does not match any top-level FUNC or known module member"),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: crate::constants::KEYWORD_EXPORT.to_string(),
+                },
+                dsl_diag::export_unknown_func(name),
                 ctx,
             ));
         }
@@ -6660,18 +6662,20 @@ pub(crate) fn validate_exports(
         // imports, so `EXPORT PERSON` after `IMPORT ["lib" AS LIB]`
         // can promote the imported type.
         if crate::constants::split_qualified(name).is_some() {
-            return Err(ParseError::validation(
-                crate::constants::KEYWORD_EXPORT,
-                format!(
-                    "EXPORT TYPE `{name}` must be bare: qualified ALIAS::TYPE re-exports are not served; import the file and re-export the bare name"
-                ),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: crate::constants::KEYWORD_EXPORT.to_string(),
+                },
+                dsl_diag::export_type_qualified(name),
                 ctx,
             ));
         }
         if !top_types.contains(name) && top_imports.is_empty() {
-            return Err(ParseError::validation(
-                crate::constants::KEYWORD_EXPORT,
-                format!("EXPORT TYPE `{name}` does not match any top-level TYPE"),
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: crate::constants::KEYWORD_EXPORT.to_string(),
+                },
+                dsl_diag::export_unknown_type(name),
                 ctx,
             ));
         }
@@ -6695,20 +6699,18 @@ pub(crate) fn validate_exports(
             Some((module, _base)) => top_imports.iter().any(|m| m == module),
         };
         if !valid {
-            let msg = match crate::constants::split_qualified(name) {
-                Some((module, _)) if module == crate::constants::SCRIPT_MODULE_NAME => format!(
-                    "EXPORT CONST `{name}` must name a top-level CONST (`$NAME`) or `$ALIAS::NAME` for a visible import: `SCRIPT::` is not a CONST namespace"
-                ),
-                Some((module, _)) => format!(
-                    "EXPORT CONST `{name}` names unknown import alias `{module}`: import a file as `{module}` to re-export its CONSTs"
-                ),
-                None => format!(
-                    "EXPORT CONST `{name}` does not match any top-level CONST (LET bindings are never exportable)"
-                ),
+            let diag = match crate::constants::split_qualified(name) {
+                Some((module, _)) if module == crate::constants::SCRIPT_MODULE_NAME => {
+                    dsl_diag::export_const_script_namespace(name)
+                }
+                Some((module, _)) => dsl_diag::export_const_unknown_alias(name, module),
+                None => dsl_diag::export_const_unknown(name),
             };
-            return Err(ParseError::validation(
-                crate::constants::KEYWORD_EXPORT,
-                msg,
+            return Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: crate::constants::KEYWORD_EXPORT.to_string(),
+                },
+                diag,
                 ctx,
             ));
         }

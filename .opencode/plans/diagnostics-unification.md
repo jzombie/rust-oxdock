@@ -193,7 +193,10 @@ wording instead of preserving old strings.
    done (2026-11-24): --max-bytes passthrough through new
    `dsl.validation.unarchive_bad_max_bytes`, EXPAND split/extra-path
    through existing constructors (3 sites). Still open: the rest of
-   the `commands.rs` bulk
+   the `commands.rs` bulk (validation fully migrated: zero
+   `ParseError::validation` sites remain; EXPORT group done
+   (2026-11-24): func/type/const lowers through six
+   `dsl.validation.export_*` constructors)
    (~90 `ParseError::validation/structural` sites) goes per-command,
    plus `parser.rs` rewrap (`lower_to_diagnostic` mapping), `lib.rs`
    mock, and `structural`/`invalid_syntax` constructors.
