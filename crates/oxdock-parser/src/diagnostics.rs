@@ -302,6 +302,128 @@ pub fn expand_extra_path() -> Diagnostic {
     )
 }
 
+/// `WORKDIR` without a path.
+pub fn workdir_requires_path() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.workdir_requires_path",
+        "WORKDIR requires a path".to_string(),
+        Diagnostic::make_fields(&[("command", "WORKDIR")]),
+    )
+}
+
+/// `WORKSPACE` without a target.
+pub fn workspace_requires_target() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.workspace_requires_target",
+        "WORKSPACE requires a target".to_string(),
+        Diagnostic::make_fields(&[("command", "WORKSPACE")]),
+    )
+}
+
+/// `WORKSPACE --local` without `CACHE`.
+pub fn workspace_local_needs_cache() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.workspace_local_needs_cache",
+        "WORKSPACE --local requires CACHE".to_string(),
+        Diagnostic::make_fields(&[("command", "WORKSPACE")]),
+    )
+}
+
+/// Unknown `WORKSPACE` target. Takes the offending value; quoting
+/// lives here.
+pub fn workspace_unknown_target(other: &str) -> Diagnostic {
+    let message = format!("unknown workspace target: {other}");
+    Diagnostic::new(
+        "dsl.validation.workspace_unknown_target",
+        message,
+        Diagnostic::make_fields(&[("command", "WORKSPACE"), ("got", other)]),
+    )
+}
+
+/// Unknown `--from-workspace` source. Shared by `COPY` and `SYMLINK`:
+/// same failure mode, one key. Takes the invoking command for the
+/// structured `command` field; the message is command-free by legacy.
+pub fn unknown_workspace_source(command: &str, other: &str) -> Diagnostic {
+    let message = format!("unknown workspace source: {other}");
+    Diagnostic::new(
+        "dsl.validation.unknown_workspace_source",
+        message,
+        Diagnostic::make_fields(&[("command", command), ("got", other)]),
+    )
+}
+
+/// `COPY` without a source positional.
+pub fn copy_requires_source() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.copy_requires_source",
+        "COPY requires a source".to_string(),
+        Diagnostic::make_fields(&[("command", "COPY")]),
+    )
+}
+
+/// `COPY` without a destination positional.
+pub fn copy_requires_destination() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.copy_requires_destination",
+        "COPY requires a destination".to_string(),
+        Diagnostic::make_fields(&[("command", "COPY")]),
+    )
+}
+
+/// `COPY` with both host-transfer flags.
+pub fn copy_host_exclusion() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.copy_host_exclusion",
+        "COPY --from-host and --to-host are mutually exclusive".to_string(),
+        Diagnostic::make_fields(&[("command", "COPY")]),
+    )
+}
+
+/// `COPY_GIT` without a revision positional.
+pub fn copy_git_requires_revision() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.copy_git_requires_revision",
+        "COPY_GIT requires a revision".to_string(),
+        Diagnostic::make_fields(&[("command", "COPY_GIT")]),
+    )
+}
+
+/// `COPY_GIT` without a source positional.
+pub fn copy_git_requires_source() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.copy_git_requires_source",
+        "COPY_GIT requires a source".to_string(),
+        Diagnostic::make_fields(&[("command", "COPY_GIT")]),
+    )
+}
+
+/// `COPY_GIT` without a destination positional.
+pub fn copy_git_requires_destination() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.copy_git_requires_destination",
+        "COPY_GIT requires a destination".to_string(),
+        Diagnostic::make_fields(&[("command", "COPY_GIT")]),
+    )
+}
+
+/// `SYMLINK` without a source positional.
+pub fn symlink_requires_source() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.symlink_requires_source",
+        "SYMLINK requires a source".to_string(),
+        Diagnostic::make_fields(&[("command", "SYMLINK")]),
+    )
+}
+
+/// `SYMLINK` without a target positional.
+pub fn symlink_requires_target() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.symlink_requires_target",
+        "SYMLINK requires a target".to_string(),
+        Diagnostic::make_fields(&[("command", "SYMLINK")]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +473,19 @@ mod tests {
             expand_assignment_error(&anyhow::anyhow!("bad split")).key(),
             expand_path_error(&anyhow::anyhow!("bad path")).key(),
             expand_extra_path().key(),
+            workdir_requires_path().key(),
+            workspace_requires_target().key(),
+            workspace_local_needs_cache().key(),
+            workspace_unknown_target("NOPE").key(),
+            unknown_workspace_source("COPY", "NOPE").key(),
+            copy_requires_source().key(),
+            copy_requires_destination().key(),
+            copy_host_exclusion().key(),
+            copy_git_requires_revision().key(),
+            copy_git_requires_source().key(),
+            copy_git_requires_destination().key(),
+            symlink_requires_source().key(),
+            symlink_requires_target().key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -385,6 +520,47 @@ mod tests {
             env_assignment_error(&inner).message(),
             "assignment requires KEY=value format"
         );
+    }
+
+    #[test]
+    fn workspace_copy_messages_keep_legacy_wording() {
+        assert_eq!(workdir_requires_path().message(), "WORKDIR requires a path");
+        assert_eq!(workspace_requires_target().message(), "WORKSPACE requires a target");
+        assert_eq!(
+            workspace_local_needs_cache().message(),
+            "WORKSPACE --local requires CACHE"
+        );
+        assert_eq!(
+            workspace_unknown_target("NOPE").message(),
+            "unknown workspace target: NOPE"
+        );
+        assert_eq!(
+            unknown_workspace_source("COPY", "NOPE").message(),
+            "unknown workspace source: NOPE"
+        );
+        assert_eq!(copy_requires_source().message(), "COPY requires a source");
+        assert_eq!(
+            copy_requires_destination().message(),
+            "COPY requires a destination"
+        );
+        assert_eq!(
+            copy_host_exclusion().message(),
+            "COPY --from-host and --to-host are mutually exclusive"
+        );
+        assert_eq!(
+            copy_git_requires_revision().message(),
+            "COPY_GIT requires a revision"
+        );
+        assert_eq!(
+            copy_git_requires_source().message(),
+            "COPY_GIT requires a source"
+        );
+        assert_eq!(
+            copy_git_requires_destination().message(),
+            "COPY_GIT requires a destination"
+        );
+        assert_eq!(symlink_requires_source().message(), "SYMLINK requires a source");
+        assert_eq!(symlink_requires_target().message(), "SYMLINK requires a target");
     }
 
     #[test]

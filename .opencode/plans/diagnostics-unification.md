@@ -138,7 +138,13 @@ directives.
    `join_value`, `lower_env_assignment`, `lower_env_tokens`,
    `lower_expand_tokens` (~15 sites) through eight more
    `dsl.validation.*` constructors; error passthroughs take
-   `&anyhow::Error` with `{reason:#}` inside. Still open: the rest of
+   `&anyhow::Error` with `{reason:#}` inside. WORKDIR/WORKSPACE/COPY
+   group done (2026-11-24): WORKDIR/WORKSPACE/COPY/COPY_GIT/SYMLINK
+   lowers (14 sites) through twelve parameterless `dsl.validation.*`
+   constructors (wording owned by constructors, no prose at call
+   sites); `unknown_workspace_source` is shared by COPY and SYMLINK
+   (same failure mode, one key) and records the invoking command.
+   Still open: the rest of
    the `commands.rs` bulk
    (~90 `ParseError::validation/structural` sites) goes per-command,
    plus `parser.rs` rewrap (`lower_to_diagnostic` mapping), `lib.rs`

@@ -1435,7 +1435,15 @@ declare_commands! {
             ASSERT_EQ $body "inner"
         "#} } ],
         lower: |_flags, args| {
-            let path = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_WORKDIR, "WORKDIR requires a path".to_string(), &SpanContext::line_only(0)))?;
+            let path = args.into_iter().next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_WORKDIR.to_string(),
+                    },
+                    dsl_diag::workdir_requires_path(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             Ok(StepKind::Workdir(path))
         },
     ],
@@ -1482,14 +1490,34 @@ declare_commands! {
         "#} } ],
         lower: |flags, args| {
             let local = flags.iter().any(|(k, _)| k == "local");
-            let target = args.into_iter().next().ok_or_else(|| ParseError::validation(KEYWORD_WORKSPACE, "WORKSPACE requires a target".to_string(), &SpanContext::line_only(0)))?;
+            let target = args.into_iter().next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_WORKSPACE.to_string(),
+                    },
+                    dsl_diag::workspace_requires_target(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             match target.as_str() {
-                "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => Err(ParseError::validation(KEYWORD_WORKSPACE, "WORKSPACE --local requires CACHE".to_string(), &SpanContext::line_only(0))),
+                "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_WORKSPACE.to_string(),
+                    },
+                    dsl_diag::workspace_local_needs_cache(),
+                    &SpanContext::line_only(0),
+                )),
                 "SNAPSHOT" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
                 "LOCAL" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
                 "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache { local })),
                 "SYSTEM" => Ok(StepKind::Workspace(WorkspaceTarget::System)),
-                other => Err(ParseError::validation(KEYWORD_WORKSPACE, format!("unknown workspace target: {other}"), &SpanContext::line_only(0))),
+                other => Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_WORKSPACE.to_string(),
+                    },
+                    dsl_diag::workspace_unknown_target(other),
+                    &SpanContext::line_only(0),
+                )),
             }
         },
     ],
@@ -1773,16 +1801,44 @@ declare_commands! {
                     "LOCAL" => Ok(WorkspaceTarget::Local),
                     "CACHE" => Ok(WorkspaceTarget::Cache { local: false }),
                     "SYSTEM" => Ok(WorkspaceTarget::System),
-                    other => Err(ParseError::validation(KEYWORD_COPY, format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
+                    other => Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_COPY.to_string(),
+                        },
+                        dsl_diag::unknown_workspace_source(KEYWORD_COPY, other),
+                        &SpanContext::line_only(0),
+                    )),
                 })
                 .transpose()?;
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY, "COPY requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY, "COPY requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY.to_string(),
+                    },
+                    dsl_diag::copy_requires_source(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
+            let to = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY.to_string(),
+                    },
+                    dsl_diag::copy_requires_destination(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             let from_host = flags.iter().any(|(k, _)| k == "from_host");
             let to_host = flags.iter().any(|(k, _)| k == "to_host");
             if from_host && to_host {
-                return Err(ParseError::validation(KEYWORD_COPY, "COPY --from-host and --to-host are mutually exclusive".to_string(), &SpanContext::line_only(0)));
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY.to_string(),
+                    },
+                    dsl_diag::copy_host_exclusion(),
+                    &SpanContext::line_only(0),
+                ));
             }
             Ok(StepKind::Copy { from_workspace, from_host, to_host, from, to })
         },
@@ -1805,9 +1861,33 @@ declare_commands! {
         lower: |flags, args| {
             let include_dirty = flags.iter().any(|(k, _)| k == "dirty");
             let mut it = args.into_iter();
-            let rev = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY_GIT, "COPY_GIT requires a revision".to_string(), &SpanContext::line_only(0)))?;
-            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY_GIT, "COPY_GIT requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_COPY_GIT, "COPY_GIT requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let rev = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY_GIT.to_string(),
+                    },
+                    dsl_diag::copy_git_requires_revision(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
+            let from = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY_GIT.to_string(),
+                    },
+                    dsl_diag::copy_git_requires_source(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
+            let to = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_COPY_GIT.to_string(),
+                    },
+                    dsl_diag::copy_git_requires_destination(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             Ok(StepKind::CopyGit { rev, from, to, include_dirty })
         },
     ],
@@ -1852,12 +1932,34 @@ declare_commands! {
                     "LOCAL" => Ok(WorkspaceTarget::Local),
                     "CACHE" => Ok(WorkspaceTarget::Cache { local: false }),
                     "SYSTEM" => Ok(WorkspaceTarget::System),
-                    other => Err(ParseError::validation(KEYWORD_SYMLINK, format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
+                    other => Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_SYMLINK.to_string(),
+                        },
+                        dsl_diag::unknown_workspace_source(KEYWORD_SYMLINK, other),
+                        &SpanContext::line_only(0),
+                    )),
                 })
                 .transpose()?;
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| ParseError::validation(KEYWORD_SYMLINK, "SYMLINK requires a source".to_string(), &SpanContext::line_only(0)))?;
-            let to = it.next().ok_or_else(|| ParseError::validation(KEYWORD_SYMLINK, "SYMLINK requires a target".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_SYMLINK.to_string(),
+                    },
+                    dsl_diag::symlink_requires_source(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
+            let to = it.next().ok_or_else(|| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_SYMLINK.to_string(),
+                    },
+                    dsl_diag::symlink_requires_target(),
+                    &SpanContext::line_only(0),
+                )
+            })?;
             Ok(StepKind::Symlink { from_workspace, from, to })
         },
     ],
