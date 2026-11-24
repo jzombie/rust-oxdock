@@ -62,7 +62,7 @@ expected syntax, and a hint with a concrete example. The contract beginners
 can rely on: a syntax error is never reported as `unknown command`. Any line
 that starts with a known command or structural keyword (`WITH_IO`, `LET`,
 `FOR`, `IF`, `ASYNC`, `AWAIT`, and the rest) always fails as
-`invalid syntax for command X` with an explanation of what was expected.
+`COMMAND`-lead `InvalidSyntax` with an explanation of what was expected.
 Only a name that matches nothing in any case fails as `unknown command`.
 
 The kinds:

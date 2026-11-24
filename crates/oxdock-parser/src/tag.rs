@@ -1392,10 +1392,10 @@ mod tests {
         let err = parse_spelling("MAP<h: BOOL ALIAS help ALIAS h2>")
             .expect_err("second ALIAS must fail");
         assert_eq!(err.key(), "dsl.alias.duplicate_on_field");
-        assert!(err.message().contains("'h'"), "{err}");
-        assert!(err.message().contains("'help'"), "{err}");
-        assert!(err.message().contains("'h2'"), "{err}");
-        assert!(err.message().contains("only one ALIAS"), "{err}");
+        assert!(err.message().contains("`h`"), "{err}");
+        assert!(err.message().contains("`help`"), "{err}");
+        assert!(err.message().contains("`h2`"), "{err}");
+        assert!(err.message().contains("only one `ALIAS`"), "{err}");
         // No internal encodings in user output.
         assert!(!err.message().contains('\u{1f}'), "{err}");
     }

@@ -734,7 +734,7 @@ mod fingerprint_tests {
             "ENV" => Ok(oxdock_parser::commands::lower_env_assignment(args)?),
             _ => Err(oxdock_parser::ParseError::unknown_command(
                 name,
-                format!("unknown command: {name}"),
+                format!("unknown command {name:?}"),
                 None,
                 &oxdock_parser::SpanContext::line_only(0),
             )),

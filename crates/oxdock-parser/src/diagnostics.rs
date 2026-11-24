@@ -47,7 +47,7 @@ pub fn decode_spelling_fragment(raw: &str) -> String {
 /// Second `ALIAS` on the same field.
 pub fn alias_duplicate_on_field(field: &str, first: &str, second: &str) -> Diagnostic {
     let message = format!(
-        "field '{field}' already has alias '{first}', found second alias '{second}': only one ALIAS per field"
+        "field `{field}` already has alias `{first}`, found second alias `{second}`: only one `ALIAS` per field"
     );
     Diagnostic::new(
         "dsl.alias.duplicate_on_field",
@@ -58,7 +58,7 @@ pub fn alias_duplicate_on_field(field: &str, first: &str, second: &str) -> Diagn
 
 /// `ALIAS` without a named field.
 pub fn alias_needs_field(got: &str) -> Diagnostic {
-    let message = format!("ALIAS needs a named field, found bare {got:?}");
+    let message = format!("`ALIAS` needs a named field, found bare {got:?}");
     Diagnostic::new(
         "dsl.alias.needs_field",
         message,
@@ -70,7 +70,7 @@ pub fn alias_needs_field(got: &str) -> Diagnostic {
 pub fn alias_needs_name() -> Diagnostic {
     Diagnostic::new(
         "dsl.alias.needs_name",
-        "ALIAS needs a lowercase alias name".to_string(),
+        "`ALIAS` needs a lowercase alias name".to_string(),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -78,7 +78,7 @@ pub fn alias_needs_name() -> Diagnostic {
 /// `ALIAS` name must start lowercase. Takes the decoded offending
 /// character and the decoded spelling; the template owns quoting.
 pub fn alias_name_lowercase(found: &str, spelling: &str) -> Diagnostic {
-    let message = format!("ALIAS name must start lowercase, found {found:?} in {spelling:?}");
+    let message = format!("`ALIAS` name must start lowercase, found {found:?} in {spelling:?}");
     Diagnostic::new(
         "dsl.alias.name_lowercase",
         message,
@@ -178,11 +178,10 @@ pub fn spelling_invalid_int(got: &str) -> Diagnostic {
     )
 }
 
-/// Flag that requires a value but got none. Preserves the legacy
-/// `invalid syntax for command ...` prefix so `expect_error`
-/// assertions keep matching.
+/// Flag that requires a value but got none. `COMMAND`-lead per the
+/// unified contract; the flag is a DSL token in backticks.
 pub fn flag_missing_value(command: &str, flag: &str) -> Diagnostic {
-    let message = format!("invalid syntax for command {command}: {flag} requires a value");
+    let message = format!("{command} `{flag}` requires a value");
     Diagnostic::new(
         "dsl.validation.flag_missing_value",
         message,
@@ -192,7 +191,7 @@ pub fn flag_missing_value(command: &str, flag: &str) -> Diagnostic {
 
 /// Unknown flag for a known command.
 pub fn unknown_flag(command: &str, flag: &str) -> Diagnostic {
-    let message = format!("invalid syntax for command {command}: unknown flag {flag}");
+    let message = format!("{command} unknown flag `{flag}`");
     Diagnostic::new(
         "dsl.validation.unknown_flag",
         message,
@@ -203,7 +202,7 @@ pub fn unknown_flag(command: &str, flag: &str) -> Diagnostic {
 /// More positionals than the command spec allows.
 pub fn too_many_positionals(command: &str, max: usize, got: usize) -> Diagnostic {
     let message = format!(
-        "invalid syntax for command {command}: expects at most {max} positional argument(s), got {got}"
+        "{command} expects at most {max} positional arguments, got {got}"
     );
     Diagnostic::new(
         "dsl.validation.too_many_positionals",
@@ -218,7 +217,7 @@ pub fn too_many_positionals(command: &str, max: usize, got: usize) -> Diagnostic
 
 /// Missing required positional argument.
 pub fn missing_argument(command: &str, name: &str) -> Diagnostic {
-    let message = format!("invalid syntax for command {command}: requires argument `{name}`");
+    let message = format!("{command} requires argument `{name}`");
     Diagnostic::new(
         "dsl.validation.missing_argument",
         message,
@@ -237,7 +236,7 @@ pub fn arg_type_mismatch(
 ) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     let message =
-        format!("invalid syntax for command {command}: argument `{name}` got {got} — {reason_text}");
+        format!("{command} argument `{name}` got {got:?}: {reason_text}");
     Diagnostic::new(
         "dsl.validation.arg_type_mismatch",
         message,
@@ -360,7 +359,7 @@ pub fn workspace_local_needs_cache() -> Diagnostic {
 /// Unknown `WORKSPACE` target. Takes the offending value; quoting
 /// lives here.
 pub fn workspace_unknown_target(other: &str) -> Diagnostic {
-    let message = format!("unknown workspace target: {other}");
+    let message = format!("unknown workspace target {other:?}");
     Diagnostic::new(
         "dsl.validation.workspace_unknown_target",
         message,
@@ -370,9 +369,9 @@ pub fn workspace_unknown_target(other: &str) -> Diagnostic {
 
 /// Unknown `--from-workspace` source. Shared by `COPY` and `SYMLINK`:
 /// same failure mode, one key. Takes the invoking command for the
-/// structured `command` field; the message is command-free by legacy.
+/// structured `command` field; the message is command-free.
 pub fn unknown_workspace_source(command: &str, other: &str) -> Diagnostic {
-    let message = format!("unknown workspace source: {other}");
+    let message = format!("unknown workspace source {other:?}");
     Diagnostic::new(
         "dsl.validation.unknown_workspace_source",
         message,
@@ -612,11 +611,14 @@ pub fn export_const_unknown(name: &str) -> Diagnostic {
 /// Known command with malformed arguments (the lowering fallback).
 /// Takes the invoking command, the rendered args (`nothing` when
 /// empty), and an optional structural hint. One key: hinted and bare
-/// are the same failure mode, the hint is ancillary.
+/// are the same failure mode, the hint is ancillary. Canonical form
+/// is `COMMAND`-lead with no legacy prefix and no trailing period;
+/// a hinted message is the hint itself (which already leads with the
+/// command), a bare one names what arrived.
 pub fn invalid_syntax(command: &str, got: &str, hint: Option<&str>) -> Diagnostic {
     let message = match hint {
-        Some(hint) => format!("invalid syntax for command {command}: {hint}"),
-        None => format!("invalid syntax for command {command}: got {got}."),
+        Some(hint) => hint.trim_end_matches('.').to_string(),
+        None => format!("{command} got {got}"),
     };
     Diagnostic::new(
         "dsl.invalid_syntax.malformed",
@@ -626,11 +628,16 @@ pub fn invalid_syntax(command: &str, got: &str, hint: Option<&str>) -> Diagnosti
 }
 
 /// Truly unknown command name. Takes the attempted name and an
-/// optional hint (structural or case hint), rendered inline as legacy.
+/// optional hint (structural or case hint). Canonical form quotes the
+/// found name with `{name:?}` and keeps the hint on its own line with
+/// no trailing period.
 pub fn unknown_command(name: &str, hint: Option<&str>) -> Diagnostic {
     let message = match hint {
-        Some(hint) => format!("unknown command: {name}\n{hint}"),
-        None => format!("unknown command: {name}"),
+        Some(hint) => format!(
+            "unknown command {name:?}\n{}",
+            hint.trim_end_matches('.')
+        ),
+        None => format!("unknown command {name:?}"),
     };
     Diagnostic::new(
         "dsl.unknown_command.unknown",
@@ -959,9 +966,9 @@ mod tests {
     fn duplicate_names_both_spellings() {
         let d = alias_duplicate_on_field("h", "help", "h2");
         assert_eq!(d.key(), "dsl.alias.duplicate_on_field");
-        assert!(d.message().contains("'h'"));
-        assert!(d.message().contains("'help'"));
-        assert!(d.message().contains("'h2'"));
+        assert!(d.message().contains("`h`"));
+        assert!(d.message().contains("`help`"));
+        assert!(d.message().contains("`h2`"));
     }
 
     #[test]
@@ -1069,15 +1076,20 @@ mod tests {
     }
 
     #[test]
-    fn validation_messages_keep_legacy_prefix() {
+    fn validation_messages_are_command_lead() {
         let d = unknown_flag("WRITE", "--nope");
         assert_eq!(d.key(), "dsl.validation.unknown_flag");
-        assert!(d.message().contains("invalid syntax for command WRITE"));
-        assert!(d.message().contains("unknown flag --nope"));
+        assert_eq!(d.message(), "WRITE unknown flag `--nope`");
+        let d = flag_missing_value("WRITE", "--path");
+        assert_eq!(d.message(), "WRITE `--path` requires a value");
         let d = missing_argument("WRITE", "path");
         assert!(d.message().contains("requires argument `path`"));
+        assert!(d.message().starts_with("WRITE"));
         let d = too_many_positionals("CMD", 1, 3);
-        assert!(d.message().contains("expects at most 1 positional argument(s), got 3"));
+        assert_eq!(d.message(), "CMD expects at most 1 positional arguments, got 3");
+        let err = anyhow::anyhow!("expected PATH");
+        let d = arg_type_mismatch("CMD", "path", "3", &err);
+        assert_eq!(d.message(), "CMD argument `path` got \"3\": expected PATH");
     }
 
     #[test]
@@ -1107,11 +1119,11 @@ mod tests {
         );
         assert_eq!(
             workspace_unknown_target("NOPE").message(),
-            "unknown workspace target: NOPE"
+            "unknown workspace target \"NOPE\""
         );
         assert_eq!(
             unknown_workspace_source("COPY", "NOPE").message(),
-            "unknown workspace source: NOPE"
+            "unknown workspace source \"NOPE\""
         );
         assert_eq!(copy_requires_source().message(), "COPY requires a source");
         assert_eq!(
@@ -1209,16 +1221,19 @@ mod tests {
     fn invalid_syntax_and_unknown_command_messages() {
         assert_eq!(
             invalid_syntax("WRITE", "nothing", None).message(),
-            "invalid syntax for command WRITE: got nothing."
+            "WRITE got nothing"
         );
         assert_eq!(
-            invalid_syntax("WRITE", "`x`", Some("use WRITE <path>")).message(),
-            "invalid syntax for command WRITE: use WRITE <path>"
+            invalid_syntax("WRITE", "`x`", Some("use WRITE <path>.")).message(),
+            "use WRITE <path>"
         );
-        assert_eq!(unknown_command("NOPE", None).message(), "unknown command: NOPE");
         assert_eq!(
-            unknown_command("WRIT", Some("did you mean WRITE?")).message(),
-            "unknown command: WRIT\ndid you mean WRITE?"
+            unknown_command("NOPE", None).message(),
+            "unknown command \"NOPE\""
+        );
+        assert_eq!(
+            unknown_command("WRIT", Some("did you mean WRITE?.")).message(),
+            "unknown command \"WRIT\"\ndid you mean WRITE?"
         );
     }
 

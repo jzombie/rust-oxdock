@@ -4975,21 +4975,21 @@ fn resolve_tag_rejects_generic_arity_violations() {
         .resolve_tag("LIST<MAP, STRING>")
         .expect_err("LIST with two args must fail");
     assert!(
-        format!("{err:#}").contains("LIST takes exactly one bare type argument"),
+        format!("{err:#}").contains("`LIST` takes exactly one bare type argument"),
         "{err:#}"
     );
     let err = state
         .resolve_tag("STRING<INT>")
         .expect_err("arguments on a scalar must fail");
     assert!(
-        format!("{err:#}").contains("'STRING' takes no type arguments"),
+        format!("{err:#}").contains("`STRING` takes no type arguments"),
         "{err:#}"
     );
     let err = state
         .resolve_tag("MAP<STRING>")
         .expect_err("bare MAP field must fail");
     assert!(
-        format!("{err:#}").contains("MAP fields require 'name: TYPE'"),
+        format!("{err:#}").contains("`MAP` fields require `name: TYPE`"),
         "{err:#}"
     );
     // Alias targets enforce the same rules: the violation rides
@@ -4999,7 +4999,7 @@ fn resolve_tag_rejects_generic_arity_violations() {
         .insert("BAD".to_string(), "LIST<MAP, STRING>".to_string());
     let err = state.resolve_tag("BAD").expect_err("alias arity must fail");
     assert!(
-        format!("{err:#}").contains("LIST takes exactly one bare type argument"),
+        format!("{err:#}").contains("`LIST` takes exactly one bare type argument"),
         "{err:#}"
     );
 }
@@ -5061,7 +5061,7 @@ fn resolve_tag_unions_admit_member_sets() {
         .resolve_tag("STRING|LIST")
         .expect_err("bare LIST member fails");
     assert!(
-        format!("{err:#}").contains("bare LIST is not a declaration type"),
+        format!("{err:#}").contains("bare `LIST` is not a declaration type"),
         "{err:#}"
     );
     // Empty members and unknown names fail naming the rule.
@@ -5076,7 +5076,7 @@ fn resolve_tag_unions_admit_member_sets() {
         .resolve_tag("NOPE|STRING")
         .expect_err("unknown member fails");
     assert!(
-        format!("{err:#}").contains("unknown type 'NOPE'"),
+        format!("{err:#}").contains("unknown type `NOPE`"),
         "{err:#}"
     );
     // Unions combine inside generics: members resolve as siblings.
@@ -5484,7 +5484,7 @@ fn resolve_tag_combines_schema_and_alias_leaves() {
         .resolve_tag("LIST<MISSING>")
         .expect_err("unknown leaf must fail");
     assert!(
-        format!("{err:#}").contains("unknown type 'MISSING'"),
+        format!("{err:#}").contains("unknown type `MISSING`"),
         "{err:#}"
     );
 }

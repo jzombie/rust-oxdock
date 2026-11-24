@@ -7,13 +7,11 @@
 //! here.
 
 use oxdock_diagnostics::Diagnostic;
-use oxdock_parser::{
-    ANY_TYPE_NAME, HANDLE_TYPE_NAME, LIST_TYPE_NAME, MAP_TYPE_NAME, Spelled,
-};
+use oxdock_parser::{ANY_TYPE_NAME, HANDLE_TYPE_NAME, LIST_TYPE_NAME, MAP_TYPE_NAME, Spelled};
 
 /// Duplicate field name inside one MAP spelling.
 pub fn map_duplicate_field(field: &str) -> Diagnostic {
-    let message = format!("duplicate field '{field}' in MAP spelling");
+    let message = format!("duplicate field `{field}` in `{MAP_TYPE_NAME}` spelling");
     Diagnostic::new(
         "dsl.map.duplicate_field",
         message,
@@ -23,7 +21,7 @@ pub fn map_duplicate_field(field: &str) -> Diagnostic {
 
 /// Alias duplicates its own field name.
 pub fn alias_self(field: &str, alias: &str) -> Diagnostic {
-    let message = format!("alias '{alias}' duplicates its own field '{field}'");
+    let message = format!("alias `{alias}` duplicates its own field `{field}`");
     Diagnostic::new(
         "dsl.alias.self",
         message,
@@ -34,7 +32,7 @@ pub fn alias_self(field: &str, alias: &str) -> Diagnostic {
 /// Alias clashes with another field or alias. Takes the alias, the
 /// field that declares it, and the owner it clashes with.
 pub fn alias_clash(alias: &str, field: &str, owner: &str) -> Diagnostic {
-    let message = format!("alias '{alias}' for field '{field}' clashes with '{owner}'");
+    let message = format!("alias `{alias}` for field `{field}` clashes with `{owner}`");
     Diagnostic::new(
         "dsl.alias.clash",
         message,
@@ -44,7 +42,7 @@ pub fn alias_clash(alias: &str, field: &str, owner: &str) -> Diagnostic {
 
 /// Generic nesting deeper than the cap, resolving a bare name.
 pub fn typing_max_depth(max: usize, name: &str) -> Diagnostic {
-    let message = format!("type spelling exceeds maximum generic depth of {max}: '{name}'");
+    let message = format!("type spelling exceeds maximum generic depth of {max}: `{name}`");
     Diagnostic::new(
         "dsl.typing.max_depth",
         message,
@@ -58,7 +56,7 @@ pub fn typing_max_depth(max: usize, name: &str) -> Diagnostic {
 pub fn typing_max_depth_spelled(max: usize, spelled: &Spelled) -> Diagnostic {
     let rendered = format!("{spelled:?}");
     let message =
-        format!("type spelling exceeds maximum generic depth of {max}: '{rendered}'");
+        format!("type spelling exceeds maximum generic depth of {max}: `{rendered}`");
     Diagnostic::new(
         "dsl.typing.max_depth",
         message,
@@ -69,7 +67,7 @@ pub fn typing_max_depth_spelled(max: usize, spelled: &Spelled) -> Diagnostic {
 /// Bare `MAP` without arguments.
 pub fn typing_bare_map() -> Diagnostic {
     let message = format!(
-        "bare {MAP_TYPE_NAME} is not a declaration type: write a shape ({MAP_TYPE_NAME}<name: TYPE, ...>) or {MAP_TYPE_NAME}<{ANY_TYPE_NAME}> for maps with unknown keys"
+        "bare `{MAP_TYPE_NAME}` is not a declaration type: write a shape (`{MAP_TYPE_NAME}<name: TYPE, ...>`) or `{MAP_TYPE_NAME}<{ANY_TYPE_NAME}>` for maps with unknown keys"
     );
     Diagnostic::new(
         "dsl.typing.bare_map",
@@ -81,7 +79,7 @@ pub fn typing_bare_map() -> Diagnostic {
 /// Bare `LIST` without arguments.
 pub fn typing_bare_list() -> Diagnostic {
     let message = format!(
-        "bare {LIST_TYPE_NAME} is not a declaration type: write a shape ({LIST_TYPE_NAME}<TYPE>) or {LIST_TYPE_NAME}<{ANY_TYPE_NAME}> for lists with unknown elements"
+        "bare `{LIST_TYPE_NAME}` is not a declaration type: write a shape (`{LIST_TYPE_NAME}<TYPE>`) or `{LIST_TYPE_NAME}<{ANY_TYPE_NAME}>` for lists with unknown elements"
     );
     Diagnostic::new(
         "dsl.typing.bare_list",
@@ -93,7 +91,7 @@ pub fn typing_bare_list() -> Diagnostic {
 /// Bare `HANDLE` without arguments.
 pub fn typing_bare_handle() -> Diagnostic {
     let message = format!(
-        "bare {HANDLE_TYPE_NAME} is not a declaration type: write {HANDLE_TYPE_NAME}<T> for a known payload or {HANDLE_TYPE_NAME}<{ANY_TYPE_NAME}> for an unknown one"
+        "bare `{HANDLE_TYPE_NAME}` is not a declaration type: write `{HANDLE_TYPE_NAME}<T>` for a known payload or `{HANDLE_TYPE_NAME}<{ANY_TYPE_NAME}>` for an unknown one"
     );
     Diagnostic::new(
         "dsl.typing.bare_handle",
@@ -126,7 +124,7 @@ pub fn typing_unknown(
     let schemas = schemas.join(", ");
     let aliases = aliases.join(", ");
     let message = format!(
-        "unknown type '{name}'; known types: {types} and schemas: {schemas} and aliases: {aliases}"
+        "unknown type `{name}`; known types: {types} and schemas: {schemas} and aliases: {aliases}"
     );
     Diagnostic::new(
         "dsl.typing.unknown",
@@ -142,7 +140,7 @@ pub fn typing_unknown(
 
 /// Type arguments on a head that takes none.
 pub fn typing_no_args(name: &str) -> Diagnostic {
-    let message = format!("'{name}' takes no type arguments");
+    let message = format!("`{name}` takes no type arguments");
     Diagnostic::new(
         "dsl.typing.no_args",
         message,
@@ -152,7 +150,7 @@ pub fn typing_no_args(name: &str) -> Diagnostic {
 
 /// `HANDLE` with anything but one bare argument.
 pub fn typing_handle_arity() -> Diagnostic {
-    let message = format!("{HANDLE_TYPE_NAME} takes exactly one bare type argument");
+    let message = format!("`{HANDLE_TYPE_NAME}` takes exactly one bare type argument");
     Diagnostic::new(
         "dsl.typing.handle_arity",
         message,
@@ -162,7 +160,7 @@ pub fn typing_handle_arity() -> Diagnostic {
 
 /// `LIST` with anything but one bare argument.
 pub fn typing_list_arity() -> Diagnostic {
-    let message = format!("{LIST_TYPE_NAME} takes exactly one bare type argument");
+    let message = format!("`{LIST_TYPE_NAME}` takes exactly one bare type argument");
     Diagnostic::new(
         "dsl.typing.list_arity",
         message,
@@ -174,7 +172,7 @@ pub fn typing_list_arity() -> Diagnostic {
 /// name for the trailing clause.
 pub fn typing_map_bare(head: &str) -> Diagnostic {
     let message = format!(
-        "{MAP_TYPE_NAME} fields require 'name: TYPE'; '{head}' takes no bare arguments"
+        "`{MAP_TYPE_NAME}` fields require `name: TYPE`; `{head}` takes no bare arguments"
     );
     Diagnostic::new(
         "dsl.typing.map_bare",
@@ -186,7 +184,7 @@ pub fn typing_map_bare(head: &str) -> Diagnostic {
 /// Default literal that does not check against its field type. Takes
 /// the field name and the rendered expected type.
 pub fn typing_default_mismatch(field: &str, expected: &str) -> Diagnostic {
-    let message = format!("default for field '{field}' does not match {expected}");
+    let message = format!("default for field `{field}` does not match {expected}");
     Diagnostic::new(
         "dsl.typing.default_mismatch",
         message,
@@ -205,7 +203,7 @@ pub fn typing_empty_union() -> Diagnostic {
 
 /// Alias name already defined as an alias.
 pub fn alias_already_defined(name: &str) -> Diagnostic {
-    let message = format!("type alias '{name}' is already defined");
+    let message = format!("type alias `{name}` is already defined");
     Diagnostic::new(
         "dsl.alias.already_defined",
         message,
@@ -215,7 +213,7 @@ pub fn alias_already_defined(name: &str) -> Diagnostic {
 
 /// Alias name collides with a builtin type.
 pub fn alias_builtin_collision(name: &str) -> Diagnostic {
-    let message = format!("type alias '{name}' collides with a builtin type");
+    let message = format!("type alias `{name}` collides with a builtin type");
     Diagnostic::new(
         "dsl.alias.builtin_collision",
         message,
@@ -225,7 +223,7 @@ pub fn alias_builtin_collision(name: &str) -> Diagnostic {
 
 /// Alias name collides with a registered host type.
 pub fn alias_host_collision(name: &str) -> Diagnostic {
-    let message = format!("type alias '{name}' collides with registered host type '{name}'");
+    let message = format!("type alias `{name}` collides with registered host type `{name}`");
     Diagnostic::new(
         "dsl.alias.host_collision",
         message,
@@ -236,7 +234,7 @@ pub fn alias_host_collision(name: &str) -> Diagnostic {
 /// Alias name collides with a registered record schema.
 pub fn alias_schema_collision(name: &str) -> Diagnostic {
     let message =
-        format!("type alias '{name}' collides with registered record schema '{name}'");
+        format!("type alias `{name}` collides with registered record schema `{name}`");
     Diagnostic::new(
         "dsl.alias.schema_collision",
         message,
@@ -246,7 +244,7 @@ pub fn alias_schema_collision(name: &str) -> Diagnostic {
 
 /// Alias name collides with a top-level function.
 pub fn alias_func_collision(name: &str) -> Diagnostic {
-    let message = format!("type alias '{name}' collides with function '{name}'");
+    let message = format!("type alias `{name}` collides with function `{name}`");
     Diagnostic::new(
         "dsl.alias.func_collision",
         message,
@@ -262,7 +260,7 @@ mod tests {
     fn clash_names_both_sides() {
         let d = alias_clash("x", "y", "z");
         assert_eq!(d.key(), "dsl.alias.clash");
-        assert_eq!(d.message(), "alias 'x' for field 'y' clashes with 'z'");
+        assert_eq!(d.message(), "alias `x` for field `y` clashes with `z`");
     }
 
     #[test]
@@ -301,30 +299,30 @@ mod tests {
     }
 
     #[test]
-    fn messages_match_legacy_wording() {
+    fn messages_match_canonical_wording() {
         assert_eq!(
             typing_bare_map().message(),
-            "bare MAP is not a declaration type: write a shape (MAP<name: TYPE, ...>) or MAP<ANY> for maps with unknown keys"
+            "bare `MAP` is not a declaration type: write a shape (`MAP<name: TYPE, ...>`) or `MAP<ANY>` for maps with unknown keys"
         );
         assert_eq!(
             typing_bare_list().message(),
-            "bare LIST is not a declaration type: write a shape (LIST<TYPE>) or LIST<ANY> for lists with unknown elements"
+            "bare `LIST` is not a declaration type: write a shape (`LIST<TYPE>`) or `LIST<ANY>` for lists with unknown elements"
         );
         assert_eq!(
             typing_bare_handle().message(),
-            "bare HANDLE is not a declaration type: write HANDLE<T> for a known payload or HANDLE<ANY> for an unknown one"
+            "bare `HANDLE` is not a declaration type: write `HANDLE<T>` for a known payload or `HANDLE<ANY>` for an unknown one"
         );
         assert_eq!(
             typing_no_args("STRING").message(),
-            "'STRING' takes no type arguments"
+            "`STRING` takes no type arguments"
         );
         assert_eq!(
             typing_handle_arity().message(),
-            "HANDLE takes exactly one bare type argument"
+            "`HANDLE` takes exactly one bare type argument"
         );
         assert_eq!(
             typing_list_arity().message(),
-            "LIST takes exactly one bare type argument"
+            "`LIST` takes exactly one bare type argument"
         );
         assert_eq!(typing_empty_union().message(), "empty union: no member shapes to admit");
         assert_eq!(

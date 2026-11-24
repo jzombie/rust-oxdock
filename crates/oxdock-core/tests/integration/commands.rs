@@ -5518,7 +5518,7 @@ fn func_handle_params_agree_across_gates() {
         ),
         (
             "FUNC TAKES($t: HANDLE): VOID {\n    AWAIT $t\n}\n",
-            "bare HANDLE is not a declaration type",
+            "bare `HANDLE` is not a declaration type",
         ),
     ] {
         let temp = GuardedPath::tempdir().unwrap();
@@ -5571,7 +5571,7 @@ fn bare_handle_declaration_fails() {
         let err = run_script(&root, script).expect_err("bare HANDLE must fail");
         assert!(
             err.to_string()
-                .contains("bare HANDLE is not a declaration type"),
+                .contains("bare `HANDLE` is not a declaration type"),
             "{script:?}: {err}"
         );
     }
@@ -6056,8 +6056,8 @@ fn static_generic_annotations_enforce_shapes() {
     assert!(err.to_string().contains("unknown field"), "{err}");
     // Arity and shape misuse fail naming the rule.
     for (script, needle) in [
-        ("LET $x: LIST<MAP, INT> = []\n", "LIST takes exactly one"),
-        ("LET $x: MAP<STRING> = {}\n", "MAP fields require"),
+        ("LET $x: LIST<MAP, INT> = []\n", "`LIST` takes exactly one"),
+        ("LET $x: MAP<STRING> = {}\n", "`MAP` fields require"),
         ("LET $x: STRING<INT> = \"s\"\n", "takes no type arguments"),
         ("LET $x: NOPE<INT> = 1\n", "unknown type"),
     ] {
@@ -6107,7 +6107,7 @@ fn static_type_aliases_define_once_use_everywhere() {
     let err = run_script(&root, "FUNC F(): VOID {\n}\nTYPE F = MAP\n")
         .expect_err("func name collision must fail");
     assert!(
-        err.to_string().contains("collides with function 'F'"),
+        err.to_string().contains("collides with function `F`"),
         "{err}"
     );
     // Generic spellings work in every declaration form.

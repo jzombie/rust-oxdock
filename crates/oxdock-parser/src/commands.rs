@@ -483,70 +483,70 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
     match name {
         name if name == KEYWORD_WITH_IO => Some(with_io_hint(&got, received)),
         name if name == KEYWORD_AWAIT => Some(format!(
-            "AWAIT waits for a background task variable, e.g. `LET $t: HANDLE<VOID> = ASYNC ECHO hi` then `AWAIT $t`; got {got}."
+            "AWAIT waits for a background task variable, e.g. `LET $t: HANDLE<VOID> = ASYNC ECHO hi` then `AWAIT $t`; got {got}"
         )),
         name if name == KEYWORD_CANCEL => Some(format!(
-            "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t: HANDLE<VOID> = ASYNC ...`); got {got}."
+            "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t: HANDLE<VOID> = ASYNC ...`); got {got}"
         )),
         name if name == KEYWORD_ASYNC => Some(format!(
-            "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t: HANDLE<T> = ASYNC ...`; got {got}."
+            "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t: HANDLE<T> = ASYNC ...`; got {got}"
         )),
         name if name == KEYWORD_FOR => Some(format!(
-            "FOR loops need `FOR $item: TYPE IN <expr> {{ ... }}` (or `FOR $key: STRING, $value: TYPE IN <expr> {{ ... }}`); got {got}."
+            "FOR loops need `FOR $item: TYPE IN <expr> {{ ... }}` (or `FOR $key: STRING, $value: TYPE IN <expr> {{ ... }}`); got {got}"
         )),
         name if name == KEYWORD_IF => Some(format!(
-            "IF needs a condition and a block, e.g. `IF true {{ ECHO yes }}`; got {got}."
+            "IF needs a condition and a block, e.g. `IF true {{ ECHO yes }}`; got {got}"
         )),
         name if name == KEYWORD_ELSE => Some(format!(
-            "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}."
+            "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}"
         )),
         name if name == KEYWORD_SWITCH => Some(format!(
-            "SWITCH needs a value or bare condition list plus braced CASE arms, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}."
+            "SWITCH needs a value or bare condition list plus braced CASE arms, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}"
         )),
         name if name == KEYWORD_CASE => Some(format!(
-            "CASE only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\", \"b\" {{ ECHO yes }} }}`; got {got}."
+            "CASE only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\", \"b\" {{ ECHO yes }} }}`; got {got}"
         )),
         name if name == KEYWORD_DEFAULT => Some(format!(
-            "DEFAULT only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}."
+            "DEFAULT only appears inside a SWITCH body, e.g. `SWITCH $cmd {{ CASE \"a\" {{ ECHO yes }} DEFAULT {{ ECHO no }} }}`; got {got}"
         )),
         name if name == KEYWORD_LET => Some(format!(
-            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE<T> = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}."
+            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE<T> = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}"
         )),
         "SET" => Some(
-            "`SET` is not a keyword; mutate a declared variable with `$var = <expr>`, e.g. `$count = 2`.".to_string(),
+            "`SET` is not a keyword; mutate a declared variable with `$var = <expr>`, e.g. `$count = 2`".to_string(),
         ),
         name if name == KEYWORD_TIMEOUT => Some(format!(
-            "TIMEOUT needs a duration and a command or block, e.g. `TIMEOUT 30s RUN ...`; got {got}."
+            "TIMEOUT needs a duration and a command or block, e.g. `TIMEOUT 30s RUN ...`; got {got}"
         )),
         name if name == KEYWORD_FAIL => Some(format!(
-            "FAIL needs a message, a code, or a block, e.g. `FAIL \"boom\"`, `FAIL 2 \"boom\"`, or `FAIL \"boom\" {{ ECHO usage }}`; got {got}."
+            "FAIL needs a message, a code, or a block, e.g. `FAIL \"boom\"`, `FAIL 2 \"boom\"`, or `FAIL \"boom\" {{ ECHO usage }}`; got {got}"
         )),
         name if name == KEYWORD_REMOTE => Some(format!(
-            "REMOTE needs a target and a braced block, e.g. `REMOTE prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}."
+            "REMOTE needs a target and a braced block, e.g. `REMOTE prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}"
         )),
         name if name == KEYWORD_FUNC => Some(format!(
-            "FUNC defines a function, e.g. `FUNC GREET($name: STRING): STRING {{ RETURN $name }}`; got {got}."
+            "FUNC defines a function, e.g. `FUNC GREET($name: STRING): STRING {{ RETURN $name }}`; got {got}"
         )),
         name if name == KEYWORD_RETURN => Some(format!(
-            "RETURN ends the nearest function, ASYNC task, or inline LET block with a value, e.g. `RETURN $x`; got {got}."
+            "RETURN ends the nearest function, ASYNC task, or inline LET block with a value, e.g. `RETURN $x`; got {got}"
         )),
         name if name == KEYWORD_WHILE => Some(format!(
-            "WHILE needs a Bool condition and a block, e.g. `WHILE !$done {{ ... }}`; got {got}."
+            "WHILE needs a Bool condition and a block, e.g. `WHILE !$done {{ ... }}`; got {got}"
         )),
         name if name == KEYWORD_BREAK => Some(
-            "`BREAK` exits the innermost enclosing FOR/WHILE loop or SWITCH; it must appear inside a loop or SWITCH.".to_string(),
+            "`BREAK` exits the innermost enclosing FOR/WHILE loop or SWITCH; it must appear inside a loop or SWITCH".to_string(),
         ),
         name if name == KEYWORD_CONTINUE => Some(
-            "`CONTINUE` skips to the next iteration of the innermost enclosing FOR/WHILE loop; it must appear inside a loop (a SWITCH never captures it).".to_string(),
+            "`CONTINUE` skips to the next iteration of the innermost enclosing FOR/WHILE loop; it must appear inside a loop (a SWITCH never captures it)".to_string(),
         ),
         name if name == KEYWORD_INHERIT_ENV => Some(format!(
-            "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME, PATH]`; got {got}."
+            "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME, PATH]`; got {got}"
         )),
         name if name == KEYWORD_IMPORT => Some(format!(
-            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; file imports take a quoted path with a mandatory alias, e.g. `IMPORT [\"./lib.oxdock\" AS LIB]`, and brackets mix both across lines, e.g. `IMPORT [STD, \"a.oxdock\" AS A]`; got {got}."
+            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; file imports take a quoted path with a mandatory alias, e.g. `IMPORT [\"./lib.oxdock\" AS LIB]`, and brackets mix both across lines, e.g. `IMPORT [STD, \"a.oxdock\" AS A]`; got {got}"
         )),
         name if name == KEYWORD_EXPORT => Some(
-            "EXPORT marks script FUNCs and qualified host functions as tools, e.g. `EXPORT FOO`, `EXPORT [FOO, STD::INT]`."
+            "EXPORT marks script FUNCs and qualified host functions as tools, e.g. `EXPORT FOO`, `EXPORT [FOO, STD::INT]`"
                 .to_string(),
         ),
         _ => None,
@@ -563,7 +563,7 @@ fn with_io_hint(got: &str, received: &str) -> String {
     if let Some(after_open) = received.strip_prefix('[') {
         match after_open.split_once(']') {
             None => {
-                return format!("{SYNTAX}: missing closing `]` in the binding list; got {got}.");
+                return format!("{SYNTAX}: missing closing `]` in the binding list; got {got}");
             }
             Some((bindings, _)) => {
                 for part in bindings.split(',') {
@@ -583,7 +583,7 @@ fn with_io_hint(got: &str, received: &str) -> String {
                         });
                         if !valid {
                             return format!(
-                                "{SYNTAX}: invalid geometry `{part}`; `rows`/`cols` need a positive integer 1-65535 (e.g. `rows=40`) and require `tty`; got {got}."
+                                "{SYNTAX}: invalid geometry `{part}`; `rows`/`cols` need a positive integer 1-65535 (e.g. `rows=40`) and require `tty`; got {got}"
                             );
                         }
                         continue;
@@ -591,14 +591,14 @@ fn with_io_hint(got: &str, received: &str) -> String {
                     if stream == "tty" {
                         if binding.is_some() {
                             return format!(
-                                "{SYNTAX}: invalid binding `{part}`; `tty` is a bare flag (geometry rides `rows`/`cols`, e.g. `[tty, rows=40]`); got {got}."
+                                "{SYNTAX}: invalid binding `{part}`; `tty` is a bare flag (geometry rides `rows`/`cols`, e.g. `[tty, rows=40]`); got {got}"
                             );
                         }
                         continue;
                     }
                     if !matches!(stream, "stdin" | "stdout" | "stderr") {
                         return format!(
-                            "{SYNTAX}: invalid stream `{stream}`; expected `stdin`, `stdout`, `stderr`, or `tty`; got {got}."
+                            "{SYNTAX}: invalid stream `{stream}`; expected `stdin`, `stdout`, `stderr`, or `tty`; got {got}"
                         );
                     }
                     let valid = match binding {
@@ -610,14 +610,14 @@ fn with_io_hint(got: &str, received: &str) -> String {
                     };
                     if !valid {
                         return format!(
-                            "{SYNTAX}: invalid binding `{part}`; {BINDINGS}; got {got}."
+                            "{SYNTAX}: invalid binding `{part}`; {BINDINGS}; got {got}"
                         );
                     }
                 }
             }
         }
     }
-    format!("{SYNTAX}; got {got}. {BINDINGS}.")
+    format!("{SYNTAX}; got {got}; {BINDINGS}")
 }
 
 /// `echo hi` is almost certainly `ECHO hi`: commands are uppercase.
@@ -628,7 +628,7 @@ fn case_hint(name: &str) -> Option<String> {
             .iter()
             .any(|meta| meta.name == upper.as_str())
     {
-        return Some(format!("did you mean `{upper}`? commands are uppercase."));
+        return Some(format!("did you mean `{upper}`? commands are uppercase"));
     }
     None
 }
@@ -7171,7 +7171,7 @@ mod tests {
     #[test]
     fn malformed_with_io_binding_names_the_bad_binding() {
         let err = parse_err("WITH_IO [stdout=discard] ECHO \"test\"\n");
-        assert!(err.contains("invalid syntax for command WITH_IO"), "{err}");
+        assert!(err.contains("WITH_IO"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
         assert!(err.contains("stdout=discard"), "{err}");
         assert!(err.contains("[stdout=$p]"), "{err}");
@@ -7198,7 +7198,7 @@ mod tests {
     #[test]
     fn await_without_task_variable_points_at_syntax() {
         let err = parse_err("AWAIT ECHO \"test\"\n");
-        assert!(err.contains("invalid syntax for command AWAIT"), "{err}");
+        assert!(err.starts_with("AWAIT"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
         assert!(err.contains("AWAIT $t"), "{err}");
         assert!(err.contains("ECHO"), "{err}");
@@ -7633,7 +7633,7 @@ mod tests {
         ] {
             let err = parse_err(script);
             assert!(
-                err.contains(&format!("invalid syntax for command {cmd}")),
+                err.starts_with(cmd),
                 "{cmd}: {err}"
             );
             assert!(!err.contains("unknown command"), "{cmd}: {err}");
@@ -7670,9 +7670,9 @@ mod tests {
     }
 
     #[test]
-    fn leaf_arity_errors_carry_invalid_syntax_prefix() {
+    fn leaf_arity_errors_are_command_lead() {
         let err = parse_err("SLEEP 1s 2s\n");
-        assert!(err.contains("invalid syntax for command SLEEP"), "{err}");
+        assert!(err.starts_with("SLEEP"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
     }
 
@@ -7725,7 +7725,7 @@ mod tests {
         ] {
             let err = parse_err(script);
             assert!(
-                err.contains("invalid syntax for command LIST_APPEND"),
+                err.starts_with("LIST_APPEND"),
                 "{script}: {err}"
             );
             assert!(!err.contains("unknown command"), "{script}: {err}");
@@ -7736,7 +7736,7 @@ mod tests {
     fn list_append_rejects_non_variable_target() {
         let err = parse_err("LIST_APPEND items \"a\"\n");
         assert!(
-            err.contains("invalid syntax for command LIST_APPEND"),
+            err.starts_with("LIST_APPEND"),
             "{err}"
         );
         assert!(!err.contains("unknown command"), "{err}");
@@ -7744,7 +7744,7 @@ mod tests {
         // targets: a `CONST` list cannot be named here at all.
         let err = parse_err("LIST_APPEND ITEMS \"a\"\n");
         assert!(
-            err.contains("invalid syntax for command LIST_APPEND"),
+            err.starts_with("LIST_APPEND"),
             "{err}"
         );
         assert!(!err.contains("unknown command"), "{err}");
@@ -7767,7 +7767,7 @@ mod tests {
     #[test]
     fn genuinely_unknown_command_keeps_bare_message() {
         let err = parse_err("FROBNICATE hi\n");
-        assert!(err.contains("unknown command: FROBNICATE"), "{err}");
+        assert!(err.contains("unknown command \"FROBNICATE\""), "{err}");
         assert!(!err.contains("did you mean"), "{err}");
     }
 
@@ -7779,7 +7779,7 @@ mod tests {
         let err = lower_command("echo", vec![Arg::String("hi".to_string(), false)])
             .expect_err("must fail")
             .to_string();
-        assert!(err.contains("unknown command: echo"), "{err}");
+        assert!(err.contains("unknown command \"echo\""), "{err}");
         assert!(err.contains("did you mean `ECHO`"), "{err}");
     }
 
@@ -7880,7 +7880,7 @@ mod tests {
         // `FUNC FOO() ECHO hi` still misses to generic: the
         // header-only invalid syntax echoes just the header.
         let err = parse_err("FUNC FOO() ECHO hi\n");
-        assert!(err.contains("invalid syntax for command FUNC"), "{err}");
+        assert!(err.starts_with("FUNC"), "{err}");
         assert!(err.contains("got `FOO() ECHO hi`"), "{err}");
     }
 

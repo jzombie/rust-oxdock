@@ -216,9 +216,7 @@ wording instead of preserving old strings.
    Key survival pinned by `stable_keys_survive_the_token_round_trip`
    (write/missing-arg, unknown-command, invalid-syntax, export
    keys through the string path with `Display` unchanged).
-   Still open: the normalization pass over all migrated
-   constructors (strip legacy `invalid syntax for command` prefixes,
-   unify quoting, update affected tests) before Phase B.
+   Normalization pass done (2026-11-24): all migrated constructors onto the contract in one diff: legacy prefixes stripped, quoting unified (backticks/`{got:?}`), trailing periods dropped, em dash replaced; hints, build mocks, and docs aligned; tests updated to canonical wording. Phase B (CLI NET set) is next.
 4. Tests per diagnostic: constructor key test plus doc fence each for
    second-`ALIAS`-on-field, alias-equals-own-field,
    alias-clashes-across-fields, plus bounded-remainder and
