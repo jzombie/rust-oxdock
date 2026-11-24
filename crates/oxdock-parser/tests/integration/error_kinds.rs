@@ -27,6 +27,34 @@ fn truly_unknown_command_reports_kind_with_span() {
 }
 
 #[test]
+fn stable_keys_survive_the_token_round_trip() {
+    // Migrated diagnostics keep their keyed payload through the
+    // token-stream round trip (`lower_err` carries, `token_error`
+    // reattaches); Display text is unchanged.
+    for (script, key) in [
+        ("WRITE\n", "dsl.validation.missing_argument"),
+        ("FROBNICATE hi\n", "dsl.unknown_command.unknown"),
+        ("EXPORT NOPE\n", "dsl.validation.export_unknown_func"),
+    ] {
+        let err = parse_script(script, lower_command).expect_err("must fail");
+        assert_eq!(err.key(), Some(key), "script: {script:?} got: {err}");
+    }
+    // Malformed known command keeps its key and the structural hint.
+    let err =
+        parse_script("WITH_IO [stdout=discard] ECHO hi\n", lower_command).expect_err("must fail");
+    assert_eq!(
+        err.key(),
+        Some("dsl.invalid_syntax.malformed"),
+        "got: {err}"
+    );
+    assert!(err.hint().is_some(), "structural hint must survive: {err}");
+    // Case-hinted unknown command keeps its hint.
+    let err = parse_script("Write hi\n", lower_command).expect_err("must fail");
+    assert_eq!(err.key(), Some("dsl.unknown_command.unknown"), "got: {err}");
+    assert!(err.hint().is_some(), "case hint must survive: {err}");
+}
+
+#[test]
 fn malformed_with_io_is_invalid_syntax_never_unknown() {
     // Strict anti-pattern: WITH_IO must always explain the binding
     // failure, never claim the command does not exist.

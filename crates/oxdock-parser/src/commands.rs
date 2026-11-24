@@ -428,24 +428,18 @@ pub(crate) fn invalid_syntax_error(name: &str, raw_args: &[Arg]) -> ParseError {
         .map(|meta| vec![meta.syntax.to_string()])
         .unwrap_or_default();
     let ctx = SpanContext::line_only(0);
-    match structural_hint(name, &received) {
-        Some(hint) => ParseError::invalid_syntax(
-            name,
-            format!("invalid syntax for command {name}: {hint}"),
-            found,
-            expected,
-            Some(hint),
-            &ctx,
-        ),
-        None => ParseError::invalid_syntax(
-            name,
-            format!("invalid syntax for command {name}: got {got}."),
-            found,
-            expected,
-            None,
-            &ctx,
-        ),
-    }
+    let hint = structural_hint(name, &received);
+    let diag = dsl_diag::invalid_syntax(name, &got, hint.as_deref());
+    ParseError::from_diagnostic(
+        ParseErrorKind::InvalidSyntax {
+            command: name.to_string(),
+        },
+        diag,
+        &ctx,
+    )
+    .with_found(found)
+    .with_expected(expected)
+    .with_hint(hint)
 }
 
 fn unknown_command_error(name: &str, raw_args: &[Arg]) -> ParseError {
@@ -456,15 +450,15 @@ fn unknown_command_error(name: &str, raw_args: &[Arg]) -> ParseError {
         .join(" ");
     let hint = structural_hint(name, &received).or_else(|| case_hint(name));
     let ctx = SpanContext::line_only(0);
-    match hint {
-        Some(hint) => ParseError::unknown_command(
-            name,
-            format!("unknown command: {name}\n{hint}"),
-            Some(hint),
-            &ctx,
-        ),
-        None => ParseError::unknown_command(name, format!("unknown command: {name}"), None, &ctx),
-    }
+    let diag = dsl_diag::unknown_command(name, hint.as_deref());
+    ParseError::from_diagnostic(
+        ParseErrorKind::UnknownCommand {
+            name: name.to_string(),
+        },
+        diag,
+        &ctx,
+    )
+    .with_hint(hint)
 }
 
 /// Single decision function for the lowering fallback: keyword led lines

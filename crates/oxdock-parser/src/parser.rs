@@ -102,6 +102,7 @@ use crate::constants::{
     VAR_SIGIL_CHAR, qualify, sigil_qualified, sigil_var,
 };
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
+use oxdock_diagnostics::Diagnostic;
 
 use crate::resolve::resolve_call_name;
 use crate::tok::{GroupDelim, LexError, Tok, TokKind, lex_str};
@@ -128,6 +129,19 @@ pub struct TokenError {
     /// (`UnknownCommand`, `InvalidSyntax`, `Validation`); `None` means
     /// a parser-native structural failure.
     pub kind: Option<ParseErrorKind>,
+    /// Owning keyed diagnostic, when this error wraps a dispatcher
+    /// [`ParseError`] built via `ParseError::from_diagnostic`. The
+    /// entry points reattach it verbatim so stable keys survive the
+    /// token-stream round trip; parser-native errors leave this as
+    /// `None` and rewrap from the message string as before. Boxed:
+    /// diagnostics are cold-path only and `TokenError` travels by
+    /// value in every `Result`.
+    pub diagnostic: Option<Box<Diagnostic>>,
+    /// Structured hint from the wrapped [`ParseError`], when the
+    /// dispatcher set one. Reattached alongside the diagnostic so
+    /// `hint()` survives the round trip; parser-native errors leave
+    /// this as `None`.
+    pub hint: Option<String>,
 }
 
 impl fmt::Display for TokenError {
@@ -146,8 +160,9 @@ impl std::error::Error for TokenError {}
 /// Lift a dispatcher/resolver [`ParseError`] into a [`TokenError`],
 /// preserving its machine-readable classification (the entry points
 /// convert it back verbatim, so `UnknownCommand`/`InvalidSyntax`/
-/// `Validation` survive the round trip). The message is the
-/// dispatcher's own display text; the split loops stamp the line.
+/// `Validation` survive the round trip) and its owning diagnostic, so
+/// stable keys survive too. The message is the dispatcher's own
+/// display text; the split loops stamp the line.
 fn lower_err(stmt: usize, e: ParseError) -> TokenError {
     TokenError {
         stmt,
@@ -155,6 +170,8 @@ fn lower_err(stmt: usize, e: ParseError) -> TokenError {
         col: 0,
         msg: e.to_string(),
         kind: Some(e.kind().clone()),
+        diagnostic: e.diagnostic().cloned().map(Box::new),
+        hint: e.hint().map(str::to_string),
     }
 }
 
@@ -471,6 +488,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
                 );
             if !lone_brace {
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt: *stmt_idx,
                     msg: "WITH_IO block must be followed by '{'".to_string(),
                     line: pending_line,
@@ -538,6 +557,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
         if is_bare_with_io(body) {
             if pending_io.is_some() {
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt: *stmt_idx,
                     msg: "previous WITH_IO block is still waiting for '{'".to_string(),
                     line,
@@ -620,6 +641,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
                 }
                 None => {
                     return Err(TokenError {
+                        diagnostic: None,
+                        hint: None,
                         stmt: stmt_idx,
                         msg: "unclosed block comment".to_string(),
                         line,
@@ -698,6 +721,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
                     Ok(false) => {}
                     Err(msg) => {
                         return Err(TokenError {
+                            diagnostic: None,
+                            hint: None,
                             stmt: stmt_idx,
                             msg,
                             line: start_line,
@@ -744,6 +769,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
                     Ok(false) => {}
                     Err(msg) => {
                         return Err(TokenError {
+                            diagnostic: None,
+                            hint: None,
                             stmt: stmt_idx,
                             msg,
                             line: start_line,
@@ -796,6 +823,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
                         Some(past) => i = past,
                         None => {
                             return Err(TokenError {
+                                diagnostic: None,
+                                hint: None,
                                 stmt: stmt_idx,
                                 msg: "unclosed block comment".to_string(),
                                 line,
@@ -856,6 +885,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
             )?,
             Err(msg) => {
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt: stmt_idx,
                     msg,
                     line: start_line,
@@ -868,6 +899,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
         // Trailing guards with no following command error (probed: a
         // lone `[env:X]` is an error), never drop silently.
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt: stmt_idx,
             msg: "guard declared without a following command".to_string(),
             line,
@@ -887,6 +920,8 @@ fn split_statements(toks: &[Tok], base: usize) -> Result<Vec<Stmt>, TokenError> 
     }
     if let Some((_, _, pending_line, pending_col)) = pending_io.take() {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt: stmt_idx,
             msg: "WITH_IO block must be followed by '{'".to_string(),
             line: pending_line,
@@ -1033,6 +1068,8 @@ fn reject_paren_line_breaks(inner: &[Tok], stmt: usize) -> Result<(), TokenError
         match &tok.kind {
             TokKind::Newline | TokKind::Semicolon => {
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt,
                     msg: "unexpected line break in argument".to_string(),
                     line: tok.line,
@@ -1085,6 +1122,8 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
                     });
                     if brace_next {
                         return Err(TokenError {
+                            diagnostic: None,
+                            hint: None,
                             stmt,
                             msg: "unexpected `$` in argument".to_string(),
                             line: 0,
@@ -1156,6 +1195,8 @@ fn render_raw_text(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
             }
             TokKind::Newline | TokKind::Semicolon => {
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt,
                     msg: "unexpected line break in argument".to_string(),
                     line: 0,
@@ -1202,6 +1243,8 @@ fn build_value_arg(
         && region[1].joint
     {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: "unexpected text after quoted value".to_string(),
             line: 0,
@@ -1320,6 +1363,8 @@ fn try_lone_value_expr(
                 ) && cur.toks.get(cur.pos + 3).is_some_and(|t| t.joint)
                 {
                     return Err(TokenError {
+                        diagnostic: None,
+                        hint: None,
                         stmt,
                         msg: crate::template::qualified_keypath_error(),
                         line: 0,
@@ -1328,6 +1373,8 @@ fn try_lone_value_expr(
                     });
                 }
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt,
                     msg: format!("unexpected text after {}", sigil_qualified(&base, &name)),
                     line: 0,
@@ -1405,6 +1452,8 @@ fn try_lone_call_expr(
         if name == KEYWORD_INSPECT {
             let [arg] = args.as_slice() else {
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt,
                     msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
                     line: 0,
@@ -1416,6 +1465,8 @@ fn try_lone_call_expr(
                 return Ok(Some(Arg::Expr(Expr::Inspect { name: name.clone() })));
             }
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
                 line: 0,
@@ -1590,6 +1641,8 @@ fn build_arg_tokens(
             }
             if let Some(msg) = failed {
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt,
                     msg,
                     line: 0,
@@ -1790,22 +1843,10 @@ fn lower_generic_args(
     ctx: &ParseCtx,
 ) -> Result<StepKind, TokenError> {
     if name == KEYWORD_ENV {
-        return lower_env_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
-            stmt,
-            msg: e.to_string(),
-            line: 0,
-            col: 0,
-            kind: None,
-        });
+        return lower_env_tokens(&lowering_ctx(stmt), tokens).map_err(|e| lower_err(stmt, e));
     }
     if name == KEYWORD_EXPAND {
-        return lower_expand_tokens(&lowering_ctx(stmt), tokens).map_err(|e| TokenError {
-            stmt,
-            msg: e.to_string(),
-            line: 0,
-            col: 0,
-            kind: None,
-        });
+        return lower_expand_tokens(&lowering_ctx(stmt), tokens).map_err(|e| lower_err(stmt, e));
     }
     let args = tokens
         .into_iter()
@@ -1932,6 +1973,8 @@ impl<'t> Cursor<'t> {
 
     fn err(&self, msg: impl Into<String>) -> TokenError {
         TokenError {
+            diagnostic: None,
+            hint: None,
             stmt: self.stmt,
             line: 0,
             col: 0,
@@ -2485,6 +2528,8 @@ fn parse_guard_groups(guard: &[Tok], stmt: usize) -> Result<Option<GuardExpr>, T
             } => inner.clone(),
             _ => {
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt,
                     msg: "unsupported non-bracket guard".to_string(),
                     line: 0,
@@ -2851,6 +2896,8 @@ fn parse_expr_call(
     if name == KEYWORD_INSPECT {
         let [arg] = args.as_slice() else {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
                 line: 0,
@@ -2862,6 +2909,8 @@ fn parse_expr_call(
             return Ok(Expr::Inspect { name: name.clone() });
         }
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: format!("INSPECT requires a $variable argument, found {arg:?}"),
             line: 0,
@@ -2916,6 +2965,8 @@ fn trailing_items_error(
         fallback.to_string()
     };
     TokenError {
+        diagnostic: None,
+        hint: None,
         stmt,
         line,
         col,
@@ -3120,6 +3171,8 @@ fn parse_timeout_duration_at(
         _ => 1,
     };
     ArgType::Duration.check_arg(&arg).map_err(|e| TokenError {
+        diagnostic: None,
+        hint: None,
         stmt,
         msg: e.to_string(),
         line: 0,
@@ -3186,6 +3239,8 @@ fn parse_io_binding_part(
     _ctx: &ParseCtx,
 ) -> Result<Option<IoBinding>, TokenError> {
     let fail = |msg: String| TokenError {
+        diagnostic: None,
+        hint: None,
         stmt,
         msg,
         line: 0,
@@ -3314,6 +3369,8 @@ fn parse_await_cancel_at(
             }
             _ => {
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt,
                     msg: format!("{head} requires a variable"),
                     line: 0,
@@ -3434,6 +3491,8 @@ fn parse_single_inner(
         // hard error, never a spliced arg (probed `RUN["a"]`).
         if toks[pos + 1].joint {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "RUN [...] requires a gap after RUN".to_string(),
                 line: 0,
@@ -3685,6 +3744,8 @@ fn render_inherit_key(part: &[Tok], stmt: usize) -> Result<Option<String>, Token
             }
             TokKind::Punct('/') if is_comment_open(part, j) => {
                 j = skip_inline_comment(part, j).ok_or(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt,
                     msg: "unclosed block comment".to_string(),
                     line: 0,
@@ -3854,6 +3915,8 @@ fn parse_with_io_single(
         && !is_template_brace(next)
     {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
@@ -3884,24 +3947,12 @@ fn parse_with_io_single(
         },
     )?;
     let span = lowering_ctx(stmt);
-    check_tty_wrapping(&bindings, Some(&cmd), &span).map_err(|e| TokenError {
-        stmt,
-        msg: e.to_string(),
-        line: 0,
-        col: 0,
-        kind: None,
-    })?;
+    check_tty_wrapping(&bindings, Some(&cmd), &span).map_err(|e| lower_err(stmt, e))?;
     let kind = StepKind::WithIo {
         bindings,
         cmd: Box::new(cmd),
     };
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
-        stmt,
-        msg: e.to_string(),
-        line: 0,
-        col: 0,
-        kind: None,
-    })?;
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| lower_err(stmt, e))?;
     Ok(Some((kind, 2 + used)))
 }
 
@@ -3969,13 +4020,7 @@ fn parse_timeout_single(
         body: body.0,
     };
     let span = lowering_ctx(stmt);
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
-        stmt,
-        msg: e.to_string(),
-        line: 0,
-        col: 0,
-        kind: None,
-    })?;
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| lower_err(stmt, e))?;
     Ok(Some((kind, 1 + dused + body.1)))
 }
 
@@ -4139,6 +4184,8 @@ fn parse_fail_single(
                 crate::command::ArgType::Int
                     .check_arg(arg)
                     .map_err(|e| TokenError {
+                        diagnostic: None,
+                        hint: None,
                         stmt,
                         msg: e.to_string(),
                         line: 0,
@@ -4158,13 +4205,7 @@ fn parse_fail_single(
         body,
     };
     let span = lowering_ctx(stmt);
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
-        stmt,
-        msg: e.to_string(),
-        line: 0,
-        col: 0,
-        kind: None,
-    })?;
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| lower_err(stmt, e))?;
     Ok(Some((kind, end - pos)))
 }
 
@@ -4198,21 +4239,9 @@ fn parse_async_single(
         };
         let body = parse_body_steps(&inner, stmt, ctx, false)?;
         let span = lowering_ctx(stmt);
-        crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| TokenError {
-            stmt,
-            msg: e.to_string(),
-            line: 0,
-            col: 0,
-            kind: None,
-        })?;
+        crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| lower_err(stmt, e))?;
         let kind = StepKind::AsyncBlock { body };
-        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
-            stmt,
-            msg: e.to_string(),
-            line: 0,
-            col: 0,
-            kind: None,
-        })?;
+        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| lower_err(stmt, e))?;
         return Ok(Some((kind, 2)));
     }
     if next.joint {
@@ -4237,21 +4266,9 @@ fn parse_async_single(
         col: 0,
     }];
     let span = lowering_ctx(stmt);
-    crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| TokenError {
-        stmt,
-        msg: e.to_string(),
-        line: 0,
-        col: 0,
-        kind: None,
-    })?;
+    crate::commands::reject_with_io_in_async(&span, &body).map_err(|e| lower_err(stmt, e))?;
     let kind = StepKind::AsyncBlock { body };
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
-        stmt,
-        msg: e.to_string(),
-        line: 0,
-        col: 0,
-        kind: None,
-    })?;
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| lower_err(stmt, e))?;
     Ok(Some((kind, 1 + used)))
 }
 
@@ -4594,6 +4611,8 @@ fn parse_case_values(
         // expression and fails downstream instead of naming the miss.
         if matches!(value, Expr::Block(_)) {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 line: 0,
                 col: 0,
@@ -4625,6 +4644,8 @@ type SwitchArms = (Vec<(Vec<Expr>, Vec<Step>)>, Option<Vec<Step>>);
 /// bodies, missing blocks, duplicate or non-trailing `DEFAULT`.
 fn parse_switch_body(inner: &[Tok], stmt: usize, ctx: &ParseCtx) -> Result<SwitchArms, TokenError> {
     let err = |msg: String| TokenError {
+        diagnostic: None,
+        hint: None,
         stmt,
         line: 0,
         col: 0,
@@ -4900,6 +4921,8 @@ fn parse_for_at(
     p += 1;
     if idents.len() != types.len() {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: format!(
                 "FOR requires explicit types: FOR $item: TYPE IN <expr> (got {} vars, {} types)",
@@ -4932,6 +4955,8 @@ fn parse_for_at(
         }
         _ => {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "FOR requires one or two variables".to_string(),
                 line: 0,
@@ -4947,6 +4972,8 @@ fn parse_for_at(
         && kt != crate::TypeTag::Int.name()
     {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: format!("FOR key variable must be INT or STRING, got {kt}"),
             line: 0,
@@ -5202,6 +5229,8 @@ fn parse_func_at(
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
     let keyword = if is_async { "ASYNC FUNC" } else { KEYWORD_FUNC };
     let fail = |msg: String| TokenError {
+        diagnostic: None,
+        hint: None,
         stmt,
         msg,
         line: 0,
@@ -5363,6 +5392,8 @@ fn parse_import_statement(
     guarded: bool,
 ) -> Result<Option<(ImportEntries, usize)>, TokenError> {
     let fail = |msg: String| TokenError {
+        diagnostic: None,
+        hint: None,
         stmt,
         msg,
         line: 0,
@@ -5628,6 +5659,8 @@ fn parse_single_file_import(
     };
     if !modules.is_empty() || !matches!(kinds.as_slice(), [StepKind::ImportFile { .. }]) {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: if !modules.is_empty()
                 || kinds
@@ -5669,6 +5702,8 @@ fn parse_export_name(
     // harvest maps) is unchanged. `$` must ride gapless onto the
     // name, like every `$` read.
     let fail = |msg: String| TokenError {
+        diagnostic: None,
+        hint: None,
         stmt,
         line: 0,
         col: 0,
@@ -6329,6 +6364,8 @@ fn parse_remote_single(
     ctx: &ParseCtx,
 ) -> Result<Option<(StepKind, usize)>, TokenError> {
     let fail = |msg: String| TokenError {
+        diagnostic: None,
+        hint: None,
         stmt,
         msg,
         line: 0,
@@ -7161,6 +7198,8 @@ fn map_trailing_error(sub: &Cursor, ctx: &ParseCtx, stmt: usize) -> TokenError {
     probe.skip_gap_nl();
     if parse_map_entry(&mut probe, ctx, stmt).is_ok() {
         return TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             line,
             col,
@@ -7311,6 +7350,8 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
             TokKind::BlockStr(full) => out.push_str(full),
             _ => {
                 return Err(TokenError {
+                    diagnostic: None,
+                    hint: None,
                     stmt,
                     msg: "malformed type in LET".to_string(),
                     line: 0,
@@ -7322,6 +7363,8 @@ fn render_type_region(toks: &[Tok], stmt: usize) -> Result<String, TokenError> {
     }
     if out.is_empty() {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
             line: 0,
@@ -7457,6 +7500,8 @@ fn parse_binding_body(
     let head_example = if is_const { "$NAME" } else { "$var" };
     if !cur.eat_punct(':') {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: format!("{kw} requires explicit types: {kw} {head_example}: TYPE = <expr>"),
             line: 0,
@@ -7568,20 +7613,8 @@ fn parse_let_rhs(
         && let Some((kind, used)) = parse_timeout_single(rhs, 0, stmt, ctx)?
     {
         let span = lowering_ctx(stmt);
-        crate::commands::reject_async_in_capture(&span, &kind).map_err(|e| TokenError {
-            stmt,
-            msg: e.to_string(),
-            line: 0,
-            col: 0,
-            kind: None,
-        })?;
-        crate::commands::reject_pipe_stdout_in_capture(&span, &kind).map_err(|e| TokenError {
-            stmt,
-            msg: e.to_string(),
-            line: 0,
-            col: 0,
-            kind: None,
-        })?;
+        crate::commands::reject_async_in_capture(&span, &kind).map_err(|e| lower_err(stmt, e))?;
+        crate::commands::reject_pipe_stdout_in_capture(&span, &kind).map_err(|e| lower_err(stmt, e))?;
         return Ok((
             StepKind::Bind {
                 var,
@@ -7678,31 +7711,11 @@ fn parse_let_rhs(
         Some(head) if is_known_command(head) => {
             let (cmd, used) = parse_inner_command(rhs, stmt, ctx)?;
             let span = lowering_ctx(stmt);
-            crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| TokenError {
-                stmt,
-                msg: e.to_string(),
-                line: 0,
-                col: 0,
-                kind: None,
-            })?;
-            crate::commands::reject_pipe_stdout_in_capture(&span, &cmd).map_err(|e| {
-                TokenError {
-                    stmt,
-                    msg: e.to_string(),
-                    line: 0,
-                    col: 0,
-                    kind: None,
-                }
-            })?;
+            crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| lower_err(stmt, e))?;
+            crate::commands::reject_pipe_stdout_in_capture(&span, &cmd).map_err(|e| lower_err(stmt, e))?;
             // `INHERIT_ENV`-led lines land here (generic): the
             // nesting check rejects them (probed).
-            crate::commands::reject_nested_inherit_env(&span, &cmd).map_err(|e| TokenError {
-                stmt,
-                msg: e.to_string(),
-                line: 0,
-                col: 0,
-                kind: None,
-            })?;
+            crate::commands::reject_nested_inherit_env(&span, &cmd).map_err(|e| lower_err(stmt, e))?;
             return Ok((
                 StepKind::Bind {
                     var,
@@ -7769,6 +7782,8 @@ fn try_let_with_io_rhs(
         None => return Ok(None),
     };
     let fail = |msg: String| TokenError {
+        diagnostic: None,
+        hint: None,
         stmt,
         msg,
         line: 0,
@@ -7894,13 +7909,7 @@ fn try_let_with_io_rhs(
             rhs: BindRhs::Async(vec![wrapped]),
         };
         let span = lowering_ctx(stmt);
-        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
-            stmt,
-            msg: e.to_string(),
-            line: 0,
-            col: 0,
-            kind: None,
-        })?;
+        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| lower_err(stmt, e))?;
         return Ok(Some((kind, 2 + 1 + used)));
     }
     if matches!(
@@ -7933,13 +7942,7 @@ fn try_let_with_io_rhs(
             "{kw} capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
         )));
     }
-    crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| TokenError {
-        stmt,
-        msg: e.to_string(),
-        line: 0,
-        col: 0,
-        kind: None,
-    })?;
+    crate::commands::reject_async_in_capture(&span, &cmd).map_err(|e| lower_err(stmt, e))?;
     Ok(Some((
         StepKind::Bind {
             var,
@@ -7968,6 +7971,8 @@ fn parse_let_async_rhs(
 ) -> Result<(StepKind, usize), TokenError> {
     let Some(first) = rest.first() else {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: "binding $var: HANDLE<T> = ASYNC requires a body".to_string(),
             line: 0,
@@ -7995,17 +8000,13 @@ fn parse_let_async_rhs(
             rhs: BindRhs::Async(body),
         };
         let span = lowering_ctx(stmt);
-        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
-            stmt,
-            msg: e.to_string(),
-            line: 0,
-            col: 0,
-            kind: None,
-        })?;
+        crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| lower_err(stmt, e))?;
         return Ok((kind, 1));
     }
     if first.joint {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: "binding $var: HANDLE<T> = ASYNC requires a body".to_string(),
             line: 0,
@@ -8037,13 +8038,7 @@ fn parse_let_async_rhs(
         }]),
     };
     let span = lowering_ctx(stmt);
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
-        stmt,
-        msg: e.to_string(),
-        line: 0,
-        col: 0,
-        kind: None,
-    })?;
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| lower_err(stmt, e))?;
     Ok((kind, used))
 }
 
@@ -8325,6 +8320,8 @@ fn parse_brace_head(
     let brace = &stmt.body[0];
     if is_template_brace(brace) {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt: idx,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
@@ -8341,6 +8338,8 @@ fn parse_brace_head(
         // the last (the block's own), mirroring the pair structure.
         if guard.is_none() || stmt.brace_detached || stmt.guard.is_empty() {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt: idx,
                 msg: "unexpected '{' in block body".to_string(),
                 line: 0,
@@ -8354,6 +8353,8 @@ fn parse_brace_head(
             pending = parse_guard_groups(&stmt.guard[..n - 1], idx)?;
         }
         let block_guard = parse_guard_groups(&stmt.guard[n - 1..n], idx)?.ok_or(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt: idx,
             msg: "unexpected '{' in block body".to_string(),
             line: 0,
@@ -8396,6 +8397,8 @@ fn parse_brace_head(
     // scope (each step folds outer-then-inner with markers).
     let Some(outer) = guard else {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt: idx,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
@@ -8406,6 +8409,8 @@ fn parse_brace_head(
     let mut steps = parse_body_steps(&inner, idx, ctx, mark)?;
     if steps.is_empty() {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt: idx,
             msg: "guard block must contain at least one command".to_string(),
             line: 0,
@@ -8478,6 +8483,8 @@ fn parse_elements(
                 }
                 None => {
                     return Err(TokenError {
+                        diagnostic: None,
+                        hint: None,
                         stmt,
                         msg: "unclosed block comment".to_string(),
                         line: 0,
@@ -8509,6 +8516,8 @@ fn parse_elements(
             {
                 if !modules.is_empty() && !in_block && pending_guard.is_some() {
                     return Err(TokenError {
+                        diagnostic: None,
+                        hint: None,
                         stmt,
                         msg: "IMPORT cannot be guarded".to_string(),
                         line: 0,
@@ -8542,6 +8551,8 @@ fn parse_elements(
         let (mut got, used) = parse_element_at(toks, pos, stmt, ctx, guard, in_block)?;
         if used == 0 {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "element consumed no input".to_string(),
                 line: 0,
@@ -8584,6 +8595,8 @@ fn parse_element_at(
     // braces route through `lower_stmt_steps`, never here.
     if starts_brace(&toks[pos..]) {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: "'{' without a pending guard".to_string(),
             line: 0,
@@ -8631,6 +8644,8 @@ fn parse_element_at(
         // Qualified calls already returned above; anything else
         // starting `ALIAS::NAME` is a binding-target misuse.
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: "cannot declare or assign ALIAS::NAME: module values read as $ALIAS::NAME in expressions and are never binding targets".to_string(),
             line: 0,
@@ -8740,6 +8755,8 @@ fn parse_element_at(
     if head_word.as_deref() == Some(KEYWORD_EXPORT) {
         if in_block {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "EXPORT is only allowed at the top level".to_string(),
                 line: 0,
@@ -8749,6 +8766,8 @@ fn parse_element_at(
         }
         if first_guard.is_some() {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "EXPORT cannot be guarded".to_string(),
                 line: 0,
@@ -8779,6 +8798,8 @@ fn parse_element_at(
                     .insert(ExportKind::Func, name.clone())
                 {
                     return Err(TokenError {
+                        diagnostic: None,
+                        hint: None,
                         stmt,
                         msg,
                         line: 0,
@@ -8800,6 +8821,8 @@ fn parse_element_at(
                     .insert(ExportKind::Type, name.clone())
                 {
                     return Err(TokenError {
+                        diagnostic: None,
+                        hint: None,
                         stmt,
                         msg,
                         line: 0,
@@ -8821,6 +8844,8 @@ fn parse_element_at(
                     .insert(ExportKind::Const, name.clone())
                 {
                     return Err(TokenError {
+                        diagnostic: None,
+                        hint: None,
                         stmt,
                         msg,
                         line: 0,
@@ -8839,6 +8864,8 @@ fn parse_element_at(
     if head_word.as_deref() == Some(KEYWORD_TYPE) {
         if in_block {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "TYPE must appear at top level".to_string(),
                 line: 0,
@@ -8848,6 +8875,8 @@ fn parse_element_at(
         }
         if first_guard.is_some() {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "TYPE cannot be guarded".to_string(),
                 line: 0,
@@ -8867,6 +8896,8 @@ fn parse_element_at(
         && (is_known_command(&upper) || crate::STRUCTURAL_KEYWORDS.contains(&upper.as_str()))
     {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: format!("command must be uppercase: found `{head}`, expected `{upper}`"),
             line: 0,
@@ -8966,6 +8997,8 @@ fn parse_with_io_element(
         let mut steps = parse_body_steps(&brace_inner, stmt, ctx, false)?;
         if steps.is_empty() {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "WITH_IO block must contain at least one command".to_string(),
                 line: 0,
@@ -8995,13 +9028,7 @@ fn parse_with_io_element(
         }
         let span = lowering_ctx(stmt);
         for s in &steps {
-            crate::commands::reject_nested_inherit_env(&span, &s.kind).map_err(|e| TokenError {
-                stmt,
-                msg: e.to_string(),
-                line: 0,
-                col: 0,
-                kind: None,
-            })?;
+            crate::commands::reject_nested_inherit_env(&span, &s.kind).map_err(|e| lower_err(stmt, e))?;
         }
         if let Some(first) = steps.first_mut() {
             first.scope_enter += 1;
@@ -9030,6 +9057,8 @@ fn parse_with_io_element(
     // fails exactly like the grammar.
     if toks[rest].joint {
         return Err(TokenError {
+            diagnostic: None,
+            hint: None,
             stmt,
             msg: "WITH_IO block must be followed by '{'".to_string(),
             line: 0,
@@ -9049,24 +9078,12 @@ fn parse_with_io_element(
         },
     )?;
     let span = lowering_ctx(stmt);
-    check_tty_wrapping(&bindings, Some(&cmd), &span).map_err(|e| TokenError {
-        stmt,
-        msg: e.to_string(),
-        line: 0,
-        col: 0,
-        kind: None,
-    })?;
+    check_tty_wrapping(&bindings, Some(&cmd), &span).map_err(|e| lower_err(stmt, e))?;
     let kind = StepKind::WithIo {
         bindings,
         cmd: Box::new(cmd),
     };
-    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| TokenError {
-        stmt,
-        msg: e.to_string(),
-        line: 0,
-        col: 0,
-        kind: None,
-    })?;
+    crate::commands::reject_nested_inherit_env(&span, &kind).map_err(|e| lower_err(stmt, e))?;
     Ok((
         vec![Step {
             guard: first_guard,
@@ -9122,6 +9139,8 @@ fn parse_inner_command(
         Some(TokKind::Word(n)) => n.clone(),
         _ => {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "statement must open with a command word".to_string(),
                 line: 0,
@@ -9146,6 +9165,8 @@ fn parse_inner_command(
     {
         if body[1].joint {
             return Err(TokenError {
+                diagnostic: None,
+                hint: None,
                 stmt,
                 msg: "RUN [...] requires a gap after RUN".to_string(),
                 line: 0,
@@ -9267,6 +9288,8 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
                 StepKind::InheritEnv { .. } => {
                     if seen_non_prelude {
                         return Err(TokenError {
+                            diagnostic: None,
+                            hint: None,
                             stmt: out.len(),
                             msg: "INHERIT_ENV must appear before any other commands".to_string(),
                             line: 0,
@@ -9278,6 +9301,8 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
                 kind => {
                     if crate::commands::contains_inherit_env(kind) {
                         return Err(TokenError {
+                            diagnostic: None,
+                            hint: None,
                             stmt: out.len(),
                             msg: "INHERIT_ENV cannot be nested inside other commands".to_string(),
                             line: 0,
@@ -9301,13 +9326,7 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
         }
     }
     crate::commands::validate_remote_copy_placement(&out, &lowering_ctx(out.len())).map_err(
-        |e| TokenError {
-            stmt: out.len(),
-            msg: e.to_string(),
-            line: 0,
-            col: 0,
-            kind: None,
-        },
+        |e| lower_err(out.len(), e),
     )?;
     {
         let top: HashSet<String> = ctx.funcs.borrow().first().cloned().unwrap_or_default();
@@ -9342,13 +9361,7 @@ pub fn parse_tokens_with_ctx(toks: &[Tok], ctx: &ParseCtx) -> Result<Vec<Step>, 
             ctx.modules,
             &top_imports,
         )
-        .map_err(|e| TokenError {
-            stmt: out.len(),
-            msg: e.to_string(),
-            line: 0,
-            col: 0,
-            kind: None,
-        })?;
+        .map_err(|e| lower_err(out.len(), e))?;
     }
     Ok(out)
 }
@@ -9426,18 +9439,29 @@ fn token_error(input: &str, e: TokenError) -> ParseError {
     };
     // Column spans are statement granularity (every error names its
     // statement's first column); the caret block still renders.
+    // A carried diagnostic reattaches verbatim (key and fields
+    // survive); only parser-native errors rewrap from the message
+    // string as before. A carried hint reattaches alongside, so
+    // `hint()` survives the round trip on every path.
+    if let Some(diagnostic) = e.diagnostic {
+        let kind = e.kind.unwrap_or(ParseErrorKind::Structural {
+            rule: "statement".to_string(),
+        });
+        return ParseError::from_diagnostic(kind, *diagnostic, &ctx).with_hint(e.hint);
+    }
+    let hint = e.hint;
     match e.kind {
         Some(crate::error::ParseErrorKind::UnknownCommand { name }) => {
-            ParseError::unknown_command(&name, e.msg, None, &ctx)
+            ParseError::unknown_command(&name, e.msg, hint, &ctx)
         }
         Some(crate::error::ParseErrorKind::InvalidSyntax { command }) => {
-            ParseError::invalid_syntax(&command, e.msg, None, Vec::new(), None, &ctx)
+            ParseError::invalid_syntax(&command, e.msg, None, Vec::new(), hint, &ctx)
         }
         Some(crate::error::ParseErrorKind::Validation { command }) => {
             ParseError::validation(&command, e.msg, &ctx)
         }
         Some(crate::error::ParseErrorKind::Syntax) => {
-            ParseError::syntax(e.msg, Vec::new(), None, &ctx)
+            ParseError::syntax(e.msg, Vec::new(), hint, &ctx)
         }
         Some(crate::error::ParseErrorKind::Structural { rule }) => {
             ParseError::structural(&rule, e.msg, &ctx)

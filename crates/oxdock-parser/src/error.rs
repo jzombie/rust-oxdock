@@ -380,6 +380,31 @@ impl ParseError {
         self
     }
 
+    /// Attach the found text (builder style). Used by the
+    /// `invalid_syntax` path, whose helper computes it alongside the
+    /// diagnostic.
+    pub fn with_found(mut self, found: Option<String>) -> Self {
+        self.detail.found = found;
+        self
+    }
+
+    /// Attach expected syntax alternatives (builder style). Used by
+    /// the `invalid_syntax` path to keep `expected()` informative
+    /// through the diagnostic migration.
+    pub fn with_expected(mut self, expected: Vec<String>) -> Self {
+        self.detail.expected = expected;
+        self
+    }
+
+    /// Attach the hint (builder style). Used by the `invalid_syntax`
+    /// and `unknown_command` paths: the hint rides inline in the
+    /// diagnostic message for legacy `Display` parity, and here so
+    /// the `hint()` accessor keeps working.
+    pub fn with_hint(mut self, hint: Option<String>) -> Self {
+        self.detail.hint = hint;
+        self
+    }
+
     /// Machine readable kind.
     pub fn kind(&self) -> &ParseErrorKind {
         &self.kind

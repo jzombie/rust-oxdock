@@ -199,10 +199,26 @@ wording instead of preserving old strings.
    `dsl.validation.export_*` constructors; structural set done
    (2026-11-24): LET/TTY/WITH_IO/REMOTE/expr lowers (10 sites)
    through ten `dsl.structural.*` constructors carrying the rule
-   in the structured field)
-   (~90 `ParseError::validation/structural` sites) goes per-command,
-   plus `parser.rs` rewrap (`lower_to_diagnostic` mapping), `lib.rs`
-   mock, and `invalid_syntax` constructors.
+   in the structured field; `invalid_syntax` set done (2026-11-24):
+   `invalid_syntax_error` through `dsl.invalid_syntax.malformed`
+   (found/expected preserved via new `with_found`/`with_expected`
+   builders), `unknown_command_error` through
+   `dsl.unknown_command.unknown`. `parser.rs` rewrap done
+   (2026-11-24): `TokenError` carries `Option<Box<Diagnostic>>`
+   (boxed: cold path, `TokenError` travels by value);
+   `lower_err` plus 25 ParseError-wrapping sites carry verbatim,
+   two kind-dropping sites (`validate_remote_copy_placement`,
+   `validate_exports`) now preserve kind too; `token_error`
+   reattaches via `from_diagnostic` when present, string rewrap
+   otherwise (lexer/parser-native errors unchanged). `lib.rs` mock
+   done (2026-11-24): all 16 sites through canonical constructors,
+   `ENV` passes production errors through directly.)
+   Key survival pinned by `stable_keys_survive_the_token_round_trip`
+   (write/missing-arg, unknown-command, invalid-syntax, export
+   keys through the string path with `Display` unchanged).
+   Still open: the normalization pass over all migrated
+   constructors (strip legacy `invalid syntax for command` prefixes,
+   unify quoting, update affected tests) before Phase B.
 4. Tests per diagnostic: constructor key test plus doc fence each for
    second-`ALIAS`-on-field, alias-equals-own-field,
    alias-clashes-across-fields, plus bounded-remainder and

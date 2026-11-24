@@ -609,6 +609,36 @@ pub fn export_const_unknown(name: &str) -> Diagnostic {
     )
 }
 
+/// Known command with malformed arguments (the lowering fallback).
+/// Takes the invoking command, the rendered args (`nothing` when
+/// empty), and an optional structural hint. One key: hinted and bare
+/// are the same failure mode, the hint is ancillary.
+pub fn invalid_syntax(command: &str, got: &str, hint: Option<&str>) -> Diagnostic {
+    let message = match hint {
+        Some(hint) => format!("invalid syntax for command {command}: {hint}"),
+        None => format!("invalid syntax for command {command}: got {got}."),
+    };
+    Diagnostic::new(
+        "dsl.invalid_syntax.malformed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command), (FIELD_GOT, got)]),
+    )
+}
+
+/// Truly unknown command name. Takes the attempted name and an
+/// optional hint (structural or case hint), rendered inline as legacy.
+pub fn unknown_command(name: &str, hint: Option<&str>) -> Diagnostic {
+    let message = match hint {
+        Some(hint) => format!("unknown command: {name}\n{hint}"),
+        None => format!("unknown command: {name}"),
+    };
+    Diagnostic::new(
+        "dsl.unknown_command.unknown",
+        message,
+        Diagnostic::make_fields(&[(FIELD_FOUND, name)]),
+    )
+}
+
 /// `LET` capture running `ASYNC`/`AWAIT`/`CANCEL` inline. The capture
 /// sink cannot stage tasks; hoist first, then await.
 pub fn let_capture_async() -> Diagnostic {
@@ -998,6 +1028,8 @@ mod tests {
             export_const_script_namespace("SCRIPT::N").key(),
             export_const_unknown_alias("$LIB::N", "LIB").key(),
             export_const_unknown("$N").key(),
+            invalid_syntax("WRITE", "nothing", None).key(),
+            unknown_command("NOPE", None).key(),
             let_capture_async().key(),
             let_capture_pipe_stdout().key(),
             nested_inherit_env().key(),
@@ -1170,6 +1202,23 @@ mod tests {
         assert_eq!(
             export_const_unknown("$N").message(),
             "EXPORT CONST `$N` does not match any top-level CONST (LET bindings are never exportable)"
+        );
+    }
+
+    #[test]
+    fn invalid_syntax_and_unknown_command_messages() {
+        assert_eq!(
+            invalid_syntax("WRITE", "nothing", None).message(),
+            "invalid syntax for command WRITE: got nothing."
+        );
+        assert_eq!(
+            invalid_syntax("WRITE", "`x`", Some("use WRITE <path>")).message(),
+            "invalid syntax for command WRITE: use WRITE <path>"
+        );
+        assert_eq!(unknown_command("NOPE", None).message(), "unknown command: NOPE");
+        assert_eq!(
+            unknown_command("WRIT", Some("did you mean WRITE?")).message(),
+            "unknown command: WRIT\ndid you mean WRITE?"
         );
     }
 
