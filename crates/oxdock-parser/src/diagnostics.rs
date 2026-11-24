@@ -222,6 +222,86 @@ pub fn arg_type_mismatch(
     )
 }
 
+/// Command invoked with no value to join. Shared helper, so the
+/// command rides as a field and every caller shares one key.
+pub fn needs_value(command: &str) -> Diagnostic {
+    let message = format!("{command} requires at least one argument");
+    Diagnostic::new(
+        "dsl.validation.needs_value",
+        message,
+        Diagnostic::make_fields(&[("command", command)]),
+    )
+}
+
+/// `ENV` without any `KEY=value` assignment.
+pub fn env_requires_assignment() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.env_requires_assignment",
+        "ENV requires KEY=value".to_string(),
+        Diagnostic::make_fields(&[("command", "ENV")]),
+    )
+}
+
+/// `ENV` assignment that is not `KEY=value` shaped.
+pub fn env_bad_format() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.env_bad_format",
+        "ENV requires KEY=value format".to_string(),
+        Diagnostic::make_fields(&[("command", "ENV")]),
+    )
+}
+
+/// `ENV` split failure passthrough. Takes the underlying failure;
+/// `{reason:#}` formatting lives here so call sites stay
+/// `format!`-free.
+pub fn env_assignment_error(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.validation.env_assignment_error",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("command", "ENV"), ("reason", &reason_text)]),
+    )
+}
+
+/// `EXPAND` override that is not `KEY=value` shaped.
+pub fn expand_bad_override() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.expand_bad_override",
+        "EXPAND requires KEY=value format for overrides".to_string(),
+        Diagnostic::make_fields(&[("command", "EXPAND")]),
+    )
+}
+
+/// `EXPAND` split failure passthrough. Takes the underlying failure;
+/// `{reason:#}` formatting lives here.
+pub fn expand_assignment_error(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.validation.expand_assignment_error",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("command", "EXPAND"), ("reason", &reason_text)]),
+    )
+}
+
+/// `EXPAND` path validation failure passthrough.
+pub fn expand_path_error(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.validation.expand_path_error",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("command", "EXPAND"), ("reason", &reason_text)]),
+    )
+}
+
+/// `EXPAND` with more than one path positional.
+pub fn expand_extra_path() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.validation.expand_extra_path",
+        "EXPAND accepts at most one path".to_string(),
+        Diagnostic::make_fields(&[("command", "EXPAND")]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +343,14 @@ mod tests {
             too_many_positionals("CMD", 1, 2).key(),
             missing_argument("CMD", "path").key(),
             arg_type_mismatch("CMD", "path", "3", &anyhow::anyhow!("expected PATH")).key(),
+            needs_value("ECHO").key(),
+            env_requires_assignment().key(),
+            env_bad_format().key(),
+            env_assignment_error(&anyhow::anyhow!("bad split")).key(),
+            expand_bad_override().key(),
+            expand_assignment_error(&anyhow::anyhow!("bad split")).key(),
+            expand_path_error(&anyhow::anyhow!("bad path")).key(),
+            expand_extra_path().key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -280,6 +368,23 @@ mod tests {
         assert!(d.message().contains("requires argument `path`"));
         let d = too_many_positionals("CMD", 1, 3);
         assert!(d.message().contains("expects at most 1 positional argument(s), got 3"));
+    }
+
+    #[test]
+    fn env_expand_messages_keep_legacy_wording() {
+        assert_eq!(env_requires_assignment().message(), "ENV requires KEY=value");
+        assert_eq!(env_bad_format().message(), "ENV requires KEY=value format");
+        assert_eq!(
+            expand_bad_override().message(),
+            "EXPAND requires KEY=value format for overrides"
+        );
+        assert_eq!(expand_extra_path().message(), "EXPAND accepts at most one path");
+        assert_eq!(needs_value("ECHO").message(), "ECHO requires at least one argument");
+        let inner = anyhow::anyhow!("assignment requires KEY=value format");
+        assert_eq!(
+            env_assignment_error(&inner).message(),
+            "assignment requires KEY=value format"
+        );
     }
 
     #[test]

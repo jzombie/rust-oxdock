@@ -35,7 +35,8 @@ use crate::constants::{
     KEYWORD_SWITCH, KEYWORD_SYMLINK, KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_UNARCHIVE,
     KEYWORD_WHILE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE, sigil_var,
 };
-use crate::error::{ParseError, ParseResult, SpanContext};
+use crate::diagnostics as dsl_diag;
+use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 use indoc::indoc;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -74,9 +75,11 @@ pub fn is_valid_remote_target(target: &str) -> bool {
 /// with single-space separators so `$x` is never silently dropped.
 fn join_value(args: Vec<Arg>, cmd_name: &str) -> ParseResult<Arg> {
     if args.is_empty() {
-        return Err(ParseError::validation(
-            cmd_name,
-            format!("{cmd_name} requires at least one argument"),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: cmd_name.to_string(),
+            },
+            dsl_diag::needs_value(cmd_name),
             &SpanContext::line_only(0),
         ));
     }
@@ -111,19 +114,29 @@ fn join_value(args: Vec<Arg>, cmd_name: &str) -> ParseResult<Arg> {
 /// assignments on raw spans first (see `lower_env_command` in parser.rs).
 pub fn lower_env_assignment(args: Vec<Arg>) -> ParseResult<StepKind> {
     let arg = args.into_iter().next().ok_or_else(|| {
-        ParseError::validation(
-            KEYWORD_ENV,
-            "ENV requires KEY=value".to_string(),
+        ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: KEYWORD_ENV.to_string(),
+            },
+            dsl_diag::env_requires_assignment(),
             &SpanContext::line_only(0),
         )
     })?;
     let Some((key, value)) = split_assignment(arg.as_str()).map_err(|e| {
-        ParseError::validation(KEYWORD_ENV, e.to_string(), &SpanContext::line_only(0))
+        ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: KEYWORD_ENV.to_string(),
+            },
+            dsl_diag::env_assignment_error(&e),
+            &SpanContext::line_only(0),
+        )
     })?
     else {
-        return Err(ParseError::validation(
-            KEYWORD_ENV,
-            "ENV requires KEY=value format".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: KEYWORD_ENV.to_string(),
+            },
+            dsl_diag::env_bad_format(),
             &SpanContext::line_only(0),
         ));
     };
@@ -5876,9 +5889,11 @@ pub(crate) enum InsToken {
 
 pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<StepKind> {
     if tokens.is_empty() {
-        return Err(ParseError::validation(
-            KEYWORD_ENV,
-            "ENV requires KEY=value".to_string(),
+        return Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: KEYWORD_ENV.to_string(),
+            },
+            dsl_diag::env_requires_assignment(),
             ctx,
         ));
     }
@@ -5887,12 +5902,22 @@ pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> Pars
             // Same KEY=value check the ENV lower applies on the
             // `lower_command` path, over the joined assignment form.
             if crate::command::split_assignment(&format!("{key}={}", value.render()))
-                .map_err(|e| ParseError::validation(KEYWORD_ENV, e.to_string(), ctx))?
+                .map_err(|e| {
+                    ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_ENV.to_string(),
+                        },
+                        dsl_diag::env_assignment_error(&e),
+                        ctx,
+                    )
+                })?
                 .is_none()
             {
-                return Err(ParseError::validation(
-                    KEYWORD_ENV,
-                    "ENV requires KEY=value format".to_string(),
+                return Err(ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_ENV.to_string(),
+                    },
+                    dsl_diag::env_bad_format(),
                     ctx,
                 ));
             }
@@ -5902,18 +5927,30 @@ pub(crate) fn lower_env_tokens(ctx: &SpanContext, tokens: Vec<InsToken>) -> Pars
             })
         }
         [InsToken::Pos(Arg::String(text, _))] => match crate::command::split_assignment(text)
-            .map_err(|e| ParseError::validation(KEYWORD_ENV, e.to_string(), ctx))?
+            .map_err(|e| {
+                ParseError::from_diagnostic(
+                    ParseErrorKind::Validation {
+                        command: KEYWORD_ENV.to_string(),
+                    },
+                    dsl_diag::env_assignment_error(&e),
+                    ctx,
+                )
+            })?
         {
             Some((key, value)) => Ok(StepKind::Env { key, value }),
-            None => Err(ParseError::validation(
-                KEYWORD_ENV,
-                "ENV requires KEY=value format".to_string(),
+            None => Err(ParseError::from_diagnostic(
+                ParseErrorKind::Validation {
+                    command: KEYWORD_ENV.to_string(),
+                },
+                dsl_diag::env_bad_format(),
                 ctx,
             )),
         },
-        _ => Err(ParseError::validation(
-            KEYWORD_ENV,
-            "ENV requires KEY=value format".to_string(),
+        _ => Err(ParseError::from_diagnostic(
+            ParseErrorKind::Validation {
+                command: KEYWORD_ENV.to_string(),
+            },
+            dsl_diag::env_bad_format(),
             ctx,
         )),
     }
@@ -5932,9 +5969,11 @@ pub(crate) fn lower_expand_tokens(
         match token {
             InsToken::Assign(key, value) => {
                 if key.is_empty() {
-                    return Err(ParseError::validation(
-                        KEYWORD_EXPAND,
-                        "EXPAND requires KEY=value format for overrides".to_string(),
+                    return Err(ParseError::from_diagnostic(
+                        ParseErrorKind::Validation {
+                            command: KEYWORD_EXPAND.to_string(),
+                        },
+                        dsl_diag::expand_bad_override(),
                         ctx,
                     ));
                 }
@@ -5943,11 +5982,21 @@ pub(crate) fn lower_expand_tokens(
             InsToken::Pos(arg) => match &arg {
                 Arg::String(text, quoted) if !quoted && text.contains('=') => {
                     let Some((key, value)) = crate::command::split_assignment(text)
-                        .map_err(|e| ParseError::validation(KEYWORD_EXPAND, e.to_string(), ctx))?
+                        .map_err(|e| {
+                            ParseError::from_diagnostic(
+                                ParseErrorKind::Validation {
+                                    command: KEYWORD_EXPAND.to_string(),
+                                },
+                                dsl_diag::expand_assignment_error(&e),
+                                ctx,
+                            )
+                        })?
                     else {
-                        return Err(ParseError::validation(
-                            KEYWORD_EXPAND,
-                            "EXPAND requires KEY=value format for overrides".to_string(),
+                        return Err(ParseError::from_diagnostic(
+                            ParseErrorKind::Validation {
+                                command: KEYWORD_EXPAND.to_string(),
+                            },
+                            dsl_diag::expand_bad_override(),
                             ctx,
                         ));
                     };
@@ -5959,13 +6008,21 @@ pub(crate) fn lower_expand_tokens(
                         // `lower_command` path arg (literals always pass;
                         // resolution stays runtime).
                         ArgType::Path.check_arg(&arg).map_err(|e| {
-                            ParseError::validation(KEYWORD_EXPAND, e.to_string(), ctx)
+                            ParseError::from_diagnostic(
+                                ParseErrorKind::Validation {
+                                    command: KEYWORD_EXPAND.to_string(),
+                                },
+                                dsl_diag::expand_path_error(&e),
+                                ctx,
+                            )
                         })?;
                         path = Some(arg);
                     } else {
-                        return Err(ParseError::validation(
-                            KEYWORD_EXPAND,
-                            "EXPAND accepts at most one path".to_string(),
+                        return Err(ParseError::from_diagnostic(
+                            ParseErrorKind::Validation {
+                                command: KEYWORD_EXPAND.to_string(),
+                            },
+                            dsl_diag::expand_extra_path(),
                             ctx,
                         ));
                     }

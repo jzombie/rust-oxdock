@@ -134,7 +134,12 @@ directives.
    the full chain survives. Span is synced both ways: `from_diagnostic`
    attaches the `ctx` span to the embedded diagnostic, and
    `with_span` enrichment propagates to it (only while it has none),
-   each pinned by a test. Still open: the `commands.rs` bulk
+   each pinned by a test. ENV/EXPAND group done (2026-11-24):
+   `join_value`, `lower_env_assignment`, `lower_env_tokens`,
+   `lower_expand_tokens` (~15 sites) through eight more
+   `dsl.validation.*` constructors; error passthroughs take
+   `&anyhow::Error` with `{reason:#}` inside. Still open: the rest of
+   the `commands.rs` bulk
    (~90 `ParseError::validation/structural` sites) goes per-command,
    plus `parser.rs` rewrap (`lower_to_diagnostic` mapping), `lib.rs`
    mock, and `structural`/`invalid_syntax` constructors.
