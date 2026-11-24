@@ -6433,7 +6433,7 @@ pub(crate) fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> Par
     if bad {
         return Err(ParseError::from_diagnostic(
             ParseErrorKind::Structural {
-                rule: "let".to_string(),
+                rule: KEYWORD_LET.to_lowercase(),
             },
             dsl_diag::let_capture_async(),
             ctx,
@@ -6450,7 +6450,7 @@ pub(crate) fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) 
     {
         return Err(ParseError::from_diagnostic(
             ParseErrorKind::Structural {
-                rule: "let".to_string(),
+                rule: KEYWORD_LET.to_lowercase(),
             },
             dsl_diag::let_capture_pipe_stdout(),
             ctx,
@@ -6549,7 +6549,7 @@ pub(crate) fn reject_nested_inherit_env(ctx: &SpanContext, kind: &StepKind) -> P
     if contains_inherit_env(kind) {
         return Err(ParseError::from_diagnostic(
             ParseErrorKind::Structural {
-                rule: "inherit_env".to_string(),
+                rule: KEYWORD_INHERIT_ENV.to_lowercase(),
             },
             dsl_diag::nested_inherit_env(),
             ctx,
@@ -6570,7 +6570,7 @@ pub(crate) fn check_tty_wrapping(
     if has_geometry && !has_tty {
         return Err(ParseError::from_diagnostic(
             ParseErrorKind::Structural {
-                rule: "with_io".to_string(),
+                rule: KEYWORD_WITH_IO.to_lowercase(),
             },
             dsl_diag::tty_geometry_without_tty(),
             span,
@@ -6585,7 +6585,7 @@ pub(crate) fn check_tty_wrapping(
     {
         return Err(ParseError::from_diagnostic(
             ParseErrorKind::Structural {
-                rule: "with_io".to_string(),
+                rule: KEYWORD_WITH_IO.to_lowercase(),
             },
             dsl_diag::tty_with_stderr(),
             span,
@@ -6595,7 +6595,7 @@ pub(crate) fn check_tty_wrapping(
         Some(StepKind::Run(_) | StepKind::RunExec { .. }) | None => Ok(()),
         Some(_) => Err(ParseError::from_diagnostic(
             ParseErrorKind::Structural {
-                rule: "with_io".to_string(),
+                rule: KEYWORD_WITH_IO.to_lowercase(),
             },
             dsl_diag::tty_wraps_non_run(),
             span,
@@ -6610,7 +6610,7 @@ pub(crate) fn reject_with_io_in_async(ctx: &SpanContext, body: &[Step]) -> Parse
         if matches!(&step.kind, StepKind::WithIo { .. }) {
             return Err(ParseError::from_diagnostic(
                 ParseErrorKind::Structural {
-                    rule: "async".to_string(),
+                    rule: KEYWORD_ASYNC.to_lowercase(),
                 },
                 dsl_diag::with_io_in_async(),
                 ctx,
@@ -6755,7 +6755,7 @@ pub(crate) fn validate_remote_copy_placement(steps: &[Step], ctx: &SpanContext) 
         {
             return Err(ParseError::from_diagnostic(
                 ParseErrorKind::Structural {
-                    rule: "copy".to_string(),
+                    rule: KEYWORD_COPY.to_lowercase(),
                 },
                 dsl_diag::copy_host_outside_remote(),
                 ctx,

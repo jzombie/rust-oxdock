@@ -9,6 +9,34 @@
 
 use oxdock_diagnostics::Diagnostic;
 
+use crate::constants::{
+    KEYWORD_APPEND, KEYWORD_APPEND_LINE, KEYWORD_ARCHIVE, KEYWORD_ASSERT_CONTAINS,
+    KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_CANCEL, KEYWORD_CONST, KEYWORD_COPY,
+    KEYWORD_COPY_GIT, KEYWORD_ENV, KEYWORD_EXIT, KEYWORD_EXPAND, KEYWORD_EXPORT,
+    KEYWORD_FUNC, KEYWORD_INHERIT_ENV, KEYWORD_INSTALL, KEYWORD_LET, KEYWORD_LIST_APPEND,
+    KEYWORD_MKDIR, KEYWORD_PROMPT, KEYWORD_READ_LINE, KEYWORD_REMOTE, KEYWORD_REMOVE,
+    KEYWORD_RUN, KEYWORD_SET_EXECUTABLE, KEYWORD_SLEEP, KEYWORD_SYMLINK, KEYWORD_TYPE,
+    KEYWORD_UNARCHIVE, KEYWORD_WITH_IO, KEYWORD_WORKDIR, KEYWORD_WORKSPACE, KEYWORD_WRITE,
+    SCRIPT_MODULE_NAME,
+};
+
+/// Structured field keys. Single spelling for the whole module:
+/// constructors reference these, never literals, so a key rename is
+/// one edit. Keys used once or twice stay inline at their single use.
+const FIELD_COMMAND: &str = "command";
+const FIELD_RULE: &str = "rule";
+const FIELD_GOT: &str = "got";
+const FIELD_FOUND: &str = "found";
+const FIELD_REASON: &str = "reason";
+const FIELD_ALIAS: &str = "alias";
+const FIELD_ARGUMENT: &str = "argument";
+const FIELD_FIELD: &str = "field";
+const FIELD_FIRST: &str = "first";
+const FIELD_FLAG: &str = "flag";
+const FIELD_MAX: &str = "max";
+const FIELD_SECOND: &str = "second";
+const FIELD_SPELLING: &str = "spelling";
+
 /// Decode a mid-parse fragment for user output: the transient
 /// `WS_SENTINEL` boundary becomes a space. Single owner for the decode
 /// rule in this crate.
@@ -24,7 +52,7 @@ pub fn alias_duplicate_on_field(field: &str, first: &str, second: &str) -> Diagn
     Diagnostic::new(
         "dsl.alias.duplicate_on_field",
         message,
-        Diagnostic::make_fields(&[("field", field), ("first", first), ("second", second)]),
+        Diagnostic::make_fields(&[(FIELD_FIELD, field), (FIELD_FIRST, first), (FIELD_SECOND, second)]),
     )
 }
 
@@ -34,7 +62,7 @@ pub fn alias_needs_field(got: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.alias.needs_field",
         message,
-        Diagnostic::make_fields(&[("got", got)]),
+        Diagnostic::make_fields(&[(FIELD_GOT, got)]),
     )
 }
 
@@ -54,7 +82,7 @@ pub fn alias_name_lowercase(found: &str, spelling: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.alias.name_lowercase",
         message,
-        Diagnostic::make_fields(&[("found", found), ("spelling", spelling)]),
+        Diagnostic::make_fields(&[(FIELD_FOUND, found), (FIELD_SPELLING, spelling)]),
     )
 }
 
@@ -64,7 +92,7 @@ pub fn spelling_trailing_text(got: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.spelling.trailing_text",
         message,
-        Diagnostic::make_fields(&[("found", got)]),
+        Diagnostic::make_fields(&[(FIELD_FOUND, got)]),
     )
 }
 
@@ -75,7 +103,7 @@ pub fn spelling_max_depth(max: usize, got: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.spelling.max_depth",
         message,
-        Diagnostic::make_fields(&[("max", &max.to_string()), ("found", got)]),
+        Diagnostic::make_fields(&[(FIELD_MAX, &max.to_string()), (FIELD_FOUND, got)]),
     )
 }
 
@@ -94,7 +122,7 @@ pub fn spelling_expected_uppercase(found: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.spelling.expected_uppercase",
         message,
-        Diagnostic::make_fields(&[("found", found)]),
+        Diagnostic::make_fields(&[(FIELD_FOUND, found)]),
     )
 }
 
@@ -104,7 +132,7 @@ pub fn spelling_expected_delimiter(got: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.spelling.expected_delimiter",
         message,
-        Diagnostic::make_fields(&[("found", got)]),
+        Diagnostic::make_fields(&[(FIELD_FOUND, got)]),
     )
 }
 
@@ -114,7 +142,7 @@ pub fn spelling_unterminated_string(got: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.spelling.unterminated_string",
         message,
-        Diagnostic::make_fields(&[("found", got)]),
+        Diagnostic::make_fields(&[(FIELD_FOUND, got)]),
     )
 }
 
@@ -126,7 +154,7 @@ pub fn spelling_expected_literal(got: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.spelling.expected_literal",
         message,
-        Diagnostic::make_fields(&[("found", got)]),
+        Diagnostic::make_fields(&[(FIELD_FOUND, got)]),
     )
 }
 
@@ -136,7 +164,7 @@ pub fn spelling_invalid_float(got: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.spelling.invalid_float",
         message,
-        Diagnostic::make_fields(&[("found", got)]),
+        Diagnostic::make_fields(&[(FIELD_FOUND, got)]),
     )
 }
 
@@ -146,7 +174,7 @@ pub fn spelling_invalid_int(got: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.spelling.invalid_int",
         message,
-        Diagnostic::make_fields(&[("found", got)]),
+        Diagnostic::make_fields(&[(FIELD_FOUND, got)]),
     )
 }
 
@@ -158,7 +186,7 @@ pub fn flag_missing_value(command: &str, flag: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.flag_missing_value",
         message,
-        Diagnostic::make_fields(&[("command", command), ("flag", flag)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command), (FIELD_FLAG, flag)]),
     )
 }
 
@@ -168,7 +196,7 @@ pub fn unknown_flag(command: &str, flag: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.unknown_flag",
         message,
-        Diagnostic::make_fields(&[("command", command), ("flag", flag)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command), (FIELD_FLAG, flag)]),
     )
 }
 
@@ -181,9 +209,9 @@ pub fn too_many_positionals(command: &str, max: usize, got: usize) -> Diagnostic
         "dsl.validation.too_many_positionals",
         message,
         Diagnostic::make_fields(&[
-            ("command", command),
-            ("max", &max.to_string()),
-            ("got", &got.to_string()),
+            (FIELD_COMMAND, command),
+            (FIELD_MAX, &max.to_string()),
+            (FIELD_GOT, &got.to_string()),
         ]),
     )
 }
@@ -194,7 +222,7 @@ pub fn missing_argument(command: &str, name: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.missing_argument",
         message,
-        Diagnostic::make_fields(&[("command", command), ("argument", name)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command), (FIELD_ARGUMENT, name)]),
     )
 }
 
@@ -214,10 +242,10 @@ pub fn arg_type_mismatch(
         "dsl.validation.arg_type_mismatch",
         message,
         Diagnostic::make_fields(&[
-            ("command", command),
-            ("argument", name),
-            ("got", got),
-            ("reason", &reason_text),
+            (FIELD_COMMAND, command),
+            (FIELD_ARGUMENT, name),
+            (FIELD_GOT, got),
+            (FIELD_REASON, &reason_text),
         ]),
     )
 }
@@ -229,7 +257,7 @@ pub fn needs_value(command: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.needs_value",
         message,
-        Diagnostic::make_fields(&[("command", command)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command)]),
     )
 }
 
@@ -237,8 +265,8 @@ pub fn needs_value(command: &str) -> Diagnostic {
 pub fn env_requires_assignment() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.env_requires_assignment",
-        "ENV requires KEY=value".to_string(),
-        Diagnostic::make_fields(&[("command", "ENV")]),
+        format!("{KEYWORD_ENV} requires KEY=value"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_ENV)]),
     )
 }
 
@@ -246,8 +274,8 @@ pub fn env_requires_assignment() -> Diagnostic {
 pub fn env_bad_format() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.env_bad_format",
-        "ENV requires KEY=value format".to_string(),
-        Diagnostic::make_fields(&[("command", "ENV")]),
+        format!("{KEYWORD_ENV} requires KEY=value format"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_ENV)]),
     )
 }
 
@@ -259,7 +287,7 @@ pub fn env_assignment_error(reason: &anyhow::Error) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.env_assignment_error",
         reason_text.clone(),
-        Diagnostic::make_fields(&[("command", "ENV"), ("reason", &reason_text)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_ENV), (FIELD_REASON, &reason_text)]),
     )
 }
 
@@ -267,8 +295,8 @@ pub fn env_assignment_error(reason: &anyhow::Error) -> Diagnostic {
 pub fn expand_bad_override() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.expand_bad_override",
-        "EXPAND requires KEY=value format for overrides".to_string(),
-        Diagnostic::make_fields(&[("command", "EXPAND")]),
+        format!("{KEYWORD_EXPAND} requires KEY=value format for overrides"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPAND)]),
     )
 }
 
@@ -279,7 +307,7 @@ pub fn expand_assignment_error(reason: &anyhow::Error) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.expand_assignment_error",
         reason_text.clone(),
-        Diagnostic::make_fields(&[("command", "EXPAND"), ("reason", &reason_text)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPAND), (FIELD_REASON, &reason_text)]),
     )
 }
 
@@ -289,7 +317,7 @@ pub fn expand_path_error(reason: &anyhow::Error) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.expand_path_error",
         reason_text.clone(),
-        Diagnostic::make_fields(&[("command", "EXPAND"), ("reason", &reason_text)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPAND), (FIELD_REASON, &reason_text)]),
     )
 }
 
@@ -297,8 +325,8 @@ pub fn expand_path_error(reason: &anyhow::Error) -> Diagnostic {
 pub fn expand_extra_path() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.expand_extra_path",
-        "EXPAND accepts at most one path".to_string(),
-        Diagnostic::make_fields(&[("command", "EXPAND")]),
+        format!("{KEYWORD_EXPAND} accepts at most one path"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPAND)]),
     )
 }
 
@@ -306,8 +334,8 @@ pub fn expand_extra_path() -> Diagnostic {
 pub fn workdir_requires_path() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.workdir_requires_path",
-        "WORKDIR requires a path".to_string(),
-        Diagnostic::make_fields(&[("command", "WORKDIR")]),
+        format!("{KEYWORD_WORKDIR} requires a path"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_WORKDIR)]),
     )
 }
 
@@ -315,8 +343,8 @@ pub fn workdir_requires_path() -> Diagnostic {
 pub fn workspace_requires_target() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.workspace_requires_target",
-        "WORKSPACE requires a target".to_string(),
-        Diagnostic::make_fields(&[("command", "WORKSPACE")]),
+        format!("{KEYWORD_WORKSPACE} requires a target"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_WORKSPACE)]),
     )
 }
 
@@ -324,8 +352,8 @@ pub fn workspace_requires_target() -> Diagnostic {
 pub fn workspace_local_needs_cache() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.workspace_local_needs_cache",
-        "WORKSPACE --local requires CACHE".to_string(),
-        Diagnostic::make_fields(&[("command", "WORKSPACE")]),
+        format!("{KEYWORD_WORKSPACE} --local requires CACHE"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_WORKSPACE)]),
     )
 }
 
@@ -336,7 +364,7 @@ pub fn workspace_unknown_target(other: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.workspace_unknown_target",
         message,
-        Diagnostic::make_fields(&[("command", "WORKSPACE"), ("got", other)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_WORKSPACE), (FIELD_GOT, other)]),
     )
 }
 
@@ -348,7 +376,7 @@ pub fn unknown_workspace_source(command: &str, other: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.unknown_workspace_source",
         message,
-        Diagnostic::make_fields(&[("command", command), ("got", other)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command), (FIELD_GOT, other)]),
     )
 }
 
@@ -356,8 +384,8 @@ pub fn unknown_workspace_source(command: &str, other: &str) -> Diagnostic {
 pub fn copy_requires_source() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.copy_requires_source",
-        "COPY requires a source".to_string(),
-        Diagnostic::make_fields(&[("command", "COPY")]),
+        format!("{KEYWORD_COPY} requires a source"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_COPY)]),
     )
 }
 
@@ -365,8 +393,8 @@ pub fn copy_requires_source() -> Diagnostic {
 pub fn copy_requires_destination() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.copy_requires_destination",
-        "COPY requires a destination".to_string(),
-        Diagnostic::make_fields(&[("command", "COPY")]),
+        format!("{KEYWORD_COPY} requires a destination"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_COPY)]),
     )
 }
 
@@ -374,8 +402,8 @@ pub fn copy_requires_destination() -> Diagnostic {
 pub fn copy_host_exclusion() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.copy_host_exclusion",
-        "COPY --from-host and --to-host are mutually exclusive".to_string(),
-        Diagnostic::make_fields(&[("command", "COPY")]),
+        format!("{KEYWORD_COPY} --from-host and --to-host are mutually exclusive"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_COPY)]),
     )
 }
 
@@ -383,8 +411,8 @@ pub fn copy_host_exclusion() -> Diagnostic {
 pub fn copy_git_requires_revision() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.copy_git_requires_revision",
-        "COPY_GIT requires a revision".to_string(),
-        Diagnostic::make_fields(&[("command", "COPY_GIT")]),
+        format!("{KEYWORD_COPY_GIT} requires a revision"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_COPY_GIT)]),
     )
 }
 
@@ -392,8 +420,8 @@ pub fn copy_git_requires_revision() -> Diagnostic {
 pub fn copy_git_requires_source() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.copy_git_requires_source",
-        "COPY_GIT requires a source".to_string(),
-        Diagnostic::make_fields(&[("command", "COPY_GIT")]),
+        format!("{KEYWORD_COPY_GIT} requires a source"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_COPY_GIT)]),
     )
 }
 
@@ -401,8 +429,8 @@ pub fn copy_git_requires_source() -> Diagnostic {
 pub fn copy_git_requires_destination() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.copy_git_requires_destination",
-        "COPY_GIT requires a destination".to_string(),
-        Diagnostic::make_fields(&[("command", "COPY_GIT")]),
+        format!("{KEYWORD_COPY_GIT} requires a destination"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_COPY_GIT)]),
     )
 }
 
@@ -410,8 +438,8 @@ pub fn copy_git_requires_destination() -> Diagnostic {
 pub fn symlink_requires_source() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.symlink_requires_source",
-        "SYMLINK requires a source".to_string(),
-        Diagnostic::make_fields(&[("command", "SYMLINK")]),
+        format!("{KEYWORD_SYMLINK} requires a source"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_SYMLINK)]),
     )
 }
 
@@ -419,8 +447,8 @@ pub fn symlink_requires_source() -> Diagnostic {
 pub fn symlink_requires_target() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.symlink_requires_target",
-        "SYMLINK requires a target".to_string(),
-        Diagnostic::make_fields(&[("command", "SYMLINK")]),
+        format!("{KEYWORD_SYMLINK} requires a target"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_SYMLINK)]),
     )
 }
 
@@ -428,8 +456,8 @@ pub fn symlink_requires_target() -> Diagnostic {
 pub fn mkdir_requires_path() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.mkdir_requires_path",
-        "MKDIR requires a path".to_string(),
-        Diagnostic::make_fields(&[("command", "MKDIR")]),
+        format!("{KEYWORD_MKDIR} requires a path"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_MKDIR)]),
     )
 }
 
@@ -437,8 +465,8 @@ pub fn mkdir_requires_path() -> Diagnostic {
 pub fn install_requires_source() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.install_requires_source",
-        "INSTALL requires a source".to_string(),
-        Diagnostic::make_fields(&[("command", "INSTALL")]),
+        format!("{KEYWORD_INSTALL} requires a source"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_INSTALL)]),
     )
 }
 
@@ -446,8 +474,8 @@ pub fn install_requires_source() -> Diagnostic {
 pub fn install_requires_destination() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.install_requires_destination",
-        "INSTALL requires a destination".to_string(),
-        Diagnostic::make_fields(&[("command", "INSTALL")]),
+        format!("{KEYWORD_INSTALL} requires a destination"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_INSTALL)]),
     )
 }
 
@@ -455,8 +483,8 @@ pub fn install_requires_destination() -> Diagnostic {
 pub fn set_executable_requires_path() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.set_executable_requires_path",
-        "SET_EXECUTABLE requires a path".to_string(),
-        Diagnostic::make_fields(&[("command", "SET_EXECUTABLE")]),
+        format!("{KEYWORD_SET_EXECUTABLE} requires a path"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_SET_EXECUTABLE)]),
     )
 }
 
@@ -464,8 +492,8 @@ pub fn set_executable_requires_path() -> Diagnostic {
 pub fn archive_requires_source() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.archive_requires_source",
-        "ARCHIVE requires a source".to_string(),
-        Diagnostic::make_fields(&[("command", "ARCHIVE")]),
+        format!("{KEYWORD_ARCHIVE} requires a source"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_ARCHIVE)]),
     )
 }
 
@@ -473,8 +501,8 @@ pub fn archive_requires_source() -> Diagnostic {
 pub fn archive_requires_destination() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.archive_requires_destination",
-        "ARCHIVE requires a destination".to_string(),
-        Diagnostic::make_fields(&[("command", "ARCHIVE")]),
+        format!("{KEYWORD_ARCHIVE} requires a destination"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_ARCHIVE)]),
     )
 }
 
@@ -482,8 +510,8 @@ pub fn archive_requires_destination() -> Diagnostic {
 pub fn unarchive_requires_archive() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.unarchive_requires_archive",
-        "UNARCHIVE requires an archive".to_string(),
-        Diagnostic::make_fields(&[("command", "UNARCHIVE")]),
+        format!("{KEYWORD_UNARCHIVE} requires an archive"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_UNARCHIVE)]),
     )
 }
 
@@ -491,8 +519,8 @@ pub fn unarchive_requires_archive() -> Diagnostic {
 pub fn unarchive_requires_destination() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.unarchive_requires_destination",
-        "UNARCHIVE requires a destination".to_string(),
-        Diagnostic::make_fields(&[("command", "UNARCHIVE")]),
+        format!("{KEYWORD_UNARCHIVE} requires a destination"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_UNARCHIVE)]),
     )
 }
 
@@ -502,8 +530,8 @@ pub fn unarchive_bad_max_bytes(reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     Diagnostic::new(
         "dsl.validation.unarchive_bad_max_bytes",
-        format!("UNARCHIVE --max-bytes {reason_text}"),
-        Diagnostic::make_fields(&[("command", "UNARCHIVE"), ("reason", &reason_text)]),
+        format!("{KEYWORD_UNARCHIVE} --max-bytes {reason_text}"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_UNARCHIVE), (FIELD_REASON, &reason_text)]),
     )
 }
 
@@ -511,11 +539,11 @@ pub fn unarchive_bad_max_bytes(reason: &anyhow::Error) -> Diagnostic {
 /// member. Takes the exported name; quoting lives here.
 pub fn export_unknown_func(name: &str) -> Diagnostic {
     let message =
-        format!("EXPORT `{name}` does not match any top-level FUNC or known module member");
+        format!("{KEYWORD_EXPORT} `{name}` does not match any top-level {KEYWORD_FUNC} or known module member");
     Diagnostic::new(
         "dsl.validation.export_unknown_func",
         message,
-        Diagnostic::make_fields(&[("command", "EXPORT"), ("got", name)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPORT), (FIELD_GOT, name)]),
     )
 }
 
@@ -523,23 +551,22 @@ pub fn export_unknown_func(name: &str) -> Diagnostic {
 /// downstream path serves. Takes the exported name.
 pub fn export_type_qualified(name: &str) -> Diagnostic {
     let message = format!(
-        "EXPORT TYPE `{name}` must be bare: qualified ALIAS::TYPE re-exports are not served; import the file and re-export the bare name"
-    );
+        "{KEYWORD_EXPORT} {KEYWORD_TYPE} `{name}` must be bare: qualified ALIAS::{KEYWORD_TYPE} re-exports are not served; import the file and re-export the bare name");
     Diagnostic::new(
         "dsl.validation.export_type_qualified",
         message,
-        Diagnostic::make_fields(&[("command", "EXPORT"), ("got", name)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPORT), (FIELD_GOT, name)]),
     )
 }
 
 /// `EXPORT TYPE` naming no top-level `TYPE` (and no imports to defer
 /// to). Takes the exported name.
 pub fn export_unknown_type(name: &str) -> Diagnostic {
-    let message = format!("EXPORT TYPE `{name}` does not match any top-level TYPE");
+    let message = format!("{KEYWORD_EXPORT} {KEYWORD_TYPE} `{name}` does not match any top-level {KEYWORD_TYPE}");
     Diagnostic::new(
         "dsl.validation.export_unknown_type",
         message,
-        Diagnostic::make_fields(&[("command", "EXPORT"), ("got", name)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPORT), (FIELD_GOT, name)]),
     )
 }
 
@@ -547,12 +574,11 @@ pub fn export_unknown_type(name: &str) -> Diagnostic {
 /// a `CONST`. Takes the exported name.
 pub fn export_const_script_namespace(name: &str) -> Diagnostic {
     let message = format!(
-        "EXPORT CONST `{name}` must name a top-level CONST (`$NAME`) or `$ALIAS::NAME` for a visible import: `SCRIPT::` is not a CONST namespace"
-    );
+        "{KEYWORD_EXPORT} {KEYWORD_CONST} `{name}` must name a top-level {KEYWORD_CONST} (`$NAME`) or `$ALIAS::NAME` for a visible import: `{SCRIPT_MODULE_NAME}::` is not a {KEYWORD_CONST} namespace");
     Diagnostic::new(
         "dsl.validation.export_const_script_namespace",
         message,
-        Diagnostic::make_fields(&[("command", "EXPORT"), ("got", name)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPORT), (FIELD_GOT, name)]),
     )
 }
 
@@ -560,15 +586,14 @@ pub fn export_const_script_namespace(name: &str) -> Diagnostic {
 /// Takes the exported name and the unknown alias.
 pub fn export_const_unknown_alias(name: &str, module: &str) -> Diagnostic {
     let message = format!(
-        "EXPORT CONST `{name}` names unknown import alias `{module}`: import a file as `{module}` to re-export its CONSTs"
-    );
+        "{KEYWORD_EXPORT} {KEYWORD_CONST} `{name}` names unknown import alias `{module}`: import a file as `{module}` to re-export its CONSTs");
     Diagnostic::new(
         "dsl.validation.export_const_unknown_alias",
         message,
         Diagnostic::make_fields(&[
-            ("command", "EXPORT"),
-            ("got", name),
-            ("alias", module),
+            (FIELD_COMMAND, KEYWORD_EXPORT),
+            (FIELD_GOT, name),
+            (FIELD_ALIAS, module),
         ]),
     )
 }
@@ -576,102 +601,110 @@ pub fn export_const_unknown_alias(name: &str, module: &str) -> Diagnostic {
 /// `EXPORT CONST` naming no top-level `CONST`. Takes the exported name.
 pub fn export_const_unknown(name: &str) -> Diagnostic {
     let message = format!(
-        "EXPORT CONST `{name}` does not match any top-level CONST (LET bindings are never exportable)"
-    );
+        "{KEYWORD_EXPORT} {KEYWORD_CONST} `{name}` does not match any top-level {KEYWORD_CONST} ({KEYWORD_LET} bindings are never exportable)");
     Diagnostic::new(
         "dsl.validation.export_const_unknown",
         message,
-        Diagnostic::make_fields(&[("command", "EXPORT"), ("got", name)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXPORT), (FIELD_GOT, name)]),
     )
 }
 
 /// `LET` capture running `ASYNC`/`AWAIT`/`CANCEL` inline. The capture
 /// sink cannot stage tasks; hoist first, then await.
 pub fn let_capture_async() -> Diagnostic {
+    let rule = KEYWORD_LET.to_lowercase();
     Diagnostic::new(
         "dsl.structural.let_capture_async",
-        "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE<T> = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(),
-        Diagnostic::make_fields(&[("rule", "let")]),
+        format!("{KEYWORD_LET} capture cannot run {KEYWORD_ASYNC}/{KEYWORD_AWAIT}/{KEYWORD_CANCEL} inline; use {KEYWORD_LET} $t: HANDLE<T> = {KEYWORD_ASYNC} ... then {KEYWORD_LET} $o: STRING = {KEYWORD_AWAIT} $t"),
+        Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
 
 /// `LET` capture using `WITH_IO [stdout=$var]`. The capture sink owns
 /// stdout.
 pub fn let_capture_pipe_stdout() -> Diagnostic {
+    let rule = KEYWORD_LET.to_lowercase();
     Diagnostic::new(
         "dsl.structural.let_capture_pipe_stdout",
-        "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout".to_string(),
-        Diagnostic::make_fields(&[("rule", "let")]),
+        format!("{KEYWORD_LET} capture cannot use {KEYWORD_WITH_IO} [stdout=$var]; the capture sink owns stdout"),
+        Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
 
 /// `INHERIT_ENV` nested inside another command. The prelude directive
 /// only reads at statement level.
 pub fn nested_inherit_env() -> Diagnostic {
+    let rule = KEYWORD_INHERIT_ENV.to_lowercase();
     Diagnostic::new(
         "dsl.structural.nested_inherit_env",
-        "INHERIT_ENV cannot be nested inside other commands".to_string(),
-        Diagnostic::make_fields(&[("rule", "inherit_env")]),
+        format!("{KEYWORD_INHERIT_ENV} cannot be nested inside other commands"),
+        Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
 
 /// `WITH_IO [rows]`/`[cols]` without `[tty]`. Geometry without a
 /// terminal has nothing to size.
 pub fn tty_geometry_without_tty() -> Diagnostic {
+    let rule = KEYWORD_WITH_IO.to_lowercase();
     Diagnostic::new(
         "dsl.structural.tty_geometry_without_tty",
-        "WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size".to_string(),
-        Diagnostic::make_fields(&[("rule", "with_io")]),
+        format!("{KEYWORD_WITH_IO} [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size"),
+        Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
 
 /// `WITH_IO [tty]` binding stderr. The pty master interleaves both
 /// streams, so they cannot demultiplex.
 pub fn tty_with_stderr() -> Diagnostic {
+    let rule = KEYWORD_WITH_IO.to_lowercase();
     Diagnostic::new(
         "dsl.structural.tty_with_stderr",
-        "WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex".to_string(),
-        Diagnostic::make_fields(&[("rule", "with_io")]),
+        format!("{KEYWORD_WITH_IO} [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex"),
+        Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
 
 /// `WITH_IO [tty]` wrapping a non-`RUN` step. Terminal-unaware
 /// commands cannot run under the pty master.
 pub fn tty_wraps_non_run() -> Diagnostic {
+    let rule = KEYWORD_WITH_IO.to_lowercase();
     Diagnostic::new(
         "dsl.structural.tty_wraps_non_run",
-        "WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it".to_string(),
-        Diagnostic::make_fields(&[("rule", "with_io")]),
+        format!("{KEYWORD_WITH_IO} [tty] only wraps a {KEYWORD_RUN} step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it"),
+        Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
 
 /// `WITH_IO` placed inside an `ASYNC` body. Pipe wiring belongs
 /// outside the task.
 pub fn with_io_in_async() -> Diagnostic {
+    let rule = KEYWORD_ASYNC.to_lowercase();
     Diagnostic::new(
         "dsl.structural.with_io_in_async",
-        "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)".to_string(),
-        Diagnostic::make_fields(&[("rule", "async")]),
+        format!("{KEYWORD_WITH_IO} cannot be placed inside {KEYWORD_ASYNC}. Place {KEYWORD_WITH_IO} outside {KEYWORD_ASYNC} instead (e.g. {KEYWORD_WITH_IO} [...] {KEYWORD_ASYNC} {KEYWORD_RUN} ...)"),
+        Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
 
 /// `COPY --from-host` / `--to-host` outside a `REMOTE` block. Transfer
 /// declarations only mean something where a session hoists them.
 pub fn copy_host_outside_remote() -> Diagnostic {
+    let rule = KEYWORD_COPY.to_lowercase();
     Diagnostic::new(
         "dsl.structural.copy_host_outside_remote",
-        "COPY --from-host and --to-host are only valid inside a REMOTE block".to_string(),
-        Diagnostic::make_fields(&[("rule", "copy")]),
+        format!("{KEYWORD_COPY} --from-host and --to-host are only valid inside a {KEYWORD_REMOTE} block"),
+        Diagnostic::make_fields(&[(FIELD_RULE, rule.as_str())]),
     )
 }
 
 /// Staged `UnsignedIntBoundary` for `2^63` where unary `-` cannot
-/// consume it. Fixed value, parameterless.
+/// consume it. Fixed value, parameterless. The `expr` rule is a
+/// parser-phase name, not a DSL command, so no `KEYWORD_*` applies.
 pub fn int_boundary_overflow() -> Diagnostic {
     Diagnostic::new(
         "dsl.structural.int_boundary_overflow",
         "integer overflow: 9223372036854775808 exceeds i64::MAX".to_string(),
-        Diagnostic::make_fields(&[("rule", "expr")]),
+        Diagnostic::make_fields(&[(FIELD_RULE, "expr")]),
     )
 }
 
@@ -682,7 +715,7 @@ pub fn int_overflow(n: u64) -> Diagnostic {
     Diagnostic::new(
         "dsl.structural.int_overflow",
         message,
-        Diagnostic::make_fields(&[("rule", "expr"), ("got", &n.to_string())]),
+        Diagnostic::make_fields(&[(FIELD_RULE, "expr"), (FIELD_GOT, &n.to_string())]),
     )
 }
 
@@ -690,8 +723,8 @@ pub fn int_overflow(n: u64) -> Diagnostic {
 pub fn write_requires_path() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.write_requires_path",
-        "WRITE requires a path".to_string(),
-        Diagnostic::make_fields(&[("command", "WRITE")]),
+        format!("{KEYWORD_WRITE} requires a path"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_WRITE)]),
     )
 }
 
@@ -699,8 +732,8 @@ pub fn write_requires_path() -> Diagnostic {
 pub fn append_requires_path() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.append_requires_path",
-        "APPEND requires a path".to_string(),
-        Diagnostic::make_fields(&[("command", "APPEND")]),
+        format!("{KEYWORD_APPEND} requires a path"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_APPEND)]),
     )
 }
 
@@ -708,8 +741,8 @@ pub fn append_requires_path() -> Diagnostic {
 pub fn append_line_requires_path() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.append_line_requires_path",
-        "APPEND_LINE requires a path".to_string(),
-        Diagnostic::make_fields(&[("command", "APPEND_LINE")]),
+        format!("{KEYWORD_APPEND_LINE} requires a path"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_APPEND_LINE)]),
     )
 }
 
@@ -717,8 +750,8 @@ pub fn append_line_requires_path() -> Diagnostic {
 pub fn remove_requires_path() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.remove_requires_path",
-        "REMOVE requires a path".to_string(),
-        Diagnostic::make_fields(&[("command", "REMOVE")]),
+        format!("{KEYWORD_REMOVE} requires a path"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_REMOVE)]),
     )
 }
 
@@ -726,8 +759,8 @@ pub fn remove_requires_path() -> Diagnostic {
 pub fn read_line_requires_variable() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.read_line_requires_variable",
-        "READ_LINE requires a variable".to_string(),
-        Diagnostic::make_fields(&[("command", "READ_LINE")]),
+        format!("{KEYWORD_READ_LINE} requires a variable"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_READ_LINE)]),
     )
 }
 
@@ -735,11 +768,11 @@ pub fn read_line_requires_variable() -> Diagnostic {
 /// argument; quoting lives here. (Renders the value, never the
 /// internal `Arg` debug shape.)
 pub fn read_line_requires_sigil(got: &str) -> Diagnostic {
-    let message = format!("READ_LINE requires a $variable, found {got:?}");
+    let message = format!("{KEYWORD_READ_LINE} requires a $variable, found {got:?}");
     Diagnostic::new(
         "dsl.validation.read_line_requires_sigil",
         message,
-        Diagnostic::make_fields(&[("command", "READ_LINE"), ("got", got)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_READ_LINE), (FIELD_GOT, got)]),
     )
 }
 
@@ -747,18 +780,18 @@ pub fn read_line_requires_sigil(got: &str) -> Diagnostic {
 pub fn prompt_requires_variable() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.prompt_requires_variable",
-        "PROMPT requires a variable".to_string(),
-        Diagnostic::make_fields(&[("command", "PROMPT")]),
+        format!("{KEYWORD_PROMPT} requires a variable"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_PROMPT)]),
     )
 }
 
 /// `PROMPT` target without a `$` sigil. Takes the rendered argument.
 pub fn prompt_requires_sigil(got: &str) -> Diagnostic {
-    let message = format!("PROMPT requires a $variable, found {got:?}");
+    let message = format!("{KEYWORD_PROMPT} requires a $variable, found {got:?}");
     Diagnostic::new(
         "dsl.validation.prompt_requires_sigil",
         message,
-        Diagnostic::make_fields(&[("command", "PROMPT"), ("got", got)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_PROMPT), (FIELD_GOT, got)]),
     )
 }
 
@@ -766,8 +799,8 @@ pub fn prompt_requires_sigil(got: &str) -> Diagnostic {
 pub fn prompt_requires_message() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.prompt_requires_message",
-        "PROMPT requires a message".to_string(),
-        Diagnostic::make_fields(&[("command", "PROMPT")]),
+        format!("{KEYWORD_PROMPT} requires a message"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_PROMPT)]),
     )
 }
 
@@ -775,8 +808,8 @@ pub fn prompt_requires_message() -> Diagnostic {
 pub fn assert_contains_requires_value() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.assert_contains_requires_value",
-        "ASSERT_CONTAINS requires a value".to_string(),
-        Diagnostic::make_fields(&[("command", "ASSERT_CONTAINS")]),
+        format!("{KEYWORD_ASSERT_CONTAINS} requires a value"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_ASSERT_CONTAINS)]),
     )
 }
 
@@ -784,8 +817,8 @@ pub fn assert_contains_requires_value() -> Diagnostic {
 pub fn assert_contains_requires_needle() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.assert_contains_requires_needle",
-        "ASSERT_CONTAINS requires a needle".to_string(),
-        Diagnostic::make_fields(&[("command", "ASSERT_CONTAINS")]),
+        format!("{KEYWORD_ASSERT_CONTAINS} requires a needle"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_ASSERT_CONTAINS)]),
     )
 }
 
@@ -793,8 +826,8 @@ pub fn assert_contains_requires_needle() -> Diagnostic {
 pub fn exit_requires_code() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.exit_requires_code",
-        "EXIT requires a code".to_string(),
-        Diagnostic::make_fields(&[("command", "EXIT")]),
+        format!("{KEYWORD_EXIT} requires a code"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_EXIT)]),
     )
 }
 
@@ -802,8 +835,8 @@ pub fn exit_requires_code() -> Diagnostic {
 pub fn sleep_requires_duration() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.sleep_requires_duration",
-        "SLEEP requires a duration (e.g. SLEEP 500ms)".to_string(),
-        Diagnostic::make_fields(&[("command", "SLEEP")]),
+        format!("{KEYWORD_SLEEP} requires a duration (e.g. {KEYWORD_SLEEP} 500ms)"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_SLEEP)]),
     )
 }
 
@@ -811,8 +844,8 @@ pub fn sleep_requires_duration() -> Diagnostic {
 pub fn sleep_takes_one() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.sleep_takes_one",
-        "SLEEP takes exactly one duration argument".to_string(),
-        Diagnostic::make_fields(&[("command", "SLEEP")]),
+        format!("{KEYWORD_SLEEP} takes exactly one duration argument"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_SLEEP)]),
     )
 }
 
@@ -820,19 +853,19 @@ pub fn sleep_takes_one() -> Diagnostic {
 pub fn list_append_requires_list() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.list_append_requires_list",
-        "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(),
-        Diagnostic::make_fields(&[("command", "LIST_APPEND")]),
+        format!("{KEYWORD_LIST_APPEND} requires a LIST variable (e.g. {KEYWORD_LIST_APPEND} $items $x)"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_LIST_APPEND)]),
     )
 }
 
 /// `LIST_APPEND` target without a `$` sigil. Takes the rendered
 /// argument; quoting lives here.
 pub fn list_append_requires_sigil(got: &str) -> Diagnostic {
-    let message = format!("LIST_APPEND requires a $variable, found {got:?}");
+    let message = format!("{KEYWORD_LIST_APPEND} requires a $variable, found {got:?}");
     Diagnostic::new(
         "dsl.validation.list_append_requires_sigil",
         message,
-        Diagnostic::make_fields(&[("command", "LIST_APPEND"), ("got", got)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_LIST_APPEND), (FIELD_GOT, got)]),
     )
 }
 
@@ -840,8 +873,8 @@ pub fn list_append_requires_sigil(got: &str) -> Diagnostic {
 pub fn list_append_requires_item() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.list_append_requires_item",
-        "LIST_APPEND requires an item to append (e.g. LIST_APPEND $items $x)".to_string(),
-        Diagnostic::make_fields(&[("command", "LIST_APPEND")]),
+        format!("{KEYWORD_LIST_APPEND} requires an item to append (e.g. {KEYWORD_LIST_APPEND} $items $x)"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_LIST_APPEND)]),
     )
 }
 
@@ -849,8 +882,8 @@ pub fn list_append_requires_item() -> Diagnostic {
 pub fn list_append_takes_two() -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.list_append_takes_two",
-        "LIST_APPEND takes exactly two arguments: LIST_APPEND $list <item>".to_string(),
-        Diagnostic::make_fields(&[("command", "LIST_APPEND")]),
+        format!("{KEYWORD_LIST_APPEND} takes exactly two arguments: {KEYWORD_LIST_APPEND} $list <item>"),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, KEYWORD_LIST_APPEND)]),
     )
 }
 
@@ -862,7 +895,7 @@ pub fn assert_equality_requires_value(command: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.assert_equality_requires_value",
         message,
-        Diagnostic::make_fields(&[("command", command)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command)]),
     )
 }
 
@@ -873,7 +906,7 @@ pub fn assert_equality_requires_expected(command: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.assert_equality_requires_expected",
         message,
-        Diagnostic::make_fields(&[("command", command)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command)]),
     )
 }
 
@@ -884,7 +917,7 @@ pub fn assert_equality_hash_with_expected(command: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.validation.assert_equality_hash_with_expected",
         message,
-        Diagnostic::make_fields(&[("command", command)]),
+        Diagnostic::make_fields(&[(FIELD_COMMAND, command)]),
     )
 }
 
