@@ -322,6 +322,17 @@ Remaining:
   inline `bail!`/`anyhow!`; non-anyhow errors wrapped with
   `anyhow::Error::new` at call sites; lib 11 + integration 39
   green; clippy/doc clean; zero fmt drift).
+- Sys crates: `oxdock-process` execution errors done 2026-11-25
+  (17 `proc.run.*` ctors appended to `src/diagnostics.rs`:
+  interpreter/exec/interactive/background-trio/spawn/unguarded/
+  argv-unimplemented/spawn-anchors/stdin+cap locks, plus a generic
+  `Debug` `run_command_failed` shared by all four backends;
+  `shell.rs`/`synthetic.rs`/`builder.rs`/`contract.rs`/
+  `env_policy.rs`/`mock.rs`/`shell_manager.rs` zero inline
+  failures; messages byte-identical; Miri-only call sites need no
+  test gating (ctors ungated); test-only macro imports moved into
+  `mod tests`; lib 119 + core lib 408 + integration 629 green;
+  clippy/doc clean; zero fmt drift).
 - Sys crates: `oxdock-process` `expand.rs` done 2026-11-25 (new
   `src/diagnostics.rs` owning 18 `proc.expand.*` ctors: env/script-var
   misses with inline `did you mean` hints via `ScriptSuggest` /

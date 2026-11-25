@@ -2,7 +2,7 @@
 // shell that supports the patterns exercised in tests: sleep, printf/echo with
 // env interpolation, redirection, and exit codes. IO is routed through the
 // workspace filesystem so we never touch the host.
-use anyhow::{Result, bail};
+use anyhow::Result;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
 
@@ -13,6 +13,7 @@ use crate::contract::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
     CommandStdin, CommandStdout, ProcessManager,
 };
+use crate::diagnostics as proc_diag;
 use crate::expand::expand_with_lookup;
 
 #[cfg(miri)]
@@ -130,7 +131,9 @@ impl ProcessManager for SyntheticProcessManager {
                     || matches!(stdout, CommandStdout::Stream(_));
                 let (out, status) = execute_sync(ctx, script, needs_bytes)?;
                 if !status.success() {
-                    bail!("command {:?} failed with status {}", script, status);
+                    return Err(anyhow::Error::new(proc_diag::run_command_failed(
+                        &script, &status,
+                    )));
                 }
                 if matches!(stderr, CommandStderr::Stream(_)) {
                     // Synthetic manager does not produce stderr output; warn if requested.
@@ -150,14 +153,20 @@ impl ProcessManager for SyntheticProcessManager {
             }
             CommandMode::Background => match stdout {
                 CommandStdout::Capture => {
-                    bail!("cannot capture stdout for background command under Miri")
+                    return Err(anyhow::Error::new(
+                        proc_diag::run_bg_capture_unsupported_miri(),
+                    ));
                 }
                 CommandStdout::Stream(_) => {
-                    bail!("stdout streaming not supported for background command under Miri")
+                    return Err(anyhow::Error::new(
+                        proc_diag::run_bg_stdout_stream_unsupported_miri(),
+                    ));
                 }
                 CommandStdout::Inherit => {
                     if matches!(stderr, CommandStderr::Stream(_)) {
-                        bail!("stderr streaming not supported for background command under Miri");
+                        return Err(anyhow::Error::new(
+                            proc_diag::run_bg_stderr_stream_unsupported_miri(),
+                        ));
                     }
                     let plan = plan_background(ctx, script)?;
                     Ok(CommandResult::Background(plan))
@@ -187,7 +196,7 @@ impl ProcessManager for SyntheticProcessManager {
         }
 
         if argv.is_empty() {
-            bail!("RUN exec form requires at least one argument");
+            return Err(anyhow::Error::new(proc_diag::run_exec_requires_argv()));
         }
 
         match mode {
@@ -196,7 +205,9 @@ impl ProcessManager for SyntheticProcessManager {
                     || matches!(stdout, CommandStdout::Stream(_));
                 let (out, status) = execute_argv_sync(ctx, argv, needs_bytes)?;
                 if !status.success() {
-                    bail!("command {argv:?} failed with status {}", status);
+                    return Err(anyhow::Error::new(proc_diag::run_command_failed(
+                        &argv, &status,
+                    )));
                 }
                 if matches!(stderr, CommandStderr::Stream(_)) {
                     // Synthetic manager does not produce stderr output.
@@ -215,14 +226,20 @@ impl ProcessManager for SyntheticProcessManager {
             }
             CommandMode::Background => match stdout {
                 CommandStdout::Capture => {
-                    bail!("cannot capture stdout for background command under Miri")
+                    return Err(anyhow::Error::new(
+                        proc_diag::run_bg_capture_unsupported_miri(),
+                    ));
                 }
                 CommandStdout::Stream(_) => {
-                    bail!("stdout streaming not supported for background command under Miri")
+                    return Err(anyhow::Error::new(
+                        proc_diag::run_bg_stdout_stream_unsupported_miri(),
+                    ));
                 }
                 CommandStdout::Inherit => {
                     if matches!(stderr, CommandStderr::Stream(_)) {
-                        bail!("stderr streaming not supported for background command under Miri");
+                        return Err(anyhow::Error::new(
+                            proc_diag::run_bg_stderr_stream_unsupported_miri(),
+                        ));
                     }
                     let plan = plan_argv_background(ctx, argv)?;
                     Ok(CommandResult::Background(plan))
@@ -484,7 +501,11 @@ fn parse_command(
 fn resolve_write(resolver: &PathResolver, ctx: &CommandContext, path: &str) -> Result<GuardedPath> {
     match ctx.cwd() {
         PolicyPath::Guarded(p) => resolver.resolve_write(p, path),
-        PolicyPath::Unguarded(_) => bail!("unguarded writes not supported in Miri"),
+        PolicyPath::Unguarded(_) => {
+            return Err(anyhow::Error::new(
+                proc_diag::run_unguarded_writes_unsupported_miri(),
+            ));
+        }
     }
 }
 

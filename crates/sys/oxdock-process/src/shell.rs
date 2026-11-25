@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use oxdock_fs::GuardedPath;
 #[cfg(all(unix, not(miri)))]
 use oxdock_fs::PathResolver;
@@ -9,6 +9,7 @@ use std::fs::File;
 use std::process::{Command, ExitStatus, Stdio};
 
 use crate::CommandBuilder;
+use crate::diagnostics as proc_diag;
 
 pub fn shell_program() -> String {
     #[cfg(windows)]
@@ -30,7 +31,9 @@ pub fn shell_program() -> String {
 pub fn interpreter_exe() -> Result<String> {
     #[cfg(miri)]
     {
-        bail!("INTERPRETER is unsupported under Miri isolation")
+        return Err(anyhow::Error::new(
+            proc_diag::run_interpreter_unsupported_miri(),
+        ));
     }
     #[cfg(not(miri))]
     {
@@ -62,9 +65,9 @@ pub fn batch_shell() -> String {
 pub(crate) fn direct_cmd(argv: &[String]) -> Result<Command> {
     let (program, rest) = argv
         .split_first()
-        .ok_or_else(|| anyhow::anyhow!("RUN exec form requires at least one argument"))?;
+        .ok_or_else(|| anyhow::Error::new(proc_diag::run_exec_requires_argv()))?;
     if program.is_empty() {
-        bail!("RUN exec form requires a non-empty executable");
+        return Err(anyhow::Error::new(proc_diag::run_exec_requires_program()));
     }
     let mut c = Command::new(program);
     c.args(rest);
@@ -94,7 +97,9 @@ impl ShellLauncher {
             .status()
             .with_context(|| format!("failed to run {:?}", cmd))?;
         if !status.success() {
-            bail!("command {:?} failed with status {}", cmd, status);
+            return Err(anyhow::Error::new(proc_diag::run_command_failed(
+                &*cmd, &status,
+            )));
         }
         Ok(())
     }
@@ -167,7 +172,9 @@ pub fn spawn_interactive_shell(
 
         let status = cmd.status()?;
         if !status.success() {
-            bail!("shell exited with status {}", status);
+            return Err(anyhow::Error::new(proc_diag::shell_exited_with_status(
+                &status,
+            )));
         }
         Ok(())
     }
@@ -203,7 +210,7 @@ pub fn spawn_interactive_shell(
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (cwd, workspace_root, banner);
-        bail!("interactive shell unsupported on this platform");
+        return Err(anyhow::Error::new(proc_diag::run_interactive_unsupported()));
     }
 }
 

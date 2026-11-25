@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 
 use crate::contract::CommandContext;
 use crate::diagnostics as expand_diag;
@@ -860,6 +860,7 @@ pub fn expand_command_env(input: &str, ctx: &CommandContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{anyhow, bail};
     use std::collections::HashMap;
 
     #[test]

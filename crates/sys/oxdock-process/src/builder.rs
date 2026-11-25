@@ -6,8 +6,6 @@ use std::{
 #[cfg(not(miri))]
 use anyhow::Context;
 use anyhow::Result;
-#[cfg(miri)]
-use anyhow::bail;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::fs::File;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -16,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitStatus, Output as StdOutput, Stdio};
 
 use crate::child::ChildHandle;
+#[cfg(miri)]
+use crate::diagnostics as proc_diag;
 
 /// Builder wrapper that centralizes direct usages of `std::process::Command`.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -149,7 +149,7 @@ impl CommandBuilder {
     pub fn spawn(&mut self) -> Result<ChildHandle> {
         #[cfg(miri)]
         {
-            bail!("spawn is not supported under Miri synthetic process backend")
+            return Err(anyhow::Error::new(proc_diag::run_spawn_unsupported_miri()));
         }
 
         #[cfg(not(miri))]
@@ -174,7 +174,7 @@ impl CommandBuilder {
         #[cfg(miri)]
         {
             let _ = self;
-            bail!("spawn is not supported under Miri synthetic process backend")
+            return Err(anyhow::Error::new(proc_diag::run_spawn_unsupported_miri()));
         }
 
         #[cfg(not(miri))]
@@ -212,7 +212,7 @@ impl CommandBuilder {
         #[cfg(miri)]
         {
             let _ = self;
-            bail!("spawn is not supported under Miri synthetic process backend")
+            return Err(anyhow::Error::new(proc_diag::run_spawn_unsupported_miri()));
         }
 
         #[cfg(not(miri))]

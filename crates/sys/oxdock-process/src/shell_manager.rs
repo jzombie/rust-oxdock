@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::Command as ProcessCommand;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -13,6 +13,7 @@ use crate::contract::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
     CommandStdin, CommandStdout, PROCESS_DEBUG_ENV_VAR, ProcessManager, SharedInput, SharedOutput,
 };
+use crate::diagnostics as proc_diag;
 use crate::shell::{batch_shell, direct_cmd, shell_cmd};
 
 /// Default process manager that shells out using the system shell.
@@ -88,7 +89,7 @@ fn run_prepared(
         CommandStdout::Stream(stream) => (Some(stream), None),
         CommandStdout::Capture => {
             if matches!(mode, CommandMode::Background) {
-                bail!("cannot capture stdout for background command");
+                return Err(anyhow::Error::new(proc_diag::run_bg_capture_unsupported()));
             }
             let buf = Arc::new(Mutex::new(Vec::new()));
             let writer: SharedOutput = buf.clone();
@@ -143,10 +144,14 @@ fn run_prepared(
                 .wait()
                 .with_context(|| format!("failed to run {desc}"))?;
             if !status.success() {
-                bail!("command {desc} failed with status {}", status);
+                return Err(anyhow::Error::new(proc_diag::run_command_failed(
+                    &*command, &status,
+                )));
             }
             if let Some(buf) = capture_buf {
-                let mut guard = buf.lock().map_err(|_| anyhow!("capture stdout poisoned"))?;
+                let mut guard = buf
+                    .lock()
+                    .map_err(|_| anyhow::Error::new(proc_diag::run_capture_lock_poisoned()))?;
                 return Ok(CommandResult::Captured(std::mem::take(&mut *guard)));
             }
             Ok(CommandResult::Completed)

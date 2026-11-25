@@ -3,9 +3,10 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 use oxdock_sys_test_utils::exit_status_from_code;
 
+use crate::diagnostics as proc_diag;
 use crate::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
     CommandStdin, CommandStdout, ProcessManager,
@@ -179,7 +180,7 @@ impl ProcessManager for MockProcessManager {
             }
             CommandMode::Background => {
                 if matches!(stdout, CommandStdout::Capture) {
-                    bail!("cannot capture stdout for background command");
+                    return Err(anyhow::Error::new(proc_diag::run_bg_capture_unsupported()));
                 }
                 self.spawns
                     .lock()
@@ -257,7 +258,7 @@ impl ProcessManager for MockProcessManager {
             }
             CommandMode::Background => {
                 if matches!(stdout, CommandStdout::Capture) {
-                    bail!("cannot capture stdout for background command");
+                    return Err(anyhow::Error::new(proc_diag::run_bg_capture_unsupported()));
                 }
                 self.argv_spawns
                     .lock()
@@ -355,7 +356,9 @@ impl Drop for MockHandle {
 fn capture_stdin(stdin: CommandStdin) -> Result<Option<Vec<u8>>> {
     match stdin {
         CommandStdin::Stream(reader) => {
-            let mut guard = reader.lock().map_err(|_| anyhow!("failed to lock stdin"))?;
+            let mut guard = reader
+                .lock()
+                .map_err(|_| anyhow::Error::new(proc_diag::run_stdin_lock_failed()))?;
             let mut buf = Vec::new();
             std::io::copy(&mut *guard, &mut buf)?;
             Ok(Some(buf))

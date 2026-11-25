@@ -9,6 +9,7 @@
 //! `did you mean` shape lives here, call sites pass only the scope.
 
 use oxdock_diagnostics::Diagnostic;
+use oxdock_fs::env as oxdock_env;
 
 /// Structured field keys. Single spelling for the whole module:
 /// constructors reference these, never literals, so a key rename is
@@ -24,6 +25,10 @@ const FIELD_SEGMENT: &str = "segment";
 const FIELD_INDEX: &str = "index";
 const FIELD_LEN: &str = "len";
 const FIELD_LIMIT: &str = "limit";
+const FIELD_COMMAND: &str = "command";
+const FIELD_STATUS: &str = "status";
+const FIELD_ARGV: &str = "argv";
+const FIELD_PROGRAM: &str = "program";
 
 /// Suggestion scope for an undefined `$var` miss: the name also lives
 /// in the step environment or the override table.
@@ -266,9 +271,205 @@ pub fn render_permit() -> Diagnostic {
     )
 }
 
+/// `INTERPRETER` lookup under Miri isolation. Parameterless: the
+/// wording is fixed.
+pub fn run_interpreter_unsupported_miri() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.interpreter_unsupported_miri",
+        "INTERPRETER is unsupported under Miri isolation".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Empty `RUN` exec argv. Parameterless: the wording is fixed.
+pub fn run_exec_requires_argv() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.exec_requires_argv",
+        "RUN exec form requires at least one argument".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `RUN` exec form with an empty program. Parameterless: the wording
+/// is fixed.
+pub fn run_exec_requires_program() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.exec_requires_program",
+        "RUN exec form requires a non-empty executable".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Spawned command exiting non-zero. Takes the command (any
+/// `Debug`: `std::process::Command`, argv slice, or script text) and
+/// the wait status; both renderings live here.
+pub fn run_command_failed(
+    desc: &impl std::fmt::Debug,
+    status: &std::process::ExitStatus,
+) -> Diagnostic {
+    let desc_text = format!("{desc:?}");
+    let status_text = status.to_string();
+    let message = format!("command {desc_text} failed with status {status_text}");
+    Diagnostic::new(
+        "proc.run.command_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_COMMAND, desc_text.as_str()),
+            (FIELD_STATUS, status_text.as_str()),
+        ]),
+    )
+}
+
+/// Shell exiting non-zero. Takes the wait status; rendering lives
+/// here.
+pub fn shell_exited_with_status(status: &std::process::ExitStatus) -> Diagnostic {
+    let status_text = status.to_string();
+    let message = format!("shell exited with status {status_text}");
+    Diagnostic::new(
+        "proc.run.shell_exited_with_status",
+        message,
+        Diagnostic::make_fields(&[(FIELD_STATUS, status_text.as_str())]),
+    )
+}
+
+/// Interactive shell on a platform without one. Parameterless: the
+/// wording is fixed.
+pub fn run_interactive_unsupported() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.interactive_unsupported",
+        "interactive shell unsupported on this platform".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Stdout capture for a background command. Parameterless: the
+/// wording is fixed.
+pub fn run_bg_capture_unsupported() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.bg_capture_unsupported",
+        "cannot capture stdout for background command".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Stdout capture for a background command under Miri isolation.
+/// Parameterless: the wording is fixed.
+pub fn run_bg_capture_unsupported_miri() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.bg_capture_unsupported_miri",
+        "cannot capture stdout for background command under Miri".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Stdout streaming for a background command under Miri isolation.
+/// Parameterless: the wording is fixed.
+pub fn run_bg_stdout_stream_unsupported_miri() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.bg_stdout_stream_unsupported_miri",
+        "stdout streaming not supported for background command under Miri".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Stderr streaming for a background command under Miri isolation.
+/// Parameterless: the wording is fixed.
+pub fn run_bg_stderr_stream_unsupported_miri() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.bg_stderr_stream_unsupported_miri",
+        "stderr streaming not supported for background command under Miri".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Native spawn under the Miri synthetic backend. Parameterless: the
+/// wording is fixed.
+pub fn run_spawn_unsupported_miri() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.spawn_unsupported_miri",
+        "spawn is not supported under Miri synthetic process backend".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Unguarded write under Miri isolation. Parameterless: the wording
+/// is fixed.
+pub fn run_unguarded_writes_unsupported_miri() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.unguarded_writes_unsupported_miri",
+        "unguarded writes not supported in Miri".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Default `run_argv` with no override. Takes the argv; `Debug`
+/// rendering lives here.
+pub fn run_argv_unimplemented(argv: &[String]) -> Diagnostic {
+    let argv_text = format!("{argv:?}");
+    let message = format!("run_argv not implemented for argv {argv_text}");
+    Diagnostic::new(
+        "proc.run.argv_unimplemented",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ARGV, argv_text.as_str())]),
+    )
+}
+
+/// Spawn without `PATH` in the script environment. Takes the program;
+/// the `PATH` spelling and the `INHERIT_ENV` fix derive from the
+/// declared env contract, never literals.
+pub fn spawn_requires_path(program: &str) -> Diagnostic {
+    let message = format!(
+        "cannot resolve '{program}' without {} in the script environment; declare INHERIT_ENV [{}]",
+        oxdock_env::os::PATH,
+        oxdock_env::os::PATH,
+    );
+    Diagnostic::new(
+        "proc.run.spawn_requires_path",
+        message,
+        Diagnostic::make_fields(&[(FIELD_PROGRAM, program)]),
+    )
+}
+
+/// Windows spawn without `SystemRoot` in the script environment. The
+/// name spelling and the `INHERIT_ENV` fix derive from the declared
+/// env contract, never literals.
+pub fn spawn_requires_system_root() -> Diagnostic {
+    let message = format!(
+        "Windows process execution requires {} in the script environment; declare INHERIT_ENV [{}]",
+        oxdock_env::os::windows::SYSTEM_ROOT,
+        oxdock_env::os::windows::SYSTEM_ROOT,
+    );
+    Diagnostic::new(
+        "proc.run.spawn_requires_system_root",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Mock stdin snapshot losing the lock race. Parameterless: the
+/// wording is fixed.
+pub fn run_stdin_lock_failed() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.stdin_lock_failed",
+        "failed to lock stdin".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Capture buffer losing the lock race. Parameterless: the wording
+/// is fixed.
+pub fn run_capture_lock_poisoned() -> Diagnostic {
+    Diagnostic::new(
+        "proc.run.capture_lock_poisoned",
+        "capture stdout poisoned".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxdock_sys_test_utils::exit_status_from_code as exit_status;
 
     #[test]
     fn each_failure_has_a_distinct_key() {
@@ -291,11 +492,34 @@ mod tests {
             render_pipe().key(),
             render_semaphore().key(),
             render_permit().key(),
+            run_interpreter_unsupported_miri().key(),
+            run_exec_requires_argv().key(),
+            run_exec_requires_program().key(),
+            shell_exited_with_status(&exit_status(1)).key(),
+            run_interactive_unsupported().key(),
+            run_bg_capture_unsupported().key(),
+            run_bg_capture_unsupported_miri().key(),
+            run_bg_stdout_stream_unsupported_miri().key(),
+            run_bg_stderr_stream_unsupported_miri().key(),
+            run_spawn_unsupported_miri().key(),
+            run_unguarded_writes_unsupported_miri().key(),
+            run_argv_unimplemented(&["RUN".to_string()]).key(),
+            spawn_requires_path("prog").key(),
+            spawn_requires_system_root().key(),
+            run_stdin_lock_failed().key(),
+            run_capture_lock_poisoned().key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
             assert!(seen.insert(k), "duplicate key {k}");
         }
+
+        // `run_command_failed` renders any `Debug` command description;
+        // one key for every description shape.
+        assert_eq!(
+            run_command_failed(&"echo hi", &exit_status(1)).key(),
+            run_command_failed(&vec!["echo".to_string()], &exit_status(1)).key()
+        );
     }
 
     #[test]
@@ -347,6 +571,32 @@ mod tests {
         assert_eq!(
             call_arg_too_deep(8).message(),
             "placeholder call argument nests too deep (limit 8)"
+        );
+        // `ExitStatus` Display is platform-specific (`exit status: N`
+        // on Unix, `exit code: N` on Windows): interpolate the value
+        // itself so the template wording is pinned without assuming
+        // either rendering.
+        let failed_status = exit_status(3);
+        assert_eq!(
+            run_command_failed(&"echo hi", &failed_status).message(),
+            format!("command \"echo hi\" failed with status {failed_status}")
+        );
+        let exited_status = exit_status(1);
+        assert_eq!(
+            shell_exited_with_status(&exited_status).message(),
+            format!("shell exited with status {exited_status}")
+        );
+        assert_eq!(
+            run_argv_unimplemented(&["RUN".to_string()]).message(),
+            "run_argv not implemented for argv [\"RUN\"]"
+        );
+        assert_eq!(
+            spawn_requires_path("prog").message(),
+            "cannot resolve 'prog' without PATH in the script environment; declare INHERIT_ENV [PATH]"
+        );
+        assert_eq!(
+            spawn_requires_system_root().message(),
+            "Windows process execution requires SystemRoot in the script environment; declare INHERIT_ENV [SystemRoot]"
         );
     }
 }

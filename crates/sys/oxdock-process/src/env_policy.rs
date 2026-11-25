@@ -21,9 +21,11 @@
 //! (generated from the declaration below by `cargo run -p oxdock-render`;
 //! templates link it through the `env_contracts_url` global).
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use oxdock_fs::env as oxdock_env;
 use std::collections::HashMap;
+
+use crate::diagnostics as proc_diag;
 
 /// Look up `name` in a script env map with OS comparison semantics:
 /// case-insensitive on Windows (where `Path` and `PATH` name the same
@@ -63,19 +65,11 @@ pub fn check_spawn_anchors(
     require_path: bool,
 ) -> Result<()> {
     if (require_path || needs_path_lookup(program)) && !has_var(envs, oxdock_env::os::PATH) {
-        bail!(
-            "cannot resolve '{program}' without {} in the script environment; declare INHERIT_ENV [{}]",
-            oxdock_env::os::PATH,
-            oxdock_env::os::PATH,
-        );
+        return Err(anyhow::Error::new(proc_diag::spawn_requires_path(program)));
     }
     #[allow(clippy::disallowed_macros)]
     if cfg!(windows) && !has_var(envs, oxdock_env::os::windows::SYSTEM_ROOT) {
-        bail!(
-            "Windows process execution requires {} in the script environment; declare INHERIT_ENV [{}]",
-            oxdock_env::os::windows::SYSTEM_ROOT,
-            oxdock_env::os::windows::SYSTEM_ROOT,
-        );
+        return Err(anyhow::Error::new(proc_diag::spawn_requires_system_root()));
     }
     Ok(())
 }
