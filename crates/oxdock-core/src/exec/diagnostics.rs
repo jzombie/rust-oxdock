@@ -7,6 +7,7 @@
 //! here.
 
 use oxdock_diagnostics::Diagnostic;
+use oxdock_parser::template::{bare_sigil_error, qualified_keypath_error};
 use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
     LIST_TYPE_NAME, MAP_TYPE_NAME, PIPE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag,
@@ -1464,6 +1465,30 @@ pub fn coerce_pipe_to_string() -> Diagnostic {
         "dsl.coerce.pipe_to_string",
         message,
         Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Key path on `$ALIAS::NAME` in a placeholder call arg. Parameterless:
+/// the parser owns the wording through its template helper, so every
+/// phase agrees word for word; this constructor only adds the key.
+pub fn eval_const_arg_keypath() -> Diagnostic {
+    let message = qualified_keypath_error();
+    Diagnostic::new(
+        "dsl.eval.const_arg_keypath",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Bare word in a placeholder call arg where only `$` reads a binding.
+/// Takes the trimmed source; the parser owns the wording through its
+/// template helper, so every phase agrees word for word.
+pub fn eval_const_arg_bare_sigil(src: &str) -> Diagnostic {
+    let message = bare_sigil_error(src);
+    Diagnostic::new(
+        "dsl.eval.const_arg_bare_sigil",
+        message,
+        Diagnostic::make_fields(&[("src", src)]),
     )
 }
 
@@ -3648,6 +3673,8 @@ mod tests {
             .key(),
             coerce_string_to_pipe("x").key(),
             coerce_pipe_to_string().key(),
+            eval_const_arg_keypath().key(),
+            eval_const_arg_bare_sigil("foo").key(),
             eval_compare_equality_shape().key(),
             eval_ordering_needs_numeric(
                 &crate::Value::string("x".to_string()),
@@ -3920,6 +3947,14 @@ mod tests {
         assert_eq!(
             coerce_pipe_to_string().message(),
             "coercion: TypeMismatch: expected STRING, got PIPE: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
+        );
+        assert_eq!(
+            eval_const_arg_keypath().message(),
+            "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+        );
+        assert_eq!(
+            eval_const_arg_bare_sigil("foo").message(),
+            "bare `foo` never reads a binding here; use `$foo`"
         );
         assert_eq!(
             eval_compare_equality_shape().message(),

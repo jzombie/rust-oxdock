@@ -1227,20 +1227,18 @@ fn resolve_const_call_arg<P: ProcessManager>(
     state: &ExecState<P>,
     src: &str,
 ) -> Result<Option<Value>> {
-    use oxdock_parser::template::{
-        TemplateArg, bare_sigil_error, classify_template_arg, qualified_keypath_error,
-    };
+    use oxdock_parser::template::{TemplateArg, classify_template_arg};
     match classify_template_arg(src) {
         TemplateArg::DollarQualified { alias, name, keys } => {
             if keys.is_empty() {
                 super::import::resolve_const_ref(state, alias, name).map(Some)
             } else {
-                Err(anyhow::anyhow!(qualified_keypath_error()))
+                Err(args_diag::eval_const_arg_keypath().into())
             }
         }
         TemplateArg::Dollar(_) => Ok(None),
         TemplateArg::ConstRef { .. } | TemplateArg::KeyPath { .. } | TemplateArg::Var(_) => {
-            Err(anyhow::anyhow!(bare_sigil_error(src.trim())))
+            Err(args_diag::eval_const_arg_bare_sigil(src.trim()).into())
         }
         _ => Ok(None),
     }

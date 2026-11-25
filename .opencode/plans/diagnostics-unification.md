@@ -1198,6 +1198,23 @@ transport, so this phase is mechanical:
    like "coercion" ride the existing call-site
    strings). Core 409 plus integration 629 green;
    clippy and fmt clean.
+   Const-call-arg step 2026-11-26: two new ctors
+   (eval_const_arg_keypath plus
+   eval_const_arg_bare_sigil, wording byte-identical,
+   both pinned by key plus message tests). The
+   parser template helpers stay the single wording
+   owners: the ctors call qualified_keypath_error
+   plus bare_sigil_error directly and only add the
+   key, so every phase keeps agreeing word for word
+   by construction. The bare-sigil ctor takes the
+   trimmed source; the keypath ctor is parameterless.
+   resolve_const_call_arg holds its anyhow signature
+   with two `.into()` conversions: its success arm
+   rides resolve_const_ref, which still returns
+   anyhow, so the flip waits on the import layer per
+   leaf-to-root order. No FUNC_* constants (template
+   internals, not stdlib surface). Core 409 plus
+   integration 629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
