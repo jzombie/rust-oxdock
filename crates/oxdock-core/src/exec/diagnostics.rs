@@ -1105,6 +1105,18 @@ pub fn std_parse_args_schema_field_type(field: &str, actual: &str) -> Diagnostic
     )
 }
 
+/// `PARSE_ARGS` trio with a non-`LIST<STRING>` argv value. Takes the
+/// underlying shape failure verbatim: its path prefix already names
+/// the entry point and argument, so no wrapper is added.
+pub fn std_parse_args_arg_shape(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.std.parse_args_arg_shape",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// `PARSE_FLAGS` with other than one argument.
 pub fn std_parse_flags_arity(got: usize) -> Diagnostic {
     let message = format!("PARSE_FLAGS() expects 1 argument, got {got}");
@@ -2732,6 +2744,7 @@ mod tests {
             std_parse_args_schema_type("S", &anyhow::anyhow!("x")).key(),
             std_parse_args_schema_shape("S").key(),
             std_parse_args_schema_field_type("f", "INT").key(),
+            std_parse_args_arg_shape(&anyhow::anyhow!("x")).key(),
             std_parse_flags_arity(2).key(),
             std_parse_flags_positional(&["a".to_string()]).key(),
             std_parse_positionals_arity(2).key(),
@@ -2848,6 +2861,13 @@ mod tests {
         assert_eq!(
             std_parse_args_missing_flag("f", None).message(),
             "PARSE_ARGS missing required flag --f"
+        );
+        assert_eq!(
+            std_parse_args_arg_shape(&anyhow::anyhow!(
+                "PARSE_FLAGS() argument `$args`: expected LIST<STRING>, got INT"
+            ))
+            .message(),
+            "PARSE_FLAGS() argument `$args`: expected LIST<STRING>, got INT"
         );
         assert_eq!(
             std_bool_cannot_coerce("BOOL_OR", "x").message(),

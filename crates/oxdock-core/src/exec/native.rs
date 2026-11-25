@@ -3155,7 +3155,7 @@ enum CliType {
 /// ever `BOOL true` (bare) or `STRING` (equals form); anything else is
 /// a caller bug. Bare flags for non-`BOOL` targets fail naming the
 /// flag instead of smuggling `true` into the slot.
-fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> Result<Value> {
+fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> DiagnosticResult<Value> {
     match target {
         CliType::Bool => {
             if let Some(b) = raw.as_bool() {
@@ -3165,42 +3165,30 @@ fn coerce_cli_flag(target: CliType, flag: &str, raw: Value) -> Result<Value> {
                 match super::args::parse_bool_str(s) {
                     Some(b) => return Ok(Value::bool(b)),
                     None => {
-                        return Err(anyhow::Error::new(std_diag::std_parse_args_bool_flag(
-                            flag, s,
-                        )));
+                        return Err(std_diag::std_parse_args_bool_flag(flag, s));
                     }
                 }
             }
-            Err(anyhow::Error::new(std_diag::std_parse_args_bool_type(
-                flag,
-                raw.type_name(),
-            )))
+            Err(std_diag::std_parse_args_bool_type(flag, raw.type_name()))
         }
         CliType::String => {
             if let Some(s) = raw.as_str() {
                 return Ok(Value::string(s.to_string()));
             }
-            Err(anyhow::Error::new(std_diag::std_parse_args_needs_value(
-                flag,
-            )))
+            Err(std_diag::std_parse_args_needs_value(flag))
         }
         CliType::Int => {
             if raw.as_bool().is_some() {
-                return Err(anyhow::Error::new(std_diag::std_parse_args_needs_value(
-                    flag,
-                )));
+                return Err(std_diag::std_parse_args_needs_value(flag));
             }
-            super::args::int_from_value(raw)
-                .map_err(|_| anyhow::Error::new(std_diag::std_parse_args_expects_int(flag)))
+            super::args::int_from_value(raw).map_err(|_| std_diag::std_parse_args_expects_int(flag))
         }
         CliType::Float => {
             if raw.as_bool().is_some() {
-                return Err(anyhow::Error::new(std_diag::std_parse_args_needs_value(
-                    flag,
-                )));
+                return Err(std_diag::std_parse_args_needs_value(flag));
             }
             super::args::float_from_value(raw)
-                .map_err(|_| anyhow::Error::new(std_diag::std_parse_args_expects_float(flag)))
+                .map_err(|_| std_diag::std_parse_args_expects_float(flag))
         }
     }
 }
@@ -3221,8 +3209,9 @@ type CliSpecs = BTreeMap<String, CliSpec>;
 
 /// Checked `LIST<STRING>` extraction for the CLI trio. Single owner
 /// so all three functions admit exactly the same argv shape.
-fn string_list_arg(val: &Value, what: &str) -> Result<Vec<String>> {
-    crate::check_value_at(&TypeTag::ListOf(Arc::new(TypeTag::String)), val, what)?;
+fn string_list_arg(val: &Value, what: &str) -> DiagnosticResult<Vec<String>> {
+    crate::check_value_at(&TypeTag::ListOf(Arc::new(TypeTag::String)), val, what)
+        .map_err(|err| std_diag::std_parse_args_arg_shape(&err))?;
     Ok(val
         .as_list()
         .expect("check_value_at enforces LIST")
@@ -3238,15 +3227,15 @@ fn string_list_arg(val: &Value, what: &str) -> Result<Vec<String>> {
 /// Shared argv tokenizer. Single owner so flags versus positionals
 /// split identically for all three entry points. Raw values are only
 /// `BOOL true` (bare) or `STRING` (equals form).
-fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<Value>)> {
+fn tokenize_raw_args(args: Vec<String>) -> DiagnosticResult<(BTreeMap<String, Value>, Vec<Value>)> {
     use lexopt::Arg::{Long, Short, Value as ArgValue};
     let mut parser = lexopt::Parser::from_args(args);
     let mut flags: BTreeMap<String, Value> = BTreeMap::new();
     let mut positionals: Vec<Value> = Vec::new();
-    let utf8 = |value: std::ffi::OsString| -> Result<String> {
+    let utf8 = |value: std::ffi::OsString| -> DiagnosticResult<String> {
         value
             .into_string()
-            .map_err(|_| anyhow::Error::new(std_diag::std_parse_args_not_utf8()))
+            .map_err(|_| std_diag::std_parse_args_not_utf8())
     };
     loop {
         match parser.next() {
@@ -3272,7 +3261,7 @@ fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<
                     .unwrap_or(option.as_str());
                 flags.insert(key.to_string(), Value::string(utf8(value)?));
             }
-            Err(err) => return Err(anyhow::Error::new(std_diag::std_parse_args_lex_error(&err))),
+            Err(err) => return Err(std_diag::std_parse_args_lex_error(&err)),
         }
     }
     Ok((flags, positionals))
@@ -3288,7 +3277,7 @@ fn tokenize_raw_args(args: Vec<String>) -> Result<(BTreeMap<String, Value>, Vec<
 fn coerce_flags(
     specs: &CliSpecs,
     raw: &BTreeMap<String, Value>,
-) -> Result<BTreeMap<String, Value>> {
+) -> DiagnosticResult<BTreeMap<String, Value>> {
     // Alias reverse map: alias spelling to canonical key. Validated
     // unique at type resolution, so a duplicate insert is unreachable.
     let mut alias_to_canonical: BTreeMap<&str, &str> = BTreeMap::new();
@@ -3300,17 +3289,15 @@ fn coerce_flags(
     let mut coerced: BTreeMap<String, Value> = BTreeMap::new();
     for (flag, spec) in specs.iter() {
         if flag.is_empty() {
-            return Err(anyhow::Error::new(
-                std_diag::std_parse_args_schema_flag_empty(),
-            ));
+            return Err(std_diag::std_parse_args_schema_flag_empty());
         }
         let canonical_raw = raw.get(flag);
         let alias_raw = spec.alias.as_ref().and_then(|alias| raw.get(alias));
         if canonical_raw.is_some() && alias_raw.is_some() {
-            return Err(anyhow::Error::new(std_diag::std_parse_args_duplicate_flag(
+            return Err(std_diag::std_parse_args_duplicate_flag(
                 flag,
                 spec.alias.as_deref(),
-            )));
+            ));
         }
         if let Some(raw_val) = canonical_raw.or(alias_raw) {
             coerced.insert(
@@ -3320,17 +3307,15 @@ fn coerce_flags(
         } else if let Some(d) = spec.default.as_ref() {
             coerced.insert(flag.clone(), d.clone());
         } else if spec.required {
-            return Err(anyhow::Error::new(std_diag::std_parse_args_missing_flag(
+            return Err(std_diag::std_parse_args_missing_flag(
                 flag,
                 spec.alias.as_deref(),
-            )));
+            ));
         }
     }
     for flag in raw.keys() {
         if !specs.contains_key(flag) && !alias_to_canonical.contains_key(flag.as_str()) {
-            return Err(anyhow::Error::new(std_diag::std_parse_args_unknown_flag(
-                flag,
-            )));
+            return Err(std_diag::std_parse_args_unknown_flag(flag));
         }
     }
     Ok(coerced)
@@ -3342,18 +3327,14 @@ fn coerce_flags(
 /// carried for command-line acceptance. Single owner so both pair and
 /// flags only entry points admit exactly the same set. Non-record
 /// types and non-scalar fields fail naming the flag.
-fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpecs> {
+fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> DiagnosticResult<CliSpecs> {
     let name = "FLAGS";
-    let tag = cx.state.resolve_tag(name).map_err(|err| {
-        anyhow::Error::new(std_diag::std_parse_args_schema_type(
-            name,
-            &anyhow::Error::new(err),
-        ))
-    })?;
+    let tag = cx
+        .state
+        .resolve_tag(name)
+        .map_err(|err| std_diag::std_parse_args_schema_type(name, &anyhow::Error::new(err)))?;
     let TypeTag::Record(fields) = tag else {
-        return Err(anyhow::Error::new(std_diag::std_parse_args_schema_shape(
-            name,
-        )));
+        return Err(std_diag::std_parse_args_schema_shape(name));
     };
     let mut specs = BTreeMap::new();
     for field in fields.iter() {
@@ -3363,8 +3344,9 @@ fn resolve_flags_specs<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<CliSpec
             TypeTag::Int => CliType::Int,
             TypeTag::Float => CliType::Float,
             _ => {
-                return Err(anyhow::Error::new(
-                    std_diag::std_parse_args_schema_field_type(&field.name, field.ty.name()),
+                return Err(std_diag::std_parse_args_schema_field_type(
+                    &field.name,
+                    field.ty.name(),
                 ));
             }
         };

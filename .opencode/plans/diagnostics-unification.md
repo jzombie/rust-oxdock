@@ -863,6 +863,22 @@ transport, so this phase is mechanical:
    Result) plus the markdown boundary test hold via
    blanket From. Core 408 plus integration 629 plus
    markdown 26 green; clippy and fmt clean.
+   CLI-parse cluster step 2026-11-26: one new ctor
+   (std_parse_args_arg_shape, verbatim passthrough of
+   the check_value_at path failure, pinned by key plus
+   message test); coerce_cli_flag plus string_list_arg
+   plus tokenize_raw_args (including its utf8 closure)
+   plus coerce_flags plus resolve_flags_specs now return
+   DiagnosticResult with bare Err ctors (all other keys
+   pre-existing; lex_error keeps its &lexopt::Error
+   param per the concrete-borrowed precedent).
+   int_from_value/float_from_value stay anyhow (their
+   own bare messages are a separate leaf); their
+   map_err sites discard into keyed ctors unchanged.
+   The three NativeFn closures (PARSE_ARGS plus
+   PARSE_FLAGS plus PARSE_POSITIONALS) stay anyhow and
+   hold via blanket From. Core 408 plus integration 629
+   green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
