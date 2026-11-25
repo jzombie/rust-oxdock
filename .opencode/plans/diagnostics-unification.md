@@ -462,10 +462,24 @@ transport, so this phase is mechanical:
 2. Migrate public signatures leaf to root, keeping
    `From<Diagnostic> for anyhow::Error` until the last caller flips.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
+4. Plugin boundary stays optional for external authors: the
+   `#[oxdock_func]` / host-function boundary keeps accepting plain
+   error returns (`anyhow` / boxed errors) and maps them to a
+   `plugin.custom` fallback key, so third-party plugins are never
+   required to depend on `oxdock-diagnostics` or hand-write
+   per-constructor modules. The strict constructor pattern
+   (`diagnostics.rs`, `FIELD_*`, key + wording pins) applies to
+   first-party crates only. If that boilerplate drags first-party
+   velocity, a follow-up (separate issue, not this one) may add a
+   declarative/`derive` macro generating constructors, `FIELD_*`
+   constants, and uniqueness checks from an enum, preserving the
+   wire format and single-owner wording.
 
 Acceptance D: `grep -r anyhow --include='*.rs' crates/ oxdock/` empty
 except shims listed, workspace tests green, no public
-`anyhow::Result`.
+`anyhow::Result`, and an external plugin with no
+`oxdock-diagnostics` dependency still compiles and runs through the
+fallback key.
 
 ## 5. Test plan (every phase)
 
@@ -493,6 +507,12 @@ except shims listed, workspace tests green, no public
   Guard: distinct keys per mode, test pins uniqueness.
 - Public API break: flipping `anyhow::Result` early. Guard: Phase D
   last, `with_source` first.
+- Plugin-authoring friction: per-constructor boilerplate plus key
+  taxonomy could push external authors away. Guard: the host-function
+  boundary keeps the `anyhow`/boxed-error fallback (`plugin.custom`
+  key); strict `diagnostics.rs` is first-party only; any
+  constructor-generating macro is a separate follow-up issue, never a
+  blocker for Phase D.
 - Speculative LSP fields: `Span` gains file ids / byte offsets only
   when a symbol table needs them. Guard: downstream crates build
   spans only through `Span` constructors (`line_only` / `line_col` /
