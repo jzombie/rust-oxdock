@@ -13,7 +13,9 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+
+use crate::diagnostics as md_diag;
 
 /// TOC option keys. Single source for every lookup and error label, so
 /// the `#[options]` spellings and the reads cannot drift.
@@ -57,10 +59,9 @@ fn cell_text(value: &oxdock_parser::Value) -> Result<String> {
     if value.as_map().is_some() || value.as_list().is_some() {
         return Ok(escape_table_cell(&serde_json::to_string(&to_json(value)?)?));
     }
-    bail!(
-        "MAP_TO_MD_TABLE cannot render {} values; use STRING, INT, FLOAT, BOOL, LIST, or MAP",
-        value.type_name()
-    )
+    Err(anyhow::Error::new(md_diag::table_unrenderable_type(
+        value.type_name(),
+    )))
 }
 
 /// Convert a script value to JSON for nested cell fallback. Mirrors the
@@ -101,7 +102,7 @@ fn to_json(value: &oxdock_parser::Value) -> Result<serde_json::Value> {
     }
     if let Some(f) = value.as_f64() {
         let number = serde_json::Number::from_f64(f)
-            .ok_or_else(|| anyhow::anyhow!("MAP_TO_MD_TABLE cannot encode non-finite float {f}"))?;
+            .ok_or_else(|| anyhow::Error::new(md_diag::table_non_finite_float(f)))?;
         return Ok(serde_json::Value::Number(number));
     }
     if let Some(b) = value.as_bool() {
@@ -115,10 +116,9 @@ fn to_json(value: &oxdock_parser::Value) -> Result<serde_json::Value> {
     if let Some(p) = value.as_path() {
         return Ok(serde_json::Value::String(p.to_string_lossy().to_string()));
     }
-    bail!(
-        "MAP_TO_MD_TABLE cannot render {} values; use STRING, INT, FLOAT, BOOL, LIST, or MAP",
-        value.type_name()
-    )
+    Err(anyhow::Error::new(md_diag::table_unrenderable_type(
+        value.type_name(),
+    )))
 }
 
 /// Render record data as a Markdown table, dataframe style.
@@ -181,12 +181,14 @@ pub fn map_to_table(value: &oxdock_parser::Value) -> Result<String> {
         for item in items {
             match item.as_map() {
                 Some(map) => vec.push(map),
-                None => bail!("MAP_TO_MD_TABLE expects a MAP or a LIST of MAPs"),
+                None => {
+                    return Err(anyhow::Error::new(md_diag::table_expects_map_or_list()));
+                }
             }
         }
         records = vec;
     } else {
-        bail!("MAP_TO_MD_TABLE expects a MAP or a LIST of MAPs");
+        return Err(anyhow::Error::new(md_diag::table_expects_map_or_list()));
     }
     // Raw keys drive lookups, escaped keys drive display: a key holding
     // `|` or a newline must not break the table it heads.
@@ -197,7 +199,7 @@ pub fn map_to_table(value: &oxdock_parser::Value) -> Result<String> {
         .into_iter()
         .collect();
     if keys.is_empty() {
-        bail!("MAP_TO_MD_TABLE found no columns to render");
+        return Err(anyhow::Error::new(md_diag::table_no_columns()));
     }
     let headers: Vec<String> = keys.iter().map(|k| escape_table_cell(k)).collect();
     // Render every cell up front so unrenderable values fail strict here
@@ -353,25 +355,35 @@ pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Resu
     let format = match format_raw.as_str() {
         "tree" => TocFormat::Tree,
         "inline" => TocFormat::Inline,
-        other => bail!("TOC option 'format' must be one of: tree, inline, got {other:?}"),
+        other => {
+            return Err(anyhow::Error::new(md_diag::toc_invalid_format(other)));
+        }
     };
     let max_level = match (format, max_level_explicit) {
         (TocFormat::Inline, None) => min_level,
         (_, explicit) => explicit.unwrap_or(3),
     };
     if !(1..=6).contains(&min_level) {
-        bail!("TOC option 'min_level' must be between 1 and 6, got {min_level}");
+        return Err(anyhow::Error::new(md_diag::toc_level_out_of_range(
+            OPT_MIN_LEVEL,
+            min_level,
+        )));
     }
     if !(1..=6).contains(&max_level) {
-        bail!("TOC option 'max_level' must be between 1 and 6, got {max_level}");
+        return Err(anyhow::Error::new(md_diag::toc_level_out_of_range(
+            OPT_MAX_LEVEL,
+            max_level,
+        )));
     }
     if min_level > max_level {
-        bail!("TOC option error: min_level ({min_level}) must not exceed max_level ({max_level})");
+        return Err(anyhow::Error::new(md_diag::toc_min_exceeds_max(
+            min_level, max_level,
+        )));
     }
     if format == TocFormat::Inline && max_level != min_level {
-        bail!(
-            "TOC option error: format 'inline' requires max_level == min_level (single depth layer), got min_level={min_level}, max_level={max_level}"
-        );
+        return Err(anyhow::Error::new(
+            md_diag::toc_inline_requires_single_level(min_level, max_level),
+        ));
     }
     let min_level = min_level as u8;
     let max_level = max_level as u8;
@@ -495,7 +507,7 @@ pub fn extract_section(document: &str, needle: &str) -> Result<String> {
     let start_index = headings
         .iter()
         .position(|(_, text, _, _)| text.starts_with(needle))
-        .ok_or_else(|| anyhow::anyhow!("no heading starts with {needle:?}"))?;
+        .ok_or_else(|| anyhow::Error::new(md_diag::section_no_heading(needle)))?;
     let level = headings[start_index].0;
     let slice_start = headings[start_index].2;
     let mut slice_end = document.len();
@@ -507,7 +519,7 @@ pub fn extract_section(document: &str, needle: &str) -> Result<String> {
     }
     let mut body = document
         .get(slice_start..slice_end)
-        .ok_or_else(|| anyhow::anyhow!("section offsets out of bounds"))?
+        .ok_or_else(|| anyhow::Error::new(md_diag::section_offsets_out_of_bounds()))?
         .to_string();
     while body.ends_with('\n') || body.ends_with('\r') {
         body.pop();
@@ -544,11 +556,12 @@ fn render_toc_inline(headings: &[Heading], delimiter: &str) -> String {
 /// means an empty string so empty sections still render.
 pub fn generate_toc(document: &str, options: &TocOptions) -> Result<String> {
     if options.format == TocFormat::Inline && options.max_level != options.min_level {
-        bail!(
-            "TOC option error: format 'inline' requires max_level == min_level (single depth layer), got min_level={}, max_level={}",
-            options.min_level,
-            options.max_level
-        );
+        return Err(anyhow::Error::new(
+            md_diag::toc_inline_requires_single_level(
+                i64::from(options.min_level),
+                i64::from(options.max_level),
+            ),
+        ));
     }
     let headings = extract_headings(document, options.min_level, options.max_level);
     match options.format {

@@ -405,6 +405,20 @@ Remaining:
   hold); lib 9 green (incl. 2 new key+wording pins), remote-proto 14
   green; clippy/doc clean; zero fmt drift; leaf doc notes the
   dependency-free diagnostics transport exception).
+- Plugin crate: `oxdock-markdown-plugin` done 2026-11-26 (new
+  `src/diagnostics.rs` owning 10 `md.*` ctors: table
+  unrenderable-type (shared cell/nested-JSON key)/non-finite-float/
+  expects-map-or-list (shared loop/top-level key)/no-columns, toc
+  invalid-format/level-out-of-range (shared min/max key via `OPT_*`
+  option param)/min-exceeds-max/inline-requires-single-level (shared
+  resolve/generate key, generation casts `u8` to `i64`), section
+  no-heading/offsets-out-of-bounds; `markdown.rs` zero inline failures
+  (only `anyhow::Error::new` remains; `funcs.rs` was already clean);
+  type names/floats/needles take structured values, `Debug` quoting
+  lives in ctors; messages byte-identical (existing
+  `requires max_level == min_level`/needle pins hold); lib 26
+  (incl. 3 new key+wording pins) + integration + doc green;
+  clippy/doc clean; zero fmt drift).
 
 ### Phase D — retire `anyhow` as the carrier
 

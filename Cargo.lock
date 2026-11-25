@@ -1788,6 +1788,7 @@ dependencies = [
  "anyhow",
  "indoc",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-func-macro",
  "oxdock-parser",
  "oxdock-process",

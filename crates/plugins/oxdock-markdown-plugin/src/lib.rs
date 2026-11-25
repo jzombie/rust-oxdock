@@ -9,6 +9,7 @@
 //!
 //! [`Engine`]: oxdock_core::Engine
 
+pub mod diagnostics;
 mod funcs;
 pub mod markdown;
 
