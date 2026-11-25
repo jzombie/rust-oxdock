@@ -312,7 +312,16 @@ Remaining:
   `bail!`/`anyhow!` left in all three; parser lib 266 +
   integration 301 green; core lib 408 + integration 629 green;
   clippy/doc clean; zero fmt drift.
-- Plugins and sys crates last.
+- Plugins and sys crates last. MCP crate done 2026-11-25
+  (new `oxdock-mcp/src/diagnostics.rs` owning 15 `mcp.*` ctors:
+  tool duplicate/opaque-return/opaque-param, schema opaque-type,
+  args not-object/missing-required/count-out-of-range/unknown,
+  export status-reserved/no-entries, session lock-poisoned
+  reload/call, serve stdio-serve/stdio-service/runtime-build
+  passthroughs; `tools.rs`/`schema.rs`/`server.rs`/`lib.rs` zero
+  inline `bail!`/`anyhow!`; non-anyhow errors wrapped with
+  `anyhow::Error::new` at call sites; lib 11 + integration 39
+  green; clippy/doc clean; zero fmt drift).
 
 ### Phase D — retire `anyhow` as the carrier
 

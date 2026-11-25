@@ -6,13 +6,14 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use oxdock_core::{
     FuncMeta, FuncParam, TypeTag, Value, fill_optional_args, json_to_value_typed,
     value_to_json_typed,
 };
 use serde_json::{Map, Value as JsonValue};
 
+use crate::diagnostics as mcp_diag;
 use crate::schema::{is_json_compatible, schema_for_tag};
 
 /// One servable tool: bare MCP name, qualified script name, and the
@@ -45,7 +46,7 @@ pub fn build_tool_table(metas: Vec<FuncMeta>, docs: &HashMapDoc) -> Result<Vec<M
     for meta in metas {
         let base = oxdock_parser::base_name(&meta.name).to_string();
         if !seen.insert(base.clone()) {
-            bail!("duplicate MCP tool name `{base}`");
+            return Err(anyhow::Error::new(mcp_diag::tool_duplicate_name(&base)));
         }
         let description = tool_description(&meta, docs);
         let (input_schema, params) = input_schema_for(&meta)?;
@@ -124,10 +125,9 @@ fn input_schema_for(meta: &FuncMeta) -> Result<(JsonValue, Vec<FuncParam>)> {
     if let Some(returns) = &meta.returns
         && !is_json_compatible(returns)
     {
-        bail!(
-            "cannot expose MCP tool `{}` with opaque return type",
-            oxdock_parser::base_name(&meta.name)
-        );
+        return Err(anyhow::Error::new(mcp_diag::tool_opaque_return(
+            oxdock_parser::base_name(&meta.name),
+        )));
     }
     let Some(params) = &meta.params else {
         return Ok((JsonValue::Object(Map::new()), Vec::new()));
@@ -141,11 +141,10 @@ fn input_schema_for(meta: &FuncMeta) -> Result<(JsonValue, Vec<FuncParam>)> {
             continue;
         };
         if !is_json_compatible(tag) {
-            bail!(
-                "cannot expose MCP tool `{}` with opaque parameter type for `${}`",
+            return Err(anyhow::Error::new(mcp_diag::tool_opaque_param(
                 oxdock_parser::base_name(&meta.name),
-                param.name
-            );
+                &param.name,
+            )));
         }
         let mut slot = schema_for_tag(tag)?;
         if let Some(allowed) = param.allowed
@@ -187,7 +186,7 @@ pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> Result<Vec<Value
     let object = match args {
         JsonValue::Object(map) => map,
         JsonValue::Null => &empty,
-        _ => bail!("MCP tool arguments must be a JSON object"),
+        _ => return Err(anyhow::Error::new(mcp_diag::args_not_object())),
     };
     let required = oxdock_core::required_arity(params);
     let mut values = Vec::with_capacity(params.len());
@@ -201,22 +200,23 @@ pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> Result<Vec<Value
                 if param.optional {
                     values.push(Value::map(BTreeMap::new()));
                 } else {
-                    bail!("missing required MCP argument `{}`", param.name);
+                    return Err(anyhow::Error::new(mcp_diag::args_missing_required(
+                        &param.name,
+                    )));
                 }
             }
         }
     }
     if values.len() < required || values.len() > params.len() {
-        bail!(
-            "MCP argument count {} out of range {}..={}",
+        return Err(anyhow::Error::new(mcp_diag::args_count_out_of_range(
             values.len(),
             required,
-            params.len()
-        );
+            params.len(),
+        )));
     }
     for key in object.keys() {
         if !params.iter().any(|param| &param.name == key) {
-            bail!("unknown MCP argument `{key}`");
+            return Err(anyhow::Error::new(mcp_diag::args_unknown(key)));
         }
     }
     Ok(fill_optional_args(params, values))
