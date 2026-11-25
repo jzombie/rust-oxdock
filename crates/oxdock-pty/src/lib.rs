@@ -14,6 +14,7 @@
 //! live with the callers under `ignore`; everything here is either
 //! pure or constructor-only.
 
+pub mod diagnostics;
 mod drain;
 mod filter;
 mod host;

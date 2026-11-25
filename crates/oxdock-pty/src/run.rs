@@ -23,7 +23,9 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::diagnostics as pty_diag;
 
 use crate::drain::{drain_overdue, elapsed_ms, quiet_remaining_ms};
 use crate::filter::DsrFilter;
@@ -216,7 +218,9 @@ fn pump_master_out(
             // Either way no more bytes will ever arrive, so the drain
             // ends here.
             Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => break,
-            Err(err) => bail!("{func} master read failed: {err}"),
+            Err(err) => {
+                return Err(anyhow::Error::new(pty_diag::master_read_failed(func, &err)));
+            }
             Ok(0) => break,
             Ok(count) => {
                 let clean = queries.feed(&buffer[..count], master_in);
@@ -225,7 +229,7 @@ fn pump_master_out(
                 }
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("{func} output lock poisoned"))?;
+                    .map_err(|_| anyhow::Error::new(pty_diag::output_lock_poisoned(func)))?;
                 guard
                     .write_all(&clean)
                     .with_context(|| format!("{func} output write failed"))?;
@@ -242,7 +246,7 @@ fn pump_master_out(
     if !tail.is_empty() {
         let mut guard = writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("{func} output lock poisoned"))?;
+            .map_err(|_| anyhow::Error::new(pty_diag::output_lock_poisoned(func)))?;
         guard
             .write_all(&tail)
             .with_context(|| format!("{func} output write failed"))?;
@@ -310,12 +314,14 @@ fn pump_stdin_to_master(
             break;
         }
         match read_chunk(&mut buffer) {
-            Err(err) => bail!("{func} input read failed: {err}"),
+            Err(err) => {
+                return Err(anyhow::Error::new(pty_diag::input_read_failed(func, &err)));
+            }
             Ok(0) => break,
             Ok(count) => {
                 let mut guard = master
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("{func} sink lock poisoned"))?;
+                    .map_err(|_| anyhow::Error::new(pty_diag::sink_lock_poisoned(func)))?;
                 if guard
                     .write_all(&console_input_bytes(&buffer[..count], &mut prev_cr))
                     .is_err()
@@ -405,7 +411,7 @@ fn spawn_repoll_watch(
 /// returns `Cancelled` without waiting out parked workers.
 pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
     if req.argv.is_empty() {
-        bail!("{} needs at least a program", req.func);
+        return Err(anyhow::Error::new(pty_diag::needs_program(req.func)));
     }
     let func = req.func;
     let epoch = Instant::now();
@@ -525,7 +531,9 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
             }));
             let outcome = match outcome {
                 Ok(inner) => inner,
-                Err(panic) => Err(anyhow::anyhow!("{func} input worker panicked: {panic:?}")),
+                Err(panic) => Err(anyhow::Error::new(pty_diag::worker_panicked(
+                    func, "input", &panic,
+                ))),
             };
             let _ = input_tx.send(PtyEvent::Done(ChildDone(0, outcome)));
         });
@@ -547,7 +555,9 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
         }));
         let outcome = match outcome {
             Ok(inner) => inner,
-            Err(panic) => Err(anyhow::anyhow!("{func} output worker panicked: {panic:?}")),
+            Err(panic) => Err(anyhow::Error::new(pty_diag::worker_panicked(
+                func, "output", &panic,
+            ))),
         };
         let _ = output_tx.send(PtyEvent::Done(ChildDone(1, outcome)));
     });

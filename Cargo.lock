@@ -1890,6 +1890,7 @@ version = "0.44.1-alpha"
 dependencies = [
  "anyhow",
  "libc",
+ "oxdock-diagnostics",
  "oxdock-process",
  "portable-pty",
  "signal-hook",
