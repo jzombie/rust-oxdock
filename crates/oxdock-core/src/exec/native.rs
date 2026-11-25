@@ -18,6 +18,8 @@ use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
 use super::diagnostics as std_diag;
 use super::function_names::{
     FUNC_BOOL, FUNC_BOOL_OR, FUNC_PARSE_ARGS, FUNC_PARSE_FLAGS, FUNC_PARSE_POSITIONALS,
+    FUNC_TEXT_COUNT, FUNC_TEXT_COUNT_MATCHES, FUNC_TEXT_EXTRACT, FUNC_TEXT_GREP,
+    FUNC_TEXT_LINES_RANGE, FUNC_TEXT_MATCH, FUNC_TEXT_REPLACE, FUNC_TEXT_REPLACE_REGEX,
 };
 use super::io::StreamHandle;
 use super::state::ExecState;
@@ -4559,7 +4561,7 @@ fn text_replace<P: ProcessManager>(
 ) -> Result<Value> {
     super::args::mirror_stream(
         cx,
-        "TEXT_REPLACE",
+        FUNC_TEXT_REPLACE,
         &text,
         super::args::TextPump::ReplaceLiteral { from, to },
     )
@@ -4569,7 +4571,7 @@ fn text_replace<P: ProcessManager>(
 /// placeholders, which carry no step IO for pipes.
 fn text_replace_string(text: Value, from: String, to: String) -> Result<Value> {
     super::args::mirror_string(
-        "TEXT_REPLACE",
+        FUNC_TEXT_REPLACE,
         &text,
         super::args::TextPump::ReplaceLiteral { from, to },
     )
@@ -4635,27 +4637,32 @@ fn text_replace_regex<P: ProcessManager>(
     replacement: String,
 ) -> Result<Value> {
     if let Some(s) = text.as_str() {
-        let out =
-            super::args::text_replace_regex_str(s, &pattern, &replacement, "TEXT_REPLACE_REGEX")?;
+        let out = super::args::text_replace_regex_str(
+            s,
+            &pattern,
+            &replacement,
+            FUNC_TEXT_REPLACE_REGEX,
+        )?;
         return Ok(Value::string(out));
     }
-    let content = super::args::read_pipe_eager(cx, "TEXT_REPLACE_REGEX", &text)?;
+    let content = super::args::read_pipe_eager(cx, FUNC_TEXT_REPLACE_REGEX, &text)?;
     let out = super::args::text_replace_regex_str(
         &content,
         &pattern,
         &replacement,
-        "TEXT_REPLACE_REGEX",
+        FUNC_TEXT_REPLACE_REGEX,
     )?;
-    super::args::write_completed_pipe(cx, "TEXT_REPLACE_REGEX", out)
+    super::args::write_completed_pipe(cx, FUNC_TEXT_REPLACE_REGEX, out)
 }
 
 /// Template projection of `TEXT_REPLACE_REGEX`: the same rewrite for
 /// `{{ }}` placeholders, which carry no step IO for pipes.
 fn text_replace_regex_string(text: Value, pattern: String, replacement: String) -> Result<Value> {
     let Some(s) = text.as_str() else {
-        return Err(super::args::pipe_needs_step_io("TEXT_REPLACE_REGEX"));
+        return Err(super::args::pipe_needs_step_io(FUNC_TEXT_REPLACE_REGEX));
     };
-    let out = super::args::text_replace_regex_str(s, &pattern, &replacement, "TEXT_REPLACE_REGEX")?;
+    let out =
+        super::args::text_replace_regex_str(s, &pattern, &replacement, FUNC_TEXT_REPLACE_REGEX)?;
     Ok(Value::string(out))
 }
 
@@ -4879,7 +4886,7 @@ fn text_lines_range(
     to: i64,
 ) -> Result<Value> {
     Ok(super::args::text_list_value(
-        super::args::text_lines_range_str(&text, from, to, "TEXT_LINES_RANGE")?,
+        super::args::text_lines_range_str(&text, from, to, FUNC_TEXT_LINES_RANGE)?,
     ))
 }
 
@@ -4910,7 +4917,7 @@ fn text_match(
     /// Regex pattern to match.
     pattern: String,
 ) -> Result<Value> {
-    let re = super::args::text_compile_pattern("TEXT_MATCH", &pattern)?;
+    let re = super::args::text_compile_pattern(FUNC_TEXT_MATCH, &pattern)?;
     Ok(Value::bool(re.is_match(&text)))
 }
 
@@ -5022,7 +5029,7 @@ fn text_extract(
     /// Regex pattern with capture groups.
     pattern: String,
 ) -> Result<Value> {
-    let groups = super::args::text_extract_str(&text, &pattern, "TEXT_EXTRACT")?;
+    let groups = super::args::text_extract_str(&text, &pattern, FUNC_TEXT_EXTRACT)?;
     Ok(super::args::text_list_value(groups))
 }
 
@@ -5297,7 +5304,7 @@ fn text_count(
     /// Literal needle to count; empty fails closed.
     needle: String,
 ) -> Result<Value> {
-    let n = super::args::text_count_str(&text, &needle, "TEXT_COUNT")?;
+    let n = super::args::text_count_str(&text, &needle, FUNC_TEXT_COUNT)?;
     Ok(Value::int(n))
 }
 
@@ -5330,7 +5337,7 @@ fn text_count_matches(
     /// Regex pattern tested per line.
     pattern: String,
 ) -> Result<Value> {
-    let n = super::args::text_count_matches_str(&text, &pattern, "TEXT_COUNT_MATCHES")?;
+    let n = super::args::text_count_matches_str(&text, &pattern, FUNC_TEXT_COUNT_MATCHES)?;
     Ok(Value::int(n))
 }
 
@@ -5405,7 +5412,7 @@ fn text_grep(
         &text,
         &pattern,
         invert,
-        "TEXT_GREP",
+        FUNC_TEXT_GREP,
     )?))
 }
 

@@ -2009,7 +2009,7 @@ fn text_pattern_cache() -> &'static std::sync::Mutex<std::collections::HashMap<S
 /// linear-time matching and no backtracking. Compiled successes cache
 /// by pattern text so repeated calls skip reconstruction; a poisoned
 /// cache degrades to recompiling instead of failing.
-pub(crate) fn text_compile_pattern(func: &str, pattern: &str) -> Result<regex::Regex> {
+pub(crate) fn text_compile_pattern(func: &str, pattern: &str) -> DiagnosticResult<regex::Regex> {
     if let Some(hit) = text_pattern_cache()
         .lock()
         .map(|guard| guard.get(pattern).cloned())
@@ -2020,7 +2020,7 @@ pub(crate) fn text_compile_pattern(func: &str, pattern: &str) -> Result<regex::R
     let re = regex::RegexBuilder::new(pattern)
         .size_limit(TEXT_REGEX_SIZE_LIMIT)
         .build()
-        .map_err(|e| anyhow::anyhow!("{func} invalid pattern {pattern:?}: {e}"))?;
+        .map_err(|err| args_diag::std_text_invalid_pattern(func, pattern, &err))?;
     if let Ok(mut guard) = text_pattern_cache().lock() {
         if guard.len() >= TEXT_PATTERN_CACHE_MAX {
             guard.clear();
@@ -2074,9 +2074,9 @@ pub(crate) fn text_replace_literal_str(
     from: &str,
     to: &str,
     func: &str,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     if from.is_empty() {
-        bail!("{func} needs a non-empty search string");
+        return Err(args_diag::std_text_needs_search(func));
     }
     Ok(s.replace(from, to))
 }
@@ -2088,7 +2088,7 @@ pub(crate) fn text_replace_regex_str(
     pattern: &str,
     replacement: &str,
     func: &str,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     let re = text_compile_pattern(func, pattern)?;
     Ok(re.replace_all(s, replacement).into_owned())
 }
@@ -2096,9 +2096,9 @@ pub(crate) fn text_replace_regex_str(
 /// Count non-overlapping literal occurrences, failing closed on an
 /// empty needle: `str` matching with an empty needle binds every
 /// character boundary, which is never the caller's intent.
-pub(crate) fn text_count_str(s: &str, needle: &str, func: &str) -> Result<i64> {
+pub(crate) fn text_count_str(s: &str, needle: &str, func: &str) -> DiagnosticResult<i64> {
     if needle.is_empty() {
-        bail!("{func} needs a non-empty needle");
+        return Err(args_diag::std_text_needs_needle(func));
     }
     Ok(s.match_indices(needle).count() as i64)
 }
@@ -2114,7 +2114,7 @@ pub(crate) fn text_grep_str(
     pattern: &str,
     invert: bool,
     func: &str,
-) -> Result<Vec<String>> {
+) -> DiagnosticResult<Vec<String>> {
     let re = text_compile_pattern(func, pattern)?;
     Ok(text_lines_str(s)
         .into_iter()
@@ -2125,7 +2125,7 @@ pub(crate) fn text_grep_str(
 /// Count lines matching a pattern: the `grep -c` shape over
 /// [`text_grep_str`], so one line counts once no matter how many times
 /// it hits.
-pub(crate) fn text_count_matches_str(s: &str, pattern: &str, func: &str) -> Result<i64> {
+pub(crate) fn text_count_matches_str(s: &str, pattern: &str, func: &str) -> DiagnosticResult<i64> {
     Ok(text_grep_str(s, pattern, false, func)?.len() as i64)
 }
 
@@ -2144,12 +2144,17 @@ pub(crate) fn text_invert_flag(options: &std::collections::BTreeMap<String, Valu
 /// like `sed -n 'A,Bp'`: a start past the last line binds an empty
 /// list, and an end past it stops at the last line. `from < 1` or
 /// `from > to` fails closed, since no line reading satisfies it.
-pub(crate) fn text_lines_range_str(s: &str, from: i64, to: i64, func: &str) -> Result<Vec<String>> {
+pub(crate) fn text_lines_range_str(
+    s: &str,
+    from: i64,
+    to: i64,
+    func: &str,
+) -> DiagnosticResult<Vec<String>> {
     if from < 1 {
-        bail!("{func} needs a 1-based start line, got {from}");
+        return Err(args_diag::std_text_needs_one_based_start(func, from));
     }
     if from > to {
-        bail!("{func} needs start <= end, got {from}..={to}");
+        return Err(args_diag::std_text_needs_ordered_range(func, from, to));
     }
     let lines = text_lines_str(s);
     let start = (from - 1) as usize;
@@ -2163,7 +2168,11 @@ pub(crate) fn text_lines_range_str(s: &str, from: i64, to: i64, func: &str) -> R
 /// Capture groups for the first match: index 0 is the full match,
 /// following indexes are groups in order. Non-participating groups
 /// bind empty so indexes stay stable. No match binds an empty list.
-pub(crate) fn text_extract_str(s: &str, pattern: &str, func: &str) -> Result<Vec<String>> {
+pub(crate) fn text_extract_str(
+    s: &str,
+    pattern: &str,
+    func: &str,
+) -> DiagnosticResult<Vec<String>> {
     let re = text_compile_pattern(func, pattern)?;
     let Some(caps) = re.captures(s) else {
         return Ok(Vec::new());
@@ -2206,7 +2215,9 @@ impl TextPump {
             TextPump::TrimSuffix(suffix) => Ok(text_trim_suffix_str(s, suffix)),
             TextPump::ToUpper => Ok(s.to_uppercase()),
             TextPump::ToLower => Ok(s.to_lowercase()),
-            TextPump::ReplaceLiteral { from, to } => text_replace_literal_str(s, from, to, func),
+            TextPump::ReplaceLiteral { from, to } => {
+                Ok(text_replace_literal_str(s, from, to, func)?)
+            }
         }
     }
 }

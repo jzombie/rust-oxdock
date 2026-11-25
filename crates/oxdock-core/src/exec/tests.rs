@@ -5797,6 +5797,14 @@ fn function_names_match_registry() {
         FUNC_PATH_WRITABLE,
         FUNC_SEMAPHORE_NEW,
         FUNC_SHELL_SPLIT_ARGS,
+        FUNC_TEXT_COUNT,
+        FUNC_TEXT_COUNT_MATCHES,
+        FUNC_TEXT_EXTRACT,
+        FUNC_TEXT_GREP,
+        FUNC_TEXT_LINES_RANGE,
+        FUNC_TEXT_MATCH,
+        FUNC_TEXT_REPLACE,
+        FUNC_TEXT_REPLACE_REGEX,
         FUNC_TO_JSON,
     ] {
         assert!(

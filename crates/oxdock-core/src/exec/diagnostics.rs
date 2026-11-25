@@ -1969,6 +1969,70 @@ pub fn std_merge_maps_duplicate(key: &str) -> Diagnostic {
     )
 }
 
+/// Invalid regex pattern. Takes the invoking function, the pattern,
+/// and the underlying failure; `Debug` rendering of the pattern and
+/// `Display` rendering of the failure live here.
+pub fn std_text_invalid_pattern(func: &str, pattern: &str, reason: &regex::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("{func} invalid pattern {pattern:?}: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.text_invalid_pattern",
+        message,
+        Diagnostic::make_fields(&[
+            ("func", func),
+            ("pattern", pattern),
+            ("reason", &reason_text),
+        ]),
+    )
+}
+
+/// Literal replacement with an empty search string. Takes the
+/// invoking function.
+pub fn std_text_needs_search(func: &str) -> Diagnostic {
+    let message = format!("{func} needs a non-empty search string");
+    Diagnostic::new(
+        "dsl.std.text_needs_search",
+        message,
+        Diagnostic::make_fields(&[("func", func)]),
+    )
+}
+
+/// Literal counting with an empty needle. Takes the invoking function.
+pub fn std_text_needs_needle(func: &str) -> Diagnostic {
+    let message = format!("{func} needs a non-empty needle");
+    Diagnostic::new(
+        "dsl.std.text_needs_needle",
+        message,
+        Diagnostic::make_fields(&[("func", func)]),
+    )
+}
+
+/// Line slicing with a zero or negative start. Takes the invoking
+/// function and the rejected start.
+pub fn std_text_needs_one_based_start(func: &str, from: i64) -> Diagnostic {
+    let message = format!("{func} needs a 1-based start line, got {from}");
+    Diagnostic::new(
+        "dsl.std.text_needs_one_based_start",
+        message,
+        Diagnostic::make_fields(&[("func", func), ("from", &from.to_string())]),
+    )
+}
+
+/// Line slicing with the start past the end. Takes the invoking
+/// function and the rejected range.
+pub fn std_text_needs_ordered_range(func: &str, from: i64, to: i64) -> Diagnostic {
+    let message = format!("{func} needs start <= end, got {from}..={to}");
+    Diagnostic::new(
+        "dsl.std.text_needs_ordered_range",
+        message,
+        Diagnostic::make_fields(&[
+            ("func", func),
+            ("from", &from.to_string()),
+            ("to", &to.to_string()),
+        ]),
+    )
+}
+
 /// `HANDLE` typed JSON decode on a non-object. Takes the offending
 /// JSON value; `Display` rendering lives here.
 pub fn json_handle_needs_object(other: &serde_json::Value) -> Diagnostic {
@@ -3271,6 +3335,14 @@ mod tests {
         String::from_utf8(vec![0xff]).unwrap_err().utf8_error()
     }
 
+    /// A `regex::Error` sample built at runtime: a literal invalid
+    /// pattern would trip the `invalid_regex` lint, so the pattern
+    /// goes through a `String` first.
+    fn regex_err_sample() -> regex::Error {
+        let pattern = "[".to_owned();
+        regex::Regex::new(&pattern).unwrap_err()
+    }
+
     #[test]
     fn clash_names_both_sides() {
         let d = alias_clash("x", "y", "z");
@@ -3527,6 +3599,11 @@ mod tests {
             eval_path_writable_needs_string().key(),
             eval_path_resolve_failed("p", &anyhow::anyhow!("x")).key(),
             eval_workdir_resolve_failed(&anyhow::anyhow!("x")).key(),
+            std_text_invalid_pattern("TEXT_MATCH", "[", &regex_err_sample()).key(),
+            std_text_needs_search("TEXT_REPLACE").key(),
+            std_text_needs_needle("TEXT_COUNT").key(),
+            std_text_needs_one_based_start("TEXT_LINES_RANGE", 0).key(),
+            std_text_needs_ordered_range("TEXT_LINES_RANGE", 3, 2).key(),
             std_format_byte_count_negative(-1).key(),
             std_format_duration_negative(-1).key(),
             std_parse_duration_range("x").key(),
@@ -3824,6 +3901,28 @@ mod tests {
         assert_eq!(
             eval_workdir_resolve_failed(&anyhow::anyhow!("denied")).message(),
             "failed to resolve working directory: denied"
+        );
+        assert!(
+            std_text_invalid_pattern("TEXT_MATCH", "[", &regex_err_sample())
+                .message()
+                .starts_with("TEXT_MATCH invalid pattern \"[\": "),
+            "pattern failure must keep its prefix"
+        );
+        assert_eq!(
+            std_text_needs_search("TEXT_REPLACE").message(),
+            "TEXT_REPLACE needs a non-empty search string"
+        );
+        assert_eq!(
+            std_text_needs_needle("TEXT_COUNT").message(),
+            "TEXT_COUNT needs a non-empty needle"
+        );
+        assert_eq!(
+            std_text_needs_one_based_start("TEXT_LINES_RANGE", 0).message(),
+            "TEXT_LINES_RANGE needs a 1-based start line, got 0"
+        );
+        assert_eq!(
+            std_text_needs_ordered_range("TEXT_LINES_RANGE", 3, 2).message(),
+            "TEXT_LINES_RANGE needs start <= end, got 3..=2"
         );
         assert_eq!(
             std_bool_cannot_coerce("BOOL_OR", "x").message(),

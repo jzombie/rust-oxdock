@@ -1127,6 +1127,36 @@ transport, so this phase is mechanical:
    constant (internal resolution, not stdlib
    surface). Core 409 plus integration 629 green;
    clippy and fmt clean.
+   Text-helpers step 2026-11-26: five new ctors
+   (std_text_invalid_pattern plus
+   std_text_needs_search plus std_text_needs_needle
+   plus std_text_needs_one_based_start plus
+   std_text_needs_ordered_range, wording
+   byte-identical, all pinned by key plus message
+   tests). Shared helpers take the invoking `func`
+   as a structured field, so one key covers every
+   caller (TEXT_MATCH, TEXT_GREP, TEXT_COUNT_MATCHES
+   and TEXT_EXTRACT share the pattern key; the empty
+   search sites stay distinct wordings, each its own
+   key). The pattern failure takes the concrete
+   `&regex::Error` per the borrowed-error precedent;
+   the prefix assertion only pins the stable head
+   since the regex backend owns the tail. Eight
+   functions flip (text_compile_pattern plus
+   text_replace_literal_str plus
+   text_replace_regex_str plus text_count_str plus
+   text_grep_str plus text_count_matches_str plus
+   text_lines_range_str plus text_extract_str);
+   TextPump::apply_str holds its anyhow signature
+   with one Ok(...?) wrap. Eight new FUNC_TEXT_*
+   constants wired through all production call sites
+   and covered by the lock test; TRIM/TO_UPPER/
+   TO_LOWER family literals stay for their own
+   mirror-step later. Test helper builds the
+   regex::Error at runtime through a String to
+   avoid the invalid_regex lint on literal patterns.
+   Core 409 plus integration 629 green; clippy and
+   fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

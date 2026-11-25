@@ -79,5 +79,21 @@ pub const FUNC_PATH_WRITABLE: &str = "PATH_WRITABLE";
 pub const FUNC_SEMAPHORE_NEW: &str = "SEMAPHORE_NEW";
 /// `SHELL_SPLIT_ARGS`: shell-word splitting.
 pub const FUNC_SHELL_SPLIT_ARGS: &str = "SHELL_SPLIT_ARGS";
+/// `TEXT_COUNT`: literal substring counting.
+pub const FUNC_TEXT_COUNT: &str = "TEXT_COUNT";
+/// `TEXT_COUNT_MATCHES`: regex match counting.
+pub const FUNC_TEXT_COUNT_MATCHES: &str = "TEXT_COUNT_MATCHES";
+/// `TEXT_EXTRACT`: regex capture-group extraction.
+pub const FUNC_TEXT_EXTRACT: &str = "TEXT_EXTRACT";
+/// `TEXT_GREP`: regex line filtering.
+pub const FUNC_TEXT_GREP: &str = "TEXT_GREP";
+/// `TEXT_LINES_RANGE`: 1-based line slicing.
+pub const FUNC_TEXT_LINES_RANGE: &str = "TEXT_LINES_RANGE";
+/// `TEXT_MATCH`: regex match testing.
+pub const FUNC_TEXT_MATCH: &str = "TEXT_MATCH";
+/// `TEXT_REPLACE`: literal string replacement.
+pub const FUNC_TEXT_REPLACE: &str = "TEXT_REPLACE";
+/// `TEXT_REPLACE_REGEX`: regex replacement.
+pub const FUNC_TEXT_REPLACE_REGEX: &str = "TEXT_REPLACE_REGEX";
 /// `TO_JSON`: value-to-JSON encoding.
 pub const FUNC_TO_JSON: &str = "TO_JSON";
