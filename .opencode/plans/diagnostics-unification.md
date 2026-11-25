@@ -951,6 +951,25 @@ transport, so this phase is mechanical:
    handlers pipe-guard) hold via blanket From. Core
    408 plus integration 629 green; clippy and fmt
    clean.
+   Path-predicate step 2026-11-26: eight new ctors
+   (eval_path_type_needs_arg plus
+   eval_path_type_needs_string plus
+   eval_is_exec_needs_arg plus
+   eval_is_exec_needs_string plus
+   eval_path_writable_needs_arg plus
+   eval_path_writable_needs_string plus
+   eval_path_resolve_failed plus
+   eval_workdir_resolve_failed, wording byte-identical,
+   all pinned by key plus message tests; the two
+   identical resolve-path texts share one key per the
+   same-failure-mode rule, while per-command arg
+   shapes keep per-command keys since IS_EXEC says
+   `name` where the others say `path`).
+   path_type_from_value plus is_exec_from_value plus
+   path_writable_from_value now return
+   DiagnosticResult; the three NativeFn wrappers stay
+   anyhow and take one Ok(...?) wrap each. Core 408
+   plus integration 629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

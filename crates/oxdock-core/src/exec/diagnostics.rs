@@ -1463,6 +1463,87 @@ pub fn eval_traverse_scalar(key: &str) -> Diagnostic {
     )
 }
 
+/// `PATH_TYPE` without its path argument. Parameterless: the arity
+/// shape already names the call, so no operand is attached.
+pub fn eval_path_type_needs_arg() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.path_type_needs_arg",
+        "PATH_TYPE requires a path argument".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `PATH_TYPE` with a non-string path. Parameterless: the value rides
+/// the enclosing call, so no operand is attached.
+pub fn eval_path_type_needs_string() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.path_type_needs_string",
+        "PATH_TYPE path argument must evaluate to a string".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `IS_EXEC` without its name argument. Parameterless.
+pub fn eval_is_exec_needs_arg() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.is_exec_needs_arg",
+        "IS_EXEC requires a name argument".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `IS_EXEC` with a non-string name. Parameterless.
+pub fn eval_is_exec_needs_string() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.is_exec_needs_string",
+        "IS_EXEC name argument must evaluate to a string".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `PATH_WRITABLE` without its path argument. Parameterless.
+pub fn eval_path_writable_needs_arg() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.path_writable_needs_arg",
+        "PATH_WRITABLE requires a path argument".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `PATH_WRITABLE` with a non-string path. Parameterless.
+pub fn eval_path_writable_needs_string() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.path_writable_needs_string",
+        "PATH_WRITABLE path argument must evaluate to a string".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Path resolution failure behind the path predicates. Takes the
+/// spelling and the underlying failure; shared by `PATH_TYPE` and
+/// `PATH_WRITABLE`, whose texts are identical.
+pub fn eval_path_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to resolve path '{path}': {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.path_resolve_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+}
+
+/// Working-directory resolution failure behind `PATH_WRITABLE`'s
+/// upward probe. Takes the underlying failure.
+pub fn eval_workdir_resolve_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to resolve working directory: {reason_text}");
+    Diagnostic::new(
+        "dsl.eval.workdir_resolve_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// `FORMAT_BYTE_COUNT` with a negative count.
 pub fn std_format_byte_count_negative(bytes: i64) -> Diagnostic {
     let message = format!("FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}");
@@ -3058,6 +3139,14 @@ mod tests {
             eval_invalid_array_index("k").key(),
             eval_index_out_of_bounds(7).key(),
             eval_traverse_scalar("k").key(),
+            eval_path_type_needs_arg().key(),
+            eval_path_type_needs_string().key(),
+            eval_is_exec_needs_arg().key(),
+            eval_is_exec_needs_string().key(),
+            eval_path_writable_needs_arg().key(),
+            eval_path_writable_needs_string().key(),
+            eval_path_resolve_failed("p", &anyhow::anyhow!("x")).key(),
+            eval_workdir_resolve_failed(&anyhow::anyhow!("x")).key(),
             std_format_byte_count_negative(-1).key(),
             std_format_duration_negative(-1).key(),
             std_parse_duration_range("x").key(),
@@ -3282,6 +3371,38 @@ mod tests {
         assert_eq!(
             eval_traverse_scalar("k").message(),
             "Cannot traverse into scalar value at key 'k'"
+        );
+        assert_eq!(
+            eval_path_type_needs_arg().message(),
+            "PATH_TYPE requires a path argument"
+        );
+        assert_eq!(
+            eval_path_type_needs_string().message(),
+            "PATH_TYPE path argument must evaluate to a string"
+        );
+        assert_eq!(
+            eval_is_exec_needs_arg().message(),
+            "IS_EXEC requires a name argument"
+        );
+        assert_eq!(
+            eval_is_exec_needs_string().message(),
+            "IS_EXEC name argument must evaluate to a string"
+        );
+        assert_eq!(
+            eval_path_writable_needs_arg().message(),
+            "PATH_WRITABLE requires a path argument"
+        );
+        assert_eq!(
+            eval_path_writable_needs_string().message(),
+            "PATH_WRITABLE path argument must evaluate to a string"
+        );
+        assert_eq!(
+            eval_path_resolve_failed("p", &anyhow::anyhow!("denied")).message(),
+            "failed to resolve path 'p': denied"
+        );
+        assert_eq!(
+            eval_workdir_resolve_failed(&anyhow::anyhow!("denied")).message(),
+            "failed to resolve working directory: denied"
         );
         assert_eq!(
             std_bool_cannot_coerce("BOOL_OR", "x").message(),

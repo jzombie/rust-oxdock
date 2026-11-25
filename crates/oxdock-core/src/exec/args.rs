@@ -579,19 +579,19 @@ fn evaluate_inspect_var<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -
 pub(crate) fn path_type_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let path_val = args
         .first()
-        .ok_or_else(|| anyhow::anyhow!("PATH_TYPE requires a path argument"))?;
+        .ok_or_else(args_diag::eval_path_type_needs_arg)?;
     let path_str = match path_val.as_str() {
         Some(s) => s.to_string(),
-        None => bail!("PATH_TYPE path argument must evaluate to a string"),
+        None => return Err(args_diag::eval_path_type_needs_string()),
     };
     let target = cx
         .state
         .fs
         .resolve_write(&cx.state.cwd, &path_str)
-        .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &err))?;
     let kind = match cx.state.fs.entry_kind_no_follow(&target) {
         Ok(EntryKind::Symlink) => "symlink",
         Ok(EntryKind::File) => "file",
@@ -638,13 +638,11 @@ pub(crate) fn path_exists<P: ProcessManager>(cx: &StepCtx<'_, P>, path: &str) ->
 pub(crate) fn is_exec_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
-    let name_val = args
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("IS_EXEC requires a name argument"))?;
+) -> DiagnosticResult<Value> {
+    let name_val = args.first().ok_or_else(args_diag::eval_is_exec_needs_arg)?;
     let name = match name_val.as_str() {
         Some(s) => s.to_string(),
-        None => bail!("IS_EXEC name argument must evaluate to a string"),
+        None => return Err(args_diag::eval_is_exec_needs_string()),
     };
     if name.is_empty() {
         return Ok(Value::bool(false));
@@ -799,13 +797,13 @@ fn is_executable_candidate<P: ProcessManager>(
 pub(crate) fn path_writable_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let path_val = args
         .first()
-        .ok_or_else(|| anyhow::anyhow!("PATH_WRITABLE requires a path argument"))?;
+        .ok_or_else(args_diag::eval_path_writable_needs_arg)?;
     let path_str = match path_val.as_str() {
         Some(s) => s.to_string(),
-        None => bail!("PATH_WRITABLE path argument must evaluate to a string"),
+        None => return Err(args_diag::eval_path_writable_needs_string()),
     };
     if path_str.is_empty() {
         return Ok(Value::bool(false));
@@ -814,7 +812,7 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, &path_str)
-        .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::eval_path_resolve_failed(&path_str, &err))?;
     let mut current = target;
     loop {
         match cx.state.fs.entry_kind_no_follow(&current) {
@@ -830,10 +828,11 @@ pub(crate) fn path_writable_from_value<P: ProcessManager>(
                 };
                 if parent.as_path().as_os_str().is_empty() {
                     let cwd = cx.state.cwd.clone();
-                    let anchor =
-                        cx.state.fs.resolve_write(&cwd, ".").map_err(|e| {
-                            anyhow::anyhow!("failed to resolve working directory: {e}")
-                        })?;
+                    let anchor = cx
+                        .state
+                        .fs
+                        .resolve_write(&cwd, ".")
+                        .map_err(|err| args_diag::eval_workdir_resolve_failed(&err))?;
                     return Ok(Value::bool(probe_dir_writable(cx, &anchor)));
                 }
                 current = parent;

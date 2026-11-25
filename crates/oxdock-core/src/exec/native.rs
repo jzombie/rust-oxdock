@@ -2427,7 +2427,10 @@ fn path_type<P: ProcessManager>(
     path: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
-    super::args::path_type_from_value(&[Value::string(text)], cx)
+    Ok(super::args::path_type_from_value(
+        &[Value::string(text)],
+        cx,
+    )?)
 }
 
 /// Report whether an ordinary file can be created at a path.
@@ -2459,7 +2462,10 @@ fn path_writable<P: ProcessManager>(
     path: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
-    super::args::path_writable_from_value(&[Value::string(text)], cx)
+    Ok(super::args::path_writable_from_value(
+        &[Value::string(text)],
+        cx,
+    )?)
 }
 
 /// Report whether a name resolves to an executable file (#100).
@@ -2496,7 +2502,7 @@ fn is_exec<P: ProcessManager>(
     name: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&name)?;
-    super::args::is_exec_from_value(&[Value::string(text)], cx)
+    Ok(super::args::is_exec_from_value(&[Value::string(text)], cx)?)
 }
 
 /// Report whether a workspace path names an ordinary file.
