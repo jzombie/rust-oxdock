@@ -725,7 +725,7 @@ impl TransferScratch {
     }
 
     fn hash_and_len(&self, stage: &mut oxdock_core::TransferStage) -> Result<(String, u64)> {
-        oxdock_utils::hash_stream(&mut *stage)
+        Ok(oxdock_utils::hash_stream(&mut *stage)?)
     }
 }
 

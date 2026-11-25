@@ -530,6 +530,14 @@ transport, so this phase is mechanical:
    Follow-up 2026-11-26: peek_failed gets the same with_source
    treatment (same format-without-source pattern, now covered by
    the source-chain test too).
+   Utils step 2026-11-26: sanitize_rel and verify_sha256 now
+   return DiagnosticResult with bare Err ctors; hash_stream now
+   returns io Result as a pure stream read. One boundary fix in
+   net-plugin hash_and_len via Ok wrap with question-mark
+   coercion; core with_context and serve question-mark callers
+   hold unchanged. Pack and unpack stay on anyhow Result until
+   io ctors plus callback migration land. Utils 9 plus core 408
+   green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

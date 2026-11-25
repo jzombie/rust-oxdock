@@ -57,7 +57,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// byte count and the digest cannot drift apart. Callers hashing
 /// incremental state instead (sorted tables, running pumps) keep their
 /// own feed and use [`hex_encode`] for the tail.
-pub fn hash_stream(mut source: impl std::io::Read) -> anyhow::Result<(String, u64)> {
+pub fn hash_stream(mut source: impl std::io::Read) -> std::io::Result<(String, u64)> {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
     let mut len = 0u64;

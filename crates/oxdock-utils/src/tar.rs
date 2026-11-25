@@ -10,6 +10,7 @@
 use std::io::{Read, Write};
 
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as tar_diag;
 
@@ -85,16 +86,16 @@ impl<W: Write> Write for HashingWriter<W> {
 /// paths, no `..` above the root. `.` and empty components (from `./x`
 /// and `a//b` spellings) normalize away; `..` pops when depth allows and
 /// fails closed at root. A single bad entry aborts the whole unpack.
-pub fn sanitize_rel(raw: &str) -> Result<String> {
+pub fn sanitize_rel(raw: &str) -> DiagnosticResult<String> {
     if raw.is_empty() {
-        return Err(anyhow::Error::new(tar_diag::empty_path()));
+        return Err(tar_diag::empty_path());
     }
     let normalized = raw.replace('\\', "/");
     if normalized != raw {
-        return Err(anyhow::Error::new(tar_diag::backslash_path(raw)));
+        return Err(tar_diag::backslash_path(raw));
     }
     if normalized.starts_with('/') {
-        return Err(anyhow::Error::new(tar_diag::absolute_path(raw)));
+        return Err(tar_diag::absolute_path(raw));
     }
     let mut parts = Vec::new();
     for part in normalized.split('/') {
@@ -103,14 +104,14 @@ pub fn sanitize_rel(raw: &str) -> Result<String> {
         }
         if part == ".." {
             if parts.pop().is_none() {
-                return Err(anyhow::Error::new(tar_diag::escapes_root(raw)));
+                return Err(tar_diag::escapes_root(raw));
             }
             continue;
         }
         parts.push(part);
     }
     if parts.is_empty() {
-        return Err(anyhow::Error::new(tar_diag::empty_path_normalized(raw)));
+        return Err(tar_diag::empty_path_normalized(raw));
     }
     Ok(parts.join("/"))
 }
@@ -154,12 +155,10 @@ pub fn pack_to<W: Write>(
 
 /// Verify sha256 hex over `bytes` against `expected`, failing closed
 /// before any unpack. Both ends call this before touching disk.
-pub fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {
+pub fn verify_sha256(bytes: &[u8], expected: &str) -> DiagnosticResult<()> {
     let actual = crate::sha256_hex(bytes);
     if actual != expected {
-        return Err(anyhow::Error::new(tar_diag::sha256_mismatch(
-            expected, &actual,
-        )));
+        return Err(tar_diag::sha256_mismatch(expected, &actual));
     }
     Ok(())
 }
