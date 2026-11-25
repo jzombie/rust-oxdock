@@ -4659,7 +4659,7 @@ fn text_replace_regex<P: ProcessManager>(
 /// `{{ }}` placeholders, which carry no step IO for pipes.
 fn text_replace_regex_string(text: Value, pattern: String, replacement: String) -> Result<Value> {
     let Some(s) = text.as_str() else {
-        return Err(super::args::pipe_needs_step_io(FUNC_TEXT_REPLACE_REGEX));
+        return Err(std_diag::std_pipe_needs_step_io(FUNC_TEXT_REPLACE_REGEX).into());
     };
     let out =
         super::args::text_replace_regex_str(s, &pattern, &replacement, FUNC_TEXT_REPLACE_REGEX)?;

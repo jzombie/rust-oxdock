@@ -2033,6 +2033,20 @@ pub fn std_text_needs_ordered_range(func: &str, from: i64, to: i64) -> Diagnosti
     )
 }
 
+/// Refusal for pipe words reaching a template projection: one message
+/// for every mirror op, so the boundary cannot drift per function.
+/// Takes the invoking function.
+pub fn std_pipe_needs_step_io(func: &str) -> Diagnostic {
+    let message = format!(
+        "{func} on PIPE input needs step IO, unavailable to placeholder calls; pass a STRING there"
+    );
+    Diagnostic::new(
+        "dsl.std.pipe_needs_step_io",
+        message,
+        Diagnostic::make_fields(&[("func", func)]),
+    )
+}
+
 /// `HANDLE` typed JSON decode on a non-object. Takes the offending
 /// JSON value; `Display` rendering lives here.
 pub fn json_handle_needs_object(other: &serde_json::Value) -> Diagnostic {
@@ -3604,6 +3618,7 @@ mod tests {
             std_text_needs_needle("TEXT_COUNT").key(),
             std_text_needs_one_based_start("TEXT_LINES_RANGE", 0).key(),
             std_text_needs_ordered_range("TEXT_LINES_RANGE", 3, 2).key(),
+            std_pipe_needs_step_io("TEXT_REPLACE").key(),
             std_format_byte_count_negative(-1).key(),
             std_format_duration_negative(-1).key(),
             std_parse_duration_range("x").key(),
@@ -3923,6 +3938,10 @@ mod tests {
         assert_eq!(
             std_text_needs_ordered_range("TEXT_LINES_RANGE", 3, 2).message(),
             "TEXT_LINES_RANGE needs start <= end, got 3..=2"
+        );
+        assert_eq!(
+            std_pipe_needs_step_io("TEXT_REPLACE").message(),
+            "TEXT_REPLACE on PIPE input needs step IO, unavailable to placeholder calls; pass a STRING there"
         );
         assert_eq!(
             std_bool_cannot_coerce("BOOL_OR", "x").message(),

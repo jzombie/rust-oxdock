@@ -1157,6 +1157,19 @@ transport, so this phase is mechanical:
    avoid the invalid_regex lint on literal patterns.
    Core 409 plus integration 629 green; clippy and
    fmt clean.
+   Pipe-refusal step 2026-11-26: one new ctor
+   (std_pipe_needs_step_io, wording byte-identical,
+   pinned by key plus message test). The anyhow
+   helper is deleted: both call sites invoke the
+   ctor directly, so the constructor is the single
+   owner of the message. mirror_string converts
+   with `.into()` and text_replace_regex_string
+   with the same, each holding its anyhow signature
+   via the blanket Diagnostic-into-anyhow
+   conversion. No new FUNC_* constant (the
+   TEXT_REPLACE call site rides the existing
+   constant). Core 409 plus integration 629 green;
+   clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

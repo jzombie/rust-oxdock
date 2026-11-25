@@ -2230,15 +2230,7 @@ pub(crate) fn mirror_string(func: &str, value: &Value, pump: TextPump) -> Result
     if let Some(s) = value.as_str() {
         return pump.apply_str(s, func).map(Value::string);
     }
-    Err(pipe_needs_step_io(func))
-}
-
-/// Refusal for pipe words reaching a template projection: one message
-/// for every mirror op, so the boundary cannot drift per function.
-pub(crate) fn pipe_needs_step_io(func: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{func} on PIPE input needs step IO, unavailable to placeholder calls; pass a STRING there"
-    )
+    Err(args_diag::std_pipe_needs_step_io(func).into())
 }
 
 /// Mirror a `STRING|PIPE` input through a transform: strings apply
