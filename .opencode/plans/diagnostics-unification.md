@@ -513,6 +513,20 @@ transport, so this phase is mechanical:
    question-mark coercion. Materialize and drain_string_strict stay
    on anyhow Result until dedicated ctors land. Pipe 5 plus core
    408 plus process 119 green; clippy and fmt clean.
+   Pipe completion done 2026-11-26: two new ctors for the mixed
+   io-plus-diagnostic sites (slot os_pipe_creation_failed,
+   spill drain_failed, both with key plus wording pins);
+   materialize and drain_string_strict now return
+   DiagnosticResult with map_err at the boundary. Crate is now
+   anyhow-free (dep removed from Cargo toml, lock entry dropped).
+   Pipe 7 plus core 408 plus process 119 green; clippy doc and
+   fmt clean.
+   AMEND 2026-11-26: both io ctors now attach the typed io error
+   via with_source (kind plus text preserved) so Error-source
+   and alternate-display chains keep it; PartialEq ignores source
+   and Display are unchanged. New source-chain test pins the
+   downcast kind and text for both ctors. Pipe 8 plus core 408
+   plus process 119 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

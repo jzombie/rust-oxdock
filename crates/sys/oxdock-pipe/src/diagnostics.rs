@@ -52,6 +52,23 @@ pub fn handle_lock_poisoned() -> Diagnostic {
     )
 }
 
+/// OS kernel pipe creation failed. Takes the I/O failure; rendering
+/// lives here. The typed I/O error rides as the chained source so
+/// `Error::source` and `{err:#}` chains keep it.
+pub fn os_pipe_creation_failed(err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("failed to create OS pipe: {err_text}");
+    Diagnostic::new(
+        "pipe.slot.os_pipe_creation_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
+}
+
 /// Peek of an unbound pipe. Parameterless: the wording is fixed.
 pub fn peek_unbound() -> Diagnostic {
     Diagnostic::new(
@@ -93,6 +110,23 @@ pub fn captured_stdout_invalid_utf8(err: &std::string::FromUtf8Error) -> Diagnos
     )
 }
 
+/// Spill-buffer drain failed. Takes the I/O failure; rendering lives
+/// here. The typed I/O error rides as the chained source so
+/// `Error::source` and `{err:#}` chains keep it.
+pub fn spill_drain_failed(err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("failed to drain spill buffer: {err_text}");
+    Diagnostic::new(
+        "pipe.spill.drain_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,10 +144,12 @@ mod tests {
             os_writer_lock_poisoned().key(),
             os_handle_consumed().key(),
             handle_lock_poisoned().key(),
+            os_pipe_creation_failed(&err).key(),
             peek_unbound().key(),
             peek_os_materialized().key(),
             peek_failed(&err).key(),
             captured_stdout_invalid_utf8(&utf8_err).key(),
+            spill_drain_failed(&err).key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -141,6 +177,10 @@ mod tests {
             "pipe handle lock poisoned"
         );
         assert_eq!(
+            os_pipe_creation_failed(&err).message(),
+            "failed to create OS pipe: boom"
+        );
+        assert_eq!(
             peek_unbound().message(),
             "cannot peek unbound pipe: bind it to a command first"
         );
@@ -155,5 +195,23 @@ mod tests {
                 .message()
                 .starts_with("captured stdout is not valid UTF-8: ")
         );
+        assert_eq!(
+            spill_drain_failed(&err).message(),
+            "failed to drain spill buffer: boom"
+        );
+    }
+
+    #[test]
+    fn io_ctors_preserve_typed_source_chain() {
+        use std::error::Error as _;
+        let err = io_err("boom");
+        for diag in [os_pipe_creation_failed(&err), spill_drain_failed(&err)] {
+            let source = diag.source().expect("io ctor keeps a source");
+            let io_source = source
+                .downcast_ref::<std::io::Error>()
+                .expect("source is the typed io error");
+            assert_eq!(io_source.kind(), std::io::ErrorKind::Other);
+            assert_eq!(io_source.to_string(), "boom");
+        }
     }
 }

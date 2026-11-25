@@ -241,11 +241,11 @@ pub enum Materialized {
 /// context : RUN-terminated ⇒ OS, else script); a decided handle returns
 /// its kind unchanged. Later bindings with different needs adapt through
 /// the caller's resolution machinery instead of failing or upgrading here.
-pub fn materialize(handle: &PipeHandle, promote: bool) -> anyhow::Result<Materialized> {
+pub fn materialize(handle: &PipeHandle, promote: bool) -> DiagnosticResult<Materialized> {
     let mut guard = handle
         .cell()
         .lock()
-        .map_err(|_| anyhow::Error::new(pipe_diag::handle_lock_poisoned()))?;
+        .map_err(|_| pipe_diag::handle_lock_poisoned())?;
     match &*guard {
         Slot::Script { backend } => Ok(Materialized::Script(Arc::clone(backend))),
         #[cfg(not(miri))]
@@ -253,7 +253,8 @@ pub fn materialize(handle: &PipeHandle, promote: bool) -> anyhow::Result<Materia
         Slot::Unbound => {
             #[cfg(not(miri))]
             if promote {
-                let entry = OsPipeEntry::new()?;
+                let entry =
+                    OsPipeEntry::new().map_err(|e| pipe_diag::os_pipe_creation_failed(&e))?;
                 let out = entry.clone();
                 *guard = Slot::Os { entry };
                 return Ok(Materialized::Os(out));
