@@ -8,7 +8,9 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+
+use crate::diagnostics as ssh_diag;
 use oxdock_func_macro::oxdock_type;
 use tokio::sync::mpsc;
 
@@ -125,15 +127,15 @@ impl SshSessionTag {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let Some(tx) = slot.as_ref() else {
-            bail!("SSH session pump already finished");
+            return Err(anyhow::Error::new(ssh_diag::session_pump_already_finished()));
         };
         tx.try_send(crate::state::DownMsg::ExitStatus(code))
             .map_err(|err| match err {
                 tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                    anyhow::anyhow!("SSH session wire queue saturated under backpressure")
+                    anyhow::Error::new(ssh_diag::session_wire_queue_saturated())
                 }
                 tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                    anyhow::anyhow!("SSH session wire writer is gone")
+                    anyhow::Error::new(ssh_diag::session_wire_writer_gone())
                 }
             })?;
         Ok(())
@@ -179,7 +181,7 @@ impl SshSessionTag {
         let mut up = self.inner.up_rx.lock().unwrap_or_else(|p| p.into_inner());
         let mut down = self.inner.down_tx.lock().unwrap_or_else(|p| p.into_inner());
         if up.is_none() || down.is_none() {
-            bail!("SSH session already pumped");
+            return Err(anyhow::Error::new(ssh_diag::session_already_pumped()));
         }
         Ok((up.take().unwrap(), down.take().unwrap()))
     }

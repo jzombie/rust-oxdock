@@ -16,6 +16,7 @@ anyhow.workspace = true
 bytes.workspace = true
 hex.workspace = true
 oxdock-core.workspace = true
+oxdock-diagnostics.workspace = true
 oxdock-fs.workspace = true
 oxdock-func-macro.workspace = true
 oxdock-net-plugin.workspace = true

@@ -18,6 +18,8 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+
+use crate::diagnostics as ssh_diag;
 use oxdock_core::{StepCtx, Value};
 use oxdock_fs::command_path;
 use oxdock_process::{self, ProcessManager, read_pump_chunk};
@@ -113,7 +115,7 @@ pub fn pump_pty_session<P: ProcessManager>(
     {
         let mut guard = writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("SSH pty output lock poisoned"))?;
+            .map_err(|_| anyhow::Error::new(ssh_diag::pty_output_lock_poisoned()))?;
         guard
             .write_all(b"\x1b[2J\x1b[H")
             .context("SSH pty session init write failed")?;
@@ -150,7 +152,9 @@ pub fn pump_pty_session<P: ProcessManager>(
         PtyOutcome::Cancelled => {
             let _ = cx.close_pipe(in_pipe);
             let _ = cx.close_pipe(out_pipe);
-            anyhow::bail!("SSH pty run interrupted by cancellation")
+            Err(anyhow::Error::new(
+                ssh_diag::pty_interrupted_by_cancellation(),
+            ))
         }
     }
 }

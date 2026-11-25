@@ -12,6 +12,7 @@
 
 mod auth;
 mod bridge;
+pub mod diagnostics;
 mod funcs;
 mod keys;
 mod pty;

@@ -7,7 +7,9 @@
 //! pre-existing files load only with safe Unix permissions. Losers of a
 //! first-start race re-read briefly in case they caught a partial write.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::diagnostics as ssh_diag;
 use oxdock_core::StepCtx;
 use oxdock_fs::{GuardedPath, PathResolver, to_forward_slashes};
 use oxdock_process::ProcessManager;
@@ -74,7 +76,7 @@ fn anchor_key_path(root: &std::path::Path, raw: &str, func: &str) -> Result<Guar
         }
         let rel = PathResolver::root_relative_path(rel_path);
         let Some(rel_str) = rel.to_str().filter(|s| !s.is_empty()) else {
-            bail!("{func} key_path escapes the workspace: {raw}");
+            return Err(anyhow::Error::new(ssh_diag::key_path_escapes(func, raw)));
         };
         return GuardedPath::new_root(root)
             .with_context(|| format!("{func} cannot guard the workspace root"))?
@@ -108,11 +110,11 @@ fn read_existing_key_retry(
         match read_and_parse_key(resolver, guarded, func) {
             Ok(key) => {
                 if key.algorithm() != Algorithm::Ed25519 {
-                    bail!(
-                        "{func} host key {} must be Ed25519, found {:?}",
-                        guarded.display(),
-                        key.algorithm()
-                    );
+                    return Err(anyhow::Error::new(ssh_diag::host_key_must_be_ed25519(
+                        func,
+                        &guarded.display().to_string(),
+                        &key.algorithm(),
+                    )));
                 }
                 return Ok(Some(key));
             }
@@ -147,10 +149,11 @@ fn assert_safe_mode(guarded: &GuardedPath, meta: &std::fs::Metadata, func: &str)
         use std::os::unix::fs::PermissionsExt;
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
-            bail!(
-                "{func} insecure permissions on host key file {}: expected 0600, got 0{mode:o}",
-                guarded.display()
-            );
+            return Err(anyhow::Error::new(ssh_diag::host_key_insecure_permissions(
+                func,
+                &guarded.display().to_string(),
+                mode,
+            )));
         }
     }
     #[cfg(not(unix))]

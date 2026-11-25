@@ -9,7 +9,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::diagnostics as ssh_diag;
 use bytes::Bytes;
 use russh::keys::PrivateKey;
 use tokio::sync::mpsc;
@@ -80,7 +82,9 @@ pub async fn run_remote_exec(
             .await
             .context("SSH_EXEC authentication exchange failed")?;
         if !matches!(authenticated, russh::client::AuthResult::Success) {
-            bail!("SSH_EXEC authentication rejected");
+            return Err(anyhow::Error::new(ssh_diag::authentication_rejected(
+                "SSH_EXEC",
+            )));
         }
         let mut channel = session
             .channel_open_session()
@@ -307,7 +311,9 @@ pub async fn connect_session(
         .await
         .context("SSH_CONNECT authentication exchange failed")?;
     if !matches!(authenticated, russh::client::AuthResult::Success) {
-        bail!("SSH_CONNECT authentication rejected");
+        return Err(anyhow::Error::new(ssh_diag::authentication_rejected(
+            "SSH_CONNECT",
+        )));
     }
     let channel = session
         .channel_open_session()

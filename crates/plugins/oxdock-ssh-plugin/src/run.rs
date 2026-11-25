@@ -12,7 +12,9 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::diagnostics as ssh_diag;
 use oxdock_core::{StepCtx, Value};
 use oxdock_fs::command_path;
 use oxdock_process::{
@@ -34,12 +36,16 @@ fn pump_fd_to_pipe(
     let mut buffer = [0u8; PUMP_CHUNK];
     loop {
         match stream.read(&mut buffer) {
-            Err(err) => bail!("SSH run child {name} read failed: {err}"),
+            Err(err) => {
+                return Err(anyhow::Error::new(ssh_diag::run_child_read_failed(
+                    name, &err,
+                )));
+            }
             Ok(0) => break,
             Ok(count) => {
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("SSH run output lock poisoned"))?;
+                    .map_err(|_| anyhow::Error::new(ssh_diag::run_output_lock_poisoned()))?;
                 guard
                     .write_all(&buffer[..count])
                     .context("SSH run output pipe write failed")?;
@@ -159,7 +165,7 @@ pub fn pump_run_session<P: ProcessManager>(
     on_exit: Option<Arc<dyn Fn(u32) + Send + Sync>>,
 ) -> Result<i64> {
     if argv.is_empty() {
-        bail!("SSH_RUN needs at least a program");
+        return Err(anyhow::Error::new(ssh_diag::run_needs_program()));
     }
     let reader = cx
         .pipe_reader(in_pipe)
@@ -199,7 +205,7 @@ pub fn pump_run_session<P: ProcessManager>(
     let child_stdin: Box<dyn Write + Send> = Box::new(stdin);
     let child_stdout: Box<dyn Read + Send> = Box::new(stdout);
     let Some(stderr) = stderr else {
-        bail!("SSH run spawn lost stderr");
+        return Err(anyhow::Error::new(ssh_diag::run_spawn_lost_stderr()));
     };
     let child_stderr: Box<dyn Read + Send> = Box::new(stderr);
 
@@ -341,7 +347,9 @@ pub fn pump_run_session<P: ProcessManager>(
         Some(err) => Err(err),
         None => {
             if cancel.load(Ordering::SeqCst) {
-                anyhow::bail!("SSH run interrupted by cancellation");
+                return Err(anyhow::Error::new(
+                    ssh_diag::run_interrupted_by_cancellation(),
+                ));
             }
             Ok(exit_code.unwrap_or(-1))
         }
