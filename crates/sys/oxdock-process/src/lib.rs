@@ -3,6 +3,7 @@ pub mod builtin_env;
 mod child;
 pub mod clock;
 mod contract;
+pub mod diagnostics;
 pub mod env_policy;
 mod expand;
 #[cfg(feature = "mock-process")]

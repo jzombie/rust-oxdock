@@ -1874,6 +1874,7 @@ dependencies = [
  "anyhow",
  "indoc",
  "libc",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-parser",
  "oxdock-pipe",

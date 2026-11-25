@@ -322,6 +322,16 @@ Remaining:
   inline `bail!`/`anyhow!`; non-anyhow errors wrapped with
   `anyhow::Error::new` at call sites; lib 11 + integration 39
   green; clippy/doc clean; zero fmt drift).
+- Sys crates: `oxdock-process` `expand.rs` done 2026-11-25 (new
+  `src/diagnostics.rs` owning 18 `proc.expand.*` ctors: env/script-var
+  misses with inline `did you mean` hints via `ScriptSuggest` /
+  `OverrideSuggest` scopes (hinted/bare share one key), missing
+  override, invalid format, no-registry, depth cap, empty/invalid/
+  nested call args, map entry/duplicate-key, key-path
+  missing-property/bad-index/out-of-bounds/on-primitive, render
+  PIPE/SEMAPHORE/PERMIT; all messages byte-identical; test stubs
+  left as-is; lib 119 + core lib 408 + integration 629 green;
+  clippy/doc clean; zero fmt drift).
 
 ### Phase D — retire `anyhow` as the carrier
 

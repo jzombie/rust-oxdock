@@ -22,6 +22,7 @@ windows-sys = { workspace = true, features = ["Win32_Security", "Win32_System_Jo
 [dependencies]
 anyhow.workspace = true
 indoc.workspace = true
+oxdock-diagnostics.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true
