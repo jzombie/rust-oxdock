@@ -340,19 +340,23 @@ fn mismatch(expected: &TypeTag, value: &Value) -> anyhow::Error {
 pub(crate) fn resolve_arg_state<P: ProcessManager>(
     arg: &Arg,
     state: &ExecState<P>,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     match arg {
-        Arg::String(s, _) => Ok(expand_string(s, &state.envs, state)?),
-        Arg::Expr(e) => bail!("Arg::Expr cannot be resolved without StepCtx: {:?}", e),
+        Arg::String(s, _) => Ok(expand_string(s, &state.envs, state)
+            .map_err(|err| args_diag::eval_arg_expand_failed(&err))?),
+        Arg::Expr(e) => Err(args_diag::eval_arg_expr_needs_step_ctx(e)),
         Arg::Parts(parts) => {
             let mut out = String::new();
             for part in parts {
                 match part {
                     ArgPart::Text(s, _) => {
-                        out.push_str(&expand_string(s, &state.envs, state)?);
+                        out.push_str(
+                            &expand_string(s, &state.envs, state)
+                                .map_err(|err| args_diag::eval_arg_expand_failed(&err))?,
+                        );
                     }
                     ArgPart::Expr(e) => {
-                        bail!("Arg::Expr cannot be resolved without StepCtx: {:?}", e)
+                        return Err(args_diag::eval_arg_expr_needs_step_ctx(e));
                     }
                 }
             }

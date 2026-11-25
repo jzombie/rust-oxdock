@@ -1108,6 +1108,25 @@ transport, so this phase is mechanical:
    new FUNC_* constant (`FUNC_TO_JSON` already
    covered). Core 409 plus integration 629 green;
    clippy and fmt clean.
+   Resolve-arg-state step 2026-11-26: two new ctors
+   (eval_arg_expr_needs_step_ctx plus
+   eval_arg_expand_failed, wording byte-identical,
+   both pinned by key plus message tests). The Expr
+   sites share one key: the ctor takes `&Expr` and
+   renders `Debug` inside, per the value-rendering
+   precedent. Expansion failures ride a verbatim
+   `{reason:#}` passthrough mirroring
+   eval_int_arg_resolve, with its own key since the
+   failure context differs (string expansion versus
+   int resolution). resolve_arg_state now returns
+   DiagnosticResult; its two steps.rs callers
+   (pre_register_assertions,
+   sync_iteration_assert_needles) stay anyhow and
+   hold via the blanket Diagnostic-into-anyhow
+   conversion, so no caller edits. No new FUNC_*
+   constant (internal resolution, not stdlib
+   surface). Core 409 plus integration 629 green;
+   clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

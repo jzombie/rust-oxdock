@@ -8,7 +8,7 @@
 
 use oxdock_diagnostics::Diagnostic;
 use oxdock_parser::{
-    ANY_TYPE_NAME, BOOL_TYPE_NAME, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
+    ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
     LIST_TYPE_NAME, MAP_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, render_structural,
 };
 
@@ -1391,6 +1391,30 @@ pub fn eval_int_arg_resolve(reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
     Diagnostic::new(
         "dsl.eval.int_arg_resolve",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// `Arg::Expr` resolved without a `StepCtx`. Takes the expression;
+/// `Debug` rendering lives here.
+pub fn eval_arg_expr_needs_step_ctx(expr: &Expr) -> Diagnostic {
+    let rendered = format!("{expr:?}");
+    let message = format!("Arg::Expr cannot be resolved without StepCtx: {rendered}");
+    Diagnostic::new(
+        "dsl.eval.arg_expr_needs_step_ctx",
+        message,
+        Diagnostic::make_fields(&[("expr", &rendered)]),
+    )
+}
+
+/// String expansion failure during `Arg` resolution. Takes the
+/// underlying failure verbatim: it already names the variable and the
+/// cause, so no wrapper is added.
+pub fn eval_arg_expand_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.eval.arg_expand_failed",
         reason_text.clone(),
         Diagnostic::make_fields(&[("reason", &reason_text)]),
     )
@@ -3481,6 +3505,8 @@ mod tests {
             eval_condition_needs_bool(&crate::Value::string("x".to_string())).key(),
             eval_expected_int("x").key(),
             eval_int_arg_resolve(&anyhow::anyhow!("x")).key(),
+            eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
+            eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
             eval_compare_equality_shape().key(),
             eval_ordering_needs_numeric(
                 &crate::Value::string("x".to_string()),
@@ -3721,6 +3747,14 @@ mod tests {
         );
         assert_eq!(
             eval_int_arg_resolve(&anyhow::anyhow!("undefined variable `$x`")).message(),
+            "undefined variable `$x`"
+        );
+        assert_eq!(
+            eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).message(),
+            "Arg::Expr cannot be resolved without StepCtx: Env(\"X\")"
+        );
+        assert_eq!(
+            eval_arg_expand_failed(&anyhow::anyhow!("undefined variable `$x`")).message(),
             "undefined variable `$x`"
         );
         assert_eq!(
