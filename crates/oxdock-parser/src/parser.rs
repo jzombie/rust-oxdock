@@ -101,6 +101,7 @@ use crate::constants::{
     KEYWORD_TIMEOUT, KEYWORD_TYPE, KEYWORD_WHILE, KEYWORD_WITH_IO, MODULE_SEPARATOR,
     VAR_SIGIL_CHAR, qualify, sigil_qualified, sigil_var,
 };
+use crate::diagnostics as dsl_diag;
 use crate::error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 use oxdock_diagnostics::Diagnostic;
 
@@ -5449,6 +5450,21 @@ fn parse_import_statement(
         // brackets). If that word is not a known module but a harvest
         // follows, fail fast naming the two valid spellings instead
         // of the misleading unknown-module error.
+        if let Some(comment) = find_bracket_comment(inner) {
+            let mut err = lower_err(
+                stmt,
+                ParseError::from_diagnostic(
+                    ParseErrorKind::InvalidSyntax {
+                        command: KEYWORD_IMPORT.to_string(),
+                    },
+                    dsl_diag::spelling_bracket_list_comment(KEYWORD_IMPORT),
+                    &lowering_ctx(stmt),
+                ),
+            );
+            err.line = comment.line;
+            err.col = comment.col;
+            return Err(err);
+        }
         let whole = whole_file_harvest(inner);
         if whole.is_none()
             && let Some(word) = single_bare_first_part(inner)
@@ -6132,6 +6148,21 @@ fn parse_export_at(
             ..
         } = &after.kind
         {
+            if let Some(comment) = find_bracket_comment(inner) {
+                let mut err = lower_err(
+                    stmt,
+                    ParseError::from_diagnostic(
+                        ParseErrorKind::InvalidSyntax {
+                            command: KEYWORD_EXPORT.to_string(),
+                        },
+                        dsl_diag::spelling_bracket_list_comment(KEYWORD_EXPORT),
+                        &lowering_ctx(stmt),
+                    ),
+                );
+                err.line = comment.line;
+                err.col = comment.col;
+                return Err(err);
+            }
             let mut func_names = Vec::new();
             let mut type_names = Vec::new();
             let mut const_names = Vec::new();
@@ -6207,6 +6238,21 @@ fn parse_export_at(
         ..
     } = &next.kind
     {
+        if let Some(comment) = find_bracket_comment(inner) {
+            let mut err = lower_err(
+                stmt,
+                ParseError::from_diagnostic(
+                    ParseErrorKind::InvalidSyntax {
+                        command: KEYWORD_EXPORT.to_string(),
+                    },
+                    dsl_diag::spelling_bracket_list_comment(KEYWORD_EXPORT),
+                    &lowering_ctx(stmt),
+                ),
+            );
+            err.line = comment.line;
+            err.col = comment.col;
+            return Err(err);
+        }
         let mut func_names = Vec::new();
         let mut type_names = Vec::new();
         let mut const_names = Vec::new();
@@ -6315,6 +6361,23 @@ fn split_bracket_entries(inner: &[Tok]) -> Vec<&[Tok]> {
     }
     parts.push(&inner[start..]);
     parts
+}
+
+/// First comment token inside a bracket name list, if any. Single
+/// owner for the shared `IMPORT`/`EXPORT` bracket rule (newlines ok,
+/// comments miss): every bracket-list entry loop consults this
+/// before treating the list as a shape miss, so the failure names
+/// and points at the comment instead of falling through to the
+/// generic statement error. Recurses into nested groups so
+/// selective-harvest `[[...]]` entries report the same way through
+/// the one key. Callers stamp the returned token's coordinates onto
+/// the error (`stamp_pos` never overwrites real positions).
+fn find_bracket_comment(inner: &[Tok]) -> Option<&Tok> {
+    inner.iter().find_map(|t| match &t.kind {
+        TokKind::Comment(_) => Some(t),
+        TokKind::Group { inner, .. } => find_bracket_comment(inner),
+        _ => None,
+    })
 }
 
 /// `TYPE NAME = SHAPE` at `pos`: uppercase name, single `=`, maximal
