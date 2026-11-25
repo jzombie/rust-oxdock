@@ -763,6 +763,21 @@ transport, so this phase is mechanical:
    shows only the pre-existing non_map_serve_options
    failure (identical on clean tree); clippy and fmt
    clean.
+   Zero-value leaf step 2026-11-26: no new ctors;
+   optional_zero_value plus check_script_param_tags now
+   return DiagnosticResult with bare Err ctors
+   (zero_value_missing already keyed; optional_param
+   keeps its &anyhow::Error param per the passthrough
+   precedent, so the two intra-file sites wrap the
+   Diagnostic inner with anyhow::Error::new).
+   resolve_script_params stays on anyhow Result: its
+   resolve_tag plus check_declaration_tag callees are
+   still anyhow, so its optional_zero_value site takes
+   the same shim and holds. The two register paths plus
+   handlers callers hold unchanged via blanket From
+   (including the with_context fill site, since anyhow
+   Context covers Diagnostic). Core 408 green; clippy
+   and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

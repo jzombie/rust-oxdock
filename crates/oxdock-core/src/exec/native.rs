@@ -962,7 +962,7 @@ pub(super) struct FuncDefData {
 /// defaults). Handles, pipes, custom types, unions, and the
 /// remaining words have no zero: omitting those fails at definition,
 /// so the caller passes explicitly.
-pub fn optional_zero_value(tag: &TypeTag) -> Result<Value> {
+pub fn optional_zero_value(tag: &TypeTag) -> DiagnosticResult<Value> {
     match tag {
         TypeTag::Bool => Ok(Value::bool(false)),
         TypeTag::String | TypeTag::Any => Ok(Value::string(String::new())),
@@ -977,9 +977,9 @@ pub fn optional_zero_value(tag: &TypeTag) -> Result<Value> {
         {
             Ok(Value::map(BTreeMap::new()))
         }
-        other => Err(anyhow::Error::new(std_diag::func_zero_value_missing(
+        other => Err(std_diag::func_zero_value_missing(
             &oxdock_parser::render_structural(other),
-        ))),
+        )),
     }
 }
 
@@ -1002,7 +1002,7 @@ pub fn resolve_script_params<P: ProcessManager>(
         state.check_declaration_tag(&format!("function `{func_name}` param `${clean}`"), &tag)?;
         if *optional {
             optional_zero_value(&tag).map(|_| ()).map_err(|err| {
-                anyhow::Error::new(std_diag::func_optional_param(func_name, &clean, &err))
+                std_diag::func_optional_param(func_name, &clean, &anyhow::Error::new(err))
             })?;
         }
         resolved.push((clean, tag, *optional));
@@ -1012,11 +1012,14 @@ pub fn resolve_script_params<P: ProcessManager>(
 
 /// Validate already-resolved script param tags: the zero-value gate
 /// for registry insertion paths that never see spellings.
-pub fn check_script_param_tags(func_name: &str, params: &[(String, TypeTag, bool)]) -> Result<()> {
+pub fn check_script_param_tags(
+    func_name: &str,
+    params: &[(String, TypeTag, bool)],
+) -> DiagnosticResult<()> {
     for (pname, tag, optional) in params {
         if *optional {
             optional_zero_value(tag).map(|_| ()).map_err(|err| {
-                anyhow::Error::new(std_diag::func_optional_param(func_name, pname, &err))
+                std_diag::func_optional_param(func_name, pname, &anyhow::Error::new(err))
             })?;
         }
     }
