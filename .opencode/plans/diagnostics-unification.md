@@ -835,6 +835,19 @@ transport, so this phase is mechanical:
    (handlers 2, static_check 2, import 2) stay anyhow and
    hold via blanket From. Core 408 plus integration 629
    green; clippy and fmt clean.
+   Func-tags validation step 2026-11-26: three new ctors
+   (func_param_values_without_type plus
+   func_optional_before_required plus
+   func_optional_without_map, wording byte-identical to
+   the replaced bail!s, all pinned by key plus message
+   tests); validate_function_type_tags now returns
+   DiagnosticResult with bare Err ctors, and its
+   check_tag_known calls hold directly. The mod
+   validate_closure caller and all seven tests.rs sites
+   hold unchanged (blanket From for ?, Display plus
+   expect_err/expect are error-type generic). Core 408
+   plus integration 629 plus parser 267 green; clippy
+   (only pre-existing baseline) and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

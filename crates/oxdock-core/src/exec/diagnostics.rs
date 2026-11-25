@@ -694,6 +694,41 @@ pub fn func_duplicate_in_scope(name: &str) -> Diagnostic {
     )
 }
 
+/// Host parameter declaring a closed value set without a type. The
+/// set only means something alongside the type check that enforces
+/// it, so the declaration fails naming the parameter and function.
+pub fn func_param_values_without_type(param: &str, func: &str) -> Diagnostic {
+    let message = format!("param '{param}' of '{func}' declares values without a type");
+    Diagnostic::new(
+        "dsl.func.param_values_without_type",
+        message,
+        Diagnostic::make_fields(&[("function", func), ("param", param)]),
+    )
+}
+
+/// Optional parameter before a required one. Omission fills trailing
+/// position only, so the declaration fails naming the offender.
+pub fn func_optional_before_required(param: &str, func: &str) -> Diagnostic {
+    let message = format!("param '{param}' of '{func}' is optional before a required param");
+    Diagnostic::new(
+        "dsl.func.optional_before_required",
+        message,
+        Diagnostic::make_fields(&[("function", func), ("param", param)]),
+    )
+}
+
+/// Optional parameter whose type does not admit an empty MAP.
+/// Omission fills an empty MAP, so the declaration fails naming the
+/// parameter and function.
+pub fn func_optional_without_map(param: &str, func: &str) -> Diagnostic {
+    let message = format!("param '{param}' of '{func}' is optional without a MAP type");
+    Diagnostic::new(
+        "dsl.func.optional_without_map",
+        message,
+        Diagnostic::make_fields(&[("function", func), ("param", param)]),
+    )
+}
+
 /// Ambiguous `ALIAS::FUNC` resolution. Takes the alias, the base
 /// name, and the holder files; joining lives here with the single
 /// owner in `super::native`.
@@ -2635,6 +2670,9 @@ mod tests {
             func_optional_param("F", "p", &anyhow::anyhow!("x")).key(),
             func_shadow_reserved("F").key(),
             func_duplicate_in_scope("F").key(),
+            func_param_values_without_type("p", "F").key(),
+            func_optional_before_required("p", "F").key(),
+            func_optional_without_map("p", "F").key(),
             func_ambiguous_alias("A", "F", &std::collections::HashSet::new()).key(),
             func_export_unknown("F").key(),
             func_placeholder_unknown("M", "F", &["M::F".to_string()]).key(),
@@ -2745,6 +2783,18 @@ mod tests {
                 .contains("`M::F`")
         );
         assert_eq!(func_unknown("F").message(), "unknown function `F`");
+        assert_eq!(
+            func_param_values_without_type("p", "F").message(),
+            "param 'p' of 'F' declares values without a type"
+        );
+        assert_eq!(
+            func_optional_before_required("p", "F").message(),
+            "param 'p' of 'F' is optional before a required param"
+        );
+        assert_eq!(
+            func_optional_without_map("p", "F").message(),
+            "param 'p' of 'F' is optional without a MAP type"
+        );
         assert_eq!(std_unknown_type("T").message(), "unknown type `T`");
         assert_eq!(
             std_parse_args_arity(2).message(),

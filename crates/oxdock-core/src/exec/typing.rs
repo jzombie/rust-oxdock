@@ -602,7 +602,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// closed `allowed` set without a type is rejected too: the set
     /// only means something alongside the `STRING` check that enforces
     /// it, so hand-built entries cannot render a set they never check.
-    pub fn validate_function_type_tags(&self) -> Result<()> {
+    pub fn validate_function_type_tags(&self) -> DiagnosticResult<()> {
         for meta in self.functions.all_metas() {
             if let Some(params) = meta.params.as_deref() {
                 for (position, param) in params.iter().enumerate() {
@@ -611,11 +611,10 @@ impl<P: ProcessManager> ExecState<P> {
                         Self::check_tag_known(self, &what, expected, false)?;
                     }
                     if param.param_type.is_none() && param.allowed.is_some() {
-                        anyhow::bail!(
-                            "param '{}' of '{}' declares values without a type",
-                            param.name,
-                            meta.name,
-                        );
+                        return Err(typing_diag::func_param_values_without_type(
+                            &param.name,
+                            &meta.name,
+                        ));
                     }
                     if param.optional {
                         // Omission fills an empty MAP, so only trailing
@@ -623,11 +622,10 @@ impl<P: ProcessManager> ExecState<P> {
                         // value the caller never chose.
                         let trails = params[position..].iter().all(|later| later.optional);
                         if !trails {
-                            anyhow::bail!(
-                                "param '{}' of '{}' is optional before a required param",
-                                param.name,
-                                meta.name,
-                            );
+                            return Err(typing_diag::func_optional_before_required(
+                                &param.name,
+                                &meta.name,
+                            ));
                         }
                         // Omission fills an empty MAP, so the param type
                         // must admit one: checked semantically (empty MAP
@@ -639,11 +637,10 @@ impl<P: ProcessManager> ExecState<P> {
                                 .is_ok()
                         });
                         if !fills {
-                            anyhow::bail!(
-                                "param '{}' of '{}' is optional without a MAP type",
-                                param.name,
-                                meta.name,
-                            );
+                            return Err(typing_diag::func_optional_without_map(
+                                &param.name,
+                                &meta.name,
+                            ));
                         }
                     }
                 }
