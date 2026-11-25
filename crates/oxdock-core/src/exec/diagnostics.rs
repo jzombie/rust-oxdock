@@ -1190,6 +1190,81 @@ pub fn std_parse_byte_count_range(s: &str) -> Diagnostic {
     )
 }
 
+/// `INT()` with a non-integral `FLOAT`. Takes the value; `Debug`
+/// rendering lives here.
+pub fn std_int_non_integer_float(got: f64) -> Diagnostic {
+    let message = format!("INT() requires an integer value, found FLOAT ({got:?})");
+    Diagnostic::new(
+        "dsl.std.int_non_integer_float",
+        message,
+        Diagnostic::make_fields(&[("got", &format!("{got:?}"))]),
+    )
+}
+
+/// `INT()` with an unparsable string. Takes the raw spelling.
+pub fn std_int_bad_string(s: &str) -> Diagnostic {
+    let message = format!("INT() requires an integer string, found {s:?}");
+    Diagnostic::new(
+        "dsl.std.int_bad_string",
+        message,
+        Diagnostic::make_fields(&[("got", s)]),
+    )
+}
+
+/// `INT()` with a non-numeric type. Takes the value; `Debug`
+/// rendering lives here.
+pub fn std_int_bad_type(got: &super::Value) -> Diagnostic {
+    let message = format!("INT() requires an Int, Float, Bool, or String, found {got:?}");
+    Diagnostic::new(
+        "dsl.std.int_bad_type",
+        message,
+        Diagnostic::make_fields(&[("got", &format!("{got:?}"))]),
+    )
+}
+
+/// `FLOAT()` with a non-finite `FLOAT`. Takes the value; `Debug`
+/// rendering lives here.
+pub fn std_float_non_finite_float(got: f64) -> Diagnostic {
+    let message = format!("FLOAT() requires a finite value, found FLOAT ({got:?})");
+    Diagnostic::new(
+        "dsl.std.float_non_finite_float",
+        message,
+        Diagnostic::make_fields(&[("got", &format!("{got:?}"))]),
+    )
+}
+
+/// `FLOAT()` with an unparsable string. Takes the raw spelling.
+pub fn std_float_bad_string(s: &str) -> Diagnostic {
+    let message = format!("FLOAT() requires a numeric string, found {s:?}");
+    Diagnostic::new(
+        "dsl.std.float_bad_string",
+        message,
+        Diagnostic::make_fields(&[("got", s)]),
+    )
+}
+
+/// `FLOAT()` with a string parsing to a non-finite value. Takes the
+/// raw spelling.
+pub fn std_float_non_finite_string(s: &str) -> Diagnostic {
+    let message = format!("FLOAT() requires a finite value, found {s:?}");
+    Diagnostic::new(
+        "dsl.std.float_non_finite_string",
+        message,
+        Diagnostic::make_fields(&[("got", s)]),
+    )
+}
+
+/// `FLOAT()` with a non-numeric type. Takes the value; `Debug`
+/// rendering lives here.
+pub fn std_float_bad_type(got: &super::Value) -> Diagnostic {
+    let message = format!("FLOAT() requires an Int, Float, or String, found {got:?}");
+    Diagnostic::new(
+        "dsl.std.float_bad_type",
+        message,
+        Diagnostic::make_fields(&[("got", &format!("{got:?}"))]),
+    )
+}
+
 /// `FORMAT_BYTE_COUNT` with a negative count.
 pub fn std_format_byte_count_negative(bytes: i64) -> Diagnostic {
     let message = format!("FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}");
@@ -2752,6 +2827,13 @@ mod tests {
             std_parse_byte_count_integral(1.5).key(),
             std_parse_byte_count_shape(&crate::Value::string("x".to_string())).key(),
             std_parse_byte_count_range("x").key(),
+            std_int_non_integer_float(1.5).key(),
+            std_int_bad_string("x").key(),
+            std_int_bad_type(&crate::Value::string("x".to_string())).key(),
+            std_float_non_finite_float(f64::INFINITY).key(),
+            std_float_bad_string("x").key(),
+            std_float_non_finite_string("inf").key(),
+            std_float_bad_type(&crate::Value::string("x".to_string())).key(),
             std_format_byte_count_negative(-1).key(),
             std_format_duration_negative(-1).key(),
             std_parse_duration_range("x").key(),
@@ -2868,6 +2950,34 @@ mod tests {
             ))
             .message(),
             "PARSE_FLAGS() argument `$args`: expected LIST<STRING>, got INT"
+        );
+        assert_eq!(
+            std_int_non_integer_float(1.5).message(),
+            "INT() requires an integer value, found FLOAT (1.5)"
+        );
+        assert_eq!(
+            std_int_bad_string("x").message(),
+            "INT() requires an integer string, found \"x\""
+        );
+        assert_eq!(
+            std_int_bad_type(&crate::Value::string("x".to_string())).message(),
+            "INT() requires an Int, Float, Bool, or String, found STRING(\"x\")"
+        );
+        assert_eq!(
+            std_float_non_finite_float(f64::INFINITY).message(),
+            "FLOAT() requires a finite value, found FLOAT (inf)"
+        );
+        assert_eq!(
+            std_float_bad_string("x").message(),
+            "FLOAT() requires a numeric string, found \"x\""
+        );
+        assert_eq!(
+            std_float_non_finite_string("inf").message(),
+            "FLOAT() requires a finite value, found \"inf\""
+        );
+        assert_eq!(
+            std_float_bad_type(&crate::Value::string("x".to_string())).message(),
+            "FLOAT() requires an Int, Float, or String, found STRING(\"x\")"
         );
         assert_eq!(
             std_bool_cannot_coerce("BOOL_OR", "x").message(),

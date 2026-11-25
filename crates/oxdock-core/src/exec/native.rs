@@ -2008,7 +2008,7 @@ fn int(
     #[union(Int, Float, String, Bool)]
     val: Value,
 ) -> Result<Value> {
-    super::args::int_from_value(val)
+    Ok(super::args::int_from_value(val)?)
 }
 
 /// Convert a value to FLOAT.
@@ -2031,7 +2031,7 @@ fn float(
     #[union(Float, Int, String)]
     val: Value,
 ) -> Result<Value> {
-    super::args::float_from_value(val)
+    Ok(super::args::float_from_value(val)?)
 }
 
 /// Format a byte count canonically (`500B`, `10KB`, `2MB`, `1GB`,

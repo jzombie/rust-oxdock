@@ -1025,7 +1025,7 @@ fn trim_ascii(s: &str) -> &str {
 /// through; `Float` only when integral and finite; `Bool` as 1/0;
 /// anything else bails. The explicit converter owns every admission:
 /// callers convert here, never at consumer slots.
-pub(crate) fn int_from_value(val: Value) -> Result<Value> {
+pub(crate) fn int_from_value(val: Value) -> DiagnosticResult<Value> {
     if val.as_i64().is_some() {
         return Ok(val);
     }
@@ -1033,7 +1033,7 @@ pub(crate) fn int_from_value(val: Value) -> Result<Value> {
         if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
             return Ok(Value::int(f as i64));
         }
-        bail!("INT() requires an integer value, found FLOAT ({f:?})");
+        return Err(args_diag::std_int_non_integer_float(f));
     }
     if let Some(b) = val.as_bool() {
         return Ok(Value::int(i64::from(b)));
@@ -1044,19 +1044,19 @@ pub(crate) fn int_from_value(val: Value) -> Result<Value> {
         return clean
             .parse::<i64>()
             .map(Value::int)
-            .map_err(|_| anyhow::anyhow!("INT() requires an integer string, found {s:?}"));
+            .map_err(|_| args_diag::std_int_bad_string(s));
     }
-    bail!("INT() requires an Int, Float, Bool, or String, found {val:?}")
+    Err(args_diag::std_int_bad_type(&val))
 }
 
 /// `FLOAT(x)`: parses `f64` (accepts int strings), bails on non-finite or
 /// non-numeric. Passes `Float`/`Int as f64` through.
-pub(crate) fn float_from_value(val: Value) -> Result<Value> {
+pub(crate) fn float_from_value(val: Value) -> DiagnosticResult<Value> {
     if let Some(f) = val.as_f64() {
         if f.is_finite() {
             return Ok(Value::float(f));
         }
-        bail!("FLOAT() requires a finite value, found FLOAT ({f:?})");
+        return Err(args_diag::std_float_non_finite_float(f));
     }
     if let Some(n) = val.as_i64() {
         return Ok(Value::float(n as f64));
@@ -1065,13 +1065,13 @@ pub(crate) fn float_from_value(val: Value) -> Result<Value> {
         let trimmed = trim_ascii(s);
         let parsed: f64 = trimmed
             .parse()
-            .map_err(|_| anyhow::anyhow!("FLOAT() requires a numeric string, found {s:?}"))?;
+            .map_err(|_| args_diag::std_float_bad_string(s))?;
         if parsed.is_finite() {
             return Ok(Value::float(parsed));
         }
-        bail!("FLOAT() requires a finite value, found {s:?}");
+        return Err(args_diag::std_float_non_finite_string(s));
     }
-    bail!("FLOAT() requires an Int, Float, or String, found {val:?}")
+    Err(args_diag::std_float_bad_type(&val))
 }
 
 /// Value-semantics core of `HAS_KEY()`: report whether a map holds a key

@@ -879,6 +879,21 @@ transport, so this phase is mechanical:
    PARSE_FLAGS plus PARSE_POSITIONALS) stay anyhow and
    hold via blanket From. Core 408 plus integration 629
    green; clippy and fmt clean.
+   Int-float converter step 2026-11-26: seven new ctors
+   (std_int_non_integer_float plus std_int_bad_string
+   plus std_int_bad_type plus std_float_non_finite_float
+   plus std_float_bad_string plus
+   std_float_non_finite_string plus std_float_bad_type,
+   wording byte-identical to the replaced bail!s, all
+   pinned by key plus message tests, Debug rendering
+   inside the ctors per the spelled precedent);
+   int_from_value plus float_from_value now return
+   DiagnosticResult with bare Err ctors. The
+   coerce_cli_flag discarding map_errs hold unchanged;
+   the INT()/FLOAT() macro fns stay anyhow and take one
+   Ok(...?) wrap each at the boundary (direct return
+   does not coerce). Core 408 plus integration 629
+   green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
