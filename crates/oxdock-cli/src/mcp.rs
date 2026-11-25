@@ -46,5 +46,5 @@ pub fn serve_mcp(opts: Options, workspace_root: oxdock_fs::GuardedPath) -> Resul
         types,
         watch: true,
     })?;
-    oxdock_mcp::serve_stdio_blocking(handler)
+    Ok(oxdock_mcp::serve_stdio_blocking(handler)?)
 }

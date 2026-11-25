@@ -552,6 +552,15 @@ transport, so this phase is mechanical:
    callers and test expect callers hold unchanged. Map_json_args
    and value_to_json_result stay on anyhow Result until the core
    json boundary flips. Mcp 50 green; clippy and fmt clean.
+   Mcp serve step 2026-11-26: serve_stdio and
+   serve_stdio_blocking now return DiagnosticResult with bare
+   Err ctors (third-party rmcp and tokio errors still ride in
+   through the existing anyhow passthrough adapters, messages
+   byte-identical); reject_reserved_metas now returns
+   DiagnosticResult with a bare Err. One boundary fix in cli
+   mcp via Ok wrap with question-mark coercion. Init_handler,
+   build_inner, and reload paths stay on anyhow Result until
+   core session errors flip. Mcp 50 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

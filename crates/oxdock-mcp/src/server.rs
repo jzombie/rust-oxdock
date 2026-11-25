@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use oxdock_core::{FuncMeta, McpSession, StreamChunk, StreamHook, TeeStream, Value};
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_process::DefaultProcessManager;
 use oxdock_process::unix_now;
@@ -758,12 +759,10 @@ fn rmcp_tool_for(tool: &McpTool) -> Tool {
 }
 
 /// Reject an `EXPORT` of the synthesized host tool name.
-fn reject_reserved_metas(metas: &[FuncMeta]) -> Result<()> {
+fn reject_reserved_metas(metas: &[FuncMeta]) -> DiagnosticResult<()> {
     for meta in metas {
         if oxdock_parser::base_name(&meta.name) == STATUS_TOOL_NAME {
-            return Err(anyhow::Error::new(mcp_diag::export_status_name_reserved(
-                STATUS_TOOL_NAME,
-            )));
+            return Err(mcp_diag::export_status_name_reserved(STATUS_TOOL_NAME));
         }
     }
     Ok(())
