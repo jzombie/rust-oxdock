@@ -615,6 +615,19 @@ transport, so this phase is mechanical:
    clippy. Interpreter, run, spawn, and interactive paths
    stay on anyhow Result until io-failure ctors land.
    Process 119 plus core 408 green; clippy and fmt clean.
+   Core json-boundary step 2026-11-26: six new ctors
+   (std_to_json_non_finite_float, std_to_json_unencodable,
+   json_handle_needs_object, json_handle_exact_shape,
+   json_handle_task_id_positive,
+   json_handle_encode_needs_handle) replace the five bare
+   bail sites; value_to_json, json_to_value_typed, and
+   value_to_json_typed now return DiagnosticResult.
+   To_json_from_value stays on anyhow Result and holds
+   unchanged via blanket From. Mcp map_json_args and
+   value_to_json_result now return DiagnosticResult with
+   bare Err ctors; server map_err boundaries hold
+   unchanged. Core 408 plus mcp 50 green; clippy and fmt
+   clean (only pre-existing baseline warnings).
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

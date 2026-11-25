@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::EntryKind;
 use oxdock_fs::env as oxdock_env;
 use oxdock_fs::to_forward_slashes;
@@ -8,6 +9,7 @@ use oxdock_process::{ProcessManager, format_value_for_string};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::diagnostics as args_diag;
 use super::state::ExecState;
 use super::steps::StepCtx;
 
@@ -1207,7 +1209,7 @@ pub(crate) fn to_json_from_value(value: Value) -> Result<Value> {
 /// Anything else fails naming the type instead of rendering
 /// a silent empty. Shared by `TO_JSON` and any host bridging values
 /// across a JSON boundary (sentinel payloads, wire frames).
-pub fn value_to_json(value: &Value) -> Result<serde_json::Value> {
+pub fn value_to_json(value: &Value) -> DiagnosticResult<serde_json::Value> {
     if let Some(id) = value.as_handle() {
         let mut map = serde_json::Map::new();
         map.insert(
@@ -1220,14 +1222,14 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value> {
         return map
             .iter()
             .map(|(key, item)| value_to_json(item).map(|v| (key.clone(), v)))
-            .collect::<Result<serde_json::Map<_, _>>>()
+            .collect::<DiagnosticResult<serde_json::Map<_, _>>>()
             .map(serde_json::Value::Object);
     }
     if let Some(list) = value.as_list() {
         return list
             .iter()
             .map(value_to_json)
-            .collect::<Result<Vec<_>>>()
+            .collect::<DiagnosticResult<Vec<_>>>()
             .map(serde_json::Value::Array);
     }
     if let Some(s) = value.as_str() {
@@ -1238,16 +1240,13 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value> {
     }
     if let Some(f) = value.as_f64() {
         let number = serde_json::Number::from_f64(f)
-            .ok_or_else(|| anyhow::anyhow!("TO_JSON cannot encode non-finite float {f}"))?;
+            .ok_or_else(|| args_diag::std_to_json_non_finite_float(f))?;
         return Ok(serde_json::Value::Number(number));
     }
     if let Some(b) = value.as_bool() {
         return Ok(serde_json::Value::Bool(b));
     }
-    bail!(
-        "TO_JSON cannot encode {} values; use STRING, INT, FLOAT, BOOL, LIST, or MAP",
-        value.type_name()
-    )
+    Err(args_diag::std_to_json_unencodable(value.type_name()))
 }
 
 /// Placeholder call arguments naming `CONST`s, classified once by
@@ -1628,22 +1627,22 @@ pub(crate) fn parse_json_from_value(value: Value) -> Result<Value> {
 /// form and rejects anything else naming the shape. Shape errors
 /// (non-object, missing key, surplus keys, zero id) fail here;
 /// unknown ids fail later at task lookup.
-pub fn json_to_value_typed(tag: Option<&TypeTag>, v: serde_json::Value) -> Result<Value> {
+pub fn json_to_value_typed(tag: Option<&TypeTag>, v: serde_json::Value) -> DiagnosticResult<Value> {
     if !matches!(tag, Some(TypeTag::Handle)) {
         return Ok(json_to_value(v));
     }
     let map = match v {
         serde_json::Value::Object(map) => map,
-        other => bail!("HANDLE argument must be an object like {{\"task_id\": 7}}, got {other}"),
+        other => return Err(args_diag::json_handle_needs_object(&other)),
     };
     if map.len() != 1 || !map.contains_key("task_id") {
-        bail!("HANDLE argument must be exactly {{\"task_id\": N}} with no other keys");
+        return Err(args_diag::json_handle_exact_shape());
     }
     let id = match map["task_id"] {
         serde_json::Value::Number(ref n) => n.as_u64().filter(|id| *id >= 1),
         _ => None,
     }
-    .ok_or_else(|| anyhow::anyhow!("HANDLE argument `task_id` must be a positive integer"))?;
+    .ok_or_else(args_diag::json_handle_task_id_positive)?;
     Ok(Value::handle(id))
 }
 
@@ -1651,7 +1650,10 @@ pub fn json_to_value_typed(tag: Option<&TypeTag>, v: serde_json::Value) -> Resul
 /// non-`HANDLE` tags behave exactly like [`value_to_json`]; a
 /// `Some(TypeTag::Handle)` tag projects the id as `{"task_id": N}`
 /// and fails naming the type for anything that is not a handle.
-pub fn value_to_json_typed(tag: Option<&TypeTag>, value: &Value) -> Result<serde_json::Value> {
+pub fn value_to_json_typed(
+    tag: Option<&TypeTag>,
+    value: &Value,
+) -> DiagnosticResult<serde_json::Value> {
     if !matches!(tag, Some(TypeTag::Handle)) {
         return value_to_json(value);
     }
@@ -1664,10 +1666,9 @@ pub fn value_to_json_typed(tag: Option<&TypeTag>, value: &Value) -> Result<serde
             );
             Ok(serde_json::Value::Object(map))
         }
-        None => bail!(
-            "cannot encode {} as HANDLE; expected a task handle",
-            value.type_name()
-        ),
+        None => Err(args_diag::json_handle_encode_needs_handle(
+            value.type_name(),
+        )),
     }
 }
 

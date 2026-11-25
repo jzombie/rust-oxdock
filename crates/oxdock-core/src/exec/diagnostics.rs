@@ -1120,6 +1120,72 @@ pub fn std_parse_duration_range(text: &str) -> Diagnostic {
     )
 }
 
+/// `TO_JSON` on a non-finite float. Takes the float; rendering lives
+/// here.
+pub fn std_to_json_non_finite_float(f: f64) -> Diagnostic {
+    let message = format!("TO_JSON cannot encode non-finite float {f}");
+    Diagnostic::new(
+        "dsl.std.to_json_non_finite_float",
+        message,
+        Diagnostic::make_fields(&[("got", &f.to_string())]),
+    )
+}
+
+/// `TO_JSON` on a value outside the template-safe set. Takes the type
+/// name; the admit list lives here.
+pub fn std_to_json_unencodable(actual: &str) -> Diagnostic {
+    let message = format!(
+        "TO_JSON cannot encode {actual} values; use STRING, INT, FLOAT, BOOL, LIST, or MAP"
+    );
+    Diagnostic::new(
+        "dsl.std.to_json_unencodable",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// `HANDLE` typed JSON decode on a non-object. Takes the offending
+/// JSON value; `Display` rendering lives here.
+pub fn json_handle_needs_object(other: &serde_json::Value) -> Diagnostic {
+    let message = format!("HANDLE argument must be an object like {{\"task_id\": 7}}, got {other}");
+    Diagnostic::new(
+        "dsl.json.handle_needs_object",
+        message,
+        Diagnostic::make_fields(&[("got", &other.to_string())]),
+    )
+}
+
+/// `HANDLE` typed JSON decode on a wrong-shaped object. Parameterless:
+/// the exact `{"task_id": N}` spelling lives here.
+pub fn json_handle_exact_shape() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.json.handle_exact_shape",
+        "HANDLE argument must be exactly {\"task_id\": N} with no other keys".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `HANDLE` typed JSON decode on a non-positive `task_id`.
+/// Parameterless: the backticked spelling lives here.
+pub fn json_handle_task_id_positive() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.json.handle_task_id_positive",
+        "HANDLE argument `task_id` must be a positive integer".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Typed JSON encode of a non-handle as `HANDLE`. Takes the type name;
+/// quoting lives here.
+pub fn json_handle_encode_needs_handle(actual: &str) -> Diagnostic {
+    let message = format!("cannot encode {actual} as HANDLE; expected a task handle");
+    Diagnostic::new(
+        "dsl.json.handle_encode_needs_handle",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
 /// IMPORT naming a file outside the static import closure. Takes the
 /// path; the closure wording lives here.
 pub fn import_not_in_closure(path: &str) -> Diagnostic {
@@ -2581,6 +2647,12 @@ mod tests {
             std_format_byte_count_negative(-1).key(),
             std_format_duration_negative(-1).key(),
             std_parse_duration_range("x").key(),
+            std_to_json_non_finite_float(f64::NAN).key(),
+            std_to_json_unencodable("VOID").key(),
+            json_handle_needs_object(&serde_json::json!(7)).key(),
+            json_handle_exact_shape().key(),
+            json_handle_task_id_positive().key(),
+            json_handle_encode_needs_handle("STRING").key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -2660,6 +2732,30 @@ mod tests {
         assert_eq!(
             std_contains_haystack_type("INT").message(),
             "CONTAINS needs a STRING or LIST haystack, found `INT`"
+        );
+        assert_eq!(
+            std_to_json_non_finite_float(f64::INFINITY).message(),
+            "TO_JSON cannot encode non-finite float inf"
+        );
+        assert_eq!(
+            std_to_json_unencodable("VOID").message(),
+            "TO_JSON cannot encode VOID values; use STRING, INT, FLOAT, BOOL, LIST, or MAP"
+        );
+        assert_eq!(
+            json_handle_needs_object(&serde_json::json!(7)).message(),
+            "HANDLE argument must be an object like {\"task_id\": 7}, got 7"
+        );
+        assert_eq!(
+            json_handle_exact_shape().message(),
+            "HANDLE argument must be exactly {\"task_id\": N} with no other keys"
+        );
+        assert_eq!(
+            json_handle_task_id_positive().message(),
+            "HANDLE argument `task_id` must be a positive integer"
+        );
+        assert_eq!(
+            json_handle_encode_needs_handle("STRING").message(),
+            "cannot encode STRING as HANDLE; expected a task handle"
         );
     }
 

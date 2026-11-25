@@ -6,7 +6,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use anyhow::Result;
 use oxdock_core::{
     FuncMeta, FuncParam, TypeTag, Value, fill_optional_args, json_to_value_typed,
     value_to_json_typed,
@@ -182,12 +181,12 @@ fn input_schema_for(meta: &FuncMeta) -> DiagnosticResult<(JsonValue, Vec<FuncPar
 /// Map a JSON arguments object to ordered `Value` words per the param
 /// table. Missing optional trailing MAP params fill `{}`; missing
 /// required params and surplus keys both fail.
-pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> Result<Vec<Value>> {
+pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> DiagnosticResult<Vec<Value>> {
     let empty = Map::new();
     let object = match args {
         JsonValue::Object(map) => map,
         JsonValue::Null => &empty,
-        _ => return Err(anyhow::Error::new(mcp_diag::args_not_object())),
+        _ => return Err(mcp_diag::args_not_object()),
     };
     let required = oxdock_core::required_arity(params);
     let mut values = Vec::with_capacity(params.len());
@@ -201,23 +200,21 @@ pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> Result<Vec<Value
                 if param.optional {
                     values.push(Value::map(BTreeMap::new()));
                 } else {
-                    return Err(anyhow::Error::new(mcp_diag::args_missing_required(
-                        &param.name,
-                    )));
+                    return Err(mcp_diag::args_missing_required(&param.name));
                 }
             }
         }
     }
     if values.len() < required || values.len() > params.len() {
-        return Err(anyhow::Error::new(mcp_diag::args_count_out_of_range(
+        return Err(mcp_diag::args_count_out_of_range(
             values.len(),
             required,
             params.len(),
-        )));
+        ));
     }
     for key in object.keys() {
         if !params.iter().any(|param| &param.name == key) {
-            return Err(anyhow::Error::new(mcp_diag::args_unknown(key)));
+            return Err(mcp_diag::args_unknown(key));
         }
     }
     Ok(fill_optional_args(params, values))
@@ -226,6 +223,6 @@ pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> Result<Vec<Value
 /// Serialize a return `Value` to JSON through the declared return
 /// tag. `HANDLE` projects as `{"task_id": N}`; every other tag rides
 /// the untyped boundary. Opaque words fail naming the type.
-pub fn value_to_json_result(tag: Option<&TypeTag>, value: &Value) -> Result<JsonValue> {
+pub fn value_to_json_result(tag: Option<&TypeTag>, value: &Value) -> DiagnosticResult<JsonValue> {
     value_to_json_typed(tag, value)
 }
