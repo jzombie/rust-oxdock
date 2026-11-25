@@ -1261,6 +1261,36 @@ transport, so this phase is mechanical:
    (call sites ride the existing func params). Core
    409 plus integration 629 green; clippy and fmt
    clean.
+   Template-expansion step 2026-11-26: seven new
+   ctors (template_missing_key plus
+   template_empty_placeholder plus
+   template_invalid_key plus template_empty_env
+   plus template_keypath plus template_bare_sigil
+   plus template_placeholder_miss, wording
+   byte-identical, all pinned by key plus message
+   tests). The template helpers stay the single
+   wording owners for keypath plus bare-sigil: the
+   new template ctors call qualified_keypath_error
+   plus bare_sigil_error directly and only add keys,
+   mirroring the const-arg pair (duplicate wording
+   across phases keeps separate keys per the
+   existing check-vs-eval precedent). Missing keys
+   share one key across both sites via the closure:
+   the ctor takes `env_hint: bool` and builds the
+   `env:` versus `$` suggestion inside, so call
+   sites pass decoded values. Empty `env:` plus
+   `script_env:` share one parameterless key. The
+   lazy placeholder miss is a verbatim passthrough
+   taking `&str` with no source attached.
+   expand_string holds its anyhow signature with
+   explicit anyhow::Error::from conversions: its
+   success arms ride resolve_const_ref plus
+   resolve_const_call_arg, both still anyhow, so the
+   flip waits on the import layer per leaf-to-root
+   order. Only one key-list entry for the missing
+   variant (true/false share the key); both wordings
+   stay pinned by message tests. Core 409 plus
+   integration 629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

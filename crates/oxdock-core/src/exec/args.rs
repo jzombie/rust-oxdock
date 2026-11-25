@@ -1756,8 +1756,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
     state: &ExecState<P>,
 ) -> Result<String> {
     use oxdock_parser::template::{
-        PlaceholderKey, TemplateSegment, TemplateSegments, bare_sigil_error,
-        classify_placeholder_key, qualified_keypath_error,
+        PlaceholderKey, TemplateSegment, TemplateSegments, classify_placeholder_key,
     };
     let mut output = String::with_capacity(input.len());
     // One diagnostic for every unresolvable bare key: missing keys
@@ -1765,29 +1764,24 @@ pub(crate) fn expand_string<P: ProcessManager>(
     // a miss suggests the sigil form (or the env form when the host
     // bridges that name).
     let missing_key = |key: &str| {
-        let mut msg = format!("undefined script variable: '{key}'");
-        if env.contains_key(key) || state.get_env(key).is_some() {
-            msg.push_str(&format!(
-                "; did you mean 'env:{key}' (environment variable)?"
-            ));
-        } else {
-            msg.push_str(&format!("; did you mean '${key}'?"));
-        }
-        anyhow::anyhow!("{msg}")
+        let env_hint = env.contains_key(key) || state.get_env(key).is_some();
+        anyhow::Error::from(args_diag::eval_template_missing_key(key, env_hint))
     };
     for segment in TemplateSegments::new(input) {
         match segment {
             TemplateSegment::Text(text) => push_escaped_text(&mut output, text),
             TemplateSegment::Placeholder { key, .. } => match classify_placeholder_key(key) {
                 PlaceholderKey::Empty => {
-                    bail!("empty template placeholder");
+                    return Err(anyhow::Error::from(
+                        args_diag::eval_template_empty_placeholder(),
+                    ));
                 }
                 PlaceholderKey::DollarQualified { alias, name, keys } => {
                     if keys.is_empty() {
                         let value = super::import::resolve_const_ref(state, alias, name)?;
                         output.push_str(&format_value_for_string(&value)?);
                     } else {
-                        return Err(anyhow::anyhow!(qualified_keypath_error()));
+                        return Err(anyhow::Error::from(args_diag::eval_template_keypath()));
                     }
                 }
                 PlaceholderKey::Dollar(rest) => {
@@ -1796,7 +1790,9 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     // templates and code agree on every error. Bare
                     // $var never reads the environment; use {{ env:KEY }}.
                     let Some(parts) = oxdock_parser::template::parse_var_path(rest) else {
-                        bail!("invalid placeholder key: '${rest}'");
+                        return Err(anyhow::Error::from(args_diag::eval_template_invalid_key(
+                            rest,
+                        )));
                     };
                     let (base, segs) = parts.split_first().expect("split always yields one");
                     let base_value = load_var_binding(state, base)?;
@@ -1818,7 +1814,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                     // step runs.
                     let env_key = env_key.trim();
                     if env_key.is_empty() {
-                        bail!("undefined environment variable: ''");
+                        return Err(anyhow::Error::from(args_diag::eval_template_empty_env()));
                     }
                     let val = env
                         .get(env_key)
@@ -1837,7 +1833,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                 PlaceholderKey::ScriptEnv(env_key) => {
                     let env_key = env_key.trim();
                     if env_key.is_empty() {
-                        bail!("undefined environment variable: ''");
+                        return Err(anyhow::Error::from(args_diag::eval_template_empty_env()));
                     }
                     if let Some(v) = env.get(env_key).map(String::as_str) {
                         output.push_str(v);
@@ -1848,7 +1844,9 @@ pub(crate) fn expand_string<P: ProcessManager>(
                 PlaceholderKey::ConstRef { .. }
                 | PlaceholderKey::KeyPath { .. }
                 | PlaceholderKey::Var(_) => {
-                    return Err(anyhow::anyhow!(bare_sigil_error(key.trim())));
+                    return Err(anyhow::Error::from(args_diag::eval_template_bare_sigil(
+                        key.trim(),
+                    )));
                 }
                 PlaceholderKey::Bare(key) => {
                     return Err(missing_key(key));
@@ -1892,7 +1890,9 @@ pub(crate) fn expand_string<P: ProcessManager>(
                                 module,
                                 call.name,
                             ) {
-                                bail!("{text}");
+                                return Err(anyhow::Error::from(
+                                    args_diag::eval_template_placeholder_miss(&text),
+                                ));
                             }
                             return Err(err);
                         }

@@ -1492,6 +1492,96 @@ pub fn eval_const_arg_bare_sigil(src: &str) -> Diagnostic {
     )
 }
 
+/// Unresolvable bare key in template expansion. Takes the key and
+/// whether the name bridges from the host environment: the hint names
+/// the `env:` form when bridged, else the `$` sigil form. Both call
+/// sites (bare keys and bare call heads) share this key.
+pub fn eval_template_missing_key(key: &str, env_hint: bool) -> Diagnostic {
+    let suggestion = if env_hint {
+        format!("env:{key}")
+    } else {
+        format!("${key}")
+    };
+    let message = if env_hint {
+        format!(
+            "undefined script variable: '{key}'; did you mean 'env:{key}' (environment variable)?"
+        )
+    } else {
+        format!("undefined script variable: '{key}'; did you mean '${key}'?")
+    };
+    Diagnostic::new(
+        "dsl.eval.template_missing_key",
+        message,
+        Diagnostic::make_fields(&[("key", key), ("suggestion", &suggestion)]),
+    )
+}
+
+/// Empty `{{ }}` placeholder. Parameterless: the wording names the
+/// rule.
+pub fn eval_template_empty_placeholder() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.template_empty_placeholder",
+        "empty template placeholder".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Malformed `$` placeholder key. Takes the rest after `$`; `Debug`
+/// rendering is unnecessary here since the key is already displayable.
+pub fn eval_template_invalid_key(rest: &str) -> Diagnostic {
+    let message = format!("invalid placeholder key: '${rest}'");
+    Diagnostic::new(
+        "dsl.eval.template_invalid_key",
+        message,
+        Diagnostic::make_fields(&[("key", rest)]),
+    )
+}
+
+/// Empty `env:` / `script_env:` name. Parameterless: both prefixes
+/// share this key, and the wording names the empty spelling.
+pub fn eval_template_empty_env() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.template_empty_env",
+        "undefined environment variable: ''".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Key path on `$ALIAS::NAME` in template expansion. Parameterless:
+/// the parser owns the wording through its template helper, so every
+/// phase agrees word for word; this constructor only adds the key.
+pub fn eval_template_keypath() -> Diagnostic {
+    let message = qualified_keypath_error();
+    Diagnostic::new(
+        "dsl.eval.template_keypath",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Bare word in template expansion where only `$` reads a binding.
+/// Takes the trimmed source; the parser owns the wording through its
+/// template helper, so every phase agrees word for word.
+pub fn eval_template_bare_sigil(src: &str) -> Diagnostic {
+    let message = bare_sigil_error(src);
+    Diagnostic::new(
+        "dsl.eval.template_bare_sigil",
+        message,
+        Diagnostic::make_fields(&[("src", src)]),
+    )
+}
+
+/// Placeholder miss classified lazily at runtime. Takes the classified
+/// text verbatim: it already names the module, name, and miss kind,
+/// so no wrapper is added and no source is attached.
+pub fn eval_template_placeholder_miss(text: &str) -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.template_placeholder_miss",
+        text.to_string(),
+        Diagnostic::make_fields(&[("reason", text)]),
+    )
+}
+
 /// Pipe input read failure. Takes the invoking function and the
 /// underlying failure.
 pub fn std_pipe_read_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
@@ -3783,6 +3873,13 @@ mod tests {
             coerce_pipe_to_string().key(),
             eval_const_arg_keypath().key(),
             eval_const_arg_bare_sigil("foo").key(),
+            eval_template_missing_key("foo", false).key(),
+            eval_template_empty_placeholder().key(),
+            eval_template_invalid_key("foo").key(),
+            eval_template_empty_env().key(),
+            eval_template_keypath().key(),
+            eval_template_bare_sigil("foo").key(),
+            eval_template_placeholder_miss("unknown placeholder").key(),
             std_pipe_read_failed("TEXT_REPLACE", &anyhow::anyhow!("x")).key(),
             std_pipe_create_failed("TEXT_REPLACE", &anyhow::anyhow!("x")).key(),
             std_pipe_spawn_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
@@ -4072,6 +4169,38 @@ mod tests {
         assert_eq!(
             eval_const_arg_bare_sigil("foo").message(),
             "bare `foo` never reads a binding here; use `$foo`"
+        );
+        assert_eq!(
+            eval_template_missing_key("foo", false).message(),
+            "undefined script variable: 'foo'; did you mean '$foo'?"
+        );
+        assert_eq!(
+            eval_template_missing_key("foo", true).message(),
+            "undefined script variable: 'foo'; did you mean 'env:foo' (environment variable)?"
+        );
+        assert_eq!(
+            eval_template_empty_placeholder().message(),
+            "empty template placeholder"
+        );
+        assert_eq!(
+            eval_template_invalid_key("foo").message(),
+            "invalid placeholder key: '$foo'"
+        );
+        assert_eq!(
+            eval_template_empty_env().message(),
+            "undefined environment variable: ''"
+        );
+        assert_eq!(
+            eval_template_keypath().message(),
+            "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+        );
+        assert_eq!(
+            eval_template_bare_sigil("foo").message(),
+            "bare `foo` never reads a binding here; use `$foo`"
+        );
+        assert_eq!(
+            eval_template_placeholder_miss("unknown placeholder function `M::F`").message(),
+            "unknown placeholder function `M::F`"
         );
         assert_eq!(
             std_pipe_read_failed("TEXT_REPLACE", &anyhow::anyhow!("denied")).message(),
