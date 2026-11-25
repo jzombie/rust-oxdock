@@ -394,6 +394,17 @@ Remaining:
   I/O failures take `&std::io::Error`, panics take `&impl Debug`;
   messages byte-identical; lib 18 + new pins green, ssh-plugin lib 13
   green; clippy/doc clean; zero fmt drift).
+- Leaf crate: `oxdock-utils` done 2026-11-26 (new
+  `src/diagnostics.rs` owning 9 `tar.*` ctors: sanitize empty/
+  backslash/absolute/escapes-root/empty-normalized, verify
+  sha256-mismatch, unpack archive-empty/archive-truncated/
+  unsupported-type; `tar.rs` zero inline failures (only
+  `anyhow::Error::new` remains); raw names take `&str`, entry type
+  takes `&impl Debug`, byte count takes `usize`; messages
+  byte-identical (existing `truncated`/`empty`/`escapes` substring pins
+  hold); lib 9 green (incl. 2 new key+wording pins), remote-proto 14
+  green; clippy/doc clean; zero fmt drift; leaf doc notes the
+  dependency-free diagnostics transport exception).
 
 ### Phase D — retire `anyhow` as the carrier
 

@@ -2,8 +2,10 @@
 //!
 //! Dependency-light helpers used by more than one crate live here, so a
 //! single helper never costs a new crate: new one-off utilities land as
-//! modules. The crate stays a leaf (third-party deps only, never
-//! workspace crates), so anything can depend on it without a cycle.
+//! modules. The crate stays a leaf (third-party deps plus the
+//! dependency-free diagnostics transport only, never workspace crates
+//! with their own dependencies), so anything can depend on it without a
+//! cycle.
 //!
 //! Current residents: streaming tarball pack/unpack ([`tar`], shared by
 //! local archive commands and remote declared transfers alike) and the
@@ -20,7 +22,11 @@
 //! implementation without depending on the remote wire contract: the
 //! proto crate keeps only the muxio methods, handshake types, and
 //! protocol digest.
+//!
+//! The only workspace dependency is the dependency-free diagnostics
+//! transport (`oxdock-diagnostics`), which cannot introduce a cycle.
 
+pub mod diagnostics;
 pub mod tar;
 
 /// Canonical lowercase hex over digest bytes: single heap allocation

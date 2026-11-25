@@ -9,7 +9,9 @@
 
 use std::io::{Read, Write};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+
+use crate::diagnostics as tar_diag;
 
 /// One file to pack: guest/host destination path, byte length, and an
 /// open reader. Lengths come from filesystem metadata at open time.
@@ -85,14 +87,14 @@ impl<W: Write> Write for HashingWriter<W> {
 /// fails closed at root. A single bad entry aborts the whole unpack.
 pub fn sanitize_rel(raw: &str) -> Result<String> {
     if raw.is_empty() {
-        bail!("tarball entry has an empty path");
+        return Err(anyhow::Error::new(tar_diag::empty_path()));
     }
     let normalized = raw.replace('\\', "/");
     if normalized != raw {
-        bail!("tarball entry has a backslash path: {raw:?}");
+        return Err(anyhow::Error::new(tar_diag::backslash_path(raw)));
     }
     if normalized.starts_with('/') {
-        bail!("tarball entry has an absolute path: {raw:?}");
+        return Err(anyhow::Error::new(tar_diag::absolute_path(raw)));
     }
     let mut parts = Vec::new();
     for part in normalized.split('/') {
@@ -101,14 +103,14 @@ pub fn sanitize_rel(raw: &str) -> Result<String> {
         }
         if part == ".." {
             if parts.pop().is_none() {
-                bail!("tarball entry escapes its root: {raw:?}");
+                return Err(anyhow::Error::new(tar_diag::escapes_root(raw)));
             }
             continue;
         }
         parts.push(part);
     }
     if parts.is_empty() {
-        bail!("tarball entry has an empty path: {raw:?}");
+        return Err(anyhow::Error::new(tar_diag::empty_path_normalized(raw)));
     }
     Ok(parts.join("/"))
 }
@@ -155,7 +157,9 @@ pub fn pack_to<W: Write>(
 pub fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {
     let actual = crate::sha256_hex(bytes);
     if actual != expected {
-        bail!("tarball sha256 mismatch: expected {expected}, got {actual}");
+        return Err(anyhow::Error::new(tar_diag::sha256_mismatch(
+            expected, &actual,
+        )));
     }
     Ok(())
 }
@@ -201,7 +205,7 @@ pub fn unpack_auto_from<R: Read>(
         }
     }
     if filled == 0 {
-        bail!("archive is empty");
+        return Err(anyhow::Error::new(tar_diag::archive_empty()));
     }
     let chained = std::io::Cursor::new(head[..filled].to_vec()).chain(src);
     if filled == 2 && head == GZIP_MAGIC {
@@ -227,7 +231,7 @@ fn unpack_raw_checked<R: Read>(
         }
     }
     if filled < first.len() {
-        bail!("archive is truncated: {filled} bytes cannot hold a tar header");
+        return Err(anyhow::Error::new(tar_diag::archive_truncated(filled)));
     }
     let chained = std::io::Cursor::new(first).chain(src);
     drain_entries(&mut tar::Archive::new(chained), apply)
@@ -261,7 +265,9 @@ fn drain_entries<R: Read>(
                     reader: &mut entry,
                 })?;
             }
-            other => bail!("tarball entry has unsupported type {other:?}: {raw:?}"),
+            other => {
+                return Err(anyhow::Error::new(tar_diag::unsupported_type(&other, &raw)));
+            }
         }
     }
     Ok(())

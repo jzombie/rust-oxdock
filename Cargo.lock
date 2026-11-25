@@ -1966,6 +1966,7 @@ version = "0.44.1-alpha"
 dependencies = [
  "anyhow",
  "flate2",
+ "oxdock-diagnostics",
  "sha2",
  "tar",
 ]
