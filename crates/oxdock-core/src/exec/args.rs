@@ -2686,15 +2686,17 @@ pub(crate) fn read_pipe_eager<P: ProcessManager>(
     }
     let reader = cx
         .pipe_reader(value)
-        .map_err(|e| anyhow::anyhow!("{func} cannot read PIPE input: {e:#}"))?;
+        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_read_failed(func, &err)))?;
     let spill = SpillBuffer::new();
     let mut carry = Vec::new();
     let mut chunk = [0u8; super::io::CHUNK_SIZE];
     loop {
         let n = reader.lock().map(|mut guard| guard.read(&mut chunk));
         let n = n
-            .map_err(|_| anyhow::anyhow!("{func} pipe reader lock poisoned"))?
-            .map_err(|e| anyhow::anyhow!("{func} cannot read PIPE input: {e}"))?;
+            .map_err(|_| anyhow::Error::from(args_diag::std_pipe_reader_lock_poisoned(func)))?
+            .map_err(|err| {
+                anyhow::Error::from(args_diag::std_pipe_chunk_read_failed(func, &err))
+            })?;
         if n == 0 {
             break;
         }
@@ -2703,18 +2705,18 @@ pub(crate) fn read_pipe_eager<P: ProcessManager>(
         let hold = trailing_incomplete_len(&staged);
         let valid_len = staged.len() - hold;
         std::str::from_utf8(&staged[..valid_len])
-            .map_err(|_| anyhow::anyhow!("{func} PIPE input is not valid UTF-8"))?;
+            .map_err(|_| anyhow::Error::from(args_diag::std_pipe_input_not_utf8(func)))?;
         spill
             .push_bytes(&staged[..valid_len])
-            .map_err(|e| anyhow::anyhow!("{func} PIPE input exceeds the spill backlog: {e}"))?;
+            .map_err(|err| anyhow::Error::from(args_diag::std_pipe_spill_failed(func, &err)))?;
         carry = staged[valid_len..].to_vec();
     }
     spill
         .push_bytes(&carry)
-        .map_err(|e| anyhow::anyhow!("{func} PIPE input exceeds the spill backlog: {e}"))?;
+        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_spill_failed(func, &err)))?;
     spill
         .drain_string_strict()
-        .map_err(|_| anyhow::anyhow!("{func} PIPE input is not valid UTF-8"))
+        .map_err(|_| anyhow::Error::from(args_diag::std_pipe_input_not_utf8(func)))
 }
 
 /// Completed pipe for eager pipe-out: mints a task-owned handle, writes
@@ -2728,17 +2730,17 @@ pub(crate) fn write_completed_pipe<P: ProcessManager>(
     let pipe = cx.new_pipe();
     let writer = cx
         .pipe_writer(&pipe)
-        .map_err(|e| anyhow::anyhow!("{func} cannot create PIPE output: {e:#}"))?;
+        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_create_failed(func, &err)))?;
     {
         let mut guard = writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("{func} pipe writer lock poisoned"))?;
+            .map_err(|_| anyhow::Error::from(args_diag::std_pipe_writer_lock_poisoned(func)))?;
         guard
             .write_all(text.as_bytes())
-            .map_err(|e| anyhow::anyhow!("{func} cannot write PIPE output: {e}"))?;
+            .map_err(|err| anyhow::Error::from(args_diag::std_pipe_write_failed(func, &err)))?;
         guard
             .flush()
-            .map_err(|e| anyhow::anyhow!("{func} cannot write PIPE output: {e}"))?;
+            .map_err(|err| anyhow::Error::from(args_diag::std_pipe_write_failed(func, &err)))?;
     }
     Ok(pipe)
 }

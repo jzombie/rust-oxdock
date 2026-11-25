@@ -1528,6 +1528,78 @@ pub fn std_pipe_spawn_failed(func: &str, reason: &std::io::Error) -> Diagnostic 
     )
 }
 
+/// Pipe reader lock poisoned during an eager read. Takes the invoking
+/// function; the poison flag carries no detail.
+pub fn std_pipe_reader_lock_poisoned(func: &str) -> Diagnostic {
+    let message = format!("{func} pipe reader lock poisoned");
+    Diagnostic::new(
+        "dsl.std.pipe_reader_lock_poisoned",
+        message,
+        Diagnostic::make_fields(&[("func", func)]),
+    )
+}
+
+/// Pipe writer lock poisoned during a completed-pipe write. Takes the
+/// invoking function; the poison flag carries no detail.
+pub fn std_pipe_writer_lock_poisoned(func: &str) -> Diagnostic {
+    let message = format!("{func} pipe writer lock poisoned");
+    Diagnostic::new(
+        "dsl.std.pipe_writer_lock_poisoned",
+        message,
+        Diagnostic::make_fields(&[("func", func)]),
+    )
+}
+
+/// Chunk read failure inside the eager-read loop. Takes the invoking
+/// function and the underlying I/O failure with `Display` rendering:
+/// the loop reports `{e}`, while the outer open reports `{e:#}`, so
+/// this stays a separate key to hold the wording byte-identical.
+pub fn std_pipe_chunk_read_failed(func: &str, reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("{func} cannot read PIPE input: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.pipe_chunk_read_failed",
+        message,
+        Diagnostic::make_fields(&[("func", func), ("reason", &reason_text)]),
+    )
+}
+
+/// Pipe input that is not valid UTF-8. Takes the invoking function;
+/// the offending bytes carry no displayable detail, so no reason
+/// field rides along.
+pub fn std_pipe_input_not_utf8(func: &str) -> Diagnostic {
+    let message = format!("{func} PIPE input is not valid UTF-8");
+    Diagnostic::new(
+        "dsl.std.pipe_input_not_utf8",
+        message,
+        Diagnostic::make_fields(&[("func", func)]),
+    )
+}
+
+/// Spill backlog overflow while staging eager pipe input. Takes the
+/// invoking function and the underlying I/O failure.
+pub fn std_pipe_spill_failed(func: &str, reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("{func} PIPE input exceeds the spill backlog: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.pipe_spill_failed",
+        message,
+        Diagnostic::make_fields(&[("func", func), ("reason", &reason_text)]),
+    )
+}
+
+/// Completed-pipe write failure. Takes the invoking function and the
+/// underlying I/O failure; `write_all` and `flush` share this key.
+pub fn std_pipe_write_failed(func: &str, reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("{func} cannot write PIPE output: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.pipe_write_failed",
+        message,
+        Diagnostic::make_fields(&[("func", func), ("reason", &reason_text)]),
+    )
+}
+
 /// Unreachable `==`/`!=` shape in the strict-equality fallback.
 /// Parameterless: the operands ride the enclosing expression.
 pub fn eval_compare_equality_shape() -> Diagnostic {
@@ -3714,6 +3786,12 @@ mod tests {
             std_pipe_read_failed("TEXT_REPLACE", &anyhow::anyhow!("x")).key(),
             std_pipe_create_failed("TEXT_REPLACE", &anyhow::anyhow!("x")).key(),
             std_pipe_spawn_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
+            std_pipe_reader_lock_poisoned("TEXT_REPLACE").key(),
+            std_pipe_writer_lock_poisoned("TEXT_REPLACE").key(),
+            std_pipe_chunk_read_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
+            std_pipe_input_not_utf8("TEXT_REPLACE").key(),
+            std_pipe_spill_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
+            std_pipe_write_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
             eval_compare_equality_shape().key(),
             eval_ordering_needs_numeric(
                 &crate::Value::string("x".to_string()),
@@ -4006,6 +4084,30 @@ mod tests {
         assert_eq!(
             std_pipe_spawn_failed("TEXT_REPLACE", &std::io::Error::other("denied"),).message(),
             "TEXT_REPLACE cannot spawn pump thread: denied"
+        );
+        assert_eq!(
+            std_pipe_reader_lock_poisoned("TEXT_REPLACE").message(),
+            "TEXT_REPLACE pipe reader lock poisoned"
+        );
+        assert_eq!(
+            std_pipe_writer_lock_poisoned("TEXT_REPLACE").message(),
+            "TEXT_REPLACE pipe writer lock poisoned"
+        );
+        assert_eq!(
+            std_pipe_chunk_read_failed("TEXT_REPLACE", &std::io::Error::other("denied"),).message(),
+            "TEXT_REPLACE cannot read PIPE input: denied"
+        );
+        assert_eq!(
+            std_pipe_input_not_utf8("TEXT_REPLACE").message(),
+            "TEXT_REPLACE PIPE input is not valid UTF-8"
+        );
+        assert_eq!(
+            std_pipe_spill_failed("TEXT_REPLACE", &std::io::Error::other("denied"),).message(),
+            "TEXT_REPLACE PIPE input exceeds the spill backlog: denied"
+        );
+        assert_eq!(
+            std_pipe_write_failed("TEXT_REPLACE", &std::io::Error::other("denied"),).message(),
+            "TEXT_REPLACE cannot write PIPE output: denied"
         );
         assert_eq!(
             eval_compare_equality_shape().message(),

@@ -1237,6 +1237,30 @@ transport, so this phase is mechanical:
    constants (call sites ride the existing func
    params). Core 409 plus integration 629 green;
    clippy and fmt clean.
+   Eager-pipe step 2026-11-26: six new ctors
+   (pipe_reader_lock_poisoned plus
+   pipe_writer_lock_poisoned plus
+   pipe_chunk_read_failed plus pipe_input_not_utf8
+   plus pipe_spill_failed plus pipe_write_failed,
+   wording byte-identical, all pinned by key plus
+   message tests). The outer open/create failures
+   reuse the existing pipe_read_failed plus
+   pipe_create_failed keys with explicit
+   anyhow::Error::from conversions (bare `.into()`
+   in map_err closures stays ambiguous per E0283).
+   The inner loop read gets its own key because it
+   reports `{e}` Display while the outer open
+   reports `{e:#}`: pipe_chunk_read_failed takes
+   `&std::io::Error` where the outer takes
+   `&anyhow::Error`. The two UTF-8 sites share one
+   func-only key (no displayable detail); the two
+   spill sites share one func-plus-io key; write_all
+   plus flush share one func-plus-io key. Locks take
+   func only. Both fns hold their anyhow signatures
+   per leaf-to-root order. No FUNC_* constants
+   (call sites ride the existing func params). Core
+   409 plus integration 629 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
