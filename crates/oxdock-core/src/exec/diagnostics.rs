@@ -9,7 +9,8 @@
 use oxdock_diagnostics::Diagnostic;
 use oxdock_parser::{
     ANY_TYPE_NAME, BOOL_TYPE_NAME, Expr, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
-    LIST_TYPE_NAME, MAP_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, render_structural,
+    LIST_TYPE_NAME, MAP_TYPE_NAME, PIPE_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag,
+    render_structural,
 };
 
 use super::function_names::{
@@ -1417,6 +1418,52 @@ pub fn eval_arg_expand_failed(reason: &anyhow::Error) -> Diagnostic {
         "dsl.eval.arg_expand_failed",
         reason_text.clone(),
         Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// Coercion mismatch: a value word refused at a declared slot. Takes
+/// the call-site context, the expected tag, and the offending value;
+/// structural rendering and the type word live here.
+pub fn coerce_type_mismatch(ctx: &str, expected: &TypeTag, value: &super::Value) -> Diagnostic {
+    let expected_text = render_structural(expected);
+    let actual = value.type_name();
+    let message = format!("{ctx}: TypeMismatch: expected {expected_text}, got {actual}");
+    Diagnostic::new(
+        "dsl.coerce.type_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("ctx", ctx),
+            ("expected", &expected_text),
+            ("actual", actual),
+        ]),
+    )
+}
+
+/// Plain string refused at a `PIPE` slot: handles are created
+/// explicitly via `LET`, never coerced. Takes the offered string;
+/// `Debug` rendering lives here.
+pub fn coerce_string_to_pipe(s: &str) -> Diagnostic {
+    let message = format!(
+        "TypeMismatch: expected {PIPE_TYPE_NAME}, got {STRING_TYPE_NAME} ({s:?}); declare LET $x: {PIPE_TYPE_NAME} and pass $x"
+    );
+    Diagnostic::new(
+        "dsl.coerce.string_to_pipe",
+        message,
+        Diagnostic::make_fields(&[("got", s)]),
+    )
+}
+
+/// Pipe handle refused in a string slot: streams are captured via
+/// `LET`, never rendered. Parameterless: the wording names the rule,
+/// and the operands ride the enclosing call.
+pub fn coerce_pipe_to_string() -> Diagnostic {
+    let message = format!(
+        "coercion: TypeMismatch: expected {STRING_TYPE_NAME}, got {PIPE_TYPE_NAME}: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: {STRING_TYPE_NAME} = ... instead."
+    );
+    Diagnostic::new(
+        "dsl.coerce.pipe_to_string",
+        message,
+        Diagnostic::make_fields(&[]),
     )
 }
 
@@ -3593,6 +3640,14 @@ mod tests {
             eval_int_arg_resolve(&anyhow::anyhow!("x")).key(),
             eval_arg_expr_needs_step_ctx(&Expr::Env("X".to_string())).key(),
             eval_arg_expand_failed(&anyhow::anyhow!("x")).key(),
+            coerce_type_mismatch(
+                "coercion",
+                &TypeTag::Int,
+                &crate::Value::string("x".to_string()),
+            )
+            .key(),
+            coerce_string_to_pipe("x").key(),
+            coerce_pipe_to_string().key(),
             eval_compare_equality_shape().key(),
             eval_ordering_needs_numeric(
                 &crate::Value::string("x".to_string()),
@@ -3848,6 +3903,23 @@ mod tests {
         assert_eq!(
             eval_arg_expand_failed(&anyhow::anyhow!("undefined variable `$x`")).message(),
             "undefined variable `$x`"
+        );
+        assert_eq!(
+            coerce_type_mismatch(
+                "coercion",
+                &TypeTag::Int,
+                &crate::Value::string("x".to_string()),
+            )
+            .message(),
+            "coercion: TypeMismatch: expected INT, got STRING"
+        );
+        assert_eq!(
+            coerce_string_to_pipe("x").message(),
+            "TypeMismatch: expected PIPE, got STRING (\"x\"); declare LET $x: PIPE and pass $x"
+        );
+        assert_eq!(
+            coerce_pipe_to_string().message(),
+            "coercion: TypeMismatch: expected STRING, got PIPE: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
         );
         assert_eq!(
             eval_compare_equality_shape().message(),

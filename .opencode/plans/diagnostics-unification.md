@@ -1170,6 +1170,34 @@ transport, so this phase is mechanical:
    TEXT_REPLACE call site rides the existing
    constant). Core 409 plus integration 629 green;
    clippy and fmt clean.
+   Coercion step 2026-11-26: three new ctors
+   (coerce_type_mismatch plus coerce_string_to_pipe
+   plus coerce_pipe_to_string, wording
+   byte-identical, all pinned by key plus message
+   tests). The generic ctor takes `&TypeTag` plus
+   `&Value` and renders the structural tag plus the
+   type word inside, per the value-rendering
+   precedent; the pipe ctors interpolate
+   PIPE_TYPE_NAME plus STRING_TYPE_NAME instead of
+   literals. Both anyhow helpers (type_mismatch,
+   mismatch) are deleted: all 15 construction sites
+   across coerce_value, coerce_scalar,
+   string_or_path_text, mirror_stream, and
+   read_pipe_eager invoke the ctors directly with
+   `.into()`, holding their anyhow signatures. One
+   signature flips as a clean leaf:
+   string_or_path_text now returns DiagnosticResult
+   (single ctor site, no inner anyhow dependency);
+   its ~15 NativeFn callers hold unchanged via the
+   blanket conversion. coerce_value plus
+   coerce_scalar stay anyhow for now: the parser
+   check_value error they propagate is still a raw
+   anyhow bail, and flipping ahead of the parser
+   would need a downcast. New `dsl.coerce.*`
+   namespace; no FUNC_* constants (slot contexts
+   like "coercion" ride the existing call-site
+   strings). Core 409 plus integration 629 green;
+   clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
