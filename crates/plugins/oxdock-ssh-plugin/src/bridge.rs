@@ -23,7 +23,9 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::diagnostics as ssh_diag;
 use bytes::Bytes;
 use oxdock_core::{StepCtx, Value};
 use oxdock_process::{CancelHub, run_guarded as guard_worker};
@@ -98,7 +100,7 @@ fn pump_out(
             Waited::Up(Some(UpMsg::Data(bytes))) => {
                 let mut guard = writer
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("SSH pump output lock poisoned"))?;
+                    .map_err(|_| anyhow::Error::new(ssh_diag::pump_output_lock_poisoned()))?;
                 guard
                     .write_all(&bytes)
                     .context("SSH pump output pipe write failed")?;
@@ -132,7 +134,9 @@ fn pump_in(
             break;
         }
         match read_pump_chunk(reader, &mut buffer) {
-            Err(err) => bail!("SSH pump input pipe read failed: {err}"),
+            Err(err) => {
+                return Err(anyhow::Error::new(ssh_diag::pump_input_read_failed(&err)));
+            }
             Ok(0) => {
                 if !cancel.load(Ordering::SeqCst) {
                     let _ = down_tx.blocking_send(DownMsg::Eof);
@@ -168,7 +172,7 @@ pub(crate) fn note_failure(
         }
         Err(_) => {
             if failed.is_none() {
-                *failed = Some(anyhow::anyhow!("SSH pump {worker} panicked"));
+                *failed = Some(anyhow::Error::new(ssh_diag::pump_worker_panicked(worker)));
             }
         }
     }
@@ -324,7 +328,9 @@ pub fn pump_session<P: ProcessManager>(
         Some(err) => Err(err),
         None => {
             if cancel.load(Ordering::SeqCst) {
-                anyhow::bail!("SSH pump interrupted by cancellation");
+                return Err(anyhow::Error::new(
+                    ssh_diag::pump_interrupted_by_cancellation(),
+                ));
             }
             Ok(())
         }
@@ -359,13 +365,15 @@ pub fn pump_pipe_to_pipe<P: ProcessManager>(
             break;
         }
         match read_pump_chunk(&reader, &mut buffer) {
-            Err(err) => bail!("SSH_PUMP source pipe read failed: {err}"),
+            Err(err) => {
+                return Err(anyhow::Error::new(ssh_diag::pump_source_read_failed(&err)));
+            }
             Ok(0) => break,
             Ok(count) => {
                 {
                     let mut guard = writer
                         .lock()
-                        .map_err(|_| anyhow::anyhow!("SSH_PUMP target lock poisoned"))?;
+                        .map_err(|_| anyhow::Error::new(ssh_diag::pump_target_lock_poisoned()))?;
                     guard
                         .write_all(&buffer[..count])
                         .context("SSH_PUMP target pipe write failed")?;
@@ -423,7 +431,11 @@ pub(crate) fn pump_pipe_to_sink(
             break;
         }
         match read_pump_chunk(reader, &mut buffer) {
-            Err(err) => bail!("{func} input pipe read failed: {err}"),
+            Err(err) => {
+                return Err(anyhow::Error::new(ssh_diag::pump_func_input_read_failed(
+                    func, &err,
+                )));
+            }
             Ok(0) => break,
             Ok(count) => {
                 if sink.write_all(&buffer[..count]).is_err() {

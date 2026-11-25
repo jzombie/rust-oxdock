@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+
+use crate::diagnostics as ssh_diag;
 use bytes::Bytes;
 use russh::server::{Auth, Handler, Msg, Session};
 use russh::{Channel, ChannelId};
@@ -142,13 +144,13 @@ impl Handler for EphemeralHandler {
         _session: &mut Session,
     ) -> Result<()> {
         let Some(state) = self.channels.get(&channel) else {
-            bail!("data for unknown channel");
+            return Err(anyhow::Error::new(ssh_diag::channel_data_unknown()));
         };
         state
             .up_tx
             .send(UpMsg::Data(Bytes::copy_from_slice(data)))
             .await
-            .map_err(|_| anyhow::anyhow!("pump went away"))?;
+            .map_err(|_| anyhow::Error::new(ssh_diag::channel_pump_gone()))?;
         Ok(())
     }
 
@@ -170,7 +172,7 @@ impl Handler for EphemeralHandler {
                 .handle()
                 .close(channel)
                 .await
-                .map_err(|_| anyhow::anyhow!("wire gone during EOF close"))?;
+                .map_err(|_| anyhow::Error::new(ssh_diag::channel_wire_gone_eof_close()))?;
             self.channels.remove(&channel);
         }
         Ok(())
@@ -254,7 +256,7 @@ impl EphemeralHandler {
         session: &mut Session,
     ) -> Result<()> {
         let Some(state) = self.channels.get_mut(&channel) else {
-            bail!("request for unknown channel");
+            return Err(anyhow::Error::new(ssh_diag::channel_request_unknown()));
         };
         if state.announced {
             let _ = session.channel_success(channel);
@@ -266,7 +268,7 @@ impl EphemeralHandler {
             state.down_rx.take(),
             state.down_tx.take(),
         ) else {
-            bail!("channel already announced");
+            return Err(anyhow::Error::new(ssh_diag::channel_already_announced()));
         };
         let handle = session.handle();
         tokio::spawn(drive_wire(down_rx, handle, channel));

@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::diagnostics as ssh_diag;
 use oxdock_core::{Field, HostModule, OxDockFn, OxDockType, RecordSchema, StepCtx, TypeTag, Value};
 use oxdock_func_macro::oxdock_func;
 use oxdock_net_plugin::{
@@ -84,16 +86,20 @@ fn dequeue_session<P: ProcessManager>(
         });
         let result = loop {
             if hub.is_cancelled() || cx.is_cancelled() {
-                break Err(anyhow::anyhow!("{func}: task cancelled"));
+                break Err(anyhow::Error::new(ssh_diag::dequeue_task_cancelled(func)));
             }
             match queue.try_pop() {
                 Dequeue::Session(session) => break Ok(session),
-                Dequeue::Shutdown => break Err(anyhow::anyhow!("{func}: server is closed")),
+                Dequeue::Shutdown => {
+                    break Err(anyhow::Error::new(ssh_diag::dequeue_server_closed(func)));
+                }
                 Dequeue::Empty | Dequeue::Cancelled => {}
             }
             match queue.wait_blocking(&hub) {
                 Dequeue::Session(session) => break Ok(session),
-                Dequeue::Shutdown => break Err(anyhow::anyhow!("{func}: server is closed")),
+                Dequeue::Shutdown => {
+                    break Err(anyhow::Error::new(ssh_diag::dequeue_server_closed(func)));
+                }
                 Dequeue::Cancelled | Dequeue::Empty => {}
             }
         };
@@ -154,9 +160,7 @@ fn ssh_dequeue<P: ProcessManager>(
     server: SshServerTag,
 ) -> Result<Value> {
     if !cx.is_async_task() {
-        bail!(
-            "SSH_DEQUEUE requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ SSH_DEQUEUE($server.server) }}"
-        );
+        return Err(anyhow::Error::new(ssh_diag::dequeue_requires_async()));
     }
     let state = Arc::clone(server.state());
     let session = dequeue_session(cx, state.queue(), "SSH_DEQUEUE")?;
@@ -220,21 +224,33 @@ fn ssh_serve<P: ProcessManager>(
         Some(value) => {
             let text = value.as_str().expect("check_options verified STRING");
             if text.trim().is_empty() {
-                bail!("SSH_SERVE option '{FIELD_USERNAME}' must not be empty");
+                return Err(anyhow::Error::new(ssh_diag::serve_option_empty(
+                    FIELD_USERNAME,
+                )));
             }
             text.to_string()
         }
-        None => bail!("SSH_SERVE option '{FIELD_USERNAME}' is required"),
+        None => {
+            return Err(anyhow::Error::new(ssh_diag::serve_option_required(
+                FIELD_USERNAME,
+            )));
+        }
     };
     let password = match map.get(FIELD_PASSWORD) {
         Some(value) => {
             let text = value.as_str().expect("check_options verified STRING");
             if text.trim().is_empty() {
-                bail!("SSH_SERVE option '{FIELD_PASSWORD}' must not be empty");
+                return Err(anyhow::Error::new(ssh_diag::serve_option_empty(
+                    FIELD_PASSWORD,
+                )));
             }
             text.to_string()
         }
-        None => bail!("SSH_SERVE option '{FIELD_PASSWORD}' is required"),
+        None => {
+            return Err(anyhow::Error::new(ssh_diag::serve_option_required(
+                FIELD_PASSWORD,
+            )));
+        }
     };
     let key_path = match map.get(OPT_KEY_PATH) {
         Some(value) => {
@@ -408,9 +424,7 @@ fn ssh_accept<P: ProcessManager>(
     out_pipe: PipeHandle,
 ) -> Result<Value> {
     if !cx.is_async_task() {
-        bail!(
-            "SSH_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE<T> = ASYNC {{ SSH_ACCEPT($server, $in, $out) }}"
-        );
+        return Err(anyhow::Error::new(ssh_diag::accept_requires_async()));
     }
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
@@ -480,7 +494,7 @@ fn ssh_pump_channel<P: ProcessManager>(
     out_pipe: PipeHandle,
 ) -> Result<Value> {
     if !cx.is_async_task() {
-        bail!("SSH_PUMP_CHANNEL requires ASYNC: pump it in its own task after SSH_DEQUEUE");
+        return Err(anyhow::Error::new(ssh_diag::pump_channel_requires_async()));
     }
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
@@ -537,10 +551,12 @@ fn ssh_send_exit_status<P: ProcessManager>(
 ) -> Result<Value> {
     let _ = cx;
     if code < 0 {
-        bail!("SSH_SEND_EXIT_STATUS code must not be negative: {code}");
+        return Err(anyhow::Error::new(ssh_diag::send_exit_status_negative(
+            code,
+        )));
     }
     let code = u32::try_from(code)
-        .map_err(|_| anyhow::anyhow!("SSH_SEND_EXIT_STATUS code out of range: {code}"))?;
+        .map_err(|_| anyhow::Error::new(ssh_diag::send_exit_status_out_of_range(code)))?;
     session.send_exit_status(code)?;
     Ok(Value::bool(true))
 }
@@ -626,7 +642,7 @@ fn ssh_connect<P: ProcessManager>(
     out_pipe: PipeHandle,
 ) -> Result<Value> {
     if !cx.is_async_task() {
-        bail!("SSH_CONNECT requires ASYNC: run it in its own task beside the SSH_PUMP tasks");
+        return Err(anyhow::Error::new(ssh_diag::connect_requires_async()));
     }
     // Registry travels as module state.
     let registry = cx
@@ -635,10 +651,10 @@ fn ssh_connect<P: ProcessManager>(
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
     if registry.is_offline() {
-        bail!("SSH_CONNECT failed: engine running in --offline mode");
+        return Err(anyhow::Error::new(ssh_diag::connect_offline()));
     }
     if username.is_empty() {
-        bail!("SSH_CONNECT username must not be empty");
+        return Err(anyhow::Error::new(ssh_diag::connect_username_empty()));
     }
     // Symbolic only: physical shapes already failed in the parser.
     let endpoint = parse_virtual_endpoint(&target, "SSH_CONNECT")?;
@@ -816,7 +832,7 @@ fn ssh_pty_run<P: ProcessManager>(
     out_pipe: PipeHandle,
 ) -> Result<Value> {
     if !cx.is_async_task() {
-        bail!("SSH_PTY_RUN requires ASYNC: run it in its own task beside the session pump task");
+        return Err(anyhow::Error::new(ssh_diag::pty_run_requires_async()));
     }
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
@@ -915,7 +931,7 @@ fn ssh_run<P: ProcessManager>(
     err_pipe: PipeHandle,
 ) -> Result<Value> {
     if !cx.is_async_task() {
-        bail!("SSH_RUN requires ASYNC: run it in its own task beside the session pump task");
+        return Err(anyhow::Error::new(ssh_diag::run_requires_async()));
     }
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
@@ -1018,16 +1034,16 @@ fn ssh_exec<P: ProcessManager>(
     options: BTreeMap<String, Value>,
 ) -> Result<Value> {
     if argv.is_empty() {
-        bail!("SSH_EXEC needs at least a program");
+        return Err(anyhow::Error::new(ssh_diag::exec_needs_program()));
     }
     if username.is_empty() {
-        bail!("SSH_EXEC username must not be empty");
+        return Err(anyhow::Error::new(ssh_diag::exec_username_empty()));
     }
     let registry = cx
         .module_state::<EndpointRegistry>("SSH")
         .expect("SSH module registers its endpoint registry as module state");
     if registry.is_offline() {
-        bail!("SSH_EXEC failed: engine running in --offline mode");
+        return Err(anyhow::Error::new(ssh_diag::exec_offline()));
     }
     // Symbolic only: physical shapes already failed in the parser.
     let endpoint = parse_virtual_endpoint(&target, "SSH_EXEC")?;
@@ -1059,7 +1075,9 @@ fn ssh_exec<P: ProcessManager>(
                 })?
             };
             if timeout.is_zero() {
-                bail!("SSH_EXEC option '{OPT_TIMEOUT}' must be positive");
+                return Err(anyhow::Error::new(ssh_diag::exec_option_must_be_positive(
+                    OPT_TIMEOUT,
+                )));
             }
             timeout
         }
@@ -1069,7 +1087,9 @@ fn ssh_exec<P: ProcessManager>(
         Some(value) => {
             let bytes = value.as_i64().expect("check_options verified INT");
             if bytes <= 0 {
-                bail!("SSH_EXEC option '{OPT_MAX_BYTES}' must be positive");
+                return Err(anyhow::Error::new(ssh_diag::exec_option_must_be_positive(
+                    OPT_MAX_BYTES,
+                )));
             }
             bytes as usize
         }

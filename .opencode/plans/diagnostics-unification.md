@@ -353,6 +353,29 @@ Remaining:
   as-is (already proper chaining); test-only `ParseError` stubs left
   as-is; messages byte-identical; lib 27 + integration 4 green;
   clippy/doc clean; zero fmt drift).
+- Plugin crate: `oxdock-ssh-plugin` done 2026-11-26 (new
+  `src/diagnostics.rs` owning 45 `ssh.*` ctors: key escapes/not-Ed25519/
+  insecure-permissions, pump output-lock/input-read/worker-panicked/
+  interrupted/source-read/target-lock/func-input-read, auth rejected
+  (shared EXEC/CONNECT key), session pump-finished/queue-saturated/
+  writer-gone/already-pumped, channel data-unknown/pump-gone/wire-gone/
+  request-unknown/already-announced, run child-read/output-lock/
+  needs-program/spawn-lost-stderr/interrupted, pty output-lock/
+  interrupted, dequeue task-cancelled/server-closed (shared
+  DEQUEUE/ACCEPT keys) + 6 requires-async + serve option-empty/
+  required (shared keys) + exec needs-program/username-empty/offline/
+  option-positive (shared key) + connect requires-async/offline/
+  username-empty + send-exit-status negative/out-of-range;
+  `keys.rs`/`bridge.rs`/`runtime.rs`/`types.rs`/`auth.rs`/`run.rs`/
+  `pty.rs`/`funcs.rs` zero inline failures (only
+  `anyhow::Error::new` + `.context` chains remain); `no_cli_mapping`
+  / `acquire_listener` / `resolve_service_target` / `check_options`
+  propagation untouched; messages byte-identical (existing
+  `contains(...)` pins hold); lib 13 green, integration 67 passed +
+  1 pre-existing failure (`non_map_serve_options_bails` fails
+  identically on the clean tree: `check_options` renders
+  "expected `MAP`" with backticks vs the test's "expected MAP");
+  clippy/doc clean; zero fmt drift).
 
 ### Phase D — retire `anyhow` as the carrier
 

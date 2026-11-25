@@ -1938,6 +1938,7 @@ dependencies = [
  "hex",
  "indoc",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-net-plugin",
