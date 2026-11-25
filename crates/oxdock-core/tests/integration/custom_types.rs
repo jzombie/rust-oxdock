@@ -520,7 +520,7 @@ fn custom_type_rejects_key_path_traversal() {
     )
     .expect_err("key path into opaque type must fail");
     assert!(
-        format!("{err:#}").contains("Cannot traverse into scalar"),
+        format!("{err:#}").contains("cannot traverse into scalar"),
         "{err:#}"
     );
 }

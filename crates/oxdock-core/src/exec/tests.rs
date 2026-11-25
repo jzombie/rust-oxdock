@@ -5169,7 +5169,7 @@ fn int_params_reject_unconverted_words() {
     let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
     let err = run_expect_err(fs, &steps, MockProcessManager::default());
     assert!(
-        format!("{err:#}").contains("expected INT"),
+        format!("{err:#}").contains("expected `INT`"),
         "names the slot: {err:#}"
     );
 }
@@ -5698,7 +5698,7 @@ fn merge_maps_rejects_unknown_policy_at_boundary() {
     let fs = MockFs::new();
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:#}").contains("expected LIST"),
+        format!("{err:#}").contains("expected `LIST"),
         "boundary enforces the LIST shape: {err:#}"
     );
 
@@ -7357,7 +7357,7 @@ fn file_import_function_read_of_caller_var_fails() {
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:?}").contains("undefined variable $carrier"),
+        format!("{err:?}").contains("undefined variable `$carrier`"),
         "fails naming the unobservable variable: {err:?}"
     );
 }
@@ -7414,7 +7414,7 @@ fn entry_function_arg_and_template_share_one_gate() {
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:?}").contains("undefined variable $nope"),
+        format!("{err:?}").contains("undefined variable `$nope`"),
         "RUN args reject undeclared names: {err:?}"
     );
     let fs = MockFs::new();
@@ -7428,7 +7428,7 @@ fn entry_function_arg_and_template_share_one_gate() {
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:?}").contains("undefined variable $nope"),
+        format!("{err:?}").contains("undefined variable `$nope`"),
         "templates reject undeclared names through the same gate: {err:?}"
     );
 }
@@ -7653,7 +7653,7 @@ fn file_import_init_cannot_see_caller_vars() {
     "#});
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:?}").contains("undefined variable $caller_var"),
+        format!("{err:?}").contains("undefined variable `$caller_var`"),
         "fails naming the unobservable variable: {err:?}"
     );
 }
@@ -9556,7 +9556,7 @@ fn dead_guarded_import_leaves_alias_unknown() {
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("unknown placeholder function 'ALIAS::F'"),
+        rendered.contains("unknown placeholder function `ALIAS::F`"),
         "dead import must leave the placeholder unknown, got: {rendered}"
     );
     assert!(
@@ -11018,7 +11018,7 @@ fn template_rejects_script_and_stateful_callees_with_pure_arity() {
     for (body, needle) in [
         (
             "{{ SCRIPT::FOO() }}",
-            "unknown placeholder function 'SCRIPT::FOO'",
+            "unknown placeholder function `SCRIPT::FOO`",
         ),
         (
             "{{ CB::F($x) }}",
@@ -11026,7 +11026,7 @@ fn template_rejects_script_and_stateful_callees_with_pure_arity() {
         ),
         (
             "{{ STD::TYPO() }}",
-            "unknown placeholder function 'STD::TYPO'",
+            "unknown placeholder function `STD::TYPO`",
         ),
         ("{{ STD::LEN() }}", "expects 1 argument"),
     ] {
@@ -11092,7 +11092,7 @@ fn template_sibling_alias_does_not_leak_script_hint() {
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     let rendered = format!("{err:#}");
     assert!(
-        rendered.contains("unknown placeholder function 'LIBB::BAR'"),
+        rendered.contains("unknown placeholder function `LIBB::BAR`"),
         "sibling alias must fail unknown, got: {rendered}"
     );
     assert!(

@@ -219,7 +219,7 @@ fn unique_rejects_non_list_statically() {
     "#};
     let err = run_script(&root, script).expect_err("non-list UNIQUE must fail");
     assert!(
-        format!("{err:#}").contains("expected LIST<ANY>"),
+        format!("{err:#}").contains("expected `LIST<ANY>`"),
         "names the list contract: {err:#}"
     );
 }

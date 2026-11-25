@@ -7,7 +7,10 @@
 //! here.
 
 use oxdock_diagnostics::Diagnostic;
-use oxdock_parser::{ANY_TYPE_NAME, HANDLE_TYPE_NAME, LIST_TYPE_NAME, MAP_TYPE_NAME, Spelled};
+use oxdock_parser::{
+    ANY_TYPE_NAME, Field, HANDLE_TYPE_NAME, LIST_TYPE_NAME, MAP_TYPE_NAME, Spelled, TypeTag,
+    render_structural,
+};
 
 /// Duplicate field name inside one MAP spelling.
 pub fn map_duplicate_field(field: &str) -> Diagnostic {
@@ -1117,6 +1120,1255 @@ pub fn std_parse_duration_range(text: &str) -> Diagnostic {
     )
 }
 
+/// IMPORT naming a file outside the static import closure. Takes the
+/// path; the closure wording lives here.
+pub fn import_not_in_closure(path: &str) -> Diagnostic {
+    let message = format!("IMPORT `{path}` cannot be read: not in the import closure");
+    Diagnostic::new(
+        "dsl.import.not_in_closure",
+        message,
+        Diagnostic::make_fields(&[("path", path)]),
+    )
+}
+
+/// IMPORT `EXPORT TYPE` naming no top-level `TYPE` in that file.
+pub fn import_export_type_mismatch(path: &str, name: &str) -> Diagnostic {
+    let message = format!(
+        "IMPORT `{path}` EXPORT TYPE `{name}` does not match any top-level TYPE in that file"
+    );
+    Diagnostic::new(
+        "dsl.import.export_type_mismatch",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("name", name)]),
+    )
+}
+
+/// Static variable declaration type resolution failure. Takes the
+/// variable name and the underlying failure.
+pub fn check_var_tag(var: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("variable `${var}`: {reason_text}");
+    Diagnostic::new(
+        "dsl.check.var_tag",
+        message,
+        Diagnostic::make_fields(&[("var", var), ("reason", &reason_text)]),
+    )
+}
+
+/// Static function tag resolution failure. Takes the function name
+/// and the underlying failure.
+pub fn check_func_tag(name: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("function `{name}`: {reason_text}");
+    Diagnostic::new(
+        "dsl.check.func_tag",
+        message,
+        Diagnostic::make_fields(&[("function", name), ("reason", &reason_text)]),
+    )
+}
+
+/// Static step-attributed passthrough. Takes the 1-based step number
+/// and the underlying failure; the `step N` prefix lives here.
+pub fn check_step_wrap(step: usize, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("step {step}: {reason_text}");
+    Diagnostic::new(
+        "dsl.check.step_wrap",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("reason", &reason_text)]),
+    )
+}
+
+/// Static context-attributed passthrough. Takes the context prefix
+/// (a file key, `at()`, `step N, line L, col C`) and the underlying
+/// failure; joining lives here.
+pub fn check_ctx_wrap(ctx: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{ctx}: {reason_text}");
+    Diagnostic::new(
+        "dsl.check.ctx_wrap",
+        message,
+        Diagnostic::make_fields(&[("ctx", ctx), ("reason", &reason_text)]),
+    )
+}
+
+/// Static exact-shape mismatch. Takes the context and both sides;
+/// structural rendering and quoting live here.
+pub fn check_exact_mismatch(ctx: &str, expected: &TypeTag, actual: &TypeTag) -> Diagnostic {
+    let exp = render_structural(expected);
+    let act = render_structural(actual);
+    let message = format!("{ctx}: TypeMismatch: expected `{exp}`, got `{act}`");
+    Diagnostic::new(
+        "dsl.check.exact_mismatch",
+        message,
+        Diagnostic::make_fields(&[("ctx", ctx), ("expected", &exp), ("actual", &act)]),
+    )
+}
+
+/// Static unification failure. Takes the context and both sides;
+/// structural rendering and quoting live here.
+pub fn check_cannot_unify(ctx: &str, left: &TypeTag, right: &TypeTag) -> Diagnostic {
+    let l = render_structural(left);
+    let r = render_structural(right);
+    let message = format!("{ctx}: cannot unify `{l}` and `{r}`");
+    Diagnostic::new(
+        "dsl.check.cannot_unify",
+        message,
+        Diagnostic::make_fields(&[("ctx", ctx), ("left", &l), ("right", &r)]),
+    )
+}
+
+/// Static undeclared variable read. Takes the location prefix
+/// (`step N: ` or empty in RPN contexts) and the key; the `$` sigil
+/// and quoting live here.
+pub fn check_undefined_var(prefix: &str, key: &str) -> Diagnostic {
+    let message = format!("{prefix}undefined variable `${key}`");
+    Diagnostic::new(
+        "dsl.check.undefined_var",
+        message,
+        Diagnostic::make_fields(&[("prefix", prefix), ("key", key)]),
+    )
+}
+
+/// Static definite-unbound read: the name binds on no reachable path.
+/// Takes the key; quoting lives here.
+pub fn check_var_not_guaranteed(key: &str) -> Diagnostic {
+    let message = format!(
+        "variable `${key}` is not guaranteed to be defined on all reachable paths for this step"
+    );
+    Diagnostic::new(
+        "dsl.check.var_not_guaranteed",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
+/// Static key-path field miss. Takes the location prefix, the part,
+/// and the record fields; the expected-names join lives here.
+pub fn check_unknown_field(prefix: &str, part: &str, fields: &[Field]) -> Diagnostic {
+    let expected = fields
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let message = format!("{prefix}unknown field `{part}`; expected fields: {expected}");
+    Diagnostic::new(
+        "dsl.check.unknown_field",
+        message,
+        Diagnostic::make_fields(&[("prefix", prefix), ("part", part), ("expected", &expected)]),
+    )
+}
+
+/// Static key-path index miss. Takes the location prefix and the
+/// part; quoting lives here.
+pub fn check_invalid_array_index(prefix: &str, part: &str) -> Diagnostic {
+    let message = format!("{prefix}invalid array index `{part}`");
+    Diagnostic::new(
+        "dsl.check.invalid_array_index",
+        message,
+        Diagnostic::make_fields(&[("prefix", prefix), ("part", part)]),
+    )
+}
+
+/// Static key-path traversal through a scalar. Takes the location
+/// prefix and the part; quoting lives here.
+pub fn check_cannot_traverse(prefix: &str, part: &str) -> Diagnostic {
+    let message = format!("{prefix}cannot traverse into scalar value at key `{part}`");
+    Diagnostic::new(
+        "dsl.check.cannot_traverse",
+        message,
+        Diagnostic::make_fields(&[("prefix", prefix), ("part", part)]),
+    )
+}
+
+/// Static duplicate function across imports. Takes the key and the
+/// display path; quoting lives here.
+pub fn check_duplicate_func(key: &str, display: &str) -> Diagnostic {
+    let message = format!("duplicate function `{key}` from `{display}` collides across imports");
+    Diagnostic::new(
+        "dsl.check.duplicate_func",
+        message,
+        Diagnostic::make_fields(&[("key", key), ("display", display)]),
+    )
+}
+
+/// Static `CONST` redeclaration. Takes the 1-based step number and the
+/// key; quoting lives here.
+pub fn check_redeclare_const(step: usize, key: &str) -> Diagnostic {
+    let message = format!(
+        "step {step}: redeclaration error: `{key}` is a CONST binding and cannot be redeclared; CONST and LET share one namespace"
+    );
+    Diagnostic::new(
+        "dsl.check.redeclare_const",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("key", key)]),
+    )
+}
+
+/// Static `LET` redeclaration. Takes the 1-based step number and the
+/// key; the `$` sigil and quoting live here.
+pub fn check_redeclare_let(step: usize, key: &str) -> Diagnostic {
+    let message = format!(
+        "step {step}: redeclaration error: `${key}` already declared in this scope; use `${key}` = ... to mutate"
+    );
+    Diagnostic::new(
+        "dsl.check.redeclare_let",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("key", key)]),
+    )
+}
+
+/// Static undeclared environment read. Takes the step position, the
+/// scope label, the source prefix (`env:`/`script_env:`), and the
+/// name; quoting lives here.
+pub fn check_undeclared_env(pos: &str, label: &str, prefix: &str, name: &str) -> Diagnostic {
+    let message = format!(
+        "{pos} in {label}: uses undeclared environment variable `{prefix}{name}`: declare it first with ENV or INHERIT_ENV"
+    );
+    Diagnostic::new(
+        "dsl.check.undeclared_env",
+        message,
+        Diagnostic::make_fields(&[
+            ("pos", pos),
+            ("scope", label),
+            ("prefix", prefix),
+            ("name", name),
+        ]),
+    )
+}
+
+/// Static `$ALIAS::NAME` key path. Qualified reads never traverse;
+/// the template owner wording lives here so no call site restates it.
+pub fn check_placeholder_keypath() -> Diagnostic {
+    let message = oxdock_parser::template::qualified_keypath_error();
+    Diagnostic::new(
+        "dsl.check.placeholder_keypath",
+        message,
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Static empty placeholder variable. Parameterless: the wording is
+/// fixed.
+pub fn check_empty_placeholder_var() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.check.empty_placeholder_var",
+        "invalid placeholder variable: empty variable reference".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Static bare-sigil read. Takes the shaped source; the hint wording
+/// lives with the template owner.
+pub fn check_bare_sigil(src: &str) -> Diagnostic {
+    let message = oxdock_parser::template::bare_sigil_error(src);
+    Diagnostic::new(
+        "dsl.check.bare_sigil",
+        message,
+        Diagnostic::make_fields(&[("src", src)]),
+    )
+}
+
+/// Static bare template head. Takes the key; quoting lives here.
+pub fn check_undefined_script_var(key: &str) -> Diagnostic {
+    let message = format!("undefined script variable: `{key}`");
+    Diagnostic::new(
+        "dsl.check.undefined_script_var",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
+/// Static unknown placeholder call. Takes the qualified name; quoting
+/// lives here. The runtime path lists known functions; the static
+/// gate cannot, so this is a distinct key.
+pub fn check_placeholder_unknown(qualified: &str) -> Diagnostic {
+    let message = format!("unknown placeholder function `{qualified}`");
+    Diagnostic::new(
+        "dsl.check.placeholder_unknown",
+        message,
+        Diagnostic::make_fields(&[("name", qualified)]),
+    )
+}
+
+/// Static disjoint platform-alias miss. Takes the alias, base, holder
+/// files, host flag, and script probe; the miss wording lives with
+/// the single owner in `super::native`.
+pub fn check_disjoint_alias_miss(
+    module: &str,
+    name: &str,
+    base: &str,
+    files: &std::collections::HashSet<String>,
+    has_host: bool,
+    is_script: &dyn Fn(&str) -> bool,
+) -> Diagnostic {
+    let message = super::native::disjoint_alias_placeholder_miss(
+        module, name, base, files, has_host, is_script,
+    );
+    Diagnostic::new(
+        "dsl.check.disjoint_alias_miss",
+        message,
+        Diagnostic::make_fields(&[("alias", module), ("name", name), ("base", base)]),
+    )
+}
+
+/// Static described placeholder miss. Takes the module, name, and the
+/// three visibility flags; the wording lives with the single owner
+/// in `super::native`. Returns `None` when the miss is undescribed
+/// (the caller falls through to [`check_placeholder_unknown`]).
+pub fn check_placeholder_miss(
+    module: &str,
+    name: &str,
+    is_script: bool,
+    is_stateful: bool,
+    alias_known: bool,
+) -> Option<Diagnostic> {
+    let text = super::native::describe_placeholder_miss(
+        module,
+        name,
+        is_script,
+        is_stateful,
+        alias_known,
+    )?;
+    Some(Diagnostic::new(
+        "dsl.check.placeholder_miss",
+        text,
+        Diagnostic::make_fields(&[("alias", module), ("name", name)]),
+    ))
+}
+
+/// Static template call arity (exact). Takes the step position, scope
+/// label, qualified name, expected total, and count.
+pub fn check_template_arity_exact(
+    pos: &str,
+    label: &str,
+    qualified: &str,
+    total: usize,
+    got: usize,
+) -> Diagnostic {
+    let message = format!("{pos} in {label}: {qualified}() expects {total} argument(s), got {got}");
+    Diagnostic::new(
+        "dsl.check.template_arity_exact",
+        message,
+        Diagnostic::make_fields(&[
+            ("pos", pos),
+            ("scope", label),
+            ("function", qualified),
+            ("expected", &total.to_string()),
+            ("got", &got.to_string()),
+        ]),
+    )
+}
+
+/// Static template call arity (range). Takes the step position, scope
+/// label, qualified name, min, max, and count.
+pub fn check_template_arity_range(
+    pos: &str,
+    label: &str,
+    qualified: &str,
+    min: usize,
+    max: usize,
+    got: usize,
+) -> Diagnostic {
+    let message =
+        format!("{pos} in {label}: {qualified}() expects {min} to {max} argument(s), got {got}");
+    Diagnostic::new(
+        "dsl.check.template_arity_range",
+        message,
+        Diagnostic::make_fields(&[
+            ("pos", pos),
+            ("scope", label),
+            ("function", qualified),
+            ("min", &min.to_string()),
+            ("max", &max.to_string()),
+            ("got", &got.to_string()),
+        ]),
+    )
+}
+
+/// Static template call closed-set miss. Takes the step position,
+/// scope label, qualified and parameter names, the allowed values,
+/// and the rendered literal; joining lives here.
+pub fn check_template_arg_allowed(
+    pos: &str,
+    label: &str,
+    qualified: &str,
+    param: &str,
+    allowed: &[&str],
+    got: &str,
+) -> Diagnostic {
+    let joined = allowed.join(", ");
+    let message = format!(
+        "{pos} in {label}: {qualified}() argument `${param}` must be one of: {joined}, got {got:?}"
+    );
+    Diagnostic::new(
+        "dsl.check.template_arg_allowed",
+        message,
+        Diagnostic::make_fields(&[
+            ("pos", pos),
+            ("scope", label),
+            ("function", qualified),
+            ("param", param),
+            ("allowed", &joined),
+            ("got", got),
+        ]),
+    )
+}
+
+/// Static template call argument nesting past the literal cap.
+/// Parameterless: the cap renders from the shared constant.
+pub fn check_template_arg_depth() -> Diagnostic {
+    let max = oxdock_parser::template::MAX_TEMPLATE_ARG_DEPTH;
+    let message = format!("placeholder call argument nests too deep (limit {max})");
+    Diagnostic::new(
+        "dsl.check.template_arg_depth",
+        message,
+        Diagnostic::make_fields(&[("max", &max.to_string())]),
+    )
+}
+
+/// Static empty template call argument. Parameterless: fixed wording.
+pub fn check_empty_placeholder_arg() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.check.empty_placeholder_arg",
+        "invalid placeholder call argument: empty variable reference".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Static analysis nesting past the cap inside a function.
+/// Takes the function key.
+pub fn check_depth_function(key: &str) -> Diagnostic {
+    let message = format!("static analysis depth exceeded in function `{key}`");
+    Diagnostic::new(
+        "dsl.check.depth_function",
+        message,
+        Diagnostic::make_fields(&[("function", key)]),
+    )
+}
+
+/// Static analysis nesting past the cap inside a scope. Takes the
+/// scope label.
+pub fn check_depth_scope(label: &str) -> Diagnostic {
+    let message = format!("static analysis depth exceeded in `{label}`");
+    Diagnostic::new(
+        "dsl.check.depth_scope",
+        message,
+        Diagnostic::make_fields(&[("scope", label)]),
+    )
+}
+/// Static malformed placeholder call argument. Takes the source;
+/// quoting lives here.
+pub fn check_invalid_placeholder_arg(src: &str) -> Diagnostic {
+    let message = format!("invalid placeholder call argument `{src}`");
+    Diagnostic::new(
+        "dsl.check.invalid_placeholder_arg",
+        message,
+        Diagnostic::make_fields(&[("src", src)]),
+    )
+}
+
+/// Static malformed map literal entry. Takes the entry; quoting lives
+/// here.
+pub fn check_invalid_map_entry(entry: &str) -> Diagnostic {
+    let message = format!("invalid map literal entry `{entry}`: use key: value");
+    Diagnostic::new(
+        "dsl.check.invalid_map_entry",
+        message,
+        Diagnostic::make_fields(&[("entry", entry)]),
+    )
+}
+
+/// Static duplicate map literal key. Takes the key; quoting lives
+/// here.
+pub fn check_duplicate_map_key(key: &str) -> Diagnostic {
+    let message = format!("duplicate key `{key}` in map literal");
+    Diagnostic::new(
+        "dsl.check.duplicate_map_key",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
+/// Static `VOID` block bound to a variable. Takes the 1-based step
+/// number and the variable; quoting lives here.
+pub fn check_void_block_bind(step: usize, var: &str) -> Diagnostic {
+    let message = format!("step {step}: VOID block has no value to bind to `${var}`");
+    Diagnostic::new(
+        "dsl.check.void_block_bind",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("var", var)]),
+    )
+}
+
+/// Static capture yield mismatch. Takes the 1-based step number, the
+/// keyword (`LET`/`CONST`), the variable, and both sides; rendering
+/// and quoting live here.
+pub fn check_capture_mismatch(
+    step: usize,
+    kw: &str,
+    var: &str,
+    yield_tag: &TypeTag,
+    tag: &TypeTag,
+) -> Diagnostic {
+    let y = render_structural(yield_tag);
+    let t = render_structural(tag);
+    let message = format!("step {step}: {kw} `${var}` captures {y} but declares {t}");
+    Diagnostic::new(
+        "dsl.check.capture_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("step", &step.to_string()),
+            ("command", kw),
+            ("var", var),
+            ("yield", &y),
+            ("declares", &t),
+        ]),
+    )
+}
+
+/// Static `AWAIT` on a non-handle. Takes the 1-based step number, the
+/// task variable, and the actual tag; rendering lives here.
+pub fn check_await_not_handle(step: usize, task_var: &str, actual: &TypeTag) -> Diagnostic {
+    let a = render_structural(actual);
+    let message = format!("step {step}: AWAIT `${task_var}` is {a}, not HANDLE");
+    Diagnostic::new(
+        "dsl.check.await_not_handle",
+        message,
+        Diagnostic::make_fields(&[
+            ("step", &step.to_string()),
+            ("task", task_var),
+            ("actual", &a),
+        ]),
+    )
+}
+
+/// Static `AWAIT` of a `HANDLE<VOID>` with an output binding. Takes
+/// the 1-based step number and both variables.
+pub fn check_await_void_payload(step: usize, task_var: &str, out_var: &str) -> Diagnostic {
+    let message = format!(
+        "step {step}: AWAIT `${task_var}` is HANDLE<VOID>: no value to bind to `${out_var}`; use bare AWAIT for join"
+    );
+    Diagnostic::new(
+        "dsl.check.await_void_payload",
+        message,
+        Diagnostic::make_fields(&[
+            ("step", &step.to_string()),
+            ("task", task_var),
+            ("var", out_var),
+        ]),
+    )
+}
+
+/// Static `AWAIT` yield mismatch. Takes the 1-based step number, the
+/// task and output variables, and both sides.
+pub fn check_await_yield_mismatch(
+    step: usize,
+    task_var: &str,
+    payload: &TypeTag,
+    out_var: &str,
+    tag: &TypeTag,
+) -> Diagnostic {
+    let p = render_structural(payload);
+    let t = render_structural(tag);
+    let message =
+        format!("step {step}: AWAIT `${task_var}` yields {p} but `${out_var}` declares {t}");
+    Diagnostic::new(
+        "dsl.check.await_yield_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("step", &step.to_string()),
+            ("task", task_var),
+            ("yield", &p),
+            ("var", out_var),
+            ("declares", &t),
+        ]),
+    )
+}
+
+/// Static `ASYNC` binding with a non-`HANDLE` declaration. Takes the
+/// 1-based step number, the variable, and the tag.
+pub fn check_async_not_handle(step: usize, var: &str, tag: &TypeTag) -> Diagnostic {
+    let t = render_structural(tag);
+    let message = format!(
+        "step {step}: ASYNC `${var}` declares {t}, not HANDLE; every ASYNC position is HANDLE-headed"
+    );
+    Diagnostic::new(
+        "dsl.check.async_not_handle",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("var", var), ("declares", &t)]),
+    )
+}
+
+/// Static `ASYNC` task with a bare `RETURN` under a valued payload.
+/// Takes the 1-based step number, the variable, and the tag.
+pub fn check_async_bare_return(step: usize, var: &str, tag: &TypeTag) -> Diagnostic {
+    let t = render_structural(tag);
+    let message = format!(
+        "step {step}: ASYNC `${var}` declares {t} but task has a bare RETURN; bare RETURN is only a void exit"
+    );
+    Diagnostic::new(
+        "dsl.check.async_bare_return",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("var", var), ("declares", &t)]),
+    )
+}
+
+/// Static `HANDLE<VOID>` task with a value `RETURN`. Takes the 1-based
+/// step number, the return line, and the yielded tag.
+pub fn check_async_void_yield(step: usize, line: usize, ty: &TypeTag) -> Diagnostic {
+    let t = render_structural(ty);
+    let message = format!("step {step}: HANDLE<VOID> task RETURN at line {line} yields {t}");
+    Diagnostic::new(
+        "dsl.check.async_void_yield",
+        message,
+        Diagnostic::make_fields(&[
+            ("step", &step.to_string()),
+            ("line", &line.to_string()),
+            ("yield", &t),
+        ]),
+    )
+}
+
+/// Static `ASYNC` task with no value `RETURN` under a valued payload.
+/// Takes the 1-based step number, the variable, and the tag.
+pub fn check_async_no_return(step: usize, var: &str, tag: &TypeTag) -> Diagnostic {
+    let t = render_structural(tag);
+    let message = format!("step {step}: ASYNC `${var}` declares {t} but task has no value RETURN");
+    Diagnostic::new(
+        "dsl.check.async_no_return",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("var", var), ("declares", &t)]),
+    )
+}
+
+/// Static `ASYNC` task `RETURN` mismatching the payload. Takes the
+/// 1-based step number, the variable, the declared tag, the return
+/// line, and the yielded tag.
+pub fn check_async_return_mismatch(
+    step: usize,
+    var: &str,
+    tag: &TypeTag,
+    line: usize,
+    ty: &TypeTag,
+) -> Diagnostic {
+    let t = render_structural(tag);
+    let y = render_structural(ty);
+    let message = format!(
+        "step {step}: ASYNC `${var}` declares {t} but task RETURN at line {line} yields {y}"
+    );
+    Diagnostic::new(
+        "dsl.check.async_return_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("step", &step.to_string()),
+            ("var", var),
+            ("declares", &t),
+            ("line", &line.to_string()),
+            ("yield", &y),
+        ]),
+    )
+}
+
+/// Static `RETURN` outside any function, task, or block. Takes the
+/// 1-based step number.
+pub fn check_return_outside(step: usize) -> Diagnostic {
+    let message = format!("step {step}: RETURN outside function, ASYNC task, or LET block");
+    Diagnostic::new(
+        "dsl.check.return_outside",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string())]),
+    )
+}
+
+/// Static `RETURN` crossing an `ASYNC` statement boundary. Takes the
+/// 1-based step number.
+pub fn check_return_crosses_async(step: usize) -> Diagnostic {
+    let message = format!("step {step}: RETURN cannot cross ASYNC boundary");
+    Diagnostic::new(
+        "dsl.check.return_crosses_async",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string())]),
+    )
+}
+
+/// Static mutation of an undeclared variable. Takes the 1-based step
+/// number and the key; quoting lives here.
+pub fn check_undeclared_set(step: usize, key: &str) -> Diagnostic {
+    let message = format!(
+        "step {step}: undeclared variable `${key}`: declare it first with LET `${key}`: TYPE = ..."
+    );
+    Diagnostic::new(
+        "dsl.check.undeclared_set",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("key", key)]),
+    )
+}
+
+/// Static mutation of a `CONST` binding. Takes the 1-based step number
+/// and the key; quoting lives here.
+pub fn check_mutate_const(step: usize, key: &str) -> Diagnostic {
+    let message =
+        format!("step {step}: cannot mutate CONST `{key}`: CONST bindings are deeply immutable");
+    Diagnostic::new(
+        "dsl.check.mutate_const",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("key", key)]),
+    )
+}
+
+/// Static isolated allowlist outside `ISOLATED`. Takes the 1-based
+/// step number.
+pub fn check_isolated_allowlist(step: usize) -> Diagnostic {
+    let message = format!("step {step}: isolated allowlist outside ISOLATED");
+    Diagnostic::new(
+        "dsl.check.isolated_allowlist",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string())]),
+    )
+}
+
+/// Static `REMOTE` use of a variable unknown outside. Takes the target
+/// and the key; quoting lives here.
+pub fn check_remote_unknown_var(target: &str, key: &str) -> Diagnostic {
+    let message = format!("REMOTE `{target}` uses unknown variable `${key}`");
+    Diagnostic::new(
+        "dsl.check.remote_unknown_var",
+        message,
+        Diagnostic::make_fields(&[("target", target), ("key", key)]),
+    )
+}
+
+/// Static `REMOTE` shipment of an undeclared environment variable.
+/// Takes the step position, scope label, target, and name.
+pub fn check_remote_undeclared_env(pos: &str, label: &str, target: &str, name: &str) -> Diagnostic {
+    let message = format!(
+        "{pos} in {label}: REMOTE `{target}` ships undeclared environment variable `env:{name}`: declare it first with ENV or INHERIT_ENV"
+    );
+    Diagnostic::new(
+        "dsl.check.remote_undeclared_env",
+        message,
+        Diagnostic::make_fields(&[
+            ("pos", pos),
+            ("scope", label),
+            ("target", target),
+            ("name", name),
+        ]),
+    )
+}
+
+/// Static `LIST_APPEND` on a non-list. Takes the 1-based step number,
+/// the list variable, and the actual tag.
+pub fn check_list_not_list(step: usize, list: &str, actual: &TypeTag) -> Diagnostic {
+    let a = render_structural(actual);
+    let message = format!("step {step}: LIST_APPEND `${list}`: variable is {a}, not LIST");
+    Diagnostic::new(
+        "dsl.check.list_not_list",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("list", list), ("actual", &a)]),
+    )
+}
+
+/// Static `LIST_APPEND` of a `VOID` item. Takes the 1-based step
+/// number and the list variable.
+pub fn check_list_void_push(step: usize, list: &str) -> Diagnostic {
+    let message = format!("step {step}: LIST_APPEND `${list}`: VOID has no value to push");
+    Diagnostic::new(
+        "dsl.check.list_void_push",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("list", list)]),
+    )
+}
+
+/// Static pipe binding to a non-`PIPE`. Takes the 1-based step number
+/// and the actual tag name.
+pub fn check_pipe_mismatch(step: usize, actual: &str) -> Diagnostic {
+    let message = format!("step {step}: TypeMismatch: expected `PIPE`, got `{actual}`");
+    Diagnostic::new(
+        "dsl.check.pipe_mismatch",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("actual", actual)]),
+    )
+}
+
+/// Static record shape missing a required field. Takes the context
+/// and the field name; quoting lives here.
+pub fn check_missing_field(ctx: &str, name: &str) -> Diagnostic {
+    let message = format!("{ctx}: missing field `{name}`");
+    Diagnostic::new(
+        "dsl.check.missing_field",
+        message,
+        Diagnostic::make_fields(&[("ctx", ctx), ("field", name)]),
+    )
+}
+
+/// Static record shape with an unknown field. Takes the context and
+/// the field name; quoting lives here.
+pub fn check_record_unknown_field(ctx: &str, name: &str) -> Diagnostic {
+    let message = format!("{ctx}: unknown field `{name}`");
+    Diagnostic::new(
+        "dsl.check.record_unknown_field",
+        message,
+        Diagnostic::make_fields(&[("ctx", ctx), ("field", name)]),
+    )
+}
+
+/// Static `BREAK` outside any loop or `SWITCH`. Takes the 1-based
+/// step number.
+pub fn check_break_outside_switch(step: usize) -> Diagnostic {
+    let message = format!("step {step}: BREAK outside loop or SWITCH");
+    Diagnostic::new(
+        "dsl.check.break_outside_switch",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string())]),
+    )
+}
+
+/// Static flow word outside any loop. Takes the 1-based step number
+/// and the word (`BREAK`/`CONTINUE`).
+pub fn check_flow_outside_loop(step: usize, word: &str) -> Diagnostic {
+    let message = format!("step {step}: {word} outside loop");
+    Diagnostic::new(
+        "dsl.check.flow_outside_loop",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("flow", word)]),
+    )
+}
+
+/// Static flow word crossing a function boundary. Takes the 1-based
+/// step number, the word, and the function name.
+pub fn check_flow_crosses_func(step: usize, word: &str, name: &str) -> Diagnostic {
+    let message = format!("step {step}: {word} cannot cross function boundary (in {name}())");
+    Diagnostic::new(
+        "dsl.check.flow_crosses_func",
+        message,
+        Diagnostic::make_fields(&[
+            ("step", &step.to_string()),
+            ("flow", word),
+            ("function", name),
+        ]),
+    )
+}
+
+/// Static flow word crossing a block boundary. Takes the 1-based step
+/// number and the word.
+pub fn check_flow_crosses_block(step: usize, word: &str) -> Diagnostic {
+    let message = format!("step {step}: {word} cannot cross block boundary");
+    Diagnostic::new(
+        "dsl.check.flow_crosses_block",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("flow", word)]),
+    )
+}
+
+/// Static flow word crossing an `ASYNC` boundary. Takes the 1-based
+/// step number and the word.
+pub fn check_flow_crosses_async(step: usize, word: &str) -> Diagnostic {
+    let message = format!("step {step}: {word} cannot cross ASYNC boundary");
+    Diagnostic::new(
+        "dsl.check.flow_crosses_async",
+        message,
+        Diagnostic::make_fields(&[("step", &step.to_string()), ("flow", word)]),
+    )
+}
+
+/// Static `VOID` argument where a value is required. Takes the
+/// context; the `VOID` wording lives here.
+pub fn check_arg_void(ctx: &str) -> Diagnostic {
+    let message = format!("{ctx}: VOID has no value to pass");
+    Diagnostic::new(
+        "dsl.check.arg_void",
+        message,
+        Diagnostic::make_fields(&[("ctx", ctx)]),
+    )
+}
+
+/// Static untyped `ANY` flowing into a concrete parameter. Takes the
+/// context and the expected tag; rendering lives here.
+pub fn check_any_into_concrete(ctx: &str, expected: &TypeTag) -> Diagnostic {
+    let exp = render_structural(expected);
+    let message = format!(
+        "{ctx}: untyped ANY value flows into `{exp}` parameter; bind through LET `$x`: `{exp}` first"
+    );
+    Diagnostic::new(
+        "dsl.check.any_into_concrete",
+        message,
+        Diagnostic::make_fields(&[("ctx", ctx), ("expected", &exp)]),
+    )
+}
+
+/// Static `ASYNC FUNC` without a `HANDLE` declaration. Takes the
+/// function key and the declared tag.
+pub fn check_async_decl_not_handle(key: &str, declared: &TypeTag) -> Diagnostic {
+    let d = render_structural(declared);
+    let message =
+        format!("function `{key}` declares {d}, but ASYNC FUNC must declare HANDLE or HANDLE<T>");
+    Diagnostic::new(
+        "dsl.check.async_decl_not_handle",
+        message,
+        Diagnostic::make_fields(&[("function", key), ("declares", &d)]),
+    )
+}
+
+/// Static function falling through with no `RETURN` on some path.
+/// Takes the function key and the declared tag.
+pub fn check_func_fallthrough(key: &str, declared: &TypeTag) -> Diagnostic {
+    let d = render_structural(declared);
+    let message =
+        format!("function `{key}` declares {d} but may fall through with no RETURN on some path");
+    Diagnostic::new(
+        "dsl.check.func_fallthrough",
+        message,
+        Diagnostic::make_fields(&[("function", key), ("declares", &d)]),
+    )
+}
+
+/// Static function with no `RETURN` on any path. Takes the function
+/// key and the declared tag.
+pub fn check_func_no_return(key: &str, declared: &TypeTag) -> Diagnostic {
+    let d = render_structural(declared);
+    let message = format!("function `{key}` declares {d} but has no RETURN on any path");
+    Diagnostic::new(
+        "dsl.check.func_no_return",
+        message,
+        Diagnostic::make_fields(&[("function", key), ("declares", &d)]),
+    )
+}
+
+/// Static function with a bare `RETURN` under a valued declaration.
+/// Takes the function key and the declared tag.
+pub fn check_func_bare_return(key: &str, declared: &TypeTag) -> Diagnostic {
+    let d = render_structural(declared);
+    let message = format!(
+        "function `{key}` declares {d} but has a bare RETURN on some path; bare RETURN is only a void exit"
+    );
+    Diagnostic::new(
+        "dsl.check.func_bare_return",
+        message,
+        Diagnostic::make_fields(&[("function", key), ("declares", &d)]),
+    )
+}
+
+/// Static `VOID` function with a value `RETURN`. Takes the function
+/// key, the return line, and the yielded tag.
+pub fn check_func_void_yield(key: &str, line: usize, ty: &TypeTag) -> Diagnostic {
+    let t = render_structural(ty);
+    let message = format!("function `{key}` declares VOID but RETURN at line {line} yields {t}");
+    Diagnostic::new(
+        "dsl.check.func_void_yield",
+        message,
+        Diagnostic::make_fields(&[
+            ("function", key),
+            ("line", &line.to_string()),
+            ("yield", &t),
+        ]),
+    )
+}
+
+/// Static function with no value `RETURN` on any path. Takes the
+/// function key and the declared tag.
+pub fn check_func_no_value_return(key: &str, declared: &TypeTag) -> Diagnostic {
+    let d = render_structural(declared);
+    let message = format!("function `{key}` declares {d} but has no value RETURN on any path");
+    Diagnostic::new(
+        "dsl.check.func_no_value_return",
+        message,
+        Diagnostic::make_fields(&[("function", key), ("declares", &d)]),
+    )
+}
+
+/// Static function `RETURN` mismatching the declaration. Takes the
+/// function key, the declared tag, the return line, and the yielded
+/// tag.
+pub fn check_func_return_mismatch(
+    key: &str,
+    declared: &TypeTag,
+    line: usize,
+    ty: &TypeTag,
+) -> Diagnostic {
+    let d = render_structural(declared);
+    let t = render_structural(ty);
+    let message = format!("function `{key}` declares {d} but RETURN at line {line} yields {t}");
+    Diagnostic::new(
+        "dsl.check.func_return_mismatch",
+        message,
+        Diagnostic::make_fields(&[
+            ("function", key),
+            ("declares", &d),
+            ("line", &line.to_string()),
+            ("yield", &t),
+        ]),
+    )
+}
+
+/// Static unknown function with an import hint suffix. Takes the name
+/// and the hint (empty when no file exports the base); joining lives
+/// here.
+pub fn check_unknown_function(name: &str, hint: &str) -> Diagnostic {
+    let message = format!("unknown function `{name}`{hint}");
+    Diagnostic::new(
+        "dsl.check.unknown_function",
+        message,
+        Diagnostic::make_fields(&[("name", name), ("hint", hint)]),
+    )
+}
+
+/// Static `CONST` read with no import alias exporting the name. Takes
+/// the step position, the qualified name, and the alias.
+pub fn check_const_no_alias_at(pos: &str, qualified: &str, alias: &str) -> Diagnostic {
+    let message =
+        format!("{pos}: unknown CONST `{qualified}`: no import alias `{alias}` exports that name");
+    Diagnostic::new(
+        "dsl.check.const_no_alias_at",
+        message,
+        Diagnostic::make_fields(&[("pos", pos), ("name", qualified), ("alias", alias)]),
+    )
+}
+
+/// Static ambiguous `CONST` alias. Takes the step position, alias,
+/// name, and holder files; the `function`->`CONST` wording lives here
+/// with the single owner in `super::native`.
+pub fn check_const_ambiguous_at(
+    pos: &str,
+    alias: &str,
+    name: &str,
+    files: &std::collections::HashSet<String>,
+) -> Diagnostic {
+    let message = format!(
+        "{pos}: {}",
+        super::native::ambiguous_alias_message(alias, name, files).replacen("function", "CONST", 1)
+    );
+    Diagnostic::new(
+        "dsl.check.const_ambiguous_at",
+        message,
+        Diagnostic::make_fields(&[("pos", pos), ("alias", alias), ("name", name)]),
+    )
+}
+
+/// Static `LET` binding read as `CONST`. Takes the step position and
+/// the qualified name.
+pub fn check_const_is_let_at(pos: &str, qualified: &str) -> Diagnostic {
+    let message = format!(
+        "{pos}: `{qualified}` is a LET binding and cannot be exported: only CONST bindings cross the module boundary"
+    );
+    Diagnostic::new(
+        "dsl.check.const_is_let_at",
+        message,
+        Diagnostic::make_fields(&[("pos", pos), ("name", qualified)]),
+    )
+}
+
+/// Static unknown `CONST` with a resolution hint. Takes the step
+/// position, the qualified name, and the hint.
+pub fn check_const_hinted_at(pos: &str, qualified: &str, hint: &str) -> Diagnostic {
+    let message = format!("{pos}: unknown CONST `{qualified}`: {hint}");
+    Diagnostic::new(
+        "dsl.check.const_hinted_at",
+        message,
+        Diagnostic::make_fields(&[("pos", pos), ("name", qualified), ("hint", hint)]),
+    )
+}
+
+/// Static call arity (exact). Takes the 1-based step number, the base
+/// name, the expected total, and the count.
+pub fn check_call_arity_exact(step: usize, display: &str, total: usize, got: usize) -> Diagnostic {
+    let message = format!("step {step}: {display}() expects {total} argument(s), got {got}");
+    Diagnostic::new(
+        "dsl.check.call_arity_exact",
+        message,
+        Diagnostic::make_fields(&[
+            ("step", &step.to_string()),
+            ("function", display),
+            ("expected", &total.to_string()),
+            ("got", &got.to_string()),
+        ]),
+    )
+}
+
+/// Static call arity (range). Takes the 1-based step number, the base
+/// name, min, max, and the count.
+pub fn check_call_arity_range(
+    step: usize,
+    display: &str,
+    min: usize,
+    max: usize,
+    got: usize,
+) -> Diagnostic {
+    let message = format!("step {step}: {display}() expects {min} to {max} argument(s), got {got}");
+    Diagnostic::new(
+        "dsl.check.call_arity_range",
+        message,
+        Diagnostic::make_fields(&[
+            ("step", &step.to_string()),
+            ("function", display),
+            ("min", &min.to_string()),
+            ("max", &max.to_string()),
+            ("got", &got.to_string()),
+        ]),
+    )
+}
+
+/// Static checked-call arity (exact) with an optional RPN position.
+/// Takes the location prefix, the base name, the expected total, and
+/// the count.
+pub fn check_apply_arity_exact(
+    prefix: &str,
+    display: &str,
+    total: usize,
+    got: usize,
+) -> Diagnostic {
+    let message = format!("{prefix}{display}() expects {total} argument(s), got {got}");
+    Diagnostic::new(
+        "dsl.check.apply_arity_exact",
+        message,
+        Diagnostic::make_fields(&[
+            ("prefix", prefix),
+            ("function", display),
+            ("expected", &total.to_string()),
+            ("got", &got.to_string()),
+        ]),
+    )
+}
+
+/// Static checked-call arity (range) with an optional RPN position.
+/// Takes the location prefix, the base name, min, max, and the count.
+pub fn check_apply_arity_range(
+    prefix: &str,
+    display: &str,
+    min: usize,
+    max: usize,
+    got: usize,
+) -> Diagnostic {
+    let message = format!("{prefix}{display}() expects {min} to {max} argument(s), got {got}");
+    Diagnostic::new(
+        "dsl.check.apply_arity_range",
+        message,
+        Diagnostic::make_fields(&[
+            ("prefix", prefix),
+            ("function", display),
+            ("min", &min.to_string()),
+            ("max", &max.to_string()),
+            ("got", &got.to_string()),
+        ]),
+    )
+}
+
+/// Static checked-call closed-set miss. Takes the argument context,
+/// the allowed values, and the rendered literal; joining lives here.
+pub fn check_call_arg_allowed(pat: &str, allowed: &[&str], text: &str) -> Diagnostic {
+    let joined = allowed.join(", ");
+    let message = format!("{pat} must be one of: {joined}, got {text:?}");
+    Diagnostic::new(
+        "dsl.check.call_arg_allowed",
+        message,
+        Diagnostic::make_fields(&[("ctx", pat), ("allowed", &joined), ("got", text)]),
+    )
+}
+
+/// Static `VOID` in arithmetic. Takes the location prefix (possibly
+/// empty in RPN contexts).
+pub fn check_void_in_arithmetic(prefix: &str) -> Diagnostic {
+    let message = format!("{prefix}VOID has no value in arithmetic");
+    Diagnostic::new(
+        "dsl.check.void_in_arithmetic",
+        message,
+        Diagnostic::make_fields(&[("prefix", prefix)]),
+    )
+}
+
+/// Static non-numeric arithmetic. Takes the location prefix.
+pub fn check_arithmetic_type(prefix: &str) -> Diagnostic {
+    let message = format!("{prefix}Type Error: arithmetic requires Int or Float");
+    Diagnostic::new(
+        "dsl.check.arithmetic_type",
+        message,
+        Diagnostic::make_fields(&[("prefix", prefix)]),
+    )
+}
+
+/// Static `VOID` under unary negation. Takes the location prefix.
+pub fn check_void_to_negate(prefix: &str) -> Diagnostic {
+    let message = format!("{prefix}VOID has no value to negate");
+    Diagnostic::new(
+        "dsl.check.void_to_negate",
+        message,
+        Diagnostic::make_fields(&[("prefix", prefix)]),
+    )
+}
+
+/// Static non-numeric unary negation. Takes the location prefix and
+/// the actual type name.
+pub fn check_negate_type(prefix: &str, actual: &str) -> Diagnostic {
+    let message = format!("{prefix}Type Error: unary '-' requires Int or Float, got {actual}");
+    Diagnostic::new(
+        "dsl.check.negate_type",
+        message,
+        Diagnostic::make_fields(&[("prefix", prefix), ("actual", actual)]),
+    )
+}
+
+/// Static `VOID` in an ordering comparison. Takes the location
+/// prefix.
+pub fn check_void_to_compare(prefix: &str) -> Diagnostic {
+    let message = format!("{prefix}VOID has no value to compare");
+    Diagnostic::new(
+        "dsl.check.void_to_compare",
+        message,
+        Diagnostic::make_fields(&[("prefix", prefix)]),
+    )
+}
+
+/// Static non-numeric ordering comparison. Takes the location prefix.
+pub fn check_ordering_type(prefix: &str) -> Diagnostic {
+    let message = format!("{prefix}Type Error: ordering comparison requires Int or Float");
+    Diagnostic::new(
+        "dsl.check.ordering_type",
+        message,
+        Diagnostic::make_fields(&[("prefix", prefix)]),
+    )
+}
+
+/// Static RPN stack underflow. Parameterless: an internal invariant,
+/// never user input.
+pub fn check_rpn_underflow() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.check.rpn_underflow",
+        "internal error: RPN stack underflow".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Static RPN stack with leftover values. Takes the count.
+pub fn check_rpn_leftover(count: usize) -> Diagnostic {
+    let message = format!("internal error: RPN stack left {count} values");
+    Diagnostic::new(
+        "dsl.check.rpn_leftover",
+        message,
+        Diagnostic::make_fields(&[("count", &count.to_string())]),
+    )
+}
+
+/// Static block falling through with no `RETURN` on some path. Takes
+/// the step position.
+pub fn check_block_fallthrough(pos: &str) -> Diagnostic {
+    let message = format!("{pos}: block may fall through with no RETURN on some path");
+    Diagnostic::new(
+        "dsl.check.block_fallthrough",
+        message,
+        Diagnostic::make_fields(&[("pos", pos)]),
+    )
+}
+
+/// Static `VOID` where a template value is required. Parameterless:
+/// fixed wording, shared by map and list literals.
+pub fn check_void_no_value() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.check.void_no_value",
+        "VOID has no value to pass".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,6 +2434,106 @@ mod tests {
             import_const_unknown("q").key(),
             import_const_uninitialized("q").key(),
             import_const_is_let("q").key(),
+            import_not_in_closure("f").key(),
+            import_export_type_mismatch("f", "T").key(),
+            check_var_tag("v", &anyhow::anyhow!("x")).key(),
+            check_func_tag("f", &anyhow::anyhow!("x")).key(),
+            check_step_wrap(3, &anyhow::anyhow!("x")).key(),
+            check_ctx_wrap("ctx", &anyhow::anyhow!("x")).key(),
+            check_exact_mismatch("ctx", &TypeTag::Int, &TypeTag::String).key(),
+            check_cannot_unify("ctx", &TypeTag::Int, &TypeTag::String).key(),
+            check_undefined_var("step 1: ", "x").key(),
+            check_var_not_guaranteed("x").key(),
+            check_unknown_field("step 1: ", "a", &[]).key(),
+            check_invalid_array_index("", "0").key(),
+            check_cannot_traverse("", "k").key(),
+            check_duplicate_func("F", "f.oxdock").key(),
+            check_redeclare_const(1, "x").key(),
+            check_redeclare_let(1, "x").key(),
+            check_undeclared_env("step 1", "top", "env:", "K").key(),
+            check_placeholder_keypath().key(),
+            check_empty_placeholder_var().key(),
+            check_bare_sigil("$x").key(),
+            check_undefined_script_var("k").key(),
+            check_placeholder_unknown("A::F").key(),
+            check_disjoint_alias_miss(
+                "A",
+                "F",
+                "F",
+                &std::collections::HashSet::new(),
+                false,
+                &|_| false,
+            )
+            .key(),
+            check_placeholder_miss("M", "F", true, false, false)
+                .expect("described")
+                .key(),
+            check_template_arity_exact("step 1", "top", "F", 1, 2).key(),
+            check_template_arity_range("step 1", "top", "F", 1, 2, 3).key(),
+            check_template_arg_allowed("step 1", "top", "F", "p", &["a"], "b").key(),
+            check_template_arg_depth().key(),
+            check_empty_placeholder_arg().key(),
+            check_invalid_placeholder_arg("x").key(),
+            check_invalid_map_entry("e").key(),
+            check_duplicate_map_key("k").key(),
+            check_void_no_value().key(),
+            check_depth_function("F").key(),
+            check_depth_scope("top").key(),
+            check_void_block_bind(1, "x").key(),
+            check_capture_mismatch(1, "LET", "x", &TypeTag::String, &TypeTag::Int).key(),
+            check_await_not_handle(1, "t", &TypeTag::String).key(),
+            check_await_void_payload(1, "t", "x").key(),
+            check_await_yield_mismatch(1, "t", &TypeTag::String, "x", &TypeTag::Int).key(),
+            check_async_not_handle(1, "x", &TypeTag::Int).key(),
+            check_async_bare_return(1, "x", &TypeTag::Int).key(),
+            check_async_void_yield(1, 3, &TypeTag::Int).key(),
+            check_async_no_return(1, "x", &TypeTag::Int).key(),
+            check_async_return_mismatch(1, "x", &TypeTag::Int, 3, &TypeTag::String).key(),
+            check_return_outside(1).key(),
+            check_return_crosses_async(1).key(),
+            check_undeclared_set(1, "x").key(),
+            check_mutate_const(1, "x").key(),
+            check_isolated_allowlist(1).key(),
+            check_remote_unknown_var("t", "x").key(),
+            check_remote_undeclared_env("step 1", "top", "t", "K").key(),
+            check_list_not_list(1, "l", &TypeTag::String).key(),
+            check_list_void_push(1, "l").key(),
+            check_pipe_mismatch(1, "STRING").key(),
+            check_missing_field("ctx", "f").key(),
+            check_record_unknown_field("ctx", "f").key(),
+            check_break_outside_switch(1).key(),
+            check_flow_outside_loop(1, "CONTINUE").key(),
+            check_flow_crosses_func(1, "BREAK", "F").key(),
+            check_flow_crosses_block(1, "BREAK").key(),
+            check_flow_crosses_async(1, "BREAK").key(),
+            check_arg_void("ctx").key(),
+            check_any_into_concrete("ctx", &TypeTag::String).key(),
+            check_async_decl_not_handle("F", &TypeTag::Int).key(),
+            check_func_fallthrough("F", &TypeTag::Int).key(),
+            check_func_no_return("F", &TypeTag::Int).key(),
+            check_func_bare_return("F", &TypeTag::Int).key(),
+            check_func_void_yield("F", 3, &TypeTag::Int).key(),
+            check_func_no_value_return("F", &TypeTag::Int).key(),
+            check_func_return_mismatch("F", &TypeTag::Int, 3, &TypeTag::String).key(),
+            check_unknown_function("F", "").key(),
+            check_const_no_alias_at("step 1", "A::C", "A").key(),
+            check_const_ambiguous_at("step 1", "A", "C", &std::collections::HashSet::new()).key(),
+            check_const_is_let_at("step 1", "A::C").key(),
+            check_const_hinted_at("step 1", "A::C", "h").key(),
+            check_call_arity_exact(1, "F", 1, 2).key(),
+            check_call_arity_range(1, "F", 1, 2, 3).key(),
+            check_apply_arity_exact("", "F", 1, 2).key(),
+            check_apply_arity_range("", "F", 1, 2, 3).key(),
+            check_call_arg_allowed("ctx", &["a"], "b").key(),
+            check_void_in_arithmetic("").key(),
+            check_arithmetic_type("").key(),
+            check_void_to_negate("").key(),
+            check_negate_type("", "STRING").key(),
+            check_void_to_compare("").key(),
+            check_ordering_type("").key(),
+            check_rpn_underflow().key(),
+            check_rpn_leftover(2).key(),
+            check_block_fallthrough("step 1").key(),
             import_flow_crosses_boundary("BREAK", 3, "f").key(),
             func_zero_value_missing("MAP").key(),
             func_param_type("F", &anyhow::anyhow!("x")).key(),
@@ -1308,6 +2660,165 @@ mod tests {
         assert_eq!(
             std_contains_haystack_type("INT").message(),
             "CONTAINS needs a STRING or LIST haystack, found `INT`"
+        );
+    }
+
+    #[test]
+    fn check_messages_match_canonical_wording() {
+        assert_eq!(
+            import_not_in_closure("f").message(),
+            "IMPORT `f` cannot be read: not in the import closure"
+        );
+        assert_eq!(
+            import_export_type_mismatch("f", "T").message(),
+            "IMPORT `f` EXPORT TYPE `T` does not match any top-level TYPE in that file"
+        );
+        assert_eq!(
+            check_var_tag("v", &anyhow::anyhow!("boom")).message(),
+            "variable `$v`: boom"
+        );
+        assert_eq!(
+            check_func_tag("F", &anyhow::anyhow!("boom")).message(),
+            "function `F`: boom"
+        );
+        assert_eq!(
+            check_step_wrap(3, &anyhow::anyhow!("boom")).message(),
+            "step 3: boom"
+        );
+        assert_eq!(
+            check_ctx_wrap("ctx", &anyhow::anyhow!("boom")).message(),
+            "ctx: boom"
+        );
+        assert_eq!(
+            check_exact_mismatch("ctx", &TypeTag::Int, &TypeTag::String).message(),
+            "ctx: TypeMismatch: expected `INT`, got `STRING`"
+        );
+        assert_eq!(
+            check_cannot_unify("ctx", &TypeTag::Int, &TypeTag::String).message(),
+            "ctx: cannot unify `INT` and `STRING`"
+        );
+        assert_eq!(
+            check_undefined_var("step 1: ", "x").message(),
+            "step 1: undefined variable `$x`"
+        );
+        assert_eq!(
+            check_var_not_guaranteed("x").message(),
+            "variable `$x` is not guaranteed to be defined on all reachable paths for this step"
+        );
+        assert_eq!(
+            check_unknown_field("step 1: ", "a", &[]).message(),
+            "step 1: unknown field `a`; expected fields: "
+        );
+        assert_eq!(
+            check_invalid_array_index("", "0").message(),
+            "invalid array index `0`"
+        );
+        assert_eq!(
+            check_cannot_traverse("", "k").message(),
+            "cannot traverse into scalar value at key `k`"
+        );
+        assert_eq!(
+            check_duplicate_func("F", "f.oxdock").message(),
+            "duplicate function `F` from `f.oxdock` collides across imports"
+        );
+        assert_eq!(
+            check_redeclare_let(2, "x").message(),
+            "step 2: redeclaration error: `$x` already declared in this scope; use `$x` = ... to mutate"
+        );
+        assert_eq!(
+            check_redeclare_const(2, "x").message(),
+            "step 2: redeclaration error: `x` is a CONST binding and cannot be redeclared; CONST and LET share one namespace"
+        );
+        assert_eq!(
+            check_undeclared_env("step 1", "top", "env:", "K").message(),
+            "step 1 in top: uses undeclared environment variable `env:K`: declare it first with ENV or INHERIT_ENV"
+        );
+        assert_eq!(
+            check_placeholder_keypath().message(),
+            "key paths on $ALIAS::NAME are not supported; copy to a local with LET or CONST first"
+        );
+        assert_eq!(
+            check_empty_placeholder_var().message(),
+            "invalid placeholder variable: empty variable reference"
+        );
+        assert!(check_bare_sigil("$x").message().contains("`$x`"));
+        assert_eq!(
+            check_undefined_script_var("k").message(),
+            "undefined script variable: `k`"
+        );
+        assert_eq!(
+            check_placeholder_unknown("A::F").message(),
+            "unknown placeholder function `A::F`"
+        );
+        assert_eq!(
+            check_template_arity_exact("step 1", "top", "F", 1, 2).message(),
+            "step 1 in top: F() expects 1 argument(s), got 2"
+        );
+        assert_eq!(
+            check_template_arity_range("step 1", "top", "F", 1, 2, 3).message(),
+            "step 1 in top: F() expects 1 to 2 argument(s), got 3"
+        );
+        assert_eq!(
+            check_template_arg_allowed("step 1", "top", "F", "p", &["a"], "b").message(),
+            "step 1 in top: F() argument `$p` must be one of: a, got \"b\""
+        );
+        assert!(
+            check_template_arg_depth()
+                .message()
+                .contains("nests too deep")
+        );
+        assert_eq!(
+            check_empty_placeholder_arg().message(),
+            "invalid placeholder call argument: empty variable reference"
+        );
+        assert_eq!(
+            check_invalid_placeholder_arg("x").message(),
+            "invalid placeholder call argument `x`"
+        );
+        assert_eq!(
+            check_invalid_map_entry("e").message(),
+            "invalid map literal entry `e`: use key: value"
+        );
+        assert_eq!(
+            check_duplicate_map_key("k").message(),
+            "duplicate key `k` in map literal"
+        );
+        assert_eq!(check_void_no_value().message(), "VOID has no value to pass");
+        assert_eq!(
+            check_redeclare_const(2, "x").message(),
+            "step 2: redeclaration error: `x` is a CONST binding and cannot be redeclared; CONST and LET share one namespace"
+        );
+        assert_eq!(
+            check_capture_mismatch(1, "LET", "x", &TypeTag::String, &TypeTag::Int).message(),
+            "step 1: LET `$x` captures STRING but declares INT"
+        );
+        assert_eq!(
+            check_flow_outside_loop(1, "CONTINUE").message(),
+            "step 1: CONTINUE outside loop"
+        );
+        assert_eq!(
+            check_flow_crosses_func(1, "BREAK", "F").message(),
+            "step 1: BREAK cannot cross function boundary (in F())"
+        );
+        assert_eq!(
+            check_unknown_function("F", " (did you mean G?)").message(),
+            "unknown function `F` (did you mean G?)"
+        );
+        assert_eq!(
+            check_call_arity_exact(1, "F", 1, 2).message(),
+            "step 1: F() expects 1 argument(s), got 2"
+        );
+        assert_eq!(
+            check_arithmetic_type("step 1: ").message(),
+            "step 1: Type Error: arithmetic requires Int or Float"
+        );
+        assert_eq!(
+            check_rpn_underflow().message(),
+            "internal error: RPN stack underflow"
+        );
+        assert_eq!(
+            check_block_fallthrough("step 1").message(),
+            "step 1: block may fall through with no RETURN on some path"
         );
     }
 

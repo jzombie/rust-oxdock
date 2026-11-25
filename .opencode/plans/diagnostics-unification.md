@@ -294,8 +294,14 @@ Remaining:
   ctors: registry, PARSE_ARGS group, byte/duration,
   BOOL/CONTAINS/LEN/PATH/SHELL builtins; only test-code `ECHO`
   stub left; lib 407 + integration 629 green; clippy/doc/fmt clean).
-  `static_check.rs` next (~129 sites, surveyed: template group,
-  flow group, const group, arithmetic group, IMPORT-static reuse).
+  `static_check.rs` done 2026-11-25 (~129 sites through ~110
+  `dsl.check.*` ctors plus 2 `dsl.import.*` additions
+  (`not_in_closure`, `export_type_mismatch`): helpers, var/keypath,
+  template group, capture/await/async, return/flow, resolve_call,
+  const group, call arity, arithmetic, RPN; zero inline
+  `bail!`/`anyhow!` left; only test-code ECHO stub remains in
+  `native.rs`; lib 408 + integration 629 green; clippy/doc clean;
+  zero fmt drift).
   `fs_ops.rs` and `pipeline.rs` verified clean (no inline
   failures; `fs_ops` only re-exports `Result`).
 - Parser: `markdown.rs`, `template.rs`, `macro_input.rs`.

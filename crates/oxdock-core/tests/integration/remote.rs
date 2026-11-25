@@ -265,7 +265,7 @@ fn remote_body_type_error_fails_before_shipping() {
         .map(|_| ())
         .expect_err("body type error must fail statically");
     assert!(
-        err.to_string().contains("undefined variable $undefined"),
+        err.to_string().contains("undefined variable `$undefined`"),
         "static error wins over missing runner, got: {err:#}"
     );
 }
@@ -389,7 +389,7 @@ fn remote_unknown_header_name_bails() {
     )
     .expect_err("unknown header var must bail");
     assert!(
-        err.to_string().contains("unknown variable $missing"),
+        err.to_string().contains("unknown variable `$missing`"),
         "{err:#}"
     );
 }

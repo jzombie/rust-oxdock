@@ -2057,7 +2057,7 @@ fn with_io_variable_pipe_undeclared_is_step_numbered_error() {
     let err = run_script(&root, "WITH_IO [stdout=$nope] ECHO hi\n")
         .expect_err("undeclared pipe var must fail");
     assert!(
-        err.to_string().contains("undefined variable $nope"),
+        err.to_string().contains("undefined variable `$nope`"),
         "{err}"
     );
 }
@@ -5510,11 +5510,11 @@ fn func_handle_params_agree_across_gates() {
     for (script, want) in [
         (
             "FUNC TAKES($t: HANDLE<ANY>): VOID {\n    AWAIT $t\n}\nLET $v: HANDLE<VOID> = ASYNC { ECHO hi }\nTAKES($v)\n",
-            "got HANDLE<VOID>",
+            "got `HANDLE<VOID>`",
         ),
         (
             "FUNC TAKES_TYPED($t: HANDLE<STRING>): VOID {\n    AWAIT $t\n}\nLET $v: HANDLE<ANY> = ASYNC { RETURN \"hi\" }\nTAKES_TYPED($v)\n",
-            "expected HANDLE<STRING>, got HANDLE<ANY>",
+            "expected `HANDLE<STRING>`, got `HANDLE<ANY>`",
         ),
         (
             "FUNC TAKES($t: HANDLE): VOID {\n    AWAIT $t\n}\n",
@@ -6240,13 +6240,13 @@ fn static_pipe_param_rejects_non_pipe() {
     let err = run_script(&root, "IMPORT [STD]\nLET $b: BOOL = EOF(\"nope\")\n")
         .expect_err("non-pipe EOF arg must fail statically");
     assert!(err.to_string().contains("TypeMismatch"), "{err}");
-    assert!(err.to_string().contains("expected PIPE"), "{err}");
+    assert!(err.to_string().contains("expected `PIPE`"), "{err}");
     let err = run_script(
         &root,
         "IMPORT [STD]\nLET $m: MAP<a: INT> = {a: 1}\nLET $b: BOOL = EOF($m)\n",
     )
     .expect_err("map EOF arg must fail statically");
-    assert!(err.to_string().contains("expected PIPE"), "{err}");
+    assert!(err.to_string().contains("expected `PIPE`"), "{err}");
 }
 
 #[test]
@@ -6261,7 +6261,7 @@ fn static_semaphore_param_rejects_non_semaphore() {
     )
     .expect_err("non-semaphore arg must fail statically");
     assert!(err.to_string().contains("TypeMismatch"), "{err}");
-    assert!(err.to_string().contains("expected SEMAPHORE"), "{err}");
+    assert!(err.to_string().contains("expected `SEMAPHORE`"), "{err}");
 }
 
 #[test]
