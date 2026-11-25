@@ -1298,6 +1298,17 @@ pub fn eval_math_stack_underflow() -> Diagnostic {
     )
 }
 
+/// Compiled-math stack imbalance at finish: the RPN left other than
+/// exactly one value. Takes the leftover count; rendering lives here.
+pub fn eval_math_stack_len(len: usize) -> Diagnostic {
+    let message = format!("compiled math left {len} values on the stack");
+    Diagnostic::new(
+        "dsl.eval.math_stack_len",
+        message,
+        Diagnostic::make_fields(&[("count", &len.to_string())]),
+    )
+}
+
 /// Integer arithmetic overflow or division by zero. Parameterless:
 /// the operands ride the enclosing expression, so no value is attached.
 pub fn eval_arith_overflow_div_zero() -> Diagnostic {
@@ -3848,6 +3859,7 @@ mod tests {
             std_float_non_finite_string("inf").key(),
             std_float_bad_type(&crate::Value::string("x".to_string())).key(),
             eval_math_stack_underflow().key(),
+            eval_math_stack_len(2).key(),
             eval_arith_overflow_div_zero().key(),
             eval_arith_needs_numeric(
                 &crate::Value::string("x".to_string()),
@@ -4096,6 +4108,10 @@ mod tests {
         assert_eq!(
             eval_math_stack_underflow().message(),
             "compiled math stack underflow"
+        );
+        assert_eq!(
+            eval_math_stack_len(2).message(),
+            "compiled math left 2 values on the stack"
         );
         assert_eq!(
             eval_arith_overflow_div_zero().message(),

@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::EntryKind;
 use oxdock_fs::env as oxdock_env;
@@ -1382,7 +1382,9 @@ fn evaluate_compiled_math<P: ProcessManager>(
         }
     }
     if stack.len() != 1 {
-        bail!("compiled math left {} values on the stack", stack.len());
+        return Err(anyhow::Error::from(args_diag::eval_math_stack_len(
+            stack.len(),
+        )));
     }
     Ok(pop_stack(&mut stack)?)
 }

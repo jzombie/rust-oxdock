@@ -1291,6 +1291,17 @@ transport, so this phase is mechanical:
    variant (true/false share the key); both wordings
    stay pinned by message tests. Core 409 plus
    integration 629 green; clippy and fmt clean.
+   Math-imbalance step 2026-11-26: one new ctor
+   (eval_math_stack_len taking `usize`, wording
+   byte-identical, pinned by key plus message test).
+   This was the last `bail!` in args.rs, so the
+   `bail` import is trimmed, leaving only
+   `anyhow::Result`. evaluate_compiled_math holds
+   its anyhow signature: its arms ride expand_string
+   plus resolve_const_ref plus handlers dispatch,
+   all still anyhow, so the signature flip waits
+   per leaf-to-root order. Core 409 plus integration
+   629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
