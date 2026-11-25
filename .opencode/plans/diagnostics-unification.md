@@ -848,6 +848,21 @@ transport, so this phase is mechanical:
    expect_err/expect are error-type generic). Core 408
    plus integration 629 plus parser 267 green; clippy
    (only pre-existing baseline) and fmt clean.
+   Options-check leaf step 2026-11-26: two new ctors
+   (check_unknown_option plus check_option_value,
+   wording byte-identical to the replaced bail! and the
+   check_value_at path failure, both pinned by key plus
+   message tests); check_options now returns
+   DiagnosticResult. The unknown-key bail becomes a bare
+   Err with the joined slice passed in; the shape check
+   maps the parser anyhow failure through the verbatim
+   passthrough (its path prefix already names func, key,
+   expected, and actual, so no wrapper is added, per
+   single-ownership). The anyhow import drops from
+   typing.rs entirely. Macro-generated wrappers (anyhow
+   Result) plus the markdown boundary test hold via
+   blanket From. Core 408 plus integration 629 plus
+   markdown 26 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

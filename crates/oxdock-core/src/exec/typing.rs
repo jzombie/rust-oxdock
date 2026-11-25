@@ -16,7 +16,6 @@ pub use oxdock_parser::{
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Result, bail};
 use oxdock_diagnostics::DiagnosticResult;
 use oxdock_parser::{
     ANY_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, Step, StepKind, canonicalize_spelling,
@@ -41,14 +40,11 @@ pub fn check_options(
     map: &std::collections::BTreeMap<String, Value>,
     options: &[crate::ParamOption],
     func: &str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     for key in map.keys() {
         if !options.iter().any(|known| known.name == key) {
             let known: Vec<&str> = options.iter().map(|known| known.name).collect();
-            bail!(
-                "{func}() unknown option '{key}' (expected: {})",
-                known.join(", ")
-            );
+            return Err(typing_diag::check_unknown_option(func, key, &known));
         }
     }
     for (key, value) in map.iter() {
@@ -56,7 +52,8 @@ pub fn check_options(
             .iter()
             .find(|known| known.name == *key)
             .expect("unknown keys rejected above");
-        crate::check_value_at(&option.value, value, &format!("{func}() option '{key}'"))?;
+        crate::check_value_at(&option.value, value, &format!("{func}() option '{key}'"))
+            .map_err(|err| typing_diag::check_option_value(&err))?;
     }
     Ok(())
 }

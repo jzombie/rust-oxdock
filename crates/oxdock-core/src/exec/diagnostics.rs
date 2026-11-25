@@ -167,6 +167,32 @@ pub fn typing_void_position(what: &str) -> Diagnostic {
     )
 }
 
+/// Unknown options-map key. Takes the function name, the offending
+/// key, and the declared option names; joining lives here so call
+/// sites pass slices. Owned by `check_options` in `typing.rs`.
+pub fn check_unknown_option(func: &str, key: &str, known: &[&str]) -> Diagnostic {
+    let expected = known.join(", ");
+    let message = format!("{func}() unknown option '{key}' (expected: {expected})");
+    Diagnostic::new(
+        "dsl.check.unknown_option",
+        message,
+        Diagnostic::make_fields(&[("function", func), ("key", key), ("expected", &expected)]),
+    )
+}
+
+/// Options-map value failing its declared shape. Takes the
+/// underlying shape failure verbatim: its path prefix already names
+/// func, key, expected, and actual, so no wrapper is added.
+/// Owned by `check_options` in `typing.rs`.
+pub fn check_option_value(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.check.option_value",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// Type arguments on a head that takes none.
 pub fn typing_no_args(name: &str) -> Diagnostic {
     let message = format!("`{name}` takes no type arguments");
@@ -2527,6 +2553,8 @@ mod tests {
             typing_unknown("NOPE", &types, &empty, &empty).key(),
             typing_unregistered("LET $x", "NOPE", &types).key(),
             typing_void_position("LET $x").key(),
+            check_unknown_option("F", "k", &["a", "b"]).key(),
+            check_option_value(&anyhow::anyhow!("x")).key(),
             typing_no_args("STRING").key(),
             typing_handle_arity().key(),
             typing_list_arity().key(),
@@ -2764,6 +2792,15 @@ mod tests {
         assert_eq!(
             typing_void_position("LET $x").message(),
             "LET $x declares VOID outside a return annotation: VOID is only a return type (or HANDLE<VOID> payload)"
+        );
+        assert_eq!(
+            check_unknown_option("F", "k", &["a", "b"]).message(),
+            "F() unknown option 'k' (expected: a, b)"
+        );
+        assert_eq!(
+            check_option_value(&anyhow::anyhow!("F() option 'k': expected INT, got STRING"))
+                .message(),
+            "F() option 'k': expected INT, got STRING"
         );
         assert_eq!(
             alias_cycle(&["A".to_string(), "B".to_string(), "A".to_string()]).message(),
