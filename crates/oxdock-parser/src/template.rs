@@ -14,6 +14,8 @@
 //!   ASCII, so no multibyte character can match, and every cut lands
 //!   on an ASCII boundary.
 
+use oxdock_diagnostics::DiagnosticResult;
+
 use crate::diagnostics as template_diag;
 
 /// One raw segment of template text: literal bytes, or one unescaped
@@ -382,7 +384,7 @@ pub fn split_top_level(src: &str, sep: char) -> Vec<String> {
 /// from the opener with escapes honored. Adjacent literals (`"a" "b"`),
 /// infix expressions (`"a" + "b"`), and trailing-escape inputs (`"foo\"`)
 /// fail closed instead of merging or truncating.
-pub fn parse_string_literal(src: &str) -> Option<anyhow::Result<String>> {
+pub fn parse_string_literal(src: &str) -> Option<DiagnosticResult<String>> {
     let atoms = scan_atoms(src);
     let [atom] = atoms.as_slice() else {
         return None;
@@ -404,7 +406,7 @@ pub fn parse_string_literal(src: &str) -> Option<anyhow::Result<String>> {
 /// Match one `"..."` or `'...'` literal from its opener to its first
 /// unescaped closer, which must end the input. `\\` skips the next
 /// byte unconditionally, so a trailing escape fails unterminated.
-fn parse_quoted_literal(src: &str, quote: char) -> anyhow::Result<String> {
+fn parse_quoted_literal(src: &str, quote: char) -> DiagnosticResult<String> {
     let bytes = src.as_bytes();
     let mut i = 1;
     while i < bytes.len() {
@@ -414,24 +416,20 @@ fn parse_quoted_literal(src: &str, quote: char) -> anyhow::Result<String> {
         }
         if bytes[i] == quote as u8 {
             if i + 1 != src.len() {
-                return Err(anyhow::Error::new(
-                    template_diag::template_string_trailing_text(src),
-                ));
+                return Err(template_diag::template_string_trailing_text(src));
             }
             return unescape_literal(&src[1..i], quote);
         }
         i += 1;
     }
-    Err(anyhow::Error::new(
-        template_diag::template_string_unterminated(src),
-    ))
+    Err(template_diag::template_string_unterminated(src))
 }
 
 /// Match one `"""..."""` block from its opener to its first unescaped
 /// closer triple, which must end the input. Lowers through the shared
 /// block lowering, so placeholder blocks read exactly like statement
 /// block strings.
-fn parse_block_literal(src: &str) -> anyhow::Result<String> {
+fn parse_block_literal(src: &str) -> DiagnosticResult<String> {
     let bytes = src.as_bytes();
     let mut i = 3;
     while i < bytes.len() {
@@ -441,22 +439,18 @@ fn parse_block_literal(src: &str) -> anyhow::Result<String> {
         }
         if bytes[i] == b'"' && bytes.get(i + 1) == Some(&b'"') && bytes.get(i + 2) == Some(&b'"') {
             if i + 3 != src.len() {
-                return Err(anyhow::Error::new(
-                    template_diag::template_block_trailing_text(src),
-                ));
+                return Err(template_diag::template_block_trailing_text(src));
             }
             return Ok(crate::command::lower_block_string(src));
         }
         i += 1;
     }
-    Err(anyhow::Error::new(
-        template_diag::template_block_unterminated(src),
-    ))
+    Err(template_diag::template_block_unterminated(src))
 }
 
 /// Unescape a quoted literal: `\\` and the enclosing quote only.
 /// Anything else keeps its backslash so template text stays predictable.
-fn unescape_literal(src: &str, quote: char) -> anyhow::Result<String> {
+fn unescape_literal(src: &str, quote: char) -> DiagnosticResult<String> {
     let mut out = String::with_capacity(src.len());
     let mut chars = src.chars();
     while let Some(c) = chars.next() {
@@ -472,9 +466,7 @@ fn unescape_literal(src: &str, quote: char) -> anyhow::Result<String> {
                 out.push(other);
             }
             None => {
-                return Err(anyhow::Error::new(
-                    template_diag::template_string_unterminated_escape(),
-                ));
+                return Err(template_diag::template_string_unterminated_escape());
             }
         }
     }
@@ -864,16 +856,14 @@ pub fn split_map_entry(entry: &str) -> Option<(String, String)> {
 /// One map literal key: a string literal in any spelling or a bare
 /// ASCII identifier. Shared by static inference and runtime
 /// resolution, which report identical diagnostics.
-pub fn parse_map_key(src: &str) -> anyhow::Result<String> {
+pub fn parse_map_key(src: &str) -> DiagnosticResult<String> {
     if let Some(literal) = parse_string_literal(src) {
         return literal;
     }
     if !src.is_empty() && src.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Ok(src.to_string());
     }
-    Err(anyhow::Error::new(template_diag::template_map_key_invalid(
-        src,
-    )))
+    Err(template_diag::template_map_key_invalid(src))
 }
 
 fn parse_dollar_path(rest: &str) -> Option<TemplateVar> {

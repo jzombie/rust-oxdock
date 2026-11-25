@@ -525,7 +525,7 @@ const MAX_LITERAL_DEPTH: usize = oxdock_parser::template::MAX_TEMPLATE_ARG_DEPTH
 pub fn resolve_placeholder_arg(
     src: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     resolve_call_arg(src, vars)
 }
 
@@ -535,7 +535,7 @@ pub fn resolve_placeholder_arg(
 fn resolve_call_arg(
     src: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     resolve_call_value(src, vars, 0)
 }
 
@@ -543,15 +543,13 @@ fn resolve_call_value(
     src: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
     depth: usize,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     use oxdock_parser::template::{
         ScalarLit, TemplateArg, classify_template_arg, parse_scalar_literal, parse_string_literal,
         parse_var_path,
     };
     if depth > MAX_LITERAL_DEPTH {
-        return Err(anyhow::Error::new(expand_diag::call_arg_too_deep(
-            MAX_LITERAL_DEPTH,
-        )));
+        return Err(expand_diag::call_arg_too_deep(MAX_LITERAL_DEPTH));
     }
     match classify_template_arg(src) {
         TemplateArg::Dollar(rest) => {
@@ -559,9 +557,9 @@ fn resolve_call_value(
                 // `$` refs split through the single template owner; the
                 // empty check below keeps the historical
                 // malformed-argument error.
-                return Err(anyhow::Error::new(expand_diag::call_arg_empty_var()));
+                return Err(expand_diag::call_arg_empty_var());
             };
-            return Ok(resolve_value_path(&parts, vars)?);
+            return resolve_value_path(&parts, vars);
         }
         TemplateArg::Str(literal_src) => {
             if let Some(literal) = parse_string_literal(literal_src) {
@@ -588,7 +586,7 @@ fn resolve_call_value(
         TemplateArg::ConstRef { .. } | TemplateArg::KeyPath { .. } | TemplateArg::Var(_) => {}
         TemplateArg::Invalid(_) => {}
     }
-    Err(anyhow::Error::new(expand_diag::call_arg_invalid(src)))
+    Err(expand_diag::call_arg_invalid(src))
 }
 
 /// Resolve a `{key: value}` map literal. Keys validate through the
@@ -597,7 +595,7 @@ fn resolve_call_map(
     inner: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
     depth: usize,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     use oxdock_parser::template::{parse_map_key, split_map_entry, split_top_level};
     let mut entries = std::collections::BTreeMap::new();
     if inner.trim().is_empty() {
@@ -605,11 +603,11 @@ fn resolve_call_map(
     }
     for entry in split_top_level(inner, ',') {
         let Some((key_src, value_src)) = split_map_entry(&entry) else {
-            return Err(anyhow::Error::new(expand_diag::map_entry_invalid(&entry)));
+            return Err(expand_diag::map_entry_invalid(&entry));
         };
         let key = parse_map_key(&key_src)?;
         if entries.contains_key(&key) {
-            return Err(anyhow::Error::new(expand_diag::map_duplicate_key(&key)));
+            return Err(expand_diag::map_duplicate_key(&key));
         }
         let value = resolve_call_value(&value_src, vars, depth + 1)?;
         entries.insert(key, value);
@@ -623,7 +621,7 @@ fn resolve_call_list(
     inner: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
     depth: usize,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     let mut items = Vec::new();
     if inner.trim().is_empty() {
         return Ok(oxdock_parser::Value::list(items));
