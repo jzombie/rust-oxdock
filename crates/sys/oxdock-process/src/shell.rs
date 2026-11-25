@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+#[cfg(windows)]
+use anyhow::Context;
+use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::GuardedPath;
 #[cfg(all(unix, not(miri)))]
@@ -29,16 +31,14 @@ pub fn shell_program() -> String {
 /// of bridging an env var. `current_exe` is an unsupported isolation
 /// operation under Miri (hard error, not a recoverable `Err`), so Miri
 /// builds report it as unsupported instead of calling through.
-pub fn interpreter_exe() -> Result<String> {
+pub fn interpreter_exe() -> DiagnosticResult<String> {
     #[cfg(miri)]
     {
-        return Err(anyhow::Error::new(
-            proc_diag::run_interpreter_unsupported_miri(),
-        ));
+        return Err(proc_diag::run_interpreter_unsupported_miri());
     }
     #[cfg(not(miri))]
     {
-        let exe = std::env::current_exe().context("determine current executable")?;
+        let exe = std::env::current_exe().map_err(|e| proc_diag::run_current_exe_failed(&e))?;
         Ok(exe.display().to_string())
     }
 }
@@ -93,29 +93,26 @@ pub struct ShellLauncher;
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 impl ShellLauncher {
-    pub fn run(&self, cmd: &mut Command) -> Result<()> {
-        let status = cmd
-            .status()
-            .with_context(|| format!("failed to run {:?}", cmd))?;
+    pub fn run(&self, cmd: &mut Command) -> DiagnosticResult<()> {
+        let status = cmd.status().map_err(|e| proc_diag::run_failed(&*cmd, &e))?;
         if !status.success() {
-            return Err(anyhow::Error::new(proc_diag::run_command_failed(
-                &*cmd, &status,
-            )));
+            return Err(proc_diag::run_command_failed(&*cmd, &status));
         }
         Ok(())
     }
 
-    pub fn run_with_output(&self, cmd: &mut Command) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    pub fn run_with_output(
+        &self,
+        cmd: &mut Command,
+    ) -> DiagnosticResult<(ExitStatus, Vec<u8>, Vec<u8>)> {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let output = cmd
-            .output()
-            .with_context(|| format!("failed to run {:?}", cmd))?;
+        let output = cmd.output().map_err(|e| proc_diag::run_failed(&*cmd, &e))?;
         Ok((output.status, output.stdout, output.stderr))
     }
 
-    pub fn spawn(&self, cmd: &mut Command) -> Result<()> {
+    pub fn spawn(&self, cmd: &mut Command) -> DiagnosticResult<()> {
         cmd.spawn()
-            .with_context(|| format!("failed to spawn {:?}", cmd))?;
+            .map_err(|e| proc_diag::spawn_failed(&*cmd, &e))?;
         Ok(())
     }
 

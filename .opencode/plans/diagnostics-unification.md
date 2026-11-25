@@ -612,9 +612,20 @@ transport, so this phase is mechanical:
    (run_exec_requires_argv, run_exec_requires_program); the
    shell_manager run_argv caller and the expect-based unit
    tests hold unchanged; redundant closure simplified per
-   clippy. Interpreter, run, spawn, and interactive paths
-   stay on anyhow Result until io-failure ctors land.
+   clippy. Interactive paths stay on anyhow Result until
+   the CommandBuilder boundary flips.
    Process 119 plus core 408 green; clippy and fmt clean.
+   Process shell-io step 2026-11-26: three new io ctors
+   (run_current_exe_failed, run_failed shared by the
+   status-wait and piped-output paths, spawn_failed) with
+   typed io source chains plus pins; interpreter_exe and
+   ShellLauncher run, run_with_output, and spawn now return
+   DiagnosticResult with bare Err ctors, messages
+   byte-identical; Context import gated to windows for the
+   one remaining windows-only use. Core native
+   interpreter_exe caller holds unchanged via blanket From.
+   Process 120 plus core 408 green; clippy and fmt clean
+   (one pre-existing obfuscated_if_else untouched).
    Core json-boundary step 2026-11-26: six new ctors
    (std_to_json_non_finite_float, std_to_json_unencodable,
    json_handle_needs_object, json_handle_exact_shape,

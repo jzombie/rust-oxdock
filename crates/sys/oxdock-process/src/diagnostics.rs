@@ -29,6 +29,7 @@ const FIELD_COMMAND: &str = "command";
 const FIELD_STATUS: &str = "status";
 const FIELD_ARGV: &str = "argv";
 const FIELD_PROGRAM: &str = "program";
+const FIELD_ERR: &str = "err";
 
 /// Suggestion scope for an undefined `$var` miss: the name also lives
 /// in the step environment or the override table.
@@ -320,6 +321,67 @@ pub fn run_command_failed(
     )
 }
 
+/// Current-executable lookup failed. Takes the I/O failure;
+/// rendering lives here. The typed I/O error rides as the chained
+/// source so `Error::source` and `{err:#}` chains keep it.
+pub fn run_current_exe_failed(err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("cannot determine current executable: {err_text}");
+    Diagnostic::new(
+        "proc.run.current_exe_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
+}
+
+/// Spawning or waiting on a shell command failed. Takes the command
+/// (any `Debug`: `std::process::Command`) and the I/O failure;
+/// rendering lives here. Shared by the status-wait and piped-output
+/// paths: one key, one mode. The typed I/O error rides as the
+/// chained source.
+pub fn run_failed(cmd: &impl std::fmt::Debug, err: &std::io::Error) -> Diagnostic {
+    let cmd_text = format!("{cmd:?}");
+    let err_text = err.to_string();
+    let message = format!("failed to run {cmd_text}: {err_text}");
+    Diagnostic::new(
+        "proc.run.run_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_COMMAND, cmd_text.as_str()),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
+}
+
+/// Spawning a shell command failed. Takes the command (any `Debug`:
+/// `std::process::Command`) and the I/O failure; rendering lives
+/// here. The typed I/O error rides as the chained source.
+pub fn spawn_failed(cmd: &impl std::fmt::Debug, err: &std::io::Error) -> Diagnostic {
+    let cmd_text = format!("{cmd:?}");
+    let err_text = err.to_string();
+    let message = format!("failed to spawn {cmd_text}: {err_text}");
+    Diagnostic::new(
+        "proc.run.spawn_failed",
+        message,
+        Diagnostic::make_fields(&[
+            (FIELD_COMMAND, cmd_text.as_str()),
+            (FIELD_ERR, err_text.as_str()),
+        ]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
+}
+
 /// Shell exiting non-zero. Takes the wait status; rendering lives
 /// here.
 pub fn shell_exited_with_status(status: &std::process::ExitStatus) -> Diagnostic {
@@ -473,6 +535,7 @@ mod tests {
 
     #[test]
     fn each_failure_has_a_distinct_key() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "x");
         let keys = [
             undefined_env_var("FOO", false).key(),
             undefined_script_var("x", None).key(),
@@ -508,6 +571,9 @@ mod tests {
             spawn_requires_system_root().key(),
             run_stdin_lock_failed().key(),
             run_capture_lock_poisoned().key(),
+            run_current_exe_failed(&io_err).key(),
+            run_failed(&"echo hi", &io_err).key(),
+            spawn_failed(&"echo hi", &io_err).key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -598,5 +664,36 @@ mod tests {
             spawn_requires_system_root().message(),
             "Windows process execution requires SystemRoot in the script environment; declare INHERIT_ENV [SystemRoot]"
         );
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "nope");
+        assert_eq!(
+            run_current_exe_failed(&io_err).message(),
+            "cannot determine current executable: nope"
+        );
+        assert_eq!(
+            run_failed(&"echo hi", &io_err).message(),
+            "failed to run \"echo hi\": nope"
+        );
+        assert_eq!(
+            spawn_failed(&"echo hi", &io_err).message(),
+            "failed to spawn \"echo hi\": nope"
+        );
+    }
+
+    #[test]
+    fn io_ctors_preserve_typed_source_chain() {
+        use std::error::Error as _;
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "nope");
+        for diag in [
+            run_current_exe_failed(&err),
+            run_failed(&"echo hi", &err),
+            spawn_failed(&"echo hi", &err),
+        ] {
+            let source = diag.source().expect("io ctor keeps a source");
+            let io_source = source
+                .downcast_ref::<std::io::Error>()
+                .expect("source is the typed io error");
+            assert_eq!(io_source.kind(), std::io::ErrorKind::NotFound);
+            assert_eq!(io_source.to_string(), "nope");
+        }
     }
 }
