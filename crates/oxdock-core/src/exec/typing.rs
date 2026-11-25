@@ -17,6 +17,7 @@ pub use oxdock_parser::{
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_parser::{
     ANY_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, Step, StepKind, canonicalize_spelling,
     intern_rendered, lookup_rendered, parse_spelling, render_structural,
@@ -308,7 +309,7 @@ impl<P: ProcessManager> ExecState<P> {
                 for member in members {
                     resolved.push(self.build_rendered(member, resolving, depth)?);
                 }
-                finish_union(resolved)
+                Ok(finish_union(resolved)?)
             }
         }
     }
@@ -445,7 +446,7 @@ impl<P: ProcessManager> ExecState<P> {
 /// order-free, so all spellings behave identically. The tag owns
 /// everything through `Arc`: shared on clone, freed with the last
 /// owner, never leaked.
-fn finish_union(members: Vec<TypeTag>) -> Result<TypeTag> {
+fn finish_union(members: Vec<TypeTag>) -> DiagnosticResult<TypeTag> {
     let mut flat: Vec<TypeTag> = Vec::with_capacity(members.len());
     for member in members {
         // Nested unions splice flat: members never nest, so every
@@ -457,7 +458,7 @@ fn finish_union(members: Vec<TypeTag>) -> Result<TypeTag> {
         }
     }
     if flat.is_empty() {
-        return Err(anyhow::Error::new(typing_diag::typing_empty_union()));
+        return Err(typing_diag::typing_empty_union());
     }
     // `ANY` absorbs the set: admitting everything is `ANY`.
     if flat.iter().any(|member| matches!(member, TypeTag::Any)) {

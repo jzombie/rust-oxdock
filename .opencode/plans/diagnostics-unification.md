@@ -788,6 +788,12 @@ transport, so this phase is mechanical:
    Handlers plus import callers (four bare-? sites, all
    still anyhow) hold unchanged via blanket From. Core
    408 green; clippy and fmt clean.
+   Union-finish leaf step 2026-11-26: no new ctors;
+   finish_union now returns DiagnosticResult with a bare
+   empty_union Err (already keyed). Its build_rendered
+   caller stays on anyhow Result, so the tail call takes
+   one Ok(...?) wrap (direct return does not coerce).
+   Core 408 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
