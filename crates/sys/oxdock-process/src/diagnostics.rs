@@ -30,6 +30,7 @@ const FIELD_STATUS: &str = "status";
 const FIELD_ARGV: &str = "argv";
 const FIELD_PROGRAM: &str = "program";
 const FIELD_ERR: &str = "err";
+const FIELD_REASON: &str = "reason";
 
 /// Suggestion scope for an undefined `$var` miss: the name also lives
 /// in the step environment or the override table.
@@ -382,6 +383,43 @@ pub fn spawn_failed(cmd: &impl std::fmt::Debug, err: &std::io::Error) -> Diagnos
     )))
 }
 
+/// Windows job-object assignment failed. Takes the underlying
+/// failure; `{reason:#}` formatting lives here so the call site
+/// stays `format!`-free. Third-party-feeling OS errors ride the
+/// anyhow passthrough and never attach a source.
+pub fn job_assign_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "proc.run.job_assign_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text.as_str())]),
+    )
+}
+
+/// Synthetic Miri-backend failure. Takes the underlying failure;
+/// `{reason:#}` formatting lives here so the call site stays
+/// `format!`-free. Already-keyed payloads are reclaimed by
+/// [`from_anyhow`], so this only names genuinely unkeyed fallout.
+pub fn synthetic_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "proc.run.synthetic_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text.as_str())]),
+    )
+}
+
+/// Reclaim an already-keyed diagnostic from an `anyhow` failure,
+/// wrapping anything else as a synthetic-backend failure. Single
+/// owner for the Miri-arm mapping so both arms preserve keys
+/// instead of restating the downcast.
+pub fn from_anyhow(err: anyhow::Error) -> Diagnostic {
+    match err.downcast::<Diagnostic>() {
+        Ok(diag) => diag,
+        Err(err) => synthetic_failed(&err),
+    }
+}
+
 /// Shell exiting non-zero. Takes the wait status; rendering lives
 /// here.
 pub fn shell_exited_with_status(status: &std::process::ExitStatus) -> Diagnostic {
@@ -574,6 +612,8 @@ mod tests {
             run_current_exe_failed(&io_err).key(),
             run_failed(&"echo hi", &io_err).key(),
             spawn_failed(&"echo hi", &io_err).key(),
+            job_assign_failed(&anyhow::anyhow!("boom")).key(),
+            synthetic_failed(&anyhow::anyhow!("boom")).key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -677,6 +717,26 @@ mod tests {
             spawn_failed(&"echo hi", &io_err).message(),
             "failed to spawn \"echo hi\": nope"
         );
+        assert_eq!(
+            job_assign_failed(&anyhow::anyhow!("boom")).message(),
+            "boom"
+        );
+        assert_eq!(synthetic_failed(&anyhow::anyhow!("boom")).message(), "boom");
+    }
+
+    #[test]
+    fn from_anyhow_reclaims_keyed_payloads() {
+        let keyed = run_exec_requires_argv();
+        let key = keyed.key();
+        let reclaimed = from_anyhow(anyhow::Error::new(keyed));
+        assert_eq!(reclaimed.key(), key);
+        assert_eq!(
+            reclaimed.message(),
+            "RUN exec form requires at least one argument"
+        );
+        let wrapped = from_anyhow(anyhow::anyhow!("boom"));
+        assert_eq!(wrapped.key(), "proc.run.synthetic_failed");
+        assert_eq!(wrapped.message(), "boom");
     }
 
     #[test]

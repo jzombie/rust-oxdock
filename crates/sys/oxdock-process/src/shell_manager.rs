@@ -294,7 +294,7 @@ fn spawn_child_with_streams(
         io_threads.push(thread);
     }
 
-    ChildHandle::new(child, stdin_thread, io_threads)
+    Ok(ChildHandle::new(child, stdin_thread, io_threads)?)
 }
 
 #[cfg(test)]

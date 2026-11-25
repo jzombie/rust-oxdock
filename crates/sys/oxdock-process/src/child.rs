@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::contract::BackgroundHandle;
+#[cfg(windows)]
+use crate::diagnostics as proc_diag;
+use oxdock_diagnostics::DiagnosticResult;
 
 /// Shared inner state for `ChildHandle`, enabling safe cloning.
 /// The OS PID is stored separately so `kill()` can signal
@@ -38,7 +41,7 @@ impl ChildHandle {
         child: Child,
         stdin_thread: Option<std::thread::JoinHandle<()>>,
         io_threads: Vec<std::thread::JoinHandle<()>>,
-    ) -> Result<Self> {
+    ) -> DiagnosticResult<Self> {
         // The stdin feeder is deliberately detached, never joined (see
         // below): it blocks reading the producer pipe, whose writers may
         // legitimately outlive a short-lived child (a session pump feeding
@@ -57,7 +60,7 @@ impl ChildHandle {
                 // before surfacing the failed spawn.
                 let mut child = child;
                 let _ = child.kill();
-                return Err(err);
+                return Err(proc_diag::from_anyhow(err));
             }
         };
         Ok(Self {

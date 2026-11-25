@@ -6,6 +6,7 @@ use std::{
 #[cfg(not(miri))]
 use anyhow::Context;
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::fs::File;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -14,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitStatus, Output as StdOutput, Stdio};
 
 use crate::child::ChildHandle;
-#[cfg(miri)]
 use crate::diagnostics as proc_diag;
 
 /// Builder wrapper that centralizes direct usages of `std::process::Command`.
@@ -110,55 +110,49 @@ impl CommandBuilder {
         self
     }
 
-    pub fn status(&mut self) -> Result<ExitStatus> {
+    pub fn status(&mut self) -> DiagnosticResult<ExitStatus> {
         #[cfg(miri)]
         {
             let snap = self.snapshot();
-            synthetic_status(&snap)
+            synthetic_status(&snap).map_err(proc_diag::from_anyhow)
         }
 
         #[cfg(not(miri))]
         {
-            let desc = format!("{:?}", self.inner);
-            let status = self
-                .inner
+            self.inner
                 .status()
-                .with_context(|| format!("failed to run {desc}"))?;
-            Ok(status)
+                .map_err(|e| proc_diag::run_failed(&self.inner, &e))
         }
     }
 
-    pub fn output(&mut self) -> Result<CommandOutput> {
+    pub fn output(&mut self) -> DiagnosticResult<CommandOutput> {
         #[cfg(miri)]
         {
             let snap = self.snapshot();
-            synthetic_output(&snap)
+            synthetic_output(&snap).map_err(proc_diag::from_anyhow)
         }
 
         #[cfg(not(miri))]
         {
-            let desc = format!("{:?}", self.inner);
-            let out = self
-                .inner
+            self.inner
                 .output()
-                .with_context(|| format!("failed to run {desc}"))?;
-            Ok(CommandOutput::from(out))
+                .map(CommandOutput::from)
+                .map_err(|e| proc_diag::run_failed(&self.inner, &e))
         }
     }
 
-    pub fn spawn(&mut self) -> Result<ChildHandle> {
+    pub fn spawn(&mut self) -> DiagnosticResult<ChildHandle> {
         #[cfg(miri)]
         {
-            return Err(anyhow::Error::new(proc_diag::run_spawn_unsupported_miri()));
+            return Err(proc_diag::run_spawn_unsupported_miri());
         }
 
         #[cfg(not(miri))]
         {
-            let desc = format!("{:?}", self.inner);
             let child = self
                 .inner
                 .spawn()
-                .with_context(|| format!("failed to spawn {desc}"))?;
+                .map_err(|e| proc_diag::spawn_failed(&self.inner, &e))?;
             ChildHandle::new(child, None, Vec::new())
         }
     }

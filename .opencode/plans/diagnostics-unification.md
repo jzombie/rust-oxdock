@@ -626,6 +626,20 @@ transport, so this phase is mechanical:
    interpreter_exe caller holds unchanged via blanket From.
    Process 120 plus core 408 green; clippy and fmt clean
    (one pre-existing obfuscated_if_else untouched).
+   Process builder-boundary step 2026-11-26: two new
+   passthrough ctors (job_assign_failed for the windows
+   job-object failure, synthetic_failed for unkeyed Miri
+   fallout) plus a from_anyhow helper reclaiming
+   already-keyed payloads via downcast so both Miri arms
+   preserve keys; CommandBuilder status, output, and spawn
+   plus ChildHandle::new now return DiagnosticResult,
+   reusing run_failed/spawn_failed/run_spawn_unsupported_miri
+   with byte-identical messages. Shell_manager holds via
+   one Ok-wrap boundary; build, ssh, cli, and core callers
+   hold unchanged. Spawn_piped variants and
+   spawn_interactive_shell stay until their own increment.
+   Process 121 plus core 408 green; clippy and fmt clean
+   (only pre-existing baseline warnings).
    Core json-boundary step 2026-11-26: six new ctors
    (std_to_json_non_finite_float, std_to_json_unencodable,
    json_handle_needs_object, json_handle_exact_shape,
