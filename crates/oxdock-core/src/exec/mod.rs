@@ -6,6 +6,7 @@ pub mod diagnostics;
 mod engine;
 mod exit;
 mod fs_ops;
+pub(crate) mod function_names;
 mod handlers;
 mod import;
 mod io;

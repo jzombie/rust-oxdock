@@ -970,6 +970,37 @@ transport, so this phase is mechanical:
    DiagnosticResult; the three NativeFn wrappers stay
    anyhow and take one Ok(...?) wrap each. Core 408
    plus integration 629 green; clippy and fmt clean.
+   Name-constant step 2026-11-26: new
+   `exec/function_names.rs` with 22 `FUNC_*` constants
+   (every STD function named in a diagnostic message
+   or hand-built registration); all core `std_*` /
+   `eval_*` constructor messages interpolate the
+   constants plus existing `*_TYPE_NAME` constants
+   instead of restating spellings, byte-identical
+   output proven by the unchanged literal message
+   pins. The three hand-built registrations
+   (`PARSE_ARGS`, `PARSE_FLAGS`, `PARSE_POSITIONALS`)
+   plus their arg-prefix strings plus the
+   `BOOL`/`BOOL_OR` coerce call sites use the same
+   constants, ending the triple-sourcing. New
+   `HostRegistration::name()` plus a
+   `function_names_match_registry` lock test asserts
+   every constant against `builtin_registrations()`,
+   so a Rust-fn rename (which moves the
+   macro-derived name) fails loudly. Parser's three
+   `("key", key)` leaks now use a new `FIELD_KEY`.
+   Deliberately unchanged: message-test expectations
+   stay literal (they lock user-visible bytes; the
+   registry test locks constant-to-registry
+   agreement), and keyword literals (`IMPORT`, `LET`,
+   `RETURN`, ...) plus core `FIELD_*` plus the
+   static-vs-runtime wording pairs stay for defined
+   follow-ups (keyword sweep via existing `KEYWORD_*`;
+   core field-key registry per the 11-crate precedent;
+   wording convergence as a behavior-changing
+   decision with its own review). Core 409 plus
+   integration 629 plus parser 267 green; clippy and
+   fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

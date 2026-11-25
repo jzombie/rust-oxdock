@@ -5754,6 +5754,49 @@ fn check_options_enforces_present_values() {
 }
 
 #[test]
+fn function_names_match_registry() {
+    // Every `function_names::FUNC_*` constant must equal the name its
+    // function registers under. `#[oxdock_func]` derives the registry
+    // name from the Rust function name, while diagnostics interpolate
+    // the constant: without this lock, renaming the Rust function
+    // moves the registry and rots the message text silently.
+    use super::function_names::*;
+    let registrations =
+        super::native::FunctionRegistry::<MockProcessManager>::builtin_registrations();
+    let registered: std::collections::HashSet<&str> =
+        registrations.iter().map(|entry| entry.name()).collect();
+    for name in [
+        FUNC_BOOL,
+        FUNC_BOOL_OR,
+        FUNC_CONTAINS,
+        FUNC_FLOAT,
+        FUNC_FORMAT_BYTE_COUNT,
+        FUNC_FORMAT_DURATION,
+        FUNC_INT,
+        FUNC_IS_EXEC,
+        FUNC_IS_TERMINAL,
+        FUNC_LEN,
+        FUNC_PARSE_ARGS,
+        FUNC_PARSE_BYTE_COUNT,
+        FUNC_PARSE_DURATION,
+        FUNC_PARSE_FLAGS,
+        FUNC_PARSE_POSITIONALS,
+        FUNC_PATH_BASE,
+        FUNC_PATH_REL,
+        FUNC_PATH_TYPE,
+        FUNC_PATH_WRITABLE,
+        FUNC_SEMAPHORE_NEW,
+        FUNC_SHELL_SPLIT_ARGS,
+        FUNC_TO_JSON,
+    ] {
+        assert!(
+            registered.contains(name),
+            "function_names constant {name:?} has no registry entry: rename the constant or the Rust function"
+        );
+    }
+}
+
+#[test]
 #[cfg_attr(
     miri,
     ignore = "blind sampling draws OS randomness through unseeded RAND, outside Miri isolation"

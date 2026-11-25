@@ -36,6 +36,7 @@ const FIELD_MAX: &str = "max";
 const FIELD_SECOND: &str = "second";
 const FIELD_SPELLING: &str = "spelling";
 const FIELD_LINE: &str = "line";
+const FIELD_KEY: &str = "key";
 
 /// Decode a mid-parse fragment for user output: the transient
 /// `WS_SENTINEL` boundary becomes a space. Single owner for the decode
@@ -1041,7 +1042,7 @@ pub fn markdown_metadata_missing_colon(line: usize, key: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.markdown.metadata_missing_colon",
         message,
-        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string()), ("key", key)]),
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string()), (FIELD_KEY, key)]),
     )
 }
 
@@ -1053,7 +1054,7 @@ pub fn markdown_metadata_equals_syntax(line: usize, key: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.markdown.metadata_equals_syntax",
         message,
-        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string()), ("key", key)]),
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string()), (FIELD_KEY, key)]),
     )
 }
 
@@ -1121,7 +1122,7 @@ pub fn markdown_metadata_unknown_key(line: usize, key: &str) -> Diagnostic {
     Diagnostic::new(
         "dsl.markdown.metadata_unknown_key",
         message,
-        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string()), ("key", key)]),
+        Diagnostic::make_fields(&[(FIELD_LINE, &line.to_string()), (FIELD_KEY, key)]),
     )
 }
 

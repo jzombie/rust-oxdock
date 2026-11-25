@@ -16,6 +16,9 @@ use oxdock_pipe::PipeHandle;
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
 
 use super::diagnostics as std_diag;
+use super::function_names::{
+    FUNC_BOOL, FUNC_BOOL_OR, FUNC_PARSE_ARGS, FUNC_PARSE_FLAGS, FUNC_PARSE_POSITIONALS,
+};
 use super::io::StreamHandle;
 use super::state::ExecState;
 use super::steps::StepCtx;
@@ -919,6 +922,19 @@ impl<P: ProcessManager> Clone for HostRegistration<P> {
 }
 
 impl<P: ProcessManager> HostRegistration<P> {
+    /// Registry name this entry answers to. The lock test in `tests.rs`
+    /// (`function_names_match_registry`) asserts every
+    /// `function_names::FUNC_*` constant against this, so a rename of
+    /// the Rust function (which moves the macro-derived name) fails
+    /// loudly instead of leaving diagnostics text behind.
+    pub fn name(&self) -> &str {
+        match self {
+            HostRegistration::Stateful { name, .. } => name,
+            HostRegistration::Pure { name, .. } => name,
+            HostRegistration::Both { name, .. } => name,
+        }
+    }
+
     /// Introspectable metadata for this entry, for documentation tooling
     /// that reads modules without registering them.
     pub fn meta(&self) -> &FuncMeta {
@@ -2957,7 +2973,8 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
-            let args = string_list_arg(&args_val, "PARSE_ARGS() argument `$args`")?;
+            let args =
+                string_list_arg(&args_val, &format!("{FUNC_PARSE_ARGS}() argument `$args`"))?;
             let specs = resolve_flags_specs(cx)?;
             let (raw, positionals) = tokenize_raw_args(args)?;
             let coerced = coerce_flags(&specs, &raw)?;
@@ -2969,9 +2986,9 @@ impl<P: ProcessManager> OxDockFn<P> for ParseArgs {
             Ok(Value::map(out))
         });
         HostRegistration::Stateful {
-            name: "PARSE_ARGS".to_string(),
+            name: FUNC_PARSE_ARGS.to_string(),
             meta: FuncMeta {
-                name: "PARSE_ARGS".to_string(),
+                name: FUNC_PARSE_ARGS.to_string(),
                 module: String::new(),
                 kind: FuncKind::HostPure,
                 params: Some(vec![FuncParam {
@@ -3402,9 +3419,9 @@ impl<P: ProcessManager> OxDockFn<P> for ParseFlags {
             Ok(Value::map(coerce_flags(&specs, &raw)?))
         });
         HostRegistration::Stateful {
-            name: "PARSE_FLAGS".to_string(),
+            name: FUNC_PARSE_FLAGS.to_string(),
             meta: FuncMeta {
-                name: "PARSE_FLAGS".to_string(),
+                name: FUNC_PARSE_FLAGS.to_string(),
                 module: String::new(),
                 kind: FuncKind::HostPure,
                 params: Some(vec![FuncParam {
@@ -3453,14 +3470,17 @@ impl<P: ProcessManager> OxDockFn<P> for ParsePositionals {
             }
             let mut iter = values.into_iter();
             let args_val = iter.next().expect("arity checked above");
-            let args = string_list_arg(&args_val, "PARSE_POSITIONALS() argument `$args`")?;
+            let args = string_list_arg(
+                &args_val,
+                &format!("{FUNC_PARSE_POSITIONALS}() argument `$args`"),
+            )?;
             let (_raw, positionals) = tokenize_raw_args(args)?;
             Ok(Value::list(positionals))
         });
         HostRegistration::Stateful {
-            name: "PARSE_POSITIONALS".to_string(),
+            name: FUNC_PARSE_POSITIONALS.to_string(),
             meta: FuncMeta {
-                name: "PARSE_POSITIONALS".to_string(),
+                name: FUNC_PARSE_POSITIONALS.to_string(),
                 module: String::new(),
                 kind: FuncKind::HostPure,
                 params: Some(vec![FuncParam {
@@ -4919,7 +4939,7 @@ fn bool_convert(
     match super::args::parse_bool_str(s) {
         Some(b) => Ok(Value::bool(b)),
         None => Err(anyhow::Error::new(std_diag::std_bool_cannot_coerce(
-            "BOOL", s,
+            FUNC_BOOL, s,
         ))),
     }
 }
@@ -4960,7 +4980,8 @@ fn bool_or(
     match super::args::parse_bool_str(&text) {
         Some(b) => Ok(Value::bool(b)),
         None => Err(anyhow::Error::new(std_diag::std_bool_cannot_coerce(
-            "BOOL_OR", &text,
+            FUNC_BOOL_OR,
+            &text,
         ))),
     }
 }

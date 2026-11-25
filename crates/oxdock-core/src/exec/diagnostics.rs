@@ -8,8 +8,15 @@
 
 use oxdock_diagnostics::Diagnostic;
 use oxdock_parser::{
-    ANY_TYPE_NAME, Field, HANDLE_TYPE_NAME, LIST_TYPE_NAME, MAP_TYPE_NAME, Spelled, TypeTag,
-    render_structural,
+    ANY_TYPE_NAME, BOOL_TYPE_NAME, FLOAT_TYPE_NAME, Field, HANDLE_TYPE_NAME, INT_TYPE_NAME,
+    LIST_TYPE_NAME, MAP_TYPE_NAME, STRING_TYPE_NAME, Spelled, TypeTag, render_structural,
+};
+
+use super::function_names::{
+    FUNC_BOOL, FUNC_CONTAINS, FUNC_FLOAT, FUNC_FORMAT_BYTE_COUNT, FUNC_FORMAT_DURATION, FUNC_INT,
+    FUNC_IS_EXEC, FUNC_IS_TERMINAL, FUNC_LEN, FUNC_PARSE_ARGS, FUNC_PARSE_BYTE_COUNT,
+    FUNC_PARSE_DURATION, FUNC_PARSE_FLAGS, FUNC_PARSE_POSITIONALS, FUNC_PATH_BASE, FUNC_PATH_REL,
+    FUNC_PATH_TYPE, FUNC_PATH_WRITABLE, FUNC_SEMAPHORE_NEW, FUNC_SHELL_SPLIT_ARGS, FUNC_TO_JSON,
 };
 
 /// Duplicate field name inside one MAP spelling.
@@ -833,7 +840,9 @@ pub fn std_unknown_type(name: &str) -> Diagnostic {
 /// `CONTAINS` with a non-string needle for a string haystack. Takes
 /// the actual needle type name.
 pub fn std_contains_needle_type(actual: &str) -> Diagnostic {
-    let message = format!("CONTAINS needs a STRING needle for a STRING haystack, found `{actual}`");
+    let message = format!(
+        "{FUNC_CONTAINS} needs a {STRING_TYPE_NAME} needle for a {STRING_TYPE_NAME} haystack, found `{actual}`"
+    );
     Diagnostic::new(
         "dsl.std.contains_needle_type",
         message,
@@ -843,7 +852,9 @@ pub fn std_contains_needle_type(actual: &str) -> Diagnostic {
 
 /// `CONTAINS` with a non-string, non-list haystack.
 pub fn std_contains_haystack_type(actual: &str) -> Diagnostic {
-    let message = format!("CONTAINS needs a STRING or LIST haystack, found `{actual}`");
+    let message = format!(
+        "{FUNC_CONTAINS} needs a {STRING_TYPE_NAME} or {LIST_TYPE_NAME} haystack, found `{actual}`"
+    );
     Diagnostic::new(
         "dsl.std.contains_haystack_type",
         message,
@@ -853,7 +864,9 @@ pub fn std_contains_haystack_type(actual: &str) -> Diagnostic {
 
 /// `LEN` with a non-string, non-list, non-map value.
 pub fn std_len_unexpected_type(actual: &str) -> Diagnostic {
-    let message = format!("LEN needs a STRING, LIST, or MAP value, got `{actual}`");
+    let message = format!(
+        "{FUNC_LEN} needs a {STRING_TYPE_NAME}, {LIST_TYPE_NAME}, or {MAP_TYPE_NAME} value, got `{actual}`"
+    );
     Diagnostic::new(
         "dsl.std.len_unexpected_type",
         message,
@@ -864,7 +877,7 @@ pub fn std_len_unexpected_type(actual: &str) -> Diagnostic {
 /// `IS_TERMINAL` with an unexpected stream name.
 pub fn std_is_terminal_expected(stream: &str) -> Diagnostic {
     let message =
-        format!("IS_TERMINAL expects \"stdin\", \"stdout\", or \"stderr\", got {stream:?}");
+        format!("{FUNC_IS_TERMINAL} expects \"stdin\", \"stdout\", or \"stderr\", got {stream:?}");
     Diagnostic::new(
         "dsl.std.is_terminal_expected",
         message,
@@ -874,7 +887,7 @@ pub fn std_is_terminal_expected(stream: &str) -> Diagnostic {
 
 /// `SEMAPHORE_NEW` with a non-positive max.
 pub fn std_semaphore_needs_positive(max: i64) -> Diagnostic {
-    let message = format!("SEMAPHORE_NEW() requires a positive max, got {max}");
+    let message = format!("{FUNC_SEMAPHORE_NEW}() requires a positive max, got {max}");
     Diagnostic::new(
         "dsl.std.semaphore_needs_positive",
         message,
@@ -885,7 +898,7 @@ pub fn std_semaphore_needs_positive(max: i64) -> Diagnostic {
 /// `BOOL` with a non-bool, non-string value. Takes the value;
 /// `Debug` rendering lives here.
 pub fn std_bool_needs_bool_or_string(got: &super::Value) -> Diagnostic {
-    let message = format!("BOOL needs a Bool or String, found {got:?}");
+    let message = format!("{FUNC_BOOL} needs a Bool or String, found {got:?}");
     Diagnostic::new(
         "dsl.std.bool_needs_bool_or_string",
         message,
@@ -896,7 +909,7 @@ pub fn std_bool_needs_bool_or_string(got: &super::Value) -> Diagnostic {
 /// `BOOL`/`BOOL_OR` with an uncoercible string. Takes the invoking
 /// command (same failure mode, one key).
 pub fn std_bool_cannot_coerce(command: &str, got: &str) -> Diagnostic {
-    let message = format!("{command} cannot coerce {got:?} to BOOL");
+    let message = format!("{command} cannot coerce {got:?} to {BOOL_TYPE_NAME}");
     Diagnostic::new(
         "dsl.std.bool_cannot_coerce",
         message,
@@ -907,7 +920,7 @@ pub fn std_bool_cannot_coerce(command: &str, got: &str) -> Diagnostic {
 /// `PATH_BASE` failure. Takes the underlying failure.
 pub fn std_path_base_failed(reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("PATH_BASE: {reason_text}");
+    let message = format!("{FUNC_PATH_BASE}: {reason_text}");
     Diagnostic::new(
         "dsl.std.path_base_failed",
         message,
@@ -918,7 +931,7 @@ pub fn std_path_base_failed(reason: &anyhow::Error) -> Diagnostic {
 /// `PATH_REL` failure. Takes the underlying failure.
 pub fn std_path_rel_failed(reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("PATH_REL: {reason_text}");
+    let message = format!("{FUNC_PATH_REL}: {reason_text}");
     Diagnostic::new(
         "dsl.std.path_rel_failed",
         message,
@@ -929,7 +942,7 @@ pub fn std_path_rel_failed(reason: &anyhow::Error) -> Diagnostic {
 /// `SHELL_SPLIT_ARGS` failure. Takes the underlying failure.
 pub fn std_shell_split_failed(reason: &shell_words::ParseError) -> Diagnostic {
     let reason_text = format!("{reason}");
-    let message = format!("SHELL_SPLIT_ARGS: {reason_text}");
+    let message = format!("{FUNC_SHELL_SPLIT_ARGS}: {reason_text}");
     Diagnostic::new(
         "dsl.std.shell_split_failed",
         message,
@@ -939,7 +952,7 @@ pub fn std_shell_split_failed(reason: &shell_words::ParseError) -> Diagnostic {
 
 /// `PARSE_ARGS` with other than one argument.
 pub fn std_parse_args_arity(got: usize) -> Diagnostic {
-    let message = format!("PARSE_ARGS() expects 1 argument, got {got}");
+    let message = format!("{FUNC_PARSE_ARGS}() expects 1 argument, got {got}");
     Diagnostic::new(
         "dsl.std.parse_args_arity",
         message,
@@ -951,7 +964,7 @@ pub fn std_parse_args_arity(got: usize) -> Diagnostic {
 /// and the rendered value; quoting lives here.
 pub fn std_parse_args_bool_flag(flag: &str, got: &str) -> Diagnostic {
     let message = format!(
-        "PARSE_ARGS flag --{flag} expects BOOL (true/false, 1/0, yes/no, on/off), got {got:?}"
+        "{FUNC_PARSE_ARGS} flag --{flag} expects {BOOL_TYPE_NAME} (true/false, 1/0, yes/no, on/off), got {got:?}"
     );
     Diagnostic::new(
         "dsl.std.parse_args_bool_flag",
@@ -963,7 +976,8 @@ pub fn std_parse_args_bool_flag(flag: &str, got: &str) -> Diagnostic {
 /// `PARSE_ARGS` BOOL flag with a non-string value. Takes the flag and
 /// the actual type name.
 pub fn std_parse_args_bool_type(flag: &str, actual: &str) -> Diagnostic {
-    let message = format!("PARSE_ARGS flag --{flag} expects BOOL, got `{actual}`");
+    let message =
+        format!("{FUNC_PARSE_ARGS} flag --{flag} expects {BOOL_TYPE_NAME}, got `{actual}`");
     Diagnostic::new(
         "dsl.std.parse_args_bool_type",
         message,
@@ -973,7 +987,7 @@ pub fn std_parse_args_bool_type(flag: &str, actual: &str) -> Diagnostic {
 
 /// `PARSE_ARGS` flag without a value.
 pub fn std_parse_args_needs_value(flag: &str) -> Diagnostic {
-    let message = format!("PARSE_ARGS flag --{flag} needs a value: use --{flag}=<value>");
+    let message = format!("{FUNC_PARSE_ARGS} flag --{flag} needs a value: use --{flag}=<value>");
     Diagnostic::new(
         "dsl.std.parse_args_needs_value",
         message,
@@ -983,7 +997,7 @@ pub fn std_parse_args_needs_value(flag: &str) -> Diagnostic {
 
 /// `PARSE_ARGS` INT flag with an unparseable value.
 pub fn std_parse_args_expects_int(flag: &str) -> Diagnostic {
-    let message = format!("PARSE_ARGS flag --{flag} expects INT");
+    let message = format!("{FUNC_PARSE_ARGS} flag --{flag} expects {INT_TYPE_NAME}");
     Diagnostic::new(
         "dsl.std.parse_args_expects_int",
         message,
@@ -993,7 +1007,7 @@ pub fn std_parse_args_expects_int(flag: &str) -> Diagnostic {
 
 /// `PARSE_ARGS` FLOAT flag with an unparseable value.
 pub fn std_parse_args_expects_float(flag: &str) -> Diagnostic {
-    let message = format!("PARSE_ARGS flag --{flag} expects FLOAT");
+    let message = format!("{FUNC_PARSE_ARGS} flag --{flag} expects {FLOAT_TYPE_NAME}");
     Diagnostic::new(
         "dsl.std.parse_args_expects_float",
         message,
@@ -1005,7 +1019,7 @@ pub fn std_parse_args_expects_float(flag: &str) -> Diagnostic {
 pub fn std_parse_args_not_utf8() -> Diagnostic {
     Diagnostic::new(
         "dsl.std.parse_args_not_utf8",
-        "PARSE_ARGS: argument must be UTF-8".to_string(),
+        format!("{FUNC_PARSE_ARGS}: argument must be UTF-8"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -1013,7 +1027,7 @@ pub fn std_parse_args_not_utf8() -> Diagnostic {
 /// `PARSE_ARGS` lexing failure. Takes the underlying failure.
 pub fn std_parse_args_lex_error(reason: &lexopt::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("PARSE_ARGS: {reason_text}");
+    let message = format!("{FUNC_PARSE_ARGS}: {reason_text}");
     Diagnostic::new(
         "dsl.std.parse_args_lex_error",
         message,
@@ -1025,7 +1039,7 @@ pub fn std_parse_args_lex_error(reason: &lexopt::Error) -> Diagnostic {
 pub fn std_parse_args_schema_flag_empty() -> Diagnostic {
     Diagnostic::new(
         "dsl.std.parse_args_schema_flag_empty",
-        "PARSE_ARGS schema flag names must be non-empty".to_string(),
+        format!("{FUNC_PARSE_ARGS} schema flag names must be non-empty"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -1038,7 +1052,7 @@ pub fn std_parse_args_duplicate_flag(flag: &str, alias: Option<&str>) -> Diagnos
         Some(alias) => format!("--{flag}/--{alias}"),
         None => format!("--{flag}"),
     };
-    let message = format!("PARSE_ARGS duplicate flag {display}");
+    let message = format!("{FUNC_PARSE_ARGS} duplicate flag {display}");
     Diagnostic::new(
         "dsl.std.parse_args_duplicate_flag",
         message,
@@ -1052,7 +1066,7 @@ pub fn std_parse_args_missing_flag(flag: &str, alias: Option<&str>) -> Diagnosti
         Some(alias) => format!("--{flag}/--{alias}"),
         None => format!("--{flag}"),
     };
-    let message = format!("PARSE_ARGS missing required flag {display}");
+    let message = format!("{FUNC_PARSE_ARGS} missing required flag {display}");
     Diagnostic::new(
         "dsl.std.parse_args_missing_flag",
         message,
@@ -1062,7 +1076,7 @@ pub fn std_parse_args_missing_flag(flag: &str, alias: Option<&str>) -> Diagnosti
 
 /// `PARSE_ARGS` with an undeclared flag.
 pub fn std_parse_args_unknown_flag(flag: &str) -> Diagnostic {
-    let message = format!("PARSE_ARGS unknown flag --{flag}");
+    let message = format!("{FUNC_PARSE_ARGS} unknown flag --{flag}");
     Diagnostic::new(
         "dsl.std.parse_args_unknown_flag",
         message,
@@ -1074,7 +1088,7 @@ pub fn std_parse_args_unknown_flag(flag: &str) -> Diagnostic {
 /// and the underlying failure.
 pub fn std_parse_args_schema_type(name: &str, reason: &anyhow::Error) -> Diagnostic {
     let reason_text = format!("{reason:#}");
-    let message = format!("PARSE_ARGS schema type {name:?}: {reason_text}");
+    let message = format!("{FUNC_PARSE_ARGS} schema type {name:?}: {reason_text}");
     Diagnostic::new(
         "dsl.std.parse_args_schema_type",
         message,
@@ -1084,7 +1098,9 @@ pub fn std_parse_args_schema_type(name: &str, reason: &anyhow::Error) -> Diagnos
 
 /// `PARSE_ARGS` schema type that is not a MAP of scalars.
 pub fn std_parse_args_schema_shape(name: &str) -> Diagnostic {
-    let message = format!("PARSE_ARGS schema type {name:?} must be a MAP shape with scalar fields");
+    let message = format!(
+        "{FUNC_PARSE_ARGS} schema type {name:?} must be a {MAP_TYPE_NAME} shape with scalar fields"
+    );
     Diagnostic::new(
         "dsl.std.parse_args_schema_shape",
         message,
@@ -1096,7 +1112,7 @@ pub fn std_parse_args_schema_shape(name: &str) -> Diagnostic {
 /// name and the actual type name.
 pub fn std_parse_args_schema_field_type(field: &str, actual: &str) -> Diagnostic {
     let message = format!(
-        "PARSE_ARGS schema for --{field}: type must be one of STRING, BOOL, INT, or FLOAT, got {actual}"
+        "{FUNC_PARSE_ARGS} schema for --{field}: type must be one of {STRING_TYPE_NAME}, {BOOL_TYPE_NAME}, {INT_TYPE_NAME}, or {FLOAT_TYPE_NAME}, got {actual}"
     );
     Diagnostic::new(
         "dsl.std.parse_args_schema_field_type",
@@ -1119,7 +1135,7 @@ pub fn std_parse_args_arg_shape(reason: &anyhow::Error) -> Diagnostic {
 
 /// `PARSE_FLAGS` with other than one argument.
 pub fn std_parse_flags_arity(got: usize) -> Diagnostic {
-    let message = format!("PARSE_FLAGS() expects 1 argument, got {got}");
+    let message = format!("{FUNC_PARSE_FLAGS}() expects 1 argument, got {got}");
     Diagnostic::new(
         "dsl.std.parse_flags_arity",
         message,
@@ -1131,7 +1147,8 @@ pub fn std_parse_flags_arity(got: usize) -> Diagnostic {
 /// joining lives here.
 pub fn std_parse_flags_positional(items: &[String]) -> Diagnostic {
     let joined = items.join(", ");
-    let message = format!("PARSE_FLAGS() does not accept positional arguments; found {joined}");
+    let message =
+        format!("{FUNC_PARSE_FLAGS}() does not accept positional arguments; found {joined}");
     Diagnostic::new(
         "dsl.std.parse_flags_positional",
         message,
@@ -1141,7 +1158,7 @@ pub fn std_parse_flags_positional(items: &[String]) -> Diagnostic {
 
 /// `PARSE_POSITIONALS` with other than one argument.
 pub fn std_parse_positionals_arity(got: usize) -> Diagnostic {
-    let message = format!("PARSE_POSITIONALS() expects 1 argument, got {got}");
+    let message = format!("{FUNC_PARSE_POSITIONALS}() expects 1 argument, got {got}");
     Diagnostic::new(
         "dsl.std.parse_positionals_arity",
         message,
@@ -1151,7 +1168,7 @@ pub fn std_parse_positionals_arity(got: usize) -> Diagnostic {
 
 /// `PARSE_BYTE_COUNT` with a negative count.
 pub fn std_parse_byte_count_negative(n: i64) -> Diagnostic {
-    let message = format!("PARSE_BYTE_COUNT needs a non-negative byte count, got {n}");
+    let message = format!("{FUNC_PARSE_BYTE_COUNT} needs a non-negative byte count, got {n}");
     Diagnostic::new(
         "dsl.std.parse_byte_count_negative",
         message,
@@ -1161,7 +1178,7 @@ pub fn std_parse_byte_count_negative(n: i64) -> Diagnostic {
 
 /// `PARSE_BYTE_COUNT` with a non-integral float.
 pub fn std_parse_byte_count_integral(got: f64) -> Diagnostic {
-    let message = format!("PARSE_BYTE_COUNT needs an integral byte count, got {got:?}");
+    let message = format!("{FUNC_PARSE_BYTE_COUNT} needs an integral byte count, got {got:?}");
     Diagnostic::new(
         "dsl.std.parse_byte_count_integral",
         message,
@@ -1172,7 +1189,7 @@ pub fn std_parse_byte_count_integral(got: f64) -> Diagnostic {
 /// `PARSE_BYTE_COUNT` with neither a token nor a number. Takes
 /// the value; `Debug` rendering lives here.
 pub fn std_parse_byte_count_shape(got: &super::Value) -> Diagnostic {
-    let message = format!("PARSE_BYTE_COUNT needs a token or number, found {got:?}");
+    let message = format!("{FUNC_PARSE_BYTE_COUNT} needs a token or number, found {got:?}");
     Diagnostic::new(
         "dsl.std.parse_byte_count_shape",
         message,
@@ -1182,7 +1199,7 @@ pub fn std_parse_byte_count_shape(got: &super::Value) -> Diagnostic {
 
 /// `PARSE_BYTE_COUNT` out of `INT` range.
 pub fn std_parse_byte_count_range(s: &str) -> Diagnostic {
-    let message = format!("PARSE_BYTE_COUNT out of INT range: {s:?}");
+    let message = format!("{FUNC_PARSE_BYTE_COUNT} out of {INT_TYPE_NAME} range: {s:?}");
     Diagnostic::new(
         "dsl.std.parse_byte_count_range",
         message,
@@ -1193,7 +1210,8 @@ pub fn std_parse_byte_count_range(s: &str) -> Diagnostic {
 /// `INT()` with a non-integral `FLOAT`. Takes the value; `Debug`
 /// rendering lives here.
 pub fn std_int_non_integer_float(got: f64) -> Diagnostic {
-    let message = format!("INT() requires an integer value, found FLOAT ({got:?})");
+    let message =
+        format!("{FUNC_INT}() requires an integer value, found {FLOAT_TYPE_NAME} ({got:?})");
     Diagnostic::new(
         "dsl.std.int_non_integer_float",
         message,
@@ -1203,7 +1221,7 @@ pub fn std_int_non_integer_float(got: f64) -> Diagnostic {
 
 /// `INT()` with an unparsable string. Takes the raw spelling.
 pub fn std_int_bad_string(s: &str) -> Diagnostic {
-    let message = format!("INT() requires an integer string, found {s:?}");
+    let message = format!("{FUNC_INT}() requires an integer string, found {s:?}");
     Diagnostic::new(
         "dsl.std.int_bad_string",
         message,
@@ -1214,7 +1232,7 @@ pub fn std_int_bad_string(s: &str) -> Diagnostic {
 /// `INT()` with a non-numeric type. Takes the value; `Debug`
 /// rendering lives here.
 pub fn std_int_bad_type(got: &super::Value) -> Diagnostic {
-    let message = format!("INT() requires an Int, Float, Bool, or String, found {got:?}");
+    let message = format!("{FUNC_INT}() requires an Int, Float, Bool, or String, found {got:?}");
     Diagnostic::new(
         "dsl.std.int_bad_type",
         message,
@@ -1225,7 +1243,8 @@ pub fn std_int_bad_type(got: &super::Value) -> Diagnostic {
 /// `FLOAT()` with a non-finite `FLOAT`. Takes the value; `Debug`
 /// rendering lives here.
 pub fn std_float_non_finite_float(got: f64) -> Diagnostic {
-    let message = format!("FLOAT() requires a finite value, found FLOAT ({got:?})");
+    let message =
+        format!("{FUNC_FLOAT}() requires a finite value, found {FLOAT_TYPE_NAME} ({got:?})");
     Diagnostic::new(
         "dsl.std.float_non_finite_float",
         message,
@@ -1235,7 +1254,7 @@ pub fn std_float_non_finite_float(got: f64) -> Diagnostic {
 
 /// `FLOAT()` with an unparsable string. Takes the raw spelling.
 pub fn std_float_bad_string(s: &str) -> Diagnostic {
-    let message = format!("FLOAT() requires a numeric string, found {s:?}");
+    let message = format!("{FUNC_FLOAT}() requires a numeric string, found {s:?}");
     Diagnostic::new(
         "dsl.std.float_bad_string",
         message,
@@ -1246,7 +1265,7 @@ pub fn std_float_bad_string(s: &str) -> Diagnostic {
 /// `FLOAT()` with a string parsing to a non-finite value. Takes the
 /// raw spelling.
 pub fn std_float_non_finite_string(s: &str) -> Diagnostic {
-    let message = format!("FLOAT() requires a finite value, found {s:?}");
+    let message = format!("{FUNC_FLOAT}() requires a finite value, found {s:?}");
     Diagnostic::new(
         "dsl.std.float_non_finite_string",
         message,
@@ -1257,7 +1276,7 @@ pub fn std_float_non_finite_string(s: &str) -> Diagnostic {
 /// `FLOAT()` with a non-numeric type. Takes the value; `Debug`
 /// rendering lives here.
 pub fn std_float_bad_type(got: &super::Value) -> Diagnostic {
-    let message = format!("FLOAT() requires an Int, Float, or String, found {got:?}");
+    let message = format!("{FUNC_FLOAT}() requires an Int, Float, or String, found {got:?}");
     Diagnostic::new(
         "dsl.std.float_bad_type",
         message,
@@ -1468,7 +1487,7 @@ pub fn eval_traverse_scalar(key: &str) -> Diagnostic {
 pub fn eval_path_type_needs_arg() -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.path_type_needs_arg",
-        "PATH_TYPE requires a path argument".to_string(),
+        format!("{FUNC_PATH_TYPE} requires a path argument"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -1478,7 +1497,7 @@ pub fn eval_path_type_needs_arg() -> Diagnostic {
 pub fn eval_path_type_needs_string() -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.path_type_needs_string",
-        "PATH_TYPE path argument must evaluate to a string".to_string(),
+        format!("{FUNC_PATH_TYPE} path argument must evaluate to a string"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -1487,7 +1506,7 @@ pub fn eval_path_type_needs_string() -> Diagnostic {
 pub fn eval_is_exec_needs_arg() -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.is_exec_needs_arg",
-        "IS_EXEC requires a name argument".to_string(),
+        format!("{FUNC_IS_EXEC} requires a name argument"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -1496,7 +1515,7 @@ pub fn eval_is_exec_needs_arg() -> Diagnostic {
 pub fn eval_is_exec_needs_string() -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.is_exec_needs_string",
-        "IS_EXEC name argument must evaluate to a string".to_string(),
+        format!("{FUNC_IS_EXEC} name argument must evaluate to a string"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -1505,7 +1524,7 @@ pub fn eval_is_exec_needs_string() -> Diagnostic {
 pub fn eval_path_writable_needs_arg() -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.path_writable_needs_arg",
-        "PATH_WRITABLE requires a path argument".to_string(),
+        format!("{FUNC_PATH_WRITABLE} requires a path argument"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -1514,7 +1533,7 @@ pub fn eval_path_writable_needs_arg() -> Diagnostic {
 pub fn eval_path_writable_needs_string() -> Diagnostic {
     Diagnostic::new(
         "dsl.eval.path_writable_needs_string",
-        "PATH_WRITABLE path argument must evaluate to a string".to_string(),
+        format!("{FUNC_PATH_WRITABLE} path argument must evaluate to a string"),
         Diagnostic::make_fields(&[]),
     )
 }
@@ -1546,7 +1565,7 @@ pub fn eval_workdir_resolve_failed(reason: &anyhow::Error) -> Diagnostic {
 
 /// `FORMAT_BYTE_COUNT` with a negative count.
 pub fn std_format_byte_count_negative(bytes: i64) -> Diagnostic {
-    let message = format!("FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}");
+    let message = format!("{FUNC_FORMAT_BYTE_COUNT} needs a non-negative byte count, got {bytes}");
     Diagnostic::new(
         "dsl.std.format_byte_count_negative",
         message,
@@ -1556,7 +1575,7 @@ pub fn std_format_byte_count_negative(bytes: i64) -> Diagnostic {
 
 /// `FORMAT_DURATION` with negative milliseconds.
 pub fn std_format_duration_negative(millis: i64) -> Diagnostic {
-    let message = format!("FORMAT_DURATION needs non-negative milliseconds, got {millis}");
+    let message = format!("{FUNC_FORMAT_DURATION} needs non-negative milliseconds, got {millis}");
     Diagnostic::new(
         "dsl.std.format_duration_negative",
         message,
@@ -1566,7 +1585,7 @@ pub fn std_format_duration_negative(millis: i64) -> Diagnostic {
 
 /// `PARSE_DURATION` out of `INT` range.
 pub fn std_parse_duration_range(text: &str) -> Diagnostic {
-    let message = format!("PARSE_DURATION out of INT range: {text:?}");
+    let message = format!("{FUNC_PARSE_DURATION} out of {INT_TYPE_NAME} range: {text:?}");
     Diagnostic::new(
         "dsl.std.parse_duration_range",
         message,
@@ -1577,7 +1596,7 @@ pub fn std_parse_duration_range(text: &str) -> Diagnostic {
 /// `TO_JSON` on a non-finite float. Takes the float; rendering lives
 /// here.
 pub fn std_to_json_non_finite_float(f: f64) -> Diagnostic {
-    let message = format!("TO_JSON cannot encode non-finite float {f}");
+    let message = format!("{FUNC_TO_JSON} cannot encode non-finite float {f}");
     Diagnostic::new(
         "dsl.std.to_json_non_finite_float",
         message,
@@ -1589,7 +1608,7 @@ pub fn std_to_json_non_finite_float(f: f64) -> Diagnostic {
 /// name; the admit list lives here.
 pub fn std_to_json_unencodable(actual: &str) -> Diagnostic {
     let message = format!(
-        "TO_JSON cannot encode {actual} values; use STRING, INT, FLOAT, BOOL, LIST, or MAP"
+        "{FUNC_TO_JSON} cannot encode {actual} values; use {STRING_TYPE_NAME}, {INT_TYPE_NAME}, {FLOAT_TYPE_NAME}, {BOOL_TYPE_NAME}, {LIST_TYPE_NAME}, or {MAP_TYPE_NAME}"
     );
     Diagnostic::new(
         "dsl.std.to_json_unencodable",
