@@ -5775,6 +5775,7 @@ fn function_names_match_registry() {
         FUNC_FLOAT,
         FUNC_FORMAT_BYTE_COUNT,
         FUNC_FORMAT_DURATION,
+        FUNC_GLOB,
         FUNC_INT,
         FUNC_IS_EXEC,
         FUNC_IS_TERMINAL,

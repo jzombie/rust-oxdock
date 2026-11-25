@@ -14,11 +14,11 @@ use oxdock_parser::{
 
 use super::function_names::{
     FUNC_BASE64_DECODE, FUNC_BASE64_ENCODE, FUNC_BOOL, FUNC_CONTAINS, FUNC_FLOAT,
-    FUNC_FORMAT_BYTE_COUNT, FUNC_FORMAT_DURATION, FUNC_INT, FUNC_IS_EXEC, FUNC_IS_TERMINAL,
-    FUNC_LEN, FUNC_LOAD_JSON, FUNC_LOAD_TOML, FUNC_PARSE_ARGS, FUNC_PARSE_BYTE_COUNT,
-    FUNC_PARSE_DURATION, FUNC_PARSE_FLAGS, FUNC_PARSE_JSON, FUNC_PARSE_POSITIONALS,
-    FUNC_PARSE_TOML, FUNC_PATH_BASE, FUNC_PATH_REL, FUNC_PATH_TYPE, FUNC_PATH_WRITABLE,
-    FUNC_SEMAPHORE_NEW, FUNC_SHELL_SPLIT_ARGS, FUNC_TO_JSON,
+    FUNC_FORMAT_BYTE_COUNT, FUNC_FORMAT_DURATION, FUNC_GLOB, FUNC_INT, FUNC_IS_EXEC,
+    FUNC_IS_TERMINAL, FUNC_LEN, FUNC_LOAD_JSON, FUNC_LOAD_TOML, FUNC_PARSE_ARGS,
+    FUNC_PARSE_BYTE_COUNT, FUNC_PARSE_DURATION, FUNC_PARSE_FLAGS, FUNC_PARSE_JSON,
+    FUNC_PARSE_POSITIONALS, FUNC_PARSE_TOML, FUNC_PATH_BASE, FUNC_PATH_REL, FUNC_PATH_TYPE,
+    FUNC_PATH_WRITABLE, FUNC_SEMAPHORE_NEW, FUNC_SHELL_SPLIT_ARGS, FUNC_TO_JSON,
 };
 
 /// Duplicate field name inside one MAP spelling.
@@ -1817,6 +1817,50 @@ pub fn std_parse_json_needs_string(actual: &str) -> Diagnostic {
     )
 }
 
+/// `GLOB` without its pattern argument. Parameterless: the arity
+/// shape already names the call, so no operand is attached.
+pub fn std_glob_needs_arg() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.glob_needs_arg",
+        format!("{FUNC_GLOB} requires a pattern argument"),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `GLOB` with a non-string pattern. Parameterless: the value rides
+/// the enclosing call, so no operand is attached.
+pub fn std_glob_needs_string() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.glob_needs_string",
+        format!("{FUNC_GLOB} pattern argument must evaluate to a string"),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `GLOB` root-resolution failure. Takes the underlying failure
+/// verbatim: it already names the root and the cause, so no wrapper
+/// is added.
+pub fn std_glob_resolve_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    Diagnostic::new(
+        "dsl.std.glob_resolve_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// `GLOB` listing failure. Takes the underlying I/O failure verbatim:
+/// the bare propagation it replaces carried no `GLOB` prefix, so none
+/// is added.
+pub fn std_glob_list_failed(reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    Diagnostic::new(
+        "dsl.std.glob_list_failed",
+        reason_text.clone(),
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// `HANDLE` typed JSON decode on a non-object. Takes the offending
 /// JSON value; `Display` rendering lives here.
 pub fn json_handle_needs_object(other: &serde_json::Value) -> Diagnostic {
@@ -3393,6 +3437,10 @@ mod tests {
             std_json_parse_failed(&serde_json::from_str::<serde_json::Value>("{bad").unwrap_err())
                 .key(),
             std_parse_json_needs_string("INT").key(),
+            std_glob_needs_arg().key(),
+            std_glob_needs_string().key(),
+            std_glob_resolve_failed(&anyhow::anyhow!("x")).key(),
+            std_glob_list_failed(&std::io::Error::other("x")).key(),
             std_base64_encode_needs_string("INT").key(),
             std_base64_decode_needs_string("INT").key(),
             std_base64_decode_failed("!!!", &base64::DecodeError::InvalidByte(0, b'!')).key(),
@@ -3712,6 +3760,22 @@ mod tests {
         assert_eq!(
             std_parse_json_needs_string("INT").message(),
             "PARSE_JSON expects a STRING, got INT"
+        );
+        assert_eq!(
+            std_glob_needs_arg().message(),
+            "GLOB requires a pattern argument"
+        );
+        assert_eq!(
+            std_glob_needs_string().message(),
+            "GLOB pattern argument must evaluate to a string"
+        );
+        assert_eq!(
+            std_glob_resolve_failed(&anyhow::anyhow!("denied")).message(),
+            "denied"
+        );
+        assert_eq!(
+            std_glob_list_failed(&std::io::Error::other("denied")).message(),
+            "denied"
         );
         assert!(
             std_json_parse_failed(&serde_json::from_str::<serde_json::Value>("{bad").unwrap_err())

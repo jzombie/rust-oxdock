@@ -1418,12 +1418,10 @@ fn evaluate_compiled_math<P: ProcessManager>(
 pub(crate) fn glob_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
-    let pattern_val = args
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("GLOB requires a pattern argument"))?;
+) -> DiagnosticResult<Value> {
+    let pattern_val = args.first().ok_or_else(args_diag::std_glob_needs_arg)?;
     let Some(raw_pattern) = pattern_val.as_str() else {
-        bail!("GLOB pattern argument must evaluate to a string");
+        return Err(args_diag::std_glob_needs_string());
     };
     let raw_pattern = raw_pattern.to_string();
 
@@ -1441,11 +1439,16 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
     // pending snapshot materializes here (a snapshot read), while local
     // roots resolve with zero I/O. The listing below then runs on concrete
     // paths in both cases.
-    let _ = cx.state.fs.resolve_read(&cx.state.cwd, ".")?;
+    let _ = cx
+        .state
+        .fs
+        .resolve_read(&cx.state.cwd, ".")
+        .map_err(|err| args_diag::std_glob_resolve_failed(&err))?;
     let root = cx.state.fs.root().clone();
     let root_path = root.as_path().to_path_buf();
     let mut entries: Vec<Value> = root
-        .glob_paths(&raw_pattern)?
+        .glob_paths(&raw_pattern)
+        .map_err(|err| args_diag::std_glob_list_failed(&err))?
         .into_iter()
         .filter_map(|p| {
             p.strip_prefix(&root_path)

@@ -2248,7 +2248,7 @@ fn glob<P: ProcessManager>(
     pattern: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&pattern)?;
-    super::args::glob_from_value(&[Value::string(text)], cx)
+    Ok(super::args::glob_from_value(&[Value::string(text)], cx)?)
 }
 
 /// Load and parse a TOML file.

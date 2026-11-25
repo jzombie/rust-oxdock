@@ -1061,6 +1061,22 @@ transport, so this phase is mechanical:
    `FUNC_PARSE_JSON`) covered by the lock test. Core
    409 plus integration 629 green; clippy and fmt
    clean.
+   Glob step 2026-11-26: four new ctors
+   (std_glob_needs_arg plus std_glob_needs_string
+   plus std_glob_resolve_failed plus
+   std_glob_list_failed, wording byte-identical, all
+   pinned by key plus message tests; the two failure
+   passthroughs stay verbatim with no prefix, matching
+   the bare `?` propagation they replace, and the
+   listing failure takes the concrete
+   `&std::io::Error` per the borrowed-error
+   precedent). glob_from_value now returns
+   DiagnosticResult; the `#[oxdock_func]` wrapper
+   stays anyhow with one Ok(...?) wrap. One new
+   FUNC_* constant (`FUNC_GLOB`) covered by the lock
+   test; test-sample construction uses
+   `io::Error::other` per the clippy lint. Core 409
+   plus integration 629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

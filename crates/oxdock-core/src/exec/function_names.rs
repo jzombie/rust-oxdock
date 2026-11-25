@@ -33,6 +33,8 @@ pub const FUNC_FORMAT_BYTE_COUNT: &str = "FORMAT_BYTE_COUNT";
 pub const FUNC_FORMAT_DURATION: &str = "FORMAT_DURATION";
 /// `FLOAT`: float conversion.
 pub const FUNC_FLOAT: &str = "FLOAT";
+/// `GLOB`: workspace pattern listing.
+pub const FUNC_GLOB: &str = "GLOB";
 /// `INT`: integer conversion.
 pub const FUNC_INT: &str = "INT";
 /// `IS_EXEC`: executable probe.
