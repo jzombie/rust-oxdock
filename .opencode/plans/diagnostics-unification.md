@@ -288,13 +288,16 @@ have zero inline `bail!`/`anyhow!` left; lib 406 + integration 629
 green; clippy/doc clean; no fmt drift.
 
 Remaining:
-- Core runtime: `native.rs` done 2026-11-24 (46 `dsl.func.*` /
-  `dsl.std.*` ctors: registry, PARSE_ARGS group, byte/duration,
+- Core runtime: `exec/mcp.rs` done (6 `dsl.mcp.*` ctors) and
+  `exec/import.rs` done (21 `dsl.import.*` ctors) and
+  `native.rs` done 2026-11-24 (46 `dsl.func.*` / `dsl.std.*`
+  ctors: registry, PARSE_ARGS group, byte/duration,
   BOOL/CONTAINS/LEN/PATH/SHELL builtins; only test-code `ECHO`
   stub left; lib 407 + integration 629 green; clippy/doc/fmt clean).
-  `static_check.rs` next (~129 sites). `fs_ops.rs` and
-  `pipeline.rs` verified clean (no inline failures; `fs_ops`
-  only re-exports `Result`).
+  `static_check.rs` next (~129 sites, surveyed: template group,
+  flow group, const group, arithmetic group, IMPORT-static reuse).
+  `fs_ops.rs` and `pipeline.rs` verified clean (no inline
+  failures; `fs_ops` only re-exports `Result`).
 - Parser: `markdown.rs`, `template.rs`, `macro_input.rs`.
 - Plugins and sys crates last.
 
