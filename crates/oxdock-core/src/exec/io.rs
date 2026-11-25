@@ -110,7 +110,7 @@ impl PipeRegistry {
     /// after a run completes, via the `PIPE` values in the returned
     /// bindings. Only meaningful once writers detached (post-run).
     pub fn peek_pipe_content(handle: &PipeHandle) -> Result<Vec<u8>> {
-        peek_handle(handle)
+        Ok(peek_handle(handle)?)
     }
 
     /// Snapshot one handle for `INSPECT()` diagnostics.

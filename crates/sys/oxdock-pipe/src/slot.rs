@@ -12,10 +12,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-// `Result` threads through the OS-pipe take-once slots, which are
-// compiled out under Miri.
 #[cfg_attr(miri, allow(unused_imports))]
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::backend::{PipeInner, ScriptPipe};
 use crate::diagnostics as pipe_diag;
@@ -59,12 +57,12 @@ impl OsPipeReader {
     /// Take the handle for `Stdio::from`. Bails deterministically if the
     /// descriptor was already consumed so a second spawn can never reuse a
     /// spent pipe or leave stdio unbound.
-    pub fn take(&self) -> Result<std::io::PipeReader> {
+    pub fn take(&self) -> DiagnosticResult<std::io::PipeReader> {
         self.inner
             .lock()
-            .map_err(|_| anyhow::Error::new(pipe_diag::os_reader_lock_poisoned()))?
+            .map_err(|_| pipe_diag::os_reader_lock_poisoned())?
             .take()
-            .ok_or_else(|| anyhow::Error::new(pipe_diag::os_handle_consumed()))
+            .ok_or_else(pipe_diag::os_handle_consumed)
     }
 
     /// Whether this half was already taken. A poisoned slot reports live
@@ -85,12 +83,12 @@ impl OsPipeWriter {
     /// Take the handle for `Stdio::from`. Bails deterministically if the
     /// descriptor was already consumed so a second spawn can never reuse a
     /// spent pipe or leave stdio unbound.
-    pub fn take(&self) -> Result<std::io::PipeWriter> {
+    pub fn take(&self) -> DiagnosticResult<std::io::PipeWriter> {
         self.inner
             .lock()
-            .map_err(|_| anyhow::Error::new(pipe_diag::os_writer_lock_poisoned()))?
+            .map_err(|_| pipe_diag::os_writer_lock_poisoned())?
             .take()
-            .ok_or_else(|| anyhow::Error::new(pipe_diag::os_handle_consumed()))
+            .ok_or_else(pipe_diag::os_handle_consumed)
     }
 
     /// Whether this half was already taken. A poisoned slot reports live
@@ -105,7 +103,7 @@ impl OsPipeWriter {
 /// copies immediately after spawning, otherwise the reader never sees EOF.
 /// Moved verbatim from `oxdock-process`; behavior is unchanged.
 #[cfg(not(miri))]
-pub fn create_os_pipe() -> Result<(OsPipeReader, OsPipeWriter)> {
+pub fn create_os_pipe() -> std::io::Result<(OsPipeReader, OsPipeWriter)> {
     let (reader, writer) = std::io::pipe()?;
     Ok((OsPipeReader::new(reader), OsPipeWriter::new(writer)))
 }
@@ -128,7 +126,7 @@ pub struct OsPipeEntry {
 #[cfg(not(miri))]
 impl OsPipeEntry {
     /// Mint a fresh kernel pair.
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new() -> std::io::Result<Self> {
         let (reader, writer) = create_os_pipe()?;
         Ok(Self { writer, reader })
     }

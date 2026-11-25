@@ -506,6 +506,13 @@ transport, so this phase is mechanical:
    `PartialEq`, `Error`) is unchanged.
 2. Migrate public signatures leaf to root, keeping
    `From<Diagnostic> for anyhow::Error` until the last caller flips.
+   Pipe step done 2026-11-26: take x2 and peek now return
+   DiagnosticResult with no Error-new wrappers; create_os_pipe and
+   OsPipeEntry-new now return io Result as pure kernel creation.
+   One boundary fix in core peek_pipe_content via Ok wrap with
+   question-mark coercion. Materialize and drain_string_strict stay
+   on anyhow Result until dedicated ctors land. Pipe 5 plus core
+   408 plus process 119 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
