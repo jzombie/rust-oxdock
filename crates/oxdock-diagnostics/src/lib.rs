@@ -23,8 +23,12 @@
 //!   [`assert_no_internal_encodings`].
 //! - The crate stays dependency-light (std plus `Arc`, never workspace
 //!   crates) so parser, core, and CLI can all depend on it without a
-//!   cycle. Conversion into `anyhow::Error` happens at call sites via
-//!   `anyhow::Error::new`, never here.
+//!   cycle. Conversion into `anyhow::Error` needs no local impl:
+//!   `anyhow`'s blanket `From<E: StdError + Send + Sync + 'static>`
+//!   already covers [`Diagnostic`], so `?` and `.into()` carry keyed
+//!   diagnostics into not-yet-migrated `anyhow::Result` signatures
+//!   with the message and chain intact. New fallible signatures
+//!   should return [`DiagnosticResult`] instead.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -101,12 +105,29 @@ impl Span {
     }
 }
 
+/// Fallible result with a keyed diagnostic. New fallible signatures
+/// return this instead of `anyhow::Result`: callers add context with
+/// [`Diagnostic::with_hint`] / [`Diagnostic::with_source`] and convert
+/// into `anyhow::Error` with `?` or `.into()` (via `anyhow`'s blanket
+/// `From`) while the rest of the workspace migrates leaf to root.
+pub type DiagnosticResult<T> = Result<T, Diagnostic>;
+
 /// One user-facing error: stable key, rendered message, structured
 /// fields, optional span, hint, and chained source. Construct through
 /// [`Diagnostic::new`] from the owning domain module, one constructor
 /// per diagnostic at its owner.
+///
+/// Pointer-sized by design: the payload lives behind one `Box` so
+/// [`DiagnosticResult`] returns stay at the `anyhow::Error` footprint
+/// on the happy path (the error value is constructed only on the cold
+/// path). A test pins `size_of::<Diagnostic>()` below.
 #[derive(Debug, Clone)]
-pub struct Diagnostic {
+pub struct Diagnostic(Box<DiagnosticInner>);
+
+/// Boxed payload behind [`Diagnostic`]. Private so the footprint
+/// guarantee and the constructor-per-diagnostic rule cannot drift.
+#[derive(Debug, Clone)]
+struct DiagnosticInner {
     key: &'static str,
     message: String,
     fields: BTreeMap<String, String>,
@@ -131,14 +152,14 @@ impl Diagnostic {
                 )
             })
             .collect();
-        Self {
+        Self(Box::new(DiagnosticInner {
             key,
             message,
             fields,
             span: None,
             hint: None,
             source: None,
-        }
+        }))
     }
 
     /// Build a sanitized field map from pairs. Domain constructors use
@@ -156,38 +177,38 @@ impl Diagnostic {
     /// Unused for rendering; tests assert on it so a template reword
     /// cannot silently fork one call site.
     pub fn key(&self) -> &'static str {
-        self.key
+        self.0.key
     }
 
     /// Whole-sentence rendered message.
     pub fn message(&self) -> &str {
-        &self.message
+        &self.0.message
     }
 
     /// Structured fields that built the message.
     pub fn fields(&self) -> &BTreeMap<String, String> {
-        &self.fields
+        &self.0.fields
     }
 
     /// Optional source span.
     pub fn span(&self) -> Option<&Span> {
-        self.span.as_ref()
+        self.0.span.as_ref()
     }
 
     /// Optional concrete hint with an example.
     pub fn hint(&self) -> Option<&str> {
-        self.hint.as_deref()
+        self.0.hint.as_deref()
     }
 
     /// Attach a source span (builder style).
     pub fn with_span(mut self, span: Span) -> Self {
-        self.span = Some(span);
+        self.0.span = Some(span);
         self
     }
 
     /// Attach a hint (builder style). Sanitized like the message.
     pub fn with_hint(mut self, hint: String) -> Self {
-        self.hint = Some(sanitize_internal_encoding(&hint));
+        self.0.hint = Some(sanitize_internal_encoding(&hint));
         self
     }
 
@@ -195,18 +216,18 @@ impl Diagnostic {
     /// chains across I/O, filesystem, process, and network boundaries
     /// without `anyhow`.
     pub fn with_source(mut self, source: Arc<dyn std::error::Error + Send + Sync>) -> Self {
-        self.source = Some(source);
+        self.0.source = Some(source);
         self
     }
 }
 
 impl PartialEq for Diagnostic {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
-            && self.message == other.message
-            && self.fields == other.fields
-            && self.span == other.span
-            && self.hint == other.hint
+        self.0.key == other.0.key
+            && self.0.message == other.0.message
+            && self.0.fields == other.0.fields
+            && self.0.span == other.0.span
+            && self.0.hint == other.0.hint
     }
 }
 
@@ -214,11 +235,11 @@ impl Eq for Diagnostic {}
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)?;
-        if let Some(hint) = &self.hint {
+        write!(f, "{}", self.0.message)?;
+        if let Some(hint) = &self.0.hint {
             write!(f, "\nhint: {hint}")?;
         }
-        if let Some(span) = &self.span
+        if let Some(span) = &self.0.span
             && span.line > 0
         {
             match (span.col_start, span.col_end) {
@@ -247,7 +268,8 @@ impl fmt::Display for Diagnostic {
 
 impl std::error::Error for Diagnostic {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
+        self.0
+            .source
             .as_ref()
             .map(|s| s.as_ref() as &(dyn std::error::Error + 'static))
     }
@@ -301,9 +323,69 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_stays_pointer_sized() {
+        assert_eq!(
+            std::mem::size_of::<Diagnostic>(),
+            std::mem::size_of::<usize>(),
+            "Diagnostic must stay one pointer wide so DiagnosticResult keeps the anyhow footprint"
+        );
+    }
+
+    #[test]
     fn equality_ignores_source_chain() {
         let a = Diagnostic::new("k", "m".to_string(), Diagnostic::make_fields(&[]));
         let b = a.clone().with_source(Arc::new(io::Error::other("chain")));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn result_alias_carries_ok_and_err() {
+        let ok: DiagnosticResult<u32> = Ok(7);
+        let got = match ok {
+            Ok(got) => got,
+            Err(_) => panic!("expected ok"),
+        };
+        assert_eq!(got, 7);
+        let diag = Diagnostic::new(
+            "test.alias",
+            "boom".to_string(),
+            Diagnostic::make_fields(&[]),
+        );
+        let err: DiagnosticResult<u32> = Err(diag.clone());
+        let got = match err {
+            Ok(_) => panic!("expected err"),
+            Err(got) => got,
+        };
+        assert_eq!(got, diag);
+    }
+
+    #[test]
+    fn anyhow_blanket_from_preserves_message_and_chain() {
+        let io_err = Arc::new(io::Error::other("missing file"));
+        let diag = Diagnostic::new(
+            "test.interop",
+            "failed to read script".to_string(),
+            Diagnostic::make_fields(&[("path", "x.ox")]),
+        )
+        .with_source(io_err);
+        let anyhow_err: anyhow::Error = diag.into();
+        assert!(anyhow_err.to_string().contains("failed to read script"));
+        assert!(format!("{anyhow_err:#}").contains("missing file"));
+    }
+
+    #[test]
+    fn question_mark_converts_into_anyhow_result() {
+        fn fallible() -> DiagnosticResult<u32> {
+            Err(Diagnostic::new(
+                "test.qmark",
+                "boom".to_string(),
+                Diagnostic::make_fields(&[]),
+            ))
+        }
+        fn caller() -> anyhow::Result<u32> {
+            Ok(fallible()? + 1)
+        }
+        let err = caller().expect_err("must propagate");
+        assert!(err.to_string().contains("boom"));
     }
 }

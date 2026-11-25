@@ -490,8 +490,20 @@ Remaining:
 Only after Phases A through C. `source` chaining is already in the
 transport, so this phase is mechanical:
 
-1. Introduce `pub type DiagnosticResult<T> = Result<T, Diagnostic>`
-   in `oxdock-diagnostics` (context via `with_hint` / `with_source`).
+1. Transport foundation done 2026-11-26: `pub type
+   DiagnosticResult<T> = Result<T, Diagnostic>` in
+   `oxdock-diagnostics` (context via `with_hint` / `with_source`);
+   no new dependency (leaf stays dependency-free) because
+   `anyhow`'s blanket `From<E: StdError + Send + Sync + 'static>`
+   already covers `Diagnostic`, so `?`/`.into()` carry keyed
+   diagnostics into unmigrated `anyhow::Result` signatures with
+   message and chain intact (pinned by transport tests).
+   `Diagnostic` is internally boxed (`Box<DiagnosticInner>`,
+   pointer-sized, pinned by a `size_of` test), so
+   `DiagnosticResult` keeps the `anyhow::Error` happy-path
+   footprint with no `clippy.toml` tuning and no per-item allows;
+   the public API (`new`, accessors, builders, `Clone`,
+   `PartialEq`, `Error`) is unchanged.
 2. Migrate public signatures leaf to root, keeping
    `From<Diagnostic> for anyhow::Error` until the last caller flips.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.

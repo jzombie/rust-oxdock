@@ -1672,6 +1672,9 @@ dependencies = [
 [[package]]
 name = "oxdock-diagnostics"
 version = "0.44.1-alpha"
+dependencies = [
+ "anyhow",
+]
 
 [[package]]
 name = "oxdock-doc-tests"
