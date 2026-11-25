@@ -13,7 +13,7 @@ use oxdock_net_plugin::validate as net_validate;
 /// Delegates to the shared NET parser so shapes stay identical
 /// everywhere; only the caller label is SSH's.
 pub fn parse_serve_endpoint(raw: &str) -> Result<net_validate::VirtualEndpoint> {
-    net_validate::parse_virtual_endpoint(raw, "SSH_SERVE")
+    Ok(net_validate::parse_virtual_endpoint(raw, "SSH_SERVE")?)
 }
 
 #[cfg(test)]

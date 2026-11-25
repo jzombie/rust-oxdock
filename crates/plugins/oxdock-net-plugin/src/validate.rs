@@ -7,15 +7,15 @@
 
 use std::net::IpAddr;
 
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as net_diag;
 
 /// Parse a numeric port (`0`-`65535`; callers narrow further).
-pub fn parse_port(text: &str) -> Result<u16> {
+pub fn parse_port(text: &str) -> DiagnosticResult<u16> {
     match text.parse::<u16>() {
         Ok(port) => Ok(port),
-        _ => Err(anyhow::Error::new(net_diag::port_not_numeric())),
+        _ => Err(net_diag::port_not_numeric()),
     }
 }
 
@@ -109,7 +109,7 @@ impl std::fmt::Display for EndpointKey {
 /// leading qualifier (`udp/dns`, the DSL lookup form) or a trailing one
 /// (`dns/udp`, the `-p` flag form); bare text has no qualifier. Unknown
 /// qualifiers bail instead of falling through to name validation.
-fn split_protocol_qualifier(text: &str) -> Result<(Option<Protocol>, &str)> {
+fn split_protocol_qualifier(text: &str) -> DiagnosticResult<(Option<Protocol>, &str)> {
     let parse_protocol = |segment: &str| match segment {
         "tcp" => Some(Protocol::Tcp),
         "udp" => Some(Protocol::Udp),
@@ -133,9 +133,7 @@ fn split_protocol_qualifier(text: &str) -> Result<(Option<Protocol>, &str)> {
         return Ok(qualified);
     }
     if text.contains('/') {
-        return Err(anyhow::Error::new(net_diag::unknown_protocol_qualifier(
-            text,
-        )));
+        return Err(net_diag::unknown_protocol_qualifier(text));
     }
     Ok((None, text))
 }
@@ -144,10 +142,13 @@ fn split_protocol_qualifier(text: &str) -> Result<(Option<Protocol>, &str)> {
 /// network. Returns the qualifier (`None` for bare text, which callers
 /// resolve as TCP with single-protocol fallback) plus the validated bare
 /// endpoint. The `func` prefix names the caller for error context.
-pub fn parse_endpoint_ref(raw: &str, func: &str) -> Result<(Option<Protocol>, VirtualEndpoint)> {
+pub fn parse_endpoint_ref(
+    raw: &str,
+    func: &str,
+) -> DiagnosticResult<(Option<Protocol>, VirtualEndpoint)> {
     let text = raw.trim();
     let (protocol, bare) = split_protocol_qualifier(text)
-        .map_err(|err| anyhow::Error::new(net_diag::endpoint_ref_invalid(func, raw, &err)))?;
+        .map_err(|err| net_diag::endpoint_ref_invalid(func, raw, &anyhow::Error::new(err)))?;
     let endpoint = parse_virtual_endpoint(bare, func)?;
     Ok((protocol, endpoint))
 }
@@ -167,22 +168,22 @@ fn is_reserved_name(name: &str) -> bool {
 /// ephemeral ports belong exclusively to the CLI outer mapping
 /// (`-p 0:<name>`). The `func` prefix names the caller (`NET_LISTEN`,
 /// `SSH_SERVE`) for error context.
-pub fn parse_virtual_endpoint(raw: &str, func: &str) -> Result<VirtualEndpoint> {
+pub fn parse_virtual_endpoint(raw: &str, func: &str) -> DiagnosticResult<VirtualEndpoint> {
     let text = raw.trim();
     if text.is_empty() {
-        return Err(anyhow::Error::new(net_diag::endpoint_empty(func, raw)));
+        return Err(net_diag::endpoint_empty(func, raw));
     }
     if text.contains(':') {
-        return Err(anyhow::Error::new(net_diag::endpoint_host_port(func, raw)));
+        return Err(net_diag::endpoint_host_port(func, raw));
     }
     if text.contains('/') || text.chars().any(char::is_whitespace) {
-        return Err(anyhow::Error::new(net_diag::endpoint_bad_chars(func, raw)));
+        return Err(net_diag::endpoint_bad_chars(func, raw));
     }
     if text.chars().all(|c| c.is_ascii_digit()) {
         let port = parse_port(text)
-            .map_err(|err| anyhow::Error::new(net_diag::endpoint_port_parse(func, raw, &err)))?;
+            .map_err(|err| net_diag::endpoint_port_parse(func, raw, &anyhow::Error::new(err)))?;
         if port == 0 {
-            return Err(anyhow::Error::new(net_diag::endpoint_port_zero(func, raw)));
+            return Err(net_diag::endpoint_port_zero(func, raw));
         }
         return Ok(VirtualEndpoint::Port(port));
     }
@@ -194,10 +195,10 @@ pub fn parse_virtual_endpoint(raw: &str, func: &str) -> Result<VirtualEndpoint> 
             .chars()
             .any(|c| c.is_ascii_alphabetic() || c == '-' || c == '_')
     {
-        return Err(anyhow::Error::new(net_diag::endpoint_bad_shape(func, raw)));
+        return Err(net_diag::endpoint_bad_shape(func, raw));
     }
     if is_reserved_name(text) {
-        return Err(anyhow::Error::new(net_diag::endpoint_reserved(func, raw)));
+        return Err(net_diag::endpoint_reserved(func, raw));
     }
     Ok(VirtualEndpoint::Name(text.to_string()))
 }

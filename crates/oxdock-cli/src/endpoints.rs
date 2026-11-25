@@ -86,7 +86,8 @@ pub fn parse_publish_arg(raw: &str) -> Result<(SocketAddr, String)> {
         return Err(errors::publish_requires_shape(raw));
     }
     #[cfg(feature = "net")]
-    parse_endpoint_ref(inner_text, "-p").map_err(|e| errors::publish_inner_invalid(raw, &e))?;
+    parse_endpoint_ref(inner_text, "-p")
+        .map_err(|e| errors::publish_inner_invalid(raw, &anyhow::Error::new(e)))?;
     let outer_text = outer_text.trim();
     let addr = if let Ok(port) = outer_text.parse::<u16>() {
         SocketAddr::from(([127, 0, 0, 1], port))
@@ -124,7 +125,7 @@ pub fn build_registry(flags: &EndpointFlags) -> Result<Arc<EndpointRegistry>> {
     }
     for (addr, inner) in &flags.publishes {
         let (protocol, endpoint) = parse_endpoint_ref(inner, "-p")
-            .map_err(|e| errors::publish_inner_invalid(inner, &e))?;
+            .map_err(|e| errors::publish_inner_invalid(inner, &anyhow::Error::new(e)))?;
         let key = EndpointKey {
             protocol: protocol.unwrap_or(Protocol::Tcp),
             endpoint,

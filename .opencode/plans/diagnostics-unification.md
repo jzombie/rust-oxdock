@@ -744,6 +744,25 @@ transport, so this phase is mechanical:
    anyhow). Core 408 plus mcp session 26 plus mcp unit
    suites green; clippy and fmt clean (only pre-existing
    baseline warnings).
+   Endpoint-validation leaf step 2026-11-26: no new
+   ctors; parse_port, split_protocol_qualifier,
+   parse_endpoint_ref, and parse_virtual_endpoint now
+   return DiagnosticResult with bare Err ctors (all
+   net.validate.* already keyed). The two chaining
+   ctors (endpoint_ref_invalid, endpoint_port_parse)
+   keep their &anyhow::Error params per the passthrough
+   precedent, so the two intra-file sites wrap the
+   Diagnostic inner with anyhow::Error::new. Net-plugin
+   plus ssh-plugin host-func callers hold unchanged via
+   blanket From; the two CLI publish_inner_invalid sites
+   wrap with anyhow::Error::new to match that ctor's
+   &anyhow::Error param; ssh parse_serve_endpoint takes
+   one Ok(...?) wrap at the anyhow boundary (direct
+   return does not coerce). Net 38 plus net-lib 38 plus
+   ssh-unit 13 plus cli-lib 49 green; ssh integration
+   shows only the pre-existing non_map_serve_options
+   failure (identical on clean tree); clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
