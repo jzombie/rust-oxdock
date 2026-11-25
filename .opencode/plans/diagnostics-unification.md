@@ -720,6 +720,20 @@ transport, so this phase is mechanical:
    simplified per clippy. Process 121 plus core 408
    green; clippy and fmt clean (only pre-existing
    baseline warnings).
+   Core MCP dispatch step 2026-11-26: no new ctors;
+   McpSession::call now returns DiagnosticResult with
+   bare Err ctors (unknown_tool plus the call_failed
+   passthrough, which keeps its &anyhow::Error param and
+   inline {reason:#} rendering). Init plus tool_metas
+   stay on anyhow Result: new_state, check_pre_run,
+   validate_closure, execute_steps, and exported_metas
+   are still anyhow, so they hold the session-assembly
+   side until those flip. The rmcp call_tool closure
+   follows with one bare-Err line (lock-poisoned path);
+   its McpError mapping via format {err:#} holds
+   unchanged for Diagnostic. Core 408 plus mcp session
+   26 plus mcp unit suites green; clippy and fmt clean
+   (only pre-existing baseline warnings).
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

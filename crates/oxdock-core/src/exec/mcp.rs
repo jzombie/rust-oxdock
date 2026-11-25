@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_parser::{Expr, ParsedScript, StepKind};
 use oxdock_process::{CommandStdin, ProcessManager, SharedOutput};
 
@@ -213,7 +214,7 @@ impl<P: ProcessManager> McpSession<P> {
     /// the next one. On failure the drained tails ride the error.
     /// Qualified exports (`STD::INT`) answer under their base name;
     /// tool-name duplicates fail at table build, so the match is unique.
-    pub fn call(&mut self, base: &str, args: Vec<Value>) -> Result<McpCallOutput> {
+    pub fn call(&mut self, base: &str, args: Vec<Value>) -> DiagnosticResult<McpCallOutput> {
         let qualified = if self.exports.funcs.iter().any(|e| e == base) {
             oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, base)
         } else {
@@ -225,7 +226,7 @@ impl<P: ProcessManager> McpSession<P> {
             {
                 Some(export) => export.clone(),
                 None => {
-                    return Err(anyhow::Error::new(mcp_diag::mcp_unknown_tool(base)));
+                    return Err(mcp_diag::mcp_unknown_tool(base));
                 }
             }
         };
@@ -261,9 +262,7 @@ impl<P: ProcessManager> McpSession<P> {
                     // this call's bytes, and the tails are the diagnosis.
                     let stdout = capped_drain(&self.stdout_buf);
                     let stderr = capped_drain(&self.stderr_buf);
-                    return Err(anyhow::Error::new(mcp_diag::mcp_call_failed(
-                        &err, &stdout, &stderr,
-                    )));
+                    return Err(mcp_diag::mcp_call_failed(&err, &stdout, &stderr));
                 }
             }
         };

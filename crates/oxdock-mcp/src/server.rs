@@ -479,7 +479,7 @@ impl ServerHandler for OxDockHandler {
         let output = tokio::task::spawn_blocking(move || {
             let mut guard = inner
                 .lock()
-                .map_err(|_| anyhow::Error::new(mcp_diag::session_lock_poisoned_call(&name)))?;
+                .map_err(|_| mcp_diag::session_lock_poisoned_call(&name))?;
             guard.session.set_stream_hook(Some(hook));
             let result = guard.session.call(&name, values);
             guard.session.set_stream_hook(None);
