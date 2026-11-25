@@ -590,6 +590,14 @@ transport, so this phase is mechanical:
    the parser template boundary does. Process 119 plus core
    408 green; clippy and fmt clean (one pre-existing
    obfuscated_if_else in diagnostics.rs untouched).
+   Process spawn-anchors step 2026-11-26: check_spawn_anchors
+   now returns DiagnosticResult with two bare Err ctors
+   (spawn_requires_path, spawn_requires_system_root); all
+   five question-mark callers (core handlers, shell_manager,
+   ssh-plugin run and pty, net-plugin session) hold unchanged
+   via blanket From; dropped the now-unused anyhow Result
+   import. Process 119 plus core 408 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

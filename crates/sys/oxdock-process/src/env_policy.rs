@@ -21,7 +21,7 @@
 //! (generated from the declaration below by `cargo run -p oxdock-render`;
 //! templates link it through the `env_contracts_url` global).
 
-use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::env as oxdock_env;
 use std::collections::HashMap;
 
@@ -63,13 +63,13 @@ pub fn check_spawn_anchors(
     program: &str,
     envs: &HashMap<String, String>,
     require_path: bool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     if (require_path || needs_path_lookup(program)) && !has_var(envs, oxdock_env::os::PATH) {
-        return Err(anyhow::Error::new(proc_diag::spawn_requires_path(program)));
+        return Err(proc_diag::spawn_requires_path(program));
     }
     #[allow(clippy::disallowed_macros)]
     if cfg!(windows) && !has_var(envs, oxdock_env::os::windows::SYSTEM_ROOT) {
-        return Err(anyhow::Error::new(proc_diag::spawn_requires_system_root()));
+        return Err(proc_diag::spawn_requires_system_root());
     }
     Ok(())
 }
