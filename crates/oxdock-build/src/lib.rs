@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod diagnostics;
 mod manifest_paths;
 mod track;
 

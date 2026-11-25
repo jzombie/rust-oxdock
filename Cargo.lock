@@ -1598,6 +1598,7 @@ version = "0.44.1-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
+ "oxdock-diagnostics",
  "oxdock-embed",
  "oxdock-fs",
  "oxdock-parser",

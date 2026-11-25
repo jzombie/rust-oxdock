@@ -343,6 +343,16 @@ Remaining:
   PIPE/SEMAPHORE/PERMIT; all messages byte-identical; test stubs
   left as-is; lib 119 + core lib 408 + integration 629 green;
   clippy/doc clean; zero fmt drift).
+- Build crate: `oxdock-build` `assets.rs` done 2026-11-25 (new
+  `src/diagnostics.rs` owning 11 `build.*` ctors: assets collect,
+  out-dir invalid, module path rejected, DSL escapes-manifest, parse
+  (shared by both sites), execution, workdir missing/not-dir, out-dir
+  target not-dir/create-failed, stage copy; `OUT_DIR` spelling derives
+  from the declared env contract, never literals; passthroughs render
+  `{reason:#}` inline with no `with_source`; `.context` chains left
+  as-is (already proper chaining); test-only `ParseError` stubs left
+  as-is; messages byte-identical; lib 27 + integration 4 green;
+  clippy/doc clean; zero fmt drift).
 
 ### Phase D — retire `anyhow` as the carrier
 
