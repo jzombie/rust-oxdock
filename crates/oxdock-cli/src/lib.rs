@@ -1120,7 +1120,11 @@ fn shell_banner(cwd: &GuardedPath, workspace_root: &GuardedPath) -> String {
 }
 
 fn run_shell(cwd: &GuardedPath, workspace_root: &GuardedPath) -> Result<()> {
-    oxdock_process::spawn_interactive_shell(cwd, workspace_root, &shell_banner(cwd, workspace_root))
+    Ok(oxdock_process::spawn_interactive_shell(
+        cwd,
+        workspace_root,
+        &shell_banner(cwd, workspace_root),
+    )?)
 }
 
 // `command_path` now lives in `oxdock-fs` to centralize Path usage.

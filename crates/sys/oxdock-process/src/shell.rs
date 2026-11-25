@@ -1,6 +1,3 @@
-#[cfg(windows)]
-use anyhow::Context;
-use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::GuardedPath;
 #[cfg(all(unix, not(miri)))]
@@ -137,7 +134,7 @@ pub fn spawn_interactive_shell(
     cwd: &GuardedPath,
     workspace_root: &GuardedPath,
     banner: &str,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     let _ = workspace_root;
     #[cfg(unix)]
     {
@@ -170,9 +167,7 @@ pub fn spawn_interactive_shell(
 
         let status = cmd.status()?;
         if !status.success() {
-            return Err(anyhow::Error::new(proc_diag::shell_exited_with_status(
-                &status,
-            )));
+            return Err(proc_diag::shell_exited_with_status(&status));
         }
         Ok(())
     }
@@ -201,14 +196,14 @@ pub fn spawn_interactive_shell(
         // Fire-and-forget so the parent console regains control immediately; the child window is
         // fully interactive. If the launch fails, surface the error right away.
         cmd.spawn()
-            .context("failed to start interactive shell window")?;
+            .map_err(|e| proc_diag::spawn_interactive_window_failed(&anyhow::Error::new(e)))?;
         Ok(())
     }
 
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (cwd, workspace_root, banner);
-        return Err(anyhow::Error::new(proc_diag::run_interactive_unsupported()));
+        return Err(proc_diag::run_interactive_unsupported());
     }
 }
 
@@ -237,7 +232,7 @@ fn windows_banner_command(banner: &str, cwd: &GuardedPath) -> String {
 }
 
 #[cfg(test)]
-type ShellCmdHook = dyn FnMut(&crate::CommandSnapshot) -> Result<()> + Send;
+type ShellCmdHook = dyn FnMut(&crate::CommandSnapshot) -> DiagnosticResult<()> + Send;
 
 #[cfg(test)]
 thread_local! {
@@ -248,7 +243,7 @@ thread_local! {
 #[cfg(test)]
 fn set_shell_command_hook<F>(hook: F)
 where
-    F: FnMut(&crate::CommandSnapshot) -> Result<()> + Send + 'static,
+    F: FnMut(&crate::CommandSnapshot) -> DiagnosticResult<()> + Send + 'static,
 {
     SHELL_CMD_HOOK.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(hook));
@@ -263,7 +258,7 @@ fn clear_shell_command_hook() {
 }
 
 #[cfg(test)]
-fn try_shell_command_hook(cmd: &mut CommandBuilder) -> Result<bool> {
+fn try_shell_command_hook(cmd: &mut CommandBuilder) -> DiagnosticResult<bool> {
     SHELL_CMD_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().as_mut() {
             let snap = cmd.snapshot();
@@ -275,7 +270,7 @@ fn try_shell_command_hook(cmd: &mut CommandBuilder) -> Result<bool> {
 }
 
 #[cfg(not(test))]
-fn try_shell_command_hook(cmd: &mut CommandBuilder) -> Result<bool> {
+fn try_shell_command_hook(cmd: &mut CommandBuilder) -> DiagnosticResult<bool> {
     let _ = cmd;
     Ok(false)
 }

@@ -3,9 +3,6 @@ use std::{
     iter::IntoIterator,
 };
 
-#[cfg(not(miri))]
-use anyhow::Context;
-use anyhow::Result;
 use oxdock_diagnostics::DiagnosticResult;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::fs::File;
@@ -164,30 +161,29 @@ impl CommandBuilder {
     /// to [`spawn`](Self::spawn). Sessions own the halves and join their
     /// pump threads; dropping the halves closes the pipes.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub fn spawn_piped(&mut self) -> Result<PipedChild> {
+    pub fn spawn_piped(&mut self) -> DiagnosticResult<PipedChild> {
         #[cfg(miri)]
         {
             let _ = self;
-            return Err(anyhow::Error::new(proc_diag::run_spawn_unsupported_miri()));
+            return Err(proc_diag::run_spawn_unsupported_miri());
         }
 
         #[cfg(not(miri))]
         {
             self.inner.stdin(Stdio::piped());
             self.inner.stdout(Stdio::piped());
-            let desc = format!("{:?}", self.inner);
             let mut child = self
                 .inner
                 .spawn()
-                .with_context(|| format!("failed to spawn {desc}"))?;
+                .map_err(|e| proc_diag::spawn_failed(&self.inner, &e))?;
             let stdin = child
                 .stdin
                 .take()
-                .with_context(|| format!("spawned process has no piped stdin: {desc}"))?;
+                .ok_or_else(|| proc_diag::spawn_pipe_half_missing(&self.inner, "stdin"))?;
             let stdout = child
                 .stdout
                 .take()
-                .with_context(|| format!("spawned process has no piped stdout: {desc}"))?;
+                .ok_or_else(|| proc_diag::spawn_pipe_half_missing(&self.inner, "stdout"))?;
             let handle = ChildHandle::new(child, None, Vec::new())?;
             Ok(PipedChild {
                 handle,
@@ -202,11 +198,11 @@ impl CommandBuilder {
     /// and handed back: binary-safe sessions keep diagnostics off stdout
     /// and route them to their own pipe. Dropping the half closes it.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub fn spawn_piped_with_stderr(&mut self) -> Result<PipedChild> {
+    pub fn spawn_piped_with_stderr(&mut self) -> DiagnosticResult<PipedChild> {
         #[cfg(miri)]
         {
             let _ = self;
-            return Err(anyhow::Error::new(proc_diag::run_spawn_unsupported_miri()));
+            return Err(proc_diag::run_spawn_unsupported_miri());
         }
 
         #[cfg(not(miri))]
@@ -214,23 +210,22 @@ impl CommandBuilder {
             self.inner.stdin(Stdio::piped());
             self.inner.stdout(Stdio::piped());
             self.inner.stderr(Stdio::piped());
-            let desc = format!("{:?}", self.inner);
             let mut child = self
                 .inner
                 .spawn()
-                .with_context(|| format!("failed to spawn {desc}"))?;
+                .map_err(|e| proc_diag::spawn_failed(&self.inner, &e))?;
             let stdin = child
                 .stdin
                 .take()
-                .with_context(|| format!("spawned process has no piped stdin: {desc}"))?;
+                .ok_or_else(|| proc_diag::spawn_pipe_half_missing(&self.inner, "stdin"))?;
             let stdout = child
                 .stdout
                 .take()
-                .with_context(|| format!("spawned process has no piped stdout: {desc}"))?;
+                .ok_or_else(|| proc_diag::spawn_pipe_half_missing(&self.inner, "stdout"))?;
             let stderr = child
                 .stderr
                 .take()
-                .with_context(|| format!("spawned process has no piped stderr: {desc}"))?;
+                .ok_or_else(|| proc_diag::spawn_pipe_half_missing(&self.inner, "stderr"))?;
             let handle = ChildHandle::new(child, None, Vec::new())?;
             Ok(PipedChild {
                 handle,

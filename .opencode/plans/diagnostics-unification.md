@@ -640,6 +640,21 @@ transport, so this phase is mechanical:
    spawn_interactive_shell stay until their own increment.
    Process 121 plus core 408 green; clippy and fmt clean
    (only pre-existing baseline warnings).
+   Process piped-spawn step 2026-11-26: two new ctors
+   (spawn_pipe_half_missing shared by all five stdin/stdout/
+   stderr take sites with the stream name as a structured
+   field, spawn_interactive_window_failed preserving the
+   windows outer label byte-identically over the inner
+   spawn_failed payload); CommandBuilder spawn_piped and
+   spawn_piped_with_stderr plus spawn_interactive_shell and
+   the test-only shell-command hook chain now return
+   DiagnosticResult with bare Err ctors. Ssh-plugin holds
+   unchanged via anyhow Context blanket; cli run_shell
+   takes one Ok-wrap boundary. Process 121 plus core 408
+   plus ssh 13 green; clippy and fmt clean (only
+   pre-existing baseline warnings).
+   Process 121 plus core 408 green; clippy and fmt clean
+   (only pre-existing baseline warnings).
    Core json-boundary step 2026-11-26: six new ctors
    (std_to_json_non_finite_float, std_to_json_unencodable,
    json_handle_needs_object, json_handle_exact_shape,

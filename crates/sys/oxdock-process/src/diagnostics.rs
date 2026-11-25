@@ -31,6 +31,7 @@ const FIELD_ARGV: &str = "argv";
 const FIELD_PROGRAM: &str = "program";
 const FIELD_ERR: &str = "err";
 const FIELD_REASON: &str = "reason";
+const FIELD_STREAM: &str = "stream";
 
 /// Suggestion scope for an undefined `$var` miss: the name also lives
 /// in the step environment or the override table.
@@ -420,6 +421,34 @@ pub fn from_anyhow(err: anyhow::Error) -> Diagnostic {
     }
 }
 
+/// Spawned piped child missing a stdio half. Takes the command (any
+/// `Debug`: `std::process::Command`) and the stream name (`stdin`,
+/// `stdout`, or `stderr`); rendering lives here. Shared by the
+/// piped and piped-with-stderr paths: one key, one mode.
+pub fn spawn_pipe_half_missing(cmd: &impl std::fmt::Debug, stream: &str) -> Diagnostic {
+    let cmd_text = format!("{cmd:?}");
+    let message = format!("spawned process has no piped {stream}: {cmd_text}");
+    Diagnostic::new(
+        "proc.run.spawn_pipe_half_missing",
+        message,
+        Diagnostic::make_fields(&[(FIELD_COMMAND, cmd_text.as_str()), (FIELD_STREAM, stream)]),
+    )
+}
+
+/// Interactive shell window launch failed. Takes the underlying
+/// failure; `{reason:#}` formatting lives here so the call site
+/// stays `format!`-free. The chained spawn diagnostic rides inline;
+/// no source is attached.
+pub fn spawn_interactive_window_failed(reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to start interactive shell window: {reason_text}");
+    Diagnostic::new(
+        "proc.run.interactive_spawn_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_REASON, reason_text.as_str())]),
+    )
+}
+
 /// Shell exiting non-zero. Takes the wait status; rendering lives
 /// here.
 pub fn shell_exited_with_status(status: &std::process::ExitStatus) -> Diagnostic {
@@ -614,6 +643,8 @@ mod tests {
             spawn_failed(&"echo hi", &io_err).key(),
             job_assign_failed(&anyhow::anyhow!("boom")).key(),
             synthetic_failed(&anyhow::anyhow!("boom")).key(),
+            spawn_pipe_half_missing(&"echo hi", "stdin").key(),
+            spawn_interactive_window_failed(&anyhow::anyhow!("boom")).key(),
         ];
         let mut seen = std::collections::HashSet::new();
         for k in keys {
@@ -722,6 +753,14 @@ mod tests {
             "boom"
         );
         assert_eq!(synthetic_failed(&anyhow::anyhow!("boom")).message(), "boom");
+        assert_eq!(
+            spawn_pipe_half_missing(&"echo hi", "stdin").message(),
+            "spawned process has no piped stdin: \"echo hi\""
+        );
+        assert_eq!(
+            spawn_interactive_window_failed(&anyhow::anyhow!("boom")).message(),
+            "failed to start interactive shell window: boom"
+        );
     }
 
     #[test]
