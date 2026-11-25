@@ -1215,6 +1215,28 @@ transport, so this phase is mechanical:
    leaf-to-root order. No FUNC_* constants (template
    internals, not stdlib surface). Core 409 plus
    integration 629 green; clippy and fmt clean.
+   Mirror-pipe step 2026-11-26: three new ctors
+   (std_pipe_read_failed plus std_pipe_create_failed
+   plus std_pipe_spawn_failed, wording byte-identical,
+   all pinned by key plus message tests; read/create
+   take `&anyhow::Error`, spawn the concrete
+   `&std::io::Error`, each per the borrowed-error
+   precedent). The empty-search preflight reuses the
+   existing std_text_needs_search key instead of
+   minting a duplicate: same failure mode, func as
+   the structured field. mirror_stream holds its
+   anyhow signature with explicit
+   anyhow::Error::from conversions: bare `.into()`
+   inside map_err closures is ambiguous (E0283,
+   reflexive From<Diagnostic> versus the blanket
+   into-anyhow), while `Err(... .into())` in tail
+   position infers cleanly from the return type.
+   Identical read/create wordings in read_pipe_eager
+   plus write_completed_pipe stay for their own
+   step, which will reuse these keys. No FUNC_*
+   constants (call sites ride the existing func
+   params). Core 409 plus integration 629 green;
+   clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

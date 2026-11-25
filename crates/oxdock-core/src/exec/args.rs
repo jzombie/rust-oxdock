@@ -2241,21 +2241,21 @@ pub(crate) fn mirror_stream<P: ProcessManager>(
     if let TextPump::ReplaceLiteral { from, .. } = &pump
         && from.is_empty()
     {
-        bail!("{func} needs a non-empty search string");
+        return Err(args_diag::std_text_needs_search(func).into());
     }
     let reader = cx
         .pipe_reader(value)
-        .map_err(|e| anyhow::anyhow!("{func} cannot read PIPE input: {e:#}"))?;
+        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_read_failed(func, &err)))?;
     let output = cx.new_pipe();
     let writer = cx
         .pipe_writer(&output)
-        .map_err(|e| anyhow::anyhow!("{func} cannot create PIPE output: {e:#}"))?;
+        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_create_failed(func, &err)))?;
     let cancelled = cx.cancel_token();
     let thread_name = format!("oxdock-text-{func}-pump");
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || run_text_pump(reader, writer, pump, &cancelled))
-        .map_err(|e| anyhow::anyhow!("{func} cannot spawn pump thread: {e}"))?;
+        .map_err(|err| anyhow::Error::from(args_diag::std_pipe_spawn_failed(func, &err)))?;
     Ok(output)
 }
 

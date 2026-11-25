@@ -1492,6 +1492,42 @@ pub fn eval_const_arg_bare_sigil(src: &str) -> Diagnostic {
     )
 }
 
+/// Pipe input read failure. Takes the invoking function and the
+/// underlying failure.
+pub fn std_pipe_read_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{func} cannot read PIPE input: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.pipe_read_failed",
+        message,
+        Diagnostic::make_fields(&[("func", func), ("reason", &reason_text)]),
+    )
+}
+
+/// Pipe output creation failure. Takes the invoking function and the
+/// underlying failure.
+pub fn std_pipe_create_failed(func: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("{func} cannot create PIPE output: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.pipe_create_failed",
+        message,
+        Diagnostic::make_fields(&[("func", func), ("reason", &reason_text)]),
+    )
+}
+
+/// Pump thread spawn failure. Takes the invoking function and the
+/// underlying I/O failure.
+pub fn std_pipe_spawn_failed(func: &str, reason: &std::io::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("{func} cannot spawn pump thread: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.pipe_spawn_failed",
+        message,
+        Diagnostic::make_fields(&[("func", func), ("reason", &reason_text)]),
+    )
+}
+
 /// Unreachable `==`/`!=` shape in the strict-equality fallback.
 /// Parameterless: the operands ride the enclosing expression.
 pub fn eval_compare_equality_shape() -> Diagnostic {
@@ -3675,6 +3711,9 @@ mod tests {
             coerce_pipe_to_string().key(),
             eval_const_arg_keypath().key(),
             eval_const_arg_bare_sigil("foo").key(),
+            std_pipe_read_failed("TEXT_REPLACE", &anyhow::anyhow!("x")).key(),
+            std_pipe_create_failed("TEXT_REPLACE", &anyhow::anyhow!("x")).key(),
+            std_pipe_spawn_failed("TEXT_REPLACE", &std::io::Error::other("x")).key(),
             eval_compare_equality_shape().key(),
             eval_ordering_needs_numeric(
                 &crate::Value::string("x".to_string()),
@@ -3955,6 +3994,18 @@ mod tests {
         assert_eq!(
             eval_const_arg_bare_sigil("foo").message(),
             "bare `foo` never reads a binding here; use `$foo`"
+        );
+        assert_eq!(
+            std_pipe_read_failed("TEXT_REPLACE", &anyhow::anyhow!("denied")).message(),
+            "TEXT_REPLACE cannot read PIPE input: denied"
+        );
+        assert_eq!(
+            std_pipe_create_failed("TEXT_REPLACE", &anyhow::anyhow!("denied")).message(),
+            "TEXT_REPLACE cannot create PIPE output: denied"
+        );
+        assert_eq!(
+            std_pipe_spawn_failed("TEXT_REPLACE", &std::io::Error::other("denied"),).message(),
+            "TEXT_REPLACE cannot spawn pump thread: denied"
         );
         assert_eq!(
             eval_compare_equality_shape().message(),
