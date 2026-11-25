@@ -2302,7 +2302,10 @@ fn load_json<P: ProcessManager>(
     path: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
-    super::args::load_json_from_value(&[Value::string(text)], cx)
+    Ok(super::args::load_json_from_value(
+        &[Value::string(text)],
+        cx,
+    )?)
 }
 
 /// Hash a workspace file or directory with SHA-256.
@@ -2419,7 +2422,7 @@ fn parse_json(
     /// JSON text already held in memory.
     text: String,
 ) -> Result<Value> {
-    super::args::parse_json_from_value(Value::string(text))
+    Ok(super::args::parse_json_from_value(Value::string(text))?)
 }
 
 /// Describe a filesystem entry.

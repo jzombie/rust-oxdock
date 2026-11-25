@@ -43,6 +43,8 @@ pub const FUNC_IS_TERMINAL: &str = "IS_TERMINAL";
 pub const FUNC_LEN: &str = "LEN";
 /// `LOAD_TOML`: TOML file loading.
 pub const FUNC_LOAD_TOML: &str = "LOAD_TOML";
+/// `LOAD_JSON`: JSON file loading.
+pub const FUNC_LOAD_JSON: &str = "LOAD_JSON";
 /// `PARSE_ARGS`: flags-plus-positionals parsing.
 pub const FUNC_PARSE_ARGS: &str = "PARSE_ARGS";
 /// `PARSE_BYTE_COUNT`: byte-count token parsing.
@@ -53,6 +55,8 @@ pub const FUNC_PARSE_DURATION: &str = "PARSE_DURATION";
 pub const FUNC_PARSE_FLAGS: &str = "PARSE_FLAGS";
 /// `PARSE_TOML`: TOML text parsing.
 pub const FUNC_PARSE_TOML: &str = "PARSE_TOML";
+/// `PARSE_JSON`: JSON text parsing.
+pub const FUNC_PARSE_JSON: &str = "PARSE_JSON";
 /// `PARSE_POSITIONALS`: positionals-only parsing.
 pub const FUNC_PARSE_POSITIONALS: &str = "PARSE_POSITIONALS";
 /// `PATH_BASE`: file-name extraction.

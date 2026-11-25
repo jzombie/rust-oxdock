@@ -15,9 +15,10 @@ use oxdock_parser::{
 use super::function_names::{
     FUNC_BASE64_DECODE, FUNC_BASE64_ENCODE, FUNC_BOOL, FUNC_CONTAINS, FUNC_FLOAT,
     FUNC_FORMAT_BYTE_COUNT, FUNC_FORMAT_DURATION, FUNC_INT, FUNC_IS_EXEC, FUNC_IS_TERMINAL,
-    FUNC_LEN, FUNC_LOAD_TOML, FUNC_PARSE_ARGS, FUNC_PARSE_BYTE_COUNT, FUNC_PARSE_DURATION,
-    FUNC_PARSE_FLAGS, FUNC_PARSE_POSITIONALS, FUNC_PARSE_TOML, FUNC_PATH_BASE, FUNC_PATH_REL,
-    FUNC_PATH_TYPE, FUNC_PATH_WRITABLE, FUNC_SEMAPHORE_NEW, FUNC_SHELL_SPLIT_ARGS, FUNC_TO_JSON,
+    FUNC_LEN, FUNC_LOAD_JSON, FUNC_LOAD_TOML, FUNC_PARSE_ARGS, FUNC_PARSE_BYTE_COUNT,
+    FUNC_PARSE_DURATION, FUNC_PARSE_FLAGS, FUNC_PARSE_JSON, FUNC_PARSE_POSITIONALS,
+    FUNC_PARSE_TOML, FUNC_PATH_BASE, FUNC_PATH_REL, FUNC_PATH_TYPE, FUNC_PATH_WRITABLE,
+    FUNC_SEMAPHORE_NEW, FUNC_SHELL_SPLIT_ARGS, FUNC_TO_JSON,
 };
 
 /// Duplicate field name inside one MAP spelling.
@@ -1739,6 +1740,83 @@ pub fn std_parse_toml_needs_string(actual: &str) -> Diagnostic {
     )
 }
 
+/// `LOAD_JSON` without its path argument. Parameterless: the arity
+/// shape already names the call, so no operand is attached.
+pub fn std_load_json_needs_arg() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.load_json_needs_arg",
+        format!("{FUNC_LOAD_JSON} requires a path argument"),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `LOAD_JSON` with a non-string path. Parameterless: the value rides
+/// the enclosing call, so no operand is attached.
+pub fn std_load_json_needs_string() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.load_json_needs_string",
+        format!("{FUNC_LOAD_JSON} path argument must evaluate to a string"),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// `LOAD_JSON` path resolution failure. Takes the spelling and the
+/// underlying failure.
+pub fn std_load_json_resolve_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to resolve JSON path '{path}': {reason_text}");
+    Diagnostic::new(
+        "dsl.std.load_json_resolve_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+}
+
+/// `LOAD_JSON` file read failure. Takes the spelling and the
+/// underlying failure.
+pub fn std_load_json_read_failed(path: &str, reason: &anyhow::Error) -> Diagnostic {
+    let reason_text = format!("{reason:#}");
+    let message = format!("failed to read JSON file '{path}': {reason_text}");
+    Diagnostic::new(
+        "dsl.std.load_json_read_failed",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+}
+
+/// `LOAD_JSON` file with invalid UTF-8. Takes the spelling and the
+/// underlying failure.
+pub fn std_load_json_not_utf8(path: &str, reason: &std::str::Utf8Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("invalid UTF-8 in JSON file '{path}': {reason_text}");
+    Diagnostic::new(
+        "dsl.std.load_json_not_utf8",
+        message,
+        Diagnostic::make_fields(&[("path", path), ("reason", &reason_text)]),
+    )
+}
+
+/// JSON content that fails to parse. Takes the underlying failure.
+pub fn std_json_parse_failed(reason: &serde_json::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("JSON parse error: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.json_parse_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
+/// `PARSE_JSON` with a non-string value. Takes the actual type name.
+pub fn std_parse_json_needs_string(actual: &str) -> Diagnostic {
+    let message = format!("{FUNC_PARSE_JSON} expects a {STRING_TYPE_NAME}, got {actual}");
+    Diagnostic::new(
+        "dsl.std.parse_json_needs_string",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
 /// `HANDLE` typed JSON decode on a non-object. Takes the offending
 /// JSON value; `Display` rendering lives here.
 pub fn json_handle_needs_object(other: &serde_json::Value) -> Diagnostic {
@@ -3307,6 +3385,14 @@ mod tests {
             std_load_toml_not_utf8("p", &utf8_err_sample()).key(),
             std_toml_parse_failed(&toml::from_str::<serde_json::Value>("a = ").unwrap_err()).key(),
             std_parse_toml_needs_string("INT").key(),
+            std_load_json_needs_arg().key(),
+            std_load_json_needs_string().key(),
+            std_load_json_resolve_failed("p", &anyhow::anyhow!("x")).key(),
+            std_load_json_read_failed("p", &anyhow::anyhow!("x")).key(),
+            std_load_json_not_utf8("p", &utf8_err_sample()).key(),
+            std_json_parse_failed(&serde_json::from_str::<serde_json::Value>("{bad").unwrap_err())
+                .key(),
+            std_parse_json_needs_string("INT").key(),
             std_base64_encode_needs_string("INT").key(),
             std_base64_decode_needs_string("INT").key(),
             std_base64_decode_failed("!!!", &base64::DecodeError::InvalidByte(0, b'!')).key(),
@@ -3602,6 +3688,36 @@ mod tests {
         assert_eq!(
             std_parse_toml_needs_string("INT").message(),
             "PARSE_TOML expects a STRING, got INT"
+        );
+        assert_eq!(
+            std_load_json_needs_arg().message(),
+            "LOAD_JSON requires a path argument"
+        );
+        assert_eq!(
+            std_load_json_needs_string().message(),
+            "LOAD_JSON path argument must evaluate to a string"
+        );
+        assert_eq!(
+            std_load_json_resolve_failed("p", &anyhow::anyhow!("denied")).message(),
+            "failed to resolve JSON path 'p': denied"
+        );
+        assert_eq!(
+            std_load_json_read_failed("p", &anyhow::anyhow!("denied")).message(),
+            "failed to read JSON file 'p': denied"
+        );
+        assert_eq!(
+            std_load_json_not_utf8("p", &utf8_err_sample()).message(),
+            "invalid UTF-8 in JSON file 'p': invalid utf-8 sequence of 1 bytes from index 0"
+        );
+        assert_eq!(
+            std_parse_json_needs_string("INT").message(),
+            "PARSE_JSON expects a STRING, got INT"
+        );
+        assert!(
+            std_json_parse_failed(&serde_json::from_str::<serde_json::Value>("{bad").unwrap_err())
+                .message()
+                .starts_with("JSON parse error: "),
+            "json failure must keep its prefix"
         );
         assert!(
             std_toml_parse_failed(&toml::from_str::<serde_json::Value>("a = ").unwrap_err())

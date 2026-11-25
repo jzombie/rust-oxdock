@@ -1043,6 +1043,24 @@ transport, so this phase is mechanical:
    (`FUNC_LOAD_TOML`, `FUNC_PARSE_TOML`) covered by
    the lock test. Core 409 plus integration 629
    green; clippy and fmt clean.
+   Json-load step 2026-11-26: seven new ctors
+   (std_load_json_needs_arg plus
+   std_load_json_needs_string plus
+   std_load_json_resolve_failed plus
+   std_load_json_read_failed plus
+   std_load_json_not_utf8 plus std_json_parse_failed
+   plus std_parse_json_needs_string, wording
+   byte-identical, all pinned by key plus message
+   tests; the JSON parse failure takes the concrete
+   `&serde_json::Error`, mirroring the TOML step's
+   `&toml::de::Error`). load_json_from_value plus
+   load_json_value plus parse_json_from_value now
+   return DiagnosticResult; the two NativeFn wrappers
+   stay anyhow with one Ok(...?) wrap each. Two new
+   FUNC_* constants (`FUNC_LOAD_JSON`,
+   `FUNC_PARSE_JSON`) covered by the lock test. Core
+   409 plus integration 629 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

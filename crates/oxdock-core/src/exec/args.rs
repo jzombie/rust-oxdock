@@ -1489,26 +1489,26 @@ pub(crate) fn load_toml_from_value<P: ProcessManager>(
 pub(crate) fn load_json_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let path_val = args
         .first()
-        .ok_or_else(|| anyhow::anyhow!("LOAD_JSON requires a path argument"))?;
+        .ok_or_else(args_diag::std_load_json_needs_arg)?;
     let Some(path_str) = path_val.as_str() else {
-        bail!("LOAD_JSON path argument must evaluate to a string");
+        return Err(args_diag::std_load_json_needs_string());
     };
     let path_str = path_str.to_string();
     let target = cx
         .state
         .fs
         .resolve_read(&cx.state.cwd, &path_str)
-        .map_err(|e| anyhow::anyhow!("failed to resolve JSON path '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_json_resolve_failed(&path_str, &err))?;
     let content = cx
         .state
         .fs
         .read_file(&target)
-        .map_err(|e| anyhow::anyhow!("failed to read JSON file '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_json_read_failed(&path_str, &err))?;
     let content_str = std::str::from_utf8(&content)
-        .map_err(|e| anyhow::anyhow!("invalid UTF-8 in JSON file '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_json_not_utf8(&path_str, &err))?;
     load_json_value(content_str)
 }
 
@@ -1529,10 +1529,10 @@ pub(crate) fn parse_toml_from_value(value: Value) -> DiagnosticResult<Value> {
 }
 
 /// Parse JSON content into a DSL `Value`.
-pub fn load_json_value(content: &str) -> Result<Value> {
+pub fn load_json_value(content: &str) -> DiagnosticResult<Value> {
     let stripped = strip_json_comments(content);
     let json_val: serde_json::Value =
-        serde_json::from_str(&stripped).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
+        serde_json::from_str(&stripped).map_err(|err| args_diag::std_json_parse_failed(&err))?;
     Ok(json_to_value(json_val))
 }
 
@@ -1608,9 +1608,9 @@ pub fn strip_json_comments(content: &str) -> String {
 
 /// Value-semantics core of `PARSE_JSON()`: parse JSON text already held
 /// in memory, using the same conversion as file loading.
-pub(crate) fn parse_json_from_value(value: Value) -> Result<Value> {
+pub(crate) fn parse_json_from_value(value: Value) -> DiagnosticResult<Value> {
     let Some(text) = value.as_str() else {
-        bail!("PARSE_JSON expects a STRING, got {}", value.type_name());
+        return Err(args_diag::std_parse_json_needs_string(value.type_name()));
     };
     load_json_value(text)
 }
