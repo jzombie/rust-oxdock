@@ -1375,6 +1375,43 @@ pub fn eval_int_arg_resolve(reason: &anyhow::Error) -> Diagnostic {
     )
 }
 
+/// Unreachable `==`/`!=` shape in the strict-equality fallback.
+/// Parameterless: the operands ride the enclosing expression.
+pub fn eval_compare_equality_shape() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.compare_equality_shape",
+        "internal error: equality shape".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Ordering comparison on non-numeric operands. Takes both operands;
+/// `Debug` rendering lives here.
+pub fn eval_ordering_needs_numeric(left: &super::Value, right: &super::Value) -> Diagnostic {
+    let message = format!(
+        "Type Error: ordering comparison requires Int or Float, found {left:?} and {right:?}"
+    );
+    Diagnostic::new(
+        "dsl.eval.ordering_needs_numeric",
+        message,
+        Diagnostic::make_fields(&[
+            ("left", &format!("{left:?}")),
+            ("right", &format!("{right:?}")),
+        ]),
+    )
+}
+
+/// Unstaged `2^63` boundary literal reaching evaluation. Takes the raw
+/// value; the parser stages negation, so arrival here is internal.
+pub fn eval_unstaged_int_boundary(n: u64) -> Diagnostic {
+    let message = format!("internal error: unstaged integer boundary {n}");
+    Diagnostic::new(
+        "dsl.eval.unstaged_int_boundary",
+        message,
+        Diagnostic::make_fields(&[("got", &n.to_string())]),
+    )
+}
+
 /// `FORMAT_BYTE_COUNT` with a negative count.
 pub fn std_format_byte_count_negative(bytes: i64) -> Diagnostic {
     let message = format!("FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}");
@@ -2958,6 +2995,13 @@ mod tests {
             eval_condition_needs_bool(&crate::Value::string("x".to_string())).key(),
             eval_expected_int("x").key(),
             eval_int_arg_resolve(&anyhow::anyhow!("x")).key(),
+            eval_compare_equality_shape().key(),
+            eval_ordering_needs_numeric(
+                &crate::Value::string("x".to_string()),
+                &crate::Value::string("y".to_string()),
+            )
+            .key(),
+            eval_unstaged_int_boundary(9223372036854775808).key(),
             std_format_byte_count_negative(-1).key(),
             std_format_duration_negative(-1).key(),
             std_parse_duration_range("x").key(),
@@ -3146,6 +3190,22 @@ mod tests {
         assert_eq!(
             eval_int_arg_resolve(&anyhow::anyhow!("undefined variable `$x`")).message(),
             "undefined variable `$x`"
+        );
+        assert_eq!(
+            eval_compare_equality_shape().message(),
+            "internal error: equality shape"
+        );
+        assert_eq!(
+            eval_ordering_needs_numeric(
+                &crate::Value::string("x".to_string()),
+                &crate::Value::string("y".to_string()),
+            )
+            .message(),
+            "Type Error: ordering comparison requires Int or Float, found STRING(\"x\") and STRING(\"y\")"
+        );
+        assert_eq!(
+            eval_unstaged_int_boundary(9223372036854775808).message(),
+            "internal error: unstaged integer boundary 9223372036854775808"
         );
         assert_eq!(
             std_bool_cannot_coerce("BOOL_OR", "x").message(),

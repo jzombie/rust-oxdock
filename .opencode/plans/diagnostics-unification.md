@@ -924,6 +924,19 @@ transport, so this phase is mechanical:
    sit in anyhow fns and hold via blanket From. Core
    408 plus integration 629 green; clippy and fmt
    clean.
+   Compare-boundary step 2026-11-26: three new ctors
+   (eval_compare_equality_shape plus
+   eval_ordering_needs_numeric plus
+   eval_unstaged_int_boundary, wording byte-identical,
+   all pinned by key plus message tests, Debug
+   rendering inside the ordering ctor).
+   apply_compare now returns DiagnosticResult; the
+   Compare arm takes one Ok(...?) wrap at the anyhow
+   boundary, while the u64 boundary arm keeps its
+   anyhow::Error::new wrap (direct Err return does
+   not coerce; needless_return avoided with a bare
+   tail). Core 408 plus integration 629 green; clippy
+   and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

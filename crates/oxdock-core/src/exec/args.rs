@@ -525,13 +525,13 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             Ok(apply_arith(*op, left_val, right_val)?)
         }
         Expr::CompiledMath(ops) => evaluate_compiled_math(ops, cx),
-        Expr::UnsignedIntBoundary(n) => {
-            bail!("internal error: unstaged integer boundary {n}")
-        }
+        Expr::UnsignedIntBoundary(n) => Err(anyhow::Error::new(
+            args_diag::eval_unstaged_int_boundary(*n),
+        )),
         Expr::Compare { op, left, right } => {
             let lv = evaluate_expr(left, cx)?;
             let rv = evaluate_expr(right, cx)?;
-            apply_compare(*op, &lv, &rv)
+            Ok(apply_compare(*op, &lv, &rv)?)
         }
         Expr::Logical { op, left, right } => {
             let left_val = evaluate_expr(left, cx)?;
@@ -972,7 +972,7 @@ pub(crate) fn values_equal(left: &Value, right: &Value) -> bool {
 /// The LET reference documents this with examples. `==`/`!=` are otherwise
 /// strict: cross-type words compare unequal (`"true" == true` is false),
 /// matching `ASSERT_EQ` value equality; ordering on non-numerics bails.
-fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
+fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> DiagnosticResult<Value> {
     if let (Some(a), Some(b)) = (as_f64_value(left), as_f64_value(right)) {
         // Both numeric (finite floats; ints always qualify).
         if left.as_i64().is_some() && right.as_i64().is_some() {
@@ -1003,14 +1003,12 @@ fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
             let result = match op {
                 CompareOp::Eq => equal,
                 CompareOp::Ne => !equal,
-                _ => bail!("internal error: equality shape"),
+                _ => return Err(args_diag::eval_compare_equality_shape()),
             };
             Ok(Value::bool(result))
         }
         CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
-            bail!(
-                "Type Error: ordering comparison requires Int or Float, found {left:?} and {right:?}"
-            );
+            Err(args_diag::eval_ordering_needs_numeric(left, right))
         }
     }
 }
