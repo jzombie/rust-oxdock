@@ -578,6 +578,18 @@ transport, so this phase is mechanical:
    expand fns stay on anyhow Result until call resolution
    flips. Process 119 plus core 408 green; clippy and fmt
    clean.
+   Process vars-path step 2026-11-26: resolve_value_path and
+   resolve_key_path_strict now return DiagnosticResult with
+   bare Err ctors; two anyhow boundary fixes via Ok wrap with
+   question-mark coercion (lookup dollar arm,
+   resolve_call_value dollar arm). The call-arg family
+   (resolve_placeholder_arg, resolve_call_arg,
+   resolve_call_value, resolve_call_map, resolve_call_list)
+   stays on anyhow Result: resolve_call_map calls parser
+   parse_map_key (anyhow return), so the family flips when
+   the parser template boundary does. Process 119 plus core
+   408 green; clippy and fmt clean (one pre-existing
+   obfuscated_if_else in diagnostics.rs untouched).
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

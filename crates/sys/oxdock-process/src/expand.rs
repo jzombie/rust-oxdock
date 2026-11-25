@@ -416,7 +416,7 @@ fn lookup(
                     rest, suggest,
                 )));
             }
-            return resolve_key_path_strict(&parts, vars);
+            return Ok(resolve_key_path_strict(&parts, vars)?);
         }
 
         // 4. Placeholder calls: `MODULE::FUNC(args)` dispatches through
@@ -561,7 +561,7 @@ fn resolve_call_value(
                 // malformed-argument error.
                 return Err(anyhow::Error::new(expand_diag::call_arg_empty_var()));
             };
-            return resolve_value_path(&parts, vars);
+            return Ok(resolve_value_path(&parts, vars)?);
         }
         TemplateArg::Str(literal_src) => {
             if let Some(literal) = parse_string_literal(literal_src) {
@@ -640,44 +640,36 @@ fn resolve_call_list(
 fn resolve_value_path(
     parts: &[String],
     vars: &HashMap<String, oxdock_parser::Value>,
-) -> Result<oxdock_parser::Value> {
+) -> DiagnosticResult<oxdock_parser::Value> {
     if parts.is_empty() || parts[0].is_empty() {
-        return Err(anyhow::Error::new(expand_diag::call_arg_empty_var()));
+        return Err(expand_diag::call_arg_empty_var());
     }
     let root_key = parts[0].as_str();
     let mut current = vars
         .get(root_key)
-        .ok_or_else(|| anyhow::Error::new(expand_diag::undefined_script_var(root_key, None)))?
+        .ok_or_else(|| expand_diag::undefined_script_var(root_key, None))?
         .clone();
     for segment in &parts[1..] {
         if segment.contains('(') || segment.contains(')') {
-            return Err(anyhow::Error::new(expand_diag::call_arg_nested_calls()));
+            return Err(expand_diag::call_arg_nested_calls());
         }
         if let Some(map) = current.as_map() {
             current = map
                 .get(segment)
-                .ok_or_else(|| {
-                    anyhow::Error::new(expand_diag::key_path_missing_property(root_key, segment))
-                })?
+                .ok_or_else(|| expand_diag::key_path_missing_property(root_key, segment))?
                 .clone();
         } else if let Some(list) = current.as_list() {
-            let idx: usize = segment.parse().map_err(|_| {
-                anyhow::Error::new(expand_diag::key_path_bad_index(root_key, segment))
-            })?;
+            let idx: usize = segment
+                .parse()
+                .map_err(|_| expand_diag::key_path_bad_index(root_key, segment))?;
             current = list
                 .get(idx)
                 .ok_or_else(|| {
-                    anyhow::Error::new(expand_diag::key_path_index_out_of_bounds(
-                        root_key,
-                        idx,
-                        list.len(),
-                    ))
+                    expand_diag::key_path_index_out_of_bounds(root_key, idx, list.len())
                 })?
                 .clone();
         } else {
-            return Err(anyhow::Error::new(expand_diag::key_path_on_primitive(
-                root_key, segment,
-            )));
+            return Err(expand_diag::key_path_on_primitive(root_key, segment));
         }
     }
     Ok(current)
@@ -690,36 +682,30 @@ fn resolve_value_path(
 fn resolve_key_path_strict(
     parts: &[String],
     vars: &HashMap<String, oxdock_parser::Value>,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     let root_key = parts[0].as_str();
     let mut current = vars
         .get(root_key)
-        .ok_or_else(|| anyhow::Error::new(expand_diag::undefined_script_var(root_key, None)))?;
+        .ok_or_else(|| expand_diag::undefined_script_var(root_key, None))?;
 
     for segment in &parts[1..] {
         if let Some(map) = current.as_map() {
-            current = map.get(segment).ok_or_else(|| {
-                anyhow::Error::new(expand_diag::key_path_missing_property(root_key, segment))
-            })?;
+            current = map
+                .get(segment)
+                .ok_or_else(|| expand_diag::key_path_missing_property(root_key, segment))?;
         } else if let Some(list) = current.as_list() {
-            let idx: usize = segment.parse().map_err(|_| {
-                anyhow::Error::new(expand_diag::key_path_bad_index(root_key, segment))
-            })?;
+            let idx: usize = segment
+                .parse()
+                .map_err(|_| expand_diag::key_path_bad_index(root_key, segment))?;
             current = list.get(idx).ok_or_else(|| {
-                anyhow::Error::new(expand_diag::key_path_index_out_of_bounds(
-                    root_key,
-                    idx,
-                    list.len(),
-                ))
+                expand_diag::key_path_index_out_of_bounds(root_key, idx, list.len())
             })?;
         } else {
-            return Err(anyhow::Error::new(expand_diag::key_path_on_primitive(
-                root_key, segment,
-            )));
+            return Err(expand_diag::key_path_on_primitive(root_key, segment));
         }
     }
 
-    Ok(format_value_for_string(current)?)
+    format_value_for_string(current)
 }
 
 /// Format a Value as a string for inline interpolation.
