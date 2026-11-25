@@ -1001,6 +1001,24 @@ transport, so this phase is mechanical:
    decision with its own review). Core 409 plus
    integration 629 plus parser 267 green; clippy and
    fmt clean.
+   Base64-codec step 2026-11-26: four new ctors
+   (std_base64_encode_needs_string plus
+   std_base64_decode_needs_string plus
+   std_base64_decode_failed plus
+   std_base64_decode_not_utf8, wording byte-identical,
+   all pinned by key plus message tests; the decode
+   failure takes the concrete `&base64::DecodeError`
+   per the borrowed-error precedent, with `Debug`
+   rendering of the input inside the ctor).
+   base64_encode_from_value plus
+   base64_decode_from_value now return
+   DiagnosticResult; the two `#[oxdock_func]` wrappers
+   stay anyhow and take one Ok(...?) wrap each, while
+   the args.rs round-trip unit tests hold unchanged.
+   Two new `FUNC_*` constants
+   (`FUNC_BASE64_ENCODE`, `FUNC_BASE64_DECODE`)
+   covered by the registry lock test. Core 409 plus
+   integration 629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

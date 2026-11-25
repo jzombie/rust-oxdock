@@ -2763,7 +2763,7 @@ fn base64_encode(
     /// Text to encode.
     text: String,
 ) -> Result<Value> {
-    super::args::base64_encode_from_value(Value::string(text))
+    Ok(super::args::base64_encode_from_value(Value::string(text))?)
 }
 
 /// Decode standard base64 to a STRING.
@@ -2786,7 +2786,7 @@ fn base64_decode(
     /// Base64 text to decode.
     text: String,
 ) -> Result<Value> {
-    super::args::base64_decode_from_value(Value::string(text))
+    Ok(super::args::base64_decode_from_value(Value::string(text))?)
 }
 
 /// Encode a script value as JSON with one trailing newline.

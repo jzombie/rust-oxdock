@@ -5766,6 +5766,8 @@ fn function_names_match_registry() {
     let registered: std::collections::HashSet<&str> =
         registrations.iter().map(|entry| entry.name()).collect();
     for name in [
+        FUNC_BASE64_DECODE,
+        FUNC_BASE64_ENCODE,
         FUNC_BOOL,
         FUNC_BOOL_OR,
         FUNC_CONTAINS,

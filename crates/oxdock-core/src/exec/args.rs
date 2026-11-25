@@ -1160,11 +1160,11 @@ pub(crate) fn rand_float_from_value(seed: Option<i64>) -> Result<Value> {
 /// Value-semantics core of `BASE64_ENCODE()`: standard-alphabet
 /// base64 with padding. Rejects non-STRING input naming the type
 /// instead of rendering a silent empty.
-pub(crate) fn base64_encode_from_value(text: Value) -> Result<Value> {
+pub(crate) fn base64_encode_from_value(text: Value) -> DiagnosticResult<Value> {
     use base64::Engine as _;
-    let input = text.as_str().ok_or_else(|| {
-        anyhow::anyhow!("BASE64_ENCODE expects a STRING, got {}", text.type_name())
-    })?;
+    let input = text
+        .as_str()
+        .ok_or_else(|| args_diag::std_base64_encode_needs_string(text.type_name()))?;
     Ok(Value::string(
         base64::engine::general_purpose::STANDARD.encode(input.as_bytes()),
     ))
@@ -1174,16 +1174,15 @@ pub(crate) fn base64_encode_from_value(text: Value) -> Result<Value> {
 /// base64 back to UTF-8 text. Invalid alphabet characters and
 /// non-UTF-8 payloads fail naming the input instead of rendering a
 /// silent empty.
-pub(crate) fn base64_decode_from_value(text: Value) -> Result<Value> {
+pub(crate) fn base64_decode_from_value(text: Value) -> DiagnosticResult<Value> {
     use base64::Engine as _;
-    let input = text.as_str().ok_or_else(|| {
-        anyhow::anyhow!("BASE64_DECODE expects a STRING, got {}", text.type_name())
-    })?;
+    let input = text
+        .as_str()
+        .ok_or_else(|| args_diag::std_base64_decode_needs_string(text.type_name()))?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(input)
-        .map_err(|e| anyhow::anyhow!("BASE64_DECODE cannot decode {input:?}: {e}"))?;
-    let decoded = String::from_utf8(bytes)
-        .map_err(|_| anyhow::anyhow!("BASE64_DECODE decoded bytes are not UTF-8"))?;
+        .map_err(|err| args_diag::std_base64_decode_failed(input, &err))?;
+    let decoded = String::from_utf8(bytes).map_err(|_| args_diag::std_base64_decode_not_utf8())?;
     Ok(Value::string(decoded))
 }
 

@@ -21,6 +21,10 @@
 pub const FUNC_BOOL: &str = "BOOL";
 /// `BOOL_OR`: disjunction with `BOOL` coercion.
 pub const FUNC_BOOL_OR: &str = "BOOL_OR";
+/// `BASE64_DECODE`: standard base64 to text.
+pub const FUNC_BASE64_DECODE: &str = "BASE64_DECODE";
+/// `BASE64_ENCODE`: text to standard base64.
+pub const FUNC_BASE64_ENCODE: &str = "BASE64_ENCODE";
 /// `CONTAINS`: substring / element membership.
 pub const FUNC_CONTAINS: &str = "CONTAINS";
 /// `FORMAT_BYTE_COUNT`: human-readable byte counts.

@@ -13,10 +13,11 @@ use oxdock_parser::{
 };
 
 use super::function_names::{
-    FUNC_BOOL, FUNC_CONTAINS, FUNC_FLOAT, FUNC_FORMAT_BYTE_COUNT, FUNC_FORMAT_DURATION, FUNC_INT,
-    FUNC_IS_EXEC, FUNC_IS_TERMINAL, FUNC_LEN, FUNC_PARSE_ARGS, FUNC_PARSE_BYTE_COUNT,
-    FUNC_PARSE_DURATION, FUNC_PARSE_FLAGS, FUNC_PARSE_POSITIONALS, FUNC_PATH_BASE, FUNC_PATH_REL,
-    FUNC_PATH_TYPE, FUNC_PATH_WRITABLE, FUNC_SEMAPHORE_NEW, FUNC_SHELL_SPLIT_ARGS, FUNC_TO_JSON,
+    FUNC_BASE64_DECODE, FUNC_BASE64_ENCODE, FUNC_BOOL, FUNC_CONTAINS, FUNC_FLOAT,
+    FUNC_FORMAT_BYTE_COUNT, FUNC_FORMAT_DURATION, FUNC_INT, FUNC_IS_EXEC, FUNC_IS_TERMINAL,
+    FUNC_LEN, FUNC_PARSE_ARGS, FUNC_PARSE_BYTE_COUNT, FUNC_PARSE_DURATION, FUNC_PARSE_FLAGS,
+    FUNC_PARSE_POSITIONALS, FUNC_PATH_BASE, FUNC_PATH_REL, FUNC_PATH_TYPE, FUNC_PATH_WRITABLE,
+    FUNC_SEMAPHORE_NEW, FUNC_SHELL_SPLIT_ARGS, FUNC_TO_JSON,
 };
 
 /// Duplicate field name inside one MAP spelling.
@@ -1617,6 +1618,50 @@ pub fn std_to_json_unencodable(actual: &str) -> Diagnostic {
     )
 }
 
+/// `BASE64_ENCODE` with a non-string value. Takes the actual type
+/// name.
+pub fn std_base64_encode_needs_string(actual: &str) -> Diagnostic {
+    let message = format!("{FUNC_BASE64_ENCODE} expects a {STRING_TYPE_NAME}, got {actual}");
+    Diagnostic::new(
+        "dsl.std.base64_encode_needs_string",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// `BASE64_DECODE` with a non-string value. Takes the actual type
+/// name.
+pub fn std_base64_decode_needs_string(actual: &str) -> Diagnostic {
+    let message = format!("{FUNC_BASE64_DECODE} expects a {STRING_TYPE_NAME}, got {actual}");
+    Diagnostic::new(
+        "dsl.std.base64_decode_needs_string",
+        message,
+        Diagnostic::make_fields(&[("actual", actual)]),
+    )
+}
+
+/// `BASE64_DECODE` with an undecodable token. Takes the raw input
+/// (`Debug` rendering lives here) and the underlying failure.
+pub fn std_base64_decode_failed(input: &str, reason: &base64::DecodeError) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("{FUNC_BASE64_DECODE} cannot decode {input:?}: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.base64_decode_failed",
+        message,
+        Diagnostic::make_fields(&[("input", input), ("reason", &reason_text)]),
+    )
+}
+
+/// `BASE64_DECODE` with a payload that is not UTF-8. Parameterless:
+/// the input rides the enclosing call.
+pub fn std_base64_decode_not_utf8() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.std.base64_decode_not_utf8",
+        format!("{FUNC_BASE64_DECODE} decoded bytes are not UTF-8"),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
 /// `HANDLE` typed JSON decode on a non-object. Takes the offending
 /// JSON value; `Display` rendering lives here.
 pub fn json_handle_needs_object(other: &serde_json::Value) -> Diagnostic {
@@ -3171,6 +3216,10 @@ mod tests {
             std_parse_duration_range("x").key(),
             std_to_json_non_finite_float(f64::NAN).key(),
             std_to_json_unencodable("VOID").key(),
+            std_base64_encode_needs_string("INT").key(),
+            std_base64_decode_needs_string("INT").key(),
+            std_base64_decode_failed("!!!", &base64::DecodeError::InvalidByte(0, b'!')).key(),
+            std_base64_decode_not_utf8().key(),
             json_handle_needs_object(&serde_json::json!(7)).key(),
             json_handle_exact_shape().key(),
             json_handle_task_id_positive().key(),
@@ -3440,8 +3489,24 @@ mod tests {
             "TO_JSON cannot encode VOID values; use STRING, INT, FLOAT, BOOL, LIST, or MAP"
         );
         assert_eq!(
+            std_base64_encode_needs_string("INT").message(),
+            "BASE64_ENCODE expects a STRING, got INT"
+        );
+        assert_eq!(
+            std_base64_decode_needs_string("INT").message(),
+            "BASE64_DECODE expects a STRING, got INT"
+        );
+        assert_eq!(
+            std_base64_decode_failed("!!!", &base64::DecodeError::InvalidByte(0, b'!')).message(),
+            "BASE64_DECODE cannot decode \"!!!\": Invalid symbol 33, offset 0."
+        );
+        assert_eq!(
             json_handle_needs_object(&serde_json::json!(7)).message(),
             "HANDLE argument must be an object like {\"task_id\": 7}, got 7"
+        );
+        assert_eq!(
+            std_base64_decode_not_utf8().message(),
+            "BASE64_DECODE decoded bytes are not UTF-8"
         );
         assert_eq!(
             json_handle_exact_shape().message(),
