@@ -825,6 +825,16 @@ transport, so this phase is mechanical:
    unchanged (Display). Core 408 plus integration 629
    plus parser 267 green; clippy (only pre-existing
    baseline) and fmt clean.
+   Script-params leaf step 2026-11-26: no new ctors;
+   resolve_script_params now returns DiagnosticResult.
+   The func_param_type map_err drops its outer
+   anyhow::Error::new (the ctor keeps its &anyhow::Error
+   param, inner shim stays); check_declaration_tag holds
+   directly and the func_optional_param site holds
+   unchanged (both already Diagnostic). All six callers
+   (handlers 2, static_check 2, import 2) stay anyhow and
+   hold via blanket From. Core 408 plus integration 629
+   green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

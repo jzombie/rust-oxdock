@@ -992,16 +992,13 @@ pub fn resolve_script_params<P: ProcessManager>(
     state: &ExecState<P>,
     func_name: &str,
     params: &[(String, String, bool)],
-) -> Result<Vec<(String, TypeTag, bool)>> {
+) -> DiagnosticResult<Vec<(String, TypeTag, bool)>> {
     let mut resolved = Vec::with_capacity(params.len());
     for (pname, ptype, optional) in params {
         let clean = pname.trim_start_matches('$').to_string();
-        let tag = state.resolve_tag(ptype).map_err(|err| {
-            anyhow::Error::new(std_diag::func_param_type(
-                func_name,
-                &anyhow::Error::new(err),
-            ))
-        })?;
+        let tag = state
+            .resolve_tag(ptype)
+            .map_err(|err| std_diag::func_param_type(func_name, &anyhow::Error::new(err)))?;
         state.check_declaration_tag(&format!("function `{func_name}` param `${clean}`"), &tag)?;
         if *optional {
             optional_zero_value(&tag).map(|_| ()).map_err(|err| {
