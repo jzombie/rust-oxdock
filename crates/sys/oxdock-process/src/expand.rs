@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::contract::CommandContext;
 use crate::diagnostics as expand_diag;
@@ -402,7 +403,7 @@ fn lookup(
             let parts = split_var_path(rest);
             if parts.len() == 1 {
                 if let Some(val) = vars.get(&parts[0]) {
-                    return format_value_for_string(val);
+                    return Ok(format_value_for_string(val)?);
                 }
                 let suggest = if env.contains_key(rest) {
                     Some(expand_diag::ScriptSuggest::Env)
@@ -444,7 +445,7 @@ fn lookup(
                 args.push(resolve_call_arg(&src, vars)?);
             }
             let result = resolver(module, name, args)?;
-            return format_value_for_string(&result);
+            return Ok(format_value_for_string(&result)?);
         }
 
         // 5. Unprefixed key: could be a missing step override or invalid
@@ -718,7 +719,7 @@ fn resolve_key_path_strict(
         }
     }
 
-    format_value_for_string(current)
+    Ok(format_value_for_string(current)?)
 }
 
 /// Format a Value as a string for inline interpolation.
@@ -732,7 +733,7 @@ fn resolve_key_path_strict(
 /// `f64` already produces the shortest round-trip decimal (Ryū since
 /// 1.36), so `ECHO` / `{{ }}` output stays clean (`3.14`, not
 /// `3.140000`) with no extra dependency.
-pub fn format_value_for_string(val: &oxdock_parser::Value) -> anyhow::Result<String> {
+pub fn format_value_for_string(val: &oxdock_parser::Value) -> DiagnosticResult<String> {
     if let Some(s) = val.as_str() {
         return Ok(s.to_string());
     }
@@ -746,13 +747,13 @@ pub fn format_value_for_string(val: &oxdock_parser::Value) -> anyhow::Result<Str
         return Ok(b.to_string());
     }
     if val.as_pipe_handle().is_some() {
-        return Err(anyhow::Error::new(expand_diag::render_pipe()));
+        return Err(expand_diag::render_pipe());
     }
     if val.as_semaphore().is_some() {
-        return Err(anyhow::Error::new(expand_diag::render_semaphore()));
+        return Err(expand_diag::render_semaphore());
     }
     if val.as_permit().is_some() {
-        return Err(anyhow::Error::new(expand_diag::render_permit()));
+        return Err(expand_diag::render_permit());
     }
     if let Some(d) = val.as_duration() {
         return Ok(oxdock_parser::command::format_duration(&d));
@@ -764,7 +765,7 @@ pub fn format_value_for_string(val: &oxdock_parser::Value) -> anyhow::Result<Str
         let parts: Vec<String> = items
             .iter()
             .map(format_value_for_string)
-            .collect::<anyhow::Result<_>>()?;
+            .collect::<DiagnosticResult<_>>()?;
         return Ok(parts.join(" "));
     }
     if let Some(map) = val.as_map() {

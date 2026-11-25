@@ -569,6 +569,15 @@ transport, so this phase is mechanical:
    into the anyhow ChildDone channel. Run_pty_session spawn and
    alloc paths stay on anyhow Result until spawn ctors land.
    Pty 19 plus core 408 green; clippy and fmt clean.
+   Process step 2026-11-26: format_value_for_string now returns
+   DiagnosticResult with three bare Err ctors (pipe,
+   semaphore, permit); recursive collect flips to
+   DiagnosticResult. Four anyhow boundary fixes via Ok wrap
+   with question-mark coercion (lookup x2, key-path tail,
+   core resolve_arg). Lookup, resolver type, and remaining
+   expand fns stay on anyhow Result until call resolution
+   flips. Process 119 plus core 408 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

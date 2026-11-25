@@ -365,7 +365,7 @@ pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &mut StepCtx<'_, P>)
         Arg::String(s, _) => Ok(expand_string(s, &cx.state.envs, cx.state)?),
         Arg::Expr(e) => {
             let val = evaluate_expr(e, cx)?;
-            format_value_for_string(&val)
+            Ok(format_value_for_string(&val)?)
         }
         Arg::Parts(parts) => {
             let mut out = String::new();
