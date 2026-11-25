@@ -546,6 +546,12 @@ transport, so this phase is mechanical:
    source-chain test pins kind and text. Pump_master_out and
    run_pty_session stay on anyhow Result until spawn and write
    ctors land. Pty 19 plus core 408 green; clippy and fmt clean.
+   Mcp step 2026-11-26: build_tool_table, input_schema_for,
+   output_schema_for, and schema_for_tag now return
+   DiagnosticResult with bare Err ctors; server question-mark
+   callers and test expect callers hold unchanged. Map_json_args
+   and value_to_json_result stay on anyhow Result until the core
+   json boundary flips. Mcp 50 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

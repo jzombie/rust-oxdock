@@ -11,6 +11,7 @@ use oxdock_core::{
     FuncMeta, FuncParam, TypeTag, Value, fill_optional_args, json_to_value_typed,
     value_to_json_typed,
 };
+use oxdock_diagnostics::DiagnosticResult;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::diagnostics as mcp_diag;
@@ -40,13 +41,13 @@ pub struct McpTool {
 /// Build the servable tool table from exported metas and script docs.
 /// `docs` maps qualified names to (summary, docs). Errors on duplicate
 /// bare names and on opaque parameter or return types.
-pub fn build_tool_table(metas: Vec<FuncMeta>, docs: &HashMapDoc) -> Result<Vec<McpTool>> {
+pub fn build_tool_table(metas: Vec<FuncMeta>, docs: &HashMapDoc) -> DiagnosticResult<Vec<McpTool>> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(metas.len());
     for meta in metas {
         let base = oxdock_parser::base_name(&meta.name).to_string();
         if !seen.insert(base.clone()) {
-            return Err(anyhow::Error::new(mcp_diag::tool_duplicate_name(&base)));
+            return Err(mcp_diag::tool_duplicate_name(&base));
         }
         let description = tool_description(&meta, docs);
         let (input_schema, params) = input_schema_for(&meta)?;
@@ -94,7 +95,7 @@ fn tool_description(meta: &FuncMeta, docs: &HashMapDoc) -> String {
 /// Build the result envelope schema: `{result: <returns>}`. The `result`
 /// key keeps `structuredContent` a JSON object (as MCP requires) while
 /// the inner schema stays the function's real return type.
-pub fn output_schema_for(meta: &FuncMeta) -> Result<JsonValue> {
+pub fn output_schema_for(meta: &FuncMeta) -> DiagnosticResult<JsonValue> {
     let inner = match &meta.returns {
         Some(tag) => schema_for_tag(tag)?,
         None => JsonValue::Object(Map::new()),
@@ -121,12 +122,12 @@ pub fn wrap_structured(value: JsonValue) -> JsonValue {
 }
 /// Build the arguments JSON Schema plus the ordered param table.
 /// `params: None` (unconstrained `Value`) renders `{}` with no params.
-fn input_schema_for(meta: &FuncMeta) -> Result<(JsonValue, Vec<FuncParam>)> {
+fn input_schema_for(meta: &FuncMeta) -> DiagnosticResult<(JsonValue, Vec<FuncParam>)> {
     if let Some(returns) = &meta.returns
         && !is_json_compatible(returns)
     {
-        return Err(anyhow::Error::new(mcp_diag::tool_opaque_return(
-            oxdock_parser::base_name(&meta.name),
+        return Err(mcp_diag::tool_opaque_return(oxdock_parser::base_name(
+            &meta.name,
         )));
     }
     let Some(params) = &meta.params else {
@@ -141,10 +142,10 @@ fn input_schema_for(meta: &FuncMeta) -> Result<(JsonValue, Vec<FuncParam>)> {
             continue;
         };
         if !is_json_compatible(tag) {
-            return Err(anyhow::Error::new(mcp_diag::tool_opaque_param(
+            return Err(mcp_diag::tool_opaque_param(
                 oxdock_parser::base_name(&meta.name),
                 &param.name,
-            )));
+            ));
         }
         let mut slot = schema_for_tag(tag)?;
         if let Some(allowed) = param.allowed
