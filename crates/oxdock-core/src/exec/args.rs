@@ -455,10 +455,10 @@ pub(crate) fn resolve_arg_as_duration<P: ProcessManager>(
 pub(crate) fn load_var_binding<P: ProcessManager>(
     state: &ExecState<P>,
     name: &str,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     state
         .get_var(name)
-        .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))
+        .ok_or_else(|| args_diag::eval_undefined_var(name))
 }
 
 pub(crate) fn evaluate_expr<P: ProcessManager>(
@@ -473,7 +473,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             }
             Ok(v.clone())
         }
-        Expr::Var { name } => load_var_binding(cx.state, name),
+        Expr::Var { name } => Ok(load_var_binding(cx.state, name)?),
         Expr::ConstRef { alias, name } => super::import::resolve_const_ref(cx.state, alias, name),
         Expr::Env(key) => match cx.state.get_env(key) {
             Some(v) => Ok(Value::string(v.to_string())),
@@ -484,7 +484,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         },
         Expr::KeyPath { base, keys } => {
             let base_value = load_var_binding(cx.state, base)?;
-            descend_value(base_value, keys)
+            Ok(descend_value(base_value, keys)?)
         }
         Expr::List(items) => {
             let mut result = Vec::new();
@@ -1277,24 +1277,24 @@ fn resolve_const_call_arg<P: ProcessManager>(
 /// so all report the same hard errors on missing keys instead of
 /// rendering empty. Callers fetch the base through
 /// [`load_var_binding`], the single read owner.
-fn descend_value(current: Value, keys: &[String]) -> Result<Value> {
+fn descend_value(current: Value, keys: &[String]) -> DiagnosticResult<Value> {
     let mut current = current;
     for key in keys {
         if let Some(map) = current.as_map() {
             current = map
                 .get(key)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Key '{}' not found in map", key))?;
+                .ok_or_else(|| args_diag::eval_key_not_found(key))?;
         } else if let Some(list) = current.as_list() {
             let idx: usize = key
                 .parse()
-                .map_err(|_| anyhow::anyhow!("Invalid array index '{}'", key))?;
+                .map_err(|_| args_diag::eval_invalid_array_index(key))?;
             current = list
                 .get(idx)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds", idx))?;
+                .ok_or_else(|| args_diag::eval_index_out_of_bounds(idx))?;
         } else {
-            bail!("Cannot traverse into scalar value at key '{}'", key);
+            return Err(args_diag::eval_traverse_scalar(key));
         }
     }
     Ok(current)

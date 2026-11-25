@@ -1412,6 +1412,57 @@ pub fn eval_unstaged_int_boundary(n: u64) -> Diagnostic {
     )
 }
 
+/// Unbound variable read at runtime. Takes the name; the `$` sigil is
+/// part of the template, not the field.
+pub fn eval_undefined_var(name: &str) -> Diagnostic {
+    let message = format!("undefined variable ${name}");
+    Diagnostic::new(
+        "dsl.eval.undefined_var",
+        message,
+        Diagnostic::make_fields(&[("name", name)]),
+    )
+}
+
+/// Missing key on a map read. Takes the key; quoting lives here.
+pub fn eval_key_not_found(key: &str) -> Diagnostic {
+    let message = format!("Key '{key}' not found in map");
+    Diagnostic::new(
+        "dsl.eval.key_not_found",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
+/// Non-numeric index on a list read. Takes the key; quoting lives here.
+pub fn eval_invalid_array_index(key: &str) -> Diagnostic {
+    let message = format!("Invalid array index '{key}'");
+    Diagnostic::new(
+        "dsl.eval.invalid_array_index",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
+/// Out-of-range index on a list read. Takes the parsed index.
+pub fn eval_index_out_of_bounds(idx: usize) -> Diagnostic {
+    let message = format!("Index {idx} out of bounds");
+    Diagnostic::new(
+        "dsl.eval.index_out_of_bounds",
+        message,
+        Diagnostic::make_fields(&[("index", &idx.to_string())]),
+    )
+}
+
+/// Key-path step into a scalar. Takes the key; quoting lives here.
+pub fn eval_traverse_scalar(key: &str) -> Diagnostic {
+    let message = format!("Cannot traverse into scalar value at key '{key}'");
+    Diagnostic::new(
+        "dsl.eval.traverse_scalar",
+        message,
+        Diagnostic::make_fields(&[("key", key)]),
+    )
+}
+
 /// `FORMAT_BYTE_COUNT` with a negative count.
 pub fn std_format_byte_count_negative(bytes: i64) -> Diagnostic {
     let message = format!("FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}");
@@ -3002,6 +3053,11 @@ mod tests {
             )
             .key(),
             eval_unstaged_int_boundary(9223372036854775808).key(),
+            eval_undefined_var("x").key(),
+            eval_key_not_found("k").key(),
+            eval_invalid_array_index("k").key(),
+            eval_index_out_of_bounds(7).key(),
+            eval_traverse_scalar("k").key(),
             std_format_byte_count_negative(-1).key(),
             std_format_duration_negative(-1).key(),
             std_parse_duration_range("x").key(),
@@ -3206,6 +3262,26 @@ mod tests {
         assert_eq!(
             eval_unstaged_int_boundary(9223372036854775808).message(),
             "internal error: unstaged integer boundary 9223372036854775808"
+        );
+        assert_eq!(
+            eval_undefined_var("nope").message(),
+            "undefined variable $nope"
+        );
+        assert_eq!(
+            eval_key_not_found("k").message(),
+            "Key 'k' not found in map"
+        );
+        assert_eq!(
+            eval_invalid_array_index("k").message(),
+            "Invalid array index 'k'"
+        );
+        assert_eq!(
+            eval_index_out_of_bounds(7).message(),
+            "Index 7 out of bounds"
+        );
+        assert_eq!(
+            eval_traverse_scalar("k").message(),
+            "Cannot traverse into scalar value at key 'k'"
         );
         assert_eq!(
             std_bool_cannot_coerce("BOOL_OR", "x").message(),

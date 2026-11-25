@@ -937,6 +937,20 @@ transport, so this phase is mechanical:
    not coerce; needless_return avoided with a bare
    tail). Core 408 plus integration 629 green; clippy
    and fmt clean.
+   Value-read step 2026-11-26: five new ctors
+   (eval_undefined_var plus eval_key_not_found plus
+   eval_invalid_array_index plus
+   eval_index_out_of_bounds plus eval_traverse_scalar,
+   wording byte-identical, all pinned by key plus
+   message tests; the runtime traverse/sigil keys stay
+   distinct from the static check_* backticked keys).
+   load_var_binding plus descend_value now return
+   DiagnosticResult; the Var plus KeyPath arms take
+   one Ok(...?) wrap each at the anyhow boundary,
+   while all `?` sites (AST, RPN, templates,
+   handlers pipe-guard) hold via blanket From. Core
+   408 plus integration 629 green; clippy and fmt
+   clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
