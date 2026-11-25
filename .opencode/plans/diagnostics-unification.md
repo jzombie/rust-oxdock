@@ -664,6 +664,19 @@ transport, so this phase is mechanical:
    shell_manager, child, contract, mock, and miri
    synthetic). Process 121 plus core 408 green; clippy and
    fmt clean (only pre-existing baseline warnings).
+   Process wait-failure step 2026-11-26: one new io ctor
+   (wait_failed, shared by the try_wait poll and the blocking
+   wait: one key, one mode, typed io source); ChildHandle
+   maps both wait io errors through it at the anyhow
+   boundary with the outer run_prepared desc context
+   unchanged. Trait flip deliberately deferred: flipping
+   BackgroundHandle/ProcessManager to DiagnosticResult
+   pulls in seven impls across three crates, including
+   core ThreadJoinHandle whose re-emit preserves EXIT
+   codes via ExitRequest context that has no Diagnostic
+   transport yet; that needs its own core-side design
+   first. Process 121 plus core 408 green; clippy and
+   fmt clean (only pre-existing baseline warnings).
    Process 121 plus core 408 green; clippy and fmt clean
    (only pre-existing baseline warnings).
    Core json-boundary step 2026-11-26: six new ctors

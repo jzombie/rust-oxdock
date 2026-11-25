@@ -384,6 +384,24 @@ pub fn spawn_failed(cmd: &impl std::fmt::Debug, err: &std::io::Error) -> Diagnos
     )))
 }
 
+/// Waiting on a spawned child failed. Takes the I/O failure;
+/// rendering lives here. Shared by the `try_wait` poll and the
+/// blocking `wait`: one key, one mode. The typed I/O error rides
+/// as the chained source.
+pub fn wait_failed(err: &std::io::Error) -> Diagnostic {
+    let err_text = err.to_string();
+    let message = format!("failed to wait for child process: {err_text}");
+    Diagnostic::new(
+        "proc.run.wait_failed",
+        message,
+        Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
+    )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
+}
+
 /// Windows job-object assignment failed. Takes the underlying
 /// failure; `{reason:#}` formatting lives here so the call site
 /// stays `format!`-free. Third-party-feeling OS errors ride the
@@ -641,6 +659,7 @@ mod tests {
             run_current_exe_failed(&io_err).key(),
             run_failed(&"echo hi", &io_err).key(),
             spawn_failed(&"echo hi", &io_err).key(),
+            wait_failed(&io_err).key(),
             job_assign_failed(&anyhow::anyhow!("boom")).key(),
             synthetic_failed(&anyhow::anyhow!("boom")).key(),
             spawn_pipe_half_missing(&"echo hi", "stdin").key(),
@@ -749,6 +768,10 @@ mod tests {
             "failed to spawn \"echo hi\": nope"
         );
         assert_eq!(
+            wait_failed(&io_err).message(),
+            "failed to wait for child process: nope"
+        );
+        assert_eq!(
             job_assign_failed(&anyhow::anyhow!("boom")).message(),
             "boom"
         );
@@ -786,6 +809,7 @@ mod tests {
             run_current_exe_failed(&err),
             run_failed(&"echo hi", &err),
             spawn_failed(&"echo hi", &err),
+            wait_failed(&err),
         ] {
             let source = diag.source().expect("io ctor keeps a source");
             let io_source = source
