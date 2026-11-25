@@ -893,3 +893,12 @@ fallback key.
   `full`), never struct literals. `Step::span()` /
   `defined_symbol()` (TYPE/FUNC, in `ast.rs`) derive from stamped
   line/col with zero new data; positions stay additive later.
+- Error-carrier choice: `anyhow` stays only as the Phase D interim
+  carrier (its blanket `From` lets unmigrated `anyhow::Result`
+  callers accept `Diagnostic` with no glue). Guard: internal
+  execution paths terminate on `DiagnosticResult`, never on a
+  second error vocabulary. `thiserror` fits only at explicit
+  external boundaries (plugin/host-function adapters, wire-error
+  mapping) where typed foreign variants must cross; adopting it is
+  a scoped post-Phase-D follow-up per boundary, never a blanket
+  replacement of `DiagnosticResult`.
