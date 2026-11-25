@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::GuardedPath;
 #[cfg(all(unix, not(miri)))]
 use oxdock_fs::PathResolver;
@@ -62,12 +63,12 @@ pub fn batch_shell() -> String {
 }
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-pub(crate) fn direct_cmd(argv: &[String]) -> Result<Command> {
+pub(crate) fn direct_cmd(argv: &[String]) -> DiagnosticResult<Command> {
     let (program, rest) = argv
         .split_first()
-        .ok_or_else(|| anyhow::Error::new(proc_diag::run_exec_requires_argv()))?;
+        .ok_or_else(proc_diag::run_exec_requires_argv)?;
     if program.is_empty() {
-        return Err(anyhow::Error::new(proc_diag::run_exec_requires_program()));
+        return Err(proc_diag::run_exec_requires_program());
     }
     let mut c = Command::new(program);
     c.args(rest);

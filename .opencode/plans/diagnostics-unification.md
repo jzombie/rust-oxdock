@@ -598,6 +598,14 @@ transport, so this phase is mechanical:
    via blanket From; dropped the now-unused anyhow Result
    import. Process 119 plus core 408 green; clippy and fmt
    clean.
+   Process direct-cmd step 2026-11-26: direct_cmd now returns
+   DiagnosticResult with two bare Err ctors
+   (run_exec_requires_argv, run_exec_requires_program); the
+   shell_manager run_argv caller and the expect-based unit
+   tests hold unchanged; redundant closure simplified per
+   clippy. Interpreter, run, spawn, and interactive paths
+   stay on anyhow Result until io-failure ctors land.
+   Process 119 plus core 408 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
