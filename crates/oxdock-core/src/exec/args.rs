@@ -1462,26 +1462,26 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
 pub(crate) fn load_toml_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
-) -> Result<Value> {
+) -> DiagnosticResult<Value> {
     let path_val = args
         .first()
-        .ok_or_else(|| anyhow::anyhow!("LOAD_TOML requires a path argument"))?;
+        .ok_or_else(args_diag::std_load_toml_needs_arg)?;
     let Some(path_str) = path_val.as_str() else {
-        bail!("LOAD_TOML path argument must evaluate to a string");
+        return Err(args_diag::std_load_toml_needs_string());
     };
     let path_str = path_str.to_string();
     let target = cx
         .state
         .fs
         .resolve_read(&cx.state.cwd, &path_str)
-        .map_err(|e| anyhow::anyhow!("failed to resolve TOML path '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_toml_resolve_failed(&path_str, &err))?;
     let content = cx
         .state
         .fs
         .read_file(&target)
-        .map_err(|e| anyhow::anyhow!("failed to read TOML file '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_toml_read_failed(&path_str, &err))?;
     let content_str = std::str::from_utf8(&content)
-        .map_err(|e| anyhow::anyhow!("invalid UTF-8 in TOML file '{}': {}", path_str, e))?;
+        .map_err(|err| args_diag::std_load_toml_not_utf8(&path_str, &err))?;
     load_toml_value(content_str)
 }
 
@@ -1513,17 +1513,17 @@ pub(crate) fn load_json_from_value<P: ProcessManager>(
 }
 
 /// Parse TOML content into a DSL `Value`.
-pub fn load_toml_value(content: &str) -> Result<Value> {
+pub fn load_toml_value(content: &str) -> DiagnosticResult<Value> {
     let json_val: serde_json::Value =
-        toml::from_str(content).map_err(|e| anyhow::anyhow!("TOML parse error: {}", e))?;
+        toml::from_str(content).map_err(|err| args_diag::std_toml_parse_failed(&err))?;
     Ok(json_to_value(json_val))
 }
 
 /// Value-semantics core of `PARSE_TOML()`: parse TOML text already held
 /// in memory, using the same conversion as file loading.
-pub(crate) fn parse_toml_from_value(value: Value) -> Result<Value> {
+pub(crate) fn parse_toml_from_value(value: Value) -> DiagnosticResult<Value> {
     let Some(text) = value.as_str() else {
-        bail!("PARSE_TOML expects a STRING, got {}", value.type_name());
+        return Err(args_diag::std_parse_toml_needs_string(value.type_name()));
     };
     load_toml_value(text)
 }

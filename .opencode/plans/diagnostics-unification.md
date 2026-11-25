@@ -1019,6 +1019,30 @@ transport, so this phase is mechanical:
    (`FUNC_BASE64_ENCODE`, `FUNC_BASE64_DECODE`)
    covered by the registry lock test. Core 409 plus
    integration 629 green; clippy and fmt clean.
+   Toml-load step 2026-11-26: seven new ctors
+   (std_load_toml_needs_arg plus
+   std_load_toml_needs_string plus
+   std_load_toml_resolve_failed plus
+   std_load_toml_read_failed plus
+   std_load_toml_not_utf8 plus std_toml_parse_failed
+   plus std_parse_toml_needs_string, wording
+   byte-identical, all pinned by key plus message
+   tests; resolve/read failures take
+   `&anyhow::Error`, the UTF-8 failure the concrete
+   `&Utf8Error`, the parse failure the concrete
+   `&toml::de::Error`, each per the borrowed-error
+   precedent). load_toml_from_value plus
+   load_toml_value plus parse_toml_from_value now
+   return DiagnosticResult; the two NativeFn wrappers
+   stay anyhow with one Ok(...?) wrap each, while the
+   internal tail calls use direct returns (same error
+   type both sides, per needless_question_mark).
+   The test helper builds the Utf8Error at runtime
+   through a Vec to avoid the invalid_from_utf8
+   lint on literal bytes. Two new FUNC_* constants
+   (`FUNC_LOAD_TOML`, `FUNC_PARSE_TOML`) covered by
+   the lock test. Core 409 plus integration 629
+   green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

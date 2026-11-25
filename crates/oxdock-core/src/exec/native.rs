@@ -2272,7 +2272,10 @@ fn load_toml<P: ProcessManager>(
     path: Value,
 ) -> Result<Value> {
     let text = super::args::string_or_path_text(&path)?;
-    super::args::load_toml_from_value(&[Value::string(text)], cx)
+    Ok(super::args::load_toml_from_value(
+        &[Value::string(text)],
+        cx,
+    )?)
 }
 
 /// Load and parse a JSON file.
@@ -2385,7 +2388,7 @@ fn parse_toml(
     /// TOML text already held in memory.
     text: String,
 ) -> Result<Value> {
-    super::args::parse_toml_from_value(Value::string(text))
+    Ok(super::args::parse_toml_from_value(Value::string(text))?)
 }
 
 /// Parse JSON text already held in memory.
