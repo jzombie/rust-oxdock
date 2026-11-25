@@ -1095,6 +1095,19 @@ transport, so this phase is mechanical:
    removed a stray duplicate `FUNC_LOAD_TOML` entry
    the TOML step left in the lock list. Core 409 plus
    integration 629 green; clippy and fmt clean.
+   To-json-encode step 2026-11-26: one new ctor
+   (std_to_json_encode_failed, wording byte-identical
+   `encode JSON: ...`, pinned by key plus prefix
+   message tests; takes the concrete
+   `&serde_json::Error` per the borrowed-error
+   precedent, mirroring the parse-failure ctor).
+   to_json_from_value now returns DiagnosticResult
+   (value_to_json was already flipped, so only the
+   serialization tail needed mapping); the NativeFn
+   wrapper stays anyhow with one Ok(...?) wrap. No
+   new FUNC_* constant (`FUNC_TO_JSON` already
+   covered). Core 409 plus integration 629 green;
+   clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

@@ -1175,9 +1175,10 @@ pub(crate) fn base64_decode_from_value(text: Value) -> DiagnosticResult<Value> {
 /// Value-semantics core of `TO_JSON()`: encode a script value as JSON
 /// with one trailing newline. Only template-safe shapes survive;
 /// anything else fails here instead of rendering as a silent empty.
-pub(crate) fn to_json_from_value(value: Value) -> Result<Value> {
+pub(crate) fn to_json_from_value(value: Value) -> DiagnosticResult<Value> {
     let json = value_to_json(&value)?;
-    let mut out = serde_json::to_string(&json).map_err(|e| anyhow::anyhow!("encode JSON: {e}"))?;
+    let mut out =
+        serde_json::to_string(&json).map_err(|err| args_diag::std_to_json_encode_failed(&err))?;
     out.push('\n');
     Ok(Value::string(out))
 }

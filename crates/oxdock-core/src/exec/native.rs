@@ -2819,7 +2819,7 @@ fn to_json(
     #[union(String, Int, Float, Bool, List, Map)]
     value: Value,
 ) -> Result<Value> {
-    super::args::to_json_from_value(value)
+    Ok(super::args::to_json_from_value(value)?)
 }
 
 /// Name the word a value holds, for data-driven branching.

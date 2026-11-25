@@ -1619,6 +1619,17 @@ pub fn std_to_json_unencodable(actual: &str) -> Diagnostic {
     )
 }
 
+/// `TO_JSON` serialization failure. Takes the underlying failure.
+pub fn std_to_json_encode_failed(reason: &serde_json::Error) -> Diagnostic {
+    let reason_text = format!("{reason}");
+    let message = format!("encode JSON: {reason_text}");
+    Diagnostic::new(
+        "dsl.std.to_json_encode_failed",
+        message,
+        Diagnostic::make_fields(&[("reason", &reason_text)]),
+    )
+}
+
 /// `BASE64_ENCODE` with a non-string value. Takes the actual type
 /// name.
 pub fn std_base64_encode_needs_string(actual: &str) -> Diagnostic {
@@ -3495,6 +3506,10 @@ mod tests {
             std_parse_duration_range("x").key(),
             std_to_json_non_finite_float(f64::NAN).key(),
             std_to_json_unencodable("VOID").key(),
+            std_to_json_encode_failed(
+                &serde_json::from_str::<serde_json::Value>("{bad").unwrap_err(),
+            )
+            .key(),
             std_load_toml_needs_arg().key(),
             std_load_toml_needs_string().key(),
             std_load_toml_resolve_failed("p", &anyhow::anyhow!("x")).key(),
@@ -3791,6 +3806,14 @@ mod tests {
         assert_eq!(
             std_to_json_unencodable("VOID").message(),
             "TO_JSON cannot encode VOID values; use STRING, INT, FLOAT, BOOL, LIST, or MAP"
+        );
+        assert!(
+            std_to_json_encode_failed(
+                &serde_json::from_str::<serde_json::Value>("{bad").unwrap_err(),
+            )
+            .message()
+            .starts_with("encode JSON: "),
+            "json encode failure must keep its prefix"
         );
         assert_eq!(
             std_load_toml_needs_arg().message(),
