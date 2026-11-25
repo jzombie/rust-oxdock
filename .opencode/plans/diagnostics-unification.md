@@ -653,6 +653,17 @@ transport, so this phase is mechanical:
    takes one Ok-wrap boundary. Process 121 plus core 408
    plus ssh 13 green; clippy and fmt clean (only
    pre-existing baseline warnings).
+   Process manager-helpers step 2026-11-26: no new ctors;
+   apply_ctx and spawn_child_with_streams now return
+   DiagnosticResult, reusing check_spawn_anchors and
+   spawn_failed with byte-identical messages. Trait impls
+   and run_prepared hold unchanged via blanket From; the
+   handle.wait site keeps run_prepared on anyhow until the
+   trait-boundary increment (needs wait io ctors plus the
+   BackgroundHandle/ProcessManager trait flip across
+   shell_manager, child, contract, mock, and miri
+   synthetic). Process 121 plus core 408 green; clippy and
+   fmt clean (only pre-existing baseline warnings).
    Process 121 plus core 408 green; clippy and fmt clean
    (only pre-existing baseline warnings).
    Core json-boundary step 2026-11-26: six new ctors

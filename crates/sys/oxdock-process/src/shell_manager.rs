@@ -6,6 +6,7 @@ use std::process::Command as ProcessCommand;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::Stdio;
 
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::PolicyPath;
 
 use crate::child::ChildHandle;
@@ -180,7 +181,7 @@ fn apply_ctx(
     ctx: &CommandContext,
     program: &str,
     require_path: bool,
-) -> Result<()> {
+) -> DiagnosticResult<()> {
     // Use command_path to strip Windows verbatim prefixes (\\?\) before passing to Command.
     // While Rust's `std::process::Command` handles verbatim paths in current_dir correctly,
     // environment variables are passed as-is. If we pass a verbatim path in `CARGO_TARGET_DIR`,
@@ -218,7 +219,7 @@ fn spawn_child_with_streams(
     stdin: Option<SharedInput>,
     stdout: Option<SharedOutput>,
     stderr: Option<SharedOutput>,
-) -> Result<ChildHandle> {
+) -> DiagnosticResult<ChildHandle> {
     if stdin.is_some() {
         cmd.stdin(Stdio::piped());
     }
@@ -231,7 +232,7 @@ fn spawn_child_with_streams(
 
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("failed to spawn {:?}", cmd))?;
+        .map_err(|e| proc_diag::spawn_failed(&*cmd, &e))?;
     let mut io_threads = Vec::new();
     let mut stdin_thread = None;
 
@@ -294,7 +295,7 @@ fn spawn_child_with_streams(
         io_threads.push(thread);
     }
 
-    Ok(ChildHandle::new(child, stdin_thread, io_threads)?)
+    ChildHandle::new(child, stdin_thread, io_threads)
 }
 
 #[cfg(test)]
