@@ -385,6 +385,15 @@ Remaining:
   I/O failures take `&std::io::Error`, UTF-8 takes
   `&std::string::FromUtf8Error`; messages byte-identical; lib 5 green
   (incl. 2 new key+wording pins); clippy/doc clean; zero fmt drift).
+- Sys crate: `oxdock-pty` done 2026-11-26 (new
+  `src/diagnostics.rs` owning 6 `pty.*` ctors: pump
+  master-read/output-lock (shared stream+tail key)/input-read/
+  sink-lock, run needs-program, worker panicked (shared input/output
+  key with `worker` field); `run.rs` zero inline failures (only
+  `anyhow::Error::new` + proper `.context` chains remain);
+  I/O failures take `&std::io::Error`, panics take `&impl Debug`;
+  messages byte-identical; lib 18 + new pins green, ssh-plugin lib 13
+  green; clippy/doc clean; zero fmt drift).
 
 ### Phase D — retire `anyhow` as the carrier
 
