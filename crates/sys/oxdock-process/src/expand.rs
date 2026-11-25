@@ -107,7 +107,7 @@ impl StreamingExpand {
 
     /// Process a chunk of input bytes, writing expanded output to `out`.
     /// Returns early on empty input to preserve pending boundary state.
-    pub fn process_bytes(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
+    pub fn process_bytes(&mut self, input: &[u8], out: &mut Vec<u8>) -> DiagnosticResult<usize> {
         if input.is_empty() {
             return Ok(0);
         }
@@ -256,7 +256,7 @@ impl StreamingExpand {
     }
 
     /// Flush remaining buffer. Incomplete placeholders are treated as literals.
-    pub fn flush(mut self, out: &mut Vec<u8>) -> Result<()> {
+    pub fn flush(mut self, out: &mut Vec<u8>) -> DiagnosticResult<()> {
         // Emit deferred closing byte if present
         if self.pending_close_brace {
             self.buffer.push(self.delimiters.close[0]);
@@ -290,7 +290,7 @@ impl StreamingExpand {
     }
 
     /// Process a complete string (convenience for short command arguments).
-    pub fn expand_string(self, input: &str) -> Result<String> {
+    pub fn expand_string(self, input: &str) -> DiagnosticResult<String> {
         let mut out = Vec::with_capacity(input.len());
         let mut expander = self;
         expander.process_bytes(input.as_bytes(), &mut out)?;
@@ -300,7 +300,12 @@ impl StreamingExpand {
 
     /// Scan for closing delimiter starting at position `i`.
     /// Returns the next position to process after the placeholder.
-    fn scan_placeholder(&mut self, input: &[u8], mut i: usize, out: &mut Vec<u8>) -> Result<usize> {
+    fn scan_placeholder(
+        &mut self,
+        input: &[u8],
+        mut i: usize,
+        out: &mut Vec<u8>,
+    ) -> DiagnosticResult<usize> {
         while i < input.len() {
             if input[i] == self.delimiters.close[0] {
                 if i + 1 < input.len() && input[i + 1] == self.delimiters.close[1] {
@@ -361,7 +366,7 @@ fn lookup(
     env: &HashMap<String, String>,
     vars: &HashMap<String, oxdock_parser::Value>,
     calls: Option<&PlaceholderCall>,
-) -> Result<String> {
+) -> DiagnosticResult<String> {
     use oxdock_parser::template::{PlaceholderKey, classify_placeholder_key, split_var_path};
     let key = raw_key.trim();
 
@@ -382,18 +387,13 @@ fn lookup(
             // Empty names bail explicitly (same message as the miss
             // below) instead of relying on the lookup miss alone.
             if env_key.is_empty() {
-                return Err(anyhow::Error::new(expand_diag::undefined_env_var(
-                    "", false,
-                )));
+                return Err(expand_diag::undefined_env_var("", false));
             }
             if let Some(val) = overrides.get(env_key).or_else(|| env.get(env_key)) {
                 return Ok(val.clone());
             }
             let suggest_script_var = vars.contains_key(env_key);
-            return Err(anyhow::Error::new(expand_diag::undefined_env_var(
-                env_key,
-                suggest_script_var,
-            )));
+            return Err(expand_diag::undefined_env_var(env_key, suggest_script_var));
         }
 
         // 3. Script variables: must be prefixed with "$". Path split
@@ -403,7 +403,7 @@ fn lookup(
             let parts = split_var_path(rest);
             if parts.len() == 1 {
                 if let Some(val) = vars.get(&parts[0]) {
-                    return Ok(format_value_for_string(val)?);
+                    return format_value_for_string(val);
                 }
                 let suggest = if env.contains_key(rest) {
                     Some(expand_diag::ScriptSuggest::Env)
@@ -412,11 +412,9 @@ fn lookup(
                 } else {
                     None
                 };
-                return Err(anyhow::Error::new(expand_diag::undefined_script_var(
-                    rest, suggest,
-                )));
+                return Err(expand_diag::undefined_script_var(rest, suggest));
             }
-            return Ok(resolve_key_path_strict(&parts, vars)?);
+            return resolve_key_path_strict(&parts, vars);
         }
 
         // 4. Placeholder calls: `MODULE::FUNC(args)` dispatches through
@@ -429,23 +427,19 @@ fn lookup(
                 // Bare `FUNC(...)` has no registry entry in override
                 // expansion: explicit invalid-format error, never silent
                 // fallthrough.
-                return Err(anyhow::Error::new(expand_diag::invalid_placeholder_format(
-                    key,
-                )));
+                return Err(expand_diag::invalid_placeholder_format(key));
             };
             let (name, args_raw) = (call.name, call.args_raw);
             let Some(resolver) = calls else {
-                return Err(anyhow::Error::new(expand_diag::call_without_registry(
-                    module, name,
-                )));
+                return Err(expand_diag::call_without_registry(module, name));
             };
             let args_src = oxdock_parser::template::split_placeholder_args(args_raw);
             let mut args = Vec::with_capacity(args_src.len());
             for src in args_src {
                 args.push(resolve_call_arg(&src, vars)?);
             }
-            let result = resolver(module, name, args)?;
-            return Ok(format_value_for_string(&result)?);
+            let result = resolver(module, name, args).map_err(expand_diag::from_anyhow)?;
+            return format_value_for_string(&result);
         }
 
         // 5. Unprefixed key: could be a missing step override or invalid
@@ -457,9 +451,7 @@ fn lookup(
         // `$ALIAS::NAME` is invalid here like everywhere: the split
         // lives in the template owner.
         PlaceholderKey::DollarQualified { .. } => {
-            return Err(anyhow::Error::new(expand_diag::invalid_placeholder_format(
-                key,
-            )));
+            return Err(expand_diag::invalid_placeholder_format(key));
         }
         PlaceholderKey::ConstRef { .. } | PlaceholderKey::KeyPath { .. } => {}
         PlaceholderKey::Var(name) | PlaceholderKey::Bare(name) => {
@@ -475,9 +467,7 @@ fn lookup(
                 } else {
                     None
                 };
-                return Err(anyhow::Error::new(expand_diag::missing_step_override(
-                    name, suggest,
-                )));
+                return Err(expand_diag::missing_step_override(name, suggest));
             }
         }
         PlaceholderKey::ScriptEnv(name) => {
@@ -485,16 +475,12 @@ fn lookup(
             // has no meaning here and falls through to the invalid
             // placeholder error below, as before.
             if name.trim().is_empty() {
-                return Err(anyhow::Error::new(expand_diag::undefined_env_var(
-                    "", false,
-                )));
+                return Err(expand_diag::undefined_env_var("", false));
             }
         }
         PlaceholderKey::Empty => {}
     }
-    Err(anyhow::Error::new(expand_diag::invalid_placeholder_format(
-        key,
-    )))
+    Err(expand_diag::invalid_placeholder_format(key))
 }
 
 /// Split a `MODULE::FUNC(args)` placeholder body for call resolution

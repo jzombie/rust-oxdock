@@ -707,6 +707,19 @@ transport, so this phase is mechanical:
    267 plus integration 303 plus process 121 plus core 408
    green; clippy and fmt clean (only pre-existing
    baseline warnings).
+   Process lookup plus streaming-expansion step
+   2026-11-26: no new ctors; lookup, process_bytes, flush,
+   expand_string, and scan_placeholder now return
+   DiagnosticResult with bare Err ctors. The anyhow
+   PlaceholderCall resolver boundary maps through the
+   existing from_anyhow reclaim, so keyed resolver errors
+   keep their keys; PlaceholderCall itself stays on anyhow
+   Result until the core native plus handlers resolver
+   layer flips. Core EXPAND streaming callers hold
+   unchanged via blanket From. Three needless Ok-wraps
+   simplified per clippy. Process 121 plus core 408
+   green; clippy and fmt clean (only pre-existing
+   baseline warnings).
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain
