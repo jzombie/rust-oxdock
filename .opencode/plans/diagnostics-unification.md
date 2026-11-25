@@ -521,12 +521,15 @@ transport, so this phase is mechanical:
    anyhow-free (dep removed from Cargo toml, lock entry dropped).
    Pipe 7 plus core 408 plus process 119 green; clippy doc and
    fmt clean.
-   AMEND 2026-11-26: both io ctors now attach the typed io error
+   AMEND 2026-11-26: the io ctors now attach the typed io error
    via with_source (kind plus text preserved) so Error-source
    and alternate-display chains keep it; PartialEq ignores source
    and Display are unchanged. New source-chain test pins the
-   downcast kind and text for both ctors. Pipe 8 plus core 408
+   downcast kind and text for each io ctor. Pipe 8 plus core 408
    plus process 119 green; clippy and fmt clean.
+   Follow-up 2026-11-26: peek_failed gets the same with_source
+   treatment (same format-without-source pattern, now covered by
+   the source-chain test too).
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

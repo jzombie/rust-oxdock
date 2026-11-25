@@ -87,7 +87,9 @@ pub fn peek_os_materialized() -> Diagnostic {
     )
 }
 
-/// Peek backend read failed. Takes the I/O failure; rendering lives here.
+/// Peek backend read failed. Takes the I/O failure; rendering lives
+/// here. The typed I/O error rides as the chained source so
+/// `Error::source` and `{err:#}` chains keep it.
 pub fn peek_failed(err: &std::io::Error) -> Diagnostic {
     let err_text = err.to_string();
     let message = format!("failed to peek pipe: {err_text}");
@@ -96,6 +98,10 @@ pub fn peek_failed(err: &std::io::Error) -> Diagnostic {
         message,
         Diagnostic::make_fields(&[(FIELD_ERR, err_text.as_str())]),
     )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
 }
 
 /// Captured stdout is not valid UTF-8. Takes the conversion failure;
@@ -205,7 +211,11 @@ mod tests {
     fn io_ctors_preserve_typed_source_chain() {
         use std::error::Error as _;
         let err = io_err("boom");
-        for diag in [os_pipe_creation_failed(&err), spill_drain_failed(&err)] {
+        for diag in [
+            os_pipe_creation_failed(&err),
+            peek_failed(&err),
+            spill_drain_failed(&err),
+        ] {
             let source = diag.source().expect("io ctor keeps a source");
             let io_source = source
                 .downcast_ref::<std::io::Error>()
