@@ -1,10 +1,11 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::fs;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::path::Path;
 
 use super::{AccessMode, PathResolver};
 use crate::GuardedPath;
+use crate::diagnostics as fs_diag;
 
 #[allow(clippy::disallowed_types)]
 use crate::UnguardedPath;
@@ -31,7 +32,7 @@ fn entry_kind_follow_symlink(file_type: &fs::FileType, src_path: &Path) -> Resul
             return Ok(CopyEntryKind::File);
         }
     }
-    bail!("unsupported file type: {}", src_path.display());
+    Err(anyhow::Error::new(fs_diag::unsupported_file_type(src_path)))
 }
 
 // Copy helpers for guarded and external sources.

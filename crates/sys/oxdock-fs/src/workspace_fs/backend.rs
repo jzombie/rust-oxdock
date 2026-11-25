@@ -1,7 +1,8 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::fs;
 
 use super::{DirEntry, GuardedPath};
+use crate::diagnostics as fs_diag;
 
 /// Private trait describing the backend IO interface. Kept private to avoid
 /// expanding the public API surface; used to ensure host/miri implementations
@@ -94,10 +95,9 @@ fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
     // aliasing, returns -1 with errno on failure.
     let ret = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
     if ret == -1 {
-        bail!(
-            "failed to resolve open file path: {}",
-            std::io::Error::last_os_error()
-        );
+        return Err(anyhow::Error::new(fs_diag::fd_path_failed(
+            &std::io::Error::last_os_error(),
+        )));
     }
     let path = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
         .to_string_lossy()
@@ -141,10 +141,9 @@ fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
         };
     }
     if len == 0 {
-        bail!(
-            "failed to resolve open file path: {}",
-            std::io::Error::last_os_error()
-        );
+        return Err(anyhow::Error::new(fs_diag::fd_path_failed(
+            &std::io::Error::last_os_error(),
+        )));
     }
     Ok(std::path::PathBuf::from(String::from_utf16_lossy(
         &buf[..len as usize],
@@ -178,12 +177,11 @@ fn verify_fd_within(
     if cmp_form(&actual).starts_with(cmp_form(&root)) {
         Ok(())
     } else {
-        bail!(
-            "opened {} outside its expected tree {} (descriptor resolves to {})",
-            path.display(),
-            expected_root.display(),
-            actual.display()
-        )
+        Err(anyhow::Error::new(fs_diag::opened_outside_tree(
+            path,
+            expected_root,
+            &actual,
+        )))
     }
 }
 
@@ -426,7 +424,9 @@ impl BackendImpl for HostBackend {
         } else if meta.is_file() {
             Ok(super::EntryKind::File)
         } else {
-            bail!("unsupported file type: {}", path.display());
+            Err(anyhow::Error::new(fs_diag::unsupported_file_type(
+                path.as_path(),
+            )))
         }
     }
 
@@ -442,14 +442,16 @@ impl BackendImpl for HostBackend {
         } else if file_type.is_file() {
             Ok(super::EntryKind::File)
         } else {
-            bail!("unsupported file type: {}", path.display());
+            Err(anyhow::Error::new(fs_diag::unsupported_file_type(
+                path.as_path(),
+            )))
         }
     }
 
     fn resolve_workdir(&self, resolved: GuardedPath) -> Result<GuardedPath> {
         if let Ok(meta) = fs::metadata(resolved.as_path()) {
             if !meta.is_dir() {
-                bail!("WORKDIR path is not a directory: {}", resolved.display());
+                return Err(anyhow::Error::new(fs_diag::workdir_not_dir(&resolved)));
             }
             return Ok(resolved);
         }
@@ -461,10 +463,7 @@ impl BackendImpl for HostBackend {
 
     fn resolve_copy_source(&self, guarded: GuardedPath) -> Result<GuardedPath> {
         if !guarded.as_path().exists() {
-            bail!(
-                "COPY source missing in build context: {}",
-                guarded.display()
-            );
+            return Err(anyhow::Error::new(fs_diag::copy_source_missing(&guarded)));
         }
         Ok(guarded)
     }
@@ -589,11 +588,11 @@ mod miri_backend {
             if guard.root() == self.root_path.as_path() {
                 self.root_state
                     .clone()
-                    .ok_or_else(|| anyhow!("synthetic state missing for root"))
+                    .ok_or_else(|| anyhow::Error::new(fs_diag::synthetic_state_missing_for_root()))
             } else {
                 self.build_state
                     .clone()
-                    .ok_or_else(|| anyhow!("synthetic state missing for build context"))
+                    .ok_or_else(|| anyhow::Error::new(fs_diag::synthetic_state_missing_for_build()))
             }
         }
     }
@@ -620,7 +619,7 @@ mod miri_backend {
             let state_ref = self.state_for_guard_rc(path)?;
             let state = state_ref.lock().expect("miri state poisoned");
             if !state.dir_exists(&rel) {
-                bail!("directory does not exist: {}", path.display());
+                return Err(anyhow::Error::new(fs_diag::synthetic_dir_missing(path)));
             }
             let children = state.list_children(&rel);
             Ok(children
@@ -725,7 +724,7 @@ mod miri_backend {
             if let Some(kind) = state.entry_kind(&rel) {
                 synthetic_metadata(kind)
             } else {
-                bail!("failed to stat {}", path.display())
+                return Err(anyhow::Error::new(fs_diag::synthetic_stat_failed(path)));
             }
         }
 
@@ -744,9 +743,11 @@ mod miri_backend {
                 }
                 Some(EntryKind::Dir) => Ok((0, None)),
                 Some(EntryKind::Symlink) => {
-                    bail!("archive member is a symlink: {}", path.display())
+                    return Err(anyhow::Error::new(
+                        fs_diag::synthetic_archive_member_symlink(path),
+                    ));
                 }
-                None => bail!("failed to stat {}", path.display()),
+                None => return Err(anyhow::Error::new(fs_diag::synthetic_stat_failed(path))),
             }
         }
 
@@ -756,7 +757,7 @@ mod miri_backend {
             let state = binding.lock().expect("miri state poisoned");
             state
                 .entry_kind(&rel)
-                .ok_or_else(|| anyhow::anyhow!("missing entry kind for {}", path.display()))
+                .ok_or_else(|| anyhow::Error::new(fs_diag::synthetic_entry_kind_missing(path)))
         }
 
         fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<EntryKind> {
@@ -786,16 +787,13 @@ mod miri_backend {
                 .lock()
                 .expect("miri state poisoned")
                 .entry_kind(&rel)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "COPY source missing in build context: {}",
-                        guarded.display()
-                    )
-                })?;
+                .ok_or_else(|| anyhow::Error::new(fs_diag::copy_source_missing(&guarded)))?;
             if matches!(kind, EntryKind::Dir | EntryKind::File) {
                 Ok(guarded)
             } else {
-                bail!("COPY source unsupported kind: {}", guarded.display());
+                Err(anyhow::Error::new(fs_diag::copy_source_unsupported_kind(
+                    &guarded,
+                )))
             }
         }
 
@@ -842,7 +840,7 @@ mod miri_backend {
         {
             // Conservative fallback: metadata is not available under Miri on this platform.
             let _ = _kind;
-            bail!("synthetic metadata unsupported under Miri on this platform")
+            Err(anyhow::Error::new(fs_diag::synthetic_metadata_unsupported()))
         }
     }
 
@@ -925,7 +923,7 @@ mod miri_backend {
             self.files
                 .get(rel)
                 .cloned()
-                .ok_or_else(|| anyhow!("missing file {rel}"))
+                .ok_or_else(|| anyhow::Error::new(fs_diag::synthetic_missing_file(rel)))
         }
 
         fn remove_file(&mut self, rel: &str) {
@@ -946,10 +944,14 @@ mod miri_backend {
 
         fn remove_empty_dir(&mut self, rel: &str) -> Result<()> {
             if !self.dir_exists(rel) {
-                bail!("directory does not exist: {rel}");
+                return Err(anyhow::Error::new(fs_diag::synthetic_remove_dir_missing(
+                    rel,
+                )));
             }
             if !self.list_children(rel).is_empty() {
-                bail!("directory not empty: {rel}");
+                return Err(anyhow::Error::new(fs_diag::synthetic_remove_dir_not_empty(
+                    rel,
+                )));
             }
             self.dirs.remove(rel);
             Ok(())

@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
 
+#[cfg(miri)]
+use crate::diagnostics as fs_diag;
+
 /// Opt into the once-per-process garbage-collection sweep of stale
 /// `oxdock-*` tempdirs (PID-lock based). Idempotent; cheap after the first
 /// call; errors are logged, never fatal.
@@ -31,6 +34,7 @@ pub fn discover_workspace_root() -> Result<GuardedPath> {
         .with_context(|| format!("failed to guard current directory {}", cwd.display()))
 }
 
+pub mod diagnostics;
 pub mod env;
 pub mod workspace_fs;
 pub use workspace_fs::git::{GitIdentity, current_head_commit, ensure_git_identity};
@@ -328,7 +332,7 @@ impl WorkspaceFs for PathResolver {
         if PathResolver::exists(self, path) {
             Ok(None)
         } else {
-            Err(anyhow::anyhow!("missing file {}", path.display()))
+            Err(anyhow::Error::new(fs_diag::missing_file(path)))
         }
     }
 
@@ -452,7 +456,7 @@ impl WorkspaceFs for PathResolver {
         #[cfg(miri)]
         {
             let _ = path;
-            anyhow::bail!("Unguarded read_dir not supported on Miri")
+            Err(anyhow::Error::new(fs_diag::unguarded_read_dir_miri()))
         }
     }
 

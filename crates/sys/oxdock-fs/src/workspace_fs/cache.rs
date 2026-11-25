@@ -15,6 +15,7 @@
 use anyhow::Result;
 
 use super::GuardedPath;
+use crate::diagnostics as fs_diag;
 use crate::env::cargo::PKG_NAME as CARGO_PKG_NAME;
 use crate::env::oxdock::{CACHE_APP, CACHE_DIR, FALLBACK_APP_NAME};
 
@@ -170,7 +171,7 @@ pub(crate) fn ensure_cache_dir(cache_dir: &std::path::Path) -> Result<()> {
         cache_manager::CacheRoot::from_root(cache_dir.to_path_buf())
             .ensure_group(CACHE_GROUP)
             .map(|_| ())
-            .map_err(|e| anyhow::anyhow!("failed to ensure cache dir {}: {e}", cache_dir.display()))
+            .map_err(|e| anyhow::Error::new(fs_diag::cache_ensure_failed(cache_dir, &e)))
     }
     #[cfg(miri)]
     {

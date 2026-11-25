@@ -451,6 +451,39 @@ Remaining:
   pins hold); lib 38 (incl. 3 new key+wording pins) + integration 38
   green, ssh-plugin lib 13 green (sole `no_cli_mapping` consumer);
   clippy/doc clean; zero fmt drift).
+- Sys crate: `oxdock-fs` done 2026-11-26 (new
+  `src/diagnostics.rs` owning 63 `fs.*` ctors: guard
+  access-escapes (shared canonical/lexical key)/snapshot-not-
+  materialized, link refuses-symlink-final/parent-reference/
+  link-ancestor, remove-link no-file-name (shared modes key)/
+  escapes-root, miri metadata-unguarded/open-file-unguarded/spill
+  (shared create/open/truncate key)/private/symlink/temp-lock/
+  unguarded-read-dir, symlink dest-exists (shared host+Miri key)/
+  self-link/unsupported-platform, file missing (shared Miri-probe +
+  mock-reads key), copy unsupported-type (shared classifier + both
+  entry-kind probes key)/source-missing (shared host+synthetic key)/
+  source-unsupported-kind/no-workspace-root/snapshot-not-
+  materialized, backend workdir-not-dir/fd-path-failed (shared
+  unix+windows key)/opened-outside-tree, synthetic state-missing
+  (root/build)/dir-missing/stat-failed (shared metadata+member key)/
+  archive-symlink/entry-kind-missing/missing-file/remove-missing/
+  remove-not-empty/metadata-unsupported, path script-not-found/
+  base-empty (shared modes key)/rel-empty/rel-dotdot/rel-mixed/
+  rel-not-prefix/scratch-collided, cache ensure-failed, snapshot
+  cwd-outside-root, mock join-failed (chain inline)/
+  metadata-unsupported (shared key)/unguarded-unsupported (shared
+  ~13-method key)/read-not-utf8/read-dir/copy (shared 4-direction
+  key)/symlink/open/perms/missing-path/remove-no-file/remove-no-dir
+  (shared recursive+empty key)/remove-not-empty/git-copy, git
+  identity-miri/config-get-failed/config-set-failed (exit status
+  interpolated, never hardcoded)/copy-outside-context/ls-tree-failed/
+  path-not-in-rev/show-failed/submodule-unsupported; all 13 files
+  zero inline failures (only `anyhow::Error::new` + proper `.context`
+  chains remain); render-only `&Path` params carry localized
+  `#[allow(clippy::disallowed_types)]` per repo convention; messages
+  byte-identical (existing `script not found` pin holds); lib 71
+  (incl. 3 new key+wording pins) + integration suites green,
+  downstream core lib 408 green; clippy/doc clean; zero fmt drift).
 
 ### Phase D — retire `anyhow` as the carrier
 
