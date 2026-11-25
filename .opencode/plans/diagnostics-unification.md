@@ -894,6 +894,22 @@ transport, so this phase is mechanical:
    Ok(...?) wrap each at the boundary (direct return
    does not coerce). Core 408 plus integration 629
    green; clippy and fmt clean.
+   Arithmetic-eval step 2026-11-26: seven new ctors
+   (eval_math_stack_underflow plus
+   eval_arith_overflow_div_zero plus
+   eval_arith_needs_numeric plus eval_float_div_zero
+   plus eval_non_finite_result plus eval_neg_overflow
+   plus eval_neg_needs_numeric, wording byte-identical
+   to the replaced bail!s, all pinned by key plus
+   message tests, Debug rendering inside the ctors;
+   non-finite shared by arith and neg so one key owns
+   the failure mode). pop_stack plus apply_arith plus
+   apply_neg now return DiagnosticResult; the
+   evaluate_expr arith arm plus the
+   evaluate_compiled_math tail take one Ok(...?) wrap
+   each at the anyhow boundary, while the interior
+   `?` sites hold via blanket From. Core 408 plus
+   integration 629 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

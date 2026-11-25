@@ -522,7 +522,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         Expr::Arithmetic { op, left, right } => {
             let left_val = evaluate_expr(left, cx)?;
             let right_val = evaluate_expr(right, cx)?;
-            apply_arith(*op, left_val, right_val)
+            Ok(apply_arith(*op, left_val, right_val)?)
         }
         Expr::CompiledMath(ops) => evaluate_compiled_math(ops, cx),
         Expr::UnsignedIntBoundary(n) => {
@@ -886,10 +886,8 @@ impl Drop for ProbeGuard {
 
 /// Pop one operand off the RPN stack with a structured error instead of a
 /// panic on malformed/truncated `CompiledMath` vectors.
-fn pop_stack(stack: &mut Vec<Value>) -> Result<Value> {
-    stack
-        .pop()
-        .ok_or_else(|| anyhow::anyhow!("compiled math stack underflow"))
+fn pop_stack(stack: &mut Vec<Value>) -> DiagnosticResult<Value> {
+    stack.pop().ok_or_else(args_diag::eval_math_stack_underflow)
 }
 
 fn as_f64_value(val: &Value) -> Option<f64> {
@@ -906,7 +904,7 @@ fn as_f64_value(val: &Value) -> Option<f64> {
 /// division, div-by-zero and overflow bail); any `Float` operand promotes
 /// (`Int as f64`) to `Float`; float div-by-zero bails; non-finite results
 /// bail rather than storing; anything else is a Type Error.
-fn apply_arith(op: ArithOp, left: Value, right: Value) -> Result<Value> {
+fn apply_arith(op: ArithOp, left: Value, right: Value) -> DiagnosticResult<Value> {
     if let (Some(a), Some(b)) = (left.as_i64(), right.as_i64()) {
         let v = match op {
             ArithOp::Add => a.checked_add(b),
@@ -914,16 +912,16 @@ fn apply_arith(op: ArithOp, left: Value, right: Value) -> Result<Value> {
             ArithOp::Mul => a.checked_mul(b),
             ArithOp::Div => a.checked_div(b),
         };
-        return v.map(Value::int).ok_or_else(|| {
-            anyhow::anyhow!("arithmetic error: integer overflow or division by zero")
-        });
+        return v
+            .map(Value::int)
+            .ok_or_else(args_diag::eval_arith_overflow_div_zero);
     }
     {
         let (Some(a), Some(b)) = (as_f64_value(&left), as_f64_value(&right)) else {
-            bail!("Type Error: arithmetic requires Int or Float, found {left:?} and {right:?}");
+            return Err(args_diag::eval_arith_needs_numeric(&left, &right));
         };
         if matches!(op, ArithOp::Div) && b == 0.0 {
-            bail!("arithmetic error: float division by zero");
+            return Err(args_diag::eval_float_div_zero());
         }
         let v = match op {
             ArithOp::Add => a + b,
@@ -934,25 +932,25 @@ fn apply_arith(op: ArithOp, left: Value, right: Value) -> Result<Value> {
         if v.is_finite() {
             Ok(Value::float(v))
         } else {
-            bail!("arithmetic error: non-finite float result")
+            Err(args_diag::eval_non_finite_result())
         }
     }
 }
 
-fn apply_neg(val: Value) -> Result<Value> {
+fn apply_neg(val: Value) -> DiagnosticResult<Value> {
     if let Some(n) = val.as_i64() {
         return n
             .checked_neg()
             .map(Value::int)
-            .ok_or_else(|| anyhow::anyhow!("arithmetic error: integer overflow"));
+            .ok_or_else(args_diag::eval_neg_overflow);
     }
     if let Some(f) = val.as_f64() {
         if f.is_finite() {
             return Ok(Value::float(-f));
         }
-        bail!("arithmetic error: non-finite float result");
+        return Err(args_diag::eval_non_finite_result());
     }
-    bail!("Type Error: unary '-' requires Int or Float, found {val:?}")
+    Err(args_diag::eval_neg_needs_numeric(&val))
 }
 
 /// Strict value equality for `SWITCH` matching: the `==` branch of
@@ -1416,7 +1414,7 @@ fn evaluate_compiled_math<P: ProcessManager>(
     if stack.len() != 1 {
         bail!("compiled math left {} values on the stack", stack.len());
     }
-    pop_stack(&mut stack)
+    Ok(pop_stack(&mut stack)?)
 }
 
 /// Value-semantics core of `GLOB()`: operates on an already-evaluated

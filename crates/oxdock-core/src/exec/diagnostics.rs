@@ -1265,6 +1265,82 @@ pub fn std_float_bad_type(got: &super::Value) -> Diagnostic {
     )
 }
 
+/// Compiled-math stack underflow at runtime. Parameterless: the RPN
+/// shape already names the site, so no operand is attached.
+pub fn eval_math_stack_underflow() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.math_stack_underflow",
+        "compiled math stack underflow".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Integer arithmetic overflow or division by zero. Parameterless:
+/// the operands ride the enclosing expression, so no value is attached.
+pub fn eval_arith_overflow_div_zero() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.arith_overflow_div_zero",
+        "arithmetic error: integer overflow or division by zero".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Non-numeric operands to a binary arithmetic operator. Takes both
+/// operands; `Debug` rendering lives here.
+pub fn eval_arith_needs_numeric(left: &super::Value, right: &super::Value) -> Diagnostic {
+    let message =
+        format!("Type Error: arithmetic requires Int or Float, found {left:?} and {right:?}");
+    Diagnostic::new(
+        "dsl.eval.arith_needs_numeric",
+        message,
+        Diagnostic::make_fields(&[
+            ("left", &format!("{left:?}")),
+            ("right", &format!("{right:?}")),
+        ]),
+    )
+}
+
+/// Float division by zero. Parameterless: the divisor rides the
+/// enclosing expression.
+pub fn eval_float_div_zero() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.float_div_zero",
+        "arithmetic error: float division by zero".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Non-finite float result from arithmetic or negation. Parameterless:
+/// shared by both paths so one key owns the failure mode.
+pub fn eval_non_finite_result() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.non_finite_result",
+        "arithmetic error: non-finite float result".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Integer overflow on unary negation. Parameterless: the operand
+/// rides the enclosing expression.
+pub fn eval_neg_overflow() -> Diagnostic {
+    Diagnostic::new(
+        "dsl.eval.neg_overflow",
+        "arithmetic error: integer overflow".to_string(),
+        Diagnostic::make_fields(&[]),
+    )
+}
+
+/// Non-numeric operand to unary negation. Takes the value; `Debug`
+/// rendering lives here.
+pub fn eval_neg_needs_numeric(got: &super::Value) -> Diagnostic {
+    let message = format!("Type Error: unary '-' requires Int or Float, found {got:?}");
+    Diagnostic::new(
+        "dsl.eval.neg_needs_numeric",
+        message,
+        Diagnostic::make_fields(&[("got", &format!("{got:?}"))]),
+    )
+}
+
 /// `FORMAT_BYTE_COUNT` with a negative count.
 pub fn std_format_byte_count_negative(bytes: i64) -> Diagnostic {
     let message = format!("FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}");
@@ -2834,6 +2910,17 @@ mod tests {
             std_float_bad_string("x").key(),
             std_float_non_finite_string("inf").key(),
             std_float_bad_type(&crate::Value::string("x".to_string())).key(),
+            eval_math_stack_underflow().key(),
+            eval_arith_overflow_div_zero().key(),
+            eval_arith_needs_numeric(
+                &crate::Value::string("x".to_string()),
+                &crate::Value::string("y".to_string()),
+            )
+            .key(),
+            eval_float_div_zero().key(),
+            eval_non_finite_result().key(),
+            eval_neg_overflow().key(),
+            eval_neg_needs_numeric(&crate::Value::string("x".to_string())).key(),
             std_format_byte_count_negative(-1).key(),
             std_format_duration_negative(-1).key(),
             std_parse_duration_range("x").key(),
@@ -2978,6 +3065,38 @@ mod tests {
         assert_eq!(
             std_float_bad_type(&crate::Value::string("x".to_string())).message(),
             "FLOAT() requires an Int, Float, or String, found STRING(\"x\")"
+        );
+        assert_eq!(
+            eval_math_stack_underflow().message(),
+            "compiled math stack underflow"
+        );
+        assert_eq!(
+            eval_arith_overflow_div_zero().message(),
+            "arithmetic error: integer overflow or division by zero"
+        );
+        assert_eq!(
+            eval_arith_needs_numeric(
+                &crate::Value::string("x".to_string()),
+                &crate::Value::string("y".to_string()),
+            )
+            .message(),
+            "Type Error: arithmetic requires Int or Float, found STRING(\"x\") and STRING(\"y\")"
+        );
+        assert_eq!(
+            eval_float_div_zero().message(),
+            "arithmetic error: float division by zero"
+        );
+        assert_eq!(
+            eval_non_finite_result().message(),
+            "arithmetic error: non-finite float result"
+        );
+        assert_eq!(
+            eval_neg_overflow().message(),
+            "arithmetic error: integer overflow"
+        );
+        assert_eq!(
+            eval_neg_needs_numeric(&crate::Value::string("x".to_string())).message(),
+            "Type Error: unary '-' requires Int or Float, found STRING(\"x\")"
         );
         assert_eq!(
             std_bool_cannot_coerce("BOOL_OR", "x").message(),
