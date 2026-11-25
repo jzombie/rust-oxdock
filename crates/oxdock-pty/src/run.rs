@@ -24,6 +24,7 @@ use std::sync::{
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use oxdock_diagnostics::DiagnosticResult;
 
 use crate::diagnostics as pty_diag;
 
@@ -302,7 +303,7 @@ fn pump_stdin_to_master(
     cancel: &Arc<AtomicBool>,
     peer_done: &Arc<AtomicBool>,
     func: &'static str,
-) -> Result<bool> {
+) -> DiagnosticResult<bool> {
     let mut buffer = [0u8; PUMP_CHUNK];
     let mut fed = false;
     let mut ends_newline = true;
@@ -315,13 +316,13 @@ fn pump_stdin_to_master(
         }
         match read_chunk(&mut buffer) {
             Err(err) => {
-                return Err(anyhow::Error::new(pty_diag::input_read_failed(func, &err)));
+                return Err(pty_diag::input_read_failed(func, &err));
             }
             Ok(0) => break,
             Ok(count) => {
                 let mut guard = master
                     .lock()
-                    .map_err(|_| anyhow::Error::new(pty_diag::sink_lock_poisoned(func)))?;
+                    .map_err(|_| pty_diag::sink_lock_poisoned(func))?;
                 if guard
                     .write_all(&console_input_bytes(&buffer[..count], &mut prev_cr))
                     .is_err()
@@ -525,7 +526,7 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
                     }
                     Err(err) => {
                         send_release_nudge(&nudge_writer, true);
-                        Err(err)
+                        Err(anyhow::Error::from(err))
                     }
                 }
             }));

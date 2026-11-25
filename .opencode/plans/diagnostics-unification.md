@@ -538,6 +538,14 @@ transport, so this phase is mechanical:
    hold unchanged. Pack and unpack stay on anyhow Result until
    io ctors plus callback migration land. Utils 9 plus core 408
    green; clippy and fmt clean.
+   Pty step 2026-11-26: pump_stdin_to_master now returns
+   DiagnosticResult with bare Err ctors; the input-worker
+   boundary maps back via Error from into the anyhow ChildDone
+   channel. Both io ctors (master_read_failed, input_read_failed)
+   now attach the typed io error via with_source; new
+   source-chain test pins kind and text. Pump_master_out and
+   run_pty_session stay on anyhow Result until spawn and write
+   ctors land. Pty 19 plus core 408 green; clippy and fmt clean.
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

@@ -20,7 +20,8 @@ const FIELD_WORKER: &str = "worker";
 const FIELD_PANIC: &str = "panic";
 
 /// Master-terminal output read failed. Takes the caller label plus the
-/// I/O failure; rendering lives here.
+/// I/O failure; rendering lives here. The typed I/O error rides as
+/// the chained source so `Error::source` and `{err:#}` chains keep it.
 pub fn master_read_failed(func: &str, err: &std::io::Error) -> Diagnostic {
     let err_text = err.to_string();
     let message = format!("{func} master read failed: {err_text}");
@@ -29,6 +30,10 @@ pub fn master_read_failed(func: &str, err: &std::io::Error) -> Diagnostic {
         message,
         Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
     )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
 }
 
 /// Output sink lock poisoned. Takes the caller label; rendering lives
@@ -43,7 +48,8 @@ pub fn output_lock_poisoned(func: &str) -> Diagnostic {
 }
 
 /// Caller stdin read failed. Takes the caller label plus the I/O
-/// failure; rendering lives here.
+/// failure; rendering lives here. The typed I/O error rides as the
+/// chained source so `Error::source` and `{err:#}` chains keep it.
 pub fn input_read_failed(func: &str, err: &std::io::Error) -> Diagnostic {
     let err_text = err.to_string();
     let message = format!("{func} input read failed: {err_text}");
@@ -52,6 +58,10 @@ pub fn input_read_failed(func: &str, err: &std::io::Error) -> Diagnostic {
         message,
         Diagnostic::make_fields(&[(FIELD_FUNC, func), (FIELD_ERR, err_text.as_str())]),
     )
+    .with_source(std::sync::Arc::new(std::io::Error::new(
+        err.kind(),
+        err_text,
+    )))
 }
 
 /// Master-writer sink lock poisoned. Takes the caller label; rendering
@@ -158,5 +168,22 @@ mod tests {
             worker_panicked("SSH_PTY_RUN", "output", &"boom").message(),
             "SSH_PTY_RUN output worker panicked: \"boom\""
         );
+    }
+
+    #[test]
+    fn io_ctors_preserve_typed_source_chain() {
+        use std::error::Error as _;
+        let err = io_err("boom");
+        for diag in [
+            master_read_failed("FUNC", &err),
+            input_read_failed("FUNC", &err),
+        ] {
+            let source = diag.source().expect("io ctor keeps a source");
+            let io_source = source
+                .downcast_ref::<std::io::Error>()
+                .expect("source is the typed io error");
+            assert_eq!(io_source.kind(), std::io::ErrorKind::Other);
+            assert_eq!(io_source.to_string(), "boom");
+        }
     }
 }
