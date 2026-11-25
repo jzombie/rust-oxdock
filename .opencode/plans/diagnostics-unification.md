@@ -734,6 +734,16 @@ transport, so this phase is mechanical:
    unchanged for Diagnostic. Core 408 plus mcp session
    26 plus mcp unit suites green; clippy and fmt clean
    (only pre-existing baseline warnings).
+   Export-metadata leaf step 2026-11-26: no new ctors;
+   resolve_file_call_key plus exported_metas plus
+   McpSession::tool_metas now return DiagnosticResult
+   with bare Err ctors (ambiguous_alias plus
+   export_unknown, both already keyed). McpSession::init
+   plus resolve_call_entry plus the rmcp build_inner path
+   hold unchanged via blanket From (Diagnostic into
+   anyhow). Core 408 plus mcp session 26 plus mcp unit
+   suites green; clippy and fmt clean (only pre-existing
+   baseline warnings).
 3. Delete `anyhow` per crate only when no `anyhow::` path remains.
 4. Plugin boundary stays optional for external authors: the
    `#[oxdock_func]` / host-function boundary keeps accepting plain

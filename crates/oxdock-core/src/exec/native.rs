@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
+use oxdock_diagnostics::DiagnosticResult;
 use oxdock_fs::to_forward_slashes;
 use oxdock_fs::{GuardedPath, WorkspaceSelection};
 use oxdock_func_macro::oxdock_func;
@@ -1812,15 +1813,15 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         &self,
         unit_targets: &AliasTargets,
         name: &str,
-    ) -> Result<Option<String>> {
+    ) -> DiagnosticResult<Option<String>> {
         match classify_alias_call(unit_targets, name, &|key| self.entries.contains_key(key)) {
             AliasResolution::Global | AliasResolution::Unknown | AliasResolution::Any { .. } => {
                 Ok(None)
             }
             AliasResolution::Canonical(key) => Ok(Some(key)),
-            AliasResolution::Ambiguous { alias, base, files } => Err(anyhow::Error::new(
-                std_diag::func_ambiguous_alias(&alias, &base, &files),
-            )),
+            AliasResolution::Ambiguous { alias, base, files } => {
+                Err(std_diag::func_ambiguous_alias(&alias, &base, &files))
+            }
         }
     }
 
@@ -1901,7 +1902,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         &self,
         func_exports: &[String],
         unit_targets: &AliasTargets,
-    ) -> anyhow::Result<Vec<FuncMeta>> {
+    ) -> DiagnosticResult<Vec<FuncMeta>> {
         let mut out = Vec::with_capacity(func_exports.len());
         for name in func_exports {
             // Bare names are script FUNCs; qualified names resolve
@@ -1922,7 +1923,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 out.push(meta);
                 continue;
             }
-            return Err(anyhow::Error::new(std_diag::func_export_unknown(name)));
+            return Err(std_diag::func_export_unknown(name));
         }
         Ok(out)
     }

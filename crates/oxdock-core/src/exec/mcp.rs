@@ -195,7 +195,7 @@ impl<P: ProcessManager> McpSession<P> {
 
     /// Tool metadata for the export list, in source order. Fails fast
     /// naming the first missing export.
-    pub fn tool_metas(&self) -> Result<Vec<FuncMeta>> {
+    pub fn tool_metas(&self) -> DiagnosticResult<Vec<FuncMeta>> {
         self.state.functions.exported_metas(
             &self.exports.funcs,
             &super::import::active_unit_alias_targets(&self.state),
